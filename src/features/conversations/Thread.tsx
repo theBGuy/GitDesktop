@@ -86,6 +86,7 @@ export function Thread({
   reactions,
   onToggleReaction,
   renderBody,
+  copyMarkdown,
 }: {
   thread: PrThreadOut;
   onQuote?: () => void;
@@ -94,6 +95,10 @@ export function Thread({
    *  discussions never pass it; the PR review card uses it to splice suggestion
    *  blocks in between markdown segments. */
   renderBody?: (body: string) => ReactNode;
+  /** Override for the Copy-markdown action — used by PR reviews to append their
+   *  file-anchored threads. Absent = copies `thread.body`, byte-identical to
+   *  before. */
+  copyMarkdown?: string;
   /** Present when the viewer may edit this comment; saves the new body. */
   onSaveEdit?: (body: string) => void;
   /** Present when the viewer may delete this comment. */
@@ -160,7 +165,9 @@ export function Thread({
                   </DropdownMenuItem>
                 )}
                 <DropdownMenuItem
-                  onClick={() => copyText(thread.body, "Markdown copied")}
+                  onClick={() =>
+                    copyText(copyMarkdown ?? thread.body, "Markdown copied")
+                  }
                 >
                   Copy markdown
                 </DropdownMenuItem>

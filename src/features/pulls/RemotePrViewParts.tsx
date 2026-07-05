@@ -68,7 +68,10 @@ function DiffThreadAnchor({
           compact
           expanded={isExpanded(t)}
           onToggleExpand={() =>
-            setExpanded((prev) => ({ ...prev, [t.id]: !isExpanded(t) }))
+            setExpanded((prev) => ({
+              ...prev,
+              [t.id]: !(prev[t.id] ?? !t.isResolved),
+            }))
           }
           onQuote={onQuote}
           onReply={onReply}

@@ -1238,6 +1238,9 @@ export interface PrThreadOut {
 export interface ReviewThreadOut {
   /** Provider thread id (GitHub node id / GitLab discussion id / Bitbucket root comment id). */
   id: string;
+  /** GraphQL id of the review that owns this thread (GitHub `PRR_…`); "" =
+   *  unknown / the provider doesn't model reviews (always "" on GitLab/Bitbucket). */
+  reviewId: string;
   path: string;
   /** 1-based anchored line; 0 = unknown (e.g. outdated threads). */
   line: number;

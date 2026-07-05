@@ -238,7 +238,10 @@ export function DiscussionView({
     );
   }
 
-  const quoteReply = makeQuoteReply({ composerRef, setBody: setComposeBody });
+  // Deferred into the handler: calling makeQuoteReply(ref) during render made the
+  // React Compiler bail out of this whole component (refs-in-render rule).
+  const quoteReply = (body: string) =>
+    makeQuoteReply({ composerRef, setBody: setComposeBody })(body);
 
   function saveCommentEdit(commentId: string, body: string) {
     updateComment.mutate(

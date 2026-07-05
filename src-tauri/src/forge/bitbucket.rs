@@ -18,7 +18,9 @@
 //!
 //! Pagination policy matches GitLab: a single page at the endpoint's max `pagelen`,
 //! no `next`-following loops (documented per call). The PR-list endpoint caps at 50;
-//! repos/pipelines allow 100.
+//! repos/pipelines allow 100. The bounded exceptions that DO follow `next` (up to 5
+//! pages) are workspace members, PR tasks, and PR comments — each documented at its
+//! call site.
 
 use serde::{Deserialize, Serialize};
 use tauri_plugin_http::reqwest;
@@ -1620,25 +1622,45 @@ fn group_bb_threads(comments: Vec<BbComment>) -> Vec<ReviewThreadOut> {
                 is_outdated: false,
                 // Bitbucket exposes no unified-diff excerpt on comments — empty.
                 diff_hunk: String::new(),
+                // Bitbucket doesn't model review objects here (pr_view emits no
+                // reviews), so there's no owning review id to attach.
+                review_id: String::new(),
                 comments,
             })
         })
         .collect()
 }
 
+/// One `…/comments` page — `values` plus the absolute `next` link (the generic
+/// `BbPage` drops `next`, so review-thread pagination needs its own struct).
+#[derive(Deserialize, Default)]
+struct BbCommentsPage {
+    #[serde(default)]
+    values: Vec<BbComment>,
+    #[serde(default)]
+    next: Option<String>,
+}
+
 /// File:line-anchored review threads on a PR — Bitbucket inline comments grouped
 /// with their reply chains. Own fetch (kept separate from `view_pr`'s conversation
-/// read).
+/// read). Follows `next` up to 5 pages (500 comments at `pagelen=100`, the
+/// `workspace_members`/`pr_tasks` idiom) because `group_bb_threads` walks parent
+/// chains across ALL comments — truncating at one page would silently orphan reply
+/// chains and drop whole threads on busy PRs.
 pub async fn review_threads(repo_path: &str, number: u64) -> AppResult<Vec<ReviewThreadOut>> {
     let creds = http::load_credentials().await?;
     let base = repo_base(repo_path).await?;
-    let page = http::bb_get_json::<BbPage<BbComment>>(
-        &creds,
-        &format!("{base}/pullrequests/{number}/comments?pagelen=100"),
-        "comments",
-    )
-    .await?;
-    Ok(group_bb_threads(page.values))
+    let mut url = format!("{base}/pullrequests/{number}/comments?pagelen=100");
+    let mut comments: Vec<BbComment> = Vec::new();
+    for _ in 0..5 {
+        let page: BbCommentsPage = http::bb_get_json(&creds, &url, "comments").await?;
+        comments.extend(page.values);
+        match page.next {
+            Some(next) if !next.is_empty() => url = next,
+            _ => break,
+        }
+    }
+    Ok(group_bb_threads(comments))
 }
 
 /// Reply in an existing review thread (`POST …/comments`, `{"content":{"raw"},
@@ -4209,6 +4231,8 @@ mod tests {
         // Bitbucket has no multi-line range or diff excerpt.
         assert_eq!(a.start_line, 0);
         assert_eq!(a.diff_hunk, "");
+        // Bitbucket doesn't model review objects, so no owning review id.
+        assert_eq!(a.review_id, "");
         assert_eq!(a.comments.len(), 3);
         assert_eq!(a.comments[0].body, "root A");
         assert_eq!(a.comments[1].body, "reply A1");

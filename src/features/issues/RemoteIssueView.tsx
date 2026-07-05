@@ -228,7 +228,10 @@ export function RemoteIssueView({
     );
   }
 
-  const quoteReply = makeQuoteReply({ composerRef, setBody: setComposeBody });
+  // Deferred into the handler: calling makeQuoteReply(ref) during render made the
+  // React Compiler bail out of this whole component (refs-in-render rule).
+  const quoteReply = (body: string) =>
+    makeQuoteReply({ composerRef, setBody: setComposeBody })(body);
 
   function doClose(reason: "completed" | "not_planned") {
     closeIssue.mutate(

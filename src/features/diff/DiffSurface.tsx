@@ -29,9 +29,10 @@ import { ensureCustomLanguages } from "./syntax";
  * review thread). The library renders it as an always-visible block below the
  * anchored line, in both Unified and Split modes.
  *
- * `extendData` holds ONE entry per line per side, so callers must pre-group
- * multiple anchors on the same side+line into a single `render()` that stacks
- * them. Anchors on lines beyond the large-diff cap don't render until the user
+ * `extendData` holds ONE entry per line per side — duplicates silently
+ * last-write-win — so callers must pre-group multiple anchors on the same
+ * side+line into a single `render()` that stacks them (as PrFilesPane does).
+ * Anchors on lines beyond the large-diff cap don't render until the user
  * expands "Show full diff".
  */
 export interface DiffLineAnchor {

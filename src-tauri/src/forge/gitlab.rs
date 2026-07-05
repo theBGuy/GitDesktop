@@ -2060,6 +2060,21 @@ struct GlabNotePosition {
     line_range: Option<GlabLineRange>,
 }
 
+/// The neutral `(path, line, side)` anchor for a positioned diff note. Arm order:
+/// new-line side, else old-line side, else path-only new, else path-only old (the
+/// last arm labels `"old"` because the path came from the old side). Pure/testable.
+fn gl_thread_anchor(position: &GlabNotePosition) -> (String, u32, &'static str) {
+    if position.new_line.is_some() && !position.new_path.is_empty() {
+        (position.new_path.clone(), position.new_line.unwrap_or(0), "new")
+    } else if position.old_line.is_some() && !position.old_path.is_empty() {
+        (position.old_path.clone(), position.old_line.unwrap_or(0), "old")
+    } else if !position.new_path.is_empty() {
+        (position.new_path.clone(), 0, "new")
+    } else {
+        (position.old_path.clone(), 0, "old")
+    }
+}
+
 /// A diff note's multi-line range endpoints (`{start:{new_line,old_line}, …}`).
 /// Only the start ref matters for the neutral `start_line`.
 #[derive(Deserialize, Default)]
@@ -2215,7 +2230,8 @@ pub async fn external_reviews(repo_path: &str, number: u64) -> AppResult<Vec<Ext
 /// File:line-anchored review threads on an MR — the positioned diff-note
 /// discussions mapped onto the neutral `ReviewThreadOut`. A thread is a discussion
 /// with at least one non-system positioned note. Path/line come from the first
-/// positioned note (new side, else old, else 0/"new"); resolution comes from the
+/// positioned note (new side, else old, else new-path/0, else old-path/0 labelled
+/// "old"); resolution comes from the
 /// first resolvable note (GitLab resolves whole discussions, not individual notes).
 /// `start_line` comes from a multi-line note's `position.line_range` (0 when
 /// single-line). GitLab's flat discussions API exposes no cheap per-thread
@@ -2235,15 +2251,7 @@ pub async fn review_threads(repo_path: &str, number: u64) -> AppResult<Vec<Revie
             continue;
         };
         let position = anchor.position.as_ref().expect("find matched .is_some()");
-        let (path, line, side) = if position.new_line.is_some() && !position.new_path.is_empty() {
-            (position.new_path.clone(), position.new_line.unwrap_or(0), "new")
-        } else if position.old_line.is_some() && !position.old_path.is_empty() {
-            (position.old_path.clone(), position.old_line.unwrap_or(0), "old")
-        } else if !position.new_path.is_empty() {
-            (position.new_path.clone(), 0, "new")
-        } else {
-            (position.old_path.clone(), 0, "new")
-        };
+        let (path, line, side) = gl_thread_anchor(position);
         // Multi-line diff notes carry a `line_range`; its start line (on the same
         // side we anchored to) is the range's first line. Single-line notes have no
         // range → 0 (the frontend then uses `line` alone).
@@ -2290,6 +2298,9 @@ pub async fn review_threads(repo_path: &str, number: u64) -> AppResult<Vec<Revie
             // note, so no cheap hunk to render — empty (frontend falls back to the
             // MR diff at the anchored line).
             diff_hunk: String::new(),
+            // GitLab doesn't model review objects here (pr_view emits no reviews),
+            // so there's no owning review id to attach.
+            review_id: String::new(),
             comments,
         });
     }
@@ -5491,6 +5502,49 @@ mod tests {
         assert_eq!(items[0].commit_sha, "");
         // resolved true but not resolvable → not resolved.
         assert!(!items[0].is_resolved);
+    }
+
+    #[test]
+    fn gl_thread_anchor_picks_side_across_all_four_arms() {
+        // Arm 1: new_line + new_path → new side, new line.
+        let (path, line, side) = gl_thread_anchor(&GlabNotePosition {
+            new_path: "src/main.rs".into(),
+            new_line: Some(42),
+            old_path: "src/old.rs".into(),
+            old_line: Some(7),
+            ..Default::default()
+        });
+        assert_eq!((path.as_str(), line, side), ("src/main.rs", 42, "new"));
+
+        // Arm 2: no new_line, but old_line + old_path → old side, old line.
+        let (path, line, side) = gl_thread_anchor(&GlabNotePosition {
+            new_path: String::new(),
+            new_line: None,
+            old_path: "src/old.rs".into(),
+            old_line: Some(9),
+            ..Default::default()
+        });
+        assert_eq!((path.as_str(), line, side), ("src/old.rs", 9, "old"));
+
+        // Arm 3: no lines, but a new_path present → new side, line 0.
+        let (path, line, side) = gl_thread_anchor(&GlabNotePosition {
+            new_path: "src/added.rs".into(),
+            new_line: None,
+            old_path: String::new(),
+            old_line: None,
+            ..Default::default()
+        });
+        assert_eq!((path.as_str(), line, side), ("src/added.rs", 0, "new"));
+
+        // Arm 4 (the fixed fallback): no lines, only old_path → OLD side, line 0.
+        let (path, line, side) = gl_thread_anchor(&GlabNotePosition {
+            new_path: String::new(),
+            new_line: None,
+            old_path: "src/removed.rs".into(),
+            old_line: None,
+            ..Default::default()
+        });
+        assert_eq!((path.as_str(), line, side), ("src/removed.rs", 0, "old"));
     }
 
     #[test]

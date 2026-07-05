@@ -1,6 +1,7 @@
 import { CaretRightIcon, CopyIcon } from "@phosphor-icons/react";
 import {
   type KeyboardEvent,
+  type MouseEvent,
   type ReactNode,
   useEffect,
   useRef,
@@ -21,8 +22,17 @@ import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 
 /** Platform-correct submit-shortcut hint (⌘+Enter on macOS, Ctrl+Enter else) —
- *  never hardcode the modifier (house platform-mod-key rule). */
-const SUBMIT_HINT = formatBinding("mod+enter");
+ *  never hardcode the modifier (house platform-mod-key rule). Exported so
+ *  RemotePrView shares the one definition. */
+export const SUBMIT_HINT = formatBinding("mod+enter");
+
+/** Sets a hover title only when the element is actually clipped — the file-group
+ *  header truncates, so the full path shows on hover only when it doesn't fit
+ *  (house measured-tooltip idiom). Measures `currentTarget`, not an inner span. */
+const clipTitle = (value: string) => (e: MouseEvent<HTMLElement>) => {
+  const el = e.currentTarget;
+  el.title = el.scrollWidth > el.clientWidth ? value : "";
+};
 
 /**
  * File:line-anchored review threads (Copilot/CodeRabbit/human line comments on
@@ -881,7 +891,10 @@ export function ReviewThreadsBlock({
           const resolvedOpen = openResolvedGroups.has(path);
           return (
             <div key={path} className="space-y-1.5">
-              <p className="truncate font-mono text-xs text-muted-foreground">
+              <p
+                className="truncate font-mono text-xs text-muted-foreground"
+                onMouseEnter={clipTitle(path)}
+              >
                 {path}
               </p>
               <div className="space-y-1.5">

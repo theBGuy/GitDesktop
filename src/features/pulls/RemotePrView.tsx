@@ -97,7 +97,6 @@ import {
   useUnrequestChangesPr,
 } from "@/lib/git/queries";
 import { type ApprovalState, providerLabel } from "@/lib/git/types";
-import { formatBinding } from "@/lib/hotkeys/binding";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
@@ -110,13 +109,14 @@ import {
   PrFilesPane,
 } from "./RemotePrViewParts";
 import { ReviewersPopover, userRefHint } from "./ReviewersPopover";
-import { ReviewThreadsBlock, type SuggestionApply } from "./ReviewThreads";
+import {
+  ReviewThreadsBlock,
+  SUBMIT_HINT,
+  type SuggestionApply,
+  threadToMarkdown,
+} from "./ReviewThreads";
 
 type Section = "conversation" | "commits" | "files" | "review";
-
-/** Platform-correct submit-shortcut hint (⌘+Enter on macOS, Ctrl+Enter else) —
- *  never hardcode the modifier (house platform-mod-key rule). */
-const SUBMIT_HINT = formatBinding("mod+enter");
 
 const MERGE_LABEL: Record<MergeStrategy, string> = {
   merge: "Create a merge commit",
@@ -321,7 +321,10 @@ export function RemotePrView({
 
   const onError = (e: unknown) => toastError(e);
 
-  const quoteReply = makeQuoteReply({ composerRef, setBody: setComposeBody });
+  // Deferred into the handler: calling makeQuoteReply(ref) during render made the
+  // React Compiler bail out of this whole component (refs-in-render rule).
+  const quoteReply = (body: string) =>
+    makeQuoteReply({ composerRef, setBody: setComposeBody })(body);
 
   function submitReview(action: ReviewAction) {
     review.mutate(
@@ -957,19 +960,43 @@ export function RemotePrView({
                   line — drop them. */}
               {pr.reviews
                 .filter((r) => hasVisibleBody(r.body) || r.state)
-                .map((r) => (
-                  <Thread
-                    // Reviews carry no node id (id is "" for reviews), but each
-                    // review submission has a unique author+timestamp.
-                    key={`${r.author}-${r.date}`}
-                    thread={r}
-                    onQuote={
-                      canWrite && hasVisibleBody(r.body)
-                        ? () => quoteReply(r.body)
-                        : undefined
-                    }
-                  />
-                ))}
+                .map((r) => {
+                  // A GitHub review's real findings live in its file-anchored
+                  // threads (Copilot/CodeRabbit reviews often carry an empty or
+                  // boilerplate body), so Copy-markdown appends them. Only when the
+                  // review has a node id (GitHub) AND owns matching threads; else
+                  // undefined ⇒ Thread copies the raw body, byte-identical.
+                  const ownThreads =
+                    r.id !== ""
+                      ? (reviewThreads.data?.filter(
+                          (t) => t.reviewId === r.id,
+                        ) ?? [])
+                      : [];
+                  const copyMarkdown =
+                    ownThreads.length > 0
+                      ? [
+                          r.body.trim() ? r.body.trim() : null,
+                          ...ownThreads.map(threadToMarkdown),
+                        ]
+                          .filter(Boolean)
+                          .join("\n\n---\n\n")
+                      : undefined;
+                  return (
+                    <Thread
+                      // Key on author+timestamp: unique per review submission and
+                      // stable (GitHub now carries a node id, but GitLab/Bitbucket
+                      // emit no review entries and leave it "").
+                      key={`${r.author}-${r.date}`}
+                      thread={r}
+                      onQuote={
+                        canWrite && hasVisibleBody(r.body)
+                          ? () => quoteReply(r.body)
+                          : undefined
+                      }
+                      copyMarkdown={copyMarkdown}
+                    />
+                  );
+                })}
               {/* File:line-anchored review threads, grouped by file. Renders
                   nothing when there are none (or while loading); a quiet muted
                   line on error. Reply/resolve gated per provider. */}

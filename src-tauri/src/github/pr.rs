@@ -1204,6 +1204,8 @@ struct RawFile {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawReview {
+    #[serde(default)]
+    id: String,
     author: Option<RawLogin>,
     #[serde(default)]
     state: String,
@@ -1315,8 +1317,9 @@ pub struct PrThreadOut {
     pub state: String,
     pub body: String,
     pub date: String,
-    /// GraphQL node id — set for conversation comments, empty for reviews
-    /// (which use a different edit path and aren't editable here).
+    /// GraphQL node id — set for conversation comments; for reviews (GitHub
+    /// only) this carries the review's `PRR_…` node id. GitLab/Bitbucket emit
+    /// no review entries, so it stays empty there.
     pub id: String,
     /// Permalink to the comment on GitHub ("" for reviews) — for "Copy link".
     pub url: String,
@@ -1349,6 +1352,10 @@ pub struct ReviewThreadOut {
     /// rendering the code context above the comment. Empty when the provider has no
     /// cheap excerpt (GitLab flat API, Bitbucket).
     pub diff_hunk: String,
+    /// GraphQL id of the review this thread belongs to (GitHub `PRR_…`, from the
+    /// first comment's `pullRequestReview`); "" when unknown or the provider
+    /// doesn't model reviews (GitLab/Bitbucket emit no review entries).
+    pub review_id: String,
     /// Full reply chain, oldest first, reusing the existing comment shape.
     pub comments: Vec<PrThreadOut>,
 }
@@ -1482,7 +1489,7 @@ pub async fn gh_pr_view(repo_path: String, number: u64) -> AppResult<PrDetails> 
                 state: r.state,
                 body: r.body,
                 date: r.submitted_at,
-                id: String::new(),
+                id: r.id,
                 url: String::new(),
                 viewer_did_author: false,
                 is_minimized: false,
@@ -1781,7 +1788,7 @@ pub async fn gh_pr_review_threads(
 
     // `number` is a u64 (digits only), so it's safe to embed directly.
     let query = format!(
-        r#"query{{ repository(owner:"{owner}", name:"{name}"){{ pullRequest(number:{number}){{ reviewThreads(first:100){{ nodes{{ id isResolved isOutdated diffSide line originalLine startLine originalStartLine path comments(first:50){{ nodes{{ id author{{ login }} body createdAt url viewerDidAuthor isMinimized minimizedReason diffHunk }} }} }} }} }} }} }}"#
+        r#"query{{ repository(owner:"{owner}", name:"{name}"){{ pullRequest(number:{number}){{ reviewThreads(first:100){{ nodes{{ id isResolved isOutdated diffSide line originalLine startLine originalStartLine path comments(first:50){{ nodes{{ id author{{ login }} body createdAt url viewerDidAuthor isMinimized minimizedReason diffHunk pullRequestReview{{ id }} }} }} }} }} }} }} }}"#
     );
     let out = run_gh(
         Some(&repo_path),
@@ -1851,6 +1858,11 @@ pub async fn gh_pr_review_threads(
             // The diff excerpt lives on the individual comments; the thread's
             // opener (first comment) carries the anchor hunk.
             let diff_hunk = str_at(t, "/comments/nodes/0/diffHunk");
+            // The owning review's node id comes off the first comment's
+            // `pullRequestReview`, which is nullable — `str_at` maps a
+            // present-but-null value to "" (it converts to `&str` before use, so
+            // the `Some(Null)` pointer trap can't swallow anything here).
+            let review_id = str_at(t, "/comments/nodes/0/pullRequestReview/id");
             threads.push(ReviewThreadOut {
                 id: str_at(t, "/id"),
                 path: str_at(t, "/path"),
@@ -1860,6 +1872,7 @@ pub async fn gh_pr_review_threads(
                 is_resolved: bool_at(t, "/isResolved"),
                 is_outdated: bool_at(t, "/isOutdated"),
                 diff_hunk,
+                review_id,
                 comments,
             });
         }
