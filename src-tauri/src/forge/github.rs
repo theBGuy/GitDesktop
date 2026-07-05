@@ -98,6 +98,31 @@ pub async fn external_reviews(
     crate::github::pr::gh_pr_external_reviews(repo_path.to_string(), number).await
 }
 
+pub async fn review_threads(
+    repo_path: &str,
+    number: u64,
+) -> AppResult<Vec<crate::github::pr::ReviewThreadOut>> {
+    crate::github::pr::gh_pr_review_threads(repo_path.to_string(), number).await
+}
+
+pub async fn reply_thread(repo_path: &str, thread_id: &str, body: &str) -> AppResult<()> {
+    crate::github::pr::gh_pr_reply_review_thread(
+        repo_path.to_string(),
+        thread_id.to_string(),
+        body.to_string(),
+    )
+    .await
+}
+
+pub async fn resolve_thread(repo_path: &str, thread_id: &str, resolved: bool) -> AppResult<()> {
+    crate::github::pr::gh_pr_resolve_review_thread(
+        repo_path.to_string(),
+        thread_id.to_string(),
+        resolved,
+    )
+    .await
+}
+
 pub async fn poll_prs(repo_path: &str) -> AppResult<Vec<crate::github::pr::PrPollInfo>> {
     crate::github::pr::gh_pr_poll(repo_path.to_string()).await
 }

@@ -712,6 +712,199 @@ pub async fn git_unignore_rules(repo_path: String, rules: Vec<UnignoreRule>) -> 
     Ok(())
 }
 
+/// Outcome of an applied suggestion — what actually happened, for honest toasts.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyLinesResult {
+    /// True when the file was staged after the edit (only when it had no other
+    /// local changes before the apply, so the index gains exactly this edit).
+    pub staged: bool,
+    /// Whether the file already had local changes (staged or unstaged) BEFORE
+    /// the apply — when true we never auto-stage (it would sweep those in too).
+    pub had_local_changes: bool,
+}
+
+/// Applies a reviewer `suggestion` to the local working tree: replaces the
+/// `expected_lines` at `start_line` with `replacement_lines`, but only after
+/// verifying the file still holds exactly `expected_lines` there (so an Apply
+/// on a drifted/outdated file is refused rather than corrupting it). The
+/// suggestion semantics (which lines, what replacement) live in the frontend;
+/// this is the provider-agnostic git-working-tree primitive behind them.
+#[tauri::command]
+pub async fn git_replace_file_lines(
+    state: State<'_, AppState>,
+    repo_path: String,
+    file_path: String,
+    start_line: u32,
+    expected_lines: Vec<String>,
+    replacement_lines: Vec<String>,
+    stage_when_clean: bool,
+) -> AppResult<ApplyLinesResult> {
+    replace_file_lines(
+        &state,
+        &repo_path,
+        &file_path,
+        start_line,
+        &expected_lines,
+        &replacement_lines,
+        stage_when_clean,
+    )
+    .await
+}
+
+/// Testable core of [`git_replace_file_lines`] — takes a plain `&AppState` so
+/// the real-repo tokio tests can drive it (mirrors `rewrite_commits`).
+pub(crate) async fn replace_file_lines(
+    state: &AppState,
+    repo_path: &str,
+    file_path: &str,
+    start_line: u32,
+    expected_lines: &[String],
+    replacement_lines: &[String],
+    stage_when_clean: bool,
+) -> AppResult<ApplyLinesResult> {
+    // Pre-mutation validation: every locally-checkable precondition before we
+    // touch the file, each with a specific message.
+    if start_line < 1 {
+        return Err(AppError::InvalidArgument(
+            "start_line must be 1-based (>= 1)".into(),
+        ));
+    }
+    if expected_lines.is_empty() {
+        return Err(AppError::InvalidArgument(
+            "expected_lines must not be empty — a suggestion replaces at least one line".into(),
+        ));
+    }
+    let rel = Path::new(file_path);
+    if rel.is_absolute() || file_path.is_empty() {
+        return Err(AppError::InvalidArgument(format!(
+            "file_path must be repo-relative: {file_path}"
+        )));
+    }
+    if rel
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(AppError::InvalidArgument(format!(
+            "file_path must not contain '..' traversal: {file_path}"
+        )));
+    }
+
+    // Hold the repo's mutating lock across the WHOLE dirty-check → read → verify
+    // → write → stage sequence, not just the final `git add`. Otherwise two
+    // concurrent Apply IPC calls on different ranges of the same file interleave:
+    // the second reads the pre-first content, verifies its own range, and writes
+    // its splice over the first's just-written file — silently discarding it.
+    // `repo_lock` is a `tokio::sync::Mutex`, so the guard is safe to hold across
+    // `.await`; but that means we must NOT call `run_git_mutating` below (it
+    // re-acquires this very lock and would deadlock) — use the lock-free `run_git`
+    // for the git steps while we already hold the guard.
+    let lock = state.repo_lock(repo_path).await;
+    let _guard = lock.lock().await;
+
+    let repo_root = std::path::Path::new(repo_path);
+    let target = repo_root.join(rel);
+    // Resolve the repo root and target, then confirm the target stays inside the
+    // repo (defends against symlink/`..` escapes the string check can miss).
+    let canon_root = tokio::fs::canonicalize(repo_root)
+        .await
+        .map_err(|_| AppError::InvalidArgument(format!("repo_path does not exist: {repo_path}")))?;
+    let canon_target = tokio::fs::canonicalize(&target).await.map_err(|_| {
+        AppError::InvalidArgument(format!("file does not exist: {file_path}"))
+    })?;
+    if !canon_target.starts_with(&canon_root) {
+        return Err(AppError::InvalidArgument(format!(
+            "file_path resolves outside the repository: {file_path}"
+        )));
+    }
+    let meta = tokio::fs::metadata(&canon_target).await.map_err(AppError::Io)?;
+    if !meta.is_file() {
+        return Err(AppError::InvalidArgument(format!(
+            "file_path is not a regular file: {file_path}"
+        )));
+    }
+
+    // Dirty check BEFORE the edit: any porcelain output for this path means the
+    // file already had staged/unstaged changes, so we must not auto-stage.
+    let status = run_git(
+        Some(repo_path),
+        &["status", "--porcelain", "--", file_path],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    let had_local_changes = !status.stdout_lossy().trim().is_empty();
+
+    // Read the file and verify the range still matches the suggestion's anchor.
+    let raw = tokio::fs::read_to_string(&canon_target)
+        .await
+        .map_err(AppError::Io)?;
+    // Mirror the BOM/EOL/trailing-newline idiom from `git_unignore_rules`: strip
+    // a leading BOM for processing and restore it, and preserve the file's line
+    // ending (`lines()` drops both \n and \r\n, so a naive join would rewrite a
+    // CRLF file to LF).
+    let (has_bom, content) = match raw.strip_prefix('\u{feff}') {
+        Some(rest) => (true, rest),
+        None => (false, raw.as_str()),
+    };
+    let ending = if content.contains("\r\n") { "\r\n" } else { "\n" };
+
+    let existing: Vec<&str> = content.lines().collect();
+    let start = (start_line - 1) as usize;
+    let end = start + expected_lines.len();
+    // Range beyond EOF, or any line differing, is a mismatch — the file drifted.
+    let matches = end <= existing.len()
+        && existing[start..end]
+            .iter()
+            .zip(expected_lines.iter())
+            .all(|(have, want)| *have == want.as_str());
+    if !matches {
+        // Drift is a legitimate state, not a caller bug — use `Command` so its
+        // bare Display surfaces cleanly in the UI toast (InvalidArgument's
+        // "invalid argument: " prefix would leak into user-facing copy).
+        return Err(AppError::Command(format!(
+            "{file_path} has changed since the suggestion was made — the lines to replace no longer match"
+        )));
+    }
+
+    // Splice the replacement in place of the expected range.
+    let mut next_lines: Vec<&str> = Vec::with_capacity(
+        existing.len() - expected_lines.len() + replacement_lines.len(),
+    );
+    next_lines.extend_from_slice(&existing[..start]);
+    next_lines.extend(replacement_lines.iter().map(String::as_str));
+    next_lines.extend_from_slice(&existing[end..]);
+    let mut next = next_lines.join(ending);
+    // Preserve the file's trailing-newline presence (even if the edit emptied it).
+    if content.ends_with('\n') {
+        next.push_str(ending);
+    }
+    if has_bom {
+        next.insert(0, '\u{feff}');
+    }
+    tokio::fs::write(&canon_target, next)
+        .await
+        .map_err(AppError::Io)?;
+
+    // Stage only when asked AND the file was otherwise clean, so the index gains
+    // exactly this edit (never sweeping in pre-existing local changes). We call
+    // the lock-free `run_git` here (not `run_git_mutating`) because we already
+    // hold the repo lock above — re-acquiring it would deadlock.
+    let staged = stage_when_clean && !had_local_changes;
+    if staged {
+        run_git(
+            Some(repo_path),
+            &["add", "--", file_path],
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
+    }
+
+    Ok(ApplyLinesResult {
+        staged,
+        had_local_changes,
+    })
+}
+
 #[tauri::command]
 pub async fn git_stash_count(repo_path: String) -> AppResult<u32> {
     let out = crate::git::runner::run_git(
@@ -1949,6 +2142,264 @@ mod tests {
         git_unignore_rules(repo, vec![rule("*.log")]).await.unwrap();
         let out = std::fs::read_to_string(dir.join(".gitignore")).unwrap();
         assert_eq!(out, "\u{feff}build/\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn lines(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[tokio::test]
+    async fn replace_lines_clean_file_stages_exactly_the_edit() {
+        let (dir, repo) = setup_repo("replace-clean").await;
+        commit_file(&repo, &dir, "src.txt", "a\nb\nc\n", "seed").await;
+
+        let state = AppState::default();
+        let res = replace_file_lines(
+            &state,
+            &repo,
+            "src.txt",
+            2,
+            &lines(&["b"]),
+            &lines(&["B1", "B2"]),
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(res.staged);
+        assert!(!res.had_local_changes);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("src.txt")).unwrap(),
+            "a\nB1\nB2\nc\n"
+        );
+        // The index holds exactly this edit — the staged blob matches the file,
+        // so there is no unstaged remainder for src.txt.
+        let porcelain = git(&repo, &["status", "--porcelain", "--", "src.txt"]).await;
+        assert_eq!(porcelain, "M  src.txt\n", "unexpected status: {porcelain:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn replace_lines_dirty_file_does_not_stage() {
+        let (dir, repo) = setup_repo("replace-dirty").await;
+        commit_file(&repo, &dir, "src.txt", "a\nb\nc\n", "seed").await;
+        // A pre-existing unstaged edit elsewhere in the same file.
+        std::fs::write(dir.join("src.txt"), "a\nb\nCHANGED\n").unwrap();
+
+        let state = AppState::default();
+        let res = replace_file_lines(
+            &state,
+            &repo,
+            "src.txt",
+            2,
+            &lines(&["b"]),
+            &lines(&["B"]),
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(!res.staged, "must not stage a file with pre-existing changes");
+        assert!(res.had_local_changes);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("src.txt")).unwrap(),
+            "a\nB\nCHANGED\n"
+        );
+        // Nothing staged: the change is unstaged-only (" M").
+        let porcelain = git(&repo, &["status", "--porcelain", "--", "src.txt"]).await;
+        assert_eq!(porcelain, " M src.txt\n", "unexpected status: {porcelain:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn replace_lines_mismatch_leaves_file_untouched() {
+        let (dir, repo) = setup_repo("replace-mismatch").await;
+        commit_file(&repo, &dir, "src.txt", "a\nb\nc\n", "seed").await;
+        let before = std::fs::read(dir.join("src.txt")).unwrap();
+
+        let state = AppState::default();
+        // Expected "X" at line 2 but the file has "b" — drift, must be refused.
+        let res = replace_file_lines(
+            &state,
+            &repo,
+            "src.txt",
+            2,
+            &lines(&["X"]),
+            &lines(&["B"]),
+            true,
+        )
+        .await;
+        assert!(res.is_err());
+        // File is byte-identical to before the attempted apply.
+        assert_eq!(std::fs::read(dir.join("src.txt")).unwrap(), before);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn replace_lines_beyond_eof_is_a_mismatch() {
+        let (dir, repo) = setup_repo("replace-eof").await;
+        commit_file(&repo, &dir, "src.txt", "a\nb\n", "seed").await;
+        let before = std::fs::read(dir.join("src.txt")).unwrap();
+
+        let state = AppState::default();
+        // start_line 2 with two expected lines runs past EOF → mismatch.
+        let res = replace_file_lines(
+            &state,
+            &repo,
+            "src.txt",
+            2,
+            &lines(&["b", "c"]),
+            &lines(&["B"]),
+            true,
+        )
+        .await;
+        assert!(res.is_err());
+        assert_eq!(std::fs::read(dir.join("src.txt")).unwrap(), before);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn replace_lines_preserves_crlf() {
+        let (dir, repo) = setup_repo("replace-crlf").await;
+        commit_file(&repo, &dir, "src.txt", "a\r\nb\r\nc\r\n", "seed").await;
+
+        let state = AppState::default();
+        let res = replace_file_lines(
+            &state,
+            &repo,
+            "src.txt",
+            2,
+            &lines(&["b"]),
+            &lines(&["B1", "B2"]),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(!res.staged);
+        // Read as bytes to prove the CRLF flavor survived (no LF conversion).
+        assert_eq!(
+            std::fs::read(dir.join("src.txt")).unwrap(),
+            b"a\r\nB1\r\nB2\r\nc\r\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn replace_lines_pure_deletion_removes_the_range() {
+        let (dir, repo) = setup_repo("replace-delete").await;
+        commit_file(&repo, &dir, "src.txt", "a\nb\nc\nd\n", "seed").await;
+
+        let state = AppState::default();
+        // Empty replacement = delete lines 2..3 ("b","c").
+        let res = replace_file_lines(
+            &state,
+            &repo,
+            "src.txt",
+            2,
+            &lines(&["b", "c"]),
+            &[],
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(!res.staged);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("src.txt")).unwrap(),
+            "a\nd\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn replace_lines_preserves_missing_trailing_newline() {
+        let (dir, repo) = setup_repo("replace-notrail").await;
+        // No trailing newline on the seed file.
+        commit_file(&repo, &dir, "src.txt", "a\nb\nc", "seed").await;
+
+        let state = AppState::default();
+        let res = replace_file_lines(
+            &state,
+            &repo,
+            "src.txt",
+            3,
+            &lines(&["c"]),
+            &lines(&["C"]),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(!res.staged);
+        // Still no trailing newline after the edit.
+        assert_eq!(
+            std::fs::read_to_string(dir.join("src.txt")).unwrap(),
+            "a\nb\nC"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn replace_lines_sequential_applies_both_survive() {
+        // The sequential form of the concurrency guard: two applies to DIFFERENT
+        // ranges of one file, each verifying against the other's post-edit state,
+        // both succeed and both edits survive (a race would clobber the first).
+        let (dir, repo) = setup_repo("replace-seq").await;
+        commit_file(&repo, &dir, "src.txt", "a\nb\nc\nd\n", "seed").await;
+        let state = AppState::default();
+
+        replace_file_lines(&state, &repo, "src.txt", 1, &lines(&["a"]), &lines(&["A"]), false)
+            .await
+            .unwrap();
+        // Second apply anchors on line 4 ("d"), which must still match after the
+        // first edit (only line 1 changed) — proving it saw the first's write.
+        replace_file_lines(&state, &repo, "src.txt", 4, &lines(&["d"]), &lines(&["D"]), false)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dir.join("src.txt")).unwrap(),
+            "A\nb\nc\nD\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn replace_lines_rejects_invalid_arguments() {
+        let (dir, repo) = setup_repo("replace-invalid").await;
+        commit_file(&repo, &dir, "src.txt", "a\nb\n", "seed").await;
+        let state = AppState::default();
+
+        // start_line 0 is not 1-based.
+        assert!(replace_file_lines(&state, &repo, "src.txt", 0, &lines(&["a"]), &[], false)
+            .await
+            .is_err());
+        // Empty expected_lines.
+        assert!(replace_file_lines(&state, &repo, "src.txt", 1, &[], &[], false)
+            .await
+            .is_err());
+        // Traversal outside the repo.
+        assert!(replace_file_lines(
+            &state,
+            &repo,
+            "../escape.txt",
+            1,
+            &lines(&["a"]),
+            &[],
+            false
+        )
+        .await
+        .is_err());
+        // Nonexistent file.
+        assert!(replace_file_lines(&state, &repo, "missing.txt", 1, &lines(&["a"]), &[], false)
+            .await
+            .is_err());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

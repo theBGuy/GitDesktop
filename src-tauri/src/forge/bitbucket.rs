@@ -36,7 +36,7 @@ use crate::forge::Forge;
 use crate::github::actions::{RunDetail, RunJob, WorkflowRun};
 use crate::github::pr::{
     ApprovalState, PrAuthor, PrCommitOut, PrDetails, PrFileOut, PrInfo, PrListLabel, PrPollInfo,
-    PrRef, PrThreadOut,
+    PrRef, PrThreadOut, ReviewThreadOut,
 };
 
 /// Failed-step logs can run to many MB; keep the tail (failures land at the end).
@@ -759,7 +759,15 @@ struct BbPathItem {
     path: String,
 }
 
-/// A PR comment (`{id, content:{raw}, user, created_on, deleted, pending, inline?}`).
+/// A PR comment (`{id, content:{raw}, user, created_on, deleted, pending, inline?,
+/// parent?}`).
+///
+/// Live-probed 2026-07-05 (stars-align-app/front_end PR #38 inline, admin_panel
+/// PR #1 reply): a reply comment carries `parent: {id, links}`; only the ROOT
+/// inline comment carries the `inline` object — replies to it do NOT re-carry
+/// `inline` (they anchor via `parent` alone). NO `resolution` key was present on
+/// ANY probed comment (general, inline, or reply) across three repos, so
+/// thread-resolution is left unwired for Bitbucket (`mr_thread_resolve` false).
 #[derive(Deserialize)]
 struct BbComment {
     #[serde(default)]
@@ -774,9 +782,13 @@ struct BbComment {
     deleted: bool,
     #[serde(default, deserialize_with = "null_to_default")]
     pending: bool,
-    /// Present only for inline (file) comments; general comments omit it.
+    /// Present only for inline (file) comments; general comments omit it. Only the
+    /// root inline comment carries this — replies anchor via `parent` (probed).
     #[serde(default)]
     inline: Option<BbInline>,
+    /// Present on replies — the id of the comment this one answers. Absent on roots.
+    #[serde(default)]
+    parent: Option<BbParent>,
     #[serde(default)]
     links: Option<BbHtmlLinks>,
 }
@@ -789,6 +801,14 @@ struct BbInline {
     to: Option<u64>,
     #[serde(default)]
     from: Option<u64>,
+}
+
+/// A comment's `parent` ref (present on replies). Only the id matters for
+/// grouping a reply back to its thread root.
+#[derive(Deserialize, Default)]
+struct BbParent {
+    #[serde(default)]
+    id: u64,
 }
 
 /// A commit status (`{key, name, state, url}`).
@@ -910,8 +930,9 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
     })
     .unwrap_or_default();
 
-    // Comments — drop deleted + pending; prefix inline comments with file:line so
-    // the file context isn't lost in the flat conversation view.
+    // Comments — drop deleted + pending, AND inline (diff-anchored) comments,
+    // which now surface as `review_threads` with real file/line context instead of
+    // leaking their bodies context-free into the flat conversation list.
     let comments: Vec<PrThreadOut> = http::bb_get_json::<BbPage<BbComment>>(
         &creds,
         &format!("{base}/comments?pagelen=100"),
@@ -921,7 +942,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
     .map(|page| {
         page.values
             .into_iter()
-            .filter(|c| !c.deleted && !c.pending)
+            .filter(|c| !c.deleted && !c.pending && c.inline.is_none())
             .map(from_bb_comment)
             .collect()
     })
@@ -985,21 +1006,12 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
     })
 }
 
-/// Map one non-deleted/non-pending comment onto a neutral thread. Inline (file)
-/// comments get a `**\`path\`** (line N):` prefix so the file/line context survives
-/// the flat conversation view.
+/// Map one non-deleted/non-pending comment onto a neutral thread. The body is the
+/// raw content verbatim — inline (diff-anchored) comments carry their file/line
+/// context structurally now (via `ReviewThreadOut.path`/`line` when grouped as a
+/// review thread), so there is no longer a `**path** (line N):` text prefix.
 fn from_bb_comment(c: BbComment) -> PrThreadOut {
-    let raw = c.content.map(|r| r.raw).unwrap_or_default();
-    let body = match &c.inline {
-        Some(inline) if !inline.path.is_empty() => {
-            let line = inline.to.or(inline.from);
-            match line {
-                Some(n) => format!("**`{}`** (line {n}):\n\n{raw}", inline.path),
-                None => format!("**`{}`**:\n\n{raw}", inline.path),
-            }
-        }
-        _ => raw,
-    };
+    let body = c.content.map(|r| r.raw).unwrap_or_default();
     PrThreadOut {
         author: c.user.as_ref().map(user_login).unwrap_or_default(),
         state: String::new(),
@@ -1504,6 +1516,168 @@ pub async fn comment_pr(repo_path: &str, number: u64, body: &str) -> AppResult<(
     let payload = serde_json::json!({ "content": { "raw": body } });
     http::bb_post_json::<serde_json::Value>(&creds, &path, &payload, "comment").await?;
     Ok(())
+}
+
+/// Group a flat list of PR comments into file:line-anchored review threads. Pure
+/// (unit-tested). A thread ROOT is an inline comment with no parent; replies
+/// attach to their root by walking the `parent` chain (a reply's parent may itself
+/// be a reply). Deleted / pending comments are dropped first. Threads and their
+/// comments are ordered oldest-first (Bitbucket returns comments oldest-first).
+fn group_bb_threads(comments: Vec<BbComment>) -> Vec<ReviewThreadOut> {
+    // Chain topology (child id -> parent id) is built from ALL fetched comments,
+    // including deleted/pending ones: they still carry id + parent, so a live reply
+    // whose INTERMEDIATE parent was deleted can still walk THROUGH it up to a
+    // surviving root. We only RENDER live comments (below) — a reply whose chain
+    // root is itself deleted/absent still drops (correct orphan handling).
+    let parent_of: std::collections::HashMap<u64, u64> = comments
+        .iter()
+        .filter_map(|c| c.parent.as_ref().map(|p| (c.id, p.id)))
+        .collect();
+    let chain_len = comments.len();
+
+    // Keep only real comments, preserving order — these are the ones we render.
+    let live: Vec<BbComment> = comments
+        .into_iter()
+        .filter(|c| !c.deleted && !c.pending)
+        .collect();
+
+    // A thread root is a LIVE inline comment with no parent. Record its order so
+    // threads come out in the order their roots appear.
+    let mut root_order: Vec<u64> = Vec::new();
+    let mut is_root: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    for c in &live {
+        if c.inline.is_some() && c.parent.is_none() {
+            root_order.push(c.id);
+            is_root.insert(c.id);
+        }
+    }
+
+    // Resolve any comment id to the root of its thread by walking parents through
+    // the full-topology map (bounded by the full comment count, so a malformed
+    // cycle can't loop forever).
+    let root_for = |mut id: u64| -> Option<u64> {
+        for _ in 0..chain_len.saturating_add(1) {
+            if is_root.contains(&id) {
+                return Some(id);
+            }
+            match parent_of.get(&id) {
+                Some(&pid) => id = pid,
+                None => return None,
+            }
+        }
+        None
+    };
+
+    // Bucket each live comment under its root (roots include themselves).
+    let mut buckets: std::collections::HashMap<u64, Vec<&BbComment>> =
+        std::collections::HashMap::new();
+    for c in &live {
+        if let Some(root) = root_for(c.id) {
+            buckets.entry(root).or_default().push(c);
+        }
+    }
+
+    root_order
+        .into_iter()
+        .filter_map(|root_id| {
+            let mut group = buckets.remove(&root_id)?;
+            // Oldest-first within the thread — Bitbucket already returns comments
+            // in ascending creation order, so sort by id to be robust to paging.
+            group.sort_by_key(|c| c.id);
+            let root = group.iter().find(|c| c.id == root_id)?;
+            let inline = root.inline.as_ref()?;
+            let (side, line) = match (inline.to, inline.from) {
+                (Some(to), _) => ("new", to as u32),
+                (None, Some(from)) => ("old", from as u32),
+                (None, None) => ("new", 0u32),
+            };
+            let comments: Vec<PrThreadOut> = group
+                .into_iter()
+                .map(|c| PrThreadOut {
+                    author: c.user.as_ref().map(user_login).unwrap_or_default(),
+                    state: String::new(),
+                    body: c.content.as_ref().map(|r| r.raw.clone()).unwrap_or_default(),
+                    date: c.created_on.clone(),
+                    id: c.id.to_string(),
+                    url: html_href(&c.links),
+                    viewer_did_author: false,
+                    is_minimized: false,
+                    minimized_reason: String::new(),
+                })
+                .collect();
+            Some(ReviewThreadOut {
+                id: root_id.to_string(),
+                path: inline.path.clone(),
+                line,
+                // Bitbucket inline anchors are single-line (`to`/`from`), with no
+                // multi-line range concept — always 0.
+                start_line: 0,
+                side: side.into(),
+                // Bitbucket surfaced no `resolution` field on any probed comment
+                // (three repos, incl. inline) — thread-resolution stays unwired.
+                is_resolved: false,
+                // No Bitbucket "outdated" concept on comments.
+                is_outdated: false,
+                // Bitbucket exposes no unified-diff excerpt on comments — empty.
+                diff_hunk: String::new(),
+                comments,
+            })
+        })
+        .collect()
+}
+
+/// File:line-anchored review threads on a PR — Bitbucket inline comments grouped
+/// with their reply chains. Own fetch (kept separate from `view_pr`'s conversation
+/// read).
+pub async fn review_threads(repo_path: &str, number: u64) -> AppResult<Vec<ReviewThreadOut>> {
+    let creds = http::load_credentials().await?;
+    let base = repo_base(repo_path).await?;
+    let page = http::bb_get_json::<BbPage<BbComment>>(
+        &creds,
+        &format!("{base}/pullrequests/{number}/comments?pagelen=100"),
+        "comments",
+    )
+    .await?;
+    Ok(group_bb_threads(page.values))
+}
+
+/// Reply in an existing review thread (`POST …/comments`, `{"content":{"raw"},
+/// "parent":{"id"}}`). `thread_id` is the root comment id.
+pub async fn reply_thread(
+    repo_path: &str,
+    number: u64,
+    thread_id: &str,
+    body: &str,
+) -> AppResult<()> {
+    if body.trim().is_empty() {
+        return Err(AppError::InvalidArgument("a reply is required".into()));
+    }
+    let parent_id: u64 = thread_id
+        .parse()
+        .map_err(|_| AppError::InvalidArgument(format!("invalid thread id: {thread_id}")))?;
+    let creds = http::load_credentials().await?;
+    let base = repo_base(repo_path).await?;
+    let path = format!("{base}/pullrequests/{number}/comments");
+    let payload = serde_json::json!({
+        "content": { "raw": body },
+        "parent": { "id": parent_id },
+    });
+    http::bb_post_json::<serde_json::Value>(&creds, &path, &payload, "reply").await?;
+    Ok(())
+}
+
+/// Resolve / unresolve a review thread. Bitbucket surfaced no comment-resolution
+/// field or endpoint on any probed comment (three repos), so this is unwired —
+/// `mr_thread_resolve` is false for Bitbucket and the command errors if reached.
+pub async fn resolve_thread(
+    _repo_path: &str,
+    _number: u64,
+    _thread_id: &str,
+    _resolved: bool,
+) -> AppResult<()> {
+    Err(AppError::Bitbucket(
+        "resolving comment threads is not supported".into(),
+    ))
 }
 
 /// Decline (close) a pull request (`POST …/pullrequests/{n}/decline`, no body). A
@@ -3971,7 +4145,10 @@ mod tests {
     }
 
     #[test]
-    fn comments_filter_deleted_and_pending_and_prefix_inline() {
+    fn conversation_comments_drop_deleted_pending_and_inline() {
+        // The flat conversation list keeps only non-deleted, non-pending, NON-inline
+        // comments (inline ones now surface as review threads) — verbatim bodies,
+        // no file:line prefix.
         let page: BbPage<BbComment> = serde_json::from_str(
             r#"{"values":[
                 {"id":1,"content":{"raw":"general note"},"user":{"display_name":"Bob"},
@@ -3986,16 +4163,97 @@ mod tests {
         let threads: Vec<PrThreadOut> = page
             .values
             .into_iter()
-            .filter(|c| !c.deleted && !c.pending)
+            .filter(|c| !c.deleted && !c.pending && c.inline.is_none())
             .map(from_bb_comment)
             .collect();
-        assert_eq!(threads.len(), 2);
-        // General comment untouched.
+        // Only the general comment survives — inline/deleted/pending are excluded.
+        assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].body, "general note");
         assert_eq!(threads[0].author, "Bob");
-        // Inline comment prefixed with file + line.
-        assert!(threads[1].body.starts_with("**`src/x.rs`** (line 12):"));
-        assert!(threads[1].body.contains("needs fix"));
+    }
+
+    #[test]
+    fn group_bb_threads_roots_replies_and_line_side() {
+        // Two inline roots (one on the new side via `to`, one on the old side via
+        // `from`), a nested reply chain, and deleted/pending/general noise that must
+        // be excluded from threads.
+        let page: BbPage<BbComment> = serde_json::from_str(
+            r#"{"values":[
+                {"id":10,"content":{"raw":"root A"},"user":{"display_name":"Ann"},
+                 "created_on":"2026-01-01","inline":{"path":"a.rs","to":5}},
+                {"id":11,"content":{"raw":"reply A1"},"user":{"display_name":"Bob"},
+                 "created_on":"2026-01-02","parent":{"id":10}},
+                {"id":12,"content":{"raw":"reply A2 (to A1)"},"user":{"display_name":"Cy"},
+                 "created_on":"2026-01-03","parent":{"id":11}},
+                {"id":20,"content":{"raw":"root B old-side"},"user":{"display_name":"Dee"},
+                 "created_on":"2026-01-04","inline":{"path":"b.rs","from":9}},
+                {"id":30,"content":{"raw":"general"},"created_on":"2026-01-05"},
+                {"id":40,"content":{"raw":"gone"},"deleted":true,"created_on":"2026-01-06",
+                 "inline":{"path":"c.rs","to":1}},
+                {"id":50,"content":{"raw":"draft"},"pending":true,"created_on":"2026-01-07",
+                 "inline":{"path":"d.rs","to":2}}
+            ]}"#,
+        )
+        .unwrap();
+        let threads = group_bb_threads(page.values);
+        assert_eq!(threads.len(), 2);
+
+        // Thread A: root + two replies (the deeper reply walks parent→parent→root),
+        // ordered oldest-first, new side, line 5.
+        let a = &threads[0];
+        assert_eq!(a.id, "10");
+        assert_eq!(a.path, "a.rs");
+        assert_eq!(a.line, 5);
+        assert_eq!(a.side, "new");
+        assert!(!a.is_resolved && !a.is_outdated);
+        // Bitbucket has no multi-line range or diff excerpt.
+        assert_eq!(a.start_line, 0);
+        assert_eq!(a.diff_hunk, "");
+        assert_eq!(a.comments.len(), 3);
+        assert_eq!(a.comments[0].body, "root A");
+        assert_eq!(a.comments[1].body, "reply A1");
+        assert_eq!(a.comments[2].body, "reply A2 (to A1)");
+
+        // Thread B: old side (from → "old"), line 9, single comment.
+        let b = &threads[1];
+        assert_eq!(b.id, "20");
+        assert_eq!(b.side, "old");
+        assert_eq!(b.line, 9);
+        assert_eq!(b.comments.len(), 1);
+    }
+
+    #[test]
+    fn group_bb_threads_walks_through_deleted_mid_chain_but_drops_deleted_root() {
+        // root(live, inline) ← mid(deleted) ← reply(live): the reply's parent points
+        // at the DELETED mid comment, so the chain must walk THROUGH mid (via the
+        // full-topology map) up to the surviving root — the reply lands in the
+        // thread even though mid itself is not rendered.
+        // root2(deleted, inline) ← reply2(live): the chain root is deleted, so no
+        // live root exists and the reply stays dropped (correct orphan handling).
+        let page: BbPage<BbComment> = serde_json::from_str(
+            r#"{"values":[
+                {"id":100,"content":{"raw":"root live"},"user":{"display_name":"Ann"},
+                 "created_on":"2026-01-01","inline":{"path":"a.rs","to":5}},
+                {"id":101,"content":{"raw":"mid gone"},"deleted":true,
+                 "created_on":"2026-01-02","parent":{"id":100}},
+                {"id":102,"content":{"raw":"reply survives"},"user":{"display_name":"Bob"},
+                 "created_on":"2026-01-03","parent":{"id":101}},
+                {"id":200,"content":{"raw":"root gone"},"deleted":true,
+                 "created_on":"2026-01-04","inline":{"path":"b.rs","to":8}},
+                {"id":201,"content":{"raw":"orphan reply"},"user":{"display_name":"Cy"},
+                 "created_on":"2026-01-05","parent":{"id":200}}
+            ]}"#,
+        )
+        .unwrap();
+        let threads = group_bb_threads(page.values);
+        // Only the live-root thread survives; the deleted-root thread is gone.
+        assert_eq!(threads.len(), 1);
+        let t = &threads[0];
+        assert_eq!(t.id, "100");
+        // root + reply render; the deleted mid is walked through but NOT rendered.
+        assert_eq!(t.comments.len(), 2);
+        assert_eq!(t.comments[0].body, "root live");
+        assert_eq!(t.comments[1].body, "reply survives");
     }
 
     #[test]

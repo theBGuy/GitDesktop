@@ -62,6 +62,7 @@ import {
   forgeFeatureReady,
   PIPELINE_IN_FLIGHT,
   prDiffOptions,
+  useApplySuggestion,
   useApprovePr,
   useCheckoutPr,
   useClosePr,
@@ -79,6 +80,7 @@ import {
   usePrDetails,
   usePrDiff,
   usePrReactions,
+  usePrReviewThreads,
   useReadyPr,
   useReopenPr,
   useRepoStatus,
@@ -87,12 +89,15 @@ import {
   useSetPrAssignees,
   useSetPrDraft,
   useSetPrReviewers,
+  useThreadReply,
+  useThreadResolve,
   useToggleReaction,
   useUnapprovePr,
   useUnminimizeComment,
   useUnrequestChangesPr,
 } from "@/lib/git/queries";
 import { type ApprovalState, providerLabel } from "@/lib/git/types";
+import { formatBinding } from "@/lib/hotkeys/binding";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
@@ -105,8 +110,13 @@ import {
   PrFilesPane,
 } from "./RemotePrViewParts";
 import { ReviewersPopover, userRefHint } from "./ReviewersPopover";
+import { ReviewThreadsBlock, type SuggestionApply } from "./ReviewThreads";
 
 type Section = "conversation" | "commits" | "files" | "review";
+
+/** Platform-correct submit-shortcut hint (⌘+Enter on macOS, Ctrl+Enter else) —
+ *  never hardcode the modifier (house platform-mod-key rule). */
+const SUBMIT_HINT = formatBinding("mod+enter");
 
 const MERGE_LABEL: Record<MergeStrategy, string> = {
   merge: "Create a merge commit",
@@ -207,6 +217,13 @@ export function RemotePrView({
   // PR tasks are a native Bitbucket concept (no GitHub/GitLab analogue wired), so
   // the flag alone gates the section + header chip — never `canWrite || …`.
   const canTasks = forgeFeatureReady(forge.data, "prTasks");
+  // Review-thread reply/resolve are shared controls (GitHub + wired providers) —
+  // same `canWrite || …` gate as comment/merge so GitHub keeps them while
+  // forge-status is pending/failed, and a ready provider positively enables them.
+  const canThreadReply =
+    canWrite || forgeFeatureReady(forge.data, "mrThreadReply");
+  const canThreadResolve =
+    canWrite || forgeFeatureReady(forge.data, "mrThreadResolve");
   const details = usePrDetails(repoPath, number);
   const prDiff = usePrDiff(repoPath, number);
   const review = useReviewPr(repoPath);
@@ -215,6 +232,7 @@ export function RemotePrView({
   const comment = useCommentPr(repoPath);
   const checkout = useCheckoutPr(repoPath);
   const repoStatus = useRepoStatus(repoPath);
+  const applySuggestion = useApplySuggestion(repoPath);
   const mergePr = useMergePr(repoPath);
   const closePr = useClosePr(repoPath);
   const reopenPr = useReopenPr(repoPath);
@@ -247,6 +265,14 @@ export function RemotePrView({
   const readyPr = useReadyPr(repoPath);
   const setDraft = useSetPrDraft(repoPath);
   const editPr = useEditPr(repoPath);
+  // File:line-anchored review threads (Copilot/CodeRabbit/human line comments).
+  // The read serves both the Conversation block below and (later) the Files
+  // diff anchors, so it lives here at the top level. The read gates on the PR
+  // number alone (a flaky status probe mustn't hide threads); the WRITE controls
+  // below stay gated on the per-provider Implemented flags.
+  const reviewThreads = usePrReviewThreads(repoPath, number);
+  const threadReply = useThreadReply(repoPath, number);
+  const threadResolve = useThreadResolve(repoPath, number);
   // Reactions are a shared control (GitLab awards emoji); the fetch is gated so
   // it never fires for a provider whose reactions aren't wired (Bitbucket).
   const canReact = canWrite || forgeFeatureReady(forge.data, "mrReactions");
@@ -522,6 +548,18 @@ export function RemotePrView({
         isTruncated: false,
       }
     : undefined;
+
+  // Gating inputs + the write for the per-suggestion Apply affordance, shared by
+  // the Conversation review-thread block and the Files-tab diff anchors. The
+  // current branch is the same status field the header's "Checked out" gate reads
+  // (`repoStatus.data?.branch?.name`); onApply supplies `stageWhenClean: true`
+  // (SuggestionApply's arg omits it) so a clean file is staged like GitHub's
+  // "Commit suggestion".
+  const suggestionApply: SuggestionApply = {
+    headRefName: pr.headRefName,
+    currentBranch: repoStatus.data?.branch?.name ?? null,
+    onApply: (a) => applySuggestion.mutateAsync({ ...a, stageWhenClean: true }),
+  };
 
   const isOpen = pr.state === "OPEN";
   const busy =
@@ -932,6 +970,27 @@ export function RemotePrView({
                     }
                   />
                 ))}
+              {/* File:line-anchored review threads, grouped by file. Renders
+                  nothing when there are none (or while loading); a quiet muted
+                  line on error. Reply/resolve gated per provider. */}
+              <ReviewThreadsBlock
+                threads={reviewThreads.data}
+                isError={reviewThreads.isError}
+                onQuote={quoteReply}
+                onReply={
+                  canThreadReply
+                    ? (threadId, body) =>
+                        threadReply.mutateAsync({ threadId, body })
+                    : undefined
+                }
+                onResolve={
+                  canThreadResolve
+                    ? (threadId, resolved) =>
+                        threadResolve.mutateAsync({ threadId, resolved })
+                    : undefined
+                }
+                apply={suggestionApply}
+              />
               {pr.comments
                 .filter((c) => hasVisibleBody(c.body))
                 .map((c) => (
@@ -1013,7 +1072,7 @@ export function RemotePrView({
                   size="sm"
                   disabled={!composeBody.trim() || busy}
                   onClick={submitComment}
-                  title="Ctrl+Enter"
+                  title={SUBMIT_HINT}
                 >
                   Comment
                 </Button>
@@ -1159,6 +1218,23 @@ export function RemotePrView({
           fileDiff={fileDiff}
           isPending={prDiff.isPending}
           isError={prDiff.isError}
+          // The same threads + handlers/gates the Conversation block uses —
+          // reuse the top-level read/mutations, don't re-fetch. Quoting from a
+          // diff card feeds the view-level composer (persists to Conversation).
+          threads={reviewThreads.data}
+          onQuote={quoteReply}
+          onReply={
+            canThreadReply
+              ? (threadId, body) => threadReply.mutateAsync({ threadId, body })
+              : undefined
+          }
+          onResolve={
+            canThreadResolve
+              ? (threadId, resolved) =>
+                  threadResolve.mutateAsync({ threadId, resolved })
+              : undefined
+          }
+          apply={suggestionApply}
         />
       )}
 

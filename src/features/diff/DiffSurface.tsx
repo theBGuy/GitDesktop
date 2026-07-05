@@ -1,6 +1,6 @@
 import { DiffFile, DiffModeEnum, DiffView } from "@git-diff-view/react";
 import type { UseQueryResult } from "@tanstack/react-query";
-import { useDeferredValue, useMemo, useState } from "react";
+import { type ReactNode, useDeferredValue, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ButtonGroup } from "@/components/ui/button-group";
 import { useFileAtRev } from "@/lib/git/queries";
@@ -23,6 +23,23 @@ import {
   shikiDiffHighlighter,
 } from "./shiki-highlighter";
 import { ensureCustomLanguages } from "./syntax";
+
+/**
+ * A line-anchored annotation rendered under a specific diff line (e.g. a PR
+ * review thread). The library renders it as an always-visible block below the
+ * anchored line, in both Unified and Split modes.
+ *
+ * `extendData` holds ONE entry per line per side, so callers must pre-group
+ * multiple anchors on the same side+line into a single `render()` that stacks
+ * them. Anchors on lines beyond the large-diff cap don't render until the user
+ * expands "Show full diff".
+ */
+export interface DiffLineAnchor {
+  side: "old" | "new";
+  /** 1-based line number in that side's file. */
+  line: number;
+  render: () => ReactNode;
+}
 
 /** User syntax preferences threaded into diff building. */
 export interface SyntaxPrefs {
@@ -126,12 +143,15 @@ export function GitDiffView({
   text,
   repoPath,
   contentRevs,
+  lineAnchors,
 }: {
   filePath: string;
   text: string;
   /** The diff's own repo, for reading full file text (highlight context). */
   repoPath?: string;
   contentRevs?: DiffContentRevs;
+  /** Line-anchored annotations (e.g. PR review threads) rendered under a line. */
+  lineAnchors?: DiffLineAnchor[];
 }) {
   return (
     <DiffErrorBoundary resetKey={`${filePath} ${text.length}`}>
@@ -140,6 +160,7 @@ export function GitDiffView({
         text={text}
         repoPath={repoPath}
         contentRevs={contentRevs}
+        lineAnchors={lineAnchors}
       />
     </DiffErrorBoundary>
   );
@@ -301,16 +322,21 @@ export function useFileContent(
   );
 }
 
+/** The per-side line -> render() maps the vendored DiffView consumes. */
+type AnchorExtendData = Record<string, { data: { render: () => ReactNode } }>;
+
 function RenderedDiff({
   filePath,
   text,
   repoPath,
   contentRevs,
+  lineAnchors,
 }: {
   filePath: string;
   text: string;
   repoPath?: string;
   contentRevs?: DiffContentRevs;
+  lineAnchors?: DiffLineAnchor[];
 }) {
   const settings = useSettings();
   const isDark = useIsDark();
@@ -366,10 +392,25 @@ function RenderedDiff({
     [shown, deferredPath, syntaxMap, customLanguages, content],
   );
 
+  // Build the per-side extendData maps from the anchors (keyed by String(line)).
+  // Memoized for referential stability: the vendored DiffView is store-based and
+  // a fresh object each render would thrash it. Anchors on lines beyond the
+  // large-diff cap simply don't render until "Show full diff" expands the diff.
+  const extendData = useMemo(() => {
+    if (!lineAnchors || lineAnchors.length === 0) return undefined;
+    const oldFile: AnchorExtendData = {};
+    const newFile: AnchorExtendData = {};
+    for (const a of lineAnchors) {
+      const target = a.side === "old" ? oldFile : newFile;
+      target[String(a.line)] = { data: { render: a.render } };
+    }
+    return { oldFile, newFile };
+  }, [lineAnchors]);
+
   if (!diffFile) return <DiffPlaceholder message="No changes to show" />;
   return (
     <>
-      <DiffView
+      <DiffView<{ render: () => ReactNode }>
         diffFile={diffFile}
         diffViewMode={
           viewMode === "split" ? DiffModeEnum.Split : DiffModeEnum.Unified
@@ -378,6 +419,18 @@ function RenderedDiff({
         diffViewHighlight
         diffViewWrap
         diffViewFontSize={12}
+        extendData={extendData}
+        // A card renders inside the diff table; give it a neutral, non-mono
+        // container so it doesn't inherit the code cell's font/background.
+        renderExtendLine={
+          extendData
+            ? ({ data }) => (
+                <div className="border-y bg-background px-3 py-2 font-sans text-xs">
+                  {data.render()}
+                </div>
+              )
+            : undefined
+        }
       />
       {hidden > 0 && (
         <div className="flex items-center justify-center gap-3 border-t bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
@@ -404,12 +457,14 @@ export function DiffSurface({
   repoPath,
   imageRevs,
   contentRevs,
+  lineAnchors,
 }: {
   filePath: string;
   diff: UseQueryResult<FileDiff>;
   repoPath?: string;
   imageRevs?: ImageRevs;
   contentRevs?: DiffContentRevs;
+  lineAnchors?: DiffLineAnchor[];
 }) {
   return (
     <DiffContent
@@ -420,6 +475,7 @@ export function DiffSurface({
       repoPath={repoPath}
       imageRevs={imageRevs}
       contentRevs={contentRevs}
+      lineAnchors={lineAnchors}
     />
   );
 }
@@ -436,6 +492,7 @@ export function DiffContent({
   repoPath,
   imageRevs,
   contentRevs,
+  lineAnchors,
 }: {
   filePath: string;
   data: FileDiff | undefined;
@@ -446,6 +503,8 @@ export function DiffContent({
   imageRevs?: ImageRevs;
   /** Revs to read full file text from for highlight context (text diffs). */
   contentRevs?: DiffContentRevs;
+  /** Line-anchored annotations (e.g. PR review threads). Absent = no anchors. */
+  lineAnchors?: DiffLineAnchor[];
 }) {
   // Diffs load near-instantly from local git, so a skeleton only adds a flash
   // and a layout shift on the way to the real content — render nothing until
@@ -503,6 +562,7 @@ export function DiffContent({
           // A truncated diff was cut by the byte cap and can't line up with the
           // full file text, so don't try whole-file highlighting there.
           contentRevs={data.isTruncated ? undefined : contentRevs}
+          lineAnchors={lineAnchors}
         />
       </div>
     </div>

@@ -161,6 +161,17 @@ export interface CommitResult {
   hash: string;
 }
 
+/** Result of applying a review suggestion to the working tree
+ *  ({@link ReviewThreadOut} → {@link ApplyLinesResult}). The backend verifies the
+ *  expected lines still match before editing, preserves EOL/BOM/trailing newline,
+ *  and only stages when the file had no other local changes. */
+export interface ApplyLinesResult {
+  /** File was staged (only when it had no other local changes before the apply). */
+  staged: boolean;
+  /** File already had local changes before the apply — we never auto-stage then. */
+  hadLocalChanges: boolean;
+}
+
 export interface CommitAuthor {
   name: string;
   email: string;
@@ -572,6 +583,13 @@ export interface ForgeImplemented {
    *  — a native Bitbucket concept with no GitHub/GitLab analogue wired here, so
    *  false for both. */
   prTasks: boolean;
+  /** Reading file:line-anchored review threads on a merge/pull request (GitHub
+   *  reviewThreads / GitLab diff-note discussions / Bitbucket inline comments). */
+  mrReviewThreads: boolean;
+  /** Replying into an existing review thread. */
+  mrThreadReply: boolean;
+  /** Resolving / unresolving a review thread. */
+  mrThreadResolve: boolean;
 }
 
 /** One pull-request task (Bitbucket's PR checklist). `id`/`commentId` are numeric
@@ -1213,6 +1231,27 @@ export interface PrThreadOut {
   /** Whether the comment is hidden (minimized), and GitHub's recorded reason. */
   isMinimized: boolean;
   minimizedReason: string;
+}
+
+/** One file:line-anchored review thread, provider-neutral (GitHub reviewThread /
+ *  GitLab diff-note discussion / Bitbucket inline-comment chain). */
+export interface ReviewThreadOut {
+  /** Provider thread id (GitHub node id / GitLab discussion id / Bitbucket root comment id). */
+  id: string;
+  path: string;
+  /** 1-based anchored line; 0 = unknown (e.g. outdated threads). */
+  line: number;
+  /** First line of a multi-line range (1-based); 0 = single-line. */
+  startLine: number;
+  /** "new" (right side) or "old" (left side). */
+  side: string;
+  isResolved: boolean;
+  isOutdated: boolean;
+  /** Unified-diff hunk excerpt the thread anchors to (GitHub diffHunk); "" when
+   *  the provider has none (GitLab/Bitbucket). */
+  diffHunk: string;
+  /** Full reply chain, oldest first. */
+  comments: PrThreadOut[];
 }
 
 export interface PrCheckOut {

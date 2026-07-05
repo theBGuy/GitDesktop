@@ -812,6 +812,76 @@ export function usePrDiff(repo: string, number: number | null) {
   });
 }
 
+// File:line-anchored review threads (Copilot/CodeRabbit/human line comments); the
+// data serves both the Conversation grouping and the Files diff anchors, so it
+// lives at the PR top level.
+export const prReviewThreadsKey = (repo: string, number: number) =>
+  ["repo", repo, "pr", number, "review-threads"] as const;
+
+export function usePrReviewThreads(repo: string, number: number | null) {
+  return useQuery({
+    queryKey: prReviewThreadsKey(repo, number ?? 0),
+    queryFn: () => api.forgePrReviewThreads(repo, number ?? 0),
+    staleTime: 30_000,
+    // Gate on `number !== null` alone, exactly like usePrDetails/usePrReactions.
+    // A transient gh status-probe failure (useForgeStatus has retry:false) leaves
+    // forge.data undefined for ~60s; gating this read on it would silently hide
+    // threads on a healthy PR. The Implemented flags still gate the WRITE
+    // controls (reply/resolve) in the view.
+    enabled: number !== null,
+  });
+}
+
+/**
+ * Applies a review suggestion to the working tree (GitHub's "Commit suggestion",
+ * done locally). It's a staging-class edit — only the working tree changes — so it
+ * narrows invalidation to {@link workingTreeKeys} (status + working-tree file
+ * diffs + the mutable file-at-rev slices), exactly like {@link useStage}. That
+ * refreshes the Changes tab/status/diffs WITHOUT prefix-matching the review-threads
+ * query key (which the whole-repo default would, forcing a needless GitHub GraphQL
+ * refetch even though no thread changed). The backend verifies the expected lines
+ * before editing; a mismatch throws.
+ */
+export function useApplySuggestion(repo: string) {
+  return useRepoMutation(
+    repo,
+    (args: {
+      filePath: string;
+      startLine: number;
+      expectedLines: string[];
+      replacementLines: string[];
+      stageWhenClean: boolean;
+    }) =>
+      api.gitReplaceFileLines(
+        repo,
+        args.filePath,
+        args.startLine,
+        args.expectedLines,
+        args.replacementLines,
+        args.stageWhenClean,
+      ),
+    { invalidate: workingTreeKeys(repo) },
+  );
+}
+
+export function useThreadReply(repo: string, number: number) {
+  return useRepoMutation(
+    repo,
+    (args: { threadId: string; body: string }) =>
+      api.forgePrThreadReply(repo, number, args.threadId, args.body),
+    { invalidate: [prReviewThreadsKey(repo, number)] },
+  );
+}
+
+export function useThreadResolve(repo: string, number: number) {
+  return useRepoMutation(
+    repo,
+    (args: { threadId: string; resolved: boolean }) =>
+      api.forgePrThreadResolve(repo, number, args.threadId, args.resolved),
+    { invalidate: [prReviewThreadsKey(repo, number)] },
+  );
+}
+
 /**
  * Warms a remote PR's view (metadata + diff) so opening it is instant. PR data
  * comes over the network (the slowest loads in the app), so prefetching on row
@@ -1700,6 +1770,9 @@ const NO_FORGE_STATUS: ForgeStatus = {
     timeTracking: false,
     issueLinks: false,
     prTasks: false,
+    mrReviewThreads: false,
+    mrThreadReply: false,
+    mrThreadResolve: false,
   },
 };
 

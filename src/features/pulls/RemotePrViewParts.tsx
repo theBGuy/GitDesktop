@@ -1,5 +1,5 @@
 import { ClockIcon } from "@phosphor-icons/react";
-import type { ComponentProps } from "react";
+import { type ComponentProps, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -18,21 +18,71 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
-import { DiffContent } from "@/features/diff/DiffSurface";
+import { DiffContent, type DiffLineAnchor } from "@/features/diff/DiffSurface";
 import { TimeTrackingControls } from "@/features/issues/RemoteIssueViewParts";
 import {
   useAddMrSpentTime,
   useGlMrTimeStats,
   useSetMrTimeEstimate,
 } from "@/lib/git/queries";
+import type { ReviewThreadOut } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
+import { ReviewThreadCard, type SuggestionApply } from "./ReviewThreads";
 
 type PrFile = { path: string; additions: number; deletions: number };
 
+/** The handlers/gates the in-diff {@link ReviewThreadCard}s need — a subset of
+ *  the Conversation block's, passed straight through from the view. */
+interface DiffThreadWiring {
+  onQuote?: (body: string) => void;
+  onReply?: (threadId: string, body: string) => Promise<void>;
+  onResolve?: (threadId: string, resolved: boolean) => Promise<void>;
+  /** Gating inputs + the write for the per-suggestion Apply affordance. Absent =
+   *  no Apply shown (identical graceful default as the Conversation block). */
+  apply?: SuggestionApply;
+}
+
+/**
+ * One anchor block: the review thread(s) on a single side+line, rendered as a
+ * gap-2 stack of compact {@link ReviewThreadCard}s. Owns its own per-thread
+ * expanded state (unresolved default-open, resolved default-closed) so each
+ * card collapses independently, mirroring the Conversation block's defaults.
+ */
+function DiffThreadAnchor({
+  threads,
+  onQuote,
+  onReply,
+  onResolve,
+  apply,
+}: { threads: ReviewThreadOut[] } & DiffThreadWiring) {
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const isExpanded = (t: ReviewThreadOut) => expanded[t.id] ?? !t.isResolved;
+  return (
+    <div className="flex flex-col gap-2">
+      {threads.map((t) => (
+        <ReviewThreadCard
+          key={t.id}
+          thread={t}
+          compact
+          expanded={isExpanded(t)}
+          onToggleExpand={() =>
+            setExpanded((prev) => ({ ...prev, [t.id]: !isExpanded(t) }))
+          }
+          onQuote={onQuote}
+          onReply={onReply}
+          onResolve={onResolve}
+          apply={apply}
+        />
+      ))}
+    </div>
+  );
+}
+
 /** The "Files" sub-tab: a file list down the left, the selected file's diff on
- *  the right. Presentational — the parent owns the selection + diff query. */
+ *  the right. Presentational — the parent owns the selection + diff query.
+ *  Review threads anchored to the selected file render under their exact line. */
 export function PrFilesPane({
   files,
   effectivePath,
@@ -40,6 +90,11 @@ export function PrFilesPane({
   fileDiff,
   isPending,
   isError,
+  threads,
+  onQuote,
+  onReply,
+  onResolve,
+  apply,
 }: {
   files: PrFile[];
   effectivePath: string | null;
@@ -47,7 +102,9 @@ export function PrFilesPane({
   fileDiff: ComponentProps<typeof DiffContent>["data"];
   isPending: boolean;
   isError: boolean;
-}) {
+  /** All PR review threads; the pane anchors those on the selected file. */
+  threads?: ReviewThreadOut[];
+} & DiffThreadWiring) {
   // Arrow keys walk the file list, mirroring the app's other diff lists.
   const onFilesKeyDown = listKeyboardNav({
     items: files,
@@ -56,6 +113,38 @@ export function PrFilesPane({
     rowKey: (file) => file.path,
     rowAttr: "data-path",
   });
+
+  // Anchors for the SELECTED file only: threads with a known line on this path
+  // that aren't outdated (outdated/line-0 threads live in the Conversation tab).
+  // Multiple threads on the same side+line collapse into one stacked anchor.
+  const lineAnchors = useMemo<DiffLineAnchor[]>(() => {
+    if (!effectivePath || !threads) return [];
+    const bySideLine = new Map<string, ReviewThreadOut[]>();
+    for (const t of threads) {
+      if (t.path !== effectivePath || t.line <= 0 || t.isOutdated) continue;
+      const side = t.side === "old" ? "old" : "new";
+      const key = `${side}:${t.line}`;
+      const bucket = bySideLine.get(key);
+      if (bucket) bucket.push(t);
+      else bySideLine.set(key, [t]);
+    }
+    return [...bySideLine.entries()].map(([key, group]) => {
+      const [side, line] = key.split(":");
+      return {
+        side: side as "old" | "new",
+        line: Number(line),
+        render: () => (
+          <DiffThreadAnchor
+            threads={group}
+            onQuote={onQuote}
+            onReply={onReply}
+            onResolve={onResolve}
+            apply={apply}
+          />
+        ),
+      };
+    });
+  }, [effectivePath, threads, onQuote, onReply, onResolve, apply]);
 
   return (
     <div className="flex min-h-0 flex-1">
@@ -95,6 +184,7 @@ export function PrFilesPane({
             data={fileDiff}
             isPending={isPending}
             isError={isError}
+            lineAnchors={lineAnchors}
           />
         ) : (
           <DiffPlaceholder message="Select a file to see its changes" />

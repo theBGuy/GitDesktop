@@ -257,6 +257,16 @@ pub struct Implemented {
     /// PR tasks are a native Bitbucket concept with no GitHub/GitLab analogue wired
     /// here, so like `mr_approve` this stays `false` for both (see `all`).
     pub pr_tasks: bool,
+    /// Reading file:line-anchored review threads on a merge/pull request — a shared
+    /// read surface (GitHub reviewThreads / GitLab diff-note discussions / Bitbucket
+    /// inline comments), so true for all three.
+    pub mr_review_threads: bool,
+    /// Replying in an existing review thread — a shared write, true for all three.
+    pub mr_thread_reply: bool,
+    /// Resolving / unresolving a review thread — GitHub and GitLab resolve threads;
+    /// Bitbucket exposed no comment-resolution field/endpoint on any probed comment,
+    /// so it stays `false` there (the forge arm errors).
+    pub mr_thread_resolve: bool,
 }
 
 impl Implemented {
@@ -318,6 +328,10 @@ impl Implemented {
             issue_links: false,
             // Like `mr_approve`: PR tasks are a Bitbucket-only surface here.
             pr_tasks: false,
+            // Review threads: read + reply are shared; GitHub resolves threads too.
+            mr_review_threads: true,
+            mr_thread_reply: true,
+            mr_thread_resolve: true,
         }
     }
 
@@ -366,6 +380,9 @@ impl Implemented {
             time_tracking: false,
             issue_links: false,
             pr_tasks: false,
+            mr_review_threads: false,
+            mr_thread_reply: false,
+            mr_thread_resolve: false,
         }
     }
 
@@ -436,6 +453,11 @@ impl Implemented {
                 issue_links: true,
                 // PR tasks are Bitbucket-only here.
                 pr_tasks: false,
+                // Review threads: read, reply, and resolve are all wired for GitLab
+                // (positioned diff-note discussions; PUT resolves the discussion).
+                mr_review_threads: true,
+                mr_thread_reply: true,
+                mr_thread_resolve: true,
             },
             // Bitbucket Cloud reads (Phase 3): PR list/view/diff, CI pipelines, and
             // repo View/URL are wired over direct HTTP. Phase 4 adds the WRITES: PR
@@ -473,6 +495,11 @@ impl Implemented {
                 ci_dispatch: true,
                 // Wave 4: the PR-tasks checklist (Bitbucket-native).
                 pr_tasks: true,
+                // Review threads: inline-comment reads + replies are wired; thread
+                // RESOLUTION stays false — no comment-resolution field/endpoint was
+                // found on any probed Bitbucket comment (`resolve_thread` errors).
+                mr_review_threads: true,
+                mr_thread_reply: true,
                 ..Self::none()
             },
         }
@@ -615,6 +642,8 @@ mod tests {
         assert!(!i.ci_job_play && !i.time_tracking && !i.issue_links);
         // PR tasks are a Bitbucket-only surface here, so GitHub stays false too.
         assert!(!i.pr_tasks);
+        // Review threads: read, reply, and resolve are all built for GitHub.
+        assert!(i.mr_review_threads && i.mr_thread_reply && i.mr_thread_resolve);
     }
 
     #[test]
@@ -656,6 +685,8 @@ mod tests {
         assert!(imp.ci_job_play && imp.time_tracking && imp.issue_links);
         // PR tasks stay Bitbucket-only — not wired for GitLab.
         assert!(!imp.pr_tasks);
+        // Review threads: read, reply, and resolve are all wired for GitLab.
+        assert!(imp.mr_review_threads && imp.mr_thread_reply && imp.mr_thread_resolve);
     }
 
     #[test]
@@ -694,5 +725,9 @@ mod tests {
         assert!(!bb.issue_edit && !bb.issue_milestone);
         assert!(!bb.issue_reactions && !bb.mr_reactions);
         assert!(!bb.ci_job_play && !bb.time_tracking && !bb.issue_links);
+        // Review threads: inline reads + replies are wired; resolution is NOT
+        // (no comment-resolution field/endpoint found on any probed Bitbucket comment).
+        assert!(bb.mr_review_threads && bb.mr_thread_reply);
+        assert!(!bb.mr_thread_resolve);
     }
 }

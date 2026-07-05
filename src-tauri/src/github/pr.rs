@@ -1325,6 +1325,32 @@ pub struct PrThreadOut {
     pub minimized_reason: String,
 }
 
+/// One file:line-anchored review thread, provider-neutral. GitHub: a GraphQL
+/// PullRequestReviewThread; GitLab: an MR diff-note discussion; Bitbucket: an
+/// inline comment and its reply chain.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewThreadOut {
+    /// Provider thread id: GitHub reviewThread node id; GitLab discussion id;
+    /// Bitbucket root comment id (stringified — u64 ids must not cross IPC as numbers).
+    pub id: String,
+    pub path: String,
+    /// 1-based anchored line; 0 = unknown (e.g. outdated GitHub threads with null line).
+    pub line: u32,
+    /// First line of a multi-line comment range (1-based); 0 = single-line (use `line`).
+    pub start_line: u32,
+    /// "new" (right side / added lines) or "old" (left side).
+    pub side: String,
+    pub is_resolved: bool,
+    pub is_outdated: bool,
+    /// The unified-diff hunk excerpt the thread anchors to (GitHub's `diffHunk`), for
+    /// rendering the code context above the comment. Empty when the provider has no
+    /// cheap excerpt (GitLab flat API, Bitbucket).
+    pub diff_hunk: String,
+    /// Full reply chain, oldest first, reusing the existing comment shape.
+    pub comments: Vec<PrThreadOut>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrCheckOut {
@@ -1668,10 +1694,14 @@ pub async fn gh_pr_external_reviews(
             if body.trim().is_empty() {
                 continue;
             }
+            // Outdated threads carry `"line": null` (key present, value null), and
+            // `pointer` returns `Some(Null)` for that — so convert to `u64` BEFORE
+            // the `originalLine` fallback, else a null `line` swallows the fallback
+            // and reports line 0 (see `gh_pr_review_threads` for the same trap).
             let line = t
                 .pointer("/line")
-                .or_else(|| t.pointer("/originalLine"))
                 .and_then(|x| x.as_u64())
+                .or_else(|| t.pointer("/originalLine").and_then(|x| x.as_u64()))
                 .unwrap_or(0) as u32;
             let commit_sha = {
                 let latest = str_at(c, "/commit/oid");
@@ -1732,6 +1762,165 @@ pub async fn gh_pr_external_reviews(
     }
 
     Ok(items)
+}
+
+/// File:line-anchored review threads on a PR — GitHub's `reviewThreads` mapped
+/// onto the neutral `ReviewThreadOut`. Each thread carries its full reply chain
+/// (oldest first). Empty-comment threads are skipped. Line falls back to the
+/// original line, then 0 (an outdated thread whose anchor moved has a null line).
+#[tauri::command]
+pub async fn gh_pr_review_threads(
+    repo_path: String,
+    number: u64,
+) -> AppResult<Vec<ReviewThreadOut>> {
+    let (owner, name) = repo_owner_name(&repo_path).await?;
+    validate_graphql_embed(&owner, "repository owner")?;
+    validate_graphql_embed(&name, "repository name")?;
+
+    // `number` is a u64 (digits only), so it's safe to embed directly.
+    let query = format!(
+        r#"query{{ repository(owner:"{owner}", name:"{name}"){{ pullRequest(number:{number}){{ reviewThreads(first:100){{ nodes{{ id isResolved isOutdated diffSide line originalLine startLine originalStartLine path comments(first:50){{ nodes{{ id author{{ login }} body createdAt url viewerDidAuthor isMinimized minimizedReason diffHunk }} }} }} }} }} }} }}"#
+    );
+    let out = run_gh(
+        Some(&repo_path),
+        &["api", "graphql", "-f", &format!("query={query}")],
+        GH_NETWORK_TIMEOUT,
+    )
+    .await?;
+    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
+        .map_err(|e| AppError::Gh(format!("could not parse the PR review threads: {e}")))?;
+
+    let str_at = |v: &serde_json::Value, p: &str| {
+        v.pointer(p).and_then(|x| x.as_str()).unwrap_or("").to_string()
+    };
+    let bool_at = |v: &serde_json::Value, p: &str| {
+        v.pointer(p).and_then(|x| x.as_bool()).unwrap_or(false)
+    };
+
+    let mut threads: Vec<ReviewThreadOut> = Vec::new();
+    if let Some(nodes) = value
+        .pointer("/data/repository/pullRequest/reviewThreads/nodes")
+        .and_then(|v| v.as_array())
+    {
+        for t in nodes {
+            let comments: Vec<PrThreadOut> = t
+                .pointer("/comments/nodes")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .map(|c| PrThreadOut {
+                            author: str_at(c, "/author/login"),
+                            state: String::new(),
+                            body: str_at(c, "/body"),
+                            date: str_at(c, "/createdAt"),
+                            id: str_at(c, "/id"),
+                            url: str_at(c, "/url"),
+                            viewer_did_author: bool_at(c, "/viewerDidAuthor"),
+                            is_minimized: bool_at(c, "/isMinimized"),
+                            minimized_reason: str_at(c, "/minimizedReason"),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            // A thread with no comments carries no content to anchor — skip it.
+            if comments.is_empty() {
+                continue;
+            }
+            // NOTE: for OUTDATED threads GitHub returns the key present but JSON
+            // null (`"line": null`), and `serde_json`'s `pointer` returns
+            // `Some(Value::Null)` for a present-but-null key — NOT `None`. So the
+            // fallback must convert to `u64` BEFORE `.or_else`, or a null `line`
+            // would swallow the `originalLine` fallback and render line 0.
+            let line = t
+                .pointer("/line")
+                .and_then(|x| x.as_u64())
+                .or_else(|| t.pointer("/originalLine").and_then(|x| x.as_u64()))
+                .unwrap_or(0) as u32;
+            let start_line = t
+                .pointer("/startLine")
+                .and_then(|x| x.as_u64())
+                .or_else(|| t.pointer("/originalStartLine").and_then(|x| x.as_u64()))
+                .unwrap_or(0) as u32;
+            let side = if str_at(t, "/diffSide") == "LEFT" {
+                "old"
+            } else {
+                "new"
+            };
+            // The diff excerpt lives on the individual comments; the thread's
+            // opener (first comment) carries the anchor hunk.
+            let diff_hunk = str_at(t, "/comments/nodes/0/diffHunk");
+            threads.push(ReviewThreadOut {
+                id: str_at(t, "/id"),
+                path: str_at(t, "/path"),
+                line,
+                start_line,
+                side: side.into(),
+                is_resolved: bool_at(t, "/isResolved"),
+                is_outdated: bool_at(t, "/isOutdated"),
+                diff_hunk,
+                comments,
+            });
+        }
+    }
+    Ok(threads)
+}
+
+/// Replies in an existing review thread, addressed by its GraphQL node id. The id
+/// and body travel as GraphQL variables (never format!-embedded) — the
+/// injection-safe idiom `gh_pr_edit_comment` uses.
+#[tauri::command]
+pub async fn gh_pr_reply_review_thread(
+    repo_path: String,
+    thread_id: String,
+    body: String,
+) -> AppResult<()> {
+    if body.trim().is_empty() {
+        return Err(AppError::InvalidArgument("a reply is required".into()));
+    }
+    run_gh(
+        Some(&repo_path),
+        &[
+            "api",
+            "graphql",
+            "-f",
+            "query=mutation($id:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id,body:$body}){comment{id}}}",
+            "-f",
+            &format!("id={thread_id}"),
+            "-f",
+            &format!("body={body}"),
+        ],
+        GH_NETWORK_TIMEOUT,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Resolves or unresolves a review thread by its GraphQL node id.
+#[tauri::command]
+pub async fn gh_pr_resolve_review_thread(
+    repo_path: String,
+    thread_id: String,
+    resolved: bool,
+) -> AppResult<()> {
+    let query = if resolved {
+        "query=mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id}}}"
+    } else {
+        "query=mutation($id:ID!){unresolveReviewThread(input:{threadId:$id}){thread{id}}}"
+    };
+    run_gh(
+        Some(&repo_path),
+        &[
+            "api",
+            "graphql",
+            "-f",
+            query,
+            "-f",
+            &format!("id={thread_id}"),
+        ],
+        GH_NETWORK_TIMEOUT,
+    )
+    .await?;
+    Ok(())
 }
 
 /// Open PRs whose head is `head` (there's at most one per base). Lets the UI

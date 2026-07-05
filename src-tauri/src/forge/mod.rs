@@ -339,6 +339,63 @@ pub async fn forge_pr_external_reviews(
     }
 }
 
+/// File:line-anchored review threads on a merge/pull request, behind the
+/// abstraction. GitHub maps `reviewThreads`; GitLab maps positioned MR
+/// discussions; Bitbucket groups inline comments and their reply chains. Each
+/// thread carries its full reply chain (oldest first).
+#[tauri::command]
+pub async fn forge_pr_review_threads(
+    repo_path: String,
+    number: u64,
+) -> AppResult<Vec<crate::github::pr::ReviewThreadOut>> {
+    match detect_non_github(&repo_path).await {
+        Some((Provider::GitLab, _)) => gitlab::review_threads(&repo_path, number).await,
+        Some((Provider::Bitbucket, _)) => bitbucket::review_threads(&repo_path, number).await,
+        _ => github::review_threads(&repo_path, number).await,
+    }
+}
+
+/// Reply in an existing review thread, behind the abstraction. `thread_id` is the
+/// provider's thread id (GitHub reviewThread node id / GitLab discussion id /
+/// Bitbucket root comment id).
+#[tauri::command]
+pub async fn forge_pr_thread_reply(
+    repo_path: String,
+    number: u64,
+    thread_id: String,
+    body: String,
+) -> AppResult<()> {
+    match detect_non_github(&repo_path).await {
+        Some((Provider::GitLab, _)) => {
+            gitlab::reply_thread(&repo_path, number, &thread_id, &body).await
+        }
+        Some((Provider::Bitbucket, _)) => {
+            bitbucket::reply_thread(&repo_path, number, &thread_id, &body).await
+        }
+        _ => github::reply_thread(&repo_path, &thread_id, &body).await,
+    }
+}
+
+/// Resolve / unresolve a review thread, behind the abstraction. Bitbucket has no
+/// thread-resolution surface wired (`mr_thread_resolve` false), so its arm errors.
+#[tauri::command]
+pub async fn forge_pr_thread_resolve(
+    repo_path: String,
+    number: u64,
+    thread_id: String,
+    resolved: bool,
+) -> AppResult<()> {
+    match detect_non_github(&repo_path).await {
+        Some((Provider::GitLab, _)) => {
+            gitlab::resolve_thread(&repo_path, number, &thread_id, resolved).await
+        }
+        Some((Provider::Bitbucket, _)) => {
+            bitbucket::resolve_thread(&repo_path, number, &thread_id, resolved).await
+        }
+        _ => github::resolve_thread(&repo_path, &thread_id, resolved).await,
+    }
+}
+
 /// Post a comment on a merge/pull request, behind the abstraction. GitHub delegates
 /// to `gh pr comment`; GitLab posts a note via `glab`. (Full reviews stay
 /// GitHub-only — approve/merge/edit each have their own forge command.)

@@ -6,6 +6,7 @@ import {
   coldStartSetSecret,
 } from "@/lib/test-mode";
 import type {
+  ApplyLinesResult,
   ApprovalState,
   BbAccountInfo,
   BbEnvironment,
@@ -99,6 +100,7 @@ import type {
   RepoStats,
   RepoStatus,
   RepoTraffic,
+  ReviewThreadOut,
   RewriteStep,
   RulesetEnforcement,
   RulesetFull,
@@ -285,6 +287,28 @@ export const gitApplyPartial = (
     selected,
     cached,
     reverse,
+  });
+
+/** Replace lines `[startLine, startLine + expectedLines.length)` (1-based) of a
+ *  file with `replacementLines` — GitHub's "Commit suggestion", applied locally.
+ *  The backend verifies `expectedLines` still match before editing (a mismatch is
+ *  a specific error), preserves EOL/BOM/trailing newline, and stages the file only
+ *  when `stageWhenClean` and it had no other local changes. */
+export const gitReplaceFileLines = (
+  repoPath: string,
+  filePath: string,
+  startLine: number,
+  expectedLines: string[],
+  replacementLines: string[],
+  stageWhenClean: boolean,
+) =>
+  invoke<ApplyLinesResult>("git_replace_file_lines", {
+    repoPath,
+    filePath,
+    startLine,
+    expectedLines,
+    replacementLines,
+    stageWhenClean,
   });
 
 export const gitCommitAuthors = (repoPath: string) =>
@@ -1392,6 +1416,34 @@ export const forgePrExternalReviews = (repoPath: string, number: number) =>
   invoke<ExternalReviewItem[]>("forge_pr_external_reviews", {
     repoPath,
     number,
+  });
+
+/** File:line-anchored review threads on a PR/MR, provider-neutral (GitHub
+ *  reviewThreads / GitLab diff-note discussions / Bitbucket inline comments). */
+export const forgePrReviewThreads = (repoPath: string, number: number) =>
+  invoke<ReviewThreadOut[]>("forge_pr_review_threads", { repoPath, number });
+
+/** Post a reply into an existing review thread. */
+export const forgePrThreadReply = (
+  repoPath: string,
+  number: number,
+  threadId: string,
+  body: string,
+) =>
+  invoke<void>("forge_pr_thread_reply", { repoPath, number, threadId, body });
+
+/** Resolve / unresolve a review thread. */
+export const forgePrThreadResolve = (
+  repoPath: string,
+  number: number,
+  threadId: string,
+  resolved: boolean,
+) =>
+  invoke<void>("forge_pr_thread_resolve", {
+    repoPath,
+    number,
+    threadId,
+    resolved,
   });
 
 export type ReviewAction = "approve" | "comment" | "request_changes";

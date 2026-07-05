@@ -22,7 +22,7 @@ use crate::github::actions::{RunDetail, RunJob, WorkflowRun};
 use crate::github::issue::{IssueDetails, IssueInfo, IssueReactions, Milestone, Reaction};
 use crate::github::pr::{
     ApprovalState, ExternalReviewItem, PrAuthor, PrCommitOut, PrDetails, PrFileOut, PrInfo,
-    PrListLabel, PrPollInfo, PrRef, PrThreadOut, RepoLabel,
+    PrListLabel, PrPollInfo, PrRef, PrThreadOut, RepoLabel, ReviewThreadOut,
 };
 use crate::state::AppState;
 use crate::github::release::{ReleaseAsset, ReleaseDetails, ReleaseInfo};
@@ -488,6 +488,12 @@ struct GlabNote {
     author: Option<GlabMrUser>,
     #[serde(default)]
     created_at: String,
+    /// The diff-anchor `position` object, present only on inline (diff) notes. We
+    /// use its presence to keep diff-anchored notes OUT of the flat conversation
+    /// list — they now surface as `review_threads` with real file/line context,
+    /// instead of leaking bodies context-free into `PrDetails.comments`.
+    #[serde(default)]
+    position: Option<GlabNotePosition>,
 }
 
 #[derive(Deserialize)]
@@ -575,7 +581,9 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
     .collect();
     commits.reverse();
 
-    // Comments — drop GitLab's system notes (auto "added a commit", etc.).
+    // Comments — drop GitLab's system notes (auto "added a commit", etc.) AND
+    // diff-anchored (positioned) notes, which now surface as `review_threads` with
+    // real file/line context instead of leaking into the flat conversation list.
     let comments: Vec<PrThreadOut> = run_glab(
         Some(repo_path),
         &["api", &format!("projects/{enc}/merge_requests/{number}/notes?sort=asc&per_page=100")],
@@ -586,7 +594,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
     .and_then(|o| serde_json::from_str::<Vec<GlabNote>>(&o.stdout_lossy()).ok())
     .unwrap_or_default()
     .into_iter()
-    .filter(|n| !n.system)
+    .filter(|n| !n.system && n.position.is_none())
     .map(|n| PrThreadOut {
         author: n.author.map(|a| a.username).unwrap_or_default(),
         state: String::new(),
@@ -2045,6 +2053,27 @@ struct GlabNotePosition {
     old_line: Option<u32>,
     #[serde(default, deserialize_with = "null_to_default")]
     head_sha: String,
+    /// Present only on multi-line diff notes: the range's start/end line refs. We
+    /// read the START line for `start_line`; a single-line note omits it. Every
+    /// field is Option per the untrusted-JSON rule.
+    #[serde(default)]
+    line_range: Option<GlabLineRange>,
+}
+
+/// A diff note's multi-line range endpoints (`{start:{new_line,old_line}, …}`).
+/// Only the start ref matters for the neutral `start_line`.
+#[derive(Deserialize, Default)]
+struct GlabLineRange {
+    #[serde(default)]
+    start: Option<GlabLineRangeRef>,
+}
+
+#[derive(Deserialize, Default)]
+struct GlabLineRangeRef {
+    #[serde(default)]
+    new_line: Option<u32>,
+    #[serde(default)]
+    old_line: Option<u32>,
 }
 
 /// One note inside an MR discussion, as `…/merge_requests/<n>/discussions`
@@ -2052,6 +2081,10 @@ struct GlabNotePosition {
 /// `resolved` is null unless the note is resolvable.
 #[derive(Deserialize)]
 struct GlabDiscussionNote {
+    /// Numeric note id — used as the neutral comment id (stringified). Absent on
+    /// no real note, but tolerated per the untrusted-JSON rule.
+    #[serde(default)]
+    id: u64,
     #[serde(default)]
     system: bool,
     #[serde(default)]
@@ -2068,9 +2101,12 @@ struct GlabDiscussionNote {
     position: Option<GlabNotePosition>,
 }
 
-/// A discussion (thread) as the discussions endpoint returns it.
+/// A discussion (thread) as the discussions endpoint returns it. `id` is the
+/// discussion's (string) id — the resolve/reply endpoints key on it.
 #[derive(Deserialize)]
 struct GlabDiscussion {
+    #[serde(default, deserialize_with = "null_to_default")]
+    id: String,
     #[serde(default, deserialize_with = "null_to_default")]
     notes: Vec<GlabDiscussionNote>,
 }
@@ -2138,14 +2174,17 @@ fn external_items_from_discussions(discussions: &[GlabDiscussion]) -> Vec<Extern
         .collect()
 }
 
-/// Third-party AI-reviewer findings on a merge request, mapped onto the same
-/// neutral shape GitHub uses. Fetches the MR discussions (per_page=100, capped at
-/// 5 pages — a re-review only needs the recent bot findings, and this can't spawn
-/// unbounded network calls) and maps every non-system note. Per-item tolerant: a
-/// malformed page is skipped, not fatal.
-pub async fn external_reviews(repo_path: &str, number: u64) -> AppResult<Vec<ExternalReviewItem>> {
-    let enc = encode_project(&project_path(repo_path).await?);
-    let mut items: Vec<ExternalReviewItem> = Vec::new();
+/// Fetch an MR's discussions (per_page=100, capped at 5 pages — the recent
+/// findings/threads are all we need, and this can't spawn unbounded network
+/// calls). Per-page tolerant: a page that won't parse stops the walk and returns
+/// what we have so far, rather than sinking the whole read. Shared by
+/// `external_reviews` (AI-context) and `review_threads` (the review-thread view).
+async fn fetch_mr_discussions(
+    repo_path: &str,
+    enc: &str,
+    number: u64,
+) -> AppResult<Vec<GlabDiscussion>> {
+    let mut all: Vec<GlabDiscussion> = Vec::new();
     for page in 1..=5u32 {
         let endpoint = format!(
             "projects/{enc}/merge_requests/{number}/discussions?per_page=100&page={page}"
@@ -2153,17 +2192,156 @@ pub async fn external_reviews(repo_path: &str, number: u64) -> AppResult<Vec<Ext
         let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
         let batch: Vec<GlabDiscussion> = match serde_json::from_str(&out.stdout_lossy()) {
             Ok(b) => b,
-            // A page that won't parse shouldn't sink the whole harvest; external
-            // context is best-effort, so stop and return what we have.
             Err(_) => break,
         };
         let done = batch.len() < 100;
-        items.extend(external_items_from_discussions(&batch));
+        all.extend(batch);
         if done {
             break;
         }
     }
-    Ok(items)
+    Ok(all)
+}
+
+/// Third-party AI-reviewer findings on a merge request, mapped onto the same
+/// neutral shape GitHub uses. Fetches the MR discussions and maps every non-system
+/// note. Per-item tolerant: a malformed note falls back rather than sinking the batch.
+pub async fn external_reviews(repo_path: &str, number: u64) -> AppResult<Vec<ExternalReviewItem>> {
+    let enc = encode_project(&project_path(repo_path).await?);
+    let discussions = fetch_mr_discussions(repo_path, &enc, number).await?;
+    Ok(external_items_from_discussions(&discussions))
+}
+
+/// File:line-anchored review threads on an MR — the positioned diff-note
+/// discussions mapped onto the neutral `ReviewThreadOut`. A thread is a discussion
+/// with at least one non-system positioned note. Path/line come from the first
+/// positioned note (new side, else old, else 0/"new"); resolution comes from the
+/// first resolvable note (GitLab resolves whole discussions, not individual notes).
+/// `start_line` comes from a multi-line note's `position.line_range` (0 when
+/// single-line). GitLab's flat discussions API exposes no cheap per-thread
+/// "outdated" bit nor a diff excerpt, so `is_outdated` is always false and
+/// `diff_hunk` is always empty. The thread's comments are its non-system notes.
+pub async fn review_threads(repo_path: &str, number: u64) -> AppResult<Vec<ReviewThreadOut>> {
+    let enc = encode_project(&project_path(repo_path).await?);
+    let discussions = fetch_mr_discussions(repo_path, &enc, number).await?;
+
+    let mut threads: Vec<ReviewThreadOut> = Vec::new();
+    for d in &discussions {
+        // Non-system notes only — a discussion is a thread when it carries at
+        // least one positioned (diff-anchored) note.
+        let notes: Vec<&GlabDiscussionNote> = d.notes.iter().filter(|n| !n.system).collect();
+        let first_positioned = notes.iter().find(|n| n.position.is_some());
+        let Some(anchor) = first_positioned else {
+            continue;
+        };
+        let position = anchor.position.as_ref().expect("find matched .is_some()");
+        let (path, line, side) = if position.new_line.is_some() && !position.new_path.is_empty() {
+            (position.new_path.clone(), position.new_line.unwrap_or(0), "new")
+        } else if position.old_line.is_some() && !position.old_path.is_empty() {
+            (position.old_path.clone(), position.old_line.unwrap_or(0), "old")
+        } else if !position.new_path.is_empty() {
+            (position.new_path.clone(), 0, "new")
+        } else {
+            (position.old_path.clone(), 0, "new")
+        };
+        // Multi-line diff notes carry a `line_range`; its start line (on the same
+        // side we anchored to) is the range's first line. Single-line notes have no
+        // range → 0 (the frontend then uses `line` alone).
+        let start_line = position
+            .line_range
+            .as_ref()
+            .and_then(|r| r.start.as_ref())
+            .and_then(|s| if side == "old" { s.old_line } else { s.new_line })
+            .unwrap_or(0);
+        // GitLab resolves whole discussions; the resolvable notes share one state.
+        let is_resolved = notes
+            .iter()
+            .find(|n| n.resolvable)
+            .map(|n| n.resolved == Some(true))
+            .unwrap_or(false);
+        let comments: Vec<PrThreadOut> = notes
+            .iter()
+            .map(|n| PrThreadOut {
+                author: n.author.as_ref().map(|a| a.username.clone()).unwrap_or_default(),
+                state: String::new(),
+                body: n.body.clone(),
+                date: n.created_at.clone(),
+                id: n.id.to_string(),
+                url: String::new(),
+                viewer_did_author: false,
+                is_minimized: false,
+                minimized_reason: String::new(),
+            })
+            .collect();
+        if comments.is_empty() {
+            continue;
+        }
+        threads.push(ReviewThreadOut {
+            id: d.id.clone(),
+            path,
+            line,
+            start_line,
+            side: side.into(),
+            is_resolved,
+            // GitLab's flat discussions API has no cheap per-thread "outdated"
+            // bit, so this is always false (staleness is inferred elsewhere).
+            is_outdated: false,
+            // GitLab's flat discussions API carries no unified-diff excerpt on the
+            // note, so no cheap hunk to render — empty (frontend falls back to the
+            // MR diff at the anchored line).
+            diff_hunk: String::new(),
+            comments,
+        });
+    }
+    Ok(threads)
+}
+
+/// Reply in an existing MR discussion (`POST …/discussions/{id}/notes`, `-f body`).
+pub async fn reply_thread(
+    repo_path: &str,
+    number: u64,
+    discussion_id: &str,
+    body: &str,
+) -> AppResult<()> {
+    if body.trim().is_empty() {
+        return Err(AppError::InvalidArgument("a reply is required".into()));
+    }
+    if discussion_id.is_empty() {
+        return Err(AppError::InvalidArgument("a thread id is required".into()));
+    }
+    let enc = encode_project(&project_path(repo_path).await?);
+    let endpoint =
+        format!("projects/{enc}/merge_requests/{number}/discussions/{discussion_id}/notes");
+    let body_arg = format!("body={body}");
+    run_glab(
+        Some(repo_path),
+        &["api", "--method", "POST", &endpoint, "-f", &body_arg],
+        GLAB_NETWORK_TIMEOUT,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Resolve / unresolve an MR discussion (`PUT …/discussions/{id}`, `-f resolved`).
+pub async fn resolve_thread(
+    repo_path: &str,
+    number: u64,
+    discussion_id: &str,
+    resolved: bool,
+) -> AppResult<()> {
+    if discussion_id.is_empty() {
+        return Err(AppError::InvalidArgument("a thread id is required".into()));
+    }
+    let enc = encode_project(&project_path(repo_path).await?);
+    let endpoint = format!("projects/{enc}/merge_requests/{number}/discussions/{discussion_id}");
+    let resolved_arg = format!("resolved={resolved}");
+    run_glab(
+        Some(repo_path),
+        &["api", "--method", "PUT", &endpoint, "-f", &resolved_arg],
+        GLAB_NETWORK_TIMEOUT,
+    )
+    .await?;
+    Ok(())
 }
 
 /// The award endpoint for a subject: the issue/MR body (`note_id` None) or one
