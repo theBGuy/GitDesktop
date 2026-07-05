@@ -35,6 +35,23 @@ function getStore(): Promise<Store> {
   return storePromise;
 }
 
+// Serialize every read-modify-write on this store (and the reload) through one in-process
+// queue — mirrors the local-PR store. Without it two overlapping mutations each reload the
+// SAME pre-flush disk snapshot (autoSave persists on a ~100ms debounce) and the later write
+// drops the earlier one's change. writeAll force-saves so each reload sees a current one.
+let opChain: Promise<unknown> = Promise.resolve();
+function serialize<T>(op: () => Promise<T>): Promise<T> {
+  const run = opChain.then(op, op);
+  // Keep the queue alive whether `op` fulfilled or rejected; callers still get `run`.
+  opChain = run.catch(() => undefined);
+  return run;
+}
+
+async function reloadRaw(): Promise<void> {
+  const store = await getStore();
+  await store.reload({ ignoreDefaults: true });
+}
+
 export async function listLocalIssues(repo: string): Promise<LocalIssue[]> {
   const store = await getStore();
   const issues = (await store.get<LocalIssue[]>(repo)) ?? [];
@@ -45,6 +62,8 @@ export async function listLocalIssues(repo: string): Promise<LocalIssue[]> {
 async function writeAll(repo: string, issues: LocalIssue[]): Promise<void> {
   const store = await getStore();
   await store.set(repo, issues);
+  // Flush now (not on autoSave's debounce) so the next serialized reload can't drop this.
+  await store.save();
 }
 
 /** Re-read `local-issues.json` from disk into the in-memory store. Kept symmetric
@@ -52,27 +71,28 @@ async function writeAll(repo: string, issues: LocalIssue[]): Promise<void> {
  *  local issues have no external writer today, but every mutation reloads first so the
  *  API is uniform and future-proof if one is ever added. */
 export async function reloadLocalIssues(): Promise<void> {
-  const store = await getStore();
-  await store.reload({ ignoreDefaults: true });
+  return serialize(reloadRaw);
 }
 
 export async function createLocalIssue(
   repo: string,
   input: { title: string; body: string },
 ): Promise<LocalIssue> {
-  const issue: LocalIssue = {
-    id: crypto.randomUUID(),
-    title: input.title,
-    body: input.body,
-    status: "open",
-    labels: [],
-    comments: [],
-    createdAt: new Date().toISOString(),
-  };
-  await reloadLocalIssues();
-  const all = await listLocalIssues(repo);
-  await writeAll(repo, [issue, ...all]);
-  return issue;
+  return serialize(async () => {
+    await reloadRaw();
+    const issue: LocalIssue = {
+      id: crypto.randomUUID(),
+      title: input.title,
+      body: input.body,
+      status: "open",
+      labels: [],
+      comments: [],
+      createdAt: new Date().toISOString(),
+    };
+    const all = await listLocalIssues(repo);
+    await writeAll(repo, [issue, ...all]);
+    return issue;
+  });
 }
 
 /** Apply `mutate` to the FRESH on-disk record for `id`, then persist — mirrors
@@ -83,24 +103,28 @@ export async function updateLocalIssue(
   id: string,
   mutate: (issue: LocalIssue) => LocalIssue,
 ): Promise<LocalIssue> {
-  await reloadLocalIssues();
-  const all = await listLocalIssues(repo);
-  const idx = all.findIndex((i) => i.id === id);
-  if (idx === -1) throw new Error(`no local issue with id ${id}`);
-  const next = [...all];
-  next[idx] = mutate(all[idx]);
-  await writeAll(repo, next);
-  return next[idx];
+  return serialize(async () => {
+    await reloadRaw();
+    const all = await listLocalIssues(repo);
+    const idx = all.findIndex((i) => i.id === id);
+    if (idx === -1) throw new Error(`no local issue with id ${id}`);
+    const next = [...all];
+    next[idx] = mutate(all[idx]);
+    await writeAll(repo, next);
+    return next[idx];
+  });
 }
 
 export async function deleteLocalIssue(
   repo: string,
   id: string,
 ): Promise<void> {
-  await reloadLocalIssues();
-  const all = await listLocalIssues(repo);
-  await writeAll(
-    repo,
-    all.filter((i) => i.id !== id),
-  );
+  return serialize(async () => {
+    await reloadRaw();
+    const all = await listLocalIssues(repo);
+    await writeAll(
+      repo,
+      all.filter((i) => i.id !== id),
+    );
+  });
 }
