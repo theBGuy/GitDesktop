@@ -83,15 +83,24 @@ export async function createLocalPr(
   return pr;
 }
 
-/** Upserts the given PR (used for approve/comment/status edits). */
-export async function saveLocalPr(repo: string, pr: LocalPr): Promise<void> {
-  // Fresh disk state first, so we don't drop a concurrent external MCP write.
+/** Apply `mutate` to the FRESH on-disk record for `id`, then persist. Reloads from
+ *  disk first, so a concurrent external MCP write to the SAME PR (e.g. a comment the
+ *  server appended while the GUI was open) is merged against — not clobbered by — a
+ *  stale in-memory snapshot. `mutate` receives the current record and returns the next
+ *  one: append to `cur.comments`, or set a field. Throws if the PR no longer exists. */
+export async function updateLocalPr(
+  repo: string,
+  id: string,
+  mutate: (pr: LocalPr) => LocalPr,
+): Promise<LocalPr> {
   await reloadLocalPrs();
   const all = await listLocalPrs(repo);
-  await writeAll(
-    repo,
-    all.map((p) => (p.id === pr.id ? pr : p)),
-  );
+  const idx = all.findIndex((p) => p.id === id);
+  if (idx === -1) throw new Error(`no local PR with id ${id}`);
+  const next = [...all];
+  next[idx] = mutate(all[idx]);
+  await writeAll(repo, next);
+  return next[idx];
 }
 
 export async function deleteLocalPr(repo: string, id: string): Promise<void> {

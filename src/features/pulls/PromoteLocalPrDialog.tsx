@@ -15,7 +15,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { forgePrComment } from "@/lib/git/api";
 import { useCreatePr, useForgeStatus } from "@/lib/git/queries";
 import type { LocalPr } from "@/lib/pulls/local";
-import { useSaveLocalPr } from "@/lib/pulls/queries";
+import { useUpdateLocalPr } from "@/lib/pulls/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 
@@ -38,7 +38,7 @@ export function PromoteLocalPrDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const createPr = useCreatePr(repoPath);
-  const save = useSaveLocalPr(repoPath);
+  const update = useUpdateLocalPr(repoPath);
   const selectPr = useUiStore((s) => s.selectPr);
   const forge = useForgeStatus(repoPath);
   const isGitLab = forge.data?.provider === "gitlab";
@@ -46,7 +46,7 @@ export function PromoteLocalPrDialog({
   const prNoun = isGitLab ? "merge request" : "pull request";
   const [draft, setDraft] = useState(false);
   const [posting, setPosting] = useState(false);
-  const pending = createPr.isPending || save.isPending || posting;
+  const pending = createPr.isPending || update.isPending || posting;
 
   // Visible comments, in order — skip empty + hidden (collapsed) ones.
   const carried = pr.comments.filter((c) => c.body.trim() && !c.hidden);
@@ -69,17 +69,20 @@ export function PromoteLocalPrDialog({
       } finally {
         setPosting(false);
       }
-      await save.mutateAsync({
-        ...pr,
-        status: "closed",
-        comments: [
-          ...pr.comments,
-          {
-            id: crypto.randomUUID(),
-            body: `Promoted to ${remoteLabel} ${prNoun} [#${number}](${url}).`,
-            createdAt: new Date().toISOString(),
-          },
-        ],
+      await update.mutateAsync({
+        id: pr.id,
+        mutate: (cur) => ({
+          ...cur,
+          status: "closed",
+          comments: [
+            ...cur.comments,
+            {
+              id: crypto.randomUUID(),
+              body: `Promoted to ${remoteLabel} ${prNoun} [#${number}](${url}).`,
+              createdAt: new Date().toISOString(),
+            },
+          ],
+        }),
       });
       toast.success(`Opened ${prNoun} #${number}`, {
         description: url,

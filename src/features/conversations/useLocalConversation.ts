@@ -21,17 +21,19 @@ export interface LocalConvEntity {
 
 /**
  * Comment + label CRUD and composer state shared by LocalPrView and
- * LocalIssueView. Every mutation spreads the WHOLE entity and replaces one
- * field via `save.mutate`, so freshness comes from the list query's refetch —
- * comments are never held in local state. `entity` may be undefined while the
- * parent is mid-unmount, so every handler guards on it.
+ * LocalIssueView. Every mutation is handed to `apply` as a function of the
+ * CURRENT record; the view routes it through updateLocalPr/updateLocalIssue,
+ * which reload disk first — so a concurrent external write to the same entity
+ * is merged, not clobbered — and comments are never held in local state.
+ * `entity` may be undefined while the parent is mid-unmount, so every handler
+ * guards on it.
  *
  * `openEdit`/`editForm` stay at the call site (they need the per-view title);
  * this hook owns only conversation/label/composer state.
  */
 export function useLocalConversation<T extends LocalConvEntity>(
   entity: T | undefined,
-  save: { mutate: (entity: T) => void },
+  apply: (mutate: (cur: T) => T) => void,
 ) {
   const [comment, setComment] = useState("");
   const [labelInput, setLabelInput] = useState("");
@@ -41,32 +43,30 @@ export function useLocalConversation<T extends LocalConvEntity>(
   const composerRef = useRef<MarkdownEditorHandle>(null);
   const quoteReply = makeQuoteReply({ composerRef, setBody: setComment });
 
-  // Spread the whole entity, override one field. `as T` works around TS not
-  // assigning a generic spread back to its own type parameter.
-  const patch = (next: Partial<T>): T => ({ ...(entity as T), ...next });
+  // Merge a field patch onto the CURRENT record — whatever `apply` reloaded from
+  // disk — not a stale snapshot, so a concurrent external write to the same entity
+  // (e.g. an MCP-appended comment) survives. `as T` works around TS not assigning a
+  // generic spread back to its own type parameter.
+  const patch = (cur: T, next: Partial<T>): T => ({ ...cur, ...next }) as T;
 
   function addComment() {
     if (!entity || !comment.trim()) return;
-    save.mutate(
-      patch({
-        comments: [
-          ...entity.comments,
-          {
-            id: crypto.randomUUID(),
-            body: comment.trim(),
-            createdAt: new Date().toISOString(),
-          },
-        ],
-      } as Partial<T>),
+    const c = {
+      id: crypto.randomUUID(),
+      body: comment.trim(),
+      createdAt: new Date().toISOString(),
+    };
+    apply((cur) =>
+      patch(cur, { comments: [...cur.comments, c] } as Partial<T>),
     );
     setComment("");
   }
 
   function editComment(commentId: string, body: string) {
     if (!entity) return;
-    save.mutate(
-      patch({
-        comments: entity.comments.map((c) =>
+    apply((cur) =>
+      patch(cur, {
+        comments: cur.comments.map((c) =>
           c.id === commentId ? { ...c, body } : c,
         ),
       } as Partial<T>),
@@ -75,18 +75,18 @@ export function useLocalConversation<T extends LocalConvEntity>(
 
   function deleteComment(commentId: string) {
     if (!entity) return;
-    save.mutate(
-      patch({
-        comments: entity.comments.filter((c) => c.id !== commentId),
+    apply((cur) =>
+      patch(cur, {
+        comments: cur.comments.filter((c) => c.id !== commentId),
       } as Partial<T>),
     );
   }
 
   function setCommentHidden(commentId: string, hidden: boolean) {
     if (!entity) return;
-    save.mutate(
-      patch({
-        comments: entity.comments.map((c) =>
+    apply((cur) =>
+      patch(cur, {
+        comments: cur.comments.map((c) =>
           c.id === commentId ? { ...c, hidden } : c,
         ),
       } as Partial<T>),
@@ -96,17 +96,19 @@ export function useLocalConversation<T extends LocalConvEntity>(
   function addLabel() {
     const name = labelInput.trim();
     if (!entity || !name) return;
-    if (!entity.labels.includes(name)) {
-      save.mutate(patch({ labels: [...entity.labels, name] } as Partial<T>));
-    }
+    apply((cur) =>
+      cur.labels.includes(name)
+        ? cur
+        : patch(cur, { labels: [...cur.labels, name] } as Partial<T>),
+    );
     setLabelInput("");
   }
 
   function removeLabel(label: string) {
     if (!entity) return;
-    save.mutate(
-      patch({
-        labels: entity.labels.filter((l) => l !== label),
+    apply((cur) =>
+      patch(cur, {
+        labels: cur.labels.filter((l) => l !== label),
       } as Partial<T>),
     );
   }

@@ -19,7 +19,7 @@ import {
 } from "@/lib/git/api";
 import type { DiffStatEntry } from "@/lib/git/types";
 import { notifyIfUnfocused } from "@/lib/notify";
-import { listLocalPrs, saveLocalPr } from "@/lib/pulls/local";
+import { listLocalPrs, updateLocalPr } from "@/lib/pulls/local";
 import { getLatestReview, saveReview } from "@/lib/pulls/reviews-history";
 import { queryClient } from "@/lib/query-client";
 import { loadSettings } from "@/lib/settings/api";
@@ -414,13 +414,13 @@ async function deliver(
     });
     return;
   }
-  await saveLocalPr(event.repoPath, {
-    ...pr,
+  await updateLocalPr(event.repoPath, targetId, (cur) => ({
+    ...cur,
     comments: [
-      ...pr.comments,
+      ...cur.comments,
       { id: crypto.randomUUID(), body, createdAt: new Date().toISOString() },
     ],
-  });
+  }));
   await queryClient.invalidateQueries({
     queryKey: ["local-prs", event.repoPath],
   });

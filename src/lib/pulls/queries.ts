@@ -9,7 +9,7 @@ import {
   deleteLocalPr,
   type LocalPr,
   listLocalPrs,
-  saveLocalPr,
+  updateLocalPr,
 } from "./local";
 import {
   clearReviewsFor,
@@ -47,8 +47,12 @@ export function useCreateLocalPr(repo: string) {
   );
 }
 
-export function useSaveLocalPr(repo: string) {
-  return useLocalPrMutation(repo, (pr: LocalPr) => saveLocalPr(repo, pr));
+export function useUpdateLocalPr(repo: string) {
+  return useLocalPrMutation(
+    repo,
+    ({ id, mutate }: { id: string; mutate: (pr: LocalPr) => LocalPr }) =>
+      updateLocalPr(repo, id, mutate),
+  );
 }
 
 export function useDeleteLocalPr(repo: string) {

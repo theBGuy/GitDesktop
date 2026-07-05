@@ -4,7 +4,7 @@ import {
   deleteLocalIssue,
   type LocalIssue,
   listLocalIssues,
-  saveLocalIssue,
+  updateLocalIssue,
 } from "./local";
 
 const localIssueKey = (repo: string) => ["local-issues", repo] as const;
@@ -34,9 +34,16 @@ export function useCreateLocalIssue(repo: string) {
   );
 }
 
-export function useSaveLocalIssue(repo: string) {
-  return useLocalIssueMutation(repo, (issue: LocalIssue) =>
-    saveLocalIssue(repo, issue),
+export function useUpdateLocalIssue(repo: string) {
+  return useLocalIssueMutation(
+    repo,
+    ({
+      id,
+      mutate,
+    }: {
+      id: string;
+      mutate: (issue: LocalIssue) => LocalIssue;
+    }) => updateLocalIssue(repo, id, mutate),
   );
 }
 

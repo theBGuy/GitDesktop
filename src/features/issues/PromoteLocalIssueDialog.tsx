@@ -14,7 +14,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { forgeIssueComment } from "@/lib/git/api";
 import { useCreateIssue, useForgeStatus } from "@/lib/git/queries";
 import type { LocalIssue } from "@/lib/issues/local";
-import { useSaveLocalIssue } from "@/lib/issues/queries";
+import { useUpdateLocalIssue } from "@/lib/issues/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 
@@ -36,7 +36,7 @@ export function PromoteLocalIssueDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const createIssue = useCreateIssue(repoPath);
-  const save = useSaveLocalIssue(repoPath);
+  const update = useUpdateLocalIssue(repoPath);
   const selectIssue = useUiStore((s) => s.selectIssue);
   const forge = useForgeStatus(repoPath);
   const remoteLabel = forge.data?.provider === "gitlab" ? "GitLab" : "GitHub";
@@ -60,18 +60,21 @@ export function PromoteLocalIssueDialog({
       for (const c of carried) {
         await forgeIssueComment(repoPath, number, c.body);
       }
-      await save.mutateAsync({
-        ...issue,
-        status: "closed",
-        closedAt: new Date().toISOString(),
-        comments: [
-          ...issue.comments,
-          {
-            id: crypto.randomUUID(),
-            body: `Promoted to ${remoteLabel} issue [#${number}](${url}).`,
-            createdAt: new Date().toISOString(),
-          },
-        ],
+      await update.mutateAsync({
+        id: issue.id,
+        mutate: (cur) => ({
+          ...cur,
+          status: "closed",
+          closedAt: new Date().toISOString(),
+          comments: [
+            ...cur.comments,
+            {
+              id: crypto.randomUUID(),
+              body: `Promoted to ${remoteLabel} issue [#${number}](${url}).`,
+              createdAt: new Date().toISOString(),
+            },
+          ],
+        }),
       });
       toast.success(`Opened issue #${number}`, {
         description: url,

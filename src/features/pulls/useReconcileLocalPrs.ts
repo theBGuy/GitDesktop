@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 import { gitBranchMergeStates } from "@/lib/git/api";
-import { useLocalPrs, useSaveLocalPr } from "@/lib/pulls/queries";
+import { useLocalPrs, useUpdateLocalPr } from "@/lib/pulls/queries";
 
 /**
  * Keeps open local PRs honest with git when the work happens outside the app
@@ -11,7 +11,7 @@ import { useLocalPrs, useSaveLocalPr } from "@/lib/pulls/queries";
  */
 export function useReconcileLocalPrs(repo: string) {
   const prs = useLocalPrs(repo);
-  const { mutate } = useSaveLocalPr(repo);
+  const { mutate } = useUpdateLocalPr(repo);
   const open = (prs.data ?? []).filter((p) => p.status === "open");
 
   const states = useQuery({
@@ -43,13 +43,19 @@ export function useReconcileLocalPrs(repo: string) {
       if (s.merged) {
         done.current.add(pr.id);
         mutate({
-          ...pr,
-          status: "merged",
-          mergedAt: pr.mergedAt ?? new Date().toISOString(),
+          id: pr.id,
+          mutate: (cur) => ({
+            ...cur,
+            status: "merged",
+            mergedAt: cur.mergedAt ?? new Date().toISOString(),
+          }),
         });
       } else if (!s.headExists) {
         done.current.add(pr.id);
-        mutate({ ...pr, status: "closed" });
+        mutate({
+          id: pr.id,
+          mutate: (cur) => ({ ...cur, status: "closed" }),
+        });
       }
     });
   }, [states.data, open, mutate]);

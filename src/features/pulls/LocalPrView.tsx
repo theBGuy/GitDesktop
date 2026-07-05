@@ -59,7 +59,7 @@ import {
 import {
   useDeleteLocalPr,
   useLocalPrs,
-  useSaveLocalPr,
+  useUpdateLocalPr,
 } from "@/lib/pulls/queries";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
@@ -79,7 +79,7 @@ export function LocalPrView({
 }) {
   const prs = useLocalPrs(repoPath);
   const pr = prs.data?.find((p) => p.id === id);
-  const save = useSaveLocalPr(repoPath);
+  const update = useUpdateLocalPr(repoPath);
   const del = useDeleteLocalPr(repoPath);
   const merge = useMergeLocalPr(repoPath);
   const selectPr = useUiStore((s) => s.selectPr);
@@ -114,14 +114,19 @@ export function LocalPrView({
     setCommentHidden,
     addLabel,
     removeLabel,
-  } = useLocalConversation(pr, save);
+  } = useLocalConversation(pr, (mutate) => {
+    if (pr) update.mutate({ id: pr.id, mutate });
+  });
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [promoteOpen, setPromoteOpen] = useState(false);
   const ghStatus = useForgeStatus(repoPath);
   const edit = useEditTitleBody({
     onSave: async ({ title, body }) => {
       if (!pr) return;
-      await save.mutateAsync({ ...pr, title, body });
+      await update.mutateAsync({
+        id: pr.id,
+        mutate: (cur) => ({ ...cur, title, body }),
+      });
     },
   });
 
@@ -148,7 +153,10 @@ export function LocalPrView({
 
   function toggleApprove() {
     if (!pr) return;
-    save.mutate({ ...pr, approved: !pr.approved });
+    update.mutate({
+      id: pr.id,
+      mutate: (cur) => ({ ...cur, approved: !cur.approved }),
+    });
   }
 
   function openEdit() {
@@ -163,10 +171,13 @@ export function LocalPrView({
       { base: pr.base, head: pr.head, message, strategy },
       {
         onSuccess: () => {
-          save.mutate({
-            ...pr,
-            status: "merged",
-            mergedAt: new Date().toISOString(),
+          update.mutate({
+            id: pr.id,
+            mutate: (cur) => ({
+              ...cur,
+              status: "merged",
+              mergedAt: new Date().toISOString(),
+            }),
           });
           const verb =
             strategy === "squash"
@@ -330,25 +341,28 @@ export function LocalPrView({
                 files: d.files,
               })),
           }}
-          posting={save.isPending}
-          onPost={(body) =>
-            save
-              .mutateAsync({
-                ...pr,
-                comments: [
-                  ...pr.comments,
-                  {
-                    id: crypto.randomUUID(),
-                    body,
-                    createdAt: new Date().toISOString(),
-                  },
-                ],
-              })
-              .catch((e) => {
-                toastError(e);
-                throw e; // let the panel skip its success toast / text clear
-              })
-          }
+          posting={update.isPending}
+          onPost={async (body) => {
+            try {
+              await update.mutateAsync({
+                id: pr.id,
+                mutate: (cur) => ({
+                  ...cur,
+                  comments: [
+                    ...cur.comments,
+                    {
+                      id: crypto.randomUUID(),
+                      body,
+                      createdAt: new Date().toISOString(),
+                    },
+                  ],
+                }),
+              });
+            } catch (e) {
+              toastError(e);
+              throw e; // let the panel skip its success toast / text clear
+            }
+          }}
         />
       )}
 
@@ -506,9 +520,15 @@ export function LocalPrView({
           size="sm"
           onClick={() => {
             if (pr.archived) {
-              save.mutate({ ...pr, archived: false });
+              update.mutate({
+                id: pr.id,
+                mutate: (cur) => ({ ...cur, archived: false }),
+              });
             } else {
-              save.mutate({ ...pr, archived: true });
+              update.mutate({
+                id: pr.id,
+                mutate: (cur) => ({ ...cur, archived: true }),
+              });
               selectPr(null);
             }
           }}
@@ -538,7 +558,12 @@ export function LocalPrView({
             <Button
               variant="outline"
               size="sm"
-              onClick={() => save.mutate({ ...pr, status: "closed" })}
+              onClick={() =>
+                update.mutate({
+                  id: pr.id,
+                  mutate: (cur) => ({ ...cur, status: "closed" }),
+                })
+              }
             >
               Close
             </Button>
@@ -593,7 +618,12 @@ export function LocalPrView({
           <Button
             variant="outline"
             size="sm"
-            onClick={() => save.mutate({ ...pr, status: "open" })}
+            onClick={() =>
+              update.mutate({
+                id: pr.id,
+                mutate: (cur) => ({ ...cur, status: "open" }),
+              })
+            }
           >
             <ArrowCounterClockwiseIcon data-icon="inline-start" />
             Reopen

@@ -44,7 +44,7 @@ import { forgeFeatureReady, useForgeStatus } from "@/lib/git/queries";
 import {
   useDeleteLocalIssue,
   useLocalIssues,
-  useSaveLocalIssue,
+  useUpdateLocalIssue,
 } from "@/lib/issues/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { formatRelativeTime } from "@/lib/time";
@@ -62,7 +62,7 @@ export function LocalIssueView({
 }) {
   const issues = useLocalIssues(repoPath);
   const issue = issues.data?.find((i) => i.id === id);
-  const save = useSaveLocalIssue(repoPath);
+  const update = useUpdateLocalIssue(repoPath);
   const del = useDeleteLocalIssue(repoPath);
   const selectIssue = useUiStore((s) => s.selectIssue);
   const ghStatus = useForgeStatus(repoPath);
@@ -81,13 +81,18 @@ export function LocalIssueView({
     setCommentHidden,
     addLabel,
     removeLabel,
-  } = useLocalConversation(issue, save);
+  } = useLocalConversation(issue, (mutate) => {
+    if (issue) update.mutate({ id: issue.id, mutate });
+  });
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [promoteOpen, setPromoteOpen] = useState(false);
   const edit = useEditTitleBody({
     onSave: async ({ title, body }) => {
       if (!issue) return;
-      await save.mutateAsync({ ...issue, title, body });
+      await update.mutateAsync({
+        id: issue.id,
+        mutate: (cur) => ({ ...cur, title, body }),
+      });
     },
   });
 
@@ -321,9 +326,15 @@ export function LocalIssueView({
           size="sm"
           onClick={() => {
             if (issue.archived) {
-              save.mutate({ ...issue, archived: false });
+              update.mutate({
+                id: issue.id,
+                mutate: (cur) => ({ ...cur, archived: false }),
+              });
             } else {
-              save.mutate({ ...issue, archived: true });
+              update.mutate({
+                id: issue.id,
+                mutate: (cur) => ({ ...cur, archived: true }),
+              });
               selectIssue(null);
             }
           }}
@@ -354,10 +365,13 @@ export function LocalIssueView({
               variant="outline"
               size="sm"
               onClick={() =>
-                save.mutate({
-                  ...issue,
-                  status: "closed",
-                  closedAt: new Date().toISOString(),
+                update.mutate({
+                  id: issue.id,
+                  mutate: (cur) => ({
+                    ...cur,
+                    status: "closed",
+                    closedAt: new Date().toISOString(),
+                  }),
                 })
               }
             >
@@ -369,7 +383,12 @@ export function LocalIssueView({
           <Button
             variant="outline"
             size="sm"
-            onClick={() => save.mutate({ ...issue, status: "open" })}
+            onClick={() =>
+              update.mutate({
+                id: issue.id,
+                mutate: (cur) => ({ ...cur, status: "open" }),
+              })
+            }
           >
             <ArrowCounterClockwiseIcon data-icon="inline-start" />
             Reopen

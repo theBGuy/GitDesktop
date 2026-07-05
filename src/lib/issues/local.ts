@@ -47,6 +47,15 @@ async function writeAll(repo: string, issues: LocalIssue[]): Promise<void> {
   await store.set(repo, issues);
 }
 
+/** Re-read `local-issues.json` from disk into the in-memory store. Kept symmetric
+ *  with the local-PR store's reconcile-before-mutate discipline (see reloadLocalPrs);
+ *  local issues have no external writer today, but every mutation reloads first so the
+ *  API is uniform and future-proof if one is ever added. */
+export async function reloadLocalIssues(): Promise<void> {
+  const store = await getStore();
+  await store.reload({ ignoreDefaults: true });
+}
+
 export async function createLocalIssue(
   repo: string,
   input: { title: string; body: string },
@@ -60,27 +69,35 @@ export async function createLocalIssue(
     comments: [],
     createdAt: new Date().toISOString(),
   };
+  await reloadLocalIssues();
   const all = await listLocalIssues(repo);
   await writeAll(repo, [issue, ...all]);
   return issue;
 }
 
-/** Upserts the given issue (used for comment/label/status edits). */
-export async function saveLocalIssue(
+/** Apply `mutate` to the FRESH on-disk record for `id`, then persist — mirrors
+ *  updateLocalPr so both local-entity stores share one reconcile-before-mutate shape.
+ *  Throws if the issue no longer exists. */
+export async function updateLocalIssue(
   repo: string,
-  issue: LocalIssue,
-): Promise<void> {
+  id: string,
+  mutate: (issue: LocalIssue) => LocalIssue,
+): Promise<LocalIssue> {
+  await reloadLocalIssues();
   const all = await listLocalIssues(repo);
-  await writeAll(
-    repo,
-    all.map((i) => (i.id === issue.id ? issue : i)),
-  );
+  const idx = all.findIndex((i) => i.id === id);
+  if (idx === -1) throw new Error(`no local issue with id ${id}`);
+  const next = [...all];
+  next[idx] = mutate(all[idx]);
+  await writeAll(repo, next);
+  return next[idx];
 }
 
 export async function deleteLocalIssue(
   repo: string,
   id: string,
 ): Promise<void> {
+  await reloadLocalIssues();
   const all = await listLocalIssues(repo);
   await writeAll(
     repo,
