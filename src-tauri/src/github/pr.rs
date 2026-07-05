@@ -1777,6 +1777,8 @@ pub async fn gh_pr_external_reviews(
 /// onto the neutral `ReviewThreadOut`. Each thread carries its full reply chain
 /// (oldest first). Empty-comment threads are skipped. Line falls back to the
 /// original line, then 0 (an outdated thread whose anchor moved has a null line).
+/// Follows the `reviewThreads` cursor up to 5 pages (500 threads) so a PR with
+/// many threads isn't silently truncated — parity with the Bitbucket comments read.
 #[tauri::command]
 pub async fn gh_pr_review_threads(
     repo_path: String,
@@ -1786,18 +1788,12 @@ pub async fn gh_pr_review_threads(
     validate_graphql_embed(&owner, "repository owner")?;
     validate_graphql_embed(&name, "repository name")?;
 
-    // `number` is a u64 (digits only), so it's safe to embed directly.
+    // owner/name are validated remote-parse values and `number` is a u64 (digits
+    // only), so all three are safe to embed. The pagination `cursor` is server-opaque
+    // text, so it travels as a GraphQL VARIABLE (never format!-embedded).
     let query = format!(
-        r#"query{{ repository(owner:"{owner}", name:"{name}"){{ pullRequest(number:{number}){{ reviewThreads(first:100){{ nodes{{ id isResolved isOutdated diffSide line originalLine startLine originalStartLine path comments(first:50){{ nodes{{ id author{{ login }} body createdAt url viewerDidAuthor isMinimized minimizedReason diffHunk pullRequestReview{{ id }} }} }} }} }} }} }} }}"#
+        r#"query($cursor: String){{ repository(owner:"{owner}", name:"{name}"){{ pullRequest(number:{number}){{ reviewThreads(first:100, after:$cursor){{ pageInfo{{ endCursor hasNextPage }} nodes{{ id isResolved isOutdated diffSide line originalLine startLine originalStartLine path comments(first:50){{ nodes{{ id author{{ login }} body createdAt url viewerDidAuthor isMinimized minimizedReason diffHunk pullRequestReview{{ id }} }} }} }} }} }} }} }}"#
     );
-    let out = run_gh(
-        Some(&repo_path),
-        &["api", "graphql", "-f", &format!("query={query}")],
-        GH_NETWORK_TIMEOUT,
-    )
-    .await?;
-    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse the PR review threads: {e}")))?;
 
     let str_at = |v: &serde_json::Value, p: &str| {
         v.pointer(p).and_then(|x| x.as_str()).unwrap_or("").to_string()
@@ -1807,75 +1803,107 @@ pub async fn gh_pr_review_threads(
     };
 
     let mut threads: Vec<ReviewThreadOut> = Vec::new();
-    if let Some(nodes) = value
-        .pointer("/data/repository/pullRequest/reviewThreads/nodes")
-        .and_then(|v| v.as_array())
-    {
-        for t in nodes {
-            let comments: Vec<PrThreadOut> = t
-                .pointer("/comments/nodes")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .map(|c| PrThreadOut {
-                            author: str_at(c, "/author/login"),
-                            state: String::new(),
-                            body: str_at(c, "/body"),
-                            date: str_at(c, "/createdAt"),
-                            id: str_at(c, "/id"),
-                            url: str_at(c, "/url"),
-                            viewer_did_author: bool_at(c, "/viewerDidAuthor"),
-                            is_minimized: bool_at(c, "/isMinimized"),
-                            minimized_reason: str_at(c, "/minimizedReason"),
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            // A thread with no comments carries no content to anchor — skip it.
-            if comments.is_empty() {
-                continue;
-            }
-            // NOTE: for OUTDATED threads GitHub returns the key present but JSON
-            // null (`"line": null`), and `serde_json`'s `pointer` returns
-            // `Some(Value::Null)` for a present-but-null key — NOT `None`. So the
-            // fallback must convert to `u64` BEFORE `.or_else`, or a null `line`
-            // would swallow the `originalLine` fallback and render line 0.
-            let line = t
-                .pointer("/line")
-                .and_then(|x| x.as_u64())
-                .or_else(|| t.pointer("/originalLine").and_then(|x| x.as_u64()))
-                .unwrap_or(0) as u32;
-            let start_line = t
-                .pointer("/startLine")
-                .and_then(|x| x.as_u64())
-                .or_else(|| t.pointer("/originalStartLine").and_then(|x| x.as_u64()))
-                .unwrap_or(0) as u32;
-            let side = if str_at(t, "/diffSide") == "LEFT" {
-                "old"
-            } else {
-                "new"
-            };
-            // The diff excerpt lives on the individual comments; the thread's
-            // opener (first comment) carries the anchor hunk.
-            let diff_hunk = str_at(t, "/comments/nodes/0/diffHunk");
-            // The owning review's node id comes off the first comment's
-            // `pullRequestReview`, which is nullable — `str_at` maps a
-            // present-but-null value to "" (it converts to `&str` before use, so
-            // the `Some(Null)` pointer trap can't swallow anything here).
-            let review_id = str_at(t, "/comments/nodes/0/pullRequestReview/id");
-            threads.push(ReviewThreadOut {
-                id: str_at(t, "/id"),
-                path: str_at(t, "/path"),
-                line,
-                start_line,
-                side: side.into(),
-                is_resolved: bool_at(t, "/isResolved"),
-                is_outdated: bool_at(t, "/isOutdated"),
-                diff_hunk,
-                review_id,
-                comments,
-            });
+    let mut cursor: Option<String> = None;
+    // Bounded at 5 pages (500 threads) — a larger PR truncates rather than looping.
+    for _ in 0..5 {
+        // The `cursor` variable is omitted on the first request (a missing GraphQL
+        // variable is null → the first page); later pages pass the prior endCursor.
+        let mut args: Vec<String> =
+            vec!["api".into(), "graphql".into(), "-f".into(), format!("query={query}")];
+        if let Some(c) = &cursor {
+            args.push("-f".into());
+            args.push(format!("cursor={c}"));
         }
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = run_gh(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT).await?;
+        let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
+            .map_err(|e| AppError::Gh(format!("could not parse the PR review threads: {e}")))?;
+
+        let review_threads = value.pointer("/data/repository/pullRequest/reviewThreads");
+        if let Some(nodes) = review_threads
+            .and_then(|rt| rt.pointer("/nodes"))
+            .and_then(|v| v.as_array())
+        {
+            for t in nodes {
+                let comments: Vec<PrThreadOut> = t
+                    .pointer("/comments/nodes")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|c| PrThreadOut {
+                                author: str_at(c, "/author/login"),
+                                state: String::new(),
+                                body: str_at(c, "/body"),
+                                date: str_at(c, "/createdAt"),
+                                id: str_at(c, "/id"),
+                                url: str_at(c, "/url"),
+                                viewer_did_author: bool_at(c, "/viewerDidAuthor"),
+                                is_minimized: bool_at(c, "/isMinimized"),
+                                minimized_reason: str_at(c, "/minimizedReason"),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                // A thread with no comments carries no content to anchor — skip it.
+                if comments.is_empty() {
+                    continue;
+                }
+                // NOTE: for OUTDATED threads GitHub returns the key present but JSON
+                // null (`"line": null`), and `serde_json`'s `pointer` returns
+                // `Some(Value::Null)` for a present-but-null key — NOT `None`. So the
+                // fallback must convert to `u64` BEFORE `.or_else`, or a null `line`
+                // would swallow the `originalLine` fallback and render line 0.
+                let line = t
+                    .pointer("/line")
+                    .and_then(|x| x.as_u64())
+                    .or_else(|| t.pointer("/originalLine").and_then(|x| x.as_u64()))
+                    .unwrap_or(0) as u32;
+                let start_line = t
+                    .pointer("/startLine")
+                    .and_then(|x| x.as_u64())
+                    .or_else(|| t.pointer("/originalStartLine").and_then(|x| x.as_u64()))
+                    .unwrap_or(0) as u32;
+                let side = if str_at(t, "/diffSide") == "LEFT" {
+                    "old"
+                } else {
+                    "new"
+                };
+                // The diff excerpt lives on the individual comments; the thread's
+                // opener (first comment) carries the anchor hunk.
+                let diff_hunk = str_at(t, "/comments/nodes/0/diffHunk");
+                // The owning review's node id comes off the first comment's
+                // `pullRequestReview`, which is nullable — `str_at` maps a
+                // present-but-null value to "" (it converts to `&str` before use, so
+                // the `Some(Null)` pointer trap can't swallow anything here).
+                let review_id = str_at(t, "/comments/nodes/0/pullRequestReview/id");
+                threads.push(ReviewThreadOut {
+                    id: str_at(t, "/id"),
+                    path: str_at(t, "/path"),
+                    line,
+                    start_line,
+                    side: side.into(),
+                    is_resolved: bool_at(t, "/isResolved"),
+                    is_outdated: bool_at(t, "/isOutdated"),
+                    diff_hunk,
+                    review_id,
+                    comments,
+                });
+            }
+        }
+
+        // Advance only while GitHub reports another page AND hands back a cursor.
+        let has_next = review_threads
+            .and_then(|rt| rt.pointer("/pageInfo/hasNextPage"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let end_cursor = review_threads
+            .and_then(|rt| rt.pointer("/pageInfo/endCursor"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !has_next || end_cursor.is_empty() {
+            break;
+        }
+        cursor = Some(end_cursor.to_string());
     }
     Ok(threads)
 }

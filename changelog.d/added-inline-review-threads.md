@@ -5,5 +5,6 @@
   resolve/unresolve. GitHub threads show the anchored code excerpt they were left
   on, reviewer suggestions render as labeled change diffs, and any thread can be
   copied as Markdown (line range, excerpt, and every reply). Resolved threads
-  collapse behind a per-file expander, and outdated ones are flagged. Previously they were invisible (GitHub) or shown as context-free
-  flat comments (GitLab/Bitbucket).
+  collapse behind a per-file expander, and outdated ones are flagged.
+  Previously they were invisible (GitHub) or shown as context-free flat
+  comments (GitLab/Bitbucket).

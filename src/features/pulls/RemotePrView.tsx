@@ -1064,11 +1064,13 @@ export function RemotePrView({
                     />
                   </div>
                 ))}
-              {pr.reviews.length === 0 && pr.comments.length === 0 && (
-                <p className="text-xs text-muted-foreground">
-                  No activity yet.
-                </p>
-              )}
+              {pr.reviews.length === 0 &&
+                pr.comments.length === 0 &&
+                !reviewThreads.data?.length && (
+                  <p className="text-xs text-muted-foreground">
+                    No activity yet.
+                  </p>
+                )}
             </div>
           </ScrollArea>
           {/* Shown for closed/merged PRs too — GitHub lets you comment (and
