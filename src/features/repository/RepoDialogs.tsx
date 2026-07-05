@@ -12,11 +12,15 @@ import {
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
 import { useAppForm } from "@/lib/form";
+import { isWindows } from "@/lib/hotkeys/binding";
 import { deleteRepoFolder } from "@/lib/git/api";
 import { type RecentRepo, repoDisplayName } from "@/lib/settings/api";
 import { useRemoveRecentRepo, useSetRepoAlias } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
+
+/** OS-accurate name for the system trash: "Recycle Bin" on Windows, else "Trash". */
+const trashName = isWindows ? "Recycle Bin" : "Trash";
 
 /**
  * Create/change a repo's display alias. Mount with a `key` derived from the
@@ -107,6 +111,7 @@ export function RemoveRepoDialog({
   const removeRecent = useRemoveRecentRepo();
   const repoPath = useUiStore((s) => s.repoPath);
   const closeRepo = useUiStore((s) => s.closeRepo);
+  const openRepo = useUiStore((s) => s.openRepo);
   const [moveToTrash, setMoveToTrash] = useState(false);
   const [busy, setBusy] = useState(false);
   const display = repo ? repoDisplayName(repo) : "";
@@ -114,19 +119,34 @@ export function RemoveRepoDialog({
   async function confirm() {
     if (!repo) return;
     setBusy(true);
+    const wasOpen = repo.path === repoPath;
+    let trashed = false;
     try {
-      // Trash first: if that fails, the repo stays open and listed.
-      if (moveToTrash) await deleteRepoFolder(repo.path);
-      if (repo.path === repoPath) closeRepo();
+      // Closing the open repo stops its git-status polling, which otherwise
+      // keeps spawning subprocesses into the folder and makes the OS abort the
+      // move. Removing the open repo should close it either way.
+      if (wasOpen) closeRepo();
+      if (moveToTrash) {
+        await deleteRepoFolder(repo.path);
+        trashed = true;
+      }
       await removeRecent.mutateAsync(repo.path);
       toast.success(
         moveToTrash
-          ? `${display} moved to the Recycle Bin`
+          ? `${display} moved to the ${trashName}`
           : `${display} removed from GitDesktop`,
       );
       setMoveToTrash(false);
       onClose();
     } catch (e) {
+      // Removal didn't complete and the folder still exists — reopen so the
+      // user isn't stranded on the welcome screen. The `!trashed` guard is
+      // deliberate and must stay: once the trash succeeds the folder is gone,
+      // so reopening it would fail. (In the rare case the trash succeeds but
+      // the subsequent removeRecent write throws, we intentionally leave the
+      // stale recents entry rather than reopen a deleted folder — the entry is
+      // harmless and self-heals next time the recents list is opened.)
+      if (wasOpen && !trashed) openRepo({ root: repo.path, name: repo.name });
       toastError(e);
     } finally {
       setBusy(false);
@@ -149,7 +169,7 @@ export function RemoveRepoDialog({
           <DialogDescription>
             Removes the repository from GitDesktop. The folder at{" "}
             <span className="font-mono">{repo?.path}</span> is kept unless you
-            also move it to the Recycle Bin.
+            also move it to the {trashName}.
           </DialogDescription>
         </DialogHeader>
         <label className="flex cursor-pointer items-center gap-2 text-xs">
@@ -157,7 +177,7 @@ export function RemoveRepoDialog({
             checked={moveToTrash}
             onCheckedChange={(v) => setMoveToTrash(v === true)}
           />
-          Also move this repository to the Recycle Bin
+          Also move this repository to the {trashName}
         </label>
         <DialogFooter>
           <Button variant="outline" onClick={onClose} disabled={busy}>

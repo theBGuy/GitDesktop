@@ -105,7 +105,35 @@ pub async fn delete_repo_folder(path: String) -> AppResult<()> {
         )));
     }
     tauri::async_runtime::spawn_blocking(move || {
-        trash::delete(&dir).map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))
+        // Retry briefly: a just-closed repo may still have an in-flight git
+        // subprocess holding a handle to the folder, which makes Windows abort
+        // the move. A few short waits let those processes exit.
+        const ATTEMPTS: usize = 3;
+        // "Recycle Bin" is Windows-only terminology; macOS and Linux call the
+        // OS trash "Trash". Pick the right one at compile time.
+        #[cfg(windows)]
+        const TRASH_NAME: &str = "Recycle Bin";
+        #[cfg(not(windows))]
+        const TRASH_NAME: &str = "Trash";
+
+        let mut cause = String::new();
+        for attempt in 0..ATTEMPTS {
+            match trash::delete(&dir) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    cause = e.to_string();
+                    if attempt + 1 < ATTEMPTS {
+                        std::thread::sleep(std::time::Duration::from_millis(300));
+                    }
+                }
+            }
+        }
+        // Lead with actionable copy; keep the raw cause as an honest suffix.
+        Err(AppError::Io(std::io::Error::other(format!(
+            "Couldn't move the repository to the {TRASH_NAME} — the folder may be in use \
+             by an open editor, terminal, or file-explorer window. Close them and try \
+             again. ({cause})"
+        ))))
     })
     .await
     .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?

@@ -638,9 +638,11 @@ async fn gh_delete_remote_head_branch(repo_path: &str, number: u64) -> AppResult
         Err(err) => {
             let raw = err.to_string();
             let lower = raw.to_ascii_lowercase();
-            // The branch is already gone (repo auto-deletes head branches, or a
-            // prior attempt removed it) — that's the desired end state.
-            if lower.contains("reference does not exist") || lower.contains("not found") {
+            // Only the explicit missing-ref case (GitHub's 422 "Reference does not
+            // exist") is the desired end state — the branch is already gone (the repo
+            // auto-deletes head branches, or a prior attempt removed it). A permission
+            // failure can return 404 "Not found", so don't swallow that — let it surface.
+            if lower.contains("reference does not exist") {
                 return Ok(());
             }
             let fork_note = if head.is_cross_repository {
