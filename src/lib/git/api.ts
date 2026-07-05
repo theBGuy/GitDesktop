@@ -2256,6 +2256,21 @@ export const readTextFile = (path: string) =>
  *  GitDesktop as an MCP server" config snippet (`<exe> mcp --repo <path>`). */
 export const appExePath = () => invoke<string>("app_exe_path");
 
+/** Merge the `gitdesktop` MCP entry into `<repo>/.mcp.json`, preserving any
+ *  sibling servers. Returns whether it wrote and whether an entry already
+ *  existed; with `overwrite:false` an existing entry is left untouched
+ *  (`{ existed: true, written: false }`). */
+export const mcpJsonWrite = (
+  repoPath: string,
+  entry: unknown,
+  overwrite: boolean,
+) =>
+  invoke<{ written: boolean; existed: boolean }>("mcp_json_write", {
+    repoPath,
+    entry,
+    overwrite,
+  });
+
 // Cold-start test mode keeps API keys in an isolated sessionStorage store so
 // the OS keychain (and the user's real keys) are never touched (no-op normally).
 export const setSecret = (provider: string, value: string) =>

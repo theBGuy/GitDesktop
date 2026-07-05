@@ -39,6 +39,10 @@ const GH_TEXT_MAX_BYTES: usize = 100_000;
 #[derive(Clone)]
 pub struct GitDesktopMcp {
     repo: String,
+    /// Whether the opt-in write tools (local-PR editing) are enabled. Off unless the
+    /// server was launched with `--allow-write`; when off, the write tools stay
+    /// registered but return a clear "disabled" error so an agent sees why.
+    allow_write: bool,
     // Read by the `#[tool_handler]`-generated `list_tools`/`call_tool`; the
     // dead-code lint misses that (it only sees the derived `Clone` touch it).
     #[allow(dead_code)]
@@ -151,6 +155,46 @@ struct RunListArgs {
     /// Limit to a branch name.
     #[serde(default)]
     branch: Option<String>,
+}
+
+// ---- Local-PR write tool parameters (opt-in via --allow-write) -------------
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct CreateLocalPrArgs {
+    /// Title of the local PR.
+    title: String,
+    /// Optional description/body (markdown). Defaults to empty.
+    #[serde(default)]
+    body: Option<String>,
+    /// Base branch (the branch changes would merge INTO). Must exist in the repo.
+    base: String,
+    /// Head branch (the branch with the changes). Must exist in the repo.
+    head: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct CommentLocalPrArgs {
+    /// The local PR's id.
+    id: String,
+    /// The comment body (markdown).
+    body: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct SetLocalPrStatusArgs {
+    /// The local PR's id.
+    id: String,
+    /// New status: "open" or "closed". "merged" is rejected — merging happens in
+    /// GitDesktop (it's a git operation this server never performs).
+    status: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct ApproveLocalPrArgs {
+    /// The local PR's id.
+    id: String,
+    /// Whether the local PR is approved.
+    approved: bool,
 }
 
 #[tool_router]
@@ -461,13 +505,107 @@ impl GitDesktopMcp {
             GH_TEXT_MAX_BYTES,
         ))]))
     }
+
+    // ---- Local-PR write tools (opt-in via --allow-write) ------------------
+    //
+    // Local PRs are GitDesktop's own app-data review artifacts (mirrored from the
+    // GUI's `local-prs.json`) — these tools create/amend those records only. No git
+    // or remote write ever happens here. All four are gated on `allow_write` and are
+    // annotated non-read-only, non-destructive (they create/amend app-data records,
+    // destroy nothing).
+
+    #[tool(
+        description = "Create a local PR — GitDesktop's own app-data review artifact for the bound \
+                       repository (NOT a GitHub/remote PR; nothing is pushed). Verifies both `base` \
+                       and `head` exist as branches first. Returns the created record as JSON.",
+        annotations(read_only_hint = false, destructive_hint = false)
+    )]
+    async fn create_local_pr(
+        &self,
+        Parameters(args): Parameters<CreateLocalPrArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_write()?;
+        // Pre-mutation guards FIRST: both refs must resolve as branches, else error
+        // naming the missing one — before any app-data write.
+        verify_branch(&self.repo, &args.base).await?;
+        verify_branch(&self.repo, &args.head).await?;
+        let record = crate::local_prs::create(
+            &self.repo,
+            &args.title,
+            args.body.as_deref().unwrap_or(""),
+            &args.base,
+            &args.head,
+        )
+        .map_err(app_err)?;
+        json_result(&record)
+    }
+
+    #[tool(
+        description = "Add a comment to a local PR (by id) in the bound repository. Returns the \
+                       updated record as JSON.",
+        annotations(read_only_hint = false, destructive_hint = false)
+    )]
+    async fn comment_local_pr(
+        &self,
+        Parameters(args): Parameters<CommentLocalPrArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_write()?;
+        let record =
+            crate::local_prs::add_comment(&self.repo, &args.id, &args.body).map_err(app_err)?;
+        json_result(&record)
+    }
+
+    #[tool(
+        description = "Set a local PR's status to \"open\" or \"closed\" (by id). \"merged\" is \
+                       rejected — merging a local PR happens in GitDesktop (a git operation this \
+                       server never performs). Returns the updated record as JSON.",
+        annotations(read_only_hint = false, destructive_hint = false)
+    )]
+    async fn set_local_pr_status(
+        &self,
+        Parameters(args): Parameters<SetLocalPrStatusArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_write()?;
+        let record =
+            crate::local_prs::set_status(&self.repo, &args.id, &args.status).map_err(app_err)?;
+        json_result(&record)
+    }
+
+    #[tool(
+        description = "Set a local PR's approved flag (by id) in the bound repository. Returns the \
+                       updated record as JSON.",
+        annotations(read_only_hint = false, destructive_hint = false)
+    )]
+    async fn approve_local_pr(
+        &self,
+        Parameters(args): Parameters<ApproveLocalPrArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_write()?;
+        let record =
+            crate::local_prs::set_approved(&self.repo, &args.id, args.approved).map_err(app_err)?;
+        json_result(&record)
+    }
 }
 
 impl GitDesktopMcp {
-    pub fn new(repo: String) -> Self {
+    pub fn with_options(repo: String, allow_write: bool) -> Self {
         Self {
             repo,
+            allow_write,
             tool_router: Self::tool_router(),
+        }
+    }
+
+    /// Gate for the write tools: an actionable error when the server wasn't launched
+    /// with `--allow-write`.
+    fn ensure_write(&self) -> Result<(), McpError> {
+        if self.allow_write {
+            Ok(())
+        } else {
+            Err(McpError::invalid_request(
+                "Write tools are disabled. Restart the server with --allow-write to enable them.",
+                None,
+            ))
         }
     }
 }
@@ -480,8 +618,11 @@ impl ServerHandler for GitDesktopMcp {
         let mut info = ServerInfo::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.instructions = Some(
-            "GitDesktop as an MCP server (read-only). Tools act on the repository this server \
-             was launched against (--repo). GitHub tools require an authenticated `gh` CLI."
+            "GitDesktop as an MCP server. Tools act on the repository this server was launched \
+             against (--repo). GitHub tools require an authenticated `gh` CLI. The read tools are \
+             always available; the local-PR write tools (create/comment/status/approve — \
+             GitDesktop's own app-data review artifacts, never git or remote writes) are enabled \
+             only when the server was launched with --allow-write."
                 .into(),
         );
         info
@@ -540,6 +681,38 @@ async fn resolve_commit(repo: &str, rev: &str) -> Result<String, McpError> {
         return Err(McpError::invalid_params(format!("no such commit: {rev}"), None));
     }
     Ok(sha)
+}
+
+/// Verifies that `branch` resolves to an existing LOCAL branch (`refs/heads/<branch>`)
+/// in the repo, erroring clearly by name if not. Used as a pre-mutation guard for
+/// `create_local_pr` so a typo'd base/head is rejected before any app-data write.
+///
+/// Local branches ONLY — a remote-tracking ref (`origin/main`) is deliberately
+/// rejected: the GUI's local-PR paths assume local branches (the create dialog only
+/// offers local names, and `git_merge_local_pr` does `git switch <base>` + cherry-pick,
+/// which errors or DWIM-creates a branch for a remote-tracking ref), so a record with
+/// a remote-tracking ref would be a latent trap at merge time.
+async fn verify_branch(repo: &str, branch: &str) -> Result<(), McpError> {
+    ensure_not_flag(branch, "branch")?;
+    let out = run_git_raw(
+        Some(repo),
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}^{{commit}}"),
+        ],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .map_err(app_err)?;
+    if !out.stdout_lossy().trim().is_empty() {
+        return Ok(());
+    }
+    Err(McpError::invalid_params(
+        format!("branch not found in this repository: {branch}"),
+        None,
+    ))
 }
 
 /// Redacts an in-URL credential (the `user:pass@` / `token@` userinfo) from an
@@ -660,7 +833,7 @@ async fn read_file_core(
 /// back to the current working directory), then runs the stdio MCP server until
 /// the client disconnects.
 pub fn run_mcp_server() {
-    let repo = parse_repo_arg();
+    let args = McpArgs::from_env();
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -671,32 +844,85 @@ pub fn run_mcp_server() {
             std::process::exit(1);
         }
     };
-    if let Err(e) = rt.block_on(serve(repo)) {
+    if let Err(e) = rt.block_on(serve(args)) {
         eprintln!("gitdesktop-mcp: {e}");
         std::process::exit(1);
     }
 }
 
-async fn serve(repo: String) -> Result<(), Box<dyn std::error::Error>> {
-    let service = GitDesktopMcp::new(repo).serve(stdio()).await?;
+async fn serve(args: McpArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let service = GitDesktopMcp::with_options(args.repo, args.allow_write)
+        .serve(stdio())
+        .await?;
     service.waiting().await?;
     Ok(())
 }
 
-/// Reads `--repo <path>` (or `--repo=<path>`) from argv; falls back to the current
-/// working directory, matching how reference MCP git servers are configured.
-fn parse_repo_arg() -> String {
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        if arg == "--repo" {
-            if let Some(path) = args.next() {
-                return path;
-            }
-        } else if let Some(path) = arg.strip_prefix("--repo=") {
-            return path.to_string();
-        }
+/// The parsed MCP-server launch arguments: the bound `--repo` and the `--allow-write`
+/// opt-in for the local-PR write tools.
+struct McpArgs {
+    repo: String,
+    allow_write: bool,
+}
+
+impl McpArgs {
+    fn from_env() -> Self {
+        Self::parse(std::env::args().skip(1))
     }
-    std::env::current_dir()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| ".".to_string())
+
+    /// Reads `--repo <path>` (or `--repo=<path>`) and the `--allow-write` flag from an
+    /// argv iterator; the repo falls back to the current working directory, matching
+    /// how reference MCP git servers are configured. `--allow-write` off by default.
+    fn parse(args: impl Iterator<Item = String>) -> Self {
+        let mut repo: Option<String> = None;
+        let mut allow_write = false;
+        let mut args = args;
+        while let Some(arg) = args.next() {
+            if arg == "--repo" {
+                if let Some(path) = args.next() {
+                    repo = Some(path);
+                }
+            } else if let Some(path) = arg.strip_prefix("--repo=") {
+                repo = Some(path.to_string());
+            } else if arg == "--allow-write" {
+                allow_write = true;
+            }
+        }
+        let repo = repo.unwrap_or_else(|| {
+            std::env::current_dir()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| ".".to_string())
+        });
+        Self { repo, allow_write }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(argv: &[&str]) -> McpArgs {
+        McpArgs::parse(argv.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn allow_write_defaults_off() {
+        let args = parse(&["--repo", "/tmp/x"]);
+        assert_eq!(args.repo, "/tmp/x");
+        assert!(!args.allow_write);
+    }
+
+    #[test]
+    fn allow_write_flag_enables_it() {
+        let args = parse(&["--repo=/tmp/x", "--allow-write"]);
+        assert_eq!(args.repo, "/tmp/x");
+        assert!(args.allow_write);
+    }
+
+    #[test]
+    fn allow_write_order_independent() {
+        let args = parse(&["--allow-write", "--repo", "/tmp/y"]);
+        assert_eq!(args.repo, "/tmp/y");
+        assert!(args.allow_write);
+    }
 }

@@ -38,6 +38,15 @@ function getStore(): Promise<Store> {
   return storePromise;
 }
 
+/** Re-read `local-prs.json` from disk into the in-memory store. The MCP server
+ *  (with `--allow-write`) can mutate this file externally; without a reload the
+ *  autoSave store would clobber those writes on the next GUI mutation.
+ *  `ignoreDefaults` fully matches the store to disk (so external deletes drop). */
+export async function reloadLocalPrs(): Promise<void> {
+  const store = await getStore();
+  await store.reload({ ignoreDefaults: true });
+}
+
 export async function listLocalPrs(repo: string): Promise<LocalPr[]> {
   const store = await getStore();
   const prs = (await store.get<LocalPr[]>(repo)) ?? [];

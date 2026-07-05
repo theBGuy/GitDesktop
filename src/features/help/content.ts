@@ -817,12 +817,19 @@ selection **mid-session** — the picker appears in a running session's reply bo
 new choice applies from your next turn.
 
 **The other direction — GitDesktop *as* a server.** At the bottom of the panel, **Use
-GitDesktop as an MCP server** gives you a ready-to-paste config snippet so any external MCP
-client — Claude Desktop, Cursor, Claude Code — can use *this* repo's **read-only** git &
-GitHub tools (status, log, diffs, blame, branches, file history/read, PRs, issues, CI logs).
-The app itself runs as a stdio server (\`gitdesktop mcp --repo <path>\`) exposing only read
-tools, so an agent can understand a repo without changing it. Copy it, paste it into your
-client's MCP config, done.
+GitDesktop as an MCP server** lets any external MCP client — Claude Desktop, Cursor, Claude
+Code — use *this* repo's **read-only-by-default** git & GitHub tools (status, log, diffs,
+blame, branches, file history/read, PRs, issues, CI logs). The app itself runs as a stdio
+server (\`gitdesktop mcp --repo <path>\`), so an agent can understand a repo without changing
+it. **Copy** the snippet and paste it into your client's config, or hit **Write to
+.mcp.json** to merge the \`gitdesktop\` entry into the open repo's \`.mcp.json\` for you —
+existing servers are preserved, and you're asked before an existing GitDesktop entry is
+replaced. Two toggles shape what gets written: **Shareable entry** swaps machine-specific
+absolute paths for portable \`\${GITDESKTOP_BIN}\` / \`\${CLAUDE_PROJECT_DIR}\` ones a
+teammate can commit (they point \`GITDESKTOP_BIN\` at their own install, or keep
+\`gitdesktop\` on their PATH), and **Allow write tools** adds \`--allow-write\` so an agent
+can also **create**, **comment on**, set the **status** of, and **approve** *this repo's*
+local PRs — off by default, keeping the server read-only.
 
 New to MCP? **Browse** opens the official Model Context Protocol registry right in that
 panel — search it and add a server in a click; it arrives **disabled** for you to review

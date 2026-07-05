@@ -533,6 +533,93 @@ pub async fn discover_mcp_servers(
     Ok(out)
 }
 
+// --- config-helper backend (write the `gitdesktop` server into `.mcp.json`) ------
+//
+// The GUI "Use GitDesktop as an MCP server" helper calls this to add the
+// `gitdesktop` server entry to a project's `.mcp.json` — the SAME file shape
+// `discover_mcp_servers` reads (top-level `"mcpServers"`). It merges: every sibling
+// server and any unknown top-level key is preserved. This writes ONLY the local
+// `.mcp.json`; no git operation is ever involved.
+
+/// Result of [`mcp_json_write`]. `written` is whether the file was actually written;
+/// `existed` is whether a `gitdesktop` entry was already present (so the GUI can
+/// confirm before overwriting).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpJsonWriteResult {
+    pub written: bool,
+    pub existed: bool,
+}
+
+/// Write/merge the `gitdesktop` server `entry` into `<repo_path>/.mcp.json`.
+///
+/// - A missing file starts from `{"mcpServers":{}}`.
+/// - A malformed existing file is an ERROR (never clobbered).
+/// - If `mcpServers.gitdesktop` already exists and `!overwrite`, returns
+///   `{ written: false, existed: true }` untouched (the GUI confirms, then re-calls
+///   with `overwrite: true`).
+/// - Otherwise sets `mcpServers.gitdesktop = entry`, preserving ALL sibling servers
+///   and unknown top-level keys, and pretty-writes the file with a trailing newline.
+#[tauri::command]
+pub async fn mcp_json_write(
+    repo_path: String,
+    entry: Value,
+    overwrite: bool,
+) -> AppResult<McpJsonWriteResult> {
+    let path = Path::new(&repo_path).join(".mcp.json");
+
+    // Parse the existing file as a Value so unknown keys round-trip. Missing → start
+    // from an empty document; malformed → error (do NOT clobber the user's file).
+    let mut doc: Value = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| {
+            AppError::Command(format!(
+                "{} is not valid JSON: {e}. Fix or remove it, then try again.",
+                path.display()
+            ))
+        })?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => json!({ "mcpServers": {} }),
+        Err(e) => return Err(AppError::Io(e)),
+    };
+    if !doc.is_object() {
+        return Err(AppError::Command(format!(
+            "{} is not a JSON object.",
+            path.display()
+        )));
+    }
+
+    // Ensure `mcpServers` is an object (create it if absent; error if present but the
+    // wrong type rather than dropping it).
+    let root = doc.as_object_mut().expect("checked is_object above");
+    let servers = root
+        .entry("mcpServers".to_string())
+        .or_insert_with(|| json!({}));
+    let servers = servers.as_object_mut().ok_or_else(|| {
+        AppError::Command(format!(
+            "{} has a non-object \"mcpServers\".",
+            path.display()
+        ))
+    })?;
+
+    let existed = servers.contains_key("gitdesktop");
+    if existed && !overwrite {
+        return Ok(McpJsonWriteResult {
+            written: false,
+            existed: true,
+        });
+    }
+    servers.insert("gitdesktop".to_string(), entry);
+
+    let mut body = serde_json::to_string_pretty(&doc)
+        .map_err(|e| AppError::Command(format!("serialize .mcp.json: {e}")))?;
+    body.push('\n');
+    std::fs::write(&path, body)?;
+
+    Ok(McpJsonWriteResult {
+        written: true,
+        existed,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -613,6 +700,114 @@ mod tests {
         assert_eq!(srv["url"], "https://mcp.example.com/mcp");
         assert_eq!(srv["headers"]["Authorization"], "Bearer x");
         assert_eq!(srv["enabled"], true);
+    }
+
+    // --- mcp_json_write ------------------------------------------------------
+
+    fn tmp_dir() -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "gd-mcp-json-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn entry() -> Value {
+        json!({ "command": "gitdesktop", "args": ["mcp", "--repo", "."] })
+    }
+
+    #[tokio::test]
+    async fn write_creates_file_when_missing() {
+        let dir = tmp_dir();
+        let res = mcp_json_write(dir.to_string_lossy().into_owned(), entry(), false)
+            .await
+            .unwrap();
+        assert!(res.written);
+        assert!(!res.existed);
+        let doc: Value =
+            serde_json::from_slice(&std::fs::read(dir.join(".mcp.json")).unwrap()).unwrap();
+        assert_eq!(doc["mcpServers"]["gitdesktop"]["command"], "gitdesktop");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn write_preserves_siblings_and_unknown_top_level_keys() {
+        let dir = tmp_dir();
+        let path = dir.join(".mcp.json");
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&json!({
+                "mcpServers": { "other": { "command": "other-bin" } },
+                "someUnknownTopKey": { "keep": true }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let res = mcp_json_write(dir.to_string_lossy().into_owned(), entry(), false)
+            .await
+            .unwrap();
+        assert!(res.written);
+        assert!(!res.existed);
+
+        let doc: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        // Sibling server preserved.
+        assert_eq!(doc["mcpServers"]["other"]["command"], "other-bin");
+        // Our entry added.
+        assert_eq!(doc["mcpServers"]["gitdesktop"]["command"], "gitdesktop");
+        // Unknown top-level key preserved.
+        assert_eq!(doc["someUnknownTopKey"]["keep"], true);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn write_detects_existing_and_refuses_without_overwrite() {
+        let dir = tmp_dir();
+        let path = dir.join(".mcp.json");
+        std::fs::write(
+            &path,
+            serde_json::to_string(&json!({
+                "mcpServers": { "gitdesktop": { "command": "OLD" } }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        // !overwrite → reports existed, writes nothing.
+        let res = mcp_json_write(dir.to_string_lossy().into_owned(), entry(), false)
+            .await
+            .unwrap();
+        assert!(!res.written);
+        assert!(res.existed);
+        let doc: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(doc["mcpServers"]["gitdesktop"]["command"], "OLD");
+
+        // overwrite → replaces.
+        let res = mcp_json_write(dir.to_string_lossy().into_owned(), entry(), true)
+            .await
+            .unwrap();
+        assert!(res.written);
+        assert!(res.existed);
+        let doc: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(doc["mcpServers"]["gitdesktop"]["command"], "gitdesktop");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn write_errors_on_malformed_existing_file_without_clobber() {
+        let dir = tmp_dir();
+        let path = dir.join(".mcp.json");
+        std::fs::write(&path, b"{ not valid json").unwrap();
+        let err = mcp_json_write(dir.to_string_lossy().into_owned(), entry(), true)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not valid JSON"));
+        // The bad file is untouched.
+        assert_eq!(std::fs::read(&path).unwrap(), b"{ not valid json");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

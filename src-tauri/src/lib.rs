@@ -10,6 +10,7 @@ mod github;
 mod health;
 mod hooks;
 mod instructions;
+mod local_prs;
 mod mcp;
 mod mcp_server;
 mod pty;
@@ -513,6 +514,7 @@ pub fn run() {
             secrets::delete_mcp_secret,
             secrets::mcp_secret_exists,
             mcp::discover_mcp_servers,
+            mcp::mcp_json_write,
             instructions::read_repo_instructions,
             instructions::read_repo_ai_ignore,
             instructions::read_repo_branch_rules,
