@@ -705,7 +705,7 @@ pub async fn git_unignore_rules(repo_path: String, rules: Vec<UnignoreRule>) -> 
             next.push_str(ending);
         }
         if has_bom {
-            next.insert_str(0, "\u{feff}");
+            next.insert(0, '\u{feff}');
         }
         tokio::fs::write(&path, next).await.map_err(AppError::Io)?;
     }

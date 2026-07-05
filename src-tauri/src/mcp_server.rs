@@ -783,7 +783,7 @@ async fn read_file_core(
         ));
     }
     if rel_path
-        .split(|c| c == '/' || c == '\\')
+        .split(['/', '\\'])
         .any(|seg| seg == "..")
     {
         return Err(McpError::invalid_params("path must not contain '..'", None));

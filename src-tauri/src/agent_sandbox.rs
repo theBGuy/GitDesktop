@@ -1117,6 +1117,7 @@ fn launch_container_shell(bin: &str, args: &[String], tip: &str) -> AppResult<()
 /// `/workspace` (the bind-mounted worktree), with the seeded claude-home mounted +
 /// (when present) the user's global skills mounted read-only so a nudged skill
 /// resolves; `--rm` tears it down, resource + capability limits harden it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_run_args(
     runtime: &str,
     agent: &str,

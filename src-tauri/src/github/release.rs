@@ -168,6 +168,7 @@ pub async fn gh_release_view(
 /// exist). `generate_notes` adds GitHub's auto commit-based notes; an explicit
 /// `notes` body is included too. Returns the new release's URL.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn gh_release_create(
     repo_path: String,
     tag: String,

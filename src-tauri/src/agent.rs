@@ -94,6 +94,8 @@ pub enum ReviewEvent {
     /// A chunk of assistant text to append to the rendered review.
     Delta { text: String },
     /// Transient progress note (Tier 2 tool activity, e.g. "Reading files…").
+    // Reserved for Tier-2 progress notes; declared but not emitted yet.
+    #[allow(dead_code)]
     Status { text: String },
     /// One structured tool step for the activity timeline — a normalized `tool`
     /// category (read/search/list/edit/write/run/web-fetch/web-search/other) plus
@@ -537,6 +539,7 @@ fn claude_review_args(
 /// keeps the full conversation AND the worktree's evolving state. Persistence is
 /// ON (no `--no-session-persistence`) so `--resume` can find the transcript; the
 /// system prompt is set only on turn 1 (the resumed session already carries it).
+#[allow(clippy::too_many_arguments)]
 fn claude_session_args(
     model: &str,
     system_prompt: &str,
@@ -718,6 +721,7 @@ fn codex_session_args(
 /// could still escape, so the host tier is "soft" (like Claude); the worktree's git
 /// isolation is the hard guarantee. Multi-turn is deterministic: `--session-id
 /// <uuid>` sets the id on turn 1, `--resume <uuid>` continues it (context retained).
+#[allow(clippy::too_many_arguments)]
 fn copilot_session_args(
     model: &str,
     session_id: &str,
@@ -1536,6 +1540,7 @@ async fn stream_agent(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn agent_review(
     state: tauri::State<'_, AppState>,
     kind: AgentKind,
@@ -1633,6 +1638,7 @@ pub async fn agent_review_cancel(
 /// container-only). Copilot's container authenticates from a `gh auth token` passed by
 /// env, since its login isn't a mountable creds file like the others'.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn agent_session(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,

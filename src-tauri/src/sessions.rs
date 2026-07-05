@@ -604,6 +604,7 @@ pub async fn transcript_append_turn(
 
 /// Records a turn's terminal result (status + coalesced narration + checkpoint).
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn transcript_append_result(
     app: AppHandle,
     id: String,
