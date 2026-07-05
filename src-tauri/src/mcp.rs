@@ -568,6 +568,14 @@ pub async fn mcp_json_write(
 ) -> AppResult<McpJsonWriteResult> {
     let path = Path::new(&repo_path).join(".mcp.json");
 
+    // The entry must be a JSON object — anything else (null, number, array) would write an
+    // invalid MCP server config. Fail fast before touching the file.
+    if !entry.is_object() {
+        return Err(AppError::Command(
+            "the .mcp.json entry must be a JSON object".to_string(),
+        ));
+    }
+
     // Parse the existing file as a Value so unknown keys round-trip. Missing → start
     // from an empty document; malformed → error (do NOT clobber the user's file).
     let mut doc: Value = match std::fs::read(&path) {
@@ -612,7 +620,7 @@ pub async fn mcp_json_write(
     let mut body = serde_json::to_string_pretty(&doc)
         .map_err(|e| AppError::Command(format!("serialize .mcp.json: {e}")))?;
     body.push('\n');
-    std::fs::write(&path, body)?;
+    crate::fsops::atomic_write(&path, body.as_bytes())?;
 
     Ok(McpJsonWriteResult {
         written: true,

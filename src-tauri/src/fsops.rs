@@ -4,6 +4,39 @@ use serde::Serialize;
 
 use crate::error::{AppError, AppResult};
 
+/// Write `contents` to `path` atomically: write a uniquely-named temp file in the same
+/// directory, then rename it over the target so a concurrent reader (another GUI or MCP
+/// process) never sees a partial or truncated file. Creates the parent directory if it
+/// doesn't exist yet.
+///
+/// `std::fs::rename` replaces an existing destination on every platform (on Windows via
+/// `MoveFileEx` with `MOVEFILE_REPLACE_EXISTING`), so this reliably overwrites a file
+/// that's already there. On a genuine IO failure (target locked, permissions) it removes
+/// the temp file rather than leaking it, then surfaces the error.
+pub fn atomic_write(path: &Path, contents: &[u8]) -> AppResult<()> {
+    let dir = path.parent().ok_or_else(|| {
+        AppError::Command(format!("path {} has no parent directory", path.display()))
+    })?;
+    std::fs::create_dir_all(dir)?;
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "tmp".to_string());
+    // Unique temp name (pid + a fresh uuid) so concurrent writers — GUI, MCP, or parallel
+    // test threads sharing one pid — can't collide on it.
+    let tmp = dir.join(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::write(&tmp, contents)?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(AppError::Io(e));
+    }
+    Ok(())
+}
+
 /// Absolute path to the running app executable. Used to build the "Use GitDesktop
 /// as an MCP server" client-config snippet, whose command is `<this exe> mcp`.
 #[tauri::command]

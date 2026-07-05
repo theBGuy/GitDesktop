@@ -107,32 +107,13 @@ fn read_store(path: &Path) -> AppResult<Map<String, Value>> {
     }
 }
 
-/// Atomically write the store object back: serialize (pretty), write a temp file in
-/// the same directory, then rename over the target so a reader never sees a partial
-/// file. Creates the app-data directory if it doesn't exist yet.
+/// Serialize the store object (pretty) and write it back atomically — temp file in the
+/// same dir + rename over the target (via [`crate::fsops::atomic_write`]) so a reader
+/// never sees a partial file, and an existing store is reliably replaced on all platforms.
 fn write_store(path: &Path, store: &Map<String, Value>) -> AppResult<()> {
-    let dir = path
-        .parent()
-        .ok_or_else(|| AppError::Command(format!("store path {} has no parent", path.display())))?;
-    std::fs::create_dir_all(dir)?;
     let body = serde_json::to_string_pretty(&Value::Object(store.clone()))
         .map_err(|e| AppError::Command(format!("serialize local-prs store: {e}")))?;
-    // Temp file in the SAME dir so the rename is atomic (same filesystem). A unique
-    // suffix (pid + a fresh uuid) keeps concurrent writers — another GUI/MCP process,
-    // or parallel test threads sharing one pid — from colliding on the temp name.
-    let tmp = dir.join(format!(
-        ".{STORE_FILE}.{}.{}.tmp",
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
-    std::fs::write(&tmp, body)?;
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        // On Windows, rename onto an existing file can fail; clean up the temp so we
-        // don't leak it, then surface the error.
-        let _ = std::fs::remove_file(&tmp);
-        return Err(AppError::Io(e));
-    }
-    Ok(())
+    crate::fsops::atomic_write(path, body.as_bytes())
 }
 
 /// Compare two repo-path keys for "same repo" tolerantly: normalize separators to
@@ -218,8 +199,9 @@ where
 {
     let path = store_path()?;
     let mut store = read_store(&path)?;
-    let key = existing_key(&store, repo)
-        .ok_or_else(|| AppError::Command(format!("no local PR with id {id}")))?;
+    let key = existing_key(&store, repo).ok_or_else(|| {
+        AppError::Command(format!("no local PRs found for this repository (id {id})"))
+    })?;
     let list = store
         .get_mut(&key)
         .and_then(Value::as_array_mut)

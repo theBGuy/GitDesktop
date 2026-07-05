@@ -47,7 +47,7 @@ rmcp = { version = "1", features = ["server", "macros", "transport-io"] }
 # the tree transitively; declared here as direct deps for the MCP-server code paths.
 dirs = "6"
 uuid = { version = "1", features = ["v4"] }
-chrono = "0.4"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 # Desktop-only: the updater plugin doesn't build for mobile.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]

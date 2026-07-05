@@ -63,6 +63,9 @@ export async function createLocalPr(
   repo: string,
   input: { title: string; body: string; base: string; head: string },
 ): Promise<LocalPr> {
+  // Reconcile any external MCP (--allow-write) writes from disk before we read-modify-
+  // write, so a GUI mutation never clobbers a PR the server added while we were focused.
+  await reloadLocalPrs();
   const pr: LocalPr = {
     id: crypto.randomUUID(),
     title: input.title,
@@ -82,6 +85,8 @@ export async function createLocalPr(
 
 /** Upserts the given PR (used for approve/comment/status edits). */
 export async function saveLocalPr(repo: string, pr: LocalPr): Promise<void> {
+  // Fresh disk state first, so we don't drop a concurrent external MCP write.
+  await reloadLocalPrs();
   const all = await listLocalPrs(repo);
   await writeAll(
     repo,
@@ -90,6 +95,8 @@ export async function saveLocalPr(repo: string, pr: LocalPr): Promise<void> {
 }
 
 export async function deleteLocalPr(repo: string, id: string): Promise<void> {
+  // Fresh disk state first, so we don't drop a concurrent external MCP write.
+  await reloadLocalPrs();
   const all = await listLocalPrs(repo);
   await writeAll(
     repo,
