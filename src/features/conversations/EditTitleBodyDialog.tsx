@@ -53,6 +53,22 @@ export function useEditTitleBody(opts: {
   return { form, open, setOpen, openEdit };
 }
 
+/** Render props for the dialog. `withForm` infers required render props from the
+ *  keys of the `props` object literal, so a truly-optional prop must be declared
+ *  here with `?` and the literal cast to this type — otherwise every caller
+ *  (the issue views) would be forced to pass `bodyActions`. */
+interface EditTitleBodyDialogProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  title: string;
+  description: ReactNode;
+  contentClassName: string | undefined;
+  bodyTextareaClassName: string;
+  /** Optional actions rendered in the description field header (e.g. an AI
+   *  "Generate" button). Absent ⇒ the field renders exactly as before. */
+  bodyActions?: ReactNode;
+}
+
 export const EditTitleBodyDialog = withForm({
   ...editTitleBodyFormOpts,
   props: {
@@ -64,7 +80,8 @@ export const EditTitleBodyDialog = withForm({
     description: null as ReactNode,
     contentClassName: undefined as string | undefined,
     bodyTextareaClassName: "max-h-72",
-  },
+    bodyActions: undefined as ReactNode,
+  } as EditTitleBodyDialogProps,
   render: function EditTitleBodyDialogRender({
     form,
     open,
@@ -73,6 +90,7 @@ export const EditTitleBodyDialog = withForm({
     description,
     contentClassName,
     bodyTextareaClassName,
+    bodyActions,
   }) {
     return (
       <Dialog open={open} onOpenChange={onOpenChange}>
@@ -102,6 +120,7 @@ export const EditTitleBodyDialog = withForm({
                   label="Description"
                   rows={8}
                   textareaClassName={bodyTextareaClassName}
+                  actions={bodyActions}
                 />
               )}
             </form.AppField>

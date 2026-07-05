@@ -9,7 +9,9 @@ import {
   GitBranchIcon,
   GitMergeIcon,
   PencilSimpleIcon,
+  SparkleIcon,
   XCircleIcon,
+  XIcon,
 } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -115,6 +117,7 @@ import {
   type SuggestionApply,
   threadToMarkdown,
 } from "./ReviewThreads";
+import { useGeneratePrDescription } from "./useGeneratePrDescription";
 
 type Section = "conversation" | "commits" | "files" | "review";
 
@@ -317,6 +320,7 @@ export function RemotePrView({
     },
     successToast: "Pull request updated",
   });
+  const prGen = useGeneratePrDescription(repoPath);
   const composerRef = useRef<MarkdownEditorHandle>(null);
 
   const onError = (e: unknown) => toastError(e);
@@ -1496,11 +1500,68 @@ export function RemotePrView({
       <EditTitleBodyDialog
         form={edit.form}
         open={edit.open}
-        onOpenChange={edit.setOpen}
+        onOpenChange={(open) => {
+          // The dialog stays mounted, so cancel any in-flight generation when it
+          // closes (unlike the create dialogs, which unmount on close).
+          if (!open) prGen.cancel();
+          edit.setOpen(open);
+        }}
         title={`Edit ${prNoun}`}
         description={`Updates the title and description of #${number} on ${remoteLabel}.`}
         contentClassName="sm:max-w-lg"
         bodyTextareaClassName="max-h-72 min-h-24 resize-y font-mono"
+        bodyActions={
+          !aiEnabled ? undefined : prGen.generating ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="xs"
+              onClick={prGen.cancel}
+            >
+              <XIcon data-icon="inline-start" />
+              Cancel
+            </Button>
+          ) : (
+            <Button
+              type="button"
+              variant="outline"
+              size="xs"
+              onClick={() =>
+                prGen.generateFromDiff(
+                  // Reuse the diff already cached by usePrDiff — and, crucially,
+                  // resolve it from the PR's own diff (not local base..head refs),
+                  // so this works for fork PRs / unfetched head branches.
+                  () =>
+                    queryClient
+                      .ensureQueryData(prDiffOptions(repoPath, number))
+                      .then((text) => ({
+                        text,
+                        truncated: false,
+                        files: pr.files.map((f) => ({
+                          path: f.path,
+                          added: f.additions,
+                          deleted: f.deletions,
+                          isBinary: false,
+                        })),
+                      })),
+                  pr.baseRefName,
+                  pr.headRefName,
+                  pr.commits.map((c) => c.headline),
+                  (d) => {
+                    edit.form.setFieldValue("title", d.title);
+                    edit.form.setFieldValue("body", d.body);
+                  },
+                  // Provider-aware prompt copy; null host → base GitHub wording.
+                  provider ?? undefined,
+                )
+              }
+              title="Generate the title and description with AI"
+            >
+              <SparkleIcon data-icon="inline-start" />
+              Generate
+            </Button>
+          )
+        }
       />
 
       <DeleteCommentDialog

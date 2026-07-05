@@ -9,6 +9,7 @@ import {
   GitlabLogoIcon,
   GitMergeIcon,
   PencilSimpleIcon,
+  SparkleIcon,
   TagIcon,
   TrashIcon,
   XIcon,
@@ -67,6 +68,7 @@ import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { PromoteLocalPrDialog } from "./PromoteLocalPrDialog";
 import { PrReviewPanel } from "./PrReviewPanel";
+import { useGeneratePrDescription } from "./useGeneratePrDescription";
 
 type Section = "conversation" | "commits" | "files" | "review";
 
@@ -124,6 +126,7 @@ export function LocalPrView({
       await save.mutateAsync({ ...pr, title, body });
     },
   });
+  const prGen = useGeneratePrDescription(repoPath);
 
   const comparison = useCompareBranches(
     repoPath,
@@ -648,11 +651,52 @@ export function LocalPrView({
       <EditTitleBodyDialog
         form={edit.form}
         open={edit.open}
-        onOpenChange={edit.setOpen}
+        onOpenChange={(open) => {
+          // The dialog stays mounted, so cancel any in-flight generation on close.
+          if (!open) prGen.cancel();
+          edit.setOpen(open);
+        }}
         title="Edit pull request"
         description="Updates the title and description of this local pull request."
         contentClassName={undefined}
         bodyTextareaClassName="max-h-72"
+        bodyActions={
+          !aiEnabled ? undefined : prGen.generating ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="xs"
+              onClick={prGen.cancel}
+            >
+              <XIcon data-icon="inline-start" />
+              Cancel
+            </Button>
+          ) : (
+            <Button
+              type="button"
+              variant="outline"
+              size="xs"
+              disabled={ahead.length === 0}
+              onClick={() =>
+                // Local PRs have real local branches — the base..head branch-diff
+                // path works, and (like create) keeps base GitHub prompt wording.
+                prGen.generate(
+                  pr.base,
+                  pr.head,
+                  ahead.map((c) => c.subject),
+                  (d) => {
+                    edit.form.setFieldValue("title", d.title);
+                    edit.form.setFieldValue("body", d.body);
+                  },
+                )
+              }
+              title="Generate the title and description with AI"
+            >
+              <SparkleIcon data-icon="inline-start" />
+              Generate
+            </Button>
+          )
+        }
       />
 
       <DeleteCommentDialog

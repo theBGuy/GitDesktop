@@ -483,7 +483,9 @@ diff excerpt, and every reply — as Markdown.
 
 Create a PR with **Create pull request** ({{kbd:create-pr}}) or from the Compare tab — as
 a **draft** if you like{{ai}}, optionally with an **AI-generated** title and description
-from the branch diff and commit subjects{{/ai}}.
+from the branch diff and commit subjects. The same **Generate** button is on the **Edit**
+dialog too, so you can write or regenerate an existing PR's title and description at any
+time — including for pull requests from forks{{/ai}}.
 
 ## GitLab merge requests
 
