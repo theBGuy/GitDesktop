@@ -212,7 +212,10 @@ fn copy_into_place(source: &Path, dest: &Path, want: &Marker) -> AppResult<()> {
     sweep_strays(dir);
     // 3. Stream-copy the source into a unique same-dir temp (fs::copy streams —
     //    never reads the ~50MB exe into memory). Same-dir keeps step 5's rename
-    //    same-volume.
+    //    same-volume. fs::copy's documented contract also copies the source's
+    //    PERMISSION BITS on every platform (Unix impl fchmods the destination),
+    //    so under the `GD_MCP_LAUNCHER_DIR` override on Unix the copy inherits
+    //    the source exe's +x — no explicit chmod needed.
     let tmp = unique_sibling(dest, "tmp");
     if let Err(e) = std::fs::copy(source, &tmp) {
         let _ = std::fs::remove_file(&tmp);

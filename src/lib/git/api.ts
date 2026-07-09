@@ -2732,7 +2732,8 @@ export interface McpGlobalStatus {
 }
 
 /** Read-only probe of the global `gitdesktop` install state for both clients,
- *  via each CLI. Never creates the managed launcher copy. See src-tauri/src/mcp.rs. */
+ *  by reading each client's config file directly (no CLI spawn). Never creates
+ *  the managed launcher copy. See src-tauri/src/mcp.rs. */
 export const mcpGlobalStatus = () =>
   invoke<McpGlobalStatus>("mcp_global_status");
 
