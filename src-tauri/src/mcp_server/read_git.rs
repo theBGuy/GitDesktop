@@ -338,9 +338,16 @@ async fn read_file_core(
         // reject NUL-containing content (a valid-UTF-8 file with NULs would sneak past
         // `read_to_string`), then reject non-UTF-8 as "binary" too — mapping it to the
         // same invalid-params error rather than an internal error.
-        let bytes = tokio::fs::read(&target)
-            .await
-            .map_err(|_| McpError::invalid_params("file not found in repository", None))?;
+        let bytes = tokio::fs::read(&target).await.map_err(|e| {
+            // Only a genuine not-found keeps the not-found message; anything else
+            // (permission denied, IO failure) surfaces honestly instead of misleading
+            // the caller about a file that clearly exists.
+            if e.kind() == std::io::ErrorKind::NotFound {
+                McpError::invalid_params("file not found in repository", None)
+            } else {
+                McpError::internal_error(e.to_string(), None)
+            }
+        })?;
         if bytes.contains(&0u8) {
             return Err(McpError::invalid_params("file appears to be binary", None));
         }
