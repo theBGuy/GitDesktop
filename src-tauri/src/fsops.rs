@@ -297,11 +297,11 @@ fn launch_terminal_unix(path: &str) -> AppResult<()> {
     use std::process::Command;
     #[cfg(target_os = "macos")]
     {
-        return Command::new("open")
+        Command::new("open")
             .args(["-a", "Terminal", path])
             .spawn()
             .map(|_| ())
-            .map_err(AppError::Io);
+            .map_err(AppError::Io)
     }
     #[cfg(not(target_os = "macos"))]
     {
