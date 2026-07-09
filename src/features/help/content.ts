@@ -1026,8 +1026,9 @@ new choice applies from your next turn.
 
 **The other direction — GitDesktop *as* a server.** At the bottom of the panel, **Use
 GitDesktop as an MCP server** lets any external MCP client — Claude Desktop, Cursor, Claude
-Code — use *this* repo's **read-only-by-default** git & forge tools (status, log, diffs,
-blame, branches, file history/read, PRs, issues, CI logs). The PR, issue, and CI tools work
+Code — use *this* repo's tools. **Reads are always on and are the default**: status, log,
+diffs, blame, branches, file history/read, PRs, issues, CI logs, labels, milestones,
+releases, and a PR's full timeline. The PR, issue, and CI tools work
 across **GitHub, GitLab, and Bitbucket** — they route through GitDesktop's forge layer and
 dispatch by the repo's remote (Bitbucket covers PRs and pipelines, but not issues — its
 native tracker is deprecated). The app itself runs as a stdio server — on macOS and Linux
@@ -1048,7 +1049,8 @@ absolute paths for portable \`\${GITDESKTOP_BIN:-gitdesktop-mcp}\` / \`\${CLAUDE
 ones a teammate can commit (they point \`GITDESKTOP_BIN\` at their own launcher, or keep
 \`gitdesktop-mcp\` on their PATH), and **Allow write tools** adds \`--allow-write\` so an agent
 can also **create**, **comment on**, set the **status** of, and **approve** *this repo's*
-local PRs (GitDesktop's own app-data review artifacts — nothing is pushed).
+local PRs — and create, comment on, and set the status of its **local issues** — GitDesktop's
+own app-data review artifacts (nothing is pushed).
 
 To make the bare launcher command actually resolve in a terminal (so the **Shareable
 entry** works with no hardcoded path and no \`GITDESKTOP_BIN\`), use the **Command-line
@@ -1058,16 +1060,39 @@ your user PATH on Windows so \`gitdesktop-mcp\` resolves, or symlinks \`gitdeskt
 undoes exactly that — no admin needed either way. On both platforms, re-running it also
 migrates any older \`gitdesktop\`-named entry a previous version left behind.
 
-Separately, **Allow remote write** adds \`--allow-remote-write\` — a distinct opt-in that
-lets an agent make **real forge writes** in this repo under your authenticated identity
-(GitHub \`gh\`, GitLab \`glab\`, or a stored Bitbucket token): **create issues**, **comment**
-on issues and pull requests, and **close/reopen** issues. Issue writes cover GitHub and
-GitLab (not Bitbucket); PR comments cover all three. The two flags are independent —
-enabling local-PR writes never grants remote writes, or vice versa — and both are **off by
-default**, so read-only stays the default. PR comments an agent posts carry a small
-**Posted by GitDesktop** footer so they're identifiable as automated, and on the read side
-an agent can pull a pull request's full comment set — the conversation, review summaries,
-and the file:line review threads.
+Writes escalate through **four separate flags**, each unlocking one tier — enabling one
+never grants another, and every flag is **off by default**, so read-only stays the default.
+
+Beyond \`--allow-write\` (local PRs and issues, above), **Allow remote write**
+(\`--allow-remote-write\`) lets an agent make **real forge writes** in this repo under your
+authenticated identity (GitHub \`gh\`, GitLab \`glab\`, or a stored Bitbucket token):
+**create, merge, update**, and **close/reopen** pull requests, toggle **draft** state,
+**request reviewers**, **edit labels**, set **assignees** (on issues and PRs), **approve** or
+**withdraw approval**, **reply to** and **resolve** review threads, **rerun/cancel/dispatch**
+CI, **create/update releases**, and **create, comment on, and close/reopen issues**. Issue
+writes cover GitHub and GitLab (not Bitbucket); PR comments cover all three. PR comments an
+agent posts carry a small **Posted by GitDesktop** footer so they're identifiable as
+automated, and on the read side an agent can pull a pull request's full comment set — the
+conversation, review summaries, and the file:line review threads.
+
+**Allow git write** (\`--allow-git-write\`) is a further, independent tier for **recoverable
+local-git mutations** of the bound repo — stage/unstage, commit (and undo the last commit),
+create/checkout/rename branches, push/pull/fetch, stash push/pop/apply, merge, rebase,
+revert, cherry-pick, and tags — plus two always-on reads it pairs with: list stashes and
+preview a merge's outcome. On top of that, **Allow destructive** (\`--allow-destructive\`,
+which requires \`--allow-git-write\` too — on its own it grants nothing) unlocks the
+**irreversible** operations: delete a branch, discard changes, reset, force-push (with
+lease), delete a remote branch, drop a stash, and delete a tag. Agent-session branches
+(\`gd/session/*\`) are refused by the branch-mutating tools, so an in-flight agent session is
+never broken.
+
+The server also exposes GitDesktop's own **AI generation recipes** (always on, no flag):
+\`generate_commit_message\`, \`generate_pr_description\`, and \`generate_branch_name\` each hand
+the agent the *same* fully assembled context and prompt the in-app feature builds — the
+staged or branch diff (with the same low-value-file budgeting), recent commit subjects as a
+style reference, your repo and global instructions, and \`.aiignore\` filtering. The tools
+don't call a model; the agent completes the returned prompt with its own inference, so you
+can trigger GitDesktop's generation from any client.
 
 New to MCP? **Browse** opens the official Model Context Protocol registry right in that
 panel — search it and add a server in a click; it arrives **disabled** for you to review

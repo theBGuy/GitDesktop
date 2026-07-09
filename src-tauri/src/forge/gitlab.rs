@@ -281,7 +281,7 @@ fn from_glab_mr(m: GlabMr) -> PrInfo {
 /// panel). GitLab splits those into separate server states, so we fetch each on
 /// its own `per_page` budget and concatenate — never one `state=all` page where
 /// open MRs would dilute (and silently truncate) the closed/merged ones.
-pub async fn list_prs(repo_path: &str, state: &str) -> AppResult<Vec<PrInfo>> {
+pub async fn list_prs(repo_path: &str, state: &str, limit: Option<u32>) -> AppResult<Vec<PrInfo>> {
     let enc = encode_project(&project_path(repo_path).await?);
     let states: &[&str] = match state {
         "open" => &["opened"],
@@ -292,13 +292,20 @@ pub async fn list_prs(repo_path: &str, state: &str) -> AppResult<Vec<PrInfo>> {
             )));
         }
     };
+    // GitLab pages at `per_page` (max 100); default to a full page. When a `limit` is
+    // asked, request at most that many per state and truncate the merged result to it
+    // (a "closed" filter fans out over two states, so the raw total can exceed `limit`).
+    let per_page = limit.map_or(100, |n| n.clamp(1, 100));
     let mut prs = Vec::new();
     for s in states {
-        let endpoint = format!("projects/{enc}/merge_requests?state={s}&per_page=100");
+        let endpoint = format!("projects/{enc}/merge_requests?state={s}&per_page={per_page}");
         let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
         let mrs: Vec<GlabMr> = serde_json::from_str(&out.stdout_lossy())
             .map_err(|e| AppError::Glab(format!("could not parse GitLab merge requests: {e}")))?;
         prs.extend(mrs.into_iter().map(from_glab_mr));
+    }
+    if let Some(n) = limit {
+        prs.truncate(n as usize);
     }
     Ok(prs)
 }
@@ -2363,7 +2370,11 @@ struct GlabIssueDetail {
 /// GitLab issue state is a single `opened`/`closed` axis (no `merged`), so unlike
 /// `list_prs` this is one fetch. GitLab's `/issues` endpoint already excludes merge
 /// requests, so no extra filtering is needed.
-pub async fn list_issues(repo_path: &str, state: &str) -> AppResult<Vec<IssueInfo>> {
+pub async fn list_issues(
+    repo_path: &str,
+    state: &str,
+    limit: Option<u32>,
+) -> AppResult<Vec<IssueInfo>> {
     let enc = encode_project(&project_path(repo_path).await?);
     let gl_state = match state {
         "open" => "opened",
@@ -2374,7 +2385,9 @@ pub async fn list_issues(repo_path: &str, state: &str) -> AppResult<Vec<IssueInf
             )));
         }
     };
-    let endpoint = format!("projects/{enc}/issues?state={gl_state}&per_page=100");
+    // GitLab pages at `per_page` (max 100); default to a full page, or cap it to `limit`.
+    let per_page = limit.map_or(100, |n| n.clamp(1, 100));
+    let endpoint = format!("projects/{enc}/issues?state={gl_state}&per_page={per_page}");
     let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
     let issues: Vec<GlabIssue> = serde_json::from_str(&out.stdout_lossy())
         .map_err(|e| AppError::Glab(format!("could not parse GitLab issues: {e}")))?;

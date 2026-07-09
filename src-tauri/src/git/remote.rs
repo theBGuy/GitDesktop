@@ -56,13 +56,25 @@ pub async fn git_remotes(repo_path: String) -> AppResult<Vec<String>> {
 
 #[tauri::command]
 pub async fn git_fetch(state: State<'_, AppState>, repo_path: String) -> AppResult<()> {
-    run_git_mutating(&state, &repo_path, &["fetch", "--prune"], NETWORK_TIMEOUT).await?;
+    git_fetch_core(&state, repo_path).await
+}
+
+pub(crate) async fn git_fetch_core(state: &AppState, repo_path: String) -> AppResult<()> {
+    run_git_mutating(state, &repo_path, &["fetch", "--prune"], NETWORK_TIMEOUT).await?;
     Ok(())
 }
 
 #[tauri::command]
 pub async fn git_pull(
     state: State<'_, AppState>,
+    repo_path: String,
+    mode: String,
+) -> AppResult<()> {
+    git_pull_core(&state, repo_path, mode).await
+}
+
+pub(crate) async fn git_pull_core(
+    state: &AppState,
     repo_path: String,
     mode: String,
 ) -> AppResult<()> {
@@ -73,13 +85,22 @@ pub async fn git_pull(
         "merge" => "--no-rebase",
         _ => "--ff-only",
     };
-    run_git_mutating(&state, &repo_path, &["pull", flag], NETWORK_TIMEOUT).await?;
+    run_git_mutating(state, &repo_path, &["pull", flag], NETWORK_TIMEOUT).await?;
     Ok(())
 }
 
 #[tauri::command]
 pub async fn git_push(
     state: State<'_, AppState>,
+    repo_path: String,
+    set_upstream: bool,
+    force: bool,
+) -> AppResult<()> {
+    git_push_core(&state, repo_path, set_upstream, force).await
+}
+
+pub(crate) async fn git_push_core(
+    state: &AppState,
     repo_path: String,
     set_upstream: bool,
     force: bool,
@@ -92,6 +113,6 @@ pub async fn git_push(
     if set_upstream {
         args.extend(["-u", "origin", "HEAD"]);
     }
-    run_git_mutating(&state, &repo_path, &args, NETWORK_TIMEOUT).await?;
+    run_git_mutating(state, &repo_path, &args, NETWORK_TIMEOUT).await?;
     Ok(())
 }

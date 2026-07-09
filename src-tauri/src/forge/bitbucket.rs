@@ -596,17 +596,24 @@ fn pr_state_filter(state: &str) -> AppResult<&'static str> {
 /// The repo's pull requests. `state` is `"open"` (→ one call `state=OPEN`) or
 /// `"closed"` (→ one call merging `MERGED`/`DECLINED`/`SUPERSEDED` via the repeatable
 /// `state` param). `pagelen` maxes at 50 for this endpoint. Unknown filters error.
-pub async fn list_prs(repo_path: &str, state: &str) -> AppResult<Vec<PrInfo>> {
+pub async fn list_prs(repo_path: &str, state: &str, limit: Option<u32>) -> AppResult<Vec<PrInfo>> {
     let states = pr_state_filter(state)?;
     let creds = http::load_credentials().await?;
     let (ws, slug) = workspace_slug(repo_path).await?;
+    // Bitbucket returns one page; `pagelen` maxes at 50. Default to a full page, or
+    // cap it to `limit` and truncate (a multi-state filter can over-return).
+    let pagelen = limit.map_or(50, |n| n.clamp(1, 50));
     let path = format!(
-        "repositories/{}/{}/pullrequests?{states}&pagelen=50",
+        "repositories/{}/{}/pullrequests?{states}&pagelen={pagelen}",
         encode_query_value(&ws),
         encode_query_value(&slug),
     );
     let page: BbPage<BbPr> = http::bb_get_json(&creds, &path, "pull requests").await?;
-    Ok(page.values.into_iter().map(from_bb_pr).collect())
+    let mut prs: Vec<PrInfo> = page.values.into_iter().map(from_bb_pr).collect();
+    if let Some(n) = limit {
+        prs.truncate(n as usize);
+    }
+    Ok(prs)
 }
 
 /// Open PRs whose source branch is `head` — the ComparePanel duplicate probe. Uses

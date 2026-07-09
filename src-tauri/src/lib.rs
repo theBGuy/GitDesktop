@@ -1,5 +1,6 @@
 mod agent;
 mod agent_sandbox;
+mod app_store;
 mod dependabot;
 mod error;
 mod forge;
@@ -10,6 +11,7 @@ mod github;
 mod health;
 mod hooks;
 mod instructions;
+mod local_issues;
 mod local_prs;
 mod mcp;
 mod mcp_launcher;

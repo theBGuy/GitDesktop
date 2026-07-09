@@ -74,6 +74,10 @@ const capabilities = [
       "Repo switcher — forge logo & visibility badge per row, grouped by owner",
   },
   { label: "In-app conflict editor (current / incoming / both)" },
+  {
+    label:
+      "Use GitDesktop as an MCP server for external AI clients — GitHub, GitLab & Bitbucket, read-only by default with an opt-in write ladder (local PRs/issues, forge writes, then recoverable & destructive git ops)",
+  },
   { label: "AI code & security review", ai: true },
   { label: "Resolve merge conflicts with AI (review, then accept)", ai: true },
   {
@@ -108,7 +112,7 @@ const capabilities = [
   { label: "Browse the official MCP registry to add servers", ai: true },
   {
     label:
-      "Use GitDesktop as an MCP server for external AI clients — GitHub, GitLab & Bitbucket (read-only, or opt-in local-PR and forge remote-write tools)",
+      "Trigger GitDesktop's AI generation (commit message, PR description, branch name) from an external MCP client",
     ai: true,
   },
   { label: "Run agents in a Docker/Podman sandbox (opt-in)", ai: true },

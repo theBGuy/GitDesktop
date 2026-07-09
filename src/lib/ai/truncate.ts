@@ -32,6 +32,10 @@ function splitIntoFileSections(diffText: string): FileSection[] {
 /**
  * Fits a staged diff into the prompt budget: drop lockfile/generated diffs
  * first, then cap oversized per-file sections, then hard-cap the total.
+ *
+ * KEEP IN SYNC: src-tauri/src/mcp_server/generate.rs (`budget_diff`,
+ * `is_low_value_path`, `split_into_file_sections`, `DIFF_CHAR_BUDGET`,
+ * `PER_FILE_CAP`) mirrors this for the MCP recipe tools.
  */
 export function budgetDiff(
   diffText: string,

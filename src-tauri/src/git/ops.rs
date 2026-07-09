@@ -211,8 +211,16 @@ pub async fn git_reset(
     repo_path: String,
     hash: String,
 ) -> AppResult<()> {
+    git_reset_core(&state, repo_path, hash).await
+}
+
+pub(crate) async fn git_reset_core(
+    state: &AppState,
+    repo_path: String,
+    hash: String,
+) -> AppResult<()> {
     validate_hash(&hash)?;
-    run_git_mutating(&state, &repo_path, &["reset", "--mixed", &hash], DEFAULT_TIMEOUT).await?;
+    run_git_mutating(state, &repo_path, &["reset", "--mixed", &hash], DEFAULT_TIMEOUT).await?;
     Ok(())
 }
 
@@ -234,9 +242,17 @@ pub async fn git_revert(
     repo_path: String,
     hash: String,
 ) -> AppResult<()> {
+    git_revert_core(&state, repo_path, hash).await
+}
+
+pub(crate) async fn git_revert_core(
+    state: &AppState,
+    repo_path: String,
+    hash: String,
+) -> AppResult<()> {
     validate_hash(&hash)?;
     // -m is not supported here; reverting merge commits needs a parent choice
-    run_git_mutating(&state, &repo_path, &["revert", "--no-edit", &hash], DEFAULT_TIMEOUT)
+    run_git_mutating(state, &repo_path, &["revert", "--no-edit", &hash], DEFAULT_TIMEOUT)
         .await?;
     Ok(())
 }
@@ -250,14 +266,22 @@ pub async fn git_cherry_pick(
     repo_path: String,
     hash: String,
 ) -> AppResult<bool> {
+    git_cherry_pick_core(&state, repo_path, hash).await
+}
+
+pub(crate) async fn git_cherry_pick_core(
+    state: &AppState,
+    repo_path: String,
+    hash: String,
+) -> AppResult<bool> {
     validate_hash(&hash)?;
-    match run_git_mutating(&state, &repo_path, &["cherry-pick", &hash], DEFAULT_TIMEOUT).await {
+    match run_git_mutating(state, &repo_path, &["cherry-pick", &hash], DEFAULT_TIMEOUT).await {
         Ok(_) => Ok(true),
         Err(AppError::Git { stderr, .. })
             if stderr.contains("is now empty") || stderr.contains("--allow-empty") =>
         {
             let _ = run_git_mutating(
-                &state,
+                state,
                 &repo_path,
                 &["cherry-pick", "--skip"],
                 DEFAULT_TIMEOUT,
@@ -437,6 +461,10 @@ pub async fn git_cherry_pick_onto(
 /// tracked changes are hard-reset to HEAD.
 #[tauri::command]
 pub async fn git_discard_all(state: State<'_, AppState>, repo_path: String) -> AppResult<()> {
+    git_discard_all_core(&state, repo_path).await
+}
+
+pub(crate) async fn git_discard_all_core(state: &AppState, repo_path: String) -> AppResult<()> {
     use crate::git::runner::{run_git, run_git_raw};
 
     let status_out = run_git(
@@ -481,7 +509,7 @@ pub async fn git_discard_all(state: State<'_, AppState>, repo_path: String) -> A
     .code
         == 0;
     if head_exists {
-        run_git_mutating(&state, &repo_path, &["reset", "--hard", "HEAD"], DEFAULT_TIMEOUT)
+        run_git_mutating(state, &repo_path, &["reset", "--hard", "HEAD"], DEFAULT_TIMEOUT)
             .await?;
     }
     Ok(())
@@ -489,8 +517,12 @@ pub async fn git_discard_all(state: State<'_, AppState>, repo_path: String) -> A
 
 #[tauri::command]
 pub async fn git_stash_all(state: State<'_, AppState>, repo_path: String) -> AppResult<()> {
+    git_stash_all_core(&state, repo_path).await
+}
+
+pub(crate) async fn git_stash_all_core(state: &AppState, repo_path: String) -> AppResult<()> {
     run_git_mutating(
-        &state,
+        state,
         &repo_path,
         &["stash", "push", "--include-untracked"],
         DEFAULT_TIMEOUT,
@@ -513,6 +545,14 @@ pub struct DiscardPath {
 #[tauri::command]
 pub async fn git_discard_paths(
     state: State<'_, AppState>,
+    repo_path: String,
+    paths: Vec<DiscardPath>,
+) -> AppResult<()> {
+    git_discard_paths_core(&state, repo_path, paths).await
+}
+
+pub(crate) async fn git_discard_paths_core(
+    state: &AppState,
     repo_path: String,
     paths: Vec<DiscardPath>,
 ) -> AppResult<()> {
@@ -545,7 +585,7 @@ pub async fn git_discard_paths(
     for batch in tracked.chunks(100) {
         let mut args = vec!["restore", "--"];
         args.extend(batch.iter().map(String::as_str));
-        run_git_mutating(&state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
+        run_git_mutating(state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
     }
     Ok(())
 }
@@ -559,12 +599,20 @@ pub async fn git_stash_paths(
     repo_path: String,
     paths: Vec<String>,
 ) -> AppResult<()> {
+    git_stash_paths_core(&state, repo_path, paths).await
+}
+
+pub(crate) async fn git_stash_paths_core(
+    state: &AppState,
+    repo_path: String,
+    paths: Vec<String>,
+) -> AppResult<()> {
     if paths.is_empty() {
         return Ok(());
     }
     let mut args = vec!["stash", "push", "--include-untracked", "--"];
     args.extend(paths.iter().map(String::as_str));
-    run_git_mutating(&state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
+    run_git_mutating(state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
     Ok(())
 }
 
@@ -597,7 +645,11 @@ pub async fn git_untrack(
 
 #[tauri::command]
 pub async fn git_stash_pop(state: State<'_, AppState>, repo_path: String) -> AppResult<()> {
-    run_git_mutating(&state, &repo_path, &["stash", "pop"], DEFAULT_TIMEOUT).await?;
+    git_stash_pop_core(&state, repo_path).await
+}
+
+pub(crate) async fn git_stash_pop_core(state: &AppState, repo_path: String) -> AppResult<()> {
+    run_git_mutating(state, &repo_path, &["stash", "pop"], DEFAULT_TIMEOUT).await?;
     Ok(())
 }
 
@@ -1274,9 +1326,18 @@ pub async fn git_stash_apply(
     index: u32,
     pop: bool,
 ) -> AppResult<()> {
+    git_stash_apply_core(&state, repo_path, index, pop).await
+}
+
+pub(crate) async fn git_stash_apply_core(
+    state: &AppState,
+    repo_path: String,
+    index: u32,
+    pop: bool,
+) -> AppResult<()> {
     let spec = format!("stash@{{{index}}}");
     let sub = if pop { "pop" } else { "apply" };
-    run_git_mutating(&state, &repo_path, &["stash", sub, &spec], DEFAULT_TIMEOUT).await?;
+    run_git_mutating(state, &repo_path, &["stash", sub, &spec], DEFAULT_TIMEOUT).await?;
     Ok(())
 }
 
@@ -1286,9 +1347,17 @@ pub async fn git_stash_drop(
     repo_path: String,
     index: u32,
 ) -> AppResult<()> {
+    git_stash_drop_core(&state, repo_path, index).await
+}
+
+pub(crate) async fn git_stash_drop_core(
+    state: &AppState,
+    repo_path: String,
+    index: u32,
+) -> AppResult<()> {
     let spec = format!("stash@{{{index}}}");
     run_git_mutating(
-        &state,
+        state,
         &repo_path,
         &["stash", "drop", &spec],
         DEFAULT_TIMEOUT,
@@ -1322,6 +1391,17 @@ pub async fn git_merge(
     no_ff: bool,
     strategy: String,
 ) -> AppResult<()> {
+    git_merge_core(&state, repo_path, branch, squash, no_ff, strategy).await
+}
+
+pub(crate) async fn git_merge_core(
+    state: &AppState,
+    repo_path: String,
+    branch: String,
+    squash: bool,
+    no_ff: bool,
+    strategy: String,
+) -> AppResult<()> {
     validate_branch_arg(&branch)?;
     let mut args: Vec<&str> = vec!["merge"];
     if squash {
@@ -1338,7 +1418,7 @@ pub async fn git_merge(
         }
     }
     args.push(&branch);
-    run_git_mutating(&state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
+    run_git_mutating(state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
     Ok(())
 }
 
@@ -1447,9 +1527,17 @@ pub async fn git_rebase(
     repo_path: String,
     branch: String,
 ) -> AppResult<()> {
+    git_rebase_core(&state, repo_path, branch).await
+}
+
+pub(crate) async fn git_rebase_core(
+    state: &AppState,
+    repo_path: String,
+    branch: String,
+) -> AppResult<()> {
     validate_branch_arg(&branch)?;
     run_git_mutating(
-        &state,
+        state,
         &repo_path,
         &["-c", "core.editor=true", "rebase", &branch],
         DEFAULT_TIMEOUT,
@@ -2650,9 +2738,18 @@ pub async fn git_tag(
     name: String,
     hash: String,
 ) -> AppResult<()> {
+    git_tag_core(&state, repo_path, name, hash).await
+}
+
+pub(crate) async fn git_tag_core(
+    state: &AppState,
+    repo_path: String,
+    name: String,
+    hash: String,
+) -> AppResult<()> {
     validate_hash(&hash)?;
     validate_tag_name(&name)?;
-    run_git_mutating(&state, &repo_path, &["tag", "--", &name, &hash], DEFAULT_TIMEOUT).await?;
+    run_git_mutating(state, &repo_path, &["tag", "--", &name, &hash], DEFAULT_TIMEOUT).await?;
     Ok(())
 }
 
@@ -2662,10 +2759,18 @@ pub async fn git_push_tag(
     repo_path: String,
     name: String,
 ) -> AppResult<()> {
+    git_push_tag_core(&state, repo_path, name).await
+}
+
+pub(crate) async fn git_push_tag_core(
+    state: &AppState,
+    repo_path: String,
+    name: String,
+) -> AppResult<()> {
     validate_tag_name(&name)?;
     let spec = format!("refs/tags/{name}");
     run_git_mutating(
-        &state,
+        state,
         &repo_path,
         &["push", "origin", &spec],
         crate::git::runner::NETWORK_TIMEOUT,
@@ -2682,9 +2787,18 @@ pub async fn git_delete_tag(
     name: String,
     on_remote: bool,
 ) -> AppResult<()> {
+    git_delete_tag_core(&state, repo_path, name, on_remote).await
+}
+
+pub(crate) async fn git_delete_tag_core(
+    state: &AppState,
+    repo_path: String,
+    name: String,
+    on_remote: bool,
+) -> AppResult<()> {
     validate_tag_name(&name)?;
     run_git_mutating(
-        &state,
+        state,
         &repo_path,
         &["tag", "-d", "--", &name],
         DEFAULT_TIMEOUT,
@@ -2693,7 +2807,7 @@ pub async fn git_delete_tag(
     if on_remote {
         let spec = format!(":refs/tags/{name}");
         run_git_mutating(
-            &state,
+            state,
             &repo_path,
             &["push", "origin", &spec],
             crate::git::runner::NETWORK_TIMEOUT,

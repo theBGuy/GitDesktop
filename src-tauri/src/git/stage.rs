@@ -14,10 +14,18 @@ pub async fn git_stage(
     repo_path: String,
     paths: Vec<String>,
 ) -> AppResult<()> {
+    git_stage_core(&state, repo_path, paths).await
+}
+
+pub(crate) async fn git_stage_core(
+    state: &AppState,
+    repo_path: String,
+    paths: Vec<String>,
+) -> AppResult<()> {
     for batch in paths.chunks(PATHS_PER_BATCH) {
         let mut args = vec!["add", "--"];
         args.extend(batch.iter().map(String::as_str));
-        run_git_mutating(&state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
+        run_git_mutating(state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
     }
     Ok(())
 }
@@ -25,6 +33,14 @@ pub async fn git_stage(
 #[tauri::command]
 pub async fn git_unstage(
     state: State<'_, AppState>,
+    repo_path: String,
+    paths: Vec<String>,
+) -> AppResult<()> {
+    git_unstage_core(&state, repo_path, paths).await
+}
+
+pub(crate) async fn git_unstage_core(
+    state: &AppState,
     repo_path: String,
     paths: Vec<String>,
 ) -> AppResult<()> {
@@ -48,7 +64,7 @@ pub async fn git_unstage(
             vec!["rm", "--cached", "-r", "--quiet", "--"]
         };
         args.extend(batch.iter().map(String::as_str));
-        run_git_mutating(&state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
+        run_git_mutating(state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
     }
     Ok(())
 }

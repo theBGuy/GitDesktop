@@ -921,10 +921,14 @@ const PR_LIST_FIELDS: &str =
 /// uses the search qualifier so merged PRs are included, matching the
 /// semantics of GitHub's own Closed tab.
 #[tauri::command]
-pub async fn gh_pr_list(repo_path: String, state: String) -> AppResult<Vec<PrInfo>> {
-    let args: &[&str] = match state.as_str() {
-        "open" => &["pr", "list", "--state", "open", "--json", PR_LIST_FIELDS],
-        "closed" => &[
+pub async fn gh_pr_list(
+    repo_path: String,
+    state: String,
+    limit: Option<u32>,
+) -> AppResult<Vec<PrInfo>> {
+    let mut args: Vec<&str> = match state.as_str() {
+        "open" => vec!["pr", "list", "--state", "open", "--json", PR_LIST_FIELDS],
+        "closed" => vec![
             "pr",
             "list",
             "--search",
@@ -938,7 +942,15 @@ pub async fn gh_pr_list(repo_path: String, state: String) -> AppResult<Vec<PrInf
             )));
         }
     };
-    let out = run_gh(Some(&repo_path), args, GH_TIMEOUT).await?;
+    // `gh pr list` defaults to 30; thread an explicit `--limit` when the caller asks
+    // for a different cap (existing callers pass `None` → gh's default is untouched).
+    let limit_str;
+    if let Some(n) = limit {
+        limit_str = n.to_string();
+        args.push("--limit");
+        args.push(&limit_str);
+    }
+    let out = run_gh(Some(&repo_path), &args, GH_TIMEOUT).await?;
     serde_json::from_str(&out.stdout_lossy())
         .map_err(|e| AppError::Gh(format!("could not parse gh pr list: {e}")))
 }
@@ -3105,6 +3117,26 @@ pub async fn gh_pr_create(
     labels: Vec<String>,
     assignees: Vec<String>,
 ) -> AppResult<PrRef> {
+    // The command shell derefs the managed `State` to a plain `&AppState` and
+    // delegates to the core, so off-Tauri callers (the MCP server, via
+    // `forge_pr_create_core`) can create a PR with an `AppState` they own.
+    gh_pr_create_core(&state, repo_path, base, head, title, body, draft, labels, assignees).await
+}
+
+/// The body of [`gh_pr_create`], taking a plain `&AppState` so it is callable off
+/// the Tauri runtime (the MCP server routes here through `forge_pr_create_core`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn gh_pr_create_core(
+    state: &AppState,
+    repo_path: String,
+    base: String,
+    head: String,
+    title: String,
+    body: String,
+    draft: bool,
+    labels: Vec<String>,
+    assignees: Vec<String>,
+) -> AppResult<PrRef> {
     validate_branch(&base)?;
     validate_branch(&head)?;
     if title.trim().is_empty() {
@@ -3113,7 +3145,7 @@ pub async fn gh_pr_create(
 
     // gh can only open a PR for a branch that exists on the remote.
     run_git_mutating(
-        &state,
+        state,
         &repo_path,
         &["push", "-u", "origin", &head],
         NETWORK_TIMEOUT,

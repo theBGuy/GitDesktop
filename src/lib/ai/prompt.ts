@@ -10,11 +10,13 @@ import type {
   ReviewPromptInput,
 } from "./types";
 
+// KEEP IN SYNC: src-tauri/src/mcp_server/generate.rs mirrors this for the MCP recipe tools.
 const BASE_SYSTEM = `You write git commit messages.
 Output ONLY the commit message itself: the first line is the subject (imperative mood, at most 72 characters), then a blank line, then an optional body explaining what changed and why.
 Never reference issue or PR numbers, tickets, or links (e.g. "Closes #123") — you can't see the issue tracker, so any such reference is fabricated.
 Do not wrap the message in markdown fences. Do not add commentary before or after the message.`;
 
+// KEEP IN SYNC: src-tauri/src/mcp_server/generate.rs mirrors this for the MCP recipe tools.
 export function buildCommitPrompt(input: CommitPromptInput): {
   system: string;
   prompt: string;
@@ -70,6 +72,7 @@ Use lowercase kebab-case, 2-5 words, specific to what the change does (avoid gen
 If the existing branch names below show a prefix convention (e.g. "feature/", "fix/", "chore/"), follow it; otherwise pick a fitting type prefix such as "feature/" or "fix/".
 Never use spaces, uppercase, or characters invalid in a git ref name.`;
 
+// KEEP IN SYNC: src-tauri/src/mcp_server/generate.rs mirrors this for the MCP recipe tools.
 export function buildBranchNamePrompt(input: BranchNamePromptInput): {
   system: string;
   prompt: string;
@@ -184,6 +187,7 @@ function prSystemFor(provider: PromptProvider | undefined): string {
     .replace("GitHub-flavored Markdown", markdownFlavor);
 }
 
+// KEEP IN SYNC: src-tauri/src/mcp_server/generate.rs mirrors this for the MCP recipe tools.
 export function buildPrPrompt(input: PrPromptInput): {
   system: string;
   prompt: string;

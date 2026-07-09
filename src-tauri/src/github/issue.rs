@@ -108,17 +108,29 @@ const ISSUE_LIST_FIELDS: &str =
 /// Issues for the Issues list. `state` is "open" or "closed". `gh issue list`
 /// already excludes pull requests, so no extra filtering is needed.
 #[tauri::command]
-pub async fn gh_issue_list(repo_path: String, state: String) -> AppResult<Vec<IssueInfo>> {
-    let args: &[&str] = match state.as_str() {
-        "open" => &["issue", "list", "--state", "open", "--json", ISSUE_LIST_FIELDS],
-        "closed" => &["issue", "list", "--state", "closed", "--json", ISSUE_LIST_FIELDS],
+pub async fn gh_issue_list(
+    repo_path: String,
+    state: String,
+    limit: Option<u32>,
+) -> AppResult<Vec<IssueInfo>> {
+    let mut args: Vec<&str> = match state.as_str() {
+        "open" => vec!["issue", "list", "--state", "open", "--json", ISSUE_LIST_FIELDS],
+        "closed" => vec!["issue", "list", "--state", "closed", "--json", ISSUE_LIST_FIELDS],
         _ => {
             return Err(AppError::InvalidArgument(format!(
                 "unknown issue state filter: {state}"
             )));
         }
     };
-    let out = run_gh(Some(&repo_path), args, GH_TIMEOUT).await?;
+    // `gh issue list` defaults to 30; thread an explicit `--limit` when the caller
+    // asks (existing callers pass `None` → gh's default is untouched).
+    let limit_str;
+    if let Some(n) = limit {
+        limit_str = n.to_string();
+        args.push("--limit");
+        args.push(&limit_str);
+    }
+    let out = run_gh(Some(&repo_path), &args, GH_TIMEOUT).await?;
     serde_json::from_str(&out.stdout_lossy())
         .map_err(|e| AppError::Gh(format!("could not parse gh issue list: {e}")))
 }

@@ -194,10 +194,19 @@ pub async fn git_rename_branch(
     old_name: String,
     new_name: String,
 ) -> AppResult<()> {
+    git_rename_branch_core(&state, repo_path, old_name, new_name).await
+}
+
+pub(crate) async fn git_rename_branch_core(
+    state: &AppState,
+    repo_path: String,
+    old_name: String,
+    new_name: String,
+) -> AppResult<()> {
     validate_ref_name(&old_name)?;
     validate_ref_name(&new_name)?;
     run_git_mutating(
-        &state,
+        state,
         &repo_path,
         &["branch", "-m", "--", &old_name, &new_name],
         DEFAULT_TIMEOUT,
@@ -240,6 +249,14 @@ pub async fn git_delete_branch(
     repo_path: String,
     name: String,
 ) -> AppResult<()> {
+    git_delete_branch_core(&state, repo_path, name).await
+}
+
+pub(crate) async fn git_delete_branch_core(
+    state: &AppState,
+    repo_path: String,
+    name: String,
+) -> AppResult<()> {
     validate_ref_name(&name)?;
     // Pre-mutation guard: git refuses to delete a branch checked out in a worktree
     // with a terse message. Detect a linked worktree holding it and surface a
@@ -252,7 +269,7 @@ pub async fn git_delete_branch(
         )));
     }
     run_git_mutating(
-        &state,
+        state,
         &repo_path,
         &["branch", "-D", "--", &name],
         DEFAULT_TIMEOUT,
@@ -267,6 +284,15 @@ pub async fn git_delete_branch(
 #[tauri::command]
 pub async fn git_delete_remote_branch(
     state: State<'_, AppState>,
+    repo_path: String,
+    remote: String,
+    name: String,
+) -> AppResult<()> {
+    git_delete_remote_branch_core(&state, repo_path, remote, name).await
+}
+
+pub(crate) async fn git_delete_remote_branch_core(
+    state: &AppState,
     repo_path: String,
     remote: String,
     name: String,
@@ -291,7 +317,7 @@ pub async fn git_delete_remote_branch(
     }
 
     let out = run_git_mutating(
-        &state,
+        state,
         &repo_path,
         &["push", &remote, "--delete", "--", &name],
         NETWORK_TIMEOUT,
@@ -363,8 +389,16 @@ pub async fn git_checkout_branch(
     repo_path: String,
     name: String,
 ) -> AppResult<()> {
+    git_checkout_branch_core(&state, repo_path, name).await
+}
+
+pub(crate) async fn git_checkout_branch_core(
+    state: &AppState,
+    repo_path: String,
+    name: String,
+) -> AppResult<()> {
     validate_ref_name(&name)?;
-    run_git_mutating(&state, &repo_path, &["switch", &name], DEFAULT_TIMEOUT).await?;
+    run_git_mutating(state, &repo_path, &["switch", &name], DEFAULT_TIMEOUT).await?;
     Ok(())
 }
 
@@ -401,6 +435,16 @@ pub async fn git_create_branch(
     checkout: bool,
     start_point: Option<String>,
 ) -> AppResult<()> {
+    git_create_branch_core(&state, repo_path, name, checkout, start_point).await
+}
+
+pub(crate) async fn git_create_branch_core(
+    state: &AppState,
+    repo_path: String,
+    name: String,
+    checkout: bool,
+    start_point: Option<String>,
+) -> AppResult<()> {
     validate_ref_name(&name)?;
     if let Some(start) = &start_point {
         // start_point may be a branch name or a commit hash — validate as a ref
@@ -415,7 +459,7 @@ pub async fn git_create_branch(
     if let Some(start) = &start_point {
         args.push(start);
     }
-    run_git_mutating(&state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
+    run_git_mutating(state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
     Ok(())
 }
 

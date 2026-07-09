@@ -257,11 +257,12 @@ pub async fn forge_clone(
 pub async fn forge_pr_list(
     repo_path: String,
     state: String,
+    limit: Option<u32>,
 ) -> AppResult<Vec<crate::github::pr::PrInfo>> {
     match detect_non_github(&repo_path).await {
-        Some((Provider::GitLab, _)) => gitlab::list_prs(&repo_path, &state).await,
-        Some((Provider::Bitbucket, _)) => bitbucket::list_prs(&repo_path, &state).await,
-        _ => github::list_prs(&repo_path, &state).await,
+        Some((Provider::GitLab, _)) => gitlab::list_prs(&repo_path, &state, limit).await,
+        Some((Provider::Bitbucket, _)) => bitbucket::list_prs(&repo_path, &state, limit).await,
+        _ => github::list_prs(&repo_path, &state, limit).await,
     }
 }
 
@@ -937,13 +938,14 @@ pub async fn forge_pr_merge(
 pub async fn forge_issue_list(
     repo_path: String,
     state: String,
+    limit: Option<u32>,
 ) -> AppResult<Vec<crate::github::issue::IssueInfo>> {
     match detect_non_github(&repo_path).await {
-        Some((Provider::GitLab, _)) => gitlab::list_issues(&repo_path, &state).await,
+        Some((Provider::GitLab, _)) => gitlab::list_issues(&repo_path, &state, limit).await,
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
             "Bitbucket issues aren't supported yet.".into(),
         )),
-        _ => github::list_issues(&repo_path, &state).await,
+        _ => github::list_issues(&repo_path, &state, limit).await,
     }
 }
 
@@ -2636,6 +2638,32 @@ pub async fn forge_pr_create(
     labels: Option<Vec<String>>,
     assignees: Option<Vec<String>>,
 ) -> AppResult<crate::github::pr::PrRef> {
+    // The `#[tauri::command]` shell just derefs the managed `State` to a plain
+    // `&AppState` and delegates to the core, so non-Tauri callers (the MCP server)
+    // can create a PR with an `AppState` they own — GUI behavior is unchanged.
+    forge_pr_create_core(
+        &state, repo_path, base, head, title, body, draft, reviewers, labels, assignees,
+    )
+    .await
+}
+
+/// The provider-dispatch core of [`forge_pr_create`], taking a plain `&AppState`
+/// (not a Tauri-managed `State`) so it is callable off the Tauri runtime — the MCP
+/// server's `create_pull_request` tool routes through it. The `#[tauri::command]`
+/// wrapper above delegates here after dereffing its `State`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn forge_pr_create_core(
+    state: &crate::state::AppState,
+    repo_path: String,
+    base: String,
+    head: String,
+    title: String,
+    body: String,
+    draft: bool,
+    reviewers: Option<Vec<String>>,
+    labels: Option<Vec<String>>,
+    assignees: Option<Vec<String>>,
+) -> AppResult<crate::github::pr::PrRef> {
     let detected = detect_non_github(&repo_path).await;
     // Create-time reviewers are Bitbucket-only. GitHub/GitLab reject a non-empty list
     // BEFORE dispatching (existing callers omit the key → `None` → untouched behavior).
@@ -2661,13 +2689,13 @@ pub async fn forge_pr_create(
     match detected {
         Some((Provider::GitLab, _)) => {
             gitlab::create_mr(
-                &state, &repo_path, &base, &head, &title, &body, draft, &labels, &assignees,
+                state, &repo_path, &base, &head, &title, &body, draft, &labels, &assignees,
             )
             .await
         }
         Some((Provider::Bitbucket, _)) => {
             bitbucket::create_pr(
-                &state,
+                state,
                 &repo_path,
                 &base,
                 &head,
@@ -2679,7 +2707,7 @@ pub async fn forge_pr_create(
             .await
         }
         _ => {
-            crate::github::pr::gh_pr_create(
+            crate::github::pr::gh_pr_create_core(
                 state, repo_path, base, head, title, body, draft, labels, assignees,
             )
             .await

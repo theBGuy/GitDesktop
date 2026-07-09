@@ -79,8 +79,12 @@ pub async fn list_repos() -> AppResult<ForgeRepoList> {
 // `PrInfo`/`PrDetails`, so the GitHub path is byte-identical to calling `gh_pr_*`
 // directly — the abstraction adds the dispatch seam without changing GitHub.
 
-pub async fn list_prs(repo_path: &str, state: &str) -> AppResult<Vec<crate::github::pr::PrInfo>> {
-    crate::github::pr::gh_pr_list(repo_path.to_string(), state.to_string()).await
+pub async fn list_prs(
+    repo_path: &str,
+    state: &str,
+    limit: Option<u32>,
+) -> AppResult<Vec<crate::github::pr::PrInfo>> {
+    crate::github::pr::gh_pr_list(repo_path.to_string(), state.to_string(), limit).await
 }
 
 pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<crate::github::pr::PrDetails> {
@@ -259,8 +263,9 @@ pub async fn reopen_pr(repo_path: &str, number: u64) -> AppResult<()> {
 pub async fn list_issues(
     repo_path: &str,
     state: &str,
+    limit: Option<u32>,
 ) -> AppResult<Vec<crate::github::issue::IssueInfo>> {
-    crate::github::issue::gh_issue_list(repo_path.to_string(), state.to_string()).await
+    crate::github::issue::gh_issue_list(repo_path.to_string(), state.to_string(), limit).await
 }
 
 pub async fn view_issue(
@@ -615,9 +620,9 @@ pub async fn set_issue_assignees(
 }
 
 /// Create an issue — delegates to the gh-backed REST create with the full GitHub
-/// field set (labels/assignees/milestone/org issue type). (`gh_pr_create` has no
-/// delegate here: it takes Tauri `State` for the push, so `forge_pr_create`'s
-/// GitHub arm calls it directly, like `forge_pr_merge`.)
+/// field set (labels/assignees/milestone/org issue type). (PR create has no delegate
+/// here: `forge_pr_create`'s GitHub arm calls `gh_pr_create_core` directly, since the
+/// push needs an `AppState`, like `forge_pr_merge`.)
 pub async fn create_issue(
     repo_path: &str,
     title: &str,

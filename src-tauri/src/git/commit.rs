@@ -211,6 +211,16 @@ pub async fn git_commit(
     body: Option<String>,
     amend: bool,
 ) -> AppResult<CommitResult> {
+    git_commit_core(&state, repo_path, title, body, amend).await
+}
+
+pub(crate) async fn git_commit_core(
+    state: &AppState,
+    repo_path: String,
+    title: String,
+    body: Option<String>,
+    amend: bool,
+) -> AppResult<CommitResult> {
     let mut args = vec!["commit"];
     if amend {
         args.push("--amend");
@@ -220,7 +230,7 @@ pub async fn git_commit(
     if let Some(body) = &body {
         args.extend(["-m", body.as_str()]);
     }
-    run_git_mutating(&state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
+    run_git_mutating(state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
     let out = run_git(Some(&repo_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT).await?;
     Ok(CommitResult {
         hash: out.stdout_lossy().trim().to_string(),
@@ -232,6 +242,10 @@ pub async fn git_commit(
 /// instead, which leaves the repo in the pre-first-commit state.
 #[tauri::command]
 pub async fn git_undo_commit(state: State<'_, AppState>, repo_path: String) -> AppResult<()> {
+    git_undo_commit_core(&state, repo_path).await
+}
+
+pub(crate) async fn git_undo_commit_core(state: &AppState, repo_path: String) -> AppResult<()> {
     let has_parent = run_git_raw(
         Some(&repo_path),
         &["rev-parse", "--verify", "--quiet", "HEAD~1"],
@@ -245,7 +259,7 @@ pub async fn git_undo_commit(state: State<'_, AppState>, repo_path: String) -> A
     } else {
         &["update-ref", "-d", "HEAD"]
     };
-    run_git_mutating(&state, &repo_path, args, DEFAULT_TIMEOUT).await?;
+    run_git_mutating(state, &repo_path, args, DEFAULT_TIMEOUT).await?;
     Ok(())
 }
 

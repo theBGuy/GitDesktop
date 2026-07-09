@@ -169,13 +169,22 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
   terminal (puts the managed-copy bin dir on your user PATH on Windows, or symlinks
   `gitdesktop-mcp` into `~/.local/bin` on macOS/Linux — reversible, no admin). The app
   runs as a stdio server (its own binary on macOS/Linux, an update-safe `gitdesktop-mcp`
-  copy on Windows), so an agent can *understand* a repo without touching it. Two **separate, orthogonal** write opt-ins layer on top:
-  **Allow write tools** (`--allow-write`) lets it create, comment on, and approve *this
-  repo's* local PRs (GitDesktop's own app-data review artifacts — nothing is pushed);
-  **Allow remote write** (`--allow-remote-write`) lets it make *real* forge writes under
-  your authenticated identity (GitHub `gh`, GitLab `glab`, or a stored Bitbucket token) —
-  create issues, comment on issues and PRs, and close/reopen issues. Neither flag implies
-  the other, and read-only stays the default.
+  copy on Windows), so an agent can *understand* a repo without touching it. Writes are an
+  **escalating opt-in ladder** — each tier is a separate flag, and enabling one never grants
+  another: **`--allow-write`** lets an agent create, comment on, approve, and set the status
+  of *this repo's* local PRs and issues (GitDesktop's own app-data review artifacts — nothing
+  is pushed); **`--allow-remote-write`** unlocks *real* forge writes under your authenticated
+  identity (GitHub `gh`, GitLab `glab`, or a stored Bitbucket token) — create/merge/update
+  PRs, request reviewers, edit labels and assignees, approve or resolve review threads, rerun
+  or dispatch CI, cut releases, and file or comment on issues; **`--allow-git-write`** enables
+  recoverable local-git mutations of the repo (stage, commit, branch, push/pull/fetch, stash,
+  merge, rebase, cherry-pick, tags); and **`--allow-destructive`** is additionally required
+  for the irreversible ones (discard, reset, force-push, delete branch/tag). Every flag is off
+  by default, so read-only stays the default — and agent-session branches are refused by the
+  branch-mutating tools. The server also exposes GitDesktop's own **AI generation recipes** —
+  it hands a connected agent the fully assembled commit-message, PR-description, or
+  branch-name prompt (the same context the in-app features build) for the agent to complete
+  with its own model.
 - **Run commands without leaving the app** — every agent session has an integrated
   terminal: a real shell in a resizable bottom dock, toggled with `Ctrl`/`⌘`+`J`. For a
   container session it runs *inside* the session's container — you pick which dev-server
