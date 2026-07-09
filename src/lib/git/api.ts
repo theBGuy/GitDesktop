@@ -2648,15 +2648,17 @@ export const readAgentCommands = (repoPath: string, agent: string) =>
 export const readTextFile = (path: string) =>
   invoke<string>("read_text_file", { path });
 
-/** Absolute path to the running app executable — the command for the "use
- *  GitDesktop as an MCP server" config snippet (`<exe> mcp --repo <path>`). */
-export const appExePath = () => invoke<string>("app_exe_path");
+/** Absolute path to the managed MCP launcher executable — ensures the
+ *  update-safe copy exists (Windows) before returning. The command for the
+ *  "use GitDesktop as an MCP server" config (`<launcher> mcp --repo <path>`). */
+export const mcpLauncherPath = () => invoke<string>("mcp_launcher_path");
 
-/** State of the `gitdesktop` command-line launcher (Settings → MCP servers).
- *  Windows adds the app dir to the user PATH; macOS/Linux symlink into
- *  ~/.local/bin. See src-tauri/src/path_launcher.rs. */
+/** State of the `gitdesktop-mcp` command-line launcher (Settings → MCP servers).
+ *  Windows puts the managed launcher's bin dir on the user PATH (migrating any
+ *  older app-dir entry); macOS/Linux symlink `gitdesktop-mcp` into ~/.local/bin.
+ *  See src-tauri/src/path_launcher.rs. */
 export interface PathLauncherStatus {
-  /** `gitdesktop` resolves in a newly-opened terminal (persisted PATH). */
+  /** `gitdesktop-mcp` resolves in a newly-opened terminal (persisted PATH). */
   onPath: boolean;
   /** We installed it, so Remove can undo it (false when on PATH by other means). */
   managed: boolean;
@@ -2711,6 +2713,33 @@ export const mcpGlobalInstall = (
     args,
     overwrite,
   });
+
+/** Whether a client's GLOBAL (user-scope) config has a `gitdesktop` server, and
+ *  whether its configured command points at the CURRENT managed launcher. */
+export interface McpGlobalClientStatus {
+  /** A `gitdesktop` server exists in this client's user config. */
+  installed: boolean;
+  /** The configured command, or null when not installed (for display). */
+  command: string | null;
+  /** The configured command resolves to the current managed launcher
+   *  (path-normalized) — false for an older install or a custom entry. */
+  current: boolean;
+}
+
+export interface McpGlobalStatus {
+  claude: McpGlobalClientStatus;
+  copilot: McpGlobalClientStatus;
+}
+
+/** Read-only probe of the global `gitdesktop` install state for both clients,
+ *  via each CLI. Never creates the managed launcher copy. See src-tauri/src/mcp.rs. */
+export const mcpGlobalStatus = () =>
+  invoke<McpGlobalStatus>("mcp_global_status");
+
+/** Remove the `gitdesktop` server from a client's GLOBAL (user-scope) config via
+ *  that client's own CLI. Errors carry actionable messages (e.g. CLI not found). */
+export const mcpGlobalRemove = (client: "claude" | "copilot") =>
+  invoke<null>("mcp_global_remove", { client });
 
 // Cold-start test mode keeps API keys in an isolated sessionStorage store so
 // the OS keychain (and the user's real keys) are never touched (no-op normally).

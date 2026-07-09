@@ -161,13 +161,15 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
   Bitbucket covers PRs and pipelines, but not issues). **Settings → MCP servers** shows a
   ready-to-paste config snippet — or **writes it straight into the repo's `.mcp.json`**
   for you (with a **Shareable** toggle for portable, teammate-committable paths), or
-  **installs it globally** for **Claude Code** or **Copilot** in one click (into the
-  client's user config, available in every project) — plus a
-  one-click **Add to PATH** launcher so the bare `gitdesktop` command resolves in any
-  terminal (adds the app to your user PATH on Windows, or symlinks it into `~/.local/bin`
-  on macOS/Linux — reversible, no admin). The app runs as a stdio server
-  (`gitdesktop mcp --repo <path>`), so an agent can *understand* a repo without touching
-  it. Two **separate, orthogonal** write opt-ins layer on top:
+  **installs it globally** for **Claude Code** or **Copilot** — per-client rows that show
+  each one's live state (installed & pointing at the current launcher, or at an older
+  install with one-click **Reinstall**) and let you **Remove** it, all into the client's
+  user config so it's available in every project — plus a
+  one-click **Add to PATH** launcher so the bare `gitdesktop-mcp` command resolves in any
+  terminal (puts the managed-copy bin dir on your user PATH on Windows, or symlinks
+  `gitdesktop-mcp` into `~/.local/bin` on macOS/Linux — reversible, no admin). The app
+  runs as a stdio server (its own binary on macOS/Linux, an update-safe `gitdesktop-mcp`
+  copy on Windows), so an agent can *understand* a repo without touching it. Two **separate, orthogonal** write opt-ins layer on top:
   **Allow write tools** (`--allow-write`) lets it create, comment on, and approve *this
   repo's* local PRs (GitDesktop's own app-data review artifacts — nothing is pushed);
   **Allow remote write** (`--allow-remote-write`) lets it make *real* forge writes under

@@ -1030,27 +1030,32 @@ Code — use *this* repo's **read-only-by-default** git & forge tools (status, l
 blame, branches, file history/read, PRs, issues, CI logs). The PR, issue, and CI tools work
 across **GitHub, GitLab, and Bitbucket** — they route through GitDesktop's forge layer and
 dispatch by the repo's remote (Bitbucket covers PRs and pipelines, but not issues — its
-native tracker is deprecated). The app itself runs as a stdio server
-(\`gitdesktop mcp --repo <path>\`), so an agent can understand a repo without changing it.
+native tracker is deprecated). The app itself runs as a stdio server — on macOS and Linux
+that's the app binary directly (\`gitdesktop mcp --repo <path>\`), and on Windows a dedicated
+update-safe copy named \`gitdesktop-mcp\` (so running servers never block app updates) — so an
+agent can understand a repo without changing it.
 **Copy** the snippet and paste it into your client's config, or hit **Write to
 .mcp.json** to merge the \`gitdesktop\` entry into the open repo's \`.mcp.json\` for you —
 existing servers are preserved, and you're asked before an existing GitDesktop entry is
 replaced. Or **install it globally** for **Claude Code** or **Copilot** — a one-click
 button that adds \`gitdesktop\` to that client's user config (so it's in *every* project, no
 per-repo file) via the client's own CLI, with a project-aware \`--repo\` so the single entry
-follows whatever repo you open. Two toggles shape what gets written: **Shareable entry** swaps machine-specific
-absolute paths for portable \`\${GITDESKTOP_BIN}\` / \`\${CLAUDE_PROJECT_DIR}\` ones a
-teammate can commit (they point \`GITDESKTOP_BIN\` at their own install, or keep
-\`gitdesktop\` on their PATH), and **Allow write tools** adds \`--allow-write\` so an agent
+follows whatever repo you open. Each client shows its **live state**: already installed and
+pointing at the current launcher, or pointing at an older install (a one-click **Reinstall**
+switches it over) — with **Remove** to take it back out, no confirmation needed. Two toggles shape what gets written: **Shareable entry** swaps machine-specific
+absolute paths for portable \`\${GITDESKTOP_BIN:-gitdesktop-mcp}\` / \`\${CLAUDE_PROJECT_DIR}\`
+ones a teammate can commit (they point \`GITDESKTOP_BIN\` at their own launcher, or keep
+\`gitdesktop-mcp\` on their PATH), and **Allow write tools** adds \`--allow-write\` so an agent
 can also **create**, **comment on**, set the **status** of, and **approve** *this repo's*
 local PRs (GitDesktop's own app-data review artifacts — nothing is pushed).
 
-To make the bare \`gitdesktop\` command actually resolve in a terminal (so the **Shareable
+To make the bare launcher command actually resolve in a terminal (so the **Shareable
 entry** works with no hardcoded path and no \`GITDESKTOP_BIN\`), use the **Command-line
-launcher** at the bottom of the disclosure: **Add to PATH** appends the app to your user
-PATH on Windows (open a new terminal afterward) or symlinks \`gitdesktop\` into
-\`~/.local/bin\` on macOS/Linux, and **Remove** undoes exactly that — no admin needed either
-way.
+launcher** at the bottom of the disclosure: **Add to PATH** puts the launcher's folder on
+your user PATH on Windows so \`gitdesktop-mcp\` resolves, or symlinks \`gitdesktop-mcp\` into
+\`~/.local/bin\` on macOS/Linux (open a new terminal afterward on Windows), and **Remove**
+undoes exactly that — no admin needed either way. On both platforms, re-running it also
+migrates any older \`gitdesktop\`-named entry a previous version left behind.
 
 Separately, **Allow remote write** adds \`--allow-remote-write\` — a distinct opt-in that
 lets an agent make **real forge writes** in this repo under your authenticated identity

@@ -717,6 +717,19 @@ pub async fn mcp_global_install(
     }
 }
 
+/// Remove the `gitdesktop` entry from Claude's GLOBAL (user-scope) config via its
+/// own CLI. `-s user` scopes to the user config (where `add-json -s user` writes).
+async fn claude_global_remove() -> AppResult<(String, String, i32)> {
+    run_client_cli("claude", &["mcp", "remove", "gitdesktop", "-s", "user"]).await
+}
+
+/// Remove the `gitdesktop` entry from Copilot's user config via its own CLI.
+/// `copilot mcp remove` takes NO scope flag — it only ever manages the user config
+/// (`~/.copilot/mcp-config.json`), which is exactly where `add` writes.
+async fn copilot_global_remove() -> AppResult<(String, String, i32)> {
+    run_client_cli("copilot", &["mcp", "remove", "gitdesktop"]).await
+}
+
 async fn claude_global_install(
     command: &str,
     args: &[String],
@@ -726,7 +739,7 @@ async fn claude_global_install(
         .map_err(|e| AppError::Command(format!("serialize entry: {e}")))?;
     if overwrite {
         // May or may not exist; a "not found" remove is harmless.
-        let _ = run_client_cli("claude", &["mcp", "remove", "gitdesktop", "-s", "user"]).await;
+        let _ = claude_global_remove().await;
     }
     let (stdout, stderr, code) = run_client_cli(
         "claude",
@@ -758,7 +771,7 @@ async fn copilot_global_install(
         // `copilot mcp remove` takes NO scope flag — it only ever manages the user
         // config (`~/.copilot/mcp-config.json`), which is exactly where `add`
         // writes, so there's no scope to mismatch. A "not found" remove is harmless.
-        let _ = run_client_cli("copilot", &["mcp", "remove", "gitdesktop"]).await;
+        let _ = copilot_global_remove().await;
     }
     // `copilot mcp add gitdesktop -- <command> <args...>` — everything after `--`
     // is the stdio launch command, written to Copilot's user config.
@@ -776,6 +789,167 @@ async fn copilot_global_install(
     }
     Err(AppError::Command(format!(
         "`copilot mcp add` failed: {}",
+        out.trim()
+    )))
+}
+
+// --- global install STATUS + REMOVE ------------------------------------------
+//
+// The Settings "Install globally" buttons write a `gitdesktop` server into a
+// client's user config. These read-only probes let the UI tell whether an entry
+// already exists — and whether it points at the CURRENT managed launcher vs an
+// older install path (old-path entries keep locking the installed exe against
+// updates) — and the remove command lets the UI clear one.
+
+/// Per-client global-install status. See the frozen contract in P4.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpGlobalClientStatus {
+    /// A `gitdesktop` entry exists in this client's global (user) config.
+    pub installed: bool,
+    /// The configured command string, when installed and readable.
+    pub command: Option<String>,
+    /// The configured command points at the CURRENT managed launcher path
+    /// (path-normalized compare). False for older install paths or custom entries.
+    pub current: bool,
+}
+
+impl McpGlobalClientStatus {
+    fn not_installed() -> Self {
+        Self {
+            installed: false,
+            command: None,
+            current: false,
+        }
+    }
+}
+
+/// Global-install status across every supported client.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpGlobalStatus {
+    pub claude: McpGlobalClientStatus,
+    pub copilot: McpGlobalClientStatus,
+}
+
+/// Path-normalized comparison for the launcher-path check: case-insensitive,
+/// `/` vs `\` insensitive, trailing-separator insensitive. Mirrors
+/// `path_launcher::norm` (which is `#[cfg(windows)]`-private, so it's re-derived
+/// locally here) and additionally folds interior separators so a config written
+/// with `/` still matches a resolved path spelled with `\`.
+fn norm_launcher_path(p: &str) -> String {
+    p.trim()
+        .trim_end_matches(['\\', '/'])
+        .replace('/', "\\")
+        .to_ascii_lowercase()
+}
+
+/// Classify a client's user-config JSON into an [`McpGlobalClientStatus`] for the
+/// `gitdesktop` entry. Pure — takes the parsed config `Value` and the current
+/// launcher path so tests need no filesystem or env. Tolerant of untrusted JSON:
+///
+/// * `mcpServers.gitdesktop` absent (or the shape isn't a map) ⇒ not installed.
+/// * present but `command` isn't a string ⇒ installed, `command: None`,
+///   `current: false`.
+/// * present with a string `command` ⇒ installed; `current` iff it path-normal-
+///   equals `launcher_path`.
+fn classify_global_entry(config: &Value, launcher_path: &str) -> McpGlobalClientStatus {
+    let Some(entry) = config
+        .get("mcpServers")
+        .and_then(|v| v.as_object())
+        .and_then(|m| m.get("gitdesktop"))
+    else {
+        return McpGlobalClientStatus::not_installed();
+    };
+    let Some(command) = entry.get("command").and_then(|v| v.as_str()) else {
+        // Present but no string command — installed, but we can't classify it.
+        return McpGlobalClientStatus {
+            installed: true,
+            command: None,
+            current: false,
+        };
+    };
+    let current = norm_launcher_path(command) == norm_launcher_path(launcher_path);
+    McpGlobalClientStatus {
+        installed: true,
+        command: Some(command.to_string()),
+        current,
+    }
+}
+
+/// Read + parse a client's user-config file into a JSON `Value`, tolerantly: a
+/// missing / oversized / unreadable / malformed file yields `None` (⇒ treated as
+/// "not installed" by the caller), never an error. The size guard matches
+/// `collect_discovered` — `~/.claude.json` also holds chat history.
+fn read_global_config(path: &Path) -> Option<Value> {
+    const MAX_BYTES: u64 = 16 * 1024 * 1024;
+    match std::fs::metadata(path) {
+        Ok(m) if m.len() <= MAX_BYTES => {}
+        _ => return None,
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<Value>(&text).ok()
+}
+
+/// Read-only status of the `gitdesktop` global (user-scope) MCP install for each
+/// client: whether an entry exists, its configured command, and whether that
+/// command points at the CURRENT managed launcher. Reads config files directly
+/// (Claude `~/.claude.json`, Copilot `~/.copilot/mcp-config.json`) — it does NOT
+/// shell out and, critically, does NOT ensure/create the managed launcher copy
+/// (uses [`mcp_launcher::resolved_launcher_path`], a zero-write path accessor).
+/// Never errors on a missing/malformed config — those read as "not installed".
+#[tauri::command]
+pub async fn mcp_global_status(app: tauri::AppHandle) -> AppResult<McpGlobalStatus> {
+    use tauri::Manager;
+
+    // Zero-write: resolve the launcher path WITHOUT ensuring the copy.
+    let launcher = crate::mcp_launcher::resolved_launcher_path()?
+        .to_string_lossy()
+        .into_owned();
+
+    let (claude, copilot) = match app.path().home_dir() {
+        Ok(home) => {
+            let claude = read_global_config(&home.join(".claude.json"))
+                .map(|cfg| classify_global_entry(&cfg, &launcher))
+                .unwrap_or_else(McpGlobalClientStatus::not_installed);
+            let copilot = read_global_config(&home.join(".copilot").join("mcp-config.json"))
+                .map(|cfg| classify_global_entry(&cfg, &launcher))
+                .unwrap_or_else(McpGlobalClientStatus::not_installed);
+            (claude, copilot)
+        }
+        // No home dir ⇒ nothing to read; report both not-installed rather than error.
+        Err(_) => (
+            McpGlobalClientStatus::not_installed(),
+            McpGlobalClientStatus::not_installed(),
+        ),
+    };
+
+    Ok(McpGlobalStatus { claude, copilot })
+}
+
+/// Remove the `gitdesktop` server from a client's GLOBAL (user-scope) config via
+/// the client's OWN CLI — the same per-client remove invocations the overwrite
+/// path of [`mcp_global_install`] uses. Dispatches on `client` like
+/// `mcp_global_install`; an unknown client is an actionable error. Removing an
+/// entry that doesn't exist lets the CLI's own behavior/error pass through (the
+/// UI only offers Remove when installed; a race just yields the CLI's message).
+#[tauri::command]
+pub async fn mcp_global_remove(client: String, _app: tauri::AppHandle) -> AppResult<()> {
+    let (stdout, stderr, code) = match client.as_str() {
+        "claude" => claude_global_remove().await?,
+        "copilot" => copilot_global_remove().await?,
+        other => {
+            return Err(AppError::Command(format!(
+                "unknown MCP client \"{other}\" (expected \"claude\" or \"copilot\")"
+            )));
+        }
+    };
+    if code == 0 {
+        return Ok(());
+    }
+    let out = format!("{stdout}{stderr}");
+    Err(AppError::Command(format!(
+        "`{client} mcp remove gitdesktop` failed: {}",
         out.trim()
     )))
 }
@@ -988,5 +1162,81 @@ mod tests {
         // Plan (research=false) defines no agent.
         let plan = build_opencode_config(&[], false).unwrap();
         assert!(plan.get("agent").is_none());
+    }
+
+    // --- classify_global_entry ----------------------------------------------
+
+    const LAUNCHER: &str = r"C:\Users\me\AppData\Local\com.thebguy.gitdesktop\bin\gitdesktop-mcp.exe";
+
+    #[test]
+    fn classify_absent_when_no_mcp_servers_or_key() {
+        // Empty doc.
+        let s = classify_global_entry(&json!({}), LAUNCHER);
+        assert!(!s.installed);
+        assert_eq!(s.command, None);
+        assert!(!s.current);
+        // mcpServers present but no gitdesktop.
+        let s = classify_global_entry(&json!({ "mcpServers": { "other": {} } }), LAUNCHER);
+        assert!(!s.installed);
+        // mcpServers wrong shape (array, not map) ⇒ absent.
+        let s = classify_global_entry(&json!({ "mcpServers": [] }), LAUNCHER);
+        assert!(!s.installed);
+    }
+
+    #[test]
+    fn classify_current_when_command_matches_launcher() {
+        let doc = json!({ "mcpServers": { "gitdesktop": { "command": LAUNCHER } } });
+        let s = classify_global_entry(&doc, LAUNCHER);
+        assert!(s.installed);
+        assert_eq!(s.command.as_deref(), Some(LAUNCHER));
+        assert!(s.current, "exact match is current");
+    }
+
+    #[test]
+    fn classify_current_is_normalization_robust() {
+        // Config command differs from the launcher only by case, separator style,
+        // and a trailing separator — still the current launcher.
+        let configured = r"c:/Users/me/AppData/Local/com.thebguy.gitdesktop/bin/gitdesktop-mcp.exe";
+        let doc = json!({ "mcpServers": { "gitdesktop": { "command": configured } } });
+        let s = classify_global_entry(&doc, LAUNCHER);
+        assert!(s.installed);
+        assert!(s.current, "case/separator differences must still match");
+    }
+
+    #[test]
+    fn classify_mismatch_for_older_install_path() {
+        // The classic old-path entry: the installed exe, not the managed copy.
+        let old = r"C:\Program Files\gitdesktop\gitdesktop.exe";
+        let doc = json!({ "mcpServers": { "gitdesktop": { "command": old } } });
+        let s = classify_global_entry(&doc, LAUNCHER);
+        assert!(s.installed);
+        assert_eq!(s.command.as_deref(), Some(old));
+        assert!(!s.current, "an older install path is not current");
+    }
+
+    #[test]
+    fn classify_non_string_command_installed_but_unclassified() {
+        // command present but not a string (e.g. a number) ⇒ installed, no command,
+        // not current — never a panic on untrusted JSON.
+        let doc = json!({ "mcpServers": { "gitdesktop": { "command": 42 } } });
+        let s = classify_global_entry(&doc, LAUNCHER);
+        assert!(s.installed);
+        assert_eq!(s.command, None);
+        assert!(!s.current);
+        // command entirely absent ⇒ same (installed, unclassified).
+        let doc = json!({ "mcpServers": { "gitdesktop": { "args": [] } } });
+        let s = classify_global_entry(&doc, LAUNCHER);
+        assert!(s.installed);
+        assert_eq!(s.command, None);
+        assert!(!s.current);
+    }
+
+    #[test]
+    fn norm_launcher_path_folds_case_separators_and_trailing() {
+        assert_eq!(
+            norm_launcher_path(r"C:\Foo\Bar\"),
+            norm_launcher_path(r"c:/foo/bar")
+        );
+        assert_eq!(norm_launcher_path("  C:\\Foo/Bar/  "), r"c:\foo\bar");
     }
 }

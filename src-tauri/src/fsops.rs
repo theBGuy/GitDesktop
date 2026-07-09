@@ -69,15 +69,6 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> AppResult<()> {
     Ok(())
 }
 
-/// Absolute path to the running app executable. Used to build the "Use GitDesktop
-/// as an MCP server" client-config snippet, whose command is `<this exe> mcp`.
-#[tauri::command]
-pub fn app_exe_path() -> AppResult<String> {
-    std::env::current_exe()
-        .map(|p| p.to_string_lossy().into_owned())
-        .map_err(AppError::Io)
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DetectedEditor {

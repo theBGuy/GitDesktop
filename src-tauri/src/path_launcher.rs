@@ -1,17 +1,19 @@
-//! One-click "add `gitdesktop` to your PATH" launcher.
+//! One-click "add `gitdesktop-mcp` to your PATH" launcher.
 //!
 //! The "Use GitDesktop as an MCP server" config points external clients at the
-//! command `gitdesktop mcp …`. That bare command only resolves if the app's
-//! executable is reachable on the shell's `PATH` — otherwise users must hardcode
+//! command `gitdesktop-mcp mcp …`. That bare command only resolves if the
+//! launcher is reachable on the shell's `PATH` — otherwise users must hardcode
 //! an absolute path (Personal variant) or set `GITDESKTOP_BIN` (Shareable
 //! variant). This module makes the bare command work in one click:
 //!
-//! * **Windows** — append the app's own directory to the *user* `PATH`
+//! * **Windows** — append the managed launcher's bin dir (holding
+//!   `gitdesktop-mcp.exe`, see `mcp_launcher.rs`) to the *user* `PATH`
 //!   (`HKCU\Environment`, no admin) and broadcast `WM_SETTINGCHANGE` so new
-//!   terminals pick it up without a logout. The command `gitdesktop` resolves to
-//!   `GitDesktop.exe` case-insensitively.
-//! * **macOS / Linux** — symlink `gitdesktop` → the app binary into
-//!   `~/.local/bin` (the lowercase name matters; Unix is case-sensitive).
+//!   terminals pick it up without a logout. A legacy install-dir entry from a
+//!   pre-launcher version is migrated away in the same write.
+//! * **macOS / Linux** — symlink `gitdesktop-mcp` → the app binary into
+//!   `~/.local/bin` (management is inactive on Unix; the name still matches the
+//!   shareable config's fallback). A legacy `gitdesktop` link we own is migrated.
 //!
 //! Every install is reversible via [`path_launcher_remove`], and we only ever
 //! remove what we created (a user-`PATH` entry we added / a symlink we own).
@@ -20,12 +22,12 @@ use crate::error::{AppError, AppResult};
 use serde::Serialize;
 use std::path::PathBuf;
 
-/// State of the `gitdesktop` command-line launcher, surfaced in Settings →
+/// State of the `gitdesktop-mcp` command-line launcher, surfaced in Settings →
 /// "Use GitDesktop as an MCP server".
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PathLauncherStatus {
-    /// `gitdesktop` resolves in a newly-opened terminal (from the *persisted*
+    /// `gitdesktop-mcp` resolves in a newly-opened terminal (from the *persisted*
     /// PATH — the registry on Windows / `$PATH` on Unix — not this process's
     /// possibly-stale environment).
     pub on_path: bool,
@@ -56,8 +58,16 @@ pub fn path_launcher_status() -> AppResult<PathLauncherStatus> {
 }
 
 #[tauri::command]
-pub fn path_launcher_install() -> AppResult<PathLauncherStatus> {
-    install_impl()
+pub fn path_launcher_install(app: tauri::AppHandle) -> AppResult<PathLauncherStatus> {
+    let _version = app.package_info().version.to_string();
+    #[cfg(windows)]
+    {
+        install_impl(&_version)
+    }
+    #[cfg(not(windows))]
+    {
+        install_impl()
+    }
 }
 
 #[tauri::command]
@@ -74,15 +84,36 @@ mod platform {
     use winreg::types::FromRegValue;
     use winreg::{RegKey, RegValue};
 
-    /// The app's own directory — adding it to PATH makes `GitDesktop.exe`
-    /// resolvable as the (case-insensitive) command `gitdesktop`.
-    fn exe_dir() -> AppResult<String> {
+    /// The directory we put on PATH. When the managed MCP launcher is active,
+    /// this is its bin dir (`%LOCALAPPDATA%\…\bin`, holding only
+    /// `gitdesktop-mcp.exe` and its `gitdesktop-mcp.version.json` marker — no
+    /// bare-`gitdesktop` copy exists), so the resolvable command is
+    /// `gitdesktop-mcp`. Otherwise the app's own install directory (dev builds
+    /// keep today's behavior). Adding it to PATH makes the launcher resolvable
+    /// case-insensitively.
+    fn launcher_dir() -> AppResult<String> {
+        if let Some(dir) = crate::mcp_launcher::managed_bin_dir() {
+            return Ok(dir.to_string_lossy().into_owned());
+        }
+        install_dir()
+    }
+
+    /// The app's own install directory (`current_exe()`'s parent). This is the
+    /// OLD launcher dir a pre-migration install would have added to PATH; we
+    /// treat it as removable-by-us and detect it for migration.
+    fn install_dir() -> AppResult<String> {
         let exe = exe_path()?;
         exe.parent()
             .map(|p| p.to_string_lossy().into_owned())
-            .ok_or_else(|| {
-                AppError::Command("could not determine the app's directory".into())
-            })
+            .ok_or_else(|| AppError::Command("could not determine the app's directory".into()))
+    }
+
+    /// The old install-dir PATH entry to migrate away from — `Some` only when
+    /// management is active AND the install dir differs from the managed dir
+    /// (i.e. there is a genuinely distinct legacy entry to reconcile).
+    fn old_entry(new_dir: &str) -> Option<String> {
+        let old = install_dir().ok()?;
+        (norm(&old) != norm(new_dir)).then_some(old)
     }
 
     /// Normalize a PATH entry for case-insensitive comparison (Windows paths are
@@ -142,13 +173,12 @@ mod platform {
     /// reads as empty + `REG_EXPAND_SZ` (the type Windows uses to create PATH).
     /// Takes the key as a parameter so it round-trips against a scratch key in
     /// tests without ever touching the live `HKCU\Environment`.
-    pub(super) fn read_path_value(
-        env: &RegKey,
-    ) -> AppResult<(String, winreg::enums::RegType)> {
+    pub(super) fn read_path_value(env: &RegKey) -> AppResult<(String, winreg::enums::RegType)> {
         match env.get_raw_value("Path") {
             Ok(raw) => {
-                let s = String::from_reg_value(&raw)
-                    .map_err(|e| AppError::Command(format!("reading PATH from the registry: {e}")))?;
+                let s = String::from_reg_value(&raw).map_err(|e| {
+                    AppError::Command(format!("reading PATH from the registry: {e}"))
+                })?;
                 Ok((s, raw.vtype))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -225,22 +255,52 @@ mod platform {
     }
 
     pub(super) fn status_impl() -> AppResult<PathLauncherStatus> {
-        let dir = exe_dir()?;
+        let dir = launcher_dir()?;
         let (user_path, _) = read_path_value(&open_user_env(KEY_READ)?)?;
+        // A leftover pre-migration entry pointing at the install folder means the
+        // shared MCP config's bare `gitdesktop` command still resolves to the
+        // install-dir exe (locks the .msi, killed by name). Nudge the user to
+        // re-run Add to PATH, which migrates it.
+        let warning = old_entry(&dir)
+            .filter(|old| path_contains(&user_path, old))
+            .map(|_| {
+                "An earlier Add to PATH entry still points at the app's install folder. \
+                 Add to PATH again to migrate it. Shared configs using the bare \
+                 `gitdesktop` command need updating to `gitdesktop-mcp`."
+                    .to_string()
+            });
         Ok(PathLauncherStatus {
             on_path: persisted_path_contains_exe_dir(&dir),
             managed: path_contains(&user_path, &dir),
             target: dir,
-            warning: None,
+            warning,
             note: None,
         })
     }
 
-    pub(super) fn install_impl() -> AppResult<PathLauncherStatus> {
-        let dir = exe_dir()?;
+    pub(super) fn install_impl(version: &str) -> AppResult<PathLauncherStatus> {
+        let dir = launcher_dir()?;
+        // Materialize the managed launcher copy FIRST — putting an empty dir on
+        // PATH is useless. On dev builds (management inactive) this is a no-op
+        // returning the install-dir exe. Ensure errors propagate.
+        crate::mcp_launcher::ensure(version)?;
         let env = open_user_env(KEY_READ | KEY_WRITE)?;
         let (current, vtype) = read_path_value(&env)?;
-        if let Some(next) = path_with_dir_added(&current, &dir) {
+        // Add the new dir and, in the SAME write, migrate away the old install-
+        // dir entry if it's present.
+        let mut next = current.clone();
+        let mut changed = false;
+        if let Some(added) = path_with_dir_added(&next, &dir) {
+            next = added;
+            changed = true;
+        }
+        if let Some(old) = old_entry(&dir) {
+            if path_contains(&next, &old) {
+                next = path_with_dir_removed(&next, &old);
+                changed = true;
+            }
+        }
+        if changed {
             write_path_value(&env, &next, vtype)?;
             broadcast_env_change();
         }
@@ -249,18 +309,29 @@ mod platform {
             managed: true,
             target: dir,
             warning: None,
-            note: Some(
-                "Added to your PATH — open a new terminal to use gitdesktop.".into(),
-            ),
+            note: Some("Added to your PATH — open a new terminal to use gitdesktop.".into()),
         })
     }
 
     pub(super) fn remove_impl() -> AppResult<PathLauncherStatus> {
-        let dir = exe_dir()?;
+        let dir = launcher_dir()?;
         let env = open_user_env(KEY_READ | KEY_WRITE)?;
         let (current, vtype) = read_path_value(&env)?;
-        if path_contains(&current, &dir) {
-            let next = path_with_dir_removed(&current, &dir);
+        // Remove BOTH the new dir and any leftover old install-dir entry — both
+        // are entries GitDesktop added, so both are ours to reverse.
+        let mut next = current.clone();
+        let mut changed = false;
+        if path_contains(&next, &dir) {
+            next = path_with_dir_removed(&next, &dir);
+            changed = true;
+        }
+        if let Some(old) = old_entry(&dir) {
+            if path_contains(&next, &old) {
+                next = path_with_dir_removed(&next, &old);
+                changed = true;
+            }
+        }
+        if changed {
             write_path_value(&env, &next, vtype)?;
             broadcast_env_change();
         }
@@ -281,12 +352,27 @@ mod platform {
 
     /// Preferred user bin directory — on `$PATH` in virtually all modern shells.
     fn user_bin_dir() -> AppResult<PathBuf> {
-        let home = std::env::var_os("HOME")
-            .ok_or_else(|| AppError::Command("HOME is not set".into()))?;
+        let home =
+            std::env::var_os("HOME").ok_or_else(|| AppError::Command("HOME is not set".into()))?;
         Ok(PathBuf::from(home).join(".local").join("bin"))
     }
 
+    /// The canonical launcher symlink. Named `gitdesktop-mcp` to match the
+    /// shareable client-config command `${GITDESKTOP_BIN:-gitdesktop-mcp}`
+    /// (`GitDesktopAsServer.tsx`), so a config authored on any platform — and
+    /// committed into a team repo — resolves on a teammate who used Add to PATH.
+    /// The symlink still targets the app binary directly: MCP dispatch is
+    /// argv[0]-independent (`main.rs` checks `argv[1]`), so `gitdesktop-mcp mcp …`
+    /// works regardless of the link name.
     fn link_path() -> AppResult<PathBuf> {
+        Ok(user_bin_dir()?.join("gitdesktop-mcp"))
+    }
+
+    /// The legacy launcher symlink from before the rename (`gitdesktop`). We
+    /// migrate it away — but only when it's ours (targets *this* exe) — so a
+    /// shared config's bare `gitdesktop-mcp` fallback isn't shadowed by a stale
+    /// `gitdesktop`-named link that no longer matches.
+    fn legacy_link_path() -> AppResult<PathBuf> {
         Ok(user_bin_dir()?.join("gitdesktop"))
     }
 
@@ -298,21 +384,24 @@ mod platform {
         std::env::split_paths(&path).any(|p| p == dir)
     }
 
-    /// Whether some `gitdesktop` is resolvable on `$PATH` (a file or a symlink).
+    /// Whether some `gitdesktop-mcp` is resolvable on `$PATH` (a file or a
+    /// symlink).
     fn gitdesktop_on_path() -> bool {
         let Some(path) = std::env::var_os("PATH") else {
             return false;
         };
         std::env::split_paths(&path).any(|dir| {
-            let cand = dir.join("gitdesktop");
+            let cand = dir.join("gitdesktop-mcp");
             std::fs::symlink_metadata(&cand)
                 .map(|m| m.file_type().is_symlink() || m.file_type().is_file())
                 .unwrap_or(false)
         })
     }
 
-    /// Whether our symlink exists and points at *this* binary.
-    fn managed(link: &Path, exe: &Path) -> bool {
+    /// Whether `link` is a symlink pointing at *this* binary (our ownership
+    /// test, shared by status/install/remove for both the canonical and legacy
+    /// links).
+    fn owned_by_us(link: &Path, exe: &Path) -> bool {
         std::fs::symlink_metadata(link)
             .map(|m| m.file_type().is_symlink())
             .unwrap_or(false)
@@ -323,8 +412,18 @@ mod platform {
         let exe = exe_path()?;
         let bin = user_bin_dir()?;
         let link = link_path()?;
-        let is_managed = managed(&link, &exe);
-        let warning = if is_managed && !dir_on_path(&bin) {
+        let is_managed = owned_by_us(&link, &exe);
+        // A leftover legacy `gitdesktop` link we own means an earlier install
+        // used the old name; nudge the user to re-run Add to PATH (which
+        // migrates it) so the shared config's `gitdesktop-mcp` fallback resolves.
+        let legacy_present = owned_by_us(&legacy_link_path()?, &exe);
+        let warning = if legacy_present {
+            Some(
+                "An earlier Add to PATH link still uses the old `gitdesktop` name. \
+                 Add to PATH again to migrate it."
+                    .to_string(),
+            )
+        } else if is_managed && !dir_on_path(&bin) {
             Some(format!(
                 "{} may not be on your PATH — add it to your shell profile, or use the Shareable entry's GITDESKTOP_BIN.",
                 bin.display()
@@ -372,12 +471,18 @@ mod platform {
             Err(e) => return Err(AppError::Io(e)),
         }
         symlink(&exe, &link).map_err(AppError::Io)?;
+        // Migrate away the legacy `gitdesktop` link when it's ours (ownership-
+        // checked) — mirrors the Windows old-entry migration in the same action.
+        let legacy = legacy_link_path()?;
+        if owned_by_us(&legacy, &exe) {
+            let _ = std::fs::remove_file(&legacy);
+        }
         let mut status = status_impl()?;
         status.note = Some(if dir_on_path(&bin) {
-            format!("Linked gitdesktop into {}.", bin.display())
+            format!("Linked gitdesktop-mcp into {}.", bin.display())
         } else {
             format!(
-                "Linked gitdesktop into {} — add that folder to your PATH to use it.",
+                "Linked gitdesktop-mcp into {} — add that folder to your PATH to use it.",
                 bin.display()
             )
         });
@@ -389,8 +494,8 @@ mod platform {
         let link = link_path()?;
         match std::fs::symlink_metadata(&link) {
             // Only remove OUR launcher — a symlink pointing at *this* binary
-            // (the same ownership test `managed()`/status use). Never delete a
-            // gitdesktop symlink the user aimed at a different install, and
+            // (the same ownership test `owned_by_us()`/status use). Never delete a
+            // gitdesktop-mcp symlink the user aimed at a different install, and
             // never a real file they placed here.
             Ok(meta) if meta.file_type().is_symlink() => {
                 if std::fs::read_link(&link).map(|t| t == exe).unwrap_or(false) {
@@ -410,8 +515,16 @@ mod platform {
             }
             _ => {} // already gone
         }
+        // Also remove the legacy `gitdesktop` link when it's ours (ownership-
+        // checked) — both are links GitDesktop created, so both are ours to
+        // reverse. Best-effort: a legacy link owned by a different install is
+        // left untouched.
+        let legacy = legacy_link_path()?;
+        if owned_by_us(&legacy, &exe) {
+            let _ = std::fs::remove_file(&legacy);
+        }
         let mut status = status_impl()?;
-        status.note = Some("Removed the gitdesktop launcher.".into());
+        status.note = Some("Removed the gitdesktop-mcp launcher.".into());
         Ok(status)
     }
 }
@@ -482,10 +595,7 @@ mod windows_path_tests {
         // Removing an absent dir is a no-op.
         assert_eq!(path_with_dir_removed(r"C:\Windows", DIR), r"C:\Windows");
         // Removing our dir never introduces a `;;` of its own.
-        assert_eq!(
-            path_with_dir_removed(&format!(r"A;{DIR};B"), DIR),
-            "A;B"
-        );
+        assert_eq!(path_with_dir_removed(&format!(r"A;{DIR};B"), DIR), "A;B");
     }
 }
 
@@ -513,7 +623,10 @@ mod windows_registry_tests {
         write_path_value(&key, seeded, REG_EXPAND_SZ).expect("seed write");
         let (val, vtype) = read_path_value(&key).expect("read seeded");
         assert_eq!(val, seeded, "%VAR% must survive the round-trip unexpanded");
-        assert!(matches!(vtype, REG_EXPAND_SZ), "type preserved: got {vtype:?}");
+        assert!(
+            matches!(vtype, REG_EXPAND_SZ),
+            "type preserved: got {vtype:?}"
+        );
 
         // Append our dir at the same type — the actual install mutation.
         let dir = r"C:\Users\me\AppData\Local\GitDesktop";
@@ -528,6 +641,7 @@ mod windows_registry_tests {
         let (_, sz_type) = read_path_value(&key).expect("read sz");
         assert!(matches!(sz_type, REG_SZ), "type honored: got {sz_type:?}");
 
-        hkcu.delete_subkey_all(SCRATCH).expect("cleanup scratch key");
+        hkcu.delete_subkey_all(SCRATCH)
+            .expect("cleanup scratch key");
     }
 }

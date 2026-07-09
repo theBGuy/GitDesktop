@@ -12,6 +12,7 @@ mod hooks;
 mod instructions;
 mod local_prs;
 mod mcp;
+mod mcp_launcher;
 mod mcp_server;
 mod oplog;
 mod path_launcher;
@@ -56,6 +57,17 @@ pub fn run() {
                     .plugin(tauri_plugin_updater::Builder::new().build())?;
                 tray::setup_tray(app.handle())?;
                 tray::init_window_title(app.handle());
+                // On Windows, keep the managed MCP launcher copy fresh after an
+                // update — but only if it already exists (lazy: never-used ⇒
+                // never copied). Fire-and-forget so startup never blocks on the
+                // ~50MB copy; a stale copy still serves running sessions.
+                #[cfg(windows)]
+                {
+                    let version = app.package_info().version.to_string();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        mcp_launcher::refresh_if_present(&version);
+                    });
+                }
             }
             Ok(())
         })
@@ -535,7 +547,7 @@ pub fn run() {
             fsops::open_with_program,
             fsops::detect_editors,
             fsops::detect_terminals,
-            fsops::app_exe_path,
+            mcp_launcher::mcp_launcher_path,
             path_launcher::path_launcher_status,
             path_launcher::path_launcher_install,
             path_launcher::path_launcher_remove,
@@ -557,6 +569,8 @@ pub fn run() {
             mcp::discover_mcp_servers,
             mcp::mcp_json_write,
             mcp::mcp_global_install,
+            mcp::mcp_global_status,
+            mcp::mcp_global_remove,
             instructions::read_repo_instructions,
             instructions::read_repo_ai_ignore,
             instructions::read_repo_branch_rules,

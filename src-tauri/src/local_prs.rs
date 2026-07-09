@@ -51,7 +51,7 @@ use serde_json::{Map, Value};
 use crate::error::{AppError, AppResult};
 
 /// The Tauri bundle identifier — the app-data subdir the store plugin writes under.
-const APP_IDENTIFIER: &str = "com.thebguy.gitdesktop";
+pub(crate) const APP_IDENTIFIER: &str = "com.thebguy.gitdesktop";
 /// The store filename (always the real name; the cold-start alias is GUI-only).
 const STORE_FILE: &str = "local-prs.json";
 

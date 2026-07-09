@@ -15,9 +15,11 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { copyText } from "@/lib/clipboard";
 import {
-  appExePath,
   mcpGlobalInstall,
+  mcpGlobalRemove,
+  mcpGlobalStatus,
   mcpJsonWrite,
+  mcpLauncherPath,
   type PathLauncherStatus,
   pathLauncherInstall,
   pathLauncherRemove,
@@ -50,6 +52,11 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
   const [confirmTarget, setConfirmTarget] = useState<InstallTarget | null>(
     null,
   );
+  // Which global client is mid-removal — parallel to `busyTarget` (which tracks
+  // installs) so per-row Install/Reinstall/Remove disable each other.
+  const [removingClient, setRemovingClient] = useState<
+    "claude" | "copilot" | null
+  >(null);
   // The command-line launcher: is `gitdesktop` on PATH, and did we put it there?
   // Only fetched while the disclosure is open (it reads the registry / $PATH).
   const queryClient = useQueryClient();
@@ -59,13 +66,53 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
     enabled: open,
   });
   const [pathBusy, setPathBusy] = useState(false);
-  // The command is this app's own executable; resolved once (it can't change
-  // mid-session). Falls back to a bare name only while the path is loading.
-  const { data: exePath } = useQuery({
-    queryKey: ["app-exe-path"],
-    queryFn: appExePath,
+  // The command is the managed MCP launcher (an update-safe copy of the app
+  // that isn't file-locked by the installed binary). Resolving it ensures the
+  // copy exists, so only fetch it once the disclosure is open — opening is the
+  // lazy-create trigger; merely mounting Settings must not write the copy.
+  const {
+    data: launcherPath,
+    isPending: launcherPathPending,
+    error: launcherPathError,
+  } = useQuery({
+    queryKey: ["mcp-launcher-path"],
+    queryFn: mcpLauncherPath,
     staleTime: Number.POSITIVE_INFINITY,
+    enabled: open,
   });
+  // Per-client global-install state (Claude Code / Copilot): is `gitdesktop` in
+  // each client's user config, and does it point at the CURRENT launcher? Only
+  // fetched while the disclosure is open (it shells out to each CLI). Refetched
+  // after any successful install/reinstall/remove so the rows stay authoritative.
+  const { data: globalStatus, isLoading: globalStatusLoading } = useQuery({
+    queryKey: ["mcp-global-status"],
+    queryFn: mcpGlobalStatus,
+    enabled: open,
+  });
+  // Actionable message when the launcher can't be prepared (e.g. antivirus
+  // quarantine) — surface it, never emit a config against a wrong/absent path.
+  const launcherErrorMessage = launcherPathError
+    ? launcherPathError instanceof Error
+      ? launcherPathError.message
+      : String(launcherPathError)
+    : null;
+  // No config that embeds the absolute launcher path may be emitted until that
+  // path resolves: writing a stale/absent path silently keeps locking the old
+  // binary. The global installs (Claude Code / Copilot) ALWAYS embed it, so they
+  // gate on this unconditionally.
+  const launcherDisabledReason = launcherPathPending
+    ? "Preparing the MCP launcher…"
+    : launcherErrorMessage;
+  // Copy / Write emit `entry`, whose command in SHAREABLE mode is the constant
+  // `${GITDESKTOP_BIN:-gitdesktop-mcp}` — independent of the local launcher, so a
+  // pending/failed local ensure must not block the one path that provably works.
+  // Only personal mode embeds the absolute path and thus needs the launcher gate.
+  const entryDisabledReason = shareable ? null : launcherDisabledReason;
+  // The replace-confirm re-runs the SAME emit as the button that opened it, so it
+  // must share that button's gate: `project` follows the shareable-aware entry
+  // gate; the global targets always embed the launcher path.
+  const confirmDisabledReason =
+    confirmTarget === "project" ? entryDisabledReason : launcherDisabledReason;
 
   // Single source of truth for both Copy and Write — the exact entry that gets
   // merged into .mcp.json under `mcpServers.gitdesktop`.
@@ -76,15 +123,21 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
     if (allowWrite) args.push("--allow-write");
     if (allowRemoteWrite) args.push("--allow-remote-write");
     return {
-      command: shareable
-        ? "${GITDESKTOP_BIN:-gitdesktop}"
-        : (exePath ?? "gitdesktop"),
+      command: shareable ? "${GITDESKTOP_BIN:-gitdesktop-mcp}" : launcherPath,
       args,
     };
-  }, [shareable, allowWrite, allowRemoteWrite, repoPath, exePath]);
+  }, [shareable, allowWrite, allowRemoteWrite, repoPath, launcherPath]);
 
+  // The snippet is display-only: while the launcher path is still resolving,
+  // `entry.command` is undefined, so show a muted "…" placeholder rather than a
+  // JSON object with a missing command line. Emission (Copy/Write) is disabled
+  // in that state, so the real `entry` — never the placeholder — is what writes.
   const snippet = JSON.stringify(
-    { mcpServers: { gitdesktop: entry } },
+    {
+      mcpServers: {
+        gitdesktop: { ...entry, command: entry.command ?? "…" },
+      },
+    },
     null,
     2,
   );
@@ -118,10 +171,13 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
     ];
     if (allowWrite) args.push("--allow-write");
     if (allowRemoteWrite) args.push("--allow-remote-write");
-    return { command: exePath ?? "gitdesktop", args };
+    return { command: launcherPath, args };
   }
 
-  function installSuccessToast(target: InstallTarget) {
+  // `replaced` = an existing entry was overwritten (reinstall/migrate), so the
+  // global toast reads honestly instead of "Added". Project (.mcp.json) toasts
+  // are unaffected by this distinction.
+  function installSuccessToast(target: InstallTarget, replaced: boolean) {
     if (target === "project") {
       toast.success(
         shareable
@@ -132,7 +188,9 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
     }
     const client = target === "claude" ? "Claude Code" : "Copilot";
     toast.success(
-      `Added gitdesktop to ${client} — available in all your projects (restart the client).`,
+      replaced
+        ? `Updated gitdesktop in ${client} — points at this launcher now (restart the client).`
+        : `Added gitdesktop to ${client} — available in all your projects (restart the client).`,
     );
   }
 
@@ -148,6 +206,10 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
         result = await mcpJsonWrite(repoPath as string, entry, overwrite);
       } else {
         const { command, args } = globalEntry(target);
+        // A global install embeds the absolute launcher path; if it hasn't
+        // resolved yet (or failed to prepare) there's nothing safe to write.
+        // The buttons are gated on this too — this is the type-level backstop.
+        if (command === undefined) return;
         result = await mcpGlobalInstall(target, command, args, overwrite);
       }
       if (result.existed && !result.written) {
@@ -155,12 +217,140 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
         return;
       }
       setConfirmTarget(null);
-      installSuccessToast(target);
+      installSuccessToast(target, result.existed);
+      // A global install/reinstall changed a client's user config — refetch the
+      // per-client rows so their installed/current state reflects it.
+      if (target !== "project") {
+        queryClient.invalidateQueries({ queryKey: ["mcp-global-status"] });
+      }
     } catch (e) {
       toastError(e);
     } finally {
       setBusyTarget(null);
     }
+  }
+
+  // Remove the global `gitdesktop` entry from a client's user config — one-click
+  // and reversible (re-installable), so no confirm dialog (matches the launcher
+  // section's Remove). Refetches the rows on success.
+  async function removeGlobal(client: "claude" | "copilot") {
+    if (removingClient || busyTarget) return;
+    setRemovingClient(client);
+    try {
+      await mcpGlobalRemove(client);
+      toast.success(
+        `Removed gitdesktop from ${client === "claude" ? "Claude Code" : "Copilot"}.`,
+      );
+      queryClient.invalidateQueries({ queryKey: ["mcp-global-status"] });
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setRemovingClient(null);
+    }
+  }
+
+  // One per-client global-install status row (Claude Code / Copilot), mirroring
+  // the Command-line launcher section's idiom below: a label + contextual action
+  // on the right, a status line underneath. Install/Reinstall embed the absolute
+  // launcher path so they gate on `launcherDisabledReason`; Remove doesn't need
+  // the path (it must work even when the launcher errored) and only blocks while
+  // an install/remove for this row is in flight.
+  function globalRow(client: "claude" | "copilot") {
+    const label = client === "claude" ? "Claude Code" : "Copilot";
+    const status = globalStatus?.[client];
+    const installing = busyTarget === client;
+    const removing = removingClient === client;
+    // Any global install/remove (either row) disables every row's actions, so a
+    // second op can't race a config write. Install/Reinstall additionally need
+    // the launcher path; Remove does not (it must work in the AV-error case).
+    const anyBusy = busyTarget !== null || removingClient !== null;
+    // Until the status query resolves, the row's action label ("Install" vs
+    // "Reinstall") isn't yet known, so hold every action rather than show a
+    // possibly-wrong one next to the "Checking…" line.
+    const rowLoadingReason = globalStatusLoading
+      ? "Checking the current install state…"
+      : null;
+    const busyReason = anyBusy
+      ? "Waiting for the current operation to finish."
+      : null;
+    // Remove doesn't embed the launcher path, so it's exempt from that gate.
+    const removeReason = rowLoadingReason ?? busyReason;
+    // Install/Reinstall embed the absolute launcher path, so they additionally
+    // gate on the launcher being ready.
+    const installReason = rowLoadingReason ?? busyReason ?? launcherDisabledReason;
+    return (
+      <div className="space-y-1" key={client}>
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs font-medium">{label}</span>
+          <div className="flex items-center gap-2">
+            {status?.installed && (
+              // A title on a natively-disabled button never surfaces, so wrap it.
+              <span title={removeReason ?? undefined}>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  disabled={removeReason !== null}
+                  onClick={() => removeGlobal(client)}
+                >
+                  {removing ? (
+                    <>
+                      <Spinner className="size-3" /> Removing…
+                    </>
+                  ) : (
+                    "Remove"
+                  )}
+                </Button>
+              </span>
+            )}
+            {/* A title on a natively-disabled button never surfaces, so wrap it.
+                Install (new) and Reinstall (migrate a stale/other entry) share
+                the same overwrite-confirm-on-existing flow. */}
+            <span title={installReason ?? undefined}>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={installReason !== null}
+                onClick={() => install(client, false)}
+              >
+                {installing ? (
+                  <>
+                    <Spinner className="size-3" />{" "}
+                    {status?.installed && !status.current
+                      ? "Reinstalling…"
+                      : "Adding…"}
+                  </>
+                ) : status?.installed && !status.current ? (
+                  "Reinstall"
+                ) : (
+                  "Install"
+                )}
+              </Button>
+            </span>
+          </div>
+        </div>
+        {globalStatusLoading ? (
+          <p className="text-xs text-muted-foreground">Checking…</p>
+        ) : status?.installed ? (
+          status.current ? (
+            <p className="flex items-center gap-1.5 text-xs text-success">
+              <CheckIcon className="shrink-0" />
+              <span>Installed — uses this launcher.</span>
+            </p>
+          ) : (
+            <p className="text-xs text-warning">
+              Installed — points at a different executable (an older install or
+              custom entry). Reinstall to use this launcher.
+            </p>
+          )
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            Not in {label}'s user config.
+          </p>
+        )}
+      </div>
+    );
   }
 
   // Run an install/remove and fold the authoritative result back into the cache.
@@ -227,7 +417,7 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
             </label>
             <p className="text-xs text-muted-foreground">
               {shareable
-                ? "Portable paths — teammates set GITDESKTOP_BIN to their install path, or add gitdesktop to their PATH (see below)."
+                ? "Portable paths — teammates set GITDESKTOP_BIN to their launcher path, or add gitdesktop-mcp to their PATH (see below)."
                 : "Absolute paths — works on this machine only. Consider gitignoring .mcp.json."}
             </p>
           </div>
@@ -267,30 +457,43 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
               Paste into your client's MCP config
             </span>
             <div className="flex items-center gap-2">
-              <Button type="button" variant="ghost" size="sm" onClick={copy}>
-                {copied ? (
-                  <>
-                    <CheckIcon data-icon="inline-start" /> Copied
-                  </>
-                ) : (
-                  <>
-                    <CopyIcon data-icon="inline-start" /> Copy
-                  </>
-                )}
-              </Button>
               {/* A title on a natively-disabled button never surfaces, so wrap it. */}
+              <span title={entryDisabledReason ?? undefined}>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  disabled={entryDisabledReason !== null}
+                  onClick={copy}
+                >
+                  {copied ? (
+                    <>
+                      <CheckIcon data-icon="inline-start" /> Copied
+                    </>
+                  ) : (
+                    <>
+                      <CopyIcon data-icon="inline-start" /> Copy
+                    </>
+                  )}
+                </Button>
+              </span>
               <span
                 title={
-                  repoPath
+                  entryDisabledReason ??
+                  (repoPath
                     ? undefined
-                    : "Open a repository to write its .mcp.json"
+                    : "Open a repository to write its .mcp.json")
                 }
               >
                 <Button
                   type="button"
                   variant="outline"
                   size="sm"
-                  disabled={!repoPath || busyTarget !== null}
+                  disabled={
+                    !repoPath ||
+                    busyTarget !== null ||
+                    entryDisabledReason !== null
+                  }
                   onClick={() => install("project", false)}
                 >
                   {busyTarget === "project" ? (
@@ -304,55 +507,33 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
               </span>
             </div>
           </div>
+          {launcherErrorMessage && (
+            <p className="text-xs text-warning">
+              Couldn't prepare the MCP launcher: {launcherErrorMessage}
+            </p>
+          )}
           <pre className="overflow-x-auto rounded border bg-muted/40 p-3 font-mono text-[11px] leading-relaxed">
             {snippet}
           </pre>
           <p className="text-xs text-muted-foreground">{modeNote}</p>
+          <p className="text-xs text-muted-foreground">
+            Older configs that point at the app executable keep working —
+            re-emitting here switches them to the update-safe launcher.
+          </p>
 
-          {/* Install globally — one click into a client's user config (all
+          {/* Install globally — per-client rows into a client's user config (all
               projects), via its own CLI. Uses a project-aware --repo so a single
-              global entry follows whatever repo the client opens. */}
-          <div className="mt-1 space-y-1.5 border-t pt-3">
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-xs font-medium">
-                Install globally — all projects
-              </span>
-              <div className="flex items-center gap-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  disabled={busyTarget !== null}
-                  onClick={() => install("claude", false)}
-                >
-                  {busyTarget === "claude" ? (
-                    <>
-                      <Spinner className="size-3" /> Adding…
-                    </>
-                  ) : (
-                    "Claude Code"
-                  )}
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  disabled={busyTarget !== null}
-                  onClick={() => install("copilot", false)}
-                >
-                  {busyTarget === "copilot" ? (
-                    <>
-                      <Spinner className="size-3" /> Adding…
-                    </>
-                  ) : (
-                    "Copilot"
-                  )}
-                </Button>
-              </div>
-            </div>
+              global entry follows whatever repo the client opens. Each row shows
+              installed state and offers Install / Reinstall / Remove. */}
+          <div className="mt-1 space-y-2 border-t pt-3">
+            <span className="text-xs font-medium">
+              Install globally — all projects
+            </span>
+            {globalRow("claude")}
+            {globalRow("copilot")}
             <p className="text-xs text-muted-foreground">
-              Adds gitdesktop to the client's user config via its CLI, so it's
-              in every project — no per-repo{" "}
+              Adds gitdesktop to the client's user config via its CLI, so it's in
+              every project — no per-repo{" "}
               <code className="font-mono">.mcp.json</code>. The write toggles
               above carry over.
             </p>
@@ -408,13 +589,13 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
                 <p className="flex items-center gap-1.5 text-xs text-success">
                   <CheckIcon className="shrink-0" />
                   <span>
-                    gitdesktop is on your PATH
+                    gitdesktop-mcp is on your PATH
                     {!launcher.managed && " — added outside GitDesktop"}
                   </span>
                 </p>
               ) : (
                 <p className="text-xs text-muted-foreground">
-                  Make <code className="font-mono">gitdesktop</code> runnable
+                  Make <code className="font-mono">gitdesktop-mcp</code> runnable
                   from any terminal, so the command above works without a full
                   path.
                 </p>
@@ -452,20 +633,27 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
                 >
                   Cancel
                 </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  disabled={busyTarget !== null}
-                  onClick={() => confirmTarget && install(confirmTarget, true)}
-                >
-                  {busyTarget !== null ? (
-                    <>
-                      <Spinner className="size-3" /> Replacing…
-                    </>
-                  ) : (
-                    "Replace entry"
-                  )}
-                </Button>
+                {/* A title on a natively-disabled button never surfaces, so wrap it. */}
+                <span title={confirmDisabledReason ?? undefined}>
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={
+                      busyTarget !== null || confirmDisabledReason !== null
+                    }
+                    onClick={() =>
+                      confirmTarget && install(confirmTarget, true)
+                    }
+                  >
+                    {busyTarget !== null ? (
+                      <>
+                        <Spinner className="size-3" /> Replacing…
+                      </>
+                    ) : (
+                      "Replace entry"
+                    )}
+                  </Button>
+                </span>
               </DialogFooter>
             </DialogContent>
           </Dialog>
