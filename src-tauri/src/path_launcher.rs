@@ -309,7 +309,7 @@ mod platform {
             managed: true,
             target: dir,
             warning: None,
-            note: Some("Added to your PATH — open a new terminal to use gitdesktop.".into()),
+            note: Some("Added to your PATH — open a new terminal to use gitdesktop-mcp.".into()),
         })
     }
 

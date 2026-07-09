@@ -81,8 +81,9 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
     enabled: open,
   });
   // Per-client global-install state (Claude Code / Copilot): is `gitdesktop` in
-  // each client's user config, and does it point at the CURRENT launcher? Only
-  // fetched while the disclosure is open (it shells out to each CLI). Refetched
+  // each client's user config, and does it point at the CURRENT launcher? A
+  // read-only probe of each client's config file (no CLI spawn, no launcher
+  // ensure); only fetched while the disclosure is open. Refetched
   // after any successful install/reinstall/remove so the rows stay authoritative.
   const { data: globalStatus, isLoading: globalStatusLoading } = useQuery({
     queryKey: ["mcp-global-status"],
@@ -279,7 +280,7 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
     // gate on the launcher being ready.
     const installReason = rowLoadingReason ?? busyReason ?? launcherDisabledReason;
     return (
-      <div className="space-y-1" key={client}>
+      <div className="space-y-1">
         <div className="flex items-center justify-between gap-2">
           <span className="text-xs font-medium">{label}</span>
           <div className="flex items-center gap-2">

@@ -832,16 +832,18 @@ pub struct McpGlobalStatus {
     pub copilot: McpGlobalClientStatus,
 }
 
-/// Path-normalized comparison for the launcher-path check: case-insensitive,
-/// `/` vs `\` insensitive, trailing-separator insensitive. Mirrors
-/// `path_launcher::norm` (which is `#[cfg(windows)]`-private, so it's re-derived
-/// locally here) and additionally folds interior separators so a config written
-/// with `/` still matches a resolved path spelled with `\`.
+/// Path-normalized comparison for the launcher-path check: trailing-separator
+/// insensitive and `/` vs `\` insensitive (unconditional — the separator fold is
+/// applied to both sides, so it stays compare-safe everywhere). Case folding is
+/// gated to case-insensitive filesystems (Windows, macOS); on Linux two paths
+/// differing only in case are genuinely distinct, so case is preserved there.
+/// Mirrors `path_launcher::norm` (which is `#[cfg(windows)]`-private, so it's
+/// re-derived locally here) with the interior-separator fold added.
 fn norm_launcher_path(p: &str) -> String {
-    p.trim()
-        .trim_end_matches(['\\', '/'])
-        .replace('/', "\\")
-        .to_ascii_lowercase()
+    let normalized = p.trim().trim_end_matches(['\\', '/']).replace('/', "\\");
+    #[cfg(any(windows, target_os = "macos"))]
+    let normalized = normalized.to_ascii_lowercase();
+    normalized
 }
 
 /// Classify a client's user-config JSON into an [`McpGlobalClientStatus`] for the
@@ -934,7 +936,7 @@ pub async fn mcp_global_status(app: tauri::AppHandle) -> AppResult<McpGlobalStat
 /// entry that doesn't exist lets the CLI's own behavior/error pass through (the
 /// UI only offers Remove when installed; a race just yields the CLI's message).
 #[tauri::command]
-pub async fn mcp_global_remove(client: String, _app: tauri::AppHandle) -> AppResult<()> {
+pub async fn mcp_global_remove(client: String) -> AppResult<()> {
     let (stdout, stderr, code) = match client.as_str() {
         "claude" => claude_global_remove().await?,
         "copilot" => copilot_global_remove().await?,
@@ -1193,14 +1195,28 @@ mod tests {
     }
 
     #[test]
-    fn classify_current_is_normalization_robust() {
-        // Config command differs from the launcher only by case, separator style,
-        // and a trailing separator — still the current launcher.
-        let configured = r"c:/Users/me/AppData/Local/com.thebguy.gitdesktop/bin/gitdesktop-mcp.exe";
+    fn classify_current_is_separator_and_trailing_robust() {
+        // Config command differs from the launcher only by separator style and a
+        // trailing separator (same case) — matches on every platform.
+        let configured =
+            r"C:/Users/me/AppData/Local/com.thebguy.gitdesktop/bin/gitdesktop-mcp.exe/";
         let doc = json!({ "mcpServers": { "gitdesktop": { "command": configured } } });
         let s = classify_global_entry(&doc, LAUNCHER);
         assert!(s.installed);
-        assert!(s.current, "case/separator differences must still match");
+        assert!(s.current, "separator/trailing differences must still match");
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn classify_current_is_case_robust_on_case_insensitive_fs() {
+        // On case-insensitive filesystems a case-only (plus separator) difference
+        // is still the current launcher. (On Linux those paths are distinct, so
+        // this is gated — see `norm_launcher_path`.)
+        let configured = r"c:/users/ME/appdata/local/com.thebguy.gitdesktop/bin/gitdesktop-mcp.exe";
+        let doc = json!({ "mcpServers": { "gitdesktop": { "command": configured } } });
+        let s = classify_global_entry(&doc, LAUNCHER);
+        assert!(s.installed);
+        assert!(s.current, "case differences must match on case-insensitive fs");
     }
 
     #[test]
@@ -1232,7 +1248,25 @@ mod tests {
     }
 
     #[test]
-    fn norm_launcher_path_folds_case_separators_and_trailing() {
+    fn norm_launcher_path_folds_separators_and_trailing() {
+        // Separator style + trailing separator + surrounding whitespace fold
+        // unconditionally, so identically-cased inputs normalize equal on every
+        // platform. (Asserted as an equality invariant rather than a literal,
+        // since the case of the output is platform-dependent.)
+        assert_eq!(
+            norm_launcher_path(r"C:\Foo\Bar\"),
+            norm_launcher_path("C:/Foo/Bar")
+        );
+        assert_eq!(
+            norm_launcher_path("  C:\\Foo/Bar/  "),
+            norm_launcher_path(r"C:\Foo\Bar")
+        );
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn norm_launcher_path_folds_case_on_case_insensitive_fs() {
+        // Case folding is gated to case-insensitive filesystems.
         assert_eq!(
             norm_launcher_path(r"C:\Foo\Bar\"),
             norm_launcher_path(r"c:/foo/bar")
