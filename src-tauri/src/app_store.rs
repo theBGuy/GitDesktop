@@ -66,15 +66,12 @@ fn parse_ignore_patterns(raw: &str) -> Vec<String> {
         .collect()
 }
 
-/// Read the AI-generation settings the recipe tools need. A missing file, missing
-/// keys, or wrong-typed values all fall back to empty per-field defaults — this
-/// never returns an error (settings are optional context, not a hard dependency).
-pub(crate) fn read_ai_generation_settings() -> AiGenSettings {
-    let Some(settings) = store_path().and_then(|p| read_settings_object(&p)) else {
-        return AiGenSettings::default();
-    };
-    // Type-check each consumed field independently: a wrong-typed field defaults
-    // on its own without poisoning the others (untrusted-JSON discipline).
+/// Extract the AI-generation fields from an already-read `"settings"` object.
+/// Type-checks each consumed field independently: a wrong-typed field defaults on
+/// its own without poisoning the others (untrusted-JSON discipline). This is the
+/// single source of truth for the parse — production calls it after reading the
+/// file, tests call it (via `read_from`) directly, so the two never drift.
+fn parse_ai_generation_settings(settings: &Value) -> AiGenSettings {
     let global_instructions = settings
         .get("globalInstructions")
         .and_then(Value::as_str)
@@ -89,6 +86,16 @@ pub(crate) fn read_ai_generation_settings() -> AiGenSettings {
         global_instructions,
         ai_ignore_patterns,
     }
+}
+
+/// Read the AI-generation settings the recipe tools need. A missing file, missing
+/// keys, or wrong-typed values all fall back to empty per-field defaults — this
+/// never returns an error (settings are optional context, not a hard dependency).
+pub(crate) fn read_ai_generation_settings() -> AiGenSettings {
+    let Some(settings) = store_path().and_then(|p| read_settings_object(&p)) else {
+        return AiGenSettings::default();
+    };
+    parse_ai_generation_settings(&settings)
 }
 
 #[cfg(test)]
@@ -110,25 +117,13 @@ mod tests {
     }
 
     /// The shared read+extract the public fn wraps (minus the fixed path), so a
-    /// test can point it at a temp file.
+    /// test can point it at a temp file. Calls the SAME `parse_ai_generation_settings`
+    /// production does, so a change to the parse is exercised by these tests.
     fn read_from(path: &Path) -> AiGenSettings {
         let Some(settings) = read_settings_object(path) else {
             return AiGenSettings::default();
         };
-        let global_instructions = settings
-            .get("globalInstructions")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let ai_ignore_patterns = settings
-            .get("aiIgnorePatterns")
-            .and_then(Value::as_str)
-            .map(parse_ignore_patterns)
-            .unwrap_or_default();
-        AiGenSettings {
-            global_instructions,
-            ai_ignore_patterns,
-        }
+        parse_ai_generation_settings(&settings)
     }
 
     #[test]

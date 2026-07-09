@@ -277,17 +277,22 @@ impl ServerHandler for GitDesktopMcp {
              tracker is deprecated, so the issue tools (list/get/create/comment/close/reopen) work \
              on GitHub and GitLab only and return an actionable error on a Bitbucket repo. \
              Capabilities are opt-in in an escalating ladder — each tier is a separate flag and \
-             enabling one never grants another: (0) READ tools (status, log, diffs, PRs, issues, \
-             CI) are always available and are the default; (1) --allow-write enables the local-PR \
-             write tools (create/comment/status/approve — GitDesktop's own app-data review \
-             artifacts, never git or remote writes); (2) --allow-remote-write enables the forge \
-             remote-write tools (create_issue, comment_issue, close_issue, reopen_issue, \
-             comment_pull_request) — REAL writes to the repository's forge under the authenticated \
-             forge identity, so they post/create publicly and are not freely reversible; \
-             (3) --allow-git-write enables RECOVERABLE local-git mutations of the bound repository \
-             (stage/commit/branch/push/…); (4) --allow-destructive is additionally required (on \
+             enabling one never grants another: (0) READ tools (status, log, diffs, blame, file \
+             history, PRs, issues, CI, releases, discussions) are always available and are the \
+             default. (1) --allow-write enables GitDesktop's own app-data write tools: local PRs \
+             AND local issues (create/comment/status and equivalents). These are review artifacts \
+             stored in GitDesktop's app data — never git commits and never remote/forge writes. \
+             (2) --allow-remote-write enables the full forge remote-write surface under the \
+             authenticated forge identity: the PR lifecycle (create/merge/edit), reviewers, \
+             labels, assignees and approvals, review threads, CI actions, releases, GitHub \
+             discussions, and issue writes (create/comment/close/reopen). These are REAL, publicly \
+             visible writes to the repository's forge and are not freely reversible. (3) \
+             --allow-git-write enables RECOVERABLE local-git mutations of the bound repository \
+             (stage/commit/branch/push/…). (4) --allow-destructive is additionally required (on \
              top of --allow-git-write) for IRRECOVERABLE local-git operations such as \
-             discard/reset/force-push."
+             discard/reset/force-push. Separately, a small set of generation-recipe tools (which \
+             assemble the context and prompt for commit-message / branch-name generation) is \
+             always available and performs no writes."
                 .into(),
         );
         info

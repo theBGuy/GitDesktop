@@ -116,8 +116,10 @@ impl GitDesktopMcp {
         description = "List pull requests from the repository's forge (GitHub, GitLab, or \
                        Bitbucket, per its remote). `state` is \"open\" (default) or \"closed\". \
                        Without `limit`, returns the provider default (GitHub ~30; GitLab and \
-                       Bitbucket a full page); pass `limit` to raise or lower that cap. Requires \
-                       the forge's authenticated CLI/credential. Returns JSON."
+                       Bitbucket a full page); pass `limit` to raise or lower that cap. Per-call \
+                       ceiling: GitHub 1000, GitLab 100, Bitbucket 50 — a larger `limit` returns \
+                       the ceiling (no pagination). Requires the forge's authenticated \
+                       CLI/credential. Returns JSON."
     )]
     async fn list_pull_requests(
         &self,
@@ -198,8 +200,9 @@ impl GitDesktopMcp {
                        Bitbucket issues aren't supported — its native tracker is deprecated). \
                        `state` is \"open\" (default) or \"closed\". Without `limit`, returns the \
                        provider default (GitHub ~30; GitLab a full page); pass `limit` to raise or \
-                       lower that cap. Requires the forge's authenticated CLI/credential. Returns \
-                       JSON."
+                       lower that cap. Per-call ceiling: GitHub 1000, GitLab 100 — a larger \
+                       `limit` returns the ceiling (no pagination). Requires the forge's \
+                       authenticated CLI/credential. Returns JSON."
     )]
     async fn list_issues(
         &self,

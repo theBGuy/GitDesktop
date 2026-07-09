@@ -944,9 +944,12 @@ pub async fn gh_pr_list(
     };
     // `gh pr list` defaults to 30; thread an explicit `--limit` when the caller asks
     // for a different cap (existing callers pass `None` → gh's default is untouched).
+    // Clamp to gh's accepted `--limit` range (1..=1000): `--limit 0` errors at runtime,
+    // and this keeps the MCP `limit` behavior consistent with the other providers, which
+    // clamp to their own page ceilings rather than erroring.
     let limit_str;
     if let Some(n) = limit {
-        limit_str = n.to_string();
+        limit_str = n.clamp(1, 1000).to_string();
         args.push("--limit");
         args.push(&limit_str);
     }

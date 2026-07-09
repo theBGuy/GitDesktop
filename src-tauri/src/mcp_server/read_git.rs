@@ -334,9 +334,18 @@ async fn read_file_core(
                 None,
             ));
         }
-        tokio::fs::read_to_string(&target)
+        // Read bytes so we apply the SAME binary contract as the `git show` branch:
+        // reject NUL-containing content (a valid-UTF-8 file with NULs would sneak past
+        // `read_to_string`), then reject non-UTF-8 as "binary" too — mapping it to the
+        // same invalid-params error rather than an internal error.
+        let bytes = tokio::fs::read(&target)
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?
+            .map_err(|_| McpError::invalid_params("file not found in repository", None))?;
+        if bytes.contains(&0u8) {
+            return Err(McpError::invalid_params("file appears to be binary", None));
+        }
+        String::from_utf8(bytes)
+            .map_err(|_| McpError::invalid_params("file appears to be binary", None))?
     };
 
     Ok(cap_head(raw, READ_FILE_MAX_BYTES))

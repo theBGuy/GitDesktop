@@ -432,7 +432,9 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<CommentIssueArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
-        crate::forge::forge_issue_comment(self.repo.clone(), args.number, args.body)
+        // Append the attribution footer so the comment is identifiable as ours.
+        let body = format!("{}{GD_COMMENT_FOOTER}", args.body);
+        crate::forge::forge_issue_comment(self.repo.clone(), args.number, body)
             .await
             .map_err(app_err)?;
         json_result(&serde_json::json!({ "issue": args.number, "action": "commented" }))

@@ -67,7 +67,7 @@ struct NewLocalIssue {
 /// Resolve the absolute path of the `local-issues.json` the frontend store writes.
 /// Mirrors `tauri-plugin-store` v2's `BaseDirectory::AppData` resolution
 /// (`dirs::data_dir()/<identifier>`) — see the module contract and [`crate::local_prs`].
-pub fn store_path() -> AppResult<PathBuf> {
+pub(crate) fn store_path() -> AppResult<PathBuf> {
     let data = dirs::data_dir()
         .ok_or_else(|| AppError::Command("could not resolve the app-data directory".to_string()))?;
     Ok(data.join(APP_IDENTIFIER).join(STORE_FILE))

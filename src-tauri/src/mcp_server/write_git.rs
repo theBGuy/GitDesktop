@@ -14,8 +14,10 @@
 //! its mutations through `self.state`'s per-repo lock (`run_git_mutating`) so concurrent
 //! MCP calls don't fight over `.git/index.lock`. User-supplied branch/rev/path strings
 //! are rejected with [`ensure_not_flag`] before they reach git argv; `delete_branch`,
-//! `delete_remote_branch`, `rename_branch`, and `checkout_branch` additionally refuse
-//! `gd/session/*` agent-session branches (mutating one breaks session Resume).
+//! `delete_remote_branch`, `checkout_branch`, `create_branch` (name), and `rename_branch`
+//! (both `from` and `to`) additionally refuse `gd/session/*` agent-session branches —
+//! mutating one breaks session Resume, and creating/renaming INTO that namespace would
+//! yield an invisible (UI-filtered) branch.
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content};
@@ -303,7 +305,8 @@ impl GitDesktopMcp {
 
     #[tool(
         description = "Create a branch in the bound repository, optionally checking it out and/or \
-                       starting from a given branch/tag/commit (defaults to HEAD). \
+                       starting from a given branch/tag/commit (defaults to HEAD). Refuses to \
+                       create a GitDesktop agent-session branch (gd/session/*). \
                        Requires --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
@@ -313,6 +316,9 @@ impl GitDesktopMcp {
     ) -> Result<CallToolResult, McpError> {
         self.ensure_git_write()?;
         ensure_not_flag(&args.name, "branch name")?;
+        // Refuse the gd/session/* prefix: every UI surface filters it, so a branch
+        // created there would be invisible (namespace pollution).
+        ensure_not_session_branch(&args.name)?;
         if let Some(from) = &args.from {
             ensure_not_flag(from, "start point")?;
         }
@@ -349,7 +355,8 @@ impl GitDesktopMcp {
 
     #[tool(
         description = "Rename a branch in the bound repository. Refuses to rename a GitDesktop \
-                       agent-session branch (gd/session/*). Requires --allow-git-write.",
+                       agent-session branch (gd/session/*), or to rename INTO that namespace. \
+                       Requires --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn rename_branch(
@@ -359,8 +366,10 @@ impl GitDesktopMcp {
         self.ensure_git_write()?;
         ensure_not_flag(&args.from, "branch name")?;
         ensure_not_flag(&args.to, "branch name")?;
-        // Protect agent-session branches: renaming one breaks session Resume.
+        // Protect agent-session branches: renaming one breaks session Resume, and
+        // renaming INTO gd/session/* would create an invisible (filtered) branch.
         ensure_not_session_branch(&args.from)?;
+        ensure_not_session_branch(&args.to)?;
         crate::git::branches::git_rename_branch_core(
             &self.state,
             self.repo.clone(),
@@ -949,6 +958,40 @@ mod tests {
         assert!(ensure_not_session_branch("main").is_ok());
         // A branch that merely CONTAINS the token but doesn't start with it is fine.
         assert!(ensure_not_session_branch("wip/gd/session/x").is_ok());
+    }
+
+    /// create_branch (name) and rename_branch (to) must also refuse the gd/session/*
+    /// namespace, so an agent can't create an invisible (UI-filtered) branch. The guard
+    /// fires before any repo access, so no real repo is needed.
+    #[tokio::test]
+    async fn session_branch_guard_refuses_creating_and_renaming_into_namespace() {
+        // git_write enabled (4th positional), everything else off.
+        let h = GitDesktopMcp::with_options("/tmp/x".to_string(), false, false, true, false);
+
+        let err = h
+            .create_branch(Parameters(CreateBranchArgs {
+                name: "gd/session/fake".into(),
+                checkout: false,
+                from: None,
+            }))
+            .await
+            .expect_err("create_branch into gd/session/* must be refused");
+        assert!(
+            err.to_string().contains("agent-session branch"),
+            "expected the session-branch refusal, got: {err}"
+        );
+
+        let err = h
+            .rename_branch(Parameters(RenameBranchArgs {
+                from: "feature/x".into(),
+                to: "gd/session/fake".into(),
+            }))
+            .await
+            .expect_err("rename_branch into gd/session/* must be refused");
+        assert!(
+            err.to_string().contains("agent-session branch"),
+            "expected the session-branch refusal, got: {err}"
+        );
     }
 
     /// The session-branch guard is wired into the branch-mutating tools even when the

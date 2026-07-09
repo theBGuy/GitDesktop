@@ -179,6 +179,10 @@ fn strip_binary_sections(diff_text: &str) -> String {
         // A header boundary is a `diff --git ` at the very start or right after a newline.
         let at_start = i == 0;
         let after_newline = i > 0 && bytes[i - 1] == b'\n';
+        // NOTE: `diff_text[i..]` slicing here can NOT panic on a UTF-8 boundary. The
+        // slice only evaluates under the `(at_start || after_newline) &&` short-circuit,
+        // and `i` is either 0 or a position immediately after a single-byte ASCII `\n` —
+        // both are always char boundaries. (Not a UTF-8 bug; don't re-flag.)
         if (at_start || after_newline) && diff_text[i..].starts_with(marker) {
             if i != last {
                 sections.push(&diff_text[last..i]);
@@ -264,6 +268,10 @@ fn split_into_file_sections(diff_text: &str) -> Vec<DiffFileSection<'_>> {
     while i < diff_text.len() {
         let at_start = i == 0;
         let after_newline = i > 0 && bytes[i - 1] == b'\n';
+        // NOTE: `diff_text[i..]` slicing here can NOT panic on a UTF-8 boundary. The
+        // slice only evaluates under the `(at_start || after_newline) &&` short-circuit,
+        // and `i` is either 0 or a position immediately after a single-byte ASCII `\n` —
+        // both are always char boundaries. (Not a UTF-8 bug; don't re-flag.)
         if (at_start || after_newline) && diff_text[i..].starts_with(marker) {
             starts.push(i);
             i += marker.len();
