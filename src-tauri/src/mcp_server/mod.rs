@@ -706,10 +706,10 @@ mod tests {
     }
 
     /// The COMBINED router's tool count must equal the sum of the per-module router
-    /// counts, and currently == 95. Deriving each term from the module's own router
+    /// counts, and currently == 110. Deriving each term from the module's own router
     /// means a package growing a module updates both sides of the equality
     /// automatically — this test never needs editing as modules gain tools.
-    /// (The `== 95` literal is the one line a package updates, and only if it
+    /// (The `== 110` literal is the one line a package updates, and only if it
     /// intends to change the current total.)
     #[test]
     fn combined_router_tool_count_is_sum_of_modules() {
@@ -721,6 +721,6 @@ mod tests {
             + GitDesktopMcp::write_git_router().list_all().len()
             + GitDesktopMcp::generate_router().list_all().len();
         assert_eq!(handler.tool_router.list_all().len(), per_module);
-        assert_eq!(per_module, 95);
+        assert_eq!(per_module, 110);
     }
 }

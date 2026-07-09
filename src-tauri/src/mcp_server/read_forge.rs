@@ -55,6 +55,61 @@ struct TagArg {
     tag: String,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct DiscussionListArgs {
+    /// Optional category node id (from list_discussion_categories) to filter by;
+    /// omit for all categories.
+    #[serde(default)]
+    category: Option<String>,
+}
+
+/// Classify a git host into the neutral provider tag, GitHub-or-not being all that
+/// the discussion gate cares about. Pure so it's unit-testable without a repo —
+/// mirrors the classification `generate::provider_tag` runs (host →
+/// `provider_tag_for_host`), returning whether the host is GitHub.
+///
+/// `None` from `provider_tag_for_host` means an unrecognized host, which the app
+/// treats as GitHub throughout — so it's GitHub here too (the `gh` discussion calls
+/// surface their own actionable error if that guess is wrong).
+fn host_is_github(host: &str, glab_hosts: &[String]) -> bool {
+    matches!(
+        crate::forge::provider_tag_for_host(host, glab_hosts),
+        Some("github") | None
+    )
+}
+
+/// Guard for the GitHub-only discussion tools: resolve the bound repo's provider the
+/// same network-light way `generate::provider_tag` does (origin remote URL → host →
+/// tag) and error honestly on a non-GitHub remote. Every discussion tool calls this
+/// first (write tools AFTER their `--allow-remote-write` gate). Shared by both the
+/// read (`read_forge`) and write (`write_forge`) discussion tools.
+pub(super) async fn ensure_github(repo: &str) -> Result<(), McpError> {
+    // No remote / unparseable URL / unrecognized host → treated as GitHub (the app's
+    // resilient default), so the tool proceeds and the `gh` layer surfaces any real
+    // mismatch. Only a POSITIVELY-identified GitLab/Bitbucket host is refused here.
+    let url = crate::git::remote::git_remote_url(repo.to_string(), "origin".to_string())
+        .await
+        .ok();
+    let host = url.as_deref().and_then(crate::forge::remote_host);
+    if let Some(host) = host {
+        let glab_hosts = crate::forge::glab::known_hosts().await;
+        if !host_is_github(&host, &glab_hosts) {
+            let provider = match crate::forge::provider_tag_for_host(&host, &glab_hosts) {
+                Some("gitlab") => "GitLab",
+                Some("bitbucket") => "Bitbucket",
+                _ => "another provider",
+            };
+            return Err(McpError::invalid_request(
+                format!(
+                    "Discussions are a GitHub feature — this repository's remote is {provider}."
+                ),
+                None,
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[tool_router(router = read_forge_router, vis = "pub(crate)")]
 impl GitDesktopMcp {
     #[tool(
@@ -325,5 +380,81 @@ impl GitDesktopMcp {
             .await
             .map_err(app_err)?;
         json_result_untrusted(&timeline)
+    }
+
+    #[tool(
+        description = "List the repository's discussion categories (GitHub only — GitLab/Bitbucket \
+                       have no discussions; the tool errors on those remotes). Returns each \
+                       category's node id, name, emoji, and whether it accepts answers, plus the \
+                       repo's node id — the category id is required to create_discussion. Returns \
+                       JSON."
+    )]
+    async fn list_discussion_categories(&self) -> Result<CallToolResult, McpError> {
+        ensure_github(&self.repo).await?;
+        let meta = crate::github::discussion::gh_discussion_categories(self.repo.clone())
+            .await
+            .map_err(app_err)?;
+        json_result(&meta)
+    }
+
+    #[tool(
+        description = "List the repository's discussions, newest-updated first (GitHub only — \
+                       GitLab/Bitbucket have no discussions; the tool errors on those remotes). \
+                       Optionally filter by a category node id (see list_discussion_categories). \
+                       Returns JSON."
+    )]
+    async fn list_discussions(
+        &self,
+        Parameters(args): Parameters<DiscussionListArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ensure_github(&self.repo).await?;
+        let discussions =
+            crate::github::discussion::gh_discussion_list(self.repo.clone(), args.category)
+                .await
+                .map_err(app_err)?;
+        json_result_untrusted(&discussions)
+    }
+
+    #[tool(
+        description = "Get a discussion's full thread by number (GitHub only — GitLab/Bitbucket \
+                       have no discussions; the tool errors on those remotes): body, category, \
+                       answer/lock/close state, and every comment with its nested replies (each \
+                       carrying its node id, author, and body). Use a comment's id with \
+                       mark_discussion_answer. Returns JSON."
+    )]
+    async fn get_discussion(
+        &self,
+        Parameters(args): Parameters<NumberArg>,
+    ) -> Result<CallToolResult, McpError> {
+        ensure_github(&self.repo).await?;
+        let discussion =
+            crate::github::discussion::gh_discussion_view(self.repo.clone(), args.number)
+                .await
+                .map_err(app_err)?;
+        json_result_untrusted(&discussion)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The discussion gate's host classification: github.com passes; a known GitLab
+    /// or Bitbucket host is refused; an unrecognized host defaults to GitHub (the
+    /// app's resilient default). Mirrors how `generate::provider_tag` classifies a
+    /// host, minus the live remote read.
+    #[test]
+    fn host_is_github_classifies_by_host() {
+        // No self-managed GitLab hosts configured for this classification.
+        let no_glab_hosts: Vec<String> = Vec::new();
+        assert!(host_is_github("github.com", &no_glab_hosts));
+        // Canonical non-GitHub hosts are refused.
+        assert!(!host_is_github("gitlab.com", &no_glab_hosts));
+        assert!(!host_is_github("bitbucket.org", &no_glab_hosts));
+        // An unrecognized host → treated as GitHub (matches the app-wide default).
+        assert!(host_is_github("git.example.com", &no_glab_hosts));
+        // A host present in glab's known-hosts is a self-managed GitLab → refused.
+        let glab_hosts = vec!["gitlab.acme.com".to_string()];
+        assert!(!host_is_github("gitlab.acme.com", &glab_hosts));
     }
 }

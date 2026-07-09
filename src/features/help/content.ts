@@ -1067,10 +1067,12 @@ Beyond \`--allow-write\` (local PRs and issues, above), **Allow remote write**
 (\`--allow-remote-write\`) lets an agent make **real forge writes** in this repo under your
 authenticated identity (GitHub \`gh\`, GitLab \`glab\`, or a stored Bitbucket token):
 **create, merge, update**, and **close/reopen** pull requests, toggle **draft** state,
-**request reviewers**, **edit labels**, set **assignees** (on issues and PRs), **approve** or
-**withdraw approval**, **reply to** and **resolve** review threads, **rerun/cancel/dispatch**
-CI, **create/update releases**, and **create, comment on, and close/reopen issues**. Issue
-writes cover GitHub and GitLab (not Bitbucket); PR comments cover all three. PR comments an
+**request reviewers**, **edit labels**, set **assignees** (on issues and PRs), **approve**,
+**request changes**, or **withdraw** either, **start**, **reply to**, and **resolve** review
+threads, add or remove **reactions**, **rerun/cancel/dispatch** CI, **create/update releases**,
+**create, comment on, close/reopen**, and set the **milestone** of issues, and — on GitHub —
+**create, comment on, answer, and close/reopen discussions**. Issue
+writes cover GitHub and GitLab (not Bitbucket); discussions are GitHub-only; PR comments cover all three. PR comments an
 agent posts carry a small **Posted by GitDesktop** footer so they're identifiable as
 automated, and on the read side an agent can pull a pull request's full comment set — the
 conversation, review summaries, and the file:line review threads.

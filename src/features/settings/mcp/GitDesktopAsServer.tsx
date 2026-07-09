@@ -472,7 +472,7 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
             </label>
             <p className="text-xs text-muted-foreground">
               {allowRemoteWrite
-                ? "Adds --allow-remote-write — real forge writes under your CLI identity: create, edit, merge, and comment on PRs, manage issues, reviewers, labels and assignees, trigger CI, and manage releases. Separate opt-in from Allow write tools."
+                ? "Adds --allow-remote-write — real forge writes under your CLI identity: create, edit, merge, and comment on PRs, manage issues, reviewers, labels and assignees, trigger CI, manage releases, and manage GitHub discussions. Separate opt-in from Allow write tools."
                 : "No real forge writes — issues and pull requests on the remote are left untouched."}
             </p>
           </div>
