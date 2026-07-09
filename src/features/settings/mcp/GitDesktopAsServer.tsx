@@ -45,6 +45,11 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
   const [shareable, setShareable] = useState(false);
   const [allowWrite, setAllowWrite] = useState(false);
   const [allowRemoteWrite, setAllowRemoteWrite] = useState(false);
+  // Two further, ladder-ordered git-write opt-ins: --allow-git-write (recoverable
+  // repo mutations) and --allow-destructive (irreversible ones — requires git-write
+  // too, so unchecking git-write must also clear destructive).
+  const [allowGitWrite, setAllowGitWrite] = useState(false);
+  const [allowDestructive, setAllowDestructive] = useState(false);
   // One install at a time: `busyTarget` is which is running, `confirmTarget` which
   // is awaiting a replace-confirm. "project" = this repo's .mcp.json;
   // "claude"/"copilot" = that client's global (all-projects) user config.
@@ -123,11 +128,24 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
       : ["mcp", "--repo", repoPath ?? "<path to your repo>"];
     if (allowWrite) args.push("--allow-write");
     if (allowRemoteWrite) args.push("--allow-remote-write");
+    if (allowGitWrite) args.push("--allow-git-write");
+    // --allow-destructive requires git-write; state consistency guarantees
+    // allowGitWrite is true whenever allowDestructive is, but gate on both so a
+    // stray flag can never emit without its prerequisite.
+    if (allowGitWrite && allowDestructive) args.push("--allow-destructive");
     return {
       command: shareable ? "${GITDESKTOP_BIN:-gitdesktop-mcp}" : launcherPath,
       args,
     };
-  }, [shareable, allowWrite, allowRemoteWrite, repoPath, launcherPath]);
+  }, [
+    shareable,
+    allowWrite,
+    allowRemoteWrite,
+    allowGitWrite,
+    allowDestructive,
+    repoPath,
+    launcherPath,
+  ]);
 
   // The snippet is display-only: while the launcher path is still resolving,
   // `entry.command` is undefined, so show a muted "…" placeholder rather than a
@@ -148,6 +166,10 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
   const writeTiers = [
     allowWrite && "local-PR tools (--allow-write)",
     allowRemoteWrite && "remote forge writes (--allow-remote-write)",
+    allowGitWrite && "git writes (--allow-git-write)",
+    allowGitWrite &&
+      allowDestructive &&
+      "destructive git writes (--allow-destructive)",
   ].filter(Boolean);
   const modeNote = writeTiers.length
     ? `Read-write · stdio · ${writeTiers.join(" + ")}.`
@@ -172,6 +194,8 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
     ];
     if (allowWrite) args.push("--allow-write");
     if (allowRemoteWrite) args.push("--allow-remote-write");
+    if (allowGitWrite) args.push("--allow-git-write");
+    if (allowGitWrite && allowDestructive) args.push("--allow-destructive");
     return { command: launcherPath, args };
   }
 
@@ -433,7 +457,7 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
             </label>
             <p className="text-xs text-muted-foreground">
               {allowWrite
-                ? "Adds --allow-write — agents can create, comment on, and approve this repo's local PRs."
+                ? "Adds --allow-write — agents can create, comment on, and approve this repo's local PRs, and create, comment on, and set the status of its local issues (GitDesktop's own app-data, never git or the remote)."
                 : "The server exposes read-only git & forge tools."}
             </p>
           </div>
@@ -448,8 +472,53 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
             </label>
             <p className="text-xs text-muted-foreground">
               {allowRemoteWrite
-                ? "Adds --allow-remote-write — real forge writes under your CLI identity: create, close/reopen, and comment on issues, and comment on PRs (issues on GitHub & GitLab; PR comments on all three). Separate opt-in from Allow write tools."
+                ? "Adds --allow-remote-write — real forge writes under your CLI identity: create, edit, merge, and comment on PRs, manage issues, reviewers, labels and assignees, trigger CI, and manage releases. Separate opt-in from Allow write tools."
                 : "No real forge writes — issues and pull requests on the remote are left untouched."}
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="flex cursor-pointer items-center gap-2 text-xs">
+              <Checkbox
+                checked={allowGitWrite}
+                onCheckedChange={(c) => {
+                  const on = c === true;
+                  setAllowGitWrite(on);
+                  // Destructive requires git-write; turning git-write off must
+                  // drop it too, so no hidden state can emit --allow-destructive.
+                  if (!on) setAllowDestructive(false);
+                }}
+              />
+              Allow git writes
+            </label>
+            <p className="text-xs text-muted-foreground">
+              {allowGitWrite
+                ? "Adds --allow-git-write — agents can mutate this repo's git state: stage/commit, create/checkout/rename branches, push/pull/fetch, stash, merge/rebase, and tags. The recoverable set only — destructive operations stay blocked."
+                : "The repository itself stays untouched — no staging, commits, branches, or pushes."}
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            {/* Destructive requires git-write. A title on a natively-disabled
+                control never surfaces, so wrap the row when it's disabled. */}
+            <span
+              title={
+                allowGitWrite ? undefined : "Requires Allow git writes."
+              }
+            >
+              <label className="flex cursor-pointer items-center gap-2 text-xs">
+                <Checkbox
+                  checked={allowDestructive}
+                  disabled={!allowGitWrite}
+                  onCheckedChange={(c) => setAllowDestructive(c === true)}
+                />
+                Allow destructive git writes
+              </label>
+            </span>
+            <p className="text-xs text-muted-foreground">
+              {allowDestructive
+                ? "Adds --allow-destructive — agents can discard changes, reset, force-push (with lease), and force-delete branches and tags. Can permanently discard uncommitted work."
+                : "Irreversible operations (discard, reset, force-push, force deletions) stay blocked even with git writes on."}
             </p>
           </div>
 
