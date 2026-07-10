@@ -3208,15 +3208,20 @@ pub(crate) async fn gh_pr_create_core(
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(0);
 
-    // Apply labels + assignees once, post-create, addressed by the HEAD BRANCH
-    // (gh pr edit accepts a number / URL / branch). `head` is always present and
-    // validated, so this never depends on scraping the PR URL out of stdout — the
-    // labels the picker chose are applied whether or not that scrape succeeds (the
-    // old `gh pr create --label` argv applied them unconditionally; keep that
-    // guarantee). Values come from the repo's own pickers, so they resolve; an
-    // unknown one would fail this edit AFTER the PR exists (surfaced, not silent).
+    // Apply labels + assignees once, post-create. Address the PR by NUMBER when the
+    // URL scrape yielded one (unambiguous, and the only form `gh pr edit` accepts for
+    // a cross-fork `OWNER:BRANCH` head), else fall back to the head BRANCH — so this
+    // still never depends on the scrape succeeding (the old `gh pr create --label`
+    // argv applied labels unconditionally; keep that guarantee). Values come from the
+    // repo's own pickers, so they resolve; an unknown one would fail this edit AFTER
+    // the PR exists (surfaced, not silent).
     if !labels.is_empty() || !assignees.is_empty() {
-        let mut edit_args = vec!["pr", "edit", head.as_str()];
+        let pr_id = if number != 0 {
+            number.to_string()
+        } else {
+            head.clone()
+        };
+        let mut edit_args = vec!["pr", "edit", pr_id.as_str()];
         for label in &labels {
             edit_args.push("--add-label");
             edit_args.push(label);
