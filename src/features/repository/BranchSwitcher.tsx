@@ -1011,6 +1011,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
             <Button
               variant="ghost"
               size="sm"
+              className="min-w-0 shrink"
               disabled={busy || amending}
               title={
                 amending
@@ -1019,9 +1020,21 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
               }
             >
               <GitBranchIcon data-icon="inline-start" />
-              {currentLabel}
+              <span
+                className="min-w-0 truncate"
+                // Only expose the full label as a tooltip when it's actually
+                // clipped — measured just-in-time on hover, so no ref needed.
+                onMouseEnter={(e) => {
+                  const el = e.currentTarget;
+                  if (el)
+                    el.title =
+                      el.scrollWidth > el.clientWidth ? currentLabel : "";
+                }}
+              >
+                {currentLabel}
+              </span>
               {head?.detached && (
-                <Badge variant="secondary" className="ml-1">
+                <Badge variant="secondary" className="ml-1 shrink-0">
                   detached
                 </Badge>
               )}
