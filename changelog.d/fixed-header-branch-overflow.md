@@ -3,4 +3,5 @@
   horizontal (and cascaded vertical) scrollbars and hiding the sync controls.
   The branch name now truncates with an ellipsis — hover it to see the full
   name — while the icons, detached badge, and Fetch/Pull/Publish controls stay
-  fully visible.
+  fully visible. The truncation order is deliberate: the branch name gives way
+  first, then the CI badge's workflow label, and the repository name last.

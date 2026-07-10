@@ -29,7 +29,10 @@ export function BranchCiBadge({ repoPath }: { repoPath: string }) {
   return (
     <button
       type="button"
-      className="flex items-center gap-1.5 rounded-none px-1.5 py-1 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+      // Middle tier of the header shrink cascade (branch 20 → badge 4 → repo 1):
+      // under space pressure the workflow name compresses after the branch label
+      // but before the repo name; the icon + title tooltip keep the meaning.
+      className="flex min-w-0 shrink-4 items-center gap-1.5 rounded-none px-1.5 py-1 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground"
       title={`${run.workflowName}: ${statusLabel(run.status, run.conclusion)} — view in Actions`}
       onClick={() => {
         selectRun(run.id);
@@ -41,7 +44,7 @@ export function BranchCiBadge({ repoPath }: { repoPath: string }) {
         conclusion={run.conclusion}
         className="size-3.5"
       />
-      <span className="hidden max-w-32 truncate sm:inline">
+      <span className="hidden min-w-0 max-w-32 truncate sm:inline">
         {run.workflowName}
       </span>
     </button>

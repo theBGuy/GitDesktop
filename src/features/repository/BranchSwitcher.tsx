@@ -1011,7 +1011,12 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
             <Button
               variant="ghost"
               size="sm"
-              className="min-w-0 shrink"
+              // Large shrink factor makes the branch label absorb essentially
+              // all header space pressure before the repo name or CI badge give
+              // way (flex removes space proportionally to factor × base size),
+              // so the header cascade collapses branch (20) → CI badge (4) →
+              // repo (1).
+              className="min-w-0 shrink-20"
               disabled={busy || amending}
               title={
                 amending
