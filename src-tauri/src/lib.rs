@@ -31,7 +31,21 @@ pub use mcp_server::run_mcp_server;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Single-instance lock, release builds only: a second launch defers to the
+    // running instance, whose callback brings the window back (incl. restoring
+    // it from the tray) instead of starting a duplicate — two instances each
+    // running automations double-post (duplicate-AI-review incident, 2026-07-10;
+    // the store plugin caches app-data per process, so instances can't dedup
+    // through the store). Dev is exempt on purpose: the lock keys on the shared
+    // `com.thebguy.gitdesktop` identifier, and dev+prod / two dev builds
+    // (parallel-worktree testing) must keep coexisting. Keep this the FIRST
+    // plugin registered so the check runs before any other init.
+    #[cfg(all(desktop, not(debug_assertions)))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        tray::show_main_window(app);
+    }));
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_notification::init())

@@ -1,0 +1,1 @@
+- GitDesktop now enforces a single running instance: launching the app again focuses the existing window — restoring it from the tray if needed — instead of opening a duplicate whose automations could double-fire (e.g. two AI reviews posted on the same PR).
