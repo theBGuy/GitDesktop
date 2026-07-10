@@ -3185,15 +3185,12 @@ pub(crate) async fn gh_pr_create_core(
     if draft {
         args.push("--draft");
     }
-    // `gh pr create` takes one `--label`/`--assignee` per value (repeatable flags).
-    for label in &labels {
-        args.push("--label");
-        args.push(label);
-    }
-    for assignee in &assignees {
-        args.push("--assignee");
-        args.push(assignee);
-    }
+    // Labels/assignees are applied AFTER create (below), NOT via `gh pr create
+    // --label/--assignee`: gh 2.94 records EACH value TWICE on the PR's activity
+    // timeline when it's passed at create time (it sets them in the create
+    // mutation AND re-applies them in a follow-up), so the feed shows doubled
+    // "added the X label" rows. `gh pr edit --add-label/--add-assignee` applies
+    // each exactly once. (Reproduced empirically 2026-07-10.)
     let out = run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await?;
 
     // gh prints the new PR's URL as its last stdout line.
@@ -3210,6 +3207,40 @@ pub(crate) async fn gh_pr_create_core(
         .next()
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(0);
+
+    // Apply labels + assignees once, post-create, addressed by the HEAD BRANCH
+    // (gh pr edit accepts a number / URL / branch). `head` is always present and
+    // validated, so this never depends on scraping the PR URL out of stdout — the
+    // labels the picker chose are applied whether or not that scrape succeeds (the
+    // old `gh pr create --label` argv applied them unconditionally; keep that
+    // guarantee). Values come from the repo's own pickers, so they resolve; an
+    // unknown one would fail this edit AFTER the PR exists (surfaced, not silent).
+    if !labels.is_empty() || !assignees.is_empty() {
+        let mut edit_args = vec!["pr", "edit", head.as_str()];
+        for label in &labels {
+            edit_args.push("--add-label");
+            edit_args.push(label);
+        }
+        for assignee in &assignees {
+            edit_args.push("--add-assignee");
+            edit_args.push(assignee);
+        }
+        // The PR already exists; on a rare edit failure (network, or a value the
+        // pickers wouldn't offer) disclose the partial state — with the PR's
+        // location when known — so the caller doesn't read it as "create failed".
+        let at = if url.is_empty() {
+            String::new()
+        } else {
+            format!(" ({url})")
+        };
+        run_gh(Some(&repo_path), &edit_args, GH_NETWORK_TIMEOUT)
+            .await
+            .map_err(move |e| {
+                AppError::Gh(format!(
+                    "The pull request was created{at}, but applying its labels/assignees failed: {e}. Add them from the PR."
+                ))
+            })?;
+    }
 
     Ok(PrRef { number, url })
 }
