@@ -68,13 +68,27 @@ export function PromoteWorktreeDialog({
   worktree: UserWorktree | null;
   onClose: () => void;
 }) {
+  // `pending` lives here (not in PromoteBody) so it gates dismissal: while a
+  // promote runs, Esc / the X / an outside click must NOT tear the dialog down —
+  // the async chain would keep going with the dialog gone (a background recovery
+  // toast; or a second concurrent promote after a quick reopen re-mounts a fresh
+  // re-entry latch). Controlled Base UI funnels every dismissal through
+  // onOpenChange, so gating onClose on !pending blocks them all.
+  const [pending, setPending] = useState(false);
   return (
-    <Dialog open={worktree !== null} onOpenChange={(o) => !o && onClose()}>
+    <Dialog
+      open={worktree !== null}
+      onOpenChange={(o) => {
+        if (!o && !pending) onClose();
+      }}
+    >
       <DialogContent>
         {worktree && (
           <PromoteBody
             repoPath={repoPath}
             worktree={worktree}
+            pending={pending}
+            setPending={setPending}
             onClose={onClose}
           />
         )}
@@ -86,16 +100,19 @@ export function PromoteWorktreeDialog({
 function PromoteBody({
   repoPath,
   worktree,
+  pending,
+  setPending,
   onClose,
 }: {
   repoPath: string;
   worktree: UserWorktree;
+  pending: boolean;
+  setPending: (value: boolean) => void;
   onClose: () => void;
 }) {
   const worktrees = useUserWorktrees(repoPath);
   const openWorktree = useOpenWorktree();
   const queryClient = useQueryClient();
-  const [pending, setPending] = useState(false);
   // Synchronous re-entry latch: `setPending` is async, so two fast clicks could
   // both pass the pending check before a re-render — this stops the second.
   const runningRef = useRef(false);

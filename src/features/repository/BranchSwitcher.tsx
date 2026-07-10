@@ -1246,10 +1246,12 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                         className="max-w-[45%] shrink-0 truncate text-[11px] text-muted-foreground"
                         onMouseEnter={(e) => {
                           const el = e.currentTarget;
-                          el.title =
-                            el.scrollWidth > el.clientWidth
-                              ? baseName(w.path)
-                              : "";
+                          // Full path is the useful tooltip (the row already
+                          // shows the folder name). removeAttribute, not
+                          // title="", so an unclipped row leaves no empty tooltip.
+                          if (el.scrollWidth > el.clientWidth)
+                            el.title = w.path;
+                          else el.removeAttribute("title");
                         }}
                       >
                         {baseName(w.path)}
