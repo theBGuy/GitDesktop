@@ -108,6 +108,7 @@ export function PrReviewPanel({
     mode,
     model,
     deltaState,
+    truncatedCoverage,
     phase,
     error,
   } = useReviewRun(target);
@@ -433,7 +434,8 @@ export function PrReviewPanel({
               }
               disabled={generating}
             />
-            Read repo files for context (slower, deeper)
+            Agentic review — read repo files and query the PR with GitDesktop
+            tools (slower, deeper)
           </label>
         )}
         {cliKind === "codex" && (
@@ -441,6 +443,46 @@ export function PrReviewPanel({
             Codex reads repo files for context (read-only sandbox).
           </p>
         )}
+        {truncatedCoverage &&
+          !generating &&
+          (() => {
+            // The last run saw a truncated diff with no tools to compensate.
+            // A tool-capable CLI (not codex) with repo-aware OFF can be upgraded
+            // in place; an HTTP provider gets an informational hint only. Codex
+            // (already repo-aware) and an already-agentic run set the flag false,
+            // so they never reach here — but guard anyway.
+            const upgradableCli =
+              (cliKind === "claude" ||
+                cliKind === "opencode" ||
+                cliKind === "copilot") &&
+              !reviewAi?.cliRepoAware;
+            if (cliKind === "codex" || reviewAi?.cliRepoAware) return null;
+            return (
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
+                <WarningIcon className="size-3 shrink-0" />
+                {upgradableCli ? (
+                  <>
+                    <span className="min-w-0">
+                      This review saw a truncated diff — agentic review lets it
+                      read the full changes.
+                    </span>
+                    <button
+                      type="button"
+                      className="cursor-pointer underline-offset-2 hover:underline"
+                      onClick={() => updateReview({ cliRepoAware: true })}
+                    >
+                      Enable agentic review
+                    </button>
+                  </>
+                ) : (
+                  <span className="min-w-0">
+                    This review saw a truncated diff. A CLI agent review model
+                    can explore the full PR.
+                  </span>
+                )}
+              </div>
+            );
+          })()}
         <ReviewHistory
           repoPath={context.repoPath}
           prKind={prKind}

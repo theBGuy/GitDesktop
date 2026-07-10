@@ -50,6 +50,33 @@ pub struct McpServerSpec {
     pub secret_keys: Vec<String>,
 }
 
+/// Build the single `McpServerSpec` that exposes GitDesktop ITSELF as a read-only
+/// MCP server for a CLI PR review (`gitdesktop mcp --repo <repo_path>`), so the
+/// review agent can pull the full PR diff / read files at any ref / blame / list
+/// PR comments instead of relying on the budget-truncated diff in the prompt.
+///
+/// The command is the CURRENT executable resolved at call time — NOT the update-safe
+/// managed launcher (`mcp_launcher.rs`). That launcher exists so a persisted GLOBAL
+/// config entry keeps working after the app updates and its exe is replaced; here the
+/// config is regenerated per review run, so `current_exe()` is always fresh and the
+/// managed copy is unnecessary. No env/url/headers/secrets: it's a plain stdio server
+/// launched read-only (no `--allow-write` / `--allow-remote-write`).
+pub fn self_server_spec(repo_path: &str) -> AppResult<McpServerSpec> {
+    let exe = std::env::current_exe()
+        .map_err(|e| AppError::Command(format!("resolve current executable: {e}")))?;
+    Ok(McpServerSpec {
+        id: "gitdesktop".into(),
+        name: "gitdesktop".into(),
+        transport: "stdio".into(),
+        command: exe.to_string_lossy().into_owned(),
+        args: vec!["mcp".into(), "--repo".into(), repo_path.to_string()],
+        env: vec![],
+        url: String::new(),
+        headers: vec![],
+        secret_keys: vec![],
+    })
+}
+
 impl McpServerSpec {
     fn is_stdio(&self) -> bool {
         self.transport == "stdio"
@@ -1056,6 +1083,33 @@ mod tests {
         assert_eq!(srv["url"], "https://mcp.example.com/mcp");
         assert_eq!(srv["headers"]["Authorization"], "Bearer x");
         assert_eq!(srv["enabled"], true);
+    }
+
+    // --- self_server_spec ----------------------------------------------------
+
+    #[test]
+    fn self_server_spec_points_at_current_exe_with_repo_args() {
+        let spec = self_server_spec(r"C:\repos\app").unwrap();
+        assert_eq!(spec.id, "gitdesktop");
+        assert_eq!(spec.name, "gitdesktop");
+        assert_eq!(spec.transport, "stdio");
+        // command is the current test binary — non-empty and equal to current_exe().
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(spec.command, exe.to_string_lossy());
+        assert!(!spec.command.is_empty());
+        // args are exactly `mcp --repo <path>` — read-only, no write opt-ins.
+        assert_eq!(spec.args, vec!["mcp", "--repo", r"C:\repos\app"]);
+        // No secrets/env/url/headers — a plain read-only stdio launch.
+        assert!(spec.env.is_empty());
+        assert!(spec.url.is_empty());
+        assert!(spec.headers.is_empty());
+        assert!(spec.secret_keys.is_empty());
+        // It validates + emits the expected tool allowlist entry for Claude.
+        validate_specs(std::slice::from_ref(&spec)).unwrap();
+        assert_eq!(
+            tool_allow_patterns(std::slice::from_ref(&spec)),
+            vec!["mcp__gitdesktop".to_string()]
+        );
     }
 
     // --- mcp_json_write ------------------------------------------------------

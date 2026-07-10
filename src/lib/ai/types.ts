@@ -133,4 +133,14 @@ export interface ReviewPromptInput {
   /** Target host — swaps the change-request noun + markdown flavor in the review
    *  system prompt. Absent/`"github"` keeps the original GitHub wording. */
   provider?: PromptProvider;
+  /** Present only for CLI repo-aware runs — what the review agent can actually do,
+   *  so the prompt frames truncation honestly instead of "coverage is partial". */
+  agentic?: {
+    /** The PR's files are checked out in the agent's working directory. */
+    filesOnDisk: boolean;
+    /** GitDesktop is attached as a read-only MCP server (`gitdesktop` tools). */
+    mcpTools: boolean;
+    /** Forge PR number for the MCP PR tools — remote PRs only. */
+    prNumber?: string;
+  };
 }

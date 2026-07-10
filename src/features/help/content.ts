@@ -696,9 +696,20 @@ using your chosen review model, and optionally post the result as a comment. A g
 review builds on **soft context** where it exists: your prior review of the PR, findings
 other AI reviewers (Copilot, CodeRabbit) left, and **GitDesktop's own earlier comments on
 the PR** — so on a re-review it treats a finding it already refuted or marked fixed as
-resolved instead of raising it cold. With a CLI agent (Claude, Copilot, or
-opencode), a **repo-aware** toggle lets the reviewer read the repo's files for deeper
-context (slower). See *AI & automations* to pick the review model.
+resolved instead of raising it cold. See *AI & automations* to pick the review model.
+
+**Agentic review.** With a CLI agent model (Claude, Copilot, or opencode), the panel's
+**Agentic review** toggle attaches GitDesktop to the run as a **read-only MCP server**:
+instead of relying on the prompt's truncated summary, the reviewer pulls the **full PR
+diff**, reads any file at any ref, runs blame and history, and reads the PR's existing
+comments and threads — so big PRs stop hedging about the part they couldn't see. It's
+**read-only end to end**: the server exposes only its read tools and the agent's own write
+tools are denied, so the reviewer can explore but never modify. The status line shows what
+it's reading as it goes. When a review's diff outgrows the prompt budget, the panel nudges
+you to turn on agentic review (CLI models, one click) or switch to a CLI agent model (HTTP
+models) for full coverage. (Codex reviews already explore the repo on their own but can't
+attach the GitDesktop tools, so they get the file-exploration framing without the PR
+tools.)
 
 Every AI-posted review is **clearly machine-authored**: a branded GitDesktop header and
 footer on the comment, and on a **local PR** a "GitDesktop" bot author with a robot avatar.

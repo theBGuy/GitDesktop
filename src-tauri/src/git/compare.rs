@@ -367,8 +367,93 @@ pub async fn git_fetch_objects(repo_path: String, refs: Vec<String>) -> AppResul
     if refs.is_empty() {
         return Ok(false);
     }
+    // Short-circuit when every requested object is already present locally — this
+    // runs before every repo-aware review worktree, and a PR that was already
+    // checked out (or fetched earlier) needs no network round-trip. If ALL SHAs
+    // resolve to a local commit, skip the fetch and report success. Any missing (or
+    // unresolvable) object falls through to the real fetch below, preserving prior
+    // behavior. `git rev-parse --verify --quiet <sha>^{commit}` exits non-zero when
+    // the object is absent, so a clean exit across all refs means "all local".
+    if all_objects_present(&repo_path, &refs).await {
+        return Ok(true);
+    }
     let mut args: Vec<&str> = vec!["fetch", "--no-tags", "origin"];
     args.extend(refs.iter().map(String::as_str));
     let out = run_git_raw(Some(&repo_path), &args, NETWORK_TIMEOUT).await?;
     Ok(out.code == 0)
+}
+
+/// Whether every ref in `refs` resolves to a commit object already in `repo_path`
+/// (no network). A spawn/timeout error or a non-zero exit for any ref ⇒ `false`,
+/// so the caller fetches — this only ever SKIPS the fetch when it's provably
+/// unnecessary, never suppresses a needed one.
+async fn all_objects_present(repo_path: &str, refs: &[String]) -> bool {
+    for r in refs {
+        let spec = format!("{r}^{{commit}}");
+        match run_git_raw(
+            Some(repo_path),
+            &["rev-parse", "--verify", "--quiet", &spec],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        {
+            Ok(out) if out.code == 0 => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn run(repo: &str, args: &[&str]) -> String {
+        run_git_raw(Some(repo), args, DEFAULT_TIMEOUT)
+            .await
+            .unwrap()
+            .stdout_lossy()
+    }
+
+    /// A locally-present SHA short-circuits `git_fetch_objects`: it returns true with
+    /// NO remote configured (a fetch would fail), proving the network path was skipped.
+    #[tokio::test]
+    async fn fetch_objects_short_circuits_when_all_present() {
+        let base = std::env::temp_dir().join(format!(
+            "gd-fetchobj-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+
+        run(&repo_s, &["init", "-q"]).await;
+        run(&repo_s, &["config", "user.email", "t@t.local"]).await;
+        run(&repo_s, &["config", "user.name", "T"]).await;
+        std::fs::write(repo.join("a.txt"), "hello\n").unwrap();
+        run(&repo_s, &["add", "-A"]).await;
+        run(&repo_s, &["commit", "-qm", "seed"]).await;
+        let head = run(&repo_s, &["rev-parse", "HEAD"]).await.trim().to_string();
+
+        // No `origin` remote exists, so a real fetch would error/fail — a `true`
+        // result can only mean the local-presence short-circuit fired.
+        let ok = git_fetch_objects(repo_s.clone(), vec![head])
+            .await
+            .expect("present-object path never errors");
+        assert!(ok, "a locally-present sha skips the fetch and reports success");
+
+        // A never-seen sha is NOT local, so it falls through to the fetch, which fails
+        // with no origin — returning false (not an error).
+        let missing = "0".repeat(40);
+        let ok = git_fetch_objects(repo_s, vec![missing])
+            .await
+            .expect("a failed fetch is Ok(false), not an error");
+        assert!(!ok, "an absent object falls through to the (failing) fetch");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

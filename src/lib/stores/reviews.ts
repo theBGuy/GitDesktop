@@ -1,7 +1,7 @@
 import { useCallback, useMemo } from "react";
 import { toast } from "sonner";
 import { create } from "zustand";
-import { cancelAgentReview } from "@/lib/ai/agent";
+import { cancelAgentReview, providerKind } from "@/lib/ai/agent";
 import {
   type ExternalContext,
   resolveExternalContext,
@@ -92,6 +92,11 @@ export interface ReviewEntry {
    *  resolved — drives the panel's rewrite/indeterminate note. Undefined on a
    *  first run or when prior context was ignored. */
   deltaState?: ReviewDeltaState;
+  /** The finished run's prompt carried a truncated diff AND the run had no tools
+   *  to compensate (not agentic) — drives the panel's "enable agentic review"
+   *  upgrade nudge. A tool-bearing run handles its own coverage, so this stays
+   *  false there. */
+  truncatedCoverage?: boolean;
 }
 
 /** A store entry tagged with its key — what the activity dock renders. */
@@ -331,6 +336,7 @@ export async function startReview(
     seq: reviewSeq++,
     error: "",
     deltaState: undefined,
+    truncatedCoverage: undefined,
   });
 
   // Wall-clock start for the persisted history record (the store itself orders
@@ -388,7 +394,21 @@ export async function startReview(
         ),
       ]);
     if (control.cancelled) return;
-    const { system, prompt } = buildReviewPrompt(
+    // Agentic run: a CLI provider in repo-aware mode reviews with the PR's files
+    // on disk and (for the tool-capable CLIs — everything but codex) GitDesktop's
+    // own read-only MCP tools attached. Computed before the prompt so it can frame
+    // truncation honestly, and to gate `mcpSelf` on the stream.
+    const kind = providerKind(ai.provider);
+    const agenticRun = Boolean(kind && ai.cliRepoAware);
+    const mcpTools = agenticRun && kind !== "codex";
+    const agentic = agenticRun
+      ? {
+          filesOnDisk: Boolean(context.headSha),
+          mcpTools,
+          prNumber: target.kind === "remote" ? target.ref : undefined,
+        }
+      : undefined;
+    const { system, prompt, coverage } = buildReviewPrompt(
       {
         title: context.title,
         body: context.body,
@@ -402,6 +422,7 @@ export async function startReview(
           isBinary: f.isBinary,
         })),
         provider: context.provider,
+        agentic,
         ...prior,
         ...own,
         ...external,
@@ -415,6 +436,7 @@ export async function startReview(
       prompt,
       repoPath: context.repoPath,
       headSha: context.headSha,
+      mcpSelf: mcpTools,
       setText: pushText,
       setStatus: (s) => patch({ status: s }),
       onCliId: (id) => {
@@ -425,7 +447,13 @@ export async function startReview(
       },
     });
     if (control.cancelled) return;
-    patch({ phase: "done", status: "" });
+    // A run WITH tools closes its own coverage gap, so only a non-agentic run that
+    // saw a truncated diff drives the panel's upgrade nudge.
+    patch({
+      phase: "done",
+      status: "",
+      truncatedCoverage: coverage.diffTruncated && !agentic,
+    });
     void notifyReviewDone(title, mode, true, target);
     // Persist the finished review so the NEXT run can use it as soft context.
     // The final text is read from the store (covers both the CLI and HTTP
@@ -645,6 +673,9 @@ export function useReviewRun(target: ReviewTarget) {
     mode: entry.mode,
     model: entry.model,
     deltaState: entry.deltaState,
+    /** The finished run saw a truncated diff and had no tools to compensate —
+     *  drives the panel's "enable agentic review" nudge. */
+    truncatedCoverage: entry.truncatedCoverage,
     /** Run phase, so the panel can show a failed run instead of silently
      *  reverting to the idle placeholder. */
     phase: entry.phase,

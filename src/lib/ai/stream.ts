@@ -5,6 +5,7 @@ import {
   gitReviewWorktree,
 } from "@/lib/git/api";
 import { toastError } from "@/lib/toast";
+import type { AgentToolKind } from "./agent";
 import { cancelAgentReview, providerKind, runAgentReview } from "./agent";
 import { createAiClient } from "./client";
 import { isCliProvider } from "./providers";
@@ -29,6 +30,32 @@ export interface CliStreamOpts {
   /** Reasoning/effort level for the run ("" = provider default). Optional — only
    *  the repo-aware flows that expose a picker (e.g. Plan) set it. */
   effort?: string;
+  /** Attach GitDesktop's own read-only MCP server to the run (reviews only), so an
+   *  agentic reviewer can pull the full PR diff and read files at any ref. Default
+   *  off keeps every other CLI flow (Debug with AI, generation) byte-identical. */
+  mcpSelf?: boolean;
+}
+
+/** A short, human status line for a tool step, from the normalized kind + target
+ *  (the `target` may be null — degrade to the bare verb). Surfaces the agentic
+ *  run's exploration in the panel's existing status line. */
+function toolStatusLine(tool: AgentToolKind, target: string | null): string {
+  const at = target?.trim();
+  switch (tool) {
+    case "read":
+      return at ? `Reading ${at}…` : "Reading a file…";
+    case "search":
+      return at ? `Searching ${at}…` : "Searching…";
+    case "list":
+      return at ? `Listing ${at}…` : "Listing files…";
+    case "web-fetch":
+    case "web-search":
+      return "Searching the web…";
+    case "run":
+      return "Running a command…";
+    default:
+      return "Working…";
+  }
 }
 
 /**
@@ -46,6 +73,7 @@ export async function runCliStream({
   registerId,
   onCost,
   effort,
+  mcpSelf,
 }: CliStreamOpts): Promise<void> {
   const kind = providerKind(ai.provider);
   if (!kind) throw new Error(`Unsupported CLI provider: ${ai.provider}`);
@@ -81,6 +109,7 @@ export async function runCliStream({
         userPrompt: prompt,
         repoPath: cwd,
         repoAware: Boolean(ai.cliRepoAware),
+        mcpSelf: Boolean(mcpSelf),
         reviewId,
         onEvent: (event) => {
           if (event.kind === "delta") {
@@ -88,6 +117,10 @@ export async function runCliStream({
             setText(buffer);
           } else if (event.kind === "status") {
             setStatus(event.text);
+          } else if (event.kind === "tool") {
+            // Make the agent's exploration visible in the panel's status line
+            // (previously silent between the CLI's own status events).
+            setStatus(toolStatusLine(event.tool, event.target));
           } else if (event.kind === "done") {
             settled = true;
             onCost?.(event.costUsd);
@@ -126,6 +159,10 @@ export interface StreamAiOpts {
   repoPath: string;
   /** PR head SHA for a CLI repo-aware worktree; omit for non-PR flows. */
   headSha?: string;
+  /** Attach GitDesktop's own read-only MCP server to the run (reviews only).
+   *  Omitted by non-review callers (Debug with AI, generation), keeping them
+   *  byte-identical. */
+  mcpSelf?: boolean;
   setText: (text: string) => void;
   setStatus: (status: string) => void;
   /** CLI path: receives the agent review id (cancel via `cancelAgentReview`). */
@@ -148,6 +185,7 @@ export async function streamAi({
   prompt,
   repoPath,
   headSha,
+  mcpSelf,
   setText,
   setStatus,
   onCliId,
@@ -160,6 +198,7 @@ export async function streamAi({
       prompt,
       repoPath,
       headSha,
+      mcpSelf,
       setText,
       setStatus,
       registerId: onCliId,

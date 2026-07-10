@@ -122,6 +122,11 @@ const capabilities = [
     ai: true,
   },
   { label: "Reviews keep running in the background", ai: true },
+  {
+    label:
+      "Agentic review — a CLI agent reads the full diff, files, blame & history via GitDesktop's read-only MCP server (Claude, Copilot & opencode)",
+    ai: true,
+  },
   { label: "Iterative reviews build on the last round", ai: true },
   { label: "Builds on Copilot / CodeRabbit reviews", ai: true },
   { label: "Factors in its own earlier comments on re-review", ai: true },
@@ -443,6 +448,13 @@ const gitCapabilities = capabilities.filter((c) => !c.ai);
                 unless you choose to post it — and it keeps running while you move
                 between PRs, or even after you close the window, then pings you when
                 it's done.
+              </p>
+              <p class="mt-4 leading-relaxed text-muted">
+                Turn on <span class="text-ink">Agentic review</span> with a CLI agent
+                model and GitDesktop attaches itself as a read-only MCP server: the
+                reviewer pulls the full diff past the prompt budget, reads any file at
+                any ref, and runs blame and history — read-only end to end, so it can
+                explore but never modify.
               </p>
             </div>
             <figure data-reveal style="transition-delay:120ms" class="window mt-10">

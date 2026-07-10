@@ -496,7 +496,27 @@ fn claude_review_args(
     system_prompt: &str,
     repo_aware: bool,
     mcp_config: Option<&str>,
+    // `mcp__<server>` allowlist entries for any server loaded via `mcp_config`.
+    // `--tools` is a STRICT allowlist, so a loaded server's tools stay uncallable
+    // unless its pattern is appended here (proven live in the session work). Empty
+    // when no self-MCP is attached, so the diff-only / plain repo-aware toolset is
+    // byte-identical to before.
+    mcp_tools: &[String],
 ) -> Vec<String> {
+    // Base toolset: repo-aware exposes the read tools; diff-only exposes none. Any
+    // MCP tool patterns are appended so a loaded self-server is actually callable —
+    // even in the diff-only case, where the base is otherwise empty.
+    let mut tools = if repo_aware {
+        "Read,Grep,Glob".to_string()
+    } else {
+        String::new()
+    };
+    for pattern in mcp_tools {
+        if !tools.is_empty() {
+            tools.push(',');
+        }
+        tools.push_str(pattern);
+    }
     let mut args = vec![
         "-p".into(),
         "--system-prompt".into(),
@@ -506,11 +526,7 @@ fn claude_review_args(
         "--include-partial-messages".into(),
         "--verbose".into(), // required alongside stream-json in print mode
         "--tools".into(),
-        if repo_aware {
-            "Read,Grep,Glob".into()
-        } else {
-            String::new()
-        },
+        tools,
         // `--strict-mcp-config` ignores every OTHER MCP source (global ~/.claude,
         // the repo's .mcp.json). With no `--mcp-config` that means zero servers
         // (also trims token cost); with one it means EXACTLY our file's servers.
@@ -849,7 +865,17 @@ fn claude_thinking_keyword(level: &str) -> Option<&'static str> {
 /// live repo — the same shape as opencode's `plan` agent. `--disable-builtin-mcps` drops
 /// the GitHub MCP server too, keeping it to local repo reads (no remote GitHub calls).
 /// Reads are path-allowed because the review runs with the repo as cwd.
-fn copilot_review_args(model: &str, prompt: &str, repo_aware: bool, effort: &str) -> Vec<String> {
+fn copilot_review_args(
+    model: &str,
+    prompt: &str,
+    repo_aware: bool,
+    effort: &str,
+    // Per-review MCP config (GitDesktop's own self-server), passed via
+    // `--additional-mcp-config @<path>` exactly as `copilot_session_args` does — it
+    // AUGMENTS (never mutates) the user's `~/.copilot/mcp-config.json`. `None` = no
+    // self-MCP, and the args are byte-identical to before.
+    mcp_config: Option<&str>,
+) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "-p".into(),
         prompt.into(),
@@ -857,10 +883,30 @@ fn copilot_review_args(model: &str, prompt: &str, repo_aware: bool, effort: &str
         "json".into(),
         "--no-color".into(),
     ];
+    if let Some(path) = mcp_config {
+        // `@` marks a file path. Needs tools enabled to be reachable, so ensure the
+        // allow-all/deny-write pair is present even when a diff-only (non-repo-aware)
+        // review attaches the self-server (the `if repo_aware` block below only runs
+        // for repo-aware). `--allow-all-tools` auto-approves the loaded tools for
+        // this non-interactive run.
+        args.push("--additional-mcp-config".into());
+        args.push(format!("@{path}"));
+        if !repo_aware {
+            args.push("--allow-all-tools".into());
+            args.push("--deny-tool=write".into());
+            args.push("--deny-tool=shell".into());
+        }
+    }
     if repo_aware {
         args.push("--allow-all-tools".into());
         args.push("--deny-tool=write".into());
         args.push("--deny-tool=shell".into());
+        // Drop Copilot's BUILTIN GitHub MCP so a repo-aware review stays repo-local.
+        // Our explicitly-passed `--additional-mcp-config` is a DIFFERENT mechanism and
+        // is expected to survive this flag. NOTE: if live validation shows
+        // `--disable-builtin-mcps` also suppresses the additional config, this flag
+        // should become conditional on `mcp_config.is_none()` — left unconditional
+        // for now to avoid a speculative behavior change (matches today's behavior).
         args.push("--disable-builtin-mcps".into());
     }
     if !model.trim().is_empty() {
@@ -1554,6 +1600,7 @@ async fn stream_agent(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn agent_review(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     kind: AgentKind,
     bin_path: Option<String>,
@@ -1566,6 +1613,12 @@ pub async fn agent_review(
     user_prompt: String,
     repo_path: String,
     repo_aware: bool,
+    // Attach GitDesktop ITSELF as a read-only MCP server (`gitdesktop mcp --repo
+    // <repo_path>`) so the review agent can pull the full PR diff / read files at
+    // any ref / blame / list PR comments, instead of relying on the budget-truncated
+    // diff in the prompt. Honored for Claude / Copilot / opencode (Codex is exempt —
+    // see below). `false` = today's behavior, byte-for-byte.
+    mcp_self: bool,
     review_id: String,
     on_event: Channel<ReviewEvent>,
 ) -> AppResult<()> {
@@ -1575,6 +1628,38 @@ pub async fn agent_review(
             kind.label()
         ))
     })?;
+
+    // When mcp_self is on and the CLI supports it, generate a per-review MCP config
+    // exposing EXACTLY one server — GitDesktop itself, read-only against `repo_path`.
+    // Written into `<app_data>/mcp` keyed by `review_id` (a UUID, so `validate_id`
+    // passes), the SAME lifecycle sessions use; removed after the run on every path.
+    // Codex is excluded: host `codex exec` cancels every MCP tool call (stdin EOF →
+    // "declined", upstream — the same wall `agent_session` documents for host Codex),
+    // and Codex reviews already self-explore the repo, so mcp_self is ignored for it.
+    let self_mcp_wanted = mcp_self && !matches!(kind, AgentKind::Codex);
+    let self_specs = if self_mcp_wanted {
+        vec![crate::mcp::self_server_spec(&repo_path)?]
+    } else {
+        Vec::new()
+    };
+    // `mcp__gitdesktop` for Claude's strict `--tools` allowlist (empty otherwise).
+    let mcp_tools = crate::mcp::tool_allow_patterns(&self_specs);
+    // The generated config path for whichever CLI applies: Claude `--mcp-config`,
+    // Copilot `--additional-mcp-config @<path>`, opencode `OPENCODE_CONFIG` env.
+    let mcp_config_path: Option<String> = if self_specs.is_empty() {
+        None
+    } else {
+        match kind {
+            AgentKind::Claude => crate::mcp::write_host_config(&app, &review_id, &self_specs)?,
+            AgentKind::Copilot => crate::mcp::write_copilot_config(&app, &review_id, &self_specs)?,
+            AgentKind::Opencode => {
+                crate::mcp::write_opencode_config(&app, &review_id, &self_specs, false)?
+            }
+            // Codex was filtered out of `self_specs` above; unreachable in practice.
+            AgentKind::Codex => None,
+        }
+        .map(|p| p.to_string_lossy().into_owned())
+    };
 
     // Per-kind invocation: Claude carries the system prompt as a flag and the
     // diff on stdin; Codex has no system-prompt flag, so both go on stdin.
@@ -1587,7 +1672,13 @@ pub async fn agent_review(
                 None => user_prompt,
             };
             (
-                claude_review_args(&model, &system_prompt, repo_aware, None),
+                claude_review_args(
+                    &model,
+                    &system_prompt,
+                    repo_aware,
+                    mcp_config_path.as_deref(),
+                    &mcp_tools,
+                ),
                 prompt,
             )
         }
@@ -1604,6 +1695,7 @@ pub async fn agent_review(
                 &format!("{system_prompt}\n\n{user_prompt}"),
                 repo_aware,
                 &effort,
+                mcp_config_path.as_deref(),
             ),
             String::new(),
         ),
@@ -1615,17 +1707,33 @@ pub async fn agent_review(
         ),
     };
 
-    // Codex always explores the repo, so it gets the longer agentic budget too.
-    let timeout = if repo_aware || matches!(kind, AgentKind::Codex) {
+    // opencode reads its MCP config from `OPENCODE_CONFIG` (no flag); the others carry
+    // it in argv. Set the env only when we actually wrote an opencode config.
+    let extra_env: Vec<(&str, String)> = match (kind, &mcp_config_path) {
+        (AgentKind::Opencode, Some(path)) => vec![("OPENCODE_CONFIG", path.clone())],
+        _ => Vec::new(),
+    };
+
+    // Codex always explores the repo, so it gets the longer agentic budget too — and
+    // a self-MCP review is agentic regardless of `repo_aware` (the agent pulls the
+    // full diff / reads files via the server), so it gets the agentic budget too.
+    let timeout = if repo_aware || self_mcp_wanted || matches!(kind, AgentKind::Codex) {
         REVIEW_TIMEOUT_AGENTIC
     } else {
         REVIEW_TIMEOUT
     };
-    stream_agent(
+    let result = stream_agent(
         &state, kind, &binary, args, stdin_text, &repo_path, timeout, &review_id, "review", None,
-        &[], &on_event,
+        &extra_env, &on_event,
     )
-    .await
+    .await;
+    // Remove the generated config on EVERY path (success, error), mirroring the
+    // session lifecycle — even though the self-spec carries no secrets. No-op when
+    // nothing was written.
+    if mcp_config_path.is_some() {
+        crate::mcp::cleanup_host_config(&app, &review_id);
+    }
+    result
 }
 
 #[tauri::command]
@@ -2328,5 +2436,81 @@ mod tests {
             claude_session_args("", "sys", "sid", false, true, true, true, None, &[]);
         assert!(!args.iter().any(|a| a == "--fork-session"));
         assert!(args.iter().any(|a| a == "--session-id"));
+    }
+
+    // --- review args: self-MCP wiring (mcp_self) -----------------------------
+
+    /// The value following a flag in an arg vector, if present.
+    fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+        let i = args.iter().position(|a| a == flag)?;
+        args.get(i + 1).map(String::as_str)
+    }
+
+    #[test]
+    fn claude_review_without_mcp_is_unchanged() {
+        // No self-MCP: no `--mcp-config`, tools are the plain repo-aware/diff-only set,
+        // and `--strict-mcp-config` is still present. This locks the mcp_self=false path
+        // to today's behavior.
+        let aware = claude_review_args("m", "sys", true, None, &[]);
+        assert_eq!(tools_of(&aware), "Read,Grep,Glob");
+        assert!(!aware.iter().any(|a| a == "--mcp-config"));
+        assert!(aware.iter().any(|a| a == "--strict-mcp-config"));
+
+        let diff_only = claude_review_args("m", "sys", false, None, &[]);
+        assert_eq!(tools_of(&diff_only), ""); // empty toolset for diff-only
+        assert!(!diff_only.iter().any(|a| a == "--mcp-config"));
+    }
+
+    #[test]
+    fn claude_review_with_mcp_adds_config_and_tool_pattern() {
+        let patterns = vec!["mcp__gitdesktop".to_string()];
+        // Repo-aware: read tools PLUS the mcp pattern; config path wired.
+        let aware = claude_review_args("m", "sys", true, Some("C:/cfg/r.json"), &patterns);
+        assert_eq!(tools_of(&aware), "Read,Grep,Glob,mcp__gitdesktop");
+        assert_eq!(flag_value(&aware, "--mcp-config"), Some("C:/cfg/r.json"));
+        assert!(aware.iter().any(|a| a == "--strict-mcp-config"));
+
+        // Diff-only: base toolset is empty, so the pattern stands alone (no leading
+        // comma) — the server stays callable even without repo-aware read tools.
+        let diff_only = claude_review_args("m", "sys", false, Some("C:/cfg/r.json"), &patterns);
+        assert_eq!(tools_of(&diff_only), "mcp__gitdesktop");
+        assert_eq!(flag_value(&diff_only, "--mcp-config"), Some("C:/cfg/r.json"));
+    }
+
+    #[test]
+    fn copilot_review_without_mcp_is_unchanged() {
+        // No self-MCP: no `--additional-mcp-config`. Repo-aware still carries the
+        // allow-all/deny pair + `--disable-builtin-mcps`; diff-only carries none.
+        let aware = copilot_review_args("m", "prompt", true, "", None);
+        assert!(!aware.iter().any(|a| a == "--additional-mcp-config"));
+        assert!(aware.iter().any(|a| a == "--allow-all-tools"));
+        assert!(aware.iter().any(|a| a == "--disable-builtin-mcps"));
+
+        let diff_only = copilot_review_args("m", "prompt", false, "", None);
+        assert!(!diff_only.iter().any(|a| a == "--additional-mcp-config"));
+        assert!(!diff_only.iter().any(|a| a == "--allow-all-tools"));
+    }
+
+    #[test]
+    fn copilot_review_with_mcp_adds_additional_config_flag() {
+        // Repo-aware + self-MCP: the `@file` additional-config flag is present, and the
+        // existing tool-permission pair + builtin-MCP disable are retained.
+        let aware = copilot_review_args("m", "prompt", true, "", Some("C:/cfg/r.copilot.json"));
+        assert_eq!(
+            flag_value(&aware, "--additional-mcp-config"),
+            Some("@C:/cfg/r.copilot.json")
+        );
+        assert!(aware.iter().any(|a| a == "--disable-builtin-mcps"));
+
+        // Diff-only + self-MCP: the flag is present AND the tools are enabled (so the
+        // server is reachable) even though it's not repo-aware; no builtin-MCP disable.
+        let diff_only = copilot_review_args("m", "prompt", false, "", Some("C:/cfg/r.copilot.json"));
+        assert_eq!(
+            flag_value(&diff_only, "--additional-mcp-config"),
+            Some("@C:/cfg/r.copilot.json")
+        );
+        assert!(diff_only.iter().any(|a| a == "--allow-all-tools"));
+        assert!(diff_only.iter().any(|a| a == "--deny-tool=write"));
+        assert!(!diff_only.iter().any(|a| a == "--disable-builtin-mcps"));
     }
 }

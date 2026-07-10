@@ -165,6 +165,10 @@ export interface AgentReviewArgs {
   repoPath: string;
   /** Tier 2: allow the agent read-only access to the repo for context. */
   repoAware: boolean;
+  /** Attach GitDesktop's own read-only MCP server (`gitdesktop` tools) to the run
+   *  so an agentic reviewer can pull the full PR diff, read files at any ref, blame,
+   *  and list PR comments. Reviews only; default off is byte-identical to today. */
+  mcpSelf?: boolean;
   /** Caller-generated id used to cancel this run via `cancelAgentReview`. */
   reviewId: string;
   onEvent: (event: ReviewEvent) => void;
@@ -186,6 +190,7 @@ export async function runAgentReview(args: AgentReviewArgs): Promise<void> {
     userPrompt: args.userPrompt,
     repoPath: args.repoPath,
     repoAware: args.repoAware,
+    mcpSelf: Boolean(args.mcpSelf),
     reviewId: args.reviewId,
     onEvent: channel,
   });
