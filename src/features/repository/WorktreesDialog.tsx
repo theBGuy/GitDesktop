@@ -1,4 +1,5 @@
 import {
+  ArrowLineUpIcon,
   CaretLeftIcon,
   DotsThreeVerticalIcon,
   FolderOpenIcon,
@@ -55,6 +56,7 @@ import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { DeleteWorktreeDialog } from "./DeleteWorktreeDialog";
+import { PromoteWorktreeDialog } from "./PromoteWorktreeDialog";
 import { useOpenWorktree } from "./useOpenRepoByPath";
 
 /** Lower-cased, forward-slashed path — git emits "/", the app stores "\" on
@@ -140,6 +142,7 @@ function WorktreeList({
   const [deleteTarget, setDeleteTarget] = useState<UserWorktree | null>(null);
   const [renameTarget, setRenameTarget] = useState<UserWorktree | null>(null);
   const [lockTarget, setLockTarget] = useState<UserWorktree | null>(null);
+  const [promoteTarget, setPromoteTarget] = useState<UserWorktree | null>(null);
 
   const list = worktrees.data ?? [];
   const linkedCount = list.filter((w) => !w.isMain).length;
@@ -202,6 +205,7 @@ function WorktreeList({
                 onLock={() => setLockTarget(w)}
                 onUnlock={() => handleUnlock(w)}
                 onDelete={() => setDeleteTarget(w)}
+                onPromote={() => setPromoteTarget(w)}
               />
             ))
           )}
@@ -266,6 +270,13 @@ function WorktreeList({
         worktree={deleteTarget}
         onClose={() => setDeleteTarget(null)}
       />
+
+      <PromoteWorktreeDialog
+        key={promoteTarget?.path ?? "no-promote"}
+        repoPath={repoPath}
+        worktree={promoteTarget}
+        onClose={() => setPromoteTarget(null)}
+      />
     </>
   );
 }
@@ -280,6 +291,7 @@ function WorktreeRow({
   onLock,
   onUnlock,
   onDelete,
+  onPromote,
 }: {
   worktree: UserWorktree;
   highlighted: boolean;
@@ -290,6 +302,7 @@ function WorktreeRow({
   onLock: () => void;
   onUnlock: () => void;
   onDelete: () => void;
+  onPromote: () => void;
 }) {
   const { path, branch, isMain, isDetached, isLocked, lockReason } = worktree;
 
@@ -393,6 +406,23 @@ function WorktreeRow({
                 Lock…
               </DropdownMenuItem>
             ))}
+          {/* Promote moves this worktree's branch into the main workspace: it
+              removes the worktree (a branch can't live in two) and checks the
+              branch out in main. Only for a linked worktree that has a branch. */}
+          {!isMain && !isDetached && (
+            <DropdownMenuItem
+              disabled={isLocked}
+              title={
+                isLocked
+                  ? "Unlock this worktree before promoting it"
+                  : undefined
+              }
+              onClick={onPromote}
+            >
+              <ArrowLineUpIcon />
+              Promote to main workspace…
+            </DropdownMenuItem>
+          )}
           <DropdownMenuItem
             variant="destructive"
             // Can't delete the main worktree, nor the one you're standing in

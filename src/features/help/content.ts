@@ -421,6 +421,11 @@ test, or review several branches at once without stashing or switching.
 - **Delete** a worktree to remove its folder; its branch is kept. A worktree with
   uncommitted changes asks before force-removing. The main worktree, and whichever one
   you're currently in, can't be renamed or deleted — switch away first.
+- **Promote to main workspace** brings a worktree's branch into your main checkout: it
+  removes the worktree (a branch can't be checked out in two at once) and checks that branch
+  out in the main workspace. The worktree must be clean first; any uncommitted work in the
+  main workspace is stashed so the checkout can't be blocked (restore it with *Pop latest
+  stash*). Works even on the worktree you're currently in.
 - **Repair links** (footer) re-connects worktrees if you moved or renamed the repository
   folder in your file manager, which otherwise breaks the path each worktree records.
 
@@ -429,7 +434,11 @@ already in use. The **branch switcher** knows this too: a branch that's checked 
 another worktree is badged, and choosing it offers to open that worktree instead of failing
 with a checkout error. You can also **Remove worktree…** straight from that badged branch's
 right-click menu — the branch stays, and its **Delete…** item un-disables once the worktree
-is gone.
+is gone. When you're in a linked worktree the switcher reminds you that a branch checkout
+lands *there* (not the main workspace) and offers a one-click **Open main workspace**, and its
+**Worktrees** section jumps you straight to any other worktree — no detour through a
+checked-out branch. **Open main workspace** and **Promote this worktree to main workspace**
+are in the command palette too.
 
 A repository's local pull requests, issues, review history, and per-repo settings are shared
 across all its worktrees, so you see the same ones whichever folder you're working in.{{ai}}

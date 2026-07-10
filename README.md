@@ -317,9 +317,10 @@ merges, cherry-picks, history edits, rebases) and, if one is interrupted by a
 crash or restart, surfaces a calm recovery notice naming what was interrupted and
 the exact branch + commit it started from — browsable any time via the *Operation
 history* command; tag management,
-submodule management, and a **worktree manager** (create, switch between, and
-remove linked worktrees, so you can work on several branches in parallel folders
-without stashing).
+submodule management, and a **worktree manager** (create, switch between, promote
+a worktree's branch into your main checkout, and remove linked worktrees, so you
+can work on several branches in parallel folders without stashing — with one-click
+jumps to the main workspace right from the branch switcher).
 
 **Syncing** — fetch / pull / push with ahead/behind indicators; pull is
 `--ff-only`, and divergence routes to a guarded force push with

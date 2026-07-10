@@ -283,6 +283,18 @@ export const ACTIONS = [
     defaultBinding: null,
   },
   {
+    id: "open-main-workspace",
+    label: "Open main workspace",
+    category: "Repository",
+    defaultBinding: null,
+  },
+  {
+    id: "promote-worktree-to-main",
+    label: "Promote this worktree to main workspace",
+    category: "Repository",
+    defaultBinding: null,
+  },
+  {
     id: "change-remote-url",
     label: "Change remote URL",
     category: "Repository",
