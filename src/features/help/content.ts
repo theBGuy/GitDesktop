@@ -1342,8 +1342,8 @@ there's an equivalent.`,
 Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
 
 - **General** — hide AI features, keep running in the **system tray** on close (so
-  background work continues; launching the app again brings that window back), and
-  privacy options.
+  background work continues; launching the app again while it's running —
+  tray-hidden or not — focuses the existing window), and privacy options.
 {{ai}}- **AI** — providers, models, keys, instructions, agent-session isolation
   (worktree / container), and the container image.
 - **Slash commands** — manage built-in and custom agent commands.

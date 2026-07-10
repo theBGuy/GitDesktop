@@ -40,7 +40,9 @@ pub fn run() {
     // through the store). Dev is exempt on purpose: the lock keys on the shared
     // `com.thebguy.gitdesktop` identifier, and dev+prod / two dev builds
     // (parallel-worktree testing) must keep coexisting. Keep this the FIRST
-    // plugin registered so the check runs before any other init.
+    // plugin registered so the check runs before any other init. The second
+    // launch's argv/cwd are intentionally dropped: v1 is focus-only, and no
+    // CLI repo-open feature exists to forward them to.
     #[cfg(all(desktop, not(debug_assertions)))]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
         tray::show_main_window(app);

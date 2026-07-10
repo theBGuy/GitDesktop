@@ -66,6 +66,9 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 }
 
 pub(crate) fn show_main_window(app: &AppHandle) {
+    // `None` is unreachable today: close-to-tray HIDES "main" (never destroys
+    // it), so the window always exists while the process runs. If the app ever
+    // closes + recreates the window, this silently no-ops — recreate it here.
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();

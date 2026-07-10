@@ -78,3 +78,9 @@ jobs:
 
       - name: Run clippy
         run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+
+      # Release-only code (`cfg(not(debug_assertions))`: the single-instance
+      # lock, the managed MCP launcher copy) never compiles in the debug-profile
+      # steps above — lint it in release profile so it can't silently rot.
+      - name: Run clippy (release-gated code)
+        run: cargo clippy --release --manifest-path src-tauri/Cargo.toml -- -D warnings
