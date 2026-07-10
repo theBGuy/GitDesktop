@@ -25,8 +25,8 @@
 //! the git cap or budgeting truncated, matching the TS `budgeted.truncated || diffTruncated`.
 
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::CallToolResult;
-use rmcp::{schemars, tool, tool_router, ErrorData as McpError};
+use rmcp::model::{CallToolResult, GetPromptResult, PromptMessage, PromptMessageRole};
+use rmcp::{prompt, prompt_router, schemars, tool, tool_router, ErrorData as McpError};
 
 use super::{app_err, ensure_not_flag, json_result, to_value, GitDesktopMcp};
 use crate::git::types::DiffStatEntry;
@@ -714,6 +714,52 @@ impl GitDesktopMcp {
                        and use the result as the commit message. Errors if nothing is staged."
     )]
     async fn generate_commit_message(&self) -> Result<CallToolResult, McpError> {
+        let recipe = self.build_commit_recipe().await?;
+        json_result(&to_value(&recipe)?)
+    }
+
+    #[tool(
+        description = "Assemble GitDesktop's PR/MR-description generation recipe for a branch range: \
+                       returns { system, prompt, note } — the same provider-aware system + user \
+                       prompt the in-app AI feature builds (three-dot branch diff, the commit \
+                       subjects the PR would introduce, a per-file summary, the repo's available \
+                       labels when any, and project/user instructions). Defaults: base = the repo's \
+                       default branch, head = the current branch. This tool does NOT call a model; \
+                       complete the returned prompt with your own inference."
+    )]
+    async fn generate_pr_description(
+        &self,
+        Parameters(args): Parameters<PrRecipeArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let recipe = self.build_pr_recipe(args).await?;
+        json_result(&to_value(&recipe)?)
+    }
+
+    #[tool(
+        description = "Assemble GitDesktop's branch-name generation recipe from the WHOLE working \
+                       tree (staged + unstaged vs HEAD, plus untracked file names): returns \
+                       { system, prompt, note } — the same system + user prompt the in-app AI feature \
+                       builds (worktree diff, file summary, existing branch names as a convention \
+                       reference, and project/user instructions). This tool does NOT call a model; \
+                       complete the returned prompt with your own inference and use the result as the \
+                       branch name."
+    )]
+    async fn generate_branch_name(&self) -> Result<CallToolResult, McpError> {
+        let recipe = self.build_branch_recipe().await?;
+        json_result(&to_value(&recipe)?)
+    }
+}
+
+// ---- Recipe builders (shared by the recipe TOOLS above and the PROMPTS below) --
+//
+// Each gathers the repository context and assembles the `Recipe`, returning the
+// same `McpError::invalid_request` on the empty-input cases. The tools serialize
+// the recipe as JSON; the prompts render it as a single user PromptMessage. One
+// source of truth so a tool and its twin prompt can never drift.
+impl GitDesktopMcp {
+    /// Gather + assemble the commit-message recipe (STAGED changes). Errors with
+    /// `invalid_request` when nothing is staged.
+    async fn build_commit_recipe(&self) -> Result<Recipe, McpError> {
         let settings = crate::app_store::read_ai_generation_settings();
         let repo_ignore = crate::instructions::read_repo_ai_ignore(self.repo.clone())
             .await
@@ -749,7 +795,7 @@ impl GitDesktopMcp {
             .await
             .map_err(app_err)?;
 
-        let recipe = assemble_commit_recipe(CommitPieces {
+        Ok(assemble_commit_recipe(CommitPieces {
             diff_text: staged.text,
             diff_truncated: staged.truncated,
             files: staged.files,
@@ -757,23 +803,12 @@ impl GitDesktopMcp {
             recent_subjects: commits.into_iter().map(|c| c.subject).collect(),
             repo_instructions,
             global_instructions: settings.global_instructions,
-        });
-        json_result(&to_value(&recipe)?)
+        }))
     }
 
-    #[tool(
-        description = "Assemble GitDesktop's PR/MR-description generation recipe for a branch range: \
-                       returns { system, prompt, note } — the same provider-aware system + user \
-                       prompt the in-app AI feature builds (three-dot branch diff, the commit \
-                       subjects the PR would introduce, a per-file summary, the repo's available \
-                       labels when any, and project/user instructions). Defaults: base = the repo's \
-                       default branch, head = the current branch. This tool does NOT call a model; \
-                       complete the returned prompt with your own inference."
-    )]
-    async fn generate_pr_description(
-        &self,
-        Parameters(args): Parameters<PrRecipeArgs>,
-    ) -> Result<CallToolResult, McpError> {
+    /// Gather + assemble the PR/MR-description recipe for a branch range, applying
+    /// the in-app base/head defaults.
+    async fn build_pr_recipe(&self, args: PrRecipeArgs) -> Result<Recipe, McpError> {
         // Resolve base/head, applying the same defaults the in-app flow uses.
         let base = match args.base {
             Some(b) => b,
@@ -829,7 +864,7 @@ impl GitDesktopMcp {
             .map_err(app_err)?;
         let settings = crate::app_store::read_ai_generation_settings();
 
-        let recipe = assemble_pr_recipe(PrPieces {
+        Ok(assemble_pr_recipe(PrPieces {
             diff_text: diff.text,
             diff_truncated: diff.truncated,
             files: diff.files,
@@ -840,20 +875,12 @@ impl GitDesktopMcp {
             repo_instructions,
             global_instructions: settings.global_instructions,
             provider,
-        });
-        json_result(&to_value(&recipe)?)
+        }))
     }
 
-    #[tool(
-        description = "Assemble GitDesktop's branch-name generation recipe from the WHOLE working \
-                       tree (staged + unstaged vs HEAD, plus untracked file names): returns \
-                       { system, prompt, note } — the same system + user prompt the in-app AI feature \
-                       builds (worktree diff, file summary, existing branch names as a convention \
-                       reference, and project/user instructions). This tool does NOT call a model; \
-                       complete the returned prompt with your own inference and use the result as the \
-                       branch name."
-    )]
-    async fn generate_branch_name(&self) -> Result<CallToolResult, McpError> {
+    /// Gather + assemble the branch-name recipe (WHOLE working tree). Errors with
+    /// `invalid_request` when there are no in-progress changes.
+    async fn build_branch_recipe(&self) -> Result<Recipe, McpError> {
         let settings = crate::app_store::read_ai_generation_settings();
         let repo_ignore = crate::instructions::read_repo_ai_ignore(self.repo.clone())
             .await
@@ -895,7 +922,7 @@ impl GitDesktopMcp {
             .await
             .map_err(app_err)?;
 
-        let recipe = assemble_branch_recipe(BranchPieces {
+        Ok(assemble_branch_recipe(BranchPieces {
             diff_text: diff.text,
             diff_truncated: diff.truncated,
             files: diff.files,
@@ -904,8 +931,75 @@ impl GitDesktopMcp {
             recent_branches: branches,
             repo_instructions,
             global_instructions: settings.global_instructions,
-        });
-        json_result(&to_value(&recipe)?)
+        }))
+    }
+}
+
+/// Render a [`Recipe`] as the single user [`PromptMessage`] an MCP prompt returns:
+/// the system + user prompt joined, described by the recipe's `note`. The client
+/// model completes the assembled prompt (the recipe tools return the same content
+/// as JSON; the prompts hand it to the client as a ready-to-complete message).
+fn recipe_as_prompt(recipe: Recipe) -> GetPromptResult {
+    let Recipe {
+        system,
+        prompt,
+        note,
+    } = recipe;
+    GetPromptResult::new(vec![PromptMessage::new_text(
+        PromptMessageRole::User,
+        format!("{system}\n\n{prompt}"),
+    )])
+    .with_description(note)
+}
+
+// ---- The generation PROMPTS (MCP prompts primitive) ------------------------
+//
+// The same three generation recipes as the tools above, exposed additionally as
+// MCP prompts (slash-command-like in clients). Each assembles GitDesktop's system
+// + user prompt from the repository and returns it as ONE user message for the
+// client's own model to complete — read-only, no writes, no opt-in required. The
+// Rust method names carry a `_prompt` suffix so they don't collide with the recipe
+// tool methods on the same type.
+#[prompt_router(router = "generate_prompt_router", vis = "pub(crate)")]
+impl GitDesktopMcp {
+    #[prompt(
+        name = "commit-message",
+        description = "Assemble GitDesktop's commit-message generation prompt from the currently \
+                       STAGED changes (staged diff, per-file summary, recent commit subjects as a \
+                       style reference, and any project/user instructions) as one ready-to-complete \
+                       message. Your model completes it and the result is the commit message. Errors \
+                       if nothing is staged."
+    )]
+    async fn commit_message_prompt(&self) -> Result<GetPromptResult, McpError> {
+        Ok(recipe_as_prompt(self.build_commit_recipe().await?))
+    }
+
+    #[prompt(
+        name = "pr-description",
+        description = "Assemble GitDesktop's provider-aware PR/MR-description generation prompt for a \
+                       branch range (branch diff, the commit subjects the PR would introduce, a \
+                       per-file summary, the repo's labels when any, and project/user instructions) \
+                       as one ready-to-complete message. Defaults: base = the repo's default branch, \
+                       head = the current branch. Your model completes it and the result is the \
+                       PR/MR title and description."
+    )]
+    async fn pr_description_prompt(
+        &self,
+        Parameters(args): Parameters<PrRecipeArgs>,
+    ) -> Result<GetPromptResult, McpError> {
+        Ok(recipe_as_prompt(self.build_pr_recipe(args).await?))
+    }
+
+    #[prompt(
+        name = "branch-name",
+        description = "Assemble GitDesktop's branch-name generation prompt from the WHOLE working \
+                       tree (staged + unstaged vs HEAD, plus untracked file names; existing branch \
+                       names as a convention reference, and project/user instructions) as one \
+                       ready-to-complete message. Your model completes it and the result is the \
+                       branch name. Errors if there are no in-progress changes."
+    )]
+    async fn branch_name_prompt(&self) -> Result<GetPromptResult, McpError> {
+        Ok(recipe_as_prompt(self.build_branch_recipe().await?))
     }
 }
 

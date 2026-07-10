@@ -1049,6 +1049,10 @@ project, no per-repo file) via the client's own CLI, with a project-aware \`--re
 single entry follows whatever repo you open. Each row shows its **live state**: already
 installed and pointing at the current launcher, or pointing at an older install (a one-click
 **Reinstall** switches it over) — with **Remove** to take it back out, no confirmation needed.
+An installed row also reads out the entry's **permission tier** (e.g. *Installed (local +
+remote writes)*, or *read-only*), and once you change the permission checkboxes so they no
+longer match the installed entry it flags the mismatch and offers **Reinstall** to apply the
+new selection.
 Two toggles shape what gets written: **Shareable entry** swaps machine-specific
 absolute paths for portable \`\${GITDESKTOP_BIN:-gitdesktop-mcp}\` / \`\${CLAUDE_PROJECT_DIR}\`
 ones a teammate can commit (they point \`GITDESKTOP_BIN\` at their own launcher, or keep
@@ -1099,7 +1103,10 @@ the agent the *same* fully assembled context and prompt the in-app feature build
 staged or branch diff (with the same low-value-file budgeting), recent commit subjects as a
 style reference, your repo and global instructions, and \`.aiignore\` filtering. The tools
 don't call a model; the agent completes the returned prompt with its own inference, so you
-can trigger GitDesktop's generation from any client.
+can trigger GitDesktop's generation from any client. The same three recipes are also exposed
+as native **MCP prompts** (\`commit-message\`, \`pr-description\`, \`branch-name\`) — the
+slash-command-like primitive many clients surface — each handing your model the assembled
+prompt to complete.
 
 New to MCP? **Browse** opens the official Model Context Protocol registry right in that
 panel — search it and add a server in a click; it arrives **disabled** for you to review

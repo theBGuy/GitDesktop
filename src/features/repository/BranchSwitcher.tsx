@@ -690,8 +690,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     "update-default-from-upstream",
     () =>
       defaultBranchRow?.upstream &&
+      !defaultBranchRow.upstreamGone &&
       doUpdateFromUpstream(defaultBranchRow.name, defaultBranchRow.upstream),
-    Boolean(defaultBranchRow?.upstream) && !busy,
+    Boolean(defaultBranchRow?.upstream) &&
+      !defaultBranchRow?.upstreamGone &&
+      !busy,
   );
   useHotkeyAction(
     "merge-into-current",
@@ -1458,7 +1461,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         currentLabel={currentLabel}
         defaultBranch={defaultName}
         hasChanges={hasChanges}
-        isPushed={Boolean(head?.upstream)}
+        isPushed={Boolean(head?.upstream) && !head?.upstreamGone}
       />
 
       <SwitchWithChangesDialog

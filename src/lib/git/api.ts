@@ -2724,6 +2724,11 @@ export interface McpGlobalClientStatus {
   /** The configured command resolves to the current managed launcher
    *  (path-normalized) — false for an older install or a custom entry. */
   current: boolean;
+  /** The installed entry's `args` (string elements only), so the UI can read
+   *  WHICH permission tier is installed and nudge Reinstall when it drifts from
+   *  the selected permissions. `null` when not installed, unreadable, or the
+   *  entry predates this probe — never guessed. */
+  args: string[] | null;
 }
 
 export interface McpGlobalStatus {

@@ -31,6 +31,11 @@ export interface BranchHead {
   upstream: string | null;
   ahead: number;
   behind: number;
+  /** The upstream is configured but its remote-tracking ref is gone (e.g. the
+   *  remote branch was deleted after a PR merge). Treat like "no upstream" for
+   *  decisions: offer Publish over Push/Pull, allow undo-commit, don't demand a
+   *  force-push on amend. */
+  upstreamGone: boolean;
 }
 
 export interface RepoStatus {
@@ -52,6 +57,10 @@ export interface Branch {
   /** Commits this branch is behind its own upstream — drives the
    *  "Update from {upstream}" action. 0 when untracked, gone, or in sync. */
   upstreamBehind: number;
+  /** The upstream is configured but its remote-tracking ref is gone (e.g. the
+   *  remote branch was deleted after a PR merge). Read as "no upstream" for
+   *  pushed-ness decisions. */
+  upstreamGone: boolean;
 }
 
 /** A branch that exists on a remote but not locally — offered in the switcher so

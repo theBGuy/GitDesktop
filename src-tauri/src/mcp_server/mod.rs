@@ -33,10 +33,18 @@ mod write_local;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use rmcp::handler::server::router::prompt::PromptRouter;
 use rmcp::handler::server::router::tool::ToolRouter;
-use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
+use rmcp::model::{
+    CallToolResult, Content, GetPromptRequestParams, GetPromptResult, ListPromptsResult,
+    PaginatedRequestParams, ServerCapabilities, ServerInfo,
+};
+use rmcp::service::RequestContext;
 use rmcp::transport::stdio;
-use rmcp::{schemars, tool_handler, ErrorData as McpError, ServerHandler, ServiceExt};
+use rmcp::{
+    prompt_handler, schemars, tool_handler, ErrorData as McpError, RoleServer, ServerHandler,
+    ServiceExt,
+};
 
 use crate::error::AppError;
 use crate::git::runner::{run_git, run_git_raw, DEFAULT_TIMEOUT};
@@ -103,6 +111,10 @@ pub struct GitDesktopMcp {
     // dead-code lint misses that (it only sees the derived `Clone` touch it).
     #[allow(dead_code)]
     tool_router: ToolRouter<GitDesktopMcp>,
+    // Read by the `#[prompt_handler]`-generated `list_prompts`/`get_prompt`; like
+    // `tool_router`, the dead-code lint only sees the derived `Clone` touch it.
+    #[allow(dead_code)]
+    prompt_router: PromptRouter<GitDesktopMcp>,
 }
 
 // ---- Shared tool parameters -----------------------------------------------
@@ -166,6 +178,11 @@ impl GitDesktopMcp {
                 + Self::write_forge_router()
                 + Self::write_git_router()
                 + Self::generate_router(),
+            // The generation recipes are ALSO exposed as MCP prompts. Only one module
+            // contributes prompts today, so there's no `+` chain here (unlike the
+            // tool router) — a future prompt-contributing module would `+` its own
+            // `PromptRouter` in.
+            prompt_router: Self::generate_prompt_router(),
         }
     }
 
@@ -262,12 +279,16 @@ impl GitDesktopMcp {
 // serves — so the `list_tools`/`call_tool`/`get_tool` the macro generates dispatch
 // across every domain module, not just one.
 #[tool_handler(router = self.tool_router)]
+#[prompt_handler(router = self.prompt_router)]
 impl ServerHandler for GitDesktopMcp {
     fn get_info(&self) -> ServerInfo {
         // ServerInfo (InitializeResult) is #[non_exhaustive] — build from default,
         // then set the fields we care about.
         let mut info = ServerInfo::default();
-        info.capabilities = ServerCapabilities::builder().enable_tools().build();
+        info.capabilities = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_prompts()
+            .build();
         info.instructions = Some(
             "GitDesktop as an MCP server. Tools act on the repository this server was launched \
              against (--repo). The PR/issue/CI tools route through GitDesktop's forge abstraction, \
@@ -292,7 +313,10 @@ impl ServerHandler for GitDesktopMcp {
              top of --allow-git-write) for IRRECOVERABLE local-git operations such as \
              discard/reset/force-push. Separately, a small set of generation-recipe tools (which \
              assemble the context and prompt for commit-message / branch-name generation) is \
-             always available and performs no writes."
+             always available and performs no writes. The same three generation recipes \
+             (commit-message, pr-description, branch-name) are ALSO exposed as MCP prompts that \
+             assemble GitDesktop's generation context for the client's own model to complete — \
+             read-only, always available, no opt-in required."
                 .into(),
         );
         info
@@ -727,5 +751,20 @@ mod tests {
             + GitDesktopMcp::generate_router().list_all().len();
         assert_eq!(handler.tool_router.list_all().len(), per_module);
         assert_eq!(per_module, 110);
+    }
+
+    /// The prompt router (separate from the tool router — prompts are NOT tools, so
+    /// the count above is unaffected) exposes exactly the three generation-recipe
+    /// prompts, by their MCP names. `list_all` returns them sorted by name.
+    #[test]
+    fn prompt_router_lists_the_three_generation_prompts() {
+        let handler = handler(false, false, false, false);
+        let names: Vec<String> = handler
+            .prompt_router
+            .list_all()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(names, vec!["branch-name", "commit-message", "pr-description"]);
     }
 }

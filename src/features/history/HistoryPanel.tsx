@@ -179,7 +179,9 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   const head = status.data?.branch;
   const lastCommit = log.data?.pages[0]?.[0];
   const canUndo = Boolean(
-    lastCommit && head && (head.upstream === null || head.ahead > 0),
+    lastCommit &&
+      head &&
+      (head.upstream === null || head.upstreamGone || head.ahead > 0),
   );
 
   async function undoLast() {
@@ -246,12 +248,15 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   // below it live on `origin/<base>` and are already published, so only the
   // branch's own commits are unpushed. (Queried only in the no-upstream case.)
   // Drives both the rewrite gating below and the per-row "not pushed" marker.
-  const noUpstream = head != null && head.upstream === null;
+  // A gone upstream counts as no upstream so the `unpushedVsRemotes` fallback
+  // engages and the per-row "not pushed" markers reflect what's truly published.
+  const noUpstream =
+    head != null && (head.upstream === null || head.upstreamGone);
   const unpushedVsRemotes = useUnpushedCount(repoPath, noUpstream);
   const unpushedCount = head
-    ? head.upstream
-      ? head.ahead
-      : (unpushedVsRemotes.data ?? 0)
+    ? noUpstream
+      ? (unpushedVsRemotes.data ?? 0)
+      : head.ahead
     : 0;
   // The unpushed set (top `unpushedCount` of the HEAD-order log), for marking
   // rows. Memoized — the React Compiler won't hoist the .slice/.map/new Set.
@@ -737,7 +742,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
               selected={selected}
               selectedCommitHash={selectedCommitHash}
               unpushedHashes={unpushedHashes}
-              upstream={head?.upstream ?? null}
+              upstream={head?.upstreamGone ? null : (head?.upstream ?? null)}
               onRowClick={onRowClick}
               onHoverPrefetch={(hash) =>
                 hoverPrefetch(() => prefetchCommit(hash))

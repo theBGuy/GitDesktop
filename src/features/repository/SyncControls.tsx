@@ -67,7 +67,11 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   const readyProviders = usePublishProviders(repoPath, noOrigin);
 
   const head = status.data?.branch;
-  const hasUpstream = Boolean(head?.upstream);
+  // A gone upstream (remote branch deleted, config lingers) reads as "no
+  // upstream": the button flips to "Publish branch" and its push sends
+  // `-u origin HEAD`, recreating the remote branch; Pull disables against the
+  // dead ref.
+  const hasUpstream = Boolean(head?.upstream) && !head?.upstreamGone;
   // amended/rewritten local history: local and remote both have commits the
   // other lacks, so neither pull --ff-only nor a normal push can succeed
   const diverged = Boolean(head && head.ahead > 0 && head.behind > 0);

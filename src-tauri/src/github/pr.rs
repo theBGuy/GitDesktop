@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::error::{AppError, AppResult};
-use crate::git::runner::{run_git_mutating, NETWORK_TIMEOUT};
+use crate::git::runner::{run_git_mutating, run_git_raw, DEFAULT_TIMEOUT, NETWORK_TIMEOUT};
 use crate::github::issue::{map_reaction_groups, repo_owner_name, IssueReactions};
 use crate::github::runner::{run_gh, run_gh_input, run_gh_raw, GH_NETWORK_TIMEOUT, GH_TIMEOUT};
 use crate::state::AppState;
@@ -626,6 +626,26 @@ async fn gh_delete_remote_head_branch(repo_path: &str, number: u64) -> AppResult
         return Ok(());
     };
 
+    // Best-effort prune of the LOCAL remote-tracking ref for this branch. The
+    // GitHub API delete never touches local git, so `refs/remotes/origin/<branch>`
+    // lingers (marked `[gone]`) until the next pruning fetch — long enough for the
+    // sync bar to keep offering stale Push/Pull. Deleting it now flips the branch
+    // to "Publish" on the next status refresh. Skipped for a cross-repository PR:
+    // a fork's head branch has no `origin` tracking ref of ours to prune. We use
+    // `run_git_raw` (no AppState) for this single atomic ref deletion rather than
+    // threading state through the signature — the same idempotent-prune model
+    // `git_delete_remote_branch_core` already uses.
+    let prune_local_tracking = || async {
+        if !head.is_cross_repository {
+            let _ = run_git_raw(
+                Some(repo_path),
+                &["update-ref", "-d", &format!("refs/remotes/origin/{branch}")],
+                DEFAULT_TIMEOUT,
+            )
+            .await;
+        }
+    };
+
     let endpoint = format!("repos/{owner}/{repo}/git/refs/heads/{branch}");
     match run_gh(
         Some(repo_path),
@@ -634,7 +654,10 @@ async fn gh_delete_remote_head_branch(repo_path: &str, number: u64) -> AppResult
     )
     .await
     {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            prune_local_tracking().await;
+            Ok(())
+        }
         Err(err) => {
             let raw = err.to_string();
             let lower = raw.to_ascii_lowercase();
@@ -643,6 +666,7 @@ async fn gh_delete_remote_head_branch(repo_path: &str, number: u64) -> AppResult
             // auto-deletes head branches, or a prior attempt removed it). A permission
             // failure can return 404 "Not found", so don't swallow that — let it surface.
             if lower.contains("reference does not exist") {
+                prune_local_tracking().await;
                 return Ok(());
             }
             let fork_note = if head.is_cross_repository {

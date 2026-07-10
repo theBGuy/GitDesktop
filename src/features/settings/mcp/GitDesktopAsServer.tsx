@@ -1,6 +1,6 @@
 import { CaretRightIcon, CheckIcon, CopyIcon } from "@phosphor-icons/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -31,6 +31,28 @@ import { toastError } from "@/lib/toast";
  *  `.mcp.json`, or a client's global (all-projects) user config. */
 type InstallTarget = "project" | "claude" | "copilot";
 
+/** The four `--allow-*` permission flags, in ladder order, mapped to their
+ *  human tier label. Drives both the installed-tier readout and the drift
+ *  comparison — every other arg (`mcp`, `--repo`, its value, unknown flags) is
+ *  ignored, so it never counts as a permission or as drift. */
+const ALLOW_FLAG_LABELS: Record<string, string> = {
+  "--allow-write": "local writes",
+  "--allow-remote-write": "remote writes",
+  "--allow-git-write": "git writes",
+  "--allow-destructive": "destructive",
+};
+
+/** The installed entry's permission tier as a readable label, e.g. "local +
+ *  remote writes", or "read-only" when no `--allow-*` flags are present. Reads
+ *  ONLY the known flags out of `args`, in ladder order, so unknown args never
+ *  leak into the label. */
+function tierLabel(installedFlags: string[]): string {
+  const parts = Object.keys(ALLOW_FLAG_LABELS)
+    .filter((flag) => installedFlags.includes(flag))
+    .map((flag) => ALLOW_FLAG_LABELS[flag]);
+  return parts.length ? parts.join(" + ") : "read-only";
+}
+
 /** Bottom-of-section disclosure: the inverse of the rest of this panel. Instead of
  *  consuming MCP servers, expose GitDesktop's OWN read-only git/GitHub tools to
  *  external clients, which run the app as a stdio server via `gitdesktop mcp`.
@@ -50,6 +72,13 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
   // too, so unchecking git-write must also clear destructive).
   const [allowGitWrite, setAllowGitWrite] = useState(false);
   const [allowDestructive, setAllowDestructive] = useState(false);
+  // Dirty-tracking for the four tier checkboxes above (NOT `shareable`): true once
+  // the user has changed any of them this open. The tier checkboxes initialize to
+  // false, so without this a flagged global install would show the drift warning +
+  // "Reinstall" the instant the disclosure opens — a nag before any intent. Reset
+  // to false on each closed→open transition (below) so every open starts pristine;
+  // `drift` gates on it, so drift/Reinstall only surface after a real change.
+  const [tierTouched, setTierTouched] = useState(false);
   // One install at a time: `busyTarget` is which is running, `confirmTarget` which
   // is awaiting a replace-confirm. "project" = this repo's .mcp.json;
   // "claude"/"copilot" = that client's global (all-projects) user config.
@@ -181,6 +210,20 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
     setTimeout(() => setCopied(false), 1500);
   }
 
+  // The four `--allow-*` flags the current checkbox selection wants, in ladder
+  // order. Single source of truth for both the emitted global entry and the drift
+  // comparison, so the installed tier and the wanted tier can't diverge.
+  // --allow-destructive requires git-write; gate on both so a stray flag can never
+  // emit (or be compared) without its prerequisite.
+  const wantedAllowFlags = useCallback((): string[] => {
+    const flags: string[] = [];
+    if (allowWrite) flags.push("--allow-write");
+    if (allowRemoteWrite) flags.push("--allow-remote-write");
+    if (allowGitWrite) flags.push("--allow-git-write");
+    if (allowGitWrite && allowDestructive) flags.push("--allow-destructive");
+    return flags;
+  }, [allowWrite, allowRemoteWrite, allowGitWrite, allowDestructive]);
+
   // The entry a GLOBAL (all-projects) install writes: the absolute exe + a DYNAMIC
   // repo so the server follows whatever project the client is in. The repo var is
   // client-specific — Claude Code expands ${CLAUDE_PROJECT_DIR}; Copilot has no
@@ -191,11 +234,8 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
       "mcp",
       "--repo",
       target === "claude" ? "${CLAUDE_PROJECT_DIR:-.}" : ".",
+      ...wantedAllowFlags(),
     ];
-    if (allowWrite) args.push("--allow-write");
-    if (allowRemoteWrite) args.push("--allow-remote-write");
-    if (allowGitWrite) args.push("--allow-git-write");
-    if (allowGitWrite && allowDestructive) args.push("--allow-destructive");
     return { command: launcherPath, args };
   }
 
@@ -303,6 +343,29 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
     // Install/Reinstall embed the absolute launcher path, so they additionally
     // gate on the launcher being ready.
     const installReason = rowLoadingReason ?? busyReason ?? launcherDisabledReason;
+    // The known `--allow-*` flags actually installed (order-normalized via the
+    // ladder map; every other arg is ignored). `args` is null for an older
+    // install predating this probe — then we can't read the tier and omit it.
+    const installedFlags =
+      status?.args != null
+        ? Object.keys(ALLOW_FLAG_LABELS).filter((flag) =>
+            (status.args as string[]).includes(flag),
+          )
+        : null;
+    // Drift = the installed permission set differs from the currently-selected
+    // one. Gated on `tierTouched` so a pristine open never nags — the checkboxes
+    // start all-false, which would otherwise read as drift against any flagged
+    // install before the user expresses intent. Only meaningful for a current,
+    // readable install; the stale-path (!current) warning owns the not-current
+    // case and takes precedence.
+    const wanted = wantedAllowFlags();
+    const drift =
+      tierTouched &&
+      status?.installed === true &&
+      status.current &&
+      installedFlags !== null &&
+      (installedFlags.length !== wanted.length ||
+        !wanted.every((flag) => installedFlags.includes(flag)));
     return (
       <div className="space-y-1">
         <div className="flex items-center justify-between gap-2">
@@ -342,11 +405,11 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
                 {installing ? (
                   <>
                     <Spinner className="size-3" />{" "}
-                    {status?.installed && !status.current
+                    {status?.installed && (!status.current || drift)
                       ? "Reinstalling…"
                       : "Adding…"}
                   </>
-                ) : status?.installed && !status.current ? (
+                ) : status?.installed && (!status.current || drift) ? (
                   "Reinstall"
                 ) : (
                   "Install"
@@ -358,15 +421,26 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
         {globalStatusLoading ? (
           <p className="text-xs text-muted-foreground">Checking…</p>
         ) : status?.installed ? (
-          status.current ? (
-            <p className="flex items-center gap-1.5 text-xs text-success">
-              <CheckIcon className="shrink-0" />
-              <span>Installed — uses this launcher.</span>
-            </p>
-          ) : (
+          !status.current ? (
+            // Stale-path warning owns the not-current case and takes precedence
+            // over any drift readout — never show both.
             <p className="text-xs text-warning">
               Installed — points at a different executable (an older install or
               custom entry). Reinstall to use this launcher.
+            </p>
+          ) : drift ? (
+            <p className="text-xs text-warning">
+              Installed ({tierLabel(installedFlags ?? [])}) — differs from the
+              selected permissions. Reinstall to apply them.
+            </p>
+          ) : (
+            <p className="flex items-center gap-1.5 text-xs text-success">
+              <CheckIcon className="shrink-0" />
+              <span>
+                Installed
+                {installedFlags !== null && ` (${tierLabel(installedFlags)})`} —
+                uses this launcher.
+              </span>
             </p>
           )
         ) : (
@@ -401,7 +475,15 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
     <div className="border-t pt-4">
       <button
         type="button"
-        onClick={() => setOpen((o) => !o)}
+        onClick={() =>
+          setOpen((o) => {
+            // Each closed→open transition starts pristine, so a flagged install
+            // shows the calm success line (with its tier readout) rather than the
+            // drift nag until the user actually changes a tier checkbox.
+            if (!o) setTierTouched(false);
+            return !o;
+          })
+        }
         aria-expanded={open}
         aria-controls="gd-as-mcp-config"
         className="flex w-full items-start gap-2 rounded text-left outline-none focus-visible:ring-1 focus-visible:ring-ring"
@@ -451,7 +533,10 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
             <label className="flex cursor-pointer items-center gap-2 text-xs">
               <Checkbox
                 checked={allowWrite}
-                onCheckedChange={(c) => setAllowWrite(c === true)}
+                onCheckedChange={(c) => {
+                  setAllowWrite(c === true);
+                  setTierTouched(true);
+                }}
               />
               Allow write tools
             </label>
@@ -466,7 +551,10 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
             <label className="flex cursor-pointer items-center gap-2 text-xs">
               <Checkbox
                 checked={allowRemoteWrite}
-                onCheckedChange={(c) => setAllowRemoteWrite(c === true)}
+                onCheckedChange={(c) => {
+                  setAllowRemoteWrite(c === true);
+                  setTierTouched(true);
+                }}
               />
               Allow remote write
             </label>
@@ -484,6 +572,7 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
                 onCheckedChange={(c) => {
                   const on = c === true;
                   setAllowGitWrite(on);
+                  setTierTouched(true);
                   // Destructive requires git-write; turning git-write off must
                   // drop it too, so no hidden state can emit --allow-destructive.
                   if (!on) setAllowDestructive(false);
@@ -510,7 +599,10 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
                 <Checkbox
                   checked={allowDestructive}
                   disabled={!allowGitWrite}
-                  onCheckedChange={(c) => setAllowDestructive(c === true)}
+                  onCheckedChange={(c) => {
+                    setAllowDestructive(c === true);
+                    setTierTouched(true);
+                  }}
                 />
                 Allow destructive git writes
               </label>

@@ -302,12 +302,17 @@ export function createDiffFile(
 
 /**
  * Reads the full old/new file text for whole-file highlight context (the
- * content-mode path) and returns `{old,new}` to hand {@link createDiffFile}, or
- * `null` when content mode shouldn't apply (no revs, unreadable side, or a diff
- * too big in lines/chars for the renderer to highlight). Gated to small,
- * non-truncated diffs whose files fit the highlight budget. The rev pair MUST
- * match the diff's own old/new. Shared by the read-only diff surface and the
- * staging diff viewer. `diffText`/`filePath` should already be deferred values.
+ * content-mode path) and returns `{ content, pending }`: `content` is
+ * `{old,new}` to hand {@link createDiffFile}, or `null` when content mode
+ * shouldn't apply (no revs, unreadable side, or a diff too big in lines/chars
+ * for the renderer to highlight). `pending` is true only while content mode
+ * WANTS to apply but its whole-file reads haven't settled yet — callers gate on
+ * it to avoid painting an intermediate hunk-only diff that will immediately be
+ * rebuilt into the collapsible content-mode layout once the reads land (the
+ * "diff flash" single-paint fix). Gated to small, non-truncated diffs whose
+ * files fit the highlight budget. The rev pair MUST match the diff's own
+ * old/new. Shared by the read-only diff surface and the staging diff viewer.
+ * `diffText`/`filePath` should already be deferred values.
  */
 export function useFileContent(
   repoPath: string | undefined,
@@ -321,7 +326,7 @@ export function useFileContent(
   // still highlights correctly instead of falling back to the hunk-only,
   // mid-comment-leaking path.
   maxDiffLines: number = DIFF_LINE_CAP,
-): { old: string; new: string } | null {
+): { content: { old: string; new: string } | null; pending: boolean } {
   const oldRev = contentRevs?.oldRev;
   const newRev = contentRevs?.newRev;
   const wantContent =
@@ -374,9 +379,18 @@ export function useFileContent(
     fitsBudget(newText) &&
     covers(newText, maxNewLine) &&
     covers(oldText, maxOldLine);
+  // Content mode wants to apply here but its whole-file reads are still in
+  // flight — the caller should hold the paint rather than build a hunk-only diff
+  // it will immediately restructure once the reads settle. An already-viewed
+  // file settles instantly from the query cache (isPending, not isFetching, so a
+  // background refetch of cached data never re-blanks the pane).
+  const pending = wantContent && (!oldSettled || !newSettled);
   return useMemo(
-    () => (useContent ? { old: oldText, new: newText } : null),
-    [useContent, oldText, newText],
+    () => ({
+      content: useContent ? { old: oldText, new: newText } : null,
+      pending,
+    }),
+    [useContent, oldText, newText, pending],
   );
 }
 
@@ -418,9 +432,13 @@ function RenderedDiff({
   const deferredText = useDeferredValue(text);
   const deferredPath = useDeferredValue(filePath);
 
-  // Whole-file highlight context + collapsible expand for small diffs; null when
-  // it shouldn't apply (big file / unreadable / truncated → capped hunk-only).
-  const content = useFileContent(
+  // Whole-file highlight context + collapsible expand for small diffs; `content`
+  // is null when it shouldn't apply (big file / unreadable / truncated → capped
+  // hunk-only). `contentPending` is true while content mode wants to apply but
+  // its reads are still loading — we hold the whole paint until it settles so the
+  // diff is built ONCE (in its final content-mode layout) rather than painted
+  // hunk-only first and rebuilt when the reads land (the visible "flash").
+  const { content, pending: contentPending } = useFileContent(
     repoPath,
     deferredPath,
     deferredText,
@@ -444,38 +462,70 @@ function RenderedDiff({
 
   // Built-in Shiki grammars (astro/tsx/rust &c.) load lazily to keep them off
   // the startup bundle. The first time a diff needs one it isn't loaded yet, so
-  // createDiffFile falls back to highlight.js / plain; kick off the async load
-  // here and bump this counter when it settles so the memo rebuilds — now with
-  // the grammar registered — and the diff re-renders highlighted.
-  const [grammarReady, setGrammarReady] = useState(0);
+  // rather than build the diff hunk-only-highlighted and rebuild it when the
+  // grammar lands (the visible highlight pop-in), we hold the paint until the
+  // load settles. Track each language's outcome ("ready" or "failed") so a
+  // failed import still releases the gate — a missing grammar must fall back to
+  // highlight.js / plain, never deadlock the pane.
+  const [grammarState, setGrammarState] = useState<
+    Record<string, "ready" | "failed">
+  >({});
   const lang = useMemo(
     () => diffLang(deferredPath, syntaxMap),
     [deferredPath, syntaxMap],
   );
   useEffect(() => {
-    if (!lang || !isBuiltinShikiLang(lang) || isShikiLang(lang)) return;
+    if (
+      !lang ||
+      !isBuiltinShikiLang(lang) ||
+      isShikiLang(lang) ||
+      grammarState[lang] !== undefined
+    )
+      return;
     let cancelled = false;
     ensureBuiltinShikiLang(lang).then((ok) => {
-      if (ok && !cancelled) setGrammarReady((n) => n + 1);
+      if (!cancelled)
+        setGrammarState((s) => ({ ...s, [lang]: ok ? "ready" : "failed" }));
     });
     return () => {
       cancelled = true;
     };
-  }, [lang]);
+  }, [lang, grammarState]);
 
-  // grammarReady is a deliberate rebuild trigger: createDiffFile reads the
+  // A built-in Shiki grammar this diff needs is still loading (never seen a
+  // "ready"/"failed" result for it): hold the paint. `isShikiLang(lang)` already
+  // true means it loaded (this or an earlier diff), so it isn't pending.
+  const grammarPending =
+    !!lang &&
+    isBuiltinShikiLang(lang) &&
+    !isShikiLang(lang) &&
+    !grammarState[lang];
+
+  // grammarState is a deliberate rebuild trigger: createDiffFile reads the
   // now-loaded Shiki grammar via module state (isShikiLang), not a passed value,
-  // so bumping it is what forces the rebuild that picks the grammar up.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: grammarReady is an intentional rebuild trigger, not read directly
+  // so recording the load result is what forces the rebuild that picks the
+  // grammar up (the gate below only lets the first build run once it's settled).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: grammarState is an intentional rebuild trigger, read via module state not directly
   const diffFile = useMemo(
     () =>
-      createDiffFile(
-        deferredPath,
-        shown,
-        { syntaxMap, customLanguages },
-        content ?? undefined,
-      ),
-    [shown, deferredPath, syntaxMap, customLanguages, content, grammarReady],
+      contentPending || grammarPending
+        ? null
+        : createDiffFile(
+            deferredPath,
+            shown,
+            { syntaxMap, customLanguages },
+            content ?? undefined,
+          ),
+    [
+      shown,
+      deferredPath,
+      syntaxMap,
+      customLanguages,
+      content,
+      contentPending,
+      grammarPending,
+      grammarState,
+    ],
   );
 
   // Build the per-side extendData maps from the anchors (keyed by String(line)).
@@ -793,6 +843,12 @@ function RenderedDiff({
     [lineWidget, resolveWidgetRange, syncPreselect],
   );
 
+  // Inputs still settling (whole-file reads or the lazy grammar): render nothing
+  // rather than a hunk-only diff we'd immediately rebuild — the single-paint gate
+  // that removes the flash. Must precede the empty-state placeholder so loading
+  // never masquerades as "No changes to show". Matches DiffContent's own
+  // render-nothing-while-loading design (see the comment there).
+  if (contentPending || grammarPending) return null;
   if (!diffFile) return <DiffPlaceholder message="No changes to show" />;
   return (
     <>

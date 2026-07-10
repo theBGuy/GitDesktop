@@ -48,7 +48,11 @@ export function useAmendWithConfirm(repoPath: string) {
 
   const branch = status.data?.branch;
   const upstream = branch?.upstream ?? null;
-  const needsForcePush = upstream !== null && (branch?.ahead ?? 0) === 0;
+  // A gone upstream (remote branch deleted) reads as no upstream: the commit
+  // isn't on any live remote, so amending it is a plain re-commit, not a
+  // force-push.
+  const needsForcePush =
+    upstream !== null && !branch?.upstreamGone && (branch?.ahead ?? 0) === 0;
 
   function requestAmend(hash: string) {
     // Amending an already-pushed commit means force-pushing it. If a branch

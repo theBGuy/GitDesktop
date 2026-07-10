@@ -744,11 +744,12 @@ pub async fn forge_pr_reopen(repo_path: String, number: u64) -> AppResult<()> {
     }
 }
 
-/// Request changes on a merge request (the blocking reviewer state), with an
-/// optional comment. GitLab-only, like the approve/unapprove toggle: GitHub
-/// requests changes through its own Review menu (`gh_pr_review`), and the
-/// frontend gates this on `implemented.mrRequestChanges` (false for GitHub), so
-/// the GitHub arm is never reached — it errors defensively.
+/// Request changes on a merge/pull request (the blocking reviewer state), with a
+/// comment. Wired for all three providers: GitLab/Bitbucket via their reviewer
+/// APIs, GitHub through `gh pr review --request-changes` (`gh_pr_review`), which
+/// requires a non-empty body. The frontend still gates its own control on
+/// `implemented.mrRequestChanges` (false for GitHub, so it uses GitHub's native
+/// Review menu there); this arm serves the MCP `request_changes` tool.
 #[tauri::command]
 pub async fn forge_pr_request_changes(
     repo_path: String,
@@ -762,9 +763,8 @@ pub async fn forge_pr_request_changes(
         Some((Provider::Bitbucket, _)) => {
             bitbucket::request_changes_pr(&repo_path, number, &body).await
         }
-        _ => Err(AppError::InvalidArgument(
-            "GitHub requests changes through the Review menu.".into(),
-        )),
+        _ => crate::github::pr::gh_pr_review(repo_path, number, "request_changes".to_string(), body)
+            .await,
     }
 }
 
@@ -879,16 +879,19 @@ pub async fn forge_pr_approvals(
     }
 }
 
-/// Approve a merge request (a bodyless GitLab reviewer action), behind the
-/// abstraction. GitLab-only — GitHub approves via the review flow.
+/// Approve a merge/pull request (a bodyless reviewer action), behind the
+/// abstraction. Wired for all three providers: GitLab/Bitbucket via their
+/// reviewer APIs, GitHub through `gh pr review --approve` (`gh_pr_review`, no
+/// body). The frontend still gates its own control on `implemented.mrApprove`
+/// (false for GitHub, which uses its native review flow there); this arm serves
+/// the MCP `approve_pull_request` tool.
 #[tauri::command]
 pub async fn forge_pr_approve(repo_path: String, number: u64) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::approve_pr(&repo_path, number).await,
         Some((Provider::Bitbucket, _)) => bitbucket::approve_pr(&repo_path, number).await,
-        _ => Err(AppError::InvalidArgument(
-            "GitHub approvals go through the review flow, not this control.".into(),
-        )),
+        _ => crate::github::pr::gh_pr_review(repo_path, number, "approve".to_string(), String::new())
+            .await,
     }
 }
 

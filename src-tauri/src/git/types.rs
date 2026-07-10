@@ -45,6 +45,11 @@ pub struct BranchHead {
     pub upstream: Option<String>,
     pub ahead: u32,
     pub behind: u32,
+    /// The upstream is configured (`upstream` is `Some`) but its remote-tracking
+    /// ref is gone (e.g. the branch was deleted on the remote after a PR merge).
+    /// Consumers treat this like "no upstream" for decisions — Publish instead of
+    /// Push/Pull, undo-commit allowed, no force-push demanded on amend.
+    pub upstream_gone: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -69,6 +74,10 @@ pub struct Branch {
     /// Commits on this branch's upstream that it doesn't have (drives
     /// "Update from origin/x" only when there's something to bring down).
     pub upstream_behind: u32,
+    /// The upstream is configured (`upstream` is `Some`) but its remote-tracking
+    /// ref is gone (e.g. the remote branch was deleted after a PR merge). Read as
+    /// "no upstream" for pushed-ness decisions.
+    pub upstream_gone: bool,
 }
 
 /// A branch that exists on a remote but not (yet) as a local branch — offered in

@@ -45,7 +45,8 @@ pub async fn git_branches(repo_path: String) -> AppResult<Vec<Branch>> {
         if name.is_empty() {
             continue;
         }
-        let (upstream_ahead, upstream_behind) = parse_upstream_track(track.unwrap_or(""));
+        let (upstream_ahead, upstream_behind, upstream_gone) =
+            parse_upstream_track(track.unwrap_or(""));
         branches.push(Branch {
             name: name.to_string(),
             is_current: head == Some("*"),
@@ -54,34 +55,38 @@ pub async fn git_branches(repo_path: String) -> AppResult<Vec<Branch>> {
             archived: archived.contains(name),
             upstream_ahead,
             upstream_behind,
+            upstream_gone,
         });
     }
     Ok(branches)
 }
 
-/// Parses git's `%(upstream:track)` field into `(ahead, behind)` counts.
+/// Parses git's `%(upstream:track)` field into `(ahead, behind, gone)`.
 ///
 /// Shapes: `[ahead 1, behind 2]`, `[ahead 1]`, `[behind 2]`, `[gone]`
-/// (upstream deleted), or empty (no upstream, or in sync). `gone`, empty, and
-/// anything unparseable all yield `(0, 0)`.
-fn parse_upstream_track(track: &str) -> (u32, u32) {
+/// (upstream deleted), or empty (no upstream, or in sync). `[gone]` yields
+/// `(0, 0, true)`; empty and anything unparseable yield `(0, 0, false)`.
+/// The `gone` bit lets consumers offer "Publish branch" instead of Push/Pull
+/// against a dead ref, even though `%(upstream:short)` still names the upstream.
+fn parse_upstream_track(track: &str) -> (u32, u32, bool) {
     let inner = track
         .trim()
         .strip_prefix('[')
         .and_then(|s| s.strip_suffix(']'));
     let Some(inner) = inner else {
-        return (0, 0);
+        return (0, 0, false);
     };
-    let (mut ahead, mut behind) = (0u32, 0u32);
+    let (mut ahead, mut behind, mut gone) = (0u32, 0u32, false);
     for part in inner.split(',') {
         let mut words = part.split_whitespace();
         match (words.next(), words.next()) {
             (Some("ahead"), Some(n)) => ahead = n.parse().unwrap_or(0),
             (Some("behind"), Some(n)) => behind = n.parse().unwrap_or(0),
+            (Some("gone"), _) => gone = true,
             _ => {}
         }
     }
-    (ahead, behind)
+    (ahead, behind, gone)
 }
 
 /// Branches that exist on a remote, for the switcher's "Remote" group. Returns
@@ -777,28 +782,29 @@ mod tests {
 
     #[test]
     fn parses_ahead_and_behind() {
-        assert_eq!(parse_upstream_track("[ahead 1, behind 2]"), (1, 2));
+        assert_eq!(parse_upstream_track("[ahead 1, behind 2]"), (1, 2, false));
     }
 
     #[test]
     fn parses_ahead_only() {
-        assert_eq!(parse_upstream_track("[ahead 1]"), (1, 0));
+        assert_eq!(parse_upstream_track("[ahead 1]"), (1, 0, false));
     }
 
     #[test]
     fn parses_behind_only() {
-        assert_eq!(parse_upstream_track("[behind 2]"), (0, 2));
+        assert_eq!(parse_upstream_track("[behind 2]"), (0, 2, false));
     }
 
     #[test]
     fn gone_upstream_is_zero() {
-        assert_eq!(parse_upstream_track("[gone]"), (0, 0));
+        // `[gone]` reports the deleted-upstream bit with zeroed counts.
+        assert_eq!(parse_upstream_track("[gone]"), (0, 0, true));
     }
 
     #[test]
     fn empty_or_unparseable_is_zero() {
-        assert_eq!(parse_upstream_track(""), (0, 0));
-        assert_eq!(parse_upstream_track("   "), (0, 0));
-        assert_eq!(parse_upstream_track("garbage"), (0, 0));
+        assert_eq!(parse_upstream_track(""), (0, 0, false));
+        assert_eq!(parse_upstream_track("   "), (0, 0, false));
+        assert_eq!(parse_upstream_track("garbage"), (0, 0, false));
     }
 }

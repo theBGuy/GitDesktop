@@ -572,7 +572,11 @@ function StagingDiffView({
   // Whole-file highlight context + expand. The staging view renders every hunk
   // regardless, so let content mode engage for big diffs too — bounded by the
   // file highlight budget, not the read-only surface's 200-line render cap.
-  const content = useFileContent(
+  // `pending` holds the paint until the whole-file reads settle, so the diff is
+  // built once in its final content-mode layout instead of flashing hunk-only
+  // first (the single-paint fix). (No Shiki grammar gating here — this staging
+  // path doesn't lazy-load built-in grammars, a pre-existing gap left as-is.)
+  const { content, pending: contentPending } = useFileContent(
     repoPath,
     deferredPath,
     deferredText,
@@ -580,15 +584,26 @@ function StagingDiffView({
     HIGHLIGHT_MAX_LINES,
   );
   // The whole-file diff (every hunk) — never capped, so all hunks stay stageable.
+  // Null while content reads are pending: don't build an intermediate diff the
+  // arriving reads would immediately restructure.
   const diffFile = useMemo(
     () =>
-      createDiffFile(
-        deferredPath,
-        deferredText,
-        { syntaxMap, customLanguages },
-        content ?? undefined,
-      ),
-    [deferredPath, deferredText, syntaxMap, customLanguages, content],
+      contentPending
+        ? null
+        : createDiffFile(
+            deferredPath,
+            deferredText,
+            { syntaxMap, customLanguages },
+            content ?? undefined,
+          ),
+    [
+      deferredPath,
+      deferredText,
+      syntaxMap,
+      customLanguages,
+      content,
+      contentPending,
+    ],
   );
 
   // The library can expand collapsed context but offers no way back; track when
@@ -674,6 +689,12 @@ function StagingDiffView({
     };
   }, [diffFile, hunks]);
 
+  // Whole-file reads still settling: render nothing rather than build a hunk-only
+  // diff we'd immediately restructure once they land (the single-paint fix). Must
+  // precede the empty-state placeholder so loading never reads as "No changes to
+  // show". All hooks above have already run (rules of hooks); the effects guard
+  // on `!diffFile`, so they no-op while pending and re-bind on the single build.
+  if (contentPending) return null;
   if (!diffFile) return <DiffPlaceholder message="No changes to show" />;
   // A hunk at line 1 has no `@@` separator row to host its buttons (sep=false),
   // so give it a synthetic header bar at the very top instead of overlaying the

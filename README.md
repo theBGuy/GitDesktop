@@ -184,7 +184,8 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
   branch-mutating tools. The server also exposes GitDesktop's own **AI generation recipes** —
   it hands a connected agent the fully assembled commit-message, PR-description, or
   branch-name prompt (the same context the in-app features build) for the agent to complete
-  with its own model.
+  with its own model — offered as recipe tools *and* as native **MCP prompts**
+  (slash-command-like in clients) for the same three.
 - **Run commands without leaving the app** — every agent session has an integrated
   terminal: a real shell in a resizable bottom dock, toggled with `Ctrl`/`⌘`+`J`. For a
   container session it runs *inside* the session's container — you pick which dev-server

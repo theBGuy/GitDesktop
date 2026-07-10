@@ -265,7 +265,7 @@ Write the review in GitHub-flavored Markdown:
   - the problem — and for **blocker**/**should-fix**, the concrete case that makes it real (the input, state, or code path that triggers it, not just an assertion);
   - a concrete suggested fix.
 - Cover real issues across correctness (bugs, logic errors, unhandled edge cases or errors), security smells, performance traps, clarity and naming, and missing or weak tests. Breadth is welcome — but only where each finding is genuinely useful.
-- Signal over volume: include a finding only if you are confident it is real; if you are unsure, leave it out. Prefer a few high-value findings over an exhaustive list, and keep nits few — never let them crowd out the real issues. Don't flag formatting a linter/formatter handles, don't restate the same nit across files, and don't flag missing tests for changes that introduce no new behavior (renames, reformatting, or pure reorganization).
+- Signal over volume: include a finding only if you are confident it is real; if you are unsure, leave it out. Prefer a few high-value findings over an exhaustive list, and keep nits few — never let them crowd out the real issues. Don't flag formatting a linter/formatter handles, don't restate the same nit across files, and don't flag missing tests for changes that introduce no new behavior (renames, reformatting, or pure reorganization). Before flagging a possible null/undefined or missing-value issue, check the typed contract: a field the types declare non-optional, or that every code path visibly always sets, is not a finding.
 - Be specific and grounded strictly in the diff — do not invent code, files, or behavior you cannot see. If the change looks solid, say so plainly in a line or two and stop.
 
 No filler: don't summarize what you reviewed, don't pad, don't add compliments — just the assessment and the findings. Do not wrap the whole review in a code fence. Do not restate the entire diff.`;
@@ -337,6 +337,7 @@ You are ALSO given findings that OTHER automated code reviewers (e.g. GitHub Cop
 Re-verify each of their findings against the CURRENT diff and use them like this:
 - If one identifies a real, still-present problem, report it as a normal finding; you MAY add a terse parenthetical credit like "(also flagged by Copilot)" when it independently matches your own conclusion.
 - If one is WRONG, already fixed, or unsupported by the current diff, AND it's the kind of thing a reader might otherwise act on, add a short line briefly dismissing it (e.g. "Copilot flagged X here; not an issue because …"). Triaging their false positives is the most useful thing you can do with them.
+- If you CANNOT verify one against the current diff — the code it concerns isn't shown here — OMIT it entirely. Do not relay it with a "could not verify" hedge, and never add supporting claims of your own that the diff does not show. An unverifiable third-party claim is not a finding.
 - Otherwise (trivial or irrelevant), ignore it silently.
 
 Never present another tool's claim as confirmed unless the current diff proves it, and never invent a finding just to agree or disagree with them.`;

@@ -54,8 +54,14 @@ pub fn parse_status_v2(text: &str) -> RepoStatus {
         upstream: None,
         ahead: 0,
         behind: 0,
+        upstream_gone: false,
     };
     let mut entries = Vec::new();
+    // Porcelain v2 has no `[gone]` token. When the upstream ref is gone git still
+    // emits `# branch.upstream <name>` but omits `# branch.ab` entirely; a live
+    // upstream always produces a `branch.ab` line (even `+0 -0`). So a present
+    // upstream with no `branch.ab` seen ⇒ gone.
+    let mut saw_ab = false;
 
     let mut tokens = text.split('\0').peekable();
     while let Some(token) = tokens.next() {
@@ -74,6 +80,7 @@ pub fn parse_status_v2(text: &str) -> RepoStatus {
             } else if let Some(upstream) = header.strip_prefix("branch.upstream ") {
                 branch.upstream = Some(upstream.to_string());
             } else if let Some(ab) = header.strip_prefix("branch.ab ") {
+                saw_ab = true;
                 for part in ab.split(' ') {
                     if let Some(a) = part.strip_prefix('+') {
                         branch.ahead = a.parse().unwrap_or(0);
@@ -136,6 +143,8 @@ pub fn parse_status_v2(text: &str) -> RepoStatus {
         }
     }
 
+    branch.upstream_gone = branch.upstream.is_some() && !saw_ab;
+
     RepoStatus { branch, entries }
 }
 
@@ -175,7 +184,35 @@ mod tests {
         assert_eq!(s.branch.upstream.as_deref(), Some("origin/main"));
         assert_eq!(s.branch.ahead, 2);
         assert_eq!(s.branch.behind, 1);
+        // A live upstream always emits a branch.ab line, so it's not gone.
+        assert!(!s.branch.upstream_gone);
         assert!(s.entries.is_empty());
+    }
+
+    #[test]
+    fn upstream_present_without_ab_line_is_gone() {
+        // When the remote branch is deleted, git keeps the upstream header but
+        // drops the branch.ab line entirely — porcelain v2's only "gone" signal.
+        let text = z(&[
+            "# branch.oid abc123",
+            "# branch.head feature",
+            "# branch.upstream origin/feature",
+            "",
+        ]);
+        let s = parse_status_v2(&text);
+        assert_eq!(s.branch.upstream.as_deref(), Some("origin/feature"));
+        assert!(s.branch.upstream_gone);
+        assert_eq!(s.branch.ahead, 0);
+        assert_eq!(s.branch.behind, 0);
+    }
+
+    #[test]
+    fn no_upstream_is_not_gone() {
+        // A branch that never had an upstream must not read as gone.
+        let text = z(&["# branch.oid abc123", "# branch.head feature", ""]);
+        let s = parse_status_v2(&text);
+        assert_eq!(s.branch.upstream, None);
+        assert!(!s.branch.upstream_gone);
     }
 
     #[test]

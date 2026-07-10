@@ -821,10 +821,9 @@ impl GitDesktopMcp {
     }
 
     #[tool(
-        description = "Approve a pull request (by number) in the bound repository's forge (GitLab \
-                       or Bitbucket, per its remote). GitHub approvals go through the review flow, \
-                       not this control — the forge layer returns an actionable error there. \
-                       Requires --allow-remote-write.",
+        description = "Approve a pull request (by number) in the bound repository's forge — works on \
+                       GitHub, GitLab, and Bitbucket, per its remote (GitHub goes through \
+                       `gh pr review --approve`). Requires --allow-remote-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn approve_pull_request(
@@ -1105,10 +1104,10 @@ impl GitDesktopMcp {
 
     #[tool(
         description = "Request changes on a pull request (the blocking reviewer state) in the bound \
-                       repository's forge (GitLab or Bitbucket, per its remote). GitHub requests \
-                       changes through its own Review menu, not this control — the forge layer \
-                       returns an actionable error there. Reversible via withdraw_change_request. \
-                       Requires --allow-remote-write.",
+                       repository's forge — works on GitHub, GitLab, and Bitbucket, per its remote \
+                       (GitHub goes through `gh pr review --request-changes`, which requires a \
+                       non-empty body; the error surfaces if it's omitted). Reversible via \
+                       withdraw_change_request on Bitbucket. Requires --allow-remote-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn request_changes(
@@ -1126,9 +1125,9 @@ impl GitDesktopMcp {
 
     #[tool(
         description = "Withdraw the viewer's requested-changes state on a pull request in the bound \
-                       repository's forge (Bitbucket, per its remote). GitLab can only revoke a \
-                       change request on Premium, and GitHub reviews live in its own Review menu — \
-                       the forge layer returns an actionable error there. Requires \
+                       repository's forge (Bitbucket only, per its remote). GitLab can only revoke a \
+                       change request on Premium, and GitHub can't withdraw a requested-changes \
+                       review via gh — the forge layer returns an actionable error there. Requires \
                        --allow-remote-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]

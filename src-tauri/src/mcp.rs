@@ -812,6 +812,11 @@ pub struct McpGlobalClientStatus {
     /// The configured command points at the CURRENT managed launcher path
     /// (path-normalized compare). False for older install paths or custom entries.
     pub current: bool,
+    /// The installed entry's `args` array (string elements only), so the UI can
+    /// show WHICH permission tier is installed and nudge Reinstall on drift.
+    /// `None` when not installed, unreadable, or the args aren't an array — never
+    /// guessed. Non-string elements are dropped, never panicked on.
+    pub args: Option<Vec<String>>,
 }
 
 impl McpGlobalClientStatus {
@@ -820,6 +825,7 @@ impl McpGlobalClientStatus {
             installed: false,
             command: None,
             current: false,
+            args: None,
         }
     }
 }
@@ -852,9 +858,14 @@ fn norm_launcher_path(p: &str) -> String {
 ///
 /// * `mcpServers.gitdesktop` absent (or the shape isn't a map) ⇒ not installed.
 /// * present but `command` isn't a string ⇒ installed, `command: None`,
-///   `current: false`.
+///   `current: false` (args still carried when present).
 /// * present with a string `command` ⇒ installed; `current` iff it path-normal-
 ///   equals `launcher_path`.
+///
+/// `args` carries the entry's `args` array (string elements only) whenever the
+/// entry exists and `args` is an array; non-string junk elements are dropped and
+/// a non-array `args` yields `None`. Untrusted JSON from another CLI's config, so
+/// every element is type-checked — this never panics on shape surprises.
 fn classify_global_entry(config: &Value, launcher_path: &str) -> McpGlobalClientStatus {
     let Some(entry) = config
         .get("mcpServers")
@@ -863,12 +874,20 @@ fn classify_global_entry(config: &Value, launcher_path: &str) -> McpGlobalClient
     else {
         return McpGlobalClientStatus::not_installed();
     };
+    // Only string elements count; a non-array `args` (or a missing one) ⇒ None.
+    let args = entry.get("args").and_then(|v| v.as_array()).map(|arr| {
+        arr.iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect::<Vec<String>>()
+    });
     let Some(command) = entry.get("command").and_then(|v| v.as_str()) else {
         // Present but no string command — installed, but we can't classify it.
+        // Still carry args so the UI can read the installed tier.
         return McpGlobalClientStatus {
             installed: true,
             command: None,
             current: false,
+            args,
         };
     };
     let current = norm_launcher_path(command) == norm_launcher_path(launcher_path);
@@ -876,6 +895,7 @@ fn classify_global_entry(config: &Value, launcher_path: &str) -> McpGlobalClient
         installed: true,
         command: Some(command.to_string()),
         current,
+        args,
     }
 }
 
@@ -1192,6 +1212,63 @@ mod tests {
         assert!(s.installed);
         assert_eq!(s.command.as_deref(), Some(LAUNCHER));
         assert!(s.current, "exact match is current");
+        // No args key ⇒ None (not an empty vec).
+        assert_eq!(s.args, None, "missing args ⇒ None");
+    }
+
+    #[test]
+    fn classify_carries_string_args() {
+        let doc = json!({ "mcpServers": { "gitdesktop": {
+            "command": LAUNCHER,
+            "args": ["mcp", "--repo", ".", "--allow-write", "--allow-remote-write"],
+        } } });
+        let s = classify_global_entry(&doc, LAUNCHER);
+        assert!(s.installed);
+        assert_eq!(
+            s.args.as_deref(),
+            Some(
+                [
+                    "mcp".to_string(),
+                    "--repo".to_string(),
+                    ".".to_string(),
+                    "--allow-write".to_string(),
+                    "--allow-remote-write".to_string(),
+                ]
+                .as_slice()
+            ),
+        );
+    }
+
+    #[test]
+    fn classify_args_drops_non_string_junk() {
+        // Untrusted JSON: numbers/objects/nulls mixed into args are dropped, never
+        // panicked on; the surviving strings are carried in order.
+        let doc = json!({ "mcpServers": { "gitdesktop": {
+            "command": LAUNCHER,
+            "args": ["mcp", 42, "--repo", { "x": 1 }, ".", null, "--allow-write"],
+        } } });
+        let s = classify_global_entry(&doc, LAUNCHER);
+        assert!(s.installed);
+        assert_eq!(
+            s.args.as_deref(),
+            Some(
+                [
+                    "mcp".to_string(),
+                    "--repo".to_string(),
+                    ".".to_string(),
+                    "--allow-write".to_string(),
+                ]
+                .as_slice()
+            ),
+        );
+        // A non-array `args` (wrong shape) ⇒ None, not a partial parse.
+        let doc = json!({ "mcpServers": { "gitdesktop": {
+            "command": LAUNCHER,
+            "args": "not-an-array",
+        } } });
+        let s = classify_global_entry(&doc, LAUNCHER);
+        assert!(s.installed);
+        assert_eq!(s.args, None, "non-array args ⇒ None");
     }
 
     #[test]
@@ -1239,12 +1316,28 @@ mod tests {
         assert!(s.installed);
         assert_eq!(s.command, None);
         assert!(!s.current);
-        // command entirely absent ⇒ same (installed, unclassified).
-        let doc = json!({ "mcpServers": { "gitdesktop": { "args": [] } } });
+        // command entirely absent ⇒ same (installed, unclassified) — but args are
+        // still carried so the tier readout survives a command-less entry.
+        let doc = json!({ "mcpServers": { "gitdesktop": {
+            "args": ["mcp", "--repo", ".", "--allow-git-write"],
+        } } });
         let s = classify_global_entry(&doc, LAUNCHER);
         assert!(s.installed);
         assert_eq!(s.command, None);
         assert!(!s.current);
+        assert_eq!(
+            s.args.as_deref(),
+            Some(
+                [
+                    "mcp".to_string(),
+                    "--repo".to_string(),
+                    ".".to_string(),
+                    "--allow-git-write".to_string(),
+                ]
+                .as_slice()
+            ),
+            "command-less entry still carries args",
+        );
     }
 
     #[test]
