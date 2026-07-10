@@ -78,11 +78,18 @@ export function useCommitAvatarUrl(email: string): string {
     let live = true;
     let pending = gravatarPending.get(normalized);
     if (!pending) {
-      pending = computeGravatarUrl(normalized).then((resolved) => {
-        gravatarCache.set(normalized, resolved);
-        gravatarPending.delete(normalized);
-        return resolved;
-      });
+      pending = computeGravatarUrl(normalized)
+        .then((resolved) => {
+          gravatarCache.set(normalized, resolved);
+          gravatarPending.delete(normalized);
+          return resolved;
+        })
+        .catch(() => {
+          // A rejected hash (e.g. crypto.subtle throwing) must clear `pending` too,
+          // or the email is stuck "pending" forever and the rejection goes unhandled.
+          gravatarPending.delete(normalized);
+          return "";
+        });
       gravatarPending.set(normalized, pending);
     }
     pending.then((resolved) => {

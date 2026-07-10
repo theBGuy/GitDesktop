@@ -279,7 +279,7 @@ Write a **summary** (there's a 72-character budget indicator) and an optional
     body: `# History & git operations
 
 The **History** tab ({{kbd:tab-history}}) is the commit log for the current branch — each
-entry shows the author's avatar (from GitHub or Gravatar). Click
+entry shows the author's avatar (from GitHub or Gravatar, or their initials). Click
 a commit to see its message, author, and full diff; **Shift + ↑ / ↓** extends the
 selection to compare a range.
 

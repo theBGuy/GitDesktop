@@ -22,8 +22,10 @@ export function CommitAuthorAvatar({
 }) {
   const src = useCommitAvatarUrl(email);
   return (
-    <Avatar size={size} className={cn("shrink-0", className)}>
-      {/* Decorative: the author name is always shown as adjacent text. */}
+    // Decorative: the author name is always shown as adjacent text, so hide the
+    // whole avatar (image OR initial fallback) from assistive tech — otherwise a
+    // screen reader announces the fallback letter before the name ("A, Alice").
+    <Avatar aria-hidden size={size} className={cn("shrink-0", className)}>
       {src && <AvatarImage src={src} alt="" />}
       <AvatarFallback>{(name || "?").charAt(0).toUpperCase()}</AvatarFallback>
     </Avatar>
