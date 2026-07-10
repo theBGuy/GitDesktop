@@ -8,6 +8,7 @@ import {
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { type MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import { CommitAuthorAvatar } from "@/components/commit-author-avatar";
 import { Button } from "@/components/ui/button";
 import {
   ContextMenu,
@@ -976,7 +977,7 @@ function CommitList({
             ref={virtualizer.measureElement}
             data-hash={commit.hash}
             className={cn(
-              "absolute top-0 left-0 block w-full border-b px-3 py-2 text-left",
+              "absolute top-0 left-0 flex w-full items-start gap-2 border-b px-3 py-2 text-left",
               selected.has(commit.hash) ||
                 (selected.size === 0 && selectedCommitHash === commit.hash)
                 ? "bg-accent text-accent-foreground"
@@ -986,52 +987,56 @@ function CommitList({
             onClick={(e) => onRowClick(e, index, commit.hash)}
             onMouseEnter={() => onHoverPrefetch(commit.hash)}
           >
-            <p className="flex items-center gap-1.5 text-xs font-medium">
-              <span className="min-w-0 truncate" title={commit.subject}>
-                {commit.subject}
-              </span>
-              {commit.tags.slice(0, 2).map((tag) => (
-                <span
-                  key={tag}
-                  className="flex max-w-24 shrink-0 items-center gap-0.5 border px-1 py-px text-[10px] font-normal text-muted-foreground"
-                  title={`tag: ${tag}`}
-                >
-                  <TagIcon className="size-2.5 shrink-0" />
-                  <span className="truncate">{tag}</span>
+            <CommitAuthorAvatar
+              name={commit.author}
+              email={commit.authorEmail}
+              className="mt-0.5"
+            />
+            <div className="min-w-0 flex-1">
+              <p className="flex items-center gap-1.5 text-xs font-medium">
+                <span className="min-w-0 truncate" title={commit.subject}>
+                  {commit.subject}
                 </span>
-              ))}
-              {commit.tags.length > 2 && (
-                <span
-                  className="shrink-0 text-[10px] font-normal text-muted-foreground"
-                  title={commit.tags.join(", ")}
-                >
-                  +{commit.tags.length - 2}
+                {commit.tags.slice(0, 2).map((tag) => (
+                  <span
+                    key={tag}
+                    className="flex max-w-24 shrink-0 items-center gap-0.5 border px-1 py-px text-[10px] font-normal text-muted-foreground"
+                    title={`tag: ${tag}`}
+                  >
+                    <TagIcon className="size-2.5 shrink-0" />
+                    <span className="truncate">{tag}</span>
+                  </span>
+                ))}
+                {commit.tags.length > 2 && (
+                  <span
+                    className="shrink-0 text-[10px] font-normal text-muted-foreground"
+                    title={commit.tags.join(", ")}
+                  >
+                    +{commit.tags.length - 2}
+                  </span>
+                )}
+                {unpushedHashes.has(commit.hash) && (
+                  <span
+                    className="ml-auto flex shrink-0 items-center text-muted-foreground"
+                    title={
+                      upstream
+                        ? `Not pushed yet — ahead of ${upstream}`
+                        : "Not pushed yet"
+                    }
+                    aria-label="Not pushed yet"
+                  >
+                    <ArrowUpIcon className="size-3" weight="bold" />
+                  </span>
+                )}
+              </p>
+              <p className="mt-0.5 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                <span className="truncate">{commit.author}</span>
+                <span>•</span>
+                <span className="shrink-0">
+                  {formatRelativeTime(commit.date)}
                 </span>
-              )}
-              {unpushedHashes.has(commit.hash) && (
-                <span
-                  className="ml-auto flex shrink-0 items-center text-muted-foreground"
-                  title={
-                    upstream
-                      ? `Not pushed yet — ahead of ${upstream}`
-                      : "Not pushed yet"
-                  }
-                  aria-label="Not pushed yet"
-                >
-                  <ArrowUpIcon className="size-3" weight="bold" />
-                </span>
-              )}
-            </p>
-            <p className="mt-0.5 flex items-center gap-1.5 text-[11px] text-muted-foreground">
-              <span className="flex size-3.5 items-center justify-center rounded-full bg-muted text-[8px] uppercase">
-                {commit.author.slice(0, 1)}
-              </span>
-              <span className="truncate">{commit.author}</span>
-              <span>•</span>
-              <span className="shrink-0">
-                {formatRelativeTime(commit.date)}
-              </span>
-            </p>
+              </p>
+            </div>
           </button>
         );
       })}

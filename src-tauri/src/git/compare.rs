@@ -32,6 +32,7 @@ fn parse_log(text: &str) -> Vec<CommitSummary> {
                 hash: parts.next()?.to_string(),
                 subject: parts.next()?.to_string(),
                 author: parts.next()?.to_string(),
+                author_email: parts.next()?.to_string(),
                 date: parts.next()?.to_string(),
                 tags: Vec::new(),
                 is_merge: false,
@@ -43,7 +44,7 @@ fn parse_log(text: &str) -> Vec<CommitSummary> {
 async fn log_range(repo_path: &str, range: &str) -> AppResult<Vec<CommitSummary>> {
     let out = run_git(
         Some(repo_path),
-        &["log", "--format=%H%x00%s%x00%an%x00%cI", range],
+        &["log", "--format=%H%x00%s%x00%an%x00%ae%x00%cI", range],
         DEFAULT_TIMEOUT,
     )
     .await?;

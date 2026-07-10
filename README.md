@@ -314,7 +314,7 @@ its own commits (the wrong base's are left behind), with a preview of exactly
 which commits will move.
 
 **History & advanced** — paged, filterable history with rich commit detail,
-per-file history and line blame, and an at-a-glance marker on every commit that
+commit-author avatars, per-file history and line blame, and an at-a-glance marker on every commit that
 hasn't been pushed yet; cherry-pick (onto the current or another branch) and a
 full **interactive rebase** ⭐ — an *Edit history* editor to reword / squash /
 fixup / drop / reorder unpushed commits behind an atomic replay engine (any

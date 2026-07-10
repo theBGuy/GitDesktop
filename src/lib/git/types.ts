@@ -145,6 +145,8 @@ export interface CommitSummary {
   hash: string;
   subject: string;
   author: string;
+  /** Author email (%ae) — drives the History-tab commit avatar. May be "". */
+  authorEmail: string;
   date: string;
   /** Tags pointing at this commit. */
   tags: string[];

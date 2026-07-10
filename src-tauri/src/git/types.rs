@@ -139,6 +139,9 @@ pub struct CommitSummary {
     pub hash: String,
     pub subject: String,
     pub author: String,
+    /// Author email (%ae). Drives the History-tab commit avatar (GitHub
+    /// no-reply login or Gravatar); empty when git records no author email.
+    pub author_email: String,
     pub date: String,
     /// Tags pointing at this commit (from %D decorations).
     pub tags: Vec<String>,

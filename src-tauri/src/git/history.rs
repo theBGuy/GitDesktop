@@ -48,7 +48,7 @@ pub async fn git_log(
         &limit_arg,
         "--skip",
         &skip_arg,
-        "--format=%H%x00%s%x00%an%x00%cI%x00%D%x00%P",
+        LOG_FORMAT,
     ];
     if let Some(q) = &search {
         // Literal, case-insensitive match against the whole commit message.
@@ -58,8 +58,8 @@ pub async fn git_log(
     Ok(parse_commit_log(&out.stdout_lossy()))
 }
 
-/// The `%H%x00%s%x00%an%x00%cI%x00%D%x00%P` log format, one commit per line.
-const LOG_FORMAT: &str = "--format=%H%x00%s%x00%an%x00%cI%x00%D%x00%P";
+/// The `%H%x00%s%x00%an%x00%ae%x00%cI%x00%D%x00%P` log format, one commit per line.
+const LOG_FORMAT: &str = "--format=%H%x00%s%x00%an%x00%ae%x00%cI%x00%D%x00%P";
 
 fn parse_commit_log(text: &str) -> Vec<CommitSummary> {
     text.lines()
@@ -69,6 +69,7 @@ fn parse_commit_log(text: &str) -> Vec<CommitSummary> {
                 hash: parts.next()?.to_string(),
                 subject: parts.next()?.to_string(),
                 author: parts.next()?.to_string(),
+                author_email: parts.next()?.to_string(),
                 date: parts.next()?.to_string(),
                 // %D: "HEAD -> main, tag: v1.0, origin/main" — keep the tags.
                 tags: parts

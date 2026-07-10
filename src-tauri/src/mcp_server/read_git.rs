@@ -94,7 +94,7 @@ impl GitDesktopMcp {
     }
 
     #[tool(
-        description = "List recent commits (sha, author, date, subject). Supports paging via \
+        description = "List recent commits (sha, author, authorEmail, date, subject). Supports paging via \
                        limit/skip and an optional message/author search filter."
     )]
     async fn log(&self, Parameters(args): Parameters<LogArgs>) -> Result<CallToolResult, McpError> {

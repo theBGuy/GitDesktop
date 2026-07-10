@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { CommitAuthorAvatar } from "@/components/commit-author-avatar";
 import {
   Dialog,
   DialogContent,
@@ -71,16 +72,23 @@ export function FileHistoryDialog({
                       key={c.hash}
                       onClick={() => setSelected(c.hash)}
                       className={cn(
-                        "block w-full border-b px-2.5 py-2 text-left text-xs",
+                        "flex w-full items-start gap-2 border-b px-2.5 py-2 text-left text-xs",
                         c.hash === activeHash
                           ? "bg-accent text-accent-foreground"
                           : "hover:bg-muted/60",
                       )}
                     >
-                      <p className="truncate font-medium">{c.subject}</p>
-                      <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
-                        {c.author} · {formatRelativeTime(c.date)}
-                      </p>
+                      <CommitAuthorAvatar
+                        name={c.author}
+                        email={c.authorEmail}
+                        className="mt-0.5"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate font-medium">{c.subject}</p>
+                        <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                          {c.author} · {formatRelativeTime(c.date)}
+                        </p>
+                      </div>
                     </button>
                   ))}
                   {fileLog.hasNextPage && (

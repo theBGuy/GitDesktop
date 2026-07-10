@@ -284,7 +284,7 @@ pub async fn git_recent_commits(repo_path: String, limit: u32) -> AppResult<Vec<
             "log",
             "-n",
             &limit_arg,
-            "--format=%H%x00%s%x00%an%x00%cI",
+            "--format=%H%x00%s%x00%an%x00%ae%x00%cI",
         ],
         DEFAULT_TIMEOUT,
     )
@@ -298,6 +298,7 @@ pub async fn git_recent_commits(repo_path: String, limit: u32) -> AppResult<Vec<
                 hash: parts.next()?.to_string(),
                 subject: parts.next()?.to_string(),
                 author: parts.next()?.to_string(),
+                author_email: parts.next()?.to_string(),
                 date: parts.next()?.to_string(),
                 tags: Vec::new(),
                 is_merge: false,

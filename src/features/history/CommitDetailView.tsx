@@ -1,6 +1,7 @@
 import { CopyIcon, DotsThreeVerticalIcon } from "@phosphor-icons/react";
 import { useDeferredValue, useMemo, useState } from "react";
 import { toast } from "sonner";
+import { CommitAuthorAvatar } from "@/components/commit-author-avatar";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -222,9 +223,7 @@ export function CommitDetailView({
           </p>
         )}
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <span className="flex size-4 items-center justify-center rounded-full bg-muted text-[9px] uppercase">
-            {commit.author.slice(0, 1)}
-          </span>
+          <CommitAuthorAvatar name={commit.author} email={commit.authorEmail} />
           <span>{commit.author}</span>
           <span>•</span>
           <span>{formatRelativeTime(commit.date)}</span>
