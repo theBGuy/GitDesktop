@@ -1029,11 +1029,16 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                 className="min-w-0 truncate"
                 // Only expose the full label as a tooltip when it's actually
                 // clipped — measured just-in-time on hover, so no ref needed.
+                // Remove the attribute (not title="") when unclipped: an empty
+                // title="" is still a title in Chromium and would suppress the
+                // Button's own conditional (amending) title above.
                 onMouseEnter={(e) => {
                   const el = e.currentTarget;
-                  if (el)
-                    el.title =
-                      el.scrollWidth > el.clientWidth ? currentLabel : "";
+                  if (el) {
+                    if (el.scrollWidth > el.clientWidth)
+                      el.title = currentLabel;
+                    else el.removeAttribute("title");
+                  }
                 }}
               >
                 {currentLabel}

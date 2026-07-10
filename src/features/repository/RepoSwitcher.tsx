@@ -79,11 +79,15 @@ export function RepoSwitcher() {
                 className="min-w-0 truncate text-sm font-medium"
                 // Only expose the full name as a tooltip when it's actually
                 // clipped — measured just-in-time on hover, so no ref needed.
+                // Remove the attribute (not title="") when unclipped: an empty
+                // title="" is still a title in Chromium and would suppress any
+                // ancestor tooltip.
                 onMouseEnter={(e) => {
                   const el = e.currentTarget;
-                  if (el)
-                    el.title =
-                      el.scrollWidth > el.clientWidth ? repoLabel : "";
+                  if (el) {
+                    if (el.scrollWidth > el.clientWidth) el.title = repoLabel;
+                    else el.removeAttribute("title");
+                  }
                 }}
               >
                 {repoLabel}
