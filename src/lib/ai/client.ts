@@ -198,6 +198,7 @@ export async function runAgenticStream(opts: AgenticStreamOpts): Promise<void> {
       }
     }
   } catch (e) {
+    if (opts.abortSignal.aborted) return; // clean cancellation — not an error
     throw new Error(annotateToolError(errorMessage(e)));
   }
 

@@ -420,7 +420,10 @@ export async function startReview(
       ? buildReviewTools({
           repoPath: context.repoPath,
           headSha: context.headSha,
-          prNumber: target.kind === "remote" ? Number(target.ref) : undefined,
+          prNumber:
+            target.kind === "remote" && Number.isFinite(Number(target.ref))
+              ? Number(target.ref)
+              : undefined,
           provider: context.provider,
         })
       : undefined;

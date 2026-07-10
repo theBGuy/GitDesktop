@@ -72,6 +72,11 @@ function formatCommits(commits: CommitSummary[]): string {
 
 const READ_FILE_CAP = 200_000;
 const FORGE_DIFF_CAP = 100_000;
+// `git_file_base64` allows files up to 20 MB. We atob+decode the WHOLE base64
+// payload in the renderer before applying READ_FILE_CAP, so guard on the raw
+// base64 length first to avoid a large renderer allocation for a file we'd only
+// cap to 200k anyway. Base64 length ≈ 4/3 × bytes, so ~1.4M chars ≈ a 1 MB file.
+const READ_FILE_BASE64_MAX = 1_400_000;
 
 /**
  * Builds the read-only tool registry for an HTTP-provider agentic review. Every
@@ -106,6 +111,8 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
             return "Error: no PR head available — pass an explicit ref to read at.";
           const b64 = await gitFileBase64(ctx.repoPath, rev, path);
           if (b64 === null) return `File does not exist at ${rev}: ${path}`;
+          if (b64.length > READ_FILE_BASE64_MAX)
+            return `Error: ${path} is too large for review reads (over ~1 MB) — use grep or diff_refs to inspect it instead.`;
           let text: string;
           try {
             text = decodeFileBytes(b64);
@@ -135,10 +142,14 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
       execute: async ({ pattern, maxHits }, { abortSignal }) => {
         try {
           if (abortSignal?.aborted) return "Error: cancelled";
+          // Match read_file: search the PR head, never a fallback ref, so a
+          // review can't search a different tree than it reads.
+          if (!ctx.headSha)
+            return "Error: no PR head available — cannot search.";
           const out = await gitGrepAtRef(
             ctx.repoPath,
             pattern,
-            ctx.headSha ?? "HEAD",
+            ctx.headSha,
             maxHits,
           );
           return out.trim() ? out : "(no matches)";

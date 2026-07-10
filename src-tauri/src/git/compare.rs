@@ -419,12 +419,20 @@ const GREP_MAX_BYTES: usize = 100_000;
 /// `path:line:content` lines — the repo-search tool an HTTP review model calls
 /// against a PR head, with NO checkout/worktree (it greps the rev directly).
 ///
-/// `git grep -I -n -F --no-color -e <pattern> <atRef>`: `-F` is fixed-string
-/// (v1 is deliberately literal, not regex — a regex mode is a later addition),
-/// `-I` skips binary files, `-n` prefixes line numbers. The pattern is passed
-/// with `-e`, so a leading `-` in it is data, not an option (a bare `--` guard
-/// isn't needed for the pattern; `validate_ref` guards the rev the same way the
-/// rest of this module does).
+/// `git grep -I -n -F -m <max_hits> --no-color -e <pattern> <atRef>`: `-F` is
+/// fixed-string (v1 is deliberately literal, not regex — a regex mode is a later
+/// addition), `-I` skips binary files, `-n` prefixes line numbers, and `-m` caps
+/// results PER FILE so one pathological file (a minified bundle the `-I` filter
+/// didn't catch) can't dominate the captured output before we trim. The pattern
+/// is passed with `-e`, so a leading `-` in it is data, not an option (a bare
+/// `--` guard isn't needed for the pattern; `validate_ref` guards the rev the
+/// same way the rest of this module does).
+///
+/// `-m` (`--max-count`) landed in git 2.38 (Oct 2022); on an older git the switch
+/// is unknown and git grep hard-fails, so [`run_grep`] retries once without it
+/// (same output, just an uncapped capture). Because `-m` is per-file, the true
+/// total match count isn't recoverable from the output, so the truncation marker
+/// is count-less.
 ///
 /// Grepping a rev makes git prefix every hit with `<atRef>:` (output is
 /// `<atRef>:path:line:content`); we strip exactly that known prefix so the model
@@ -443,42 +451,25 @@ pub async fn git_grep_at_ref(
     }
     let max_hits = max_hits.unwrap_or(GREP_DEFAULT_MAX_HITS) as usize;
 
-    // `run_git_raw` so we can treat exit 1 (git grep's documented "no match")
-    // as an empty result rather than an error; any OTHER non-zero is real.
-    let out = run_git_raw(
-        Some(&repo_path),
-        &[
-            "grep", "-I", "-n", "-F", "--no-color", "-e", &pattern, &at_ref,
-        ],
-        DEFAULT_TIMEOUT,
-    )
-    .await?;
-    match out.code {
-        0 => {}
-        // git grep exits 1 with no output when nothing matched.
-        1 if out.stdout.is_empty() => return Ok(String::new()),
-        _ => {
-            return Err(AppError::Git {
-                code: out.code,
-                stderr: out.stderr,
-            })
-        }
-    }
+    let Some(stdout) = run_grep(&repo_path, &pattern, &at_ref, max_hits).await? else {
+        // No match (git grep's documented exit 1 with empty output).
+        return Ok(String::new());
+    };
 
     let prefix = format!("{at_ref}:");
-    let stdout = out.stdout_lossy();
-    let total = stdout.lines().count();
     let kept: Vec<String> = stdout
         .lines()
         .take(max_hits)
         // git prefixes each hit with `<atRef>:`; normalize to repo-relative.
         .map(|l| l.strip_prefix(&prefix).unwrap_or(l).to_string())
         .collect();
+    // With `-m` the true total is unknowable, so the marker carries no count —
+    // it only signals that more lines existed than we returned.
+    let over = stdout.lines().count() > max_hits;
 
     let mut result = kept.join("\n");
-    if total > max_hits {
-        let remaining = total - max_hits;
-        result.push_str(&format!("\n[... {remaining} more matches truncated]"));
+    if over {
+        result.push_str("\n[... additional matches truncated]");
     }
 
     // Byte hard-cap on top of the line cap, char-boundary safe.
@@ -487,6 +478,63 @@ pub async fn git_grep_at_ref(
         result = format!("{head}\n[... output truncated at {GREP_MAX_BYTES} bytes]");
     }
     Ok(result)
+}
+
+/// Runs the fixed-string `git grep` at a rev, returning `Some(stdout)` on a match,
+/// `None` for the documented no-match (exit 1, empty output). `run_git_raw` so exit
+/// 1 stays a success signal rather than an error; any OTHER non-zero is a real error.
+///
+/// Retries ONCE without `-m` when the first run fails with an unknown-option error,
+/// so a git older than 2.38 (which lacks `--max-count`) falls back to an uncapped
+/// capture instead of hard-failing. The retry shares this same match/exit handling.
+async fn run_grep(
+    repo_path: &str,
+    pattern: &str,
+    at_ref: &str,
+    max_hits: usize,
+) -> AppResult<Option<String>> {
+    let max_hits_arg = max_hits.to_string();
+    let with_m = [
+        "grep", "-I", "-n", "-F", "-m", &max_hits_arg, "--no-color", "-e", pattern, at_ref,
+    ];
+    let out = run_git_raw(Some(repo_path), &with_m, DEFAULT_TIMEOUT).await?;
+    match out.code {
+        0 => return Ok(Some(out.stdout_lossy())),
+        1 if out.stdout.is_empty() => return Ok(None),
+        _ if is_unknown_option(&out.stderr) => {} // fall through to the -m-less retry
+        _ => {
+            return Err(AppError::Git {
+                code: out.code,
+                stderr: out.stderr,
+            })
+        }
+    }
+
+    // git < 2.38: retry without `-m`. Same args minus the `-m <n>` pair — output is
+    // identical, just an uncapped capture (still trimmed by the caller's line/byte caps).
+    let without_m = [
+        "grep", "-I", "-n", "-F", "--no-color", "-e", pattern, at_ref,
+    ];
+    let out = run_git_raw(Some(repo_path), &without_m, DEFAULT_TIMEOUT).await?;
+    match out.code {
+        0 => Ok(Some(out.stdout_lossy())),
+        1 if out.stdout.is_empty() => Ok(None),
+        _ => Err(AppError::Git {
+            code: out.code,
+            stderr: out.stderr,
+        }),
+    }
+}
+
+/// Whether git's stderr indicates it rejected an unknown command-line option —
+/// the signal that this git predates `-m`/`--max-count` (2.38). Matched
+/// case-insensitively on git's phrasings ("unknown switch"/"unknown option") plus
+/// the `usage: git grep` banner it prints on an option error.
+fn is_unknown_option(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("unknown switch")
+        || lower.contains("unknown option")
+        || lower.contains("usage: git grep")
 }
 
 #[cfg(test)]
@@ -627,15 +675,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// More matches than `max_hits` → the kept lines plus a truncation marker
-    /// carrying the correct remainder count.
+    /// More returned lines than `max_hits` → the kept lines plus a count-less
+    /// truncation marker. The marker carries NO remainder count: `-m` caps per
+    /// file, so the true total match count is not recoverable from the output (a
+    /// count would understate). We assert the fixed lines returned and the marker
+    /// text only.
+    ///
+    /// The matches are spread across THREE files deliberately: `-m` is per-file, so
+    /// a single file with N matches would itself be capped to `max_hits` by git and
+    /// never overflow the returned-line cap. Three files × 2 matches each = 6 lines
+    /// out of git, which the caller's `take(2)` then trims — the realistic path.
     #[tokio::test]
     async fn grep_at_ref_caps_hits_with_marker() {
         let (base, repo) = seed_repo("grep-cap").await;
 
-        // 5 matching lines across one file.
-        let body: String = (0..5).map(|i| format!("hit MATCHME line {i}\n")).collect();
-        std::fs::write(std::path::Path::new(&repo).join("m.txt"), body).unwrap();
+        // 2 matching lines in each of 3 files (a.txt, b.txt, c.txt).
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(
+                std::path::Path::new(&repo).join(name),
+                "hit MATCHME one\nhit MATCHME two\n",
+            )
+            .unwrap();
+        }
         run(&repo, &["add", "-A"]).await;
         run(&repo, &["commit", "-qm", "seed"]).await;
 
@@ -644,14 +705,33 @@ mod tests {
             .unwrap();
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 3, "2 kept lines + 1 marker line");
-        assert_eq!(lines[0], "m.txt:1:hit MATCHME line 0");
-        assert_eq!(lines[1], "m.txt:2:hit MATCHME line 1");
+        // git grep orders by path, so the first two lines are a.txt's two matches.
+        assert_eq!(lines[0], "a.txt:1:hit MATCHME one");
+        assert_eq!(lines[1], "a.txt:2:hit MATCHME two");
         assert_eq!(
-            lines[2], "[... 3 more matches truncated]",
-            "remainder = 5 total - 2 kept"
+            lines[2], "[... additional matches truncated]",
+            "count-less marker: -m makes the true total unknowable"
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The unknown-option matcher recognizes git's real phrasings (so a git < 2.38
+    /// lacking `-m` triggers the fallback), while leaving unrelated grep failures
+    /// (e.g. a bad rev) to surface as real errors.
+    #[test]
+    fn is_unknown_option_matches_gits_phrasings() {
+        // git 2.51's actual banner for an unknown option (captured verbatim).
+        assert!(is_unknown_option(
+            "error: unknown option `max-count'\nusage: git grep [<options>] [-e] <pattern>"
+        ));
+        // Older/alternate phrasing.
+        assert!(is_unknown_option("error: unknown switch `m'"));
+        assert!(is_unknown_option("USAGE: GIT GREP ...")); // case-insensitive
+        // A genuine grep failure must NOT be mistaken for a version issue.
+        assert!(!is_unknown_option(
+            "fatal: ambiguous argument 'nope': unknown revision or path not in the working tree"
+        ));
     }
 
     /// A ref that looks like an option is rejected before any git runs.
