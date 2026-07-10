@@ -124,8 +124,16 @@ function PromoteBody({
   const worktreeDirty = (wStatus.data?.entries.length ?? 0) > 0;
   const mainDirty = (mStatus.data?.entries.length ?? 0) > 0;
   const mainBranch = mStatus.data?.branch?.name ?? "the default branch";
+  // A failed status read must NOT read as "clean": with `data` undefined the
+  // dirty checks silently become false, which would enable Promote with unknown
+  // tree state and could skip the main-WIP stash before the checkout.
+  const statusError = wStatus.isError || (Boolean(mainPath) && mStatus.isError);
   const blocked =
-    noMain || worktreeDirty || worktree.isLocked || !worktree.branch;
+    noMain ||
+    statusError ||
+    worktreeDirty ||
+    worktree.isLocked ||
+    !worktree.branch;
 
   async function doPromote() {
     if (!mainPath || !worktree.branch || blocked) return;
@@ -133,6 +141,11 @@ function PromoteBody({
     if (runningRef.current) return;
     runningRef.current = true;
     const willStash = mainDirty;
+    // Track how far the composite got. Once the worktree is removed we're past
+    // the point of no return: a later failure needs recovery guidance (the
+    // folder is gone, the branch is free but unchecked-out), not git's raw error.
+    let removed = false;
+    let stashed = false;
     setPending(true);
     try {
       // Verify the main workspace is reachable BEFORE any mutation.
@@ -150,10 +163,14 @@ function PromoteBody({
       // Free the branch: remove the worktree but KEEP the branch (null) — we
       // check it out in main next. force=false: the clean-tree guard already ran.
       await removeWorktreeFreeingBranch(mainPath, worktree.path);
+      removed = true;
       await pruneWorktrees(mainPath).catch(() => undefined);
       // The branch's working tree is free now; stash main's own WIP (if any) so
       // the checkout can't be blocked, then land main on the promoted branch.
-      if (willStash) await gitStashAll(mainPath);
+      if (willStash) {
+        await gitStashAll(mainPath);
+        stashed = true;
+      }
       await gitCheckoutBranch(mainPath, worktree.branch);
       await queryClient.invalidateQueries({ queryKey: repoKeys.all(mainPath) });
       toast.success(
@@ -163,7 +180,18 @@ function PromoteBody({
       );
       onClose();
     } catch (e) {
-      toastError(e);
+      if (removed) {
+        // The worktree is already gone and the branch is free but not checked
+        // out — surface the recovery path (with git's error as the detail).
+        toast.error(
+          `Removed the worktree, but couldn't check out ${worktree.branch} in your main workspace — switch to it there manually.${
+            stashed ? " Your changes are stashed — use Pop latest stash." : ""
+          }`,
+          { description: e instanceof Error ? e.message : String(e) },
+        );
+      } else {
+        toastError(e);
+      }
       runningRef.current = false;
       setPending(false);
     }
@@ -195,6 +223,11 @@ function PromoteBody({
       {checking ? (
         <p className="flex items-center gap-2 text-xs text-muted-foreground">
           <Spinner /> Checking worktree state…
+        </p>
+      ) : statusError ? (
+        <p className="text-xs text-warning">
+          Couldn't read the worktree or main workspace state. Close this and try
+          again.
         </p>
       ) : noMain ? (
         <p className="text-xs text-warning">

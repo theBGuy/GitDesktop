@@ -410,17 +410,11 @@ function WorktreeRow({
               removes the worktree (a branch can't live in two) and checks the
               branch out in main. Only for a linked worktree that has a branch. */}
           {!isMain && !isDetached && (
-            <DropdownMenuItem
-              disabled={isLocked}
-              title={
-                isLocked
-                  ? "Unlock this worktree before promoting it"
-                  : undefined
-              }
-              onClick={onPromote}
-            >
+            <DropdownMenuItem disabled={isLocked} onClick={onPromote}>
               <ArrowLineUpIcon />
-              Promote to main workspace…
+              {isLocked
+                ? "Promote to main workspace… (locked)"
+                : "Promote to main workspace…"}
             </DropdownMenuItem>
           )}
           <DropdownMenuItem

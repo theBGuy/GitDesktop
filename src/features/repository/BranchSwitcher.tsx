@@ -398,6 +398,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     ...visibleBranches,
     ...(showArchived ? archivedBranches : []),
     ...(showRemote ? remoteOnly : []),
+    // The Worktrees section is a selectable list too — key its rows by path so
+    // arrow nav flows from the branch rows straight into it (each row carries a
+    // matching `data-row`). Paths use forward slashes, safe as a data-row value.
+    ...otherWorktrees.map((w) => ({ name: w.path })),
   ];
   const onBranchKeyDown = listKeyboardNav({
     items: navBranches,
@@ -763,8 +767,12 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     try {
       const wts = await listUserWorktrees(repoPath);
       const main = wts.find((w) => w.isMain);
-      if (!main || normPath(main.path) === normPath(repoPath)) {
-        toast.info("You're already in the main workspace.");
+      if (!main) {
+        toast.error("Couldn't find the main workspace for this repository.");
+        return;
+      }
+      if (normPath(main.path) === normPath(repoPath)) {
+        toast.info("Already in the main workspace.");
         return;
       }
       openWorktree(main.path);
@@ -1215,8 +1223,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                     Worktrees
                   </p>
                   {otherWorktrees.map((w) => (
-                    <MenuRow
+                    <button
                       key={w.path}
+                      type="button"
+                      data-row={w.path}
+                      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none"
                       onClick={() => {
                         setOpen(false);
                         openWorktree(w.path);
@@ -1243,7 +1254,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                       >
                         {baseName(w.path)}
                       </span>
-                    </MenuRow>
+                    </button>
                   ))}
                 </div>
               )}
