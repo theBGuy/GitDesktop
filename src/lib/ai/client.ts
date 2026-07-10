@@ -141,7 +141,6 @@ export async function runAgenticStream(opts: AgenticStreamOpts): Promise<void> {
   // Terminal state, captured on `finish` so a zero-text run can explain itself.
   let finishReason = "unknown";
   let toolSteps = 0;
-  let aborted = false;
   try {
     for await (const part of result.fullStream) {
       switch (part.type) {
@@ -190,7 +189,10 @@ export async function runAgenticStream(opts: AgenticStreamOpts): Promise<void> {
           throw new Error(annotateToolError(errorMessage(part.error)));
         }
         case "abort": {
-          aborted = true;
+          // Real per the installed SDK: ai@6's TextStreamPart union includes
+          // `type: 'abort'` (node_modules/ai/dist/index.d.ts ~L2599). An abort
+          // may ALSO surface as a thrown AbortError mid-await — the catch below
+          // handles that shape. Either way: clean cancellation, not an error.
           return;
         }
         default:
@@ -206,7 +208,7 @@ export async function runAgenticStream(opts: AgenticStreamOpts): Promise<void> {
   // on tool calls, or ended on `length`/`tool-calls`) would otherwise resolve
   // silently → the panel shows the never-ran placeholder. Fail honestly so the
   // error path surfaces it (nothing gets persisted). An abort returns above.
-  if (!aborted && !buffer.trim()) {
+  if (!buffer.trim()) {
     throw new Error(
       `The review ended after ${toolSteps} tool step(s) without producing a conclusion (${finishReason}). Try again, or turn off Agentic review for a single-pass response.`,
     );

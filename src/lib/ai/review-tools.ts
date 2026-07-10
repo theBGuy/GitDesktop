@@ -224,7 +224,7 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
             ctx.repoPath,
             from,
             to,
-            100_000,
+            FORGE_DIFF_CAP,
           );
           if (delta.reason !== "ok" && !delta.text.trim())
             return `No diff available (${delta.reason}).`;
@@ -323,7 +323,7 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
           };
           return (
             UNTRUSTED_PREFIX +
-            capHead(JSON.stringify(composed, null, 2), 100_000)
+            capHead(JSON.stringify(composed, null, 2), FORGE_DIFF_CAP)
           );
         } catch (e) {
           return `Error: ${errorMessage(e)}`;
