@@ -903,10 +903,10 @@ fn copilot_review_args(
         args.push("--deny-tool=shell".into());
         // Drop Copilot's BUILTIN GitHub MCP so a repo-aware review stays repo-local.
         // Our explicitly-passed `--additional-mcp-config` is a DIFFERENT mechanism and
-        // is expected to survive this flag. NOTE: if live validation shows
-        // `--disable-builtin-mcps` also suppresses the additional config, this flag
-        // should become conditional on `mcp_config.is_none()` — left unconditional
-        // for now to avoid a speculative behavior change (matches today's behavior).
+        // SURVIVES this flag — probe-validated 2026-07-10 on Copilot CLI 1.0.70 with
+        // this exact flag set: the agent enumerated every `gitdesktop-*` tool from the
+        // additional config while the builtin GitHub MCP stayed disabled. Do not make
+        // this conditional on `mcp_config` — the two flags compose as intended.
         args.push("--disable-builtin-mcps".into());
     }
     if !model.trim().is_empty() {

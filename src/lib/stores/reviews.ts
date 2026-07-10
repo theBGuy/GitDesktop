@@ -452,7 +452,7 @@ export async function startReview(
     patch({
       phase: "done",
       status: "",
-      truncatedCoverage: coverage.diffTruncated && !agentic,
+      truncatedCoverage: coverage.diffTruncated && !agenticRun,
     });
     void notifyReviewDone(title, mode, true, target);
     // Persist the finished review so the NEXT run can use it as soft context.

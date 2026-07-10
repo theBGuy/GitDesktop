@@ -387,6 +387,11 @@ pub async fn git_fetch_objects(repo_path: String, refs: Vec<String>) -> AppResul
 /// (no network). A spawn/timeout error or a non-zero exit for any ref ⇒ `false`,
 /// so the caller fetches — this only ever SKIPS the fetch when it's provably
 /// unnecessary, never suppresses a needed one.
+///
+/// One `rev-parse` spawn per ref: every current caller passes a single SHA (the PR
+/// head), so batching isn't worth it yet. If a multi-SHA caller appears, switch to
+/// one `git cat-file --batch-check` process (`rev-parse --verify` takes exactly one
+/// revision, so it can't batch).
 async fn all_objects_present(repo_path: &str, refs: &[String]) -> bool {
     for r in refs {
         let spec = format!("{r}^{{commit}}");
