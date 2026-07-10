@@ -698,18 +698,24 @@ other AI reviewers (Copilot, CodeRabbit) left, and **GitDesktop's own earlier co
 the PR** — so on a re-review it treats a finding it already refuted or marked fixed as
 resolved instead of raising it cold. See *AI & automations* to pick the review model.
 
-**Agentic review.** With a CLI agent model (Claude, Copilot, or opencode), the panel's
-**Agentic review** toggle attaches GitDesktop to the run as a **read-only MCP server**:
-instead of relying on the prompt's truncated summary, the reviewer pulls the **full PR
-diff**, reads any file at any ref, runs blame and history, and reads the PR's existing
-comments and threads — so big PRs stop hedging about the part they couldn't see. It's
-**read-only end to end**: the server exposes only its read tools and the agent's own write
-tools are denied, so the reviewer can explore but never modify. The status line shows what
-it's reading as it goes. When a review's diff outgrows the prompt budget, the panel nudges
-you to turn on agentic review (CLI models, one click) or switch to a CLI agent model (HTTP
-models) for full coverage. (Codex reviews already explore the repo on their own but can't
-attach the GitDesktop tools, so they get the file-exploration framing without the PR
-tools.)
+**Agentic review.** The panel's **Agentic review** toggle gives the reviewer read-only
+tools so that, instead of relying on the prompt's truncated summary, it pulls the **full PR
+diff**, reads any file at any ref, searches the repo, runs history, and reads the
+PR's existing comments and threads — so big PRs stop hedging about the part they couldn't
+see. It works two ways depending on your review model. **CLI agent models** (Claude,
+Copilot, opencode) get the tools through GitDesktop attaching to the run as a **read-only
+MCP server**. **HTTP/API models** (Anthropic, OpenAI, OpenAI-compatible, OpenRouter,
+Ollama) get a **native, read-only tool loop** instead — with **no review workspace to
+prepare**, so those reviews start instantly (no "Preparing review workspace…" wait).
+Either way it's **read-only end to end** — only read tools exist in the loop, so the
+reviewer can explore but never modify — and the status line shows what it's reading as it
+goes. When a review's diff outgrows the prompt budget, the panel offers one click to turn
+on agentic review for full coverage. A couple of caveats: each tool step is an extra model
+call, so agentic runs are slower and pricier than a one-shot review; and small local models
+(some Ollama models) may not support tool calling — the review fails with a clear message
+suggesting you turn agentic off or pick another model. (Codex reviews already explore the
+repo on their own but can't attach the GitDesktop tools, so they get the file-exploration
+framing without the PR tools.)
 
 Every AI-posted review is **clearly machine-authored**: a branded GitDesktop header and
 footer on the comment, and on a **local PR** a "GitDesktop" bot author with a robot avatar.

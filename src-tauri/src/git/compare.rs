@@ -409,6 +409,86 @@ async fn all_objects_present(repo_path: &str, refs: &[String]) -> bool {
     true
 }
 
+/// Default cap on matching lines returned by `git_grep_at_ref`.
+const GREP_DEFAULT_MAX_HITS: u32 = 200;
+/// Hard cap on total output bytes, so a pathological line (a minified bundle the
+/// `-I` binary filter didn't catch) can't blow past the model's context.
+const GREP_MAX_BYTES: usize = 100_000;
+
+/// Search the repository at a given rev for a fixed string, returning matching
+/// `path:line:content` lines — the repo-search tool an HTTP review model calls
+/// against a PR head, with NO checkout/worktree (it greps the rev directly).
+///
+/// `git grep -I -n -F --no-color -e <pattern> <atRef>`: `-F` is fixed-string
+/// (v1 is deliberately literal, not regex — a regex mode is a later addition),
+/// `-I` skips binary files, `-n` prefixes line numbers. The pattern is passed
+/// with `-e`, so a leading `-` in it is data, not an option (a bare `--` guard
+/// isn't needed for the pattern; `validate_ref` guards the rev the same way the
+/// rest of this module does).
+///
+/// Grepping a rev makes git prefix every hit with `<atRef>:` (output is
+/// `<atRef>:path:line:content`); we strip exactly that known prefix so the model
+/// sees repo-relative `path:line:content`. Only the leading `atRef:` is removed —
+/// path- and content-embedded colons are preserved.
+#[tauri::command]
+pub async fn git_grep_at_ref(
+    repo_path: String,
+    pattern: String,
+    at_ref: String,
+    max_hits: Option<u32>,
+) -> AppResult<String> {
+    validate_ref(&at_ref)?;
+    if pattern.trim().is_empty() {
+        return Err(AppError::InvalidArgument("empty search pattern".into()));
+    }
+    let max_hits = max_hits.unwrap_or(GREP_DEFAULT_MAX_HITS) as usize;
+
+    // `run_git_raw` so we can treat exit 1 (git grep's documented "no match")
+    // as an empty result rather than an error; any OTHER non-zero is real.
+    let out = run_git_raw(
+        Some(&repo_path),
+        &[
+            "grep", "-I", "-n", "-F", "--no-color", "-e", &pattern, &at_ref,
+        ],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    match out.code {
+        0 => {}
+        // git grep exits 1 with no output when nothing matched.
+        1 if out.stdout.is_empty() => return Ok(String::new()),
+        _ => {
+            return Err(AppError::Git {
+                code: out.code,
+                stderr: out.stderr,
+            })
+        }
+    }
+
+    let prefix = format!("{at_ref}:");
+    let stdout = out.stdout_lossy();
+    let total = stdout.lines().count();
+    let kept: Vec<String> = stdout
+        .lines()
+        .take(max_hits)
+        // git prefixes each hit with `<atRef>:`; normalize to repo-relative.
+        .map(|l| l.strip_prefix(&prefix).unwrap_or(l).to_string())
+        .collect();
+
+    let mut result = kept.join("\n");
+    if total > max_hits {
+        let remaining = total - max_hits;
+        result.push_str(&format!("\n[... {remaining} more matches truncated]"));
+    }
+
+    // Byte hard-cap on top of the line cap, char-boundary safe.
+    if result.len() > GREP_MAX_BYTES {
+        let (head, _) = truncate_at_char_boundary(result, GREP_MAX_BYTES);
+        result = format!("{head}\n[... output truncated at {GREP_MAX_BYTES} bytes]");
+    }
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,6 +538,140 @@ mod tests {
             .await
             .expect("a failed fetch is Ok(false), not an error");
         assert!(!ok, "an absent object falls through to the (failing) fetch");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Seeds a fresh repo and returns `(base_dir, repo_path)`. Caller removes
+    /// `base_dir`.
+    async fn seed_repo(tag: &str) -> (std::path::PathBuf, String) {
+        let base = std::env::temp_dir().join(format!(
+            "gd-{tag}-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        run(&repo_s, &["init", "-q"]).await;
+        run(&repo_s, &["config", "user.email", "t@t.local"]).await;
+        run(&repo_s, &["config", "user.name", "T"]).await;
+        (base, repo_s)
+    }
+
+    /// A match at a rev is found even after the working tree (and later commits)
+    /// no longer contain the needle — grep reads the rev's tree, not the checkout.
+    #[tokio::test]
+    async fn grep_at_ref_reads_the_rev_not_the_worktree() {
+        let (base, repo) = seed_repo("grep-rev").await;
+
+        std::fs::write(
+            std::path::Path::new(&repo).join("a.txt"),
+            "the SECRET_NEEDLE lives here\nplain line\n",
+        )
+        .unwrap();
+        run(&repo, &["add", "-A"]).await;
+        run(&repo, &["commit", "-qm", "add needle"]).await;
+        let sha = run(&repo, &["rev-parse", "HEAD"]).await.trim().to_string();
+
+        // Change the working tree so the needle is gone from disk (unstaged edit).
+        std::fs::write(
+            std::path::Path::new(&repo).join("a.txt"),
+            "the needle is gone now\nplain line\n",
+        )
+        .unwrap();
+
+        // Grep at the commit → still found (reads the committed tree).
+        let hit = git_grep_at_ref(repo.clone(), "SECRET_NEEDLE".into(), sha.clone(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            hit, "a.txt:1:the SECRET_NEEDLE lives here",
+            "match found at the rev, ref-prefix stripped to repo-relative path"
+        );
+
+        // Commit the removal, then grep at HEAD → empty (needle no longer in tree).
+        run(&repo, &["add", "-A"]).await;
+        run(&repo, &["commit", "-qm", "remove needle"]).await;
+        let gone = git_grep_at_ref(repo.clone(), "SECRET_NEEDLE".into(), "HEAD".into(), None)
+            .await
+            .unwrap();
+        assert_eq!(gone, "", "no match at HEAD → Ok(empty), not an error");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The `<ref>:` prefix git prepends when grepping a rev is stripped, while
+    /// colons embedded in the path/content are preserved.
+    #[tokio::test]
+    async fn grep_at_ref_strips_only_the_ref_prefix() {
+        let (base, repo) = seed_repo("grep-prefix").await;
+
+        std::fs::write(
+            std::path::Path::new(&repo).join("cfg.txt"),
+            "endpoint: http://host:8080/path FINDME\n",
+        )
+        .unwrap();
+        run(&repo, &["add", "-A"]).await;
+        run(&repo, &["commit", "-qm", "seed"]).await;
+
+        let hit = git_grep_at_ref(repo.clone(), "FINDME".into(), "HEAD".into(), None)
+            .await
+            .unwrap();
+        // Only the leading `HEAD:` is gone; every content colon survives.
+        assert_eq!(hit, "cfg.txt:1:endpoint: http://host:8080/path FINDME");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// More matches than `max_hits` → the kept lines plus a truncation marker
+    /// carrying the correct remainder count.
+    #[tokio::test]
+    async fn grep_at_ref_caps_hits_with_marker() {
+        let (base, repo) = seed_repo("grep-cap").await;
+
+        // 5 matching lines across one file.
+        let body: String = (0..5).map(|i| format!("hit MATCHME line {i}\n")).collect();
+        std::fs::write(std::path::Path::new(&repo).join("m.txt"), body).unwrap();
+        run(&repo, &["add", "-A"]).await;
+        run(&repo, &["commit", "-qm", "seed"]).await;
+
+        let out = git_grep_at_ref(repo.clone(), "MATCHME".into(), "HEAD".into(), Some(2))
+            .await
+            .unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 3, "2 kept lines + 1 marker line");
+        assert_eq!(lines[0], "m.txt:1:hit MATCHME line 0");
+        assert_eq!(lines[1], "m.txt:2:hit MATCHME line 1");
+        assert_eq!(
+            lines[2], "[... 3 more matches truncated]",
+            "remainder = 5 total - 2 kept"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A ref that looks like an option is rejected before any git runs.
+    #[tokio::test]
+    async fn grep_at_ref_rejects_option_like_ref() {
+        let (base, repo) = seed_repo("grep-badref").await;
+
+        let err = git_grep_at_ref(repo.clone(), "x".into(), "-oops".into(), None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, AppError::InvalidArgument(_)),
+            "leading-dash ref rejected as invalid argument"
+        );
+
+        // An empty/whitespace pattern is likewise rejected.
+        let err = git_grep_at_ref(repo.clone(), "   ".into(), "HEAD".into(), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::InvalidArgument(_)));
 
         let _ = std::fs::remove_dir_all(&base);
     }

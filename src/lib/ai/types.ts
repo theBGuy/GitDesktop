@@ -21,8 +21,10 @@ export interface AiSettings {
   /** Explicit path to the agent CLI binary (CLI providers only); empty/omitted
    *  means auto-detect on PATH and the known install locations. */
   cliPath?: string;
-  /** CLI providers: let the agent read surrounding repo files for context
-   *  (Tier 2), instead of reviewing the diff alone. Slower and pricier. */
+  /** Agentic review: let the review model explore — repo files and PR context
+   *  via GitDesktop's read-only tools. CLI agents read the checked-out files and
+   *  attach the MCP server; HTTP models get a native tool loop. Slower and
+   *  pricier. (Field name unchanged — persisted.) */
   cliRepoAware?: boolean;
 }
 
@@ -140,6 +142,9 @@ export interface ReviewPromptInput {
     filesOnDisk: boolean;
     /** GitDesktop is attached as a read-only MCP server (`gitdesktop` tools). */
     mcpTools: boolean;
+    /** HTTP provider with a native AI-SDK tool loop — same explore capability,
+     *  no files on disk. */
+    httpTools?: boolean;
     /** Forge PR number for the MCP PR tools — remote PRs only. */
     prNumber?: string;
   };

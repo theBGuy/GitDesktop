@@ -1,3 +1,4 @@
+import type { ToolSet } from "ai";
 import { useCallback, useRef, useState } from "react";
 import {
   gitFetchObjects,
@@ -7,7 +8,7 @@ import {
 import { toastError } from "@/lib/toast";
 import type { AgentToolKind } from "./agent";
 import { cancelAgentReview, providerKind, runAgentReview } from "./agent";
-import { createAiClient } from "./client";
+import { createAiClient, runAgenticStream } from "./client";
 import { isCliProvider } from "./providers";
 import type { AiSettings } from "./types";
 
@@ -163,6 +164,10 @@ export interface StreamAiOpts {
    *  Omitted by non-review callers (Debug with AI, generation), keeping them
    *  byte-identical. */
   mcpSelf?: boolean;
+  /** Native AI-SDK review tools for an HTTP-provider agentic review — the model
+   *  explores via a tool loop (no MCP, no worktree). HTTP agentic reviews only;
+   *  CLI and non-review callers omit it, keeping their path byte-identical. */
+  reviewTools?: ToolSet;
   setText: (text: string) => void;
   setStatus: (status: string) => void;
   /** CLI path: receives the agent review id (cancel via `cancelAgentReview`). */
@@ -186,6 +191,7 @@ export async function streamAi({
   repoPath,
   headSha,
   mcpSelf,
+  reviewTools,
   setText,
   setStatus,
   onCliId,
@@ -207,6 +213,25 @@ export async function streamAi({
   }
   const abort = new AbortController();
   onAbort(abort);
+  // HTTP-provider agentic review: drive a native tool loop instead of the plain
+  // text stream. The tools read at the PR head ref (no worktree), so best-effort
+  // fetch that commit first — a fork PR's head may not be a local object yet
+  // (the Rust command short-circuits when it already is, so this is cheap).
+  if (reviewTools) {
+    if (headSha) {
+      await gitFetchObjects(repoPath, [headSha]).catch(() => undefined);
+    }
+    await runAgenticStream({
+      settings: ai,
+      system,
+      prompt,
+      tools: reviewTools,
+      abortSignal: abort.signal,
+      setText,
+      setStatus,
+    });
+    return;
+  }
   const client = await createAiClient(ai);
   let buffer = "";
   for await (const chunk of client.stream({

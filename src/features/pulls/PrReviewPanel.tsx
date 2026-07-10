@@ -422,9 +422,7 @@ export function PrReviewPanel({
             </button>
           </div>
         )}
-        {(cliKind === "claude" ||
-          cliKind === "opencode" ||
-          cliKind === "copilot") && (
+        {cliKind !== "codex" && (
           <label className="flex items-center gap-2 text-xs text-muted-foreground">
             <Switch
               size="sm"
@@ -443,39 +441,29 @@ export function PrReviewPanel({
             Codex reads repo files for context (read-only sandbox).
           </p>
         )}
-        {/* The last run saw a truncated diff with no tools to compensate. A
-            tool-capable CLI (not codex) with repo-aware OFF can be upgraded in
-            place; an HTTP provider (null cliKind) gets an informational hint
-            only. Codex (already repo-aware) and an already-agentic run set the
-            flag false, so they never reach here — but the guards hold anyway. */}
+        {/* The last run saw a truncated diff with no tools to compensate. Every
+            non-codex provider is now upgradable in place — the tool-capable CLIs
+            (claude/opencode/copilot) and all HTTP providers (null cliKind) gain
+            the same agentic explore capability. Codex (already repo-aware) and
+            an already-agentic run set the flag false, so they never reach here —
+            but the guards hold anyway. */}
         {truncatedCoverage &&
           !generating &&
           cliKind !== "codex" &&
           !reviewAi?.cliRepoAware && (
             <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
               <WarningIcon className="size-3 shrink-0" />
-              {cliKind === "claude" ||
-              cliKind === "opencode" ||
-              cliKind === "copilot" ? (
-                <>
-                  <span className="min-w-0">
-                    This review saw a truncated diff — agentic review lets it
-                    read the full changes.
-                  </span>
-                  <button
-                    type="button"
-                    className="cursor-pointer underline-offset-2 hover:underline"
-                    onClick={() => updateReview({ cliRepoAware: true })}
-                  >
-                    Enable agentic review
-                  </button>
-                </>
-              ) : (
-                <span className="min-w-0">
-                  This review saw a truncated diff. A CLI agent review model can
-                  explore the full PR.
-                </span>
-              )}
+              <span className="min-w-0">
+                This review saw a truncated diff — agentic review lets it read
+                the full changes.
+              </span>
+              <button
+                type="button"
+                className="cursor-pointer underline-offset-2 hover:underline"
+                onClick={() => updateReview({ cliRepoAware: true })}
+              >
+                Enable agentic review
+              </button>
             </div>
           )}
         <ReviewHistory

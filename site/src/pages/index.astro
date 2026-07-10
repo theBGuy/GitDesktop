@@ -124,7 +124,7 @@ const capabilities = [
   { label: "Reviews keep running in the background", ai: true },
   {
     label:
-      "Agentic review — a CLI agent reads the full diff, files, blame & history via GitDesktop's read-only MCP server (Claude, Copilot & opencode)",
+      "Agentic review — the reviewer reads the full diff, files, search & history through read-only tools, with CLI agents (Claude, Copilot, opencode) and API models (Anthropic, OpenAI, OpenRouter, Ollama)",
     ai: true,
   },
   { label: "Iterative reviews build on the last round", ai: true },
@@ -450,11 +450,12 @@ const gitCapabilities = capabilities.filter((c) => !c.ai);
                 it's done.
               </p>
               <p class="mt-4 leading-relaxed text-muted">
-                Turn on <span class="text-ink">Agentic review</span> with a CLI agent
-                model and GitDesktop attaches itself as a read-only MCP server: the
-                reviewer pulls the full diff past the prompt budget, reads any file at
-                any ref, and runs blame and history — read-only end to end, so it can
-                explore but never modify.
+                Turn on <span class="text-ink">Agentic review</span> and the reviewer
+                pulls the full diff past the prompt budget, reads any file at any ref,
+                searches the repo, and runs history — read-only end to end, so
+                it can explore but never modify. It works with CLI agent models (via
+                GitDesktop's read-only MCP server) and with API models through a native
+                tool loop, which needs no review workspace and so starts instantly.
               </p>
             </div>
             <figure data-reveal style="transition-delay:120ms" class="window mt-10">

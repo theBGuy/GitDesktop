@@ -13,6 +13,7 @@ import {
 import { type PriorContext, resolvePriorContext } from "@/lib/ai/prior-context";
 import { buildReviewPrompt } from "@/lib/ai/prompt";
 import { isLocalProvider } from "@/lib/ai/providers";
+import { buildReviewTools } from "@/lib/ai/review-tools";
 import { streamAi } from "@/lib/ai/stream";
 import type {
   AiSettings,
@@ -394,19 +395,34 @@ export async function startReview(
         ),
       ]);
     if (control.cancelled) return;
-    // Agentic run: a CLI provider in repo-aware mode reviews with the PR's files
-    // on disk and (for the tool-capable CLIs — everything but codex) GitDesktop's
-    // own read-only MCP tools attached. Computed before the prompt so it can frame
-    // truncation honestly, and to gate `mcpSelf` on the stream.
+    // Agentic run: in repo-aware mode the reviewer explores. A CLI provider
+    // reviews with the PR's files on disk and (for the tool-capable CLIs —
+    // everything but codex) GitDesktop's own read-only MCP tools attached; an
+    // HTTP provider (null kind) instead drives a native AI-SDK tool loop with no
+    // worktree. Computed before the prompt so it can frame truncation honestly,
+    // and to gate `mcpSelf` / `reviewTools` on the stream.
     const kind = providerKind(ai.provider);
-    const agenticRun = Boolean(kind && ai.cliRepoAware);
-    const mcpTools = agenticRun && kind !== "codex";
+    const agenticRun = Boolean(ai.cliRepoAware);
+    const mcpTools = agenticRun && kind !== null && kind !== "codex";
+    const httpTools = agenticRun && kind === null;
     const agentic = agenticRun
       ? {
-          filesOnDisk: Boolean(context.headSha),
+          // An HTTP run has no worktree even with a head, so files-on-disk needs
+          // a CLI kind as well.
+          filesOnDisk: Boolean(kind && context.headSha),
           mcpTools,
+          httpTools,
           prNumber: target.kind === "remote" ? target.ref : undefined,
         }
+      : undefined;
+    // The native tool registry for an HTTP agentic run (empty otherwise).
+    const reviewTools = httpTools
+      ? buildReviewTools({
+          repoPath: context.repoPath,
+          headSha: context.headSha,
+          prNumber: target.kind === "remote" ? Number(target.ref) : undefined,
+          provider: context.provider,
+        })
       : undefined;
     const { system, prompt, coverage } = buildReviewPrompt(
       {
@@ -437,6 +453,7 @@ export async function startReview(
       repoPath: context.repoPath,
       headSha: context.headSha,
       mcpSelf: mcpTools,
+      reviewTools,
       setText: pushText,
       setStatus: (s) => patch({ status: s }),
       onCliId: (id) => {

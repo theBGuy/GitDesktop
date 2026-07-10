@@ -187,6 +187,8 @@ impl GitDesktopMcp {
         let review_threads = crate::forge::forge_pr_review_threads(self.repo.clone(), args.number)
             .await
             .map_err(app_err)?;
+        // KEEP IN SYNC: src/lib/ai/review-tools.ts (`list_pull_request_comments`)
+        // mirrors this composed shape for the HTTP review tool loop.
         json_result_untrusted(&serde_json::json!({
             "number": args.number,
             "comments": pr.comments,

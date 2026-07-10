@@ -235,16 +235,18 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
   "GitDesktop" bot author with a robot avatar on local PRs, and (with a GitLab
   project/group access token in Settings → Accounts) posting as the real **GitLab
   project bot** rather than your own account.
-- **Agentic review — no more "couldn't verify the truncated part"** — with a CLI
-  agent model (Claude Code, Copilot CLI, or opencode), turn on **Agentic review**
-  and GitDesktop attaches itself as a **read-only MCP server** to the run: the
-  reviewer pulls the *full* PR diff (past the prompt's truncation budget), reads
-  any file at any ref, runs blame and history, and reads the PR's existing
-  comments — then reports live what it's exploring ("Reading src/foo.rs…").
+- **Agentic review — no more "couldn't verify the truncated part"** — turn on
+  **Agentic review** and the reviewer gets read-only tools to pull the *full* PR
+  diff (past the prompt's truncation budget), read any file at any ref, search
+  the repo, and read the PR's existing comments and history — then
+  reports live what it's exploring ("Reading src/foo.rs…"). Works with **CLI
+  agent models** (Claude Code, Copilot CLI, opencode), where GitDesktop attaches
+  itself as a **read-only MCP server**, and with **HTTP/API models** (Anthropic,
+  OpenAI, OpenAI-compatible, OpenRouter, Ollama) through a native tool loop —
+  with **no review workspace to prepare, so those reviews start instantly**.
   Everything is **read-only end to end** — no write tools, no repo mutations. When
-  a review's diff outgrows the prompt budget, the panel nudges you to enable
-  agentic review (CLI models) or switch to a CLI agent (HTTP models) for full
-  coverage.
+  a review's diff outgrows the prompt budget, the panel offers one click to
+  enable agentic review for full coverage.
 - **Debug failed CI with AI** — turn a failed job's logs into a streamed
   root-cause + fix, ending with a ready-to-paste prompt for a coding agent.
 - **Markdown everywhere you write** — Write/Preview tabs and a formatting toolbar

@@ -973,6 +973,15 @@ export const gitDiffBetweenRefs = (
 export const gitFetchObjects = (repoPath: string, refs: string[]) =>
   invoke<boolean>("git_fetch_objects", { repoPath, refs });
 
+/** Fixed-string `git grep` at a rev, as `path:line:content` lines ("" = no
+ *  matches). Used by the agentic HTTP review tool loop to search at the PR head. */
+export const gitGrepAtRef = (
+  repoPath: string,
+  pattern: string,
+  atRef: string,
+  maxHits?: number,
+) => invoke<string>("git_grep_at_ref", { repoPath, pattern, atRef, maxHits });
+
 /** Current tip SHA of each requested local branch (one for-each-ref call).
  *  Branches that don't exist are omitted. Used to watch open local PRs' heads. */
 export const gitBranchTips = (repoPath: string, branches: string[]) =>
