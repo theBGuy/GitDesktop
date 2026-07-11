@@ -1,4 +1,5 @@
 import type { ContextPack } from "./agent";
+import { distillReadme } from "./readme";
 import { budgetDiff, budgetReviewExtras, type ReviewExtras } from "./truncate";
 import type {
   BranchNamePromptInput,
@@ -750,8 +751,12 @@ export function extractBranchName(raw: string): string {
 
 const DESCRIPTION_SYSTEM = `You write a GitHub repository's "About" metadata from its README.
 Output EXACTLY these two lines and nothing else:
-Description: <a single line of up to ~250 characters, no trailing period, no quotes; describe what the project does and what makes it stand out — do not begin with "This repository", "A repository for", or the project's own name>
+Description: <one information-dense line of roughly 200 to 325 characters (short one-liners read thin, so use the space — but never exceed 325; the field truncates anything longer), no trailing period, no quotes; describe what the project does and what makes it stand out — do not begin with "This repository", "A repository for", or the project's own name>
 Topics: <3 to 8 space-separated lowercase tags using only letters, digits, and hyphens, e.g. "react typescript cli git">`;
+
+// A long README is condensed (features/highlights breadth preserved) to fit this
+// budget rather than blindly truncated. See distillReadme in ./readme.
+const README_BUDGET = 10_000;
 
 export function buildRepoDescriptionPrompt(input: {
   repoName: string;
@@ -771,7 +776,10 @@ export function buildRepoDescriptionPrompt(input: {
 
   const promptParts = [`## Repository name\n${input.repoName}`];
   if (input.readme.trim()) {
-    promptParts.push(`## README (truncated)\n${input.readme.slice(0, 6000)}`);
+    const readme = distillReadme(input.readme, README_BUDGET);
+    promptParts.push(
+      `## README${readme.length < input.readme.length ? " (condensed)" : ""}\n${readme}`,
+    );
   } else {
     promptParts.push(
       "## README\n(none — infer from the repository name alone)",
@@ -782,6 +790,19 @@ export function buildRepoDescriptionPrompt(input: {
     system: systemParts.join("\n\n"),
     prompt: promptParts.join("\n\n"),
   };
+}
+
+/** Cap a description at `max` chars without chopping mid-word: cut at the last
+ *  space inside `max` if it's past ~300, else a plain slice, then strip any
+ *  trailing punctuation/whitespace the cut left behind. */
+function capDescription(text: string, max: number): string {
+  if (text.length <= max) {
+    return text;
+  }
+  const window = text.slice(0, max);
+  const lastSpace = window.lastIndexOf(" ");
+  const cut = lastSpace > 300 ? window.slice(0, lastSpace) : window;
+  return cut.replace(/[\s,;:—-]+$/, "");
 }
 
 /** Parse the model's "Description:" / "Topics:" lines into clean values. */
@@ -799,12 +820,15 @@ export function extractRepoDetails(raw: string): {
     lines.find((l) => /^description\s*[:-]/i.test(l)) ??
     lines.find((l) => l.length > 0) ??
     "";
-  const description = descLine
+  const cleaned = descLine
     .replace(/^description\s*[:-]\s*/i, "")
     .replace(/^[`'"]+|[`'"]+$/g, "")
     .replace(/\.$/, "")
-    .trim()
-    .slice(0, 350);
+    .trim();
+  // Models can't count chars reliably; on the rare overshoot, cut on a word
+  // boundary near 350 (past ~300) and strip trailing punctuation, so a too-long
+  // description degrades to a clean whole-word line rather than a mid-word chop.
+  const description = capDescription(cleaned, 350);
 
   const topicsLine = lines.find((l) => /^topics\s*[:-]/i.test(l)) ?? "";
   const topics = topicsLine
