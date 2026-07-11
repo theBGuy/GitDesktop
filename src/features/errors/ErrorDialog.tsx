@@ -24,6 +24,14 @@ export function ErrorDialog() {
 
   const fullText = presentation?.fullText ?? "";
 
+  // Controlled Base UI dialogs don't fire onOpenChange when `open` flips via the
+  // prop, so the Close button clears `copied` itself — otherwise a Copy → Close
+  // within 1.5s leaves the next-opened dialog briefly showing "Copied".
+  function handleClose() {
+    close();
+    setCopied(false);
+  }
+
   function copy() {
     navigator.clipboard
       .writeText(fullText)
@@ -40,10 +48,7 @@ export function ErrorDialog() {
     <Dialog
       open={presentation !== null}
       onOpenChange={(open) => {
-        if (!open) {
-          close();
-          setCopied(false);
-        }
+        if (!open) handleClose();
       }}
     >
       <DialogContent className="flex max-h-[85vh] flex-col sm:max-w-2xl">
@@ -53,7 +58,9 @@ export function ErrorDialog() {
               {presentation?.summary}
             </DialogTitle>
             {presentation?.label && (
-              <Badge variant="secondary">{presentation.label}</Badge>
+              <Badge variant="secondary" className="shrink-0">
+                {presentation.label}
+              </Badge>
             )}
           </div>
         </DialogHeader>
@@ -61,7 +68,7 @@ export function ErrorDialog() {
           {fullText}
         </pre>
         <DialogFooter>
-          <Button variant="outline" onClick={close}>
+          <Button variant="outline" onClick={handleClose}>
             Close
           </Button>
           <Button variant="secondary" onClick={copy}>

@@ -58,25 +58,26 @@ function firstMeaningfulLine(message: string): string {
   return stripGitPrefix(nonEmpty ?? message).trim() || message.trim();
 }
 
-/** Conflict-family markers — a paused rebase/merge/cherry-pick/revert. When any
+/** Conflict-family markers (lowercase — matched case-insensitively, since git
+ *  emits both `error: could not apply …` and `Could not apply <sha>…`). When any
  *  appears we translate to a single calm line (the ConflictBanner already owns
  *  the durable surface); the raw text still flows to fullText untouched. */
 const CONFLICT_MARKERS = [
   "could not apply",
-  "Resolve all conflicts",
-  "CONFLICT (",
+  "resolve all conflicts",
+  "conflict (",
   "needs merge",
 ];
 
 /** The paused operation named in the text, capitalized for the summary. */
 function conflictOp(text: string): string {
   const lower = text.toLowerCase();
-  const idx = ["rebase", "merge", "cherry-pick", "revert"]
+  const found = ["rebase", "merge", "cherry-pick", "revert"]
     .map((op) => ({ op, at: lower.indexOf(op) }))
     .filter((m) => m.at !== -1)
     .sort((a, b) => a.at - b.at)[0];
-  if (!idx) return "Operation";
-  const { op } = idx;
+  if (!found) return "Operation";
+  const { op } = found;
   return op === "cherry-pick"
     ? "Cherry-pick"
     : op.charAt(0).toUpperCase() + op.slice(1);
@@ -104,10 +105,12 @@ export function presentError(e: unknown): ErrorPresentation {
         : message;
 
     const combined = `${message}\n${stderr}`;
-    const isConflict = CONFLICT_MARKERS.some((m) => combined.includes(m));
+    const combinedLower = combined.toLowerCase();
+    const isConflict = CONFLICT_MARKERS.some((m) => combinedLower.includes(m));
+    const label = KIND_LABELS[e.kind];
     const summary = isConflict
       ? `${conflictOp(combined)} paused — resolve the conflicts, then continue.`
-      : firstMeaningfulLine(message);
+      : firstMeaningfulLine(message) || label;
 
     const distinctStderr = stderr !== "" && !message.includes(stderr);
     const long =
@@ -115,11 +118,11 @@ export function presentError(e: unknown): ErrorPresentation {
       distinctStderr ||
       fullText.length > 140;
 
-    return { label: KIND_LABELS[e.kind], summary, fullText, long };
+    return { label, summary, fullText, long };
   }
 
   const message = e instanceof Error ? e.message : String(e);
-  const summary = firstMeaningfulLine(message);
+  const summary = firstMeaningfulLine(message) || "Unexpected error";
   const long = nonEmptyLineCount(message) > 1 || message.length > 140;
   return { label: null, summary, fullText: message, long };
 }
