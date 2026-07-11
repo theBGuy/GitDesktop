@@ -750,7 +750,7 @@ export function extractBranchName(raw: string): string {
 
 const DESCRIPTION_SYSTEM = `You write a GitHub repository's "About" metadata from its README.
 Output EXACTLY these two lines and nothing else:
-Description: <one concise line, at most ~140 characters, no trailing period, no quotes; describe what the project does — do not begin with "This repository", "A repository for", or the project's own name>
+Description: <a single line of up to ~250 characters, no trailing period, no quotes; describe what the project does and what makes it stand out — do not begin with "This repository", "A repository for", or the project's own name>
 Topics: <3 to 8 space-separated lowercase tags using only letters, digits, and hyphens, e.g. "react typescript cli git">`;
 
 export function buildRepoDescriptionPrompt(input: {
