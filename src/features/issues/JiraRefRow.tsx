@@ -50,11 +50,11 @@ export function JiraRefRow({
     }
   }
 
-  // Titles are best-effort from whatever list is already cached; "all" is the
-  // broadest filter so it covers open and closed referenced issues. Passing the
-  // link only when there's something to resolve keeps the query disabled (so a
-  // linked repo with no referenced keys fires ZERO Jira calls); when it IS
-  // enabled the panel has usually already warmed this cache.
+  // Titles are best-effort; "all" is the broadest filter so it covers open and
+  // closed referenced issues — note it's a DISTINCT cache key from the panel's
+  // open/closed lists, so the first matched-key render may fetch one small page
+  // cold. Passing the link only when there's something to resolve keeps the
+  // query disabled (a linked repo with no referenced keys fires ZERO Jira calls).
   const issues = useJiraIssues(repoPath, keys.length > 0 ? link : null, "all");
   const selectIssue = useUiStore((s) => s.selectIssue);
   const setRepoTab = useUiStore((s) => s.setRepoTab);
