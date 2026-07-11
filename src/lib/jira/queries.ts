@@ -7,16 +7,23 @@ import {
 import type { ForgeUserRef } from "@/lib/git/types";
 import {
   jiraAccount,
+  jiraCommentDelete,
+  jiraCommentEdit,
   jiraIssueAssign,
   jiraIssueComment,
   jiraIssueCreate,
   jiraIssueList,
+  jiraIssueSetDueDate,
+  jiraIssueSetLabels,
+  jiraIssueSetPriority,
   jiraIssueTransition,
   jiraIssueTransitions,
   jiraIssueTransitionTo,
   jiraIssueTypes,
   jiraIssueView,
+  jiraLabels,
   jiraPermissions,
+  jiraPriorities,
   jiraProjectSearch,
   jiraUserSearch,
 } from "./api";
@@ -27,6 +34,7 @@ import {
   setJiraLink,
 } from "./store";
 import type {
+  JiraComment,
   JiraIssueDetails,
   JiraIssueInfo,
   JiraIssueState,
@@ -233,6 +241,37 @@ export function useJiraUserSearch(
     enabled: !!link && enabled,
     placeholderData: keepPreviousData,
     staleTime: 30_000,
+  });
+}
+
+/** The site's priority scheme, for the priority picker. Fetched lazily — the
+ *  caller passes `enabled` (e.g. the priority menu being open) so nothing loads
+ *  on mount. Priorities are site-global (not per-project), so the key is the site
+ *  alone and a generous staleTime keeps it off the hot path. */
+export function useJiraPriorities(
+  link: JiraLink | null | undefined,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: ["jira-priorities", link?.siteHost ?? ""] as const,
+    queryFn: () => jiraPriorities((link as JiraLink).siteHost),
+    enabled: !!link && enabled,
+    staleTime: 5 * 60_000,
+  });
+}
+
+/** All labels known to the site (first page), for the labels editor. Fetched
+ *  lazily on `enabled` (the labels popover being open); the caller filters
+ *  client-side. Site-global, so keyed on the site alone. */
+export function useJiraLabels(
+  link: JiraLink | null | undefined,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: ["jira-labels", link?.siteHost ?? ""] as const,
+    queryFn: () => jiraLabels((link as JiraLink).siteHost),
+    enabled: !!link && enabled,
+    staleTime: 5 * 60_000,
   });
 }
 
@@ -513,6 +552,256 @@ export function useJiraAssign(repo: string, link: JiraLink | null | undefined) {
       }
       for (const [listKey, list] of ctx?.lists ?? []) {
         queryClient.setQueryData(listKey, list);
+      }
+    },
+    onSettled: () => invalidateJiraForRepo(queryClient, repo),
+  });
+}
+
+/** The shared optimistic context for a field patch (detail snapshot + every
+ *  patched list cache), so rollback restores exactly what onMutate touched.
+ *  Mirrors `useJiraAssign`'s context. */
+type FieldPatchCtx = {
+  detailKey: readonly unknown[] | null;
+  prevDetail: JiraIssueDetails | undefined;
+  lists: [readonly unknown[], JiraIssueInfo[] | undefined][];
+};
+
+/** Optimistically patch a set of detail fields, and (for the subset of fields the
+ *  list row also carries) the matching row in every jira-issues list cache for
+ *  this repo. `detailPatch` is applied to the detail entry; `listPatch` (when
+ *  given) to the matching list row — separate because a detail-only field (due
+ *  date) has no list-row counterpart. Snapshots for rollback. */
+async function applyOptimisticField(
+  queryClient: ReturnType<typeof useQueryClient>,
+  repo: string,
+  link: JiraLink,
+  issueKey: string,
+  detailPatch: Partial<JiraIssueDetails>,
+  listPatch?: Partial<JiraIssueInfo>,
+): Promise<FieldPatchCtx> {
+  const detailKey = jiraIssueDetailKey(repo, link.siteHost, issueKey);
+  await queryClient.cancelQueries({ queryKey: detailKey });
+  const prevDetail = queryClient.getQueryData<JiraIssueDetails>(detailKey);
+  if (prevDetail) {
+    queryClient.setQueryData<JiraIssueDetails>(detailKey, {
+      ...prevDetail,
+      ...detailPatch,
+    });
+  }
+  const lists = queryClient.getQueriesData<JiraIssueInfo[]>({
+    predicate: (q) =>
+      q.queryKey[0] === "repo" &&
+      q.queryKey[1] === repo &&
+      q.queryKey[2] === "jira-issues",
+  });
+  if (listPatch) {
+    for (const [listKey, list] of lists) {
+      if (!list) continue;
+      queryClient.setQueryData<JiraIssueInfo[]>(
+        listKey,
+        list.map((i) => (i.key === issueKey ? { ...i, ...listPatch } : i)),
+      );
+    }
+  }
+  return { detailKey, prevDetail, lists };
+}
+
+/** Restore the detail + list caches from a FieldPatchCtx (rollback on error). */
+function rollbackOptimisticField(
+  queryClient: ReturnType<typeof useQueryClient>,
+  ctx: FieldPatchCtx | undefined,
+) {
+  if (ctx?.detailKey && ctx.prevDetail !== undefined) {
+    queryClient.setQueryData(ctx.detailKey, ctx.prevDetail);
+  }
+  for (const [listKey, list] of ctx?.lists ?? []) {
+    queryClient.setQueryData(listKey, list);
+  }
+}
+
+/** Set/clear the issue's due date. Optimistic: patches the detail cache (the due
+ *  date isn't carried on the list row, so no list patch) with rollback. */
+export function useJiraSetDueDate(
+  repo: string,
+  link: JiraLink | null | undefined,
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { issueKey: string; dueDate: string | null }) =>
+      jiraIssueSetDueDate(
+        (link as JiraLink).siteHost,
+        args.issueKey,
+        args.dueDate,
+      ),
+    onMutate: async (args) => {
+      if (!link) return undefined;
+      return applyOptimisticField(queryClient, repo, link, args.issueKey, {
+        dueDate: args.dueDate,
+      });
+    },
+    onError: (_e, _args, ctx) => rollbackOptimisticField(queryClient, ctx),
+    onSettled: () => invalidateJiraForRepo(queryClient, repo),
+  });
+}
+
+/** Set the issue's priority. Optimistic: patches the priority NAME onto the detail
+ *  cache and the matching list row (both carry `priorityName`) with rollback. The
+ *  caller passes the chosen name so the chip updates instantly. */
+export function useJiraSetPriority(
+  repo: string,
+  link: JiraLink | null | undefined,
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (args: {
+      issueKey: string;
+      priorityId: string;
+      priorityName: string;
+    }) =>
+      jiraIssueSetPriority(
+        (link as JiraLink).siteHost,
+        args.issueKey,
+        args.priorityId,
+      ),
+    onMutate: async (args) => {
+      if (!link) return undefined;
+      return applyOptimisticField(
+        queryClient,
+        repo,
+        link,
+        args.issueKey,
+        { priorityName: args.priorityName },
+        { priorityName: args.priorityName },
+      );
+    },
+    onError: (_e, _args, ctx) => rollbackOptimisticField(queryClient, ctx),
+    onSettled: () => invalidateJiraForRepo(queryClient, repo),
+  });
+}
+
+/** Replace the issue's labels wholesale. Optimistic: patches the label array onto
+ *  the detail cache and the matching list row (both carry `labels`) with rollback. */
+export function useJiraSetLabels(
+  repo: string,
+  link: JiraLink | null | undefined,
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { issueKey: string; labels: string[] }) =>
+      jiraIssueSetLabels(
+        (link as JiraLink).siteHost,
+        args.issueKey,
+        args.labels,
+      ),
+    onMutate: async (args) => {
+      if (!link) return undefined;
+      return applyOptimisticField(
+        queryClient,
+        repo,
+        link,
+        args.issueKey,
+        { labels: args.labels },
+        { labels: args.labels },
+      );
+    },
+    onError: (_e, _args, ctx) => rollbackOptimisticField(queryClient, ctx),
+    onSettled: () => invalidateJiraForRepo(queryClient, repo),
+  });
+}
+
+/** Edit one of the viewer's own comments. Optimistic: patches the comment's body
+ *  (and a provisional `updatedAt`) in place in the detail cache; the server's real
+ *  comment (with the true updatedAt) lands on success. Rollback restores the
+ *  prior comment array. Comments aren't on the list row, so no list patch. */
+export function useJiraCommentEdit(
+  repo: string,
+  link: JiraLink | null | undefined,
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (args: {
+      issueKey: string;
+      commentId: string;
+      bodyMd: string;
+    }) =>
+      jiraCommentEdit(
+        (link as JiraLink).siteHost,
+        args.issueKey,
+        args.commentId,
+        args.bodyMd,
+      ),
+    onMutate: async (args) => {
+      if (!link) return undefined;
+      const detailKey = jiraIssueDetailKey(repo, link.siteHost, args.issueKey);
+      await queryClient.cancelQueries({ queryKey: detailKey });
+      const prevDetail = queryClient.getQueryData<JiraIssueDetails>(detailKey);
+      if (prevDetail) {
+        const now = new Date().toISOString();
+        queryClient.setQueryData<JiraIssueDetails>(detailKey, {
+          ...prevDetail,
+          comments: prevDetail.comments.map((c) =>
+            c.id === args.commentId
+              ? { ...c, bodyMd: args.bodyMd, updatedAt: now }
+              : c,
+          ),
+        });
+      }
+      return { detailKey, prevDetail };
+    },
+    onError: (_e, _args, ctx) => {
+      if (ctx?.detailKey && ctx.prevDetail !== undefined) {
+        queryClient.setQueryData(ctx.detailKey, ctx.prevDetail);
+      }
+    },
+    onSuccess: (comment, args) => {
+      if (!link) return;
+      const detailKey = jiraIssueDetailKey(repo, link.siteHost, args.issueKey);
+      queryClient.setQueryData<JiraIssueDetails>(detailKey, (d) =>
+        d
+          ? {
+              ...d,
+              comments: d.comments.map((c: JiraComment) =>
+                c.id === comment.id ? comment : c,
+              ),
+            }
+          : d,
+      );
+    },
+    onSettled: () => invalidateJiraForRepo(queryClient, repo),
+  });
+}
+
+/** Delete one of the viewer's own comments. Optimistic: removes the comment from
+ *  the detail cache immediately; rollback restores it on error. */
+export function useJiraCommentDelete(
+  repo: string,
+  link: JiraLink | null | undefined,
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { issueKey: string; commentId: string }) =>
+      jiraCommentDelete(
+        (link as JiraLink).siteHost,
+        args.issueKey,
+        args.commentId,
+      ),
+    onMutate: async (args) => {
+      if (!link) return undefined;
+      const detailKey = jiraIssueDetailKey(repo, link.siteHost, args.issueKey);
+      await queryClient.cancelQueries({ queryKey: detailKey });
+      const prevDetail = queryClient.getQueryData<JiraIssueDetails>(detailKey);
+      if (prevDetail) {
+        queryClient.setQueryData<JiraIssueDetails>(detailKey, {
+          ...prevDetail,
+          comments: prevDetail.comments.filter((c) => c.id !== args.commentId),
+        });
+      }
+      return { detailKey, prevDetail };
+    },
+    onError: (_e, _args, ctx) => {
+      if (ctx?.detailKey && ctx.prevDetail !== undefined) {
+        queryClient.setQueryData(ctx.detailKey, ctx.prevDetail);
       }
     },
     onSettled: () => invalidateJiraForRepo(queryClient, repo),

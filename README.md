@@ -134,15 +134,18 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
   automatically per site with nothing to configure — with **View in Jira** link-outs. You can also **create** an issue (summary, description, and an
   issue-type picker), **comment** in Markdown, **close / reopen** by following the project's
   own workflow (the confirmation names the real resulting status) — or jump to any workflow
-  status from the **status menu** on the chip — and **assign / unassign** via
-  user search — actions your Jira permissions don't allow simply don't appear. The linked
+  status from the **status menu** on the chip — **assign / unassign** via
+  user search, set or clear a **due date**, change **priority**, edit **labels**, and
+  **edit or delete your own comments** — actions your Jira permissions don't allow simply
+  don't appear. The linked
   project's **issue keys** (e.g. `PROJ-123`) are also spotted in the current **branch name**,
   a commit's message, and a PR's title/description, and surfaced as a compact **referenced
   Jira issues** row that jumps straight to the issue in the Issues tab. A **local issue** can
   be **promoted to Jira** too (alongside GitHub / GitLab when both are available) — its
   comments carry over and the local one closes with a back-link. Agents connected through
   GitDesktop's **MCP server** get `jira_*` tools to list and read the linked project's issues,
-  and — behind the `--allow-remote-write` opt-in — comment, close/reopen, create, and assign.
+  and — behind the `--allow-remote-write` opt-in — comment, close/reopen, create, assign, and
+  update an issue's due date, priority, and labels.
   Connect with an **Atlassian API token** (email + token, validated before saving and kept in
   your OS keychain), or reuse an existing Bitbucket credential. Especially handy for
   **Bitbucket** repos, whose native tracker Atlassian retires 2026-08-20.

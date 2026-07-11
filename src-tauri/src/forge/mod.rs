@@ -407,6 +407,76 @@ pub async fn jira_permissions(
     jira::permissions(&site, &project_key).await
 }
 
+// ── Jira writes (phase 5): due date / priority / labels / comment edit-delete + pickers ──
+
+/// The site's priorities for the priority picker (`GET /rest/api/3/priority`).
+#[tauri::command]
+pub async fn jira_priorities(site: String) -> AppResult<Vec<jira::JiraPriority>> {
+    jira::priorities(&site).await
+}
+
+/// The site's labels for the labels picker (first page of `GET /rest/api/3/label`; the UI
+/// filters client-side — no server query param exists).
+#[tauri::command]
+pub async fn jira_labels(site: String) -> AppResult<Vec<String>> {
+    jira::labels(&site).await
+}
+
+/// Set (or clear) a Jira issue's due date. `due_date = Some("YYYY-MM-DD")` sets it; `None`
+/// clears it. The date grammar is validated before any network call.
+#[tauri::command]
+pub async fn jira_issue_set_due_date(
+    site: String,
+    key: String,
+    due_date: Option<String>,
+) -> AppResult<()> {
+    jira::issue_set_due_date(&site, &key, due_date.as_deref()).await
+}
+
+/// Set a Jira issue's priority by id (from `jira_priorities`).
+#[tauri::command]
+pub async fn jira_issue_set_priority(
+    site: String,
+    key: String,
+    priority_id: String,
+) -> AppResult<()> {
+    jira::issue_set_priority(&site, &key, &priority_id).await
+}
+
+/// Replace a Jira issue's labels wholesale. Each label is validated (non-empty, no
+/// whitespace) before any network call; an empty vec clears all labels.
+#[tauri::command]
+pub async fn jira_issue_set_labels(
+    site: String,
+    key: String,
+    labels: Vec<String>,
+) -> AppResult<()> {
+    jira::issue_set_labels(&site, &key, &labels).await
+}
+
+/// Edit one of your own comments on a Jira issue. `body_md` is markdown (converted to ADF);
+/// a whitespace-only body and a non-numeric comment id are rejected before any network
+/// call. Returns the updated comment.
+#[tauri::command]
+pub async fn jira_comment_edit(
+    site: String,
+    key: String,
+    comment_id: String,
+    body_md: String,
+) -> AppResult<jira::JiraComment> {
+    jira::comment_edit(&site, &key, &comment_id, &body_md).await
+}
+
+/// Delete one of your own comments on a Jira issue.
+#[tauri::command]
+pub async fn jira_comment_delete(
+    site: String,
+    key: String,
+    comment_id: String,
+) -> AppResult<()> {
+    jira::comment_delete(&site, &key, &comment_id).await
+}
+
 /// The signed-in user's repositories on a provider, for the clone browser.
 /// Dispatches by provider — GitHub via `gh`, GitLab via `glab`; Bitbucket isn't
 /// implemented yet. Account-scoped (no repo path), unlike `forge_status`.

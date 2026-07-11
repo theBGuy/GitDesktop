@@ -92,6 +92,9 @@ export interface JiraComment {
   author: ForgeUserRef | null;
   bodyMd: string;
   createdAt: string;
+  /** When the comment was last edited; `null` when never edited (or equal to
+   *  `createdAt` on a pristine comment). Drives the "(edited)" cue. */
+  updatedAt: string | null;
 }
 
 /** The full read-only detail for one Jira issue (list fields + description,
@@ -103,6 +106,10 @@ export interface JiraIssueDetails extends JiraIssueInfo {
   /** Description body, already converted ADF → markdown. */
   descriptionMd: string;
   comments: JiraComment[];
+  /** The calling account's accountId, so the UI can recognise the viewer's OWN
+   *  comments to offer edit/delete. `null` = unknown (hide own-comment
+   *  affordances); Jira still enforces ownership server-side regardless. */
+  viewerAccountId: string | null;
 }
 
 // ── Write path (phase 2) ────────────────────────────────────────────────────
@@ -116,6 +123,21 @@ export interface JiraPermissions {
   transitionIssues: boolean;
   createIssues: boolean;
   assignIssues: boolean;
+  /** Set the issue's due date (Jira's SCHEDULE_ISSUES permission). */
+  scheduleIssues: boolean;
+  /** Edit the issue's own fields (priority, labels — Jira's EDIT_ISSUES). */
+  editIssues: boolean;
+  /** Edit the viewer's own comments (Jira's EDIT_OWN_COMMENTS). */
+  editOwnComments: boolean;
+  /** Delete the viewer's own comments (Jira's DELETE_OWN_COMMENTS). */
+  deleteOwnComments: boolean;
+}
+
+/** A priority option for the priority picker (`/priority`). */
+export interface JiraPriority {
+  id: string;
+  name: string;
+  iconUrl: string;
 }
 
 /** An issue type for the create picker (`createmeta`); `subtask` types are

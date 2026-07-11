@@ -298,7 +298,7 @@ function isPastDue(dueDate: string): boolean {
  *  mutation per keystroke with garbage intermediate dates (caught live).
  *  While mid-edit the value also passes through "", which must not read as a
  *  clear — clearing is the explicit Clear button instead. */
-function DueDateRow({
+export function DueDateRow({
   value,
   open,
   pending,

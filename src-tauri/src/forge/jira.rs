@@ -206,6 +206,33 @@ fn is_valid_issue_key(key: &str) -> bool {
         && number.bytes().all(|b| b.is_ascii_digit())
 }
 
+/// Whether `s` is a `YYYY-MM-DD` date (`^\d{4}-\d{2}-\d{2}$`) — the grammar the due-date
+/// write requires before sending it. This is a shape check, not a calendar check (Jira
+/// validates the actual date); an impossible date like `2026-13-40` still passes the
+/// grammar and surfaces through Jira's error envelope. Pure (testable).
+fn is_valid_due_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b[..4].iter().all(u8::is_ascii_digit)
+        && b[5..7].iter().all(u8::is_ascii_digit)
+        && b[8..].iter().all(u8::is_ascii_digit)
+}
+
+/// Whether `label` is a valid Jira label: non-empty and containing no whitespace (Jira
+/// labels cannot contain spaces — the server would 400, but a local check gives a clean
+/// message). Pure (testable).
+fn is_valid_label(label: &str) -> bool {
+    !label.is_empty() && !label.chars().any(char::is_whitespace)
+}
+
+/// Whether a Jira comment id is a non-empty run of ASCII digits — comment ids are numeric
+/// strings, grammar-validated before being interpolated into a request path. Pure.
+fn is_valid_comment_id(id: &str) -> bool {
+    !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())
+}
+
 /// Jira's error envelope: `{"errorMessages": [..], "errors": {field: msg}}`. Either
 /// may be absent on a given response; parsing is best-effort and the caller falls back
 /// to a status+snippet message.
@@ -536,6 +563,36 @@ fn account_info_from_myself(me: JiraUser, email_fallback: &str) -> JiraAccountIn
 async fn probe_myself(creds: &JiraCredentials, email_fallback: &str) -> AppResult<JiraAccountInfo> {
     let me: JiraUser = get_json(creds, "myself", "account").await?;
     Ok(account_info_from_myself(me, email_fallback))
+}
+
+/// Per-site cache of the CALLER's Jira accountId, filled by one `GET /myself` per process
+/// per site. Purely a UX-gating input for the issue view's `viewer_account_id` (whether to
+/// OFFER edit/delete-own-comment) — Jira enforces ownership server-side regardless, so a
+/// stale entry can never grant a write. Keyed per site; never cleared within a process.
+static VIEWER_ACCOUNT_IDS: OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+    OnceLock::new();
+
+fn viewer_account_ids() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    VIEWER_ACCOUNT_IDS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// The caller's accountId for a site, from the per-process cache or one `GET /myself` probe.
+/// Any failure (network, parse, empty accountId) yields `None` — the issue view still
+/// succeeds; the own-comment affordances are simply hidden. A resolved id is cached so
+/// later issue views on the same site skip the probe. The std mutex is taken and released
+/// around each map access, never held across the `.await`.
+async fn resolve_viewer_account_id(creds: &JiraCredentials, site: &str) -> Option<String> {
+    if let Ok(map) = viewer_account_ids().lock() {
+        if let Some(id) = map.get(site) {
+            return Some(id.clone());
+        }
+    }
+    let me: JiraUser = get_json(creds, "myself", "account").await.ok()?;
+    let id = me.account_id.filter(|s| !s.is_empty())?;
+    if let Ok(mut map) = viewer_account_ids().lock() {
+        map.insert(site.to_string(), id.clone());
+    }
+    Some(id)
 }
 
 /// The `/_edge/tenant_info` response — an UNAUTHENTICATED endpoint on the site host that
@@ -1624,6 +1681,9 @@ pub struct JiraComment {
     pub author: Option<ForgeUserRef>,
     pub body_md: String,
     pub created_at: String,
+    /// The comment's `updated` timestamp, or `None` when Jira omits it. B5 shows an
+    /// "(edited)" cue when this differs from `created_at`.
+    pub updated_at: Option<String>,
 }
 
 /// Full read view of one Jira issue.
@@ -1660,6 +1720,12 @@ pub struct JiraIssueDetails {
     pub description_md: String,
     pub comments: Vec<JiraComment>,
     pub url: String,
+    /// The CALLER's Jira accountId (from a per-site in-process cache filled by one
+    /// `GET /myself` per process per site), or `None` when it couldn't be resolved. This
+    /// is UX gating ONLY — B5 hides the edit/delete-own-comment affordances on `None`.
+    /// Jira enforces comment ownership server-side (EDIT_OWN/DELETE_OWN) regardless, so a
+    /// stale or missing value can never grant a write the server wouldn't allow.
+    pub viewer_account_id: Option<String>,
 }
 
 /// Map one Jira comment object (`{id, author, body, created}`) onto the neutral
@@ -1680,6 +1746,11 @@ fn map_comment(c: &Value) -> JiraComment {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string(),
+        updated_at: c
+            .get("updated")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
     }
 }
 
@@ -1718,6 +1789,10 @@ pub async fn issue_view(site: &str, key: &str) -> AppResult<JiraIssueDetails> {
     );
     let issue: Value = get_json(&creds, &path, "issue").await?;
     let fields = issue.get("fields").cloned().unwrap_or(Value::Null);
+
+    // The caller's accountId (cached per site), for own-comment UX gating. Best-effort —
+    // any failure yields None and the issue view still succeeds.
+    let viewer_account_id = resolve_viewer_account_id(&creds, &site).await;
 
     let issue_type = fields.get("issuetype");
     let (sprint_name, sprint_state) = extract_sprint(&fields, &map);
@@ -1791,6 +1866,7 @@ pub async fn issue_view(site: &str, key: &str) -> AppResult<JiraIssueDetails> {
         comments: map_comments(&fields),
         url: format!("https://{site}/browse/{key}"),
         key: key.to_string(),
+        viewer_account_id,
     })
 }
 
@@ -2256,6 +2332,14 @@ pub struct JiraProjectPermissions {
     pub transition_issues: bool,
     pub create_issues: bool,
     pub assign_issues: bool,
+    /// `SCHEDULE_ISSUES` — the due-date permission (NOT `EDIT_ISSUES`; live-verified).
+    pub schedule_issues: bool,
+    /// `EDIT_ISSUES` — gates priority + labels writes.
+    pub edit_issues: bool,
+    /// `EDIT_OWN_COMMENTS` — gates editing your own comment.
+    pub edit_own_comments: bool,
+    /// `DELETE_OWN_COMMENTS` — gates deleting your own comment.
+    pub delete_own_comments: bool,
 }
 
 /// Whether a single permission in a `mypermissions` response is granted. Defensive: an
@@ -2278,6 +2362,10 @@ fn parse_permissions(body: &Value) -> JiraProjectPermissions {
         transition_issues: have_permission(body, "TRANSITION_ISSUES"),
         create_issues: have_permission(body, "CREATE_ISSUES"),
         assign_issues: have_permission(body, "ASSIGN_ISSUES"),
+        schedule_issues: have_permission(body, "SCHEDULE_ISSUES"),
+        edit_issues: have_permission(body, "EDIT_ISSUES"),
+        edit_own_comments: have_permission(body, "EDIT_OWN_COMMENTS"),
+        delete_own_comments: have_permission(body, "DELETE_OWN_COMMENTS"),
     }
 }
 
@@ -2295,11 +2383,218 @@ pub async fn permissions(site: &str, project_key: &str) -> AppResult<JiraProject
     let creds = load_credentials(&site).await?;
     let path = format!(
         "mypermissions?projectKey={}&permissions=ADD_COMMENTS,TRANSITION_ISSUES,\
-         CREATE_ISSUES,ASSIGN_ISSUES",
+         CREATE_ISSUES,ASSIGN_ISSUES,SCHEDULE_ISSUES,EDIT_ISSUES,EDIT_OWN_COMMENTS,\
+         DELETE_OWN_COMMENTS",
         crate::forge::encode_query_value(project_key),
     );
     let body: Value = get_json(&creds, &path, "permissions").await?;
     Ok(parse_permissions(&body))
+}
+
+// ── Writes (phase 5): due date / priority / labels / comment edit-delete + pickers ──
+
+/// One Jira priority for the priority picker (`GET /rest/api/3/priority`).
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraPriority {
+    pub id: String,
+    pub name: String,
+    pub icon_url: String,
+}
+
+/// The site's priorities for the priority picker — `GET /rest/api/3/priority`, which
+/// returns a BARE ARRAY of `{id, name, iconUrl, …}` (no envelope). Parsed straight into
+/// `Vec<JiraPriority>`.
+pub async fn priorities(site: &str) -> AppResult<Vec<JiraPriority>> {
+    let site = normalize_site(site)?;
+    let creds = load_credentials(&site).await?;
+    get_json(&creds, "priority", "priorities").await
+}
+
+/// The `GET /rest/api/3/label` response — a paginated `{values:[string], total}` envelope.
+/// No query parameter exists, so the picker fetches the first page and filters client-side.
+#[derive(Deserialize, Default)]
+struct JiraLabelsPage {
+    #[serde(default)]
+    values: Vec<String>,
+}
+
+/// The site's labels for the labels picker — the first page of `GET /rest/api/3/label`
+/// (`{values, total}`; no query param exists, so the UI filters `values` client-side).
+pub async fn labels(site: &str) -> AppResult<Vec<String>> {
+    let site = normalize_site(site)?;
+    let creds = load_credentials(&site).await?;
+    let page: JiraLabelsPage =
+        get_json(&creds, &format!("label?maxResults={MAX_RESULTS}"), "labels").await?;
+    Ok(page.values)
+}
+
+/// Set (or clear) an issue's due date. `due_date = Some("YYYY-MM-DD")` sets it; `None`
+/// clears it (`PUT /issue/<key>` with `{fields:{duedate: null}}`). The date grammar is
+/// validated (shape only — Jira validates the calendar date) BEFORE any network call; a
+/// bad shape is an `InvalidArgument`. A project whose screen lacks the due-date field
+/// surfaces through the existing error envelope (the phase-4 field-name translation makes
+/// it readable) — not special-cased here.
+pub async fn issue_set_due_date(site: &str, key: &str, due_date: Option<&str>) -> AppResult<()> {
+    let site = normalize_site(site)?;
+    if !is_valid_issue_key(key) {
+        return Err(AppError::InvalidArgument(format!(
+            "invalid Jira issue key: {key}"
+        )));
+    }
+    if let Some(d) = due_date {
+        if !is_valid_due_date(d) {
+            return Err(AppError::InvalidArgument(format!(
+                "invalid due date (expected YYYY-MM-DD): {d}"
+            )));
+        }
+    }
+    let creds = load_credentials(&site).await?;
+    // `duedate: null` clears; a valid string sets. Serialize either explicitly.
+    let body = json!({ "fields": { "duedate": due_date } });
+    send_no_content(
+        &creds,
+        reqwest::Method::PUT,
+        &format!("issue/{key}"),
+        Some(&body),
+    )
+    .await
+}
+
+/// Set an issue's priority to `priority_id` (`PUT /issue/<key>` with
+/// `{fields:{priority:{id}}}`). The id comes from [`priorities`]; the issue key is
+/// grammar-validated first. A screen without a priority field surfaces through the error
+/// envelope.
+pub async fn issue_set_priority(site: &str, key: &str, priority_id: &str) -> AppResult<()> {
+    let site = normalize_site(site)?;
+    if !is_valid_issue_key(key) {
+        return Err(AppError::InvalidArgument(format!(
+            "invalid Jira issue key: {key}"
+        )));
+    }
+    if priority_id.trim().is_empty() {
+        return Err(AppError::InvalidArgument(
+            "a priority id is required".into(),
+        ));
+    }
+    let creds = load_credentials(&site).await?;
+    let body = json!({ "fields": { "priority": { "id": priority_id } } });
+    send_no_content(
+        &creds,
+        reqwest::Method::PUT,
+        &format!("issue/{key}"),
+        Some(&body),
+    )
+    .await
+}
+
+/// Replace an issue's labels wholesale (`PUT /issue/<key>` with `{fields:{labels}}`). Every
+/// label is validated (non-empty, no whitespace — Jira labels can't contain spaces) BEFORE
+/// any network call; a bad label is an `InvalidArgument` naming it. An empty `labels` vec
+/// clears all labels. The issue key is grammar-validated first.
+pub async fn issue_set_labels(site: &str, key: &str, labels: &[String]) -> AppResult<()> {
+    let site = normalize_site(site)?;
+    if !is_valid_issue_key(key) {
+        return Err(AppError::InvalidArgument(format!(
+            "invalid Jira issue key: {key}"
+        )));
+    }
+    for label in labels {
+        if !is_valid_label(label) {
+            return Err(AppError::InvalidArgument(format!(
+                "invalid Jira label (labels can't be empty or contain spaces): {label:?}"
+            )));
+        }
+    }
+    let creds = load_credentials(&site).await?;
+    let body = json!({ "fields": { "labels": labels } });
+    send_no_content(
+        &creds,
+        reqwest::Method::PUT,
+        &format!("issue/{key}"),
+        Some(&body),
+    )
+    .await
+}
+
+/// Edit one of your own comments on an issue. The markdown `body_md` is converted to ADF
+/// (via [`md_to_adf`]) and PUT to `/issue/<key>/comment/<id>`; the returned comment object
+/// is mapped back to a neutral [`JiraComment`]. A whitespace-only body is rejected, and the
+/// comment id is grammar-validated (digits only), BOTH before any network call.
+///
+/// Editing round-trips ADF→md→ADF, so exotic nodes the writer can't emit (mentions,
+/// panels) are dropped — acceptable for OWN comments, consistent with phase 5 excluding
+/// replies/mentions. Ownership is enforced server-side by EDIT_OWN_COMMENTS.
+pub async fn comment_edit(
+    site: &str,
+    key: &str,
+    comment_id: &str,
+    body_md: &str,
+) -> AppResult<JiraComment> {
+    let site = normalize_site(site)?;
+    if !is_valid_issue_key(key) {
+        return Err(AppError::InvalidArgument(format!(
+            "invalid Jira issue key: {key}"
+        )));
+    }
+    if !is_valid_comment_id(comment_id) {
+        return Err(AppError::InvalidArgument(format!(
+            "invalid Jira comment id: {comment_id}"
+        )));
+    }
+    if body_md.trim().is_empty() {
+        return Err(AppError::InvalidArgument(
+            "a comment body is required".into(),
+        ));
+    }
+    let creds = load_credentials(&site).await?;
+    let adf = md_to_adf::markdown_to_adf(body_md);
+    let body = json!({ "body": adf });
+    let path = format!("issue/{key}/comment/{comment_id}");
+    let resp: Value = post_put_json(&creds, &path, &body, "comment").await?;
+    Ok(map_comment(&resp))
+}
+
+/// Delete one of your own comments on an issue (`DELETE /issue/<key>/comment/<id>`;
+/// returns 204). The issue key and the digits-only comment id are grammar-validated BEFORE
+/// any network call. Ownership is enforced server-side by DELETE_OWN_COMMENTS.
+pub async fn comment_delete(site: &str, key: &str, comment_id: &str) -> AppResult<()> {
+    let site = normalize_site(site)?;
+    if !is_valid_issue_key(key) {
+        return Err(AppError::InvalidArgument(format!(
+            "invalid Jira issue key: {key}"
+        )));
+    }
+    if !is_valid_comment_id(comment_id) {
+        return Err(AppError::InvalidArgument(format!(
+            "invalid Jira comment id: {comment_id}"
+        )));
+    }
+    let creds = load_credentials(&site).await?;
+    send_no_content(
+        &creds,
+        reqwest::Method::DELETE,
+        &format!("issue/{key}/comment/{comment_id}"),
+        None,
+    )
+    .await
+}
+
+/// PUT JSON to a Jira endpoint and deserialize the 2xx body into `T` — the comment-edit
+/// endpoint returns the updated comment object (unlike the 204-returning property PUTs,
+/// which use [`send_no_content`]). Same error handling as [`post_json`].
+async fn post_put_json<T: serde::de::DeserializeOwned>(
+    creds: &JiraCredentials,
+    path: &str,
+    body: &Value,
+    what: &str,
+) -> AppResult<T> {
+    let (status, resp_body) = raw_request(creds, reqwest::Method::PUT, path, Some(body)).await?;
+    if !(200..300).contains(&status) {
+        return Err(http_error_for(status, &resp_body, &creds.site));
+    }
+    serde_json::from_str(&resp_body)
+        .map_err(|e| AppError::Jira(format!("could not parse Jira {what}: {e}")))
 }
 
 #[cfg(test)]
@@ -2882,6 +3177,10 @@ mod tests {
                 "TRANSITION_ISSUES": { "havePermission": false },
                 "CREATE_ISSUES": { "havePermission": true },
                 // ASSIGN_ISSUES absent entirely.
+                "SCHEDULE_ISSUES": { "havePermission": true },
+                "EDIT_ISSUES": { "havePermission": false },
+                "EDIT_OWN_COMMENTS": { "havePermission": true },
+                // DELETE_OWN_COMMENTS absent entirely.
             }
         });
         let p = parse_permissions(&body);
@@ -2890,6 +3189,12 @@ mod tests {
         assert!(p.create_issues);
         // Absent key → false, never an error.
         assert!(!p.assign_issues);
+        // The phase-5 keys each defend independently.
+        assert!(p.schedule_issues);
+        assert!(!p.edit_issues);
+        assert!(p.edit_own_comments);
+        // Absent key → false.
+        assert!(!p.delete_own_comments);
     }
 
     #[test]
@@ -2900,6 +3205,10 @@ mod tests {
         assert!(!p.transition_issues);
         assert!(!p.create_issues);
         assert!(!p.assign_issues);
+        assert!(!p.schedule_issues);
+        assert!(!p.edit_issues);
+        assert!(!p.edit_own_comments);
+        assert!(!p.delete_own_comments);
         // A present entry with a non-bool havePermission also defaults false.
         let p2 = parse_permissions(&json!({
             "permissions": { "ADD_COMMENTS": { "havePermission": "yes" } }
@@ -3455,5 +3764,112 @@ mod tests {
             gateway.resolve_agile("board/5/configuration"),
             "https://api.atlassian.com/ex/jira/abc-123/rest/agile/1.0/board/5/configuration"
         );
+    }
+
+    // ── Phase 5: property writes / pickers / comment edit-delete ─────────────────
+
+    #[test]
+    fn priorities_parse_live_bare_array_with_iconurl_casing() {
+        // Verbatim shape from GET /rest/api/3/priority — a BARE ARRAY (no envelope) of
+        // {id, name, iconUrl, …}. The `iconUrl` camelCase key is the crux: without
+        // `rename_all = "camelCase"` on JiraPriority, `icon_url` would parse empty.
+        let body = r##"[
+            { "id": "1", "name": "Highest", "iconUrl": "https://icon/highest",
+              "statusColor": "#d04437" },
+            { "id": "3", "name": "Medium", "iconUrl": "https://icon/medium" }
+        ]"##;
+        let parsed: Vec<JiraPriority> = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].id, "1");
+        assert_eq!(parsed[0].name, "Highest");
+        assert_eq!(parsed[0].icon_url, "https://icon/highest");
+        assert_eq!(parsed[1].name, "Medium");
+    }
+
+    #[test]
+    fn labels_page_extracts_values() {
+        // Verbatim shape from GET /rest/api/3/label — a paginated {values, total} envelope.
+        let body = r#"{
+            "maxResults": 50, "startAt": 0, "total": 3, "isLast": true,
+            "values": ["backend", "frontend", "urgent"]
+        }"#;
+        let page: JiraLabelsPage = serde_json::from_str(body).unwrap();
+        assert_eq!(page.values, vec!["backend", "frontend", "urgent"]);
+        // A missing `values` degrades to empty (not an error).
+        let empty: JiraLabelsPage = serde_json::from_str(r#"{"total":0}"#).unwrap();
+        assert!(empty.values.is_empty());
+    }
+
+    #[test]
+    fn valid_due_date_grammar() {
+        assert!(is_valid_due_date("2026-07-11"));
+        assert!(is_valid_due_date("0000-00-00")); // shape-only; Jira validates the calendar
+        assert!(!is_valid_due_date("")); // empty
+        assert!(!is_valid_due_date("2026-7-11")); // single-digit month
+        assert!(!is_valid_due_date("2026/07/11")); // wrong separator
+        assert!(!is_valid_due_date("2026-07-11T00:00:00")); // has time
+        assert!(!is_valid_due_date("26-07-11")); // 2-digit year
+        assert!(!is_valid_due_date("2026-07-1x")); // non-digit
+    }
+
+    #[test]
+    fn due_date_body_uses_null_to_clear() {
+        // None → {fields:{duedate:null}} (clears); Some → the string.
+        let cleared = json!({ "fields": { "duedate": Option::<&str>::None } });
+        assert!(cleared["fields"]["duedate"].is_null());
+        let set = json!({ "fields": { "duedate": Some("2026-07-11") } });
+        assert_eq!(set["fields"]["duedate"], "2026-07-11");
+    }
+
+    #[test]
+    fn valid_label_rejects_whitespace_and_empty() {
+        assert!(is_valid_label("backend"));
+        assert!(is_valid_label("needs-review"));
+        assert!(!is_valid_label("")); // empty
+        assert!(!is_valid_label("two words")); // space
+        assert!(!is_valid_label("tab\tlabel")); // tab
+        assert!(!is_valid_label(" leading")); // leading space
+    }
+
+    #[test]
+    fn valid_comment_id_requires_nonempty_digits() {
+        assert!(is_valid_comment_id("10001"));
+        assert!(is_valid_comment_id("7"));
+        assert!(!is_valid_comment_id("")); // empty
+        assert!(!is_valid_comment_id("10a")); // non-digit
+        assert!(!is_valid_comment_id("10 01")); // space
+        assert!(!is_valid_comment_id("../10001")); // path-traversal attempt
+        assert!(!is_valid_comment_id("-1")); // sign
+    }
+
+    #[test]
+    fn map_comment_populates_updated_at_when_present() {
+        // A comment whose `updated` differs from `created` (an edited comment) populates
+        // `updated_at`; B5 shows the "(edited)" cue from that.
+        let edited = json!({
+            "id": "10001",
+            "author": { "accountId": "a1", "displayName": "Bob" },
+            "body": { "type": "doc", "version": 1, "content": [
+                { "type": "paragraph", "content": [ { "type": "text", "text": "Edited body" } ] }
+            ]},
+            "created": "2026-02-01T00:00:00.000+0000",
+            "updated": "2026-02-02T09:30:00.000+0000"
+        });
+        let c = map_comment(&edited);
+        assert_eq!(c.id, "10001");
+        assert_eq!(c.body_md, "Edited body");
+        assert_eq!(c.created_at, "2026-02-01T00:00:00.000+0000");
+        assert_eq!(
+            c.updated_at.as_deref(),
+            Some("2026-02-02T09:30:00.000+0000")
+        );
+
+        // An absent `updated` → None (no cue).
+        let unedited = json!({
+            "id": "10002",
+            "body": { "type": "doc", "version": 1, "content": [] },
+            "created": "2026-02-01T00:00:00.000+0000"
+        });
+        assert!(map_comment(&unedited).updated_at.is_none());
     }
 }

@@ -794,16 +794,19 @@ issue links out with **View in Jira**.
 When the project uses them, issues also show their **agile fields** — **story points** (both
 on the list rows and in the detail), **sprint**, a clickable **epic / parent** (open it to
 jump to that issue), **components**, and **fix versions**. These are resolved automatically
-per Jira site, so there's nothing to configure; they're read-only here for now.
+per Jira site, so there's nothing to configure; all of these agile fields are read-only
+here (edit them in Jira).
 
 You can work an issue without leaving the tab. **Create** one ({{kbd:create-jira-issue}}
 from the palette) with a summary, Markdown description, and an **issue-type** picker;
 **comment** in Markdown; **close or reopen** it by following the project's own workflow —
 the confirmation names the real resulting status, not a generic "closed" — or move it to
 any workflow status from the **status menu** on the chip, which lists the transitions your
-role allows by their target status name; and **assign or unassign** it by searching your
-project's users. Each action is gated on your Jira
-permissions, so anything your token and role can't do simply doesn't appear.
+role allows by their target status name; **assign or unassign** it by searching your
+project's users; set or clear its **due date**, change its **priority**, and edit its
+**labels**; and **edit or delete your own comments**. Each action is gated on your Jira
+permissions, so anything your token and role can't do simply doesn't appear — a control shows
+up only when your permissions allow it.
 
 **Referenced issues follow your work.** When a **branch name**, a commit's message (in the
 commit detail view), or a pull request's title or description mentions one of the linked
@@ -1156,8 +1159,8 @@ authenticated identity (GitHub \`gh\`, GitLab \`glab\`, or a stored Bitbucket to
 threads, add or remove **reactions**, **rerun/cancel/dispatch** CI, **create/update releases**,
 **create, comment on, close/reopen**, and set the **milestone** of issues, and — on GitHub —
 **create, comment on, answer, and close/reopen discussions**. The same flag also unlocks the
-linked Jira project's write \`jira_*\` tools — **comment**, **close/reopen**, **create**, and
-**assign** its issues. Issue
+linked Jira project's write \`jira_*\` tools — **comment**, **close/reopen**, **create**,
+**assign**, and **update** (due date, priority, labels) its issues. Issue
 writes cover GitHub and GitLab (not Bitbucket); discussions are GitHub-only; PR comments cover all three. PR comments an
 agent posts carry a small **Posted by GitDesktop** footer so they're identifiable as
 automated, and on the read side an agent can pull a pull request's full comment set — the

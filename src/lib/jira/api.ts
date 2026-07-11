@@ -10,6 +10,7 @@ import type {
   JiraIssueState,
   JiraIssueType,
   JiraPermissions,
+  JiraPriority,
   JiraProject,
   JiraStoredAccount,
   JiraTransition,
@@ -150,3 +151,50 @@ export const jiraIssueAssign = (
  *  avatar URL. */
 export const jiraUserSearch = (site: string, key: string, query: string) =>
   invoke<ForgeUserRef[]>("jira_user_search", { site, key, query });
+
+// ── Write path (phase 5): due date · priority · labels · comment edit/delete ──
+
+/** The site's priority scheme (`/priority`), for the priority picker. */
+export const jiraPriorities = (site: string) =>
+  invoke<JiraPriority[]>("jira_priorities", { site });
+
+/** All labels known to the site (first page); the caller filters client-side. */
+export const jiraLabels = (site: string) =>
+  invoke<string[]>("jira_labels", { site });
+
+/** Set (`"YYYY-MM-DD"`) or clear (`null`) the issue's due date. */
+export const jiraIssueSetDueDate = (
+  site: string,
+  key: string,
+  dueDate: string | null,
+) => invoke<void>("jira_issue_set_due_date", { site, key, dueDate });
+
+/** Set the issue's priority by id. */
+export const jiraIssueSetPriority = (
+  site: string,
+  key: string,
+  priorityId: string,
+) => invoke<void>("jira_issue_set_priority", { site, key, priorityId });
+
+/** Replace the issue's labels wholesale (Jira has no add/remove delta API). */
+export const jiraIssueSetLabels = (
+  site: string,
+  key: string,
+  labels: string[],
+) => invoke<void>("jira_issue_set_labels", { site, key, labels });
+
+/** Edit one of the viewer's own comments (markdown → ADF Rust-side); returns the
+ *  updated comment with its body back as markdown. */
+export const jiraCommentEdit = (
+  site: string,
+  key: string,
+  commentId: string,
+  bodyMd: string,
+) => invoke<JiraComment>("jira_comment_edit", { site, key, commentId, bodyMd });
+
+/** Delete one of the viewer's own comments. */
+export const jiraCommentDelete = (
+  site: string,
+  key: string,
+  commentId: string,
+) => invoke<void>("jira_comment_delete", { site, key, commentId });
