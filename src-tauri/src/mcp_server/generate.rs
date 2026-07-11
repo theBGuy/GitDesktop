@@ -113,10 +113,18 @@ fn pr_system_for(provider: Option<&str>) -> String {
                 "PR"
             };
             PR_SYSTEM
-                .replacen("GitHub pull request", &format!("{host} {}", copy.pr_noun), 1)
+                .replacen(
+                    "GitHub pull request",
+                    &format!("{host} {}", copy.pr_noun),
+                    1,
+                )
                 .replacen("the PR title", &format!("the {} title", copy.pr_noun), 1)
                 .replacen("no \"PR:\"", &format!("no \"{abbrev}:\""), 1)
-                .replacen("human-written PR:", &format!("human-written {}:", copy.pr_noun), 1)
+                .replacen(
+                    "human-written PR:",
+                    &format!("human-written {}:", copy.pr_noun),
+                    1,
+                )
                 .replacen(
                     "issue or PR numbers",
                     &format!("issue or {abbrev} numbers"),
@@ -1083,7 +1091,9 @@ mod tests {
         });
         // System: base + both instruction sections (global trimmed).
         assert!(recipe.system.starts_with("You write git commit messages."));
-        assert!(recipe.system.contains("## Project instructions\nRepo rule."));
+        assert!(recipe
+            .system
+            .contains("## Project instructions\nRepo rule."));
         assert!(recipe.system.contains("## User instructions\nGlobal rule."));
         // Prompt: all the expected headers, in order, plus the closing line.
         assert!(recipe.prompt.contains("## Files changed\nx.rs +1 -1"));
@@ -1174,11 +1184,15 @@ mod tests {
             global_instructions: String::new(),
             provider: Some("github".to_string()),
         });
-        assert!(recipe.system.starts_with("You write GitHub pull request descriptions"));
+        assert!(recipe
+            .system
+            .starts_with("You write GitHub pull request descriptions"));
         assert!(recipe
             .prompt
             .contains("This pull request merges `feature/x` into `main`."));
-        assert!(recipe.prompt.contains("## Commits in this PR\n- feat: thing"));
+        assert!(recipe
+            .prompt
+            .contains("## Commits in this PR\n- feat: thing"));
         // No labels section when the repo has none.
         assert!(!recipe.system.contains("## Labels"));
     }
@@ -1199,7 +1213,9 @@ mod tests {
         });
         assert!(recipe.system.contains("GitLab merge request"));
         assert!(recipe.system.contains("GitLab-flavored Markdown"));
-        assert!(recipe.prompt.contains("This merge request merges `topic` into `main`."));
+        assert!(recipe
+            .prompt
+            .contains("This merge request merges `topic` into `main`."));
         // Labels present (blank entry filtered out).
         assert!(recipe.system.contains("## Labels"));
         assert!(recipe.system.contains("these labels: bug."));
@@ -1282,7 +1298,12 @@ mod tests {
             assert!(is_low_value_path(p), "expected low-value: {p}");
         }
         // Extension branches (suffix-anchored, anywhere in the path).
-        for p in ["a/b.min.js", "x.min.css", "out/bundle.map", "t/__snap__.snap"] {
+        for p in [
+            "a/b.min.js",
+            "x.min.css",
+            "out/bundle.map",
+            "t/__snap__.snap",
+        ] {
             assert!(is_low_value_path(p), "expected low-value: {p}");
         }
         // Real code is NOT low-value (incl. a file merely NAMED like a lockfile part).

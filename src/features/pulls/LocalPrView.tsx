@@ -194,6 +194,14 @@ export function LocalPrView({
   // fallen behind base. Non-empty ⇒ offer GitHub's "Update branch".
   const behind = comparison.data?.behind ?? [];
   const fileCount = diffFiles.data?.length;
+  // Shared JiraRefRow sources for both header branches (conflict-takeover +
+  // normal) so the two can't diverge. Branch name LAST so title/description
+  // attribution wins a key that also appears in the branch name.
+  const jiraRefSources = [
+    { label: "title", text: pr.title },
+    { label: "description", text: pr.body },
+    { label: "branch name", text: pr.head },
+  ];
 
   function toggleApprove() {
     if (!pr) return;
@@ -342,14 +350,7 @@ export function LocalPrView({
               {pr.status}
             </Badge>
           </div>
-          <JiraRefRow
-            repoPath={repoPath}
-            sources={[
-              { label: "title", text: pr.title },
-              { label: "description", text: pr.body },
-              { label: "branch name", text: pr.head },
-            ]}
-          />
+          <JiraRefRow repoPath={repoPath} sources={jiraRefSources} />
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             <span className="font-mono">{pr.head}</span>
             <span>→</span>
@@ -391,14 +392,7 @@ export function LocalPrView({
           )}
           {pr.archived && <Badge variant="secondary">archived</Badge>}
         </div>
-        <JiraRefRow
-          repoPath={repoPath}
-          sources={[
-            { label: "title", text: pr.title },
-            { label: "description", text: pr.body },
-            { label: "branch name", text: pr.head },
-          ]}
-        />
+        <JiraRefRow repoPath={repoPath} sources={jiraRefSources} />
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <span className="font-mono">{pr.head}</span>
           <span>→</span>

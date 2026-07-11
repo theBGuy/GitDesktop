@@ -15,7 +15,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
 use rmcp::{schemars, tool, tool_router, ErrorData as McpError};
 
-use super::{app_err, json_result_untrusted, GitDesktopMcp};
+use super::{app_err, ensure_key_in_project, json_result_untrusted, GitDesktopMcp};
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct JiraIssueListArgs {
@@ -64,13 +64,14 @@ impl GitDesktopMcp {
                        by key, e.g. \"PROJ-123\", from the repository's LINKED Jira project \
                        (configured in GitDesktop; errors with a link hint when the repo has none). \
                        Never takes a site or project — the stored link is the single source of \
-                       truth. Returns JSON."
+                       truth (the key must belong to the linked project). Returns JSON."
     )]
     async fn get_jira_issue(
         &self,
         Parameters(args): Parameters<JiraIssueKeyArg>,
     ) -> Result<CallToolResult, McpError> {
         let link = self.jira_link().await?;
+        ensure_key_in_project(&args.key, &link)?;
         let issue = crate::forge::jira::issue_view(&link.site_host, &args.key)
             .await
             .map_err(app_err)?;

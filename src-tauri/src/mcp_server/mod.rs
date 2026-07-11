@@ -301,6 +301,33 @@ impl GitDesktopMcp {
     }
 }
 
+/// Reject a Jira issue `key` whose project prefix isn't the LINKED project. The link pins
+/// only the site, so without this a key-taking `jira_*` tool would reach any project on
+/// that site (e.g. `OTHER-456` under a `MYT` link) — wider than the "linked project's
+/// issues" contract. The prefix is everything before the last `-` (matching
+/// `jira::is_valid_issue_key`'s `rsplit_once('-')`), compared case-insensitively. A key
+/// with no `-` (no derivable project) is refused too. Shared by every key-taking tool in
+/// `read_jira`/`write_jira` (not `list_jira_issues`, which is JQL-scoped to the project,
+/// nor `create_jira_issue`, which creates in the linked project). Pure (unit-tested).
+fn ensure_key_in_project(
+    key: &str,
+    link: &crate::jira_links::JiraLinkEntry,
+) -> Result<(), McpError> {
+    let prefix = key.rsplit_once('-').map(|(project, _)| project);
+    let matches = prefix.is_some_and(|p| p.eq_ignore_ascii_case(&link.project_key));
+    if matches {
+        Ok(())
+    } else {
+        Err(McpError::invalid_request(
+            format!(
+                "Key {key} doesn't belong to the linked project {}.",
+                link.project_key
+            ),
+            None,
+        ))
+    }
+}
+
 // The combined per-instance router (built in `with_options`) is what the handler
 // serves — so the `list_tools`/`call_tool`/`get_tool` the macro generates dispatch
 // across every domain module, not just one.
@@ -788,6 +815,31 @@ mod tests {
         assert_eq!(per_module, 116);
     }
 
+    /// `ensure_key_in_project` gates a key-taking Jira tool to the linked project: the
+    /// prefix (before the last `-`) must equal `link.project_key`, case-insensitively.
+    /// A different project (same site) or a key with no `-` is refused, and the error
+    /// names both the key and the linked project.
+    #[test]
+    fn ensure_key_in_project_gates_the_prefix() {
+        let link = crate::jira_links::JiraLinkEntry {
+            site_host: "acme.atlassian.net".to_string(),
+            project_key: "MYT".to_string(),
+            project_name: "My Thing".to_string(),
+        };
+        // Exact match passes.
+        assert!(ensure_key_in_project("MYT-123", &link).is_ok());
+        // Case-insensitive match passes (a lowercased prefix still belongs).
+        assert!(ensure_key_in_project("myt-1", &link).is_ok());
+        // A different project on the same site is refused, naming both.
+        let err = ensure_key_in_project("OTHER-456", &link)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("OTHER-456"), "err: {err}");
+        assert!(err.contains("MYT"), "err: {err}");
+        // A key with no derivable project (no `-`) is refused.
+        assert!(ensure_key_in_project("NODASH", &link).is_err());
+    }
+
     /// The prompt router (separate from the tool router — prompts are NOT tools, so
     /// the count above is unaffected) exposes exactly the three generation-recipe
     /// prompts, by their MCP names. `list_all` returns them sorted by name.
@@ -800,6 +852,9 @@ mod tests {
             .into_iter()
             .map(|p| p.name)
             .collect();
-        assert_eq!(names, vec!["branch-name", "commit-message", "pr-description"]);
+        assert_eq!(
+            names,
+            vec!["branch-name", "commit-message", "pr-description"]
+        );
     }
 }

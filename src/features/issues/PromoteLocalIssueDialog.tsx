@@ -1,6 +1,6 @@
 import { KanbanIcon } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -76,15 +76,35 @@ export function PromoteLocalIssueDialog({
   );
 
   const bothAvailable = canPublishForge && canPublishJira;
-  const [destination, setDestination] = useState<Destination>(
-    canPublishForge ? "forge" : "jira",
-  );
-  // Keep the selection valid as the async gates resolve (e.g. the Jira
-  // permission probe lands after mount). When only one destination is possible,
-  // force it; otherwise default to the forge on first availability.
+  // Init unconditionally to "forge"; the effect below settles the real default
+  // once the async gates resolve (a bare init can't, since both gates are still
+  // pending at mount).
+  const [destination, setDestination] = useState<Destination>("forge");
+  // True once the user has explicitly toggled the destination — after that the
+  // auto-default effect must not override their pick (only the hidden-destination
+  // force-switch below still applies).
+  const userPicked = useRef(false);
+  // Keep the selection sensible as the async gates resolve (the forge status +
+  // Jira permission probes land at different times, often out of order). Two
+  // rules:
+  //   1. Auto-default only while the user hasn't picked: forge-first when both
+  //      are available, jira when only jira is. This is what makes forge win the
+  //      race even if the (cached) Jira gate resolves first.
+  //   2. Force-switch away from a destination whose gate just turned false —
+  //      applies EVEN after a user pick, because a hidden destination must never
+  //      be the one that submits.
   useEffect(() => {
-    if (canPublishForge && !canPublishJira) setDestination("forge");
-    else if (canPublishJira && !canPublishForge) setDestination("jira");
+    if (!userPicked.current) {
+      if (canPublishForge) setDestination("forge");
+      else if (canPublishJira) setDestination("jira");
+      return;
+    }
+    // User has picked: only correct an impossible selection.
+    setDestination((cur) => {
+      if (cur === "forge" && !canPublishForge && canPublishJira) return "jira";
+      if (cur === "jira" && !canPublishJira && canPublishForge) return "forge";
+      return cur;
+    });
   }, [canPublishForge, canPublishJira]);
 
   const [pending, setPending] = useState(false);
@@ -99,6 +119,7 @@ export function PromoteLocalIssueDialog({
   // Explain WHY the Jira submit is dead (never a title on a disabled button):
   // still loading the project's types, or the project has none we can create.
   const jiraLoadingTypes = destination === "jira" && jiraTypes.isPending;
+  const jiraTypesError = destination === "jira" && jiraTypes.isError;
   const jiraNoTypes =
     destination === "jira" &&
     !jiraTypes.isPending &&
@@ -261,7 +282,10 @@ export function PromoteLocalIssueDialog({
                   destination === "forge" && "font-medium",
                 )}
                 aria-pressed={destination === "forge"}
-                onClick={() => setDestination("forge")}
+                onClick={() => {
+                  userPicked.current = true;
+                  setDestination("forge");
+                }}
                 disabled={pending}
               >
                 {remoteLabel}
@@ -273,7 +297,10 @@ export function PromoteLocalIssueDialog({
                   destination === "jira" && "font-medium",
                 )}
                 aria-pressed={destination === "jira"}
-                onClick={() => setDestination("jira")}
+                onClick={() => {
+                  userPicked.current = true;
+                  setDestination("jira");
+                }}
                 disabled={pending}
               >
                 <KanbanIcon data-icon="inline-start" />
@@ -288,6 +315,19 @@ export function PromoteLocalIssueDialog({
             <Spinner data-icon="inline-start" />
             Loading issue types…
           </p>
+        )}
+        {jiraTypesError && (
+          <div className="flex items-center gap-2 border px-3 py-2 text-xs text-muted-foreground">
+            <span className="flex-1">Couldn't load Jira issue types.</span>
+            <Button
+              type="button"
+              variant="outline"
+              size="xs"
+              onClick={() => jiraTypes.refetch()}
+            >
+              Retry
+            </Button>
+          </div>
         )}
         {jiraNoTypes && (
           <p className="text-xs text-warning">

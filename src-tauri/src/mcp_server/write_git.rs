@@ -282,10 +282,15 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<CommitArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_git_write()?;
-        let result =
-            crate::git::commit::git_commit_core(&self.state, self.repo.clone(), args.message, args.body, args.amend)
-                .await
-                .map_err(app_err)?;
+        let result = crate::git::commit::git_commit_core(
+            &self.state,
+            self.repo.clone(),
+            args.message,
+            args.body,
+            args.amend,
+        )
+        .await
+        .map_err(app_err)?;
         json_result(&result)
     }
 
@@ -347,9 +352,13 @@ impl GitDesktopMcp {
         self.ensure_git_write()?;
         ensure_not_flag(&args.name, "branch name")?;
         ensure_not_session_branch(&args.name)?;
-        crate::git::branches::git_checkout_branch_core(&self.state, self.repo.clone(), args.name.clone())
-            .await
-            .map_err(app_err)?;
+        crate::git::branches::git_checkout_branch_core(
+            &self.state,
+            self.repo.clone(),
+            args.name.clone(),
+        )
+        .await
+        .map_err(app_err)?;
         ok_text(format!("switched to {}", args.name))
     }
 
@@ -563,9 +572,10 @@ impl GitDesktopMcp {
     ) -> Result<CallToolResult, McpError> {
         self.ensure_git_write()?;
         ensure_not_flag(&args.sha, "sha")?;
-        let created = crate::git::ops::git_cherry_pick_core(&self.state, self.repo.clone(), args.sha.clone())
-            .await
-            .map_err(app_err)?;
+        let created =
+            crate::git::ops::git_cherry_pick_core(&self.state, self.repo.clone(), args.sha.clone())
+                .await
+                .map_err(app_err)?;
         json_result(&serde_json::json!({ "sha": args.sha, "committed": created }))
     }
 
@@ -656,9 +666,13 @@ impl GitDesktopMcp {
         self.ensure_destructive()?;
         ensure_not_flag(&args.name, "branch name")?;
         ensure_not_session_branch(&args.name)?;
-        crate::git::branches::git_delete_branch_core(&self.state, self.repo.clone(), args.name.clone())
-            .await
-            .map_err(app_err)?;
+        crate::git::branches::git_delete_branch_core(
+            &self.state,
+            self.repo.clone(),
+            args.name.clone(),
+        )
+        .await
+        .map_err(app_err)?;
         ok_text(format!("branch deleted: {}", args.name))
     }
 
@@ -761,7 +775,10 @@ impl GitDesktopMcp {
         )
         .await
         .map_err(app_err)?;
-        ok_text(format!("remote branch deleted: {}/{}", args.remote, args.name))
+        ok_text(format!(
+            "remote branch deleted: {}/{}",
+            args.remote, args.name
+        ))
     }
 
     #[tool(
@@ -793,9 +810,14 @@ impl GitDesktopMcp {
     ) -> Result<CallToolResult, McpError> {
         self.ensure_destructive()?;
         ensure_not_flag(&args.name, "tag name")?;
-        crate::git::ops::git_delete_tag_core(&self.state, self.repo.clone(), args.name.clone(), args.remote)
-            .await
-            .map_err(app_err)?;
+        crate::git::ops::git_delete_tag_core(
+            &self.state,
+            self.repo.clone(),
+            args.name.clone(),
+            args.remote,
+        )
+        .await
+        .map_err(app_err)?;
         ok_text(format!("tag deleted: {}", args.name))
     }
 }
@@ -824,20 +846,35 @@ mod tests {
             ($call:expr, $flag:literal) => {{
                 let err = $call.await.expect_err("expected the gate to fire");
                 let msg = err.to_string();
-                assert!(msg.contains($flag), "gate error should name {}, got: {msg}", $flag);
+                assert!(
+                    msg.contains($flag),
+                    "gate error should name {}, got: {msg}",
+                    $flag
+                );
             }};
         }
 
         // Recoverable tools: gated on --allow-git-write.
         assert_gated!(h.stage_files(Parameters(args_stage())), "--allow-git-write");
-        assert_gated!(h.unstage_files(Parameters(args_stage())), "--allow-git-write");
         assert_gated!(
-            h.commit(Parameters(CommitArgs { message: "m".into(), body: None, amend: false })),
+            h.unstage_files(Parameters(args_stage())),
+            "--allow-git-write"
+        );
+        assert_gated!(
+            h.commit(Parameters(CommitArgs {
+                message: "m".into(),
+                body: None,
+                amend: false
+            })),
             "--allow-git-write"
         );
         assert_gated!(h.undo_last_commit(), "--allow-git-write");
         assert_gated!(
-            h.create_branch(Parameters(CreateBranchArgs { name: "b".into(), checkout: false, from: None })),
+            h.create_branch(Parameters(CreateBranchArgs {
+                name: "b".into(),
+                checkout: false,
+                from: None
+            })),
             "--allow-git-write"
         );
         assert_gated!(
@@ -845,18 +882,38 @@ mod tests {
             "--allow-git-write"
         );
         assert_gated!(
-            h.rename_branch(Parameters(RenameBranchArgs { from: "a".into(), to: "b".into() })),
+            h.rename_branch(Parameters(RenameBranchArgs {
+                from: "a".into(),
+                to: "b".into()
+            })),
             "--allow-git-write"
         );
-        assert_gated!(h.push(Parameters(PushArgs { set_upstream: false })), "--allow-git-write");
-        assert_gated!(h.pull(Parameters(PullArgs { mode: None })), "--allow-git-write");
+        assert_gated!(
+            h.push(Parameters(PushArgs {
+                set_upstream: false
+            })),
+            "--allow-git-write"
+        );
+        assert_gated!(
+            h.pull(Parameters(PullArgs { mode: None })),
+            "--allow-git-write"
+        );
         assert_gated!(h.fetch(), "--allow-git-write");
-        assert_gated!(h.stash_push(Parameters(StashPushArgs { paths: vec![] })), "--allow-git-write");
+        assert_gated!(
+            h.stash_push(Parameters(StashPushArgs { paths: vec![] })),
+            "--allow-git-write"
+        );
         assert_gated!(h.stash_pop(), "--allow-git-write");
-        assert_gated!(h.stash_apply(Parameters(StashApplyArgs { index: 0 })), "--allow-git-write");
+        assert_gated!(
+            h.stash_apply(Parameters(StashApplyArgs { index: 0 })),
+            "--allow-git-write"
+        );
         assert_gated!(
             h.merge_branch(Parameters(MergeBranchArgs {
-                branch: "b".into(), squash: false, no_ff: false, strategy: None
+                branch: "b".into(),
+                squash: false,
+                no_ff: false,
+                strategy: None
             })),
             "--allow-git-write"
         );
@@ -864,13 +921,25 @@ mod tests {
             h.rebase_branch(Parameters(RebaseBranchArgs { onto: "b".into() })),
             "--allow-git-write"
         );
-        assert_gated!(h.revert_commit(Parameters(ShaArgs { sha: "abc".into() })), "--allow-git-write");
-        assert_gated!(h.cherry_pick(Parameters(ShaArgs { sha: "abc".into() })), "--allow-git-write");
         assert_gated!(
-            h.create_tag(Parameters(CreateTagArgs { name: "v1".into(), at: "abc".into() })),
+            h.revert_commit(Parameters(ShaArgs { sha: "abc".into() })),
             "--allow-git-write"
         );
-        assert_gated!(h.push_tag(Parameters(TagNameArgs { name: "v1".into() })), "--allow-git-write");
+        assert_gated!(
+            h.cherry_pick(Parameters(ShaArgs { sha: "abc".into() })),
+            "--allow-git-write"
+        );
+        assert_gated!(
+            h.create_tag(Parameters(CreateTagArgs {
+                name: "v1".into(),
+                at: "abc".into()
+            })),
+            "--allow-git-write"
+        );
+        assert_gated!(
+            h.push_tag(Parameters(TagNameArgs { name: "v1".into() })),
+            "--allow-git-write"
+        );
 
         // Destructive tools: both flags missing, so --allow-git-write is named.
         assert_gated!(
@@ -882,15 +951,27 @@ mod tests {
             "--allow-git-write"
         );
         assert_gated!(h.discard_all_changes(), "--allow-git-write");
-        assert_gated!(h.reset_to_commit(Parameters(ShaArgs { sha: "abc".into() })), "--allow-git-write");
-        assert_gated!(h.force_push(), "--allow-git-write");
         assert_gated!(
-            h.delete_remote_branch(Parameters(DeleteRemoteBranchArgs { remote: "origin".into(), name: "b".into() })),
+            h.reset_to_commit(Parameters(ShaArgs { sha: "abc".into() })),
             "--allow-git-write"
         );
-        assert_gated!(h.drop_stash(Parameters(StashIndexArgs { index: 0 })), "--allow-git-write");
+        assert_gated!(h.force_push(), "--allow-git-write");
         assert_gated!(
-            h.delete_tag(Parameters(DeleteTagArgs { name: "v1".into(), remote: false })),
+            h.delete_remote_branch(Parameters(DeleteRemoteBranchArgs {
+                remote: "origin".into(),
+                name: "b".into()
+            })),
+            "--allow-git-write"
+        );
+        assert_gated!(
+            h.drop_stash(Parameters(StashIndexArgs { index: 0 })),
+            "--allow-git-write"
+        );
+        assert_gated!(
+            h.delete_tag(Parameters(DeleteTagArgs {
+                name: "v1".into(),
+                remote: false
+            })),
             "--allow-git-write"
         );
     }
@@ -903,7 +984,9 @@ mod tests {
 
         macro_rules! assert_destructive_gated {
             ($call:expr) => {{
-                let err = $call.await.expect_err("expected the destructive gate to fire");
+                let err = $call
+                    .await
+                    .expect_err("expected the destructive gate to fire");
                 let msg = err.to_string();
                 assert!(
                     msg.contains("--allow-destructive"),
@@ -913,7 +996,9 @@ mod tests {
         }
 
         assert_destructive_gated!(h.delete_branch(Parameters(BranchNameArgs { name: "b".into() })));
-        assert_destructive_gated!(h.discard_changes(Parameters(DiscardChangesArgs { paths: vec![] })));
+        assert_destructive_gated!(
+            h.discard_changes(Parameters(DiscardChangesArgs { paths: vec![] }))
+        );
         assert_destructive_gated!(h.discard_all_changes());
         assert_destructive_gated!(h.reset_to_commit(Parameters(ShaArgs { sha: "abc".into() })));
         assert_destructive_gated!(h.force_push());
@@ -922,7 +1007,10 @@ mod tests {
             name: "b".into(),
         })));
         assert_destructive_gated!(h.drop_stash(Parameters(StashIndexArgs { index: 0 })));
-        assert_destructive_gated!(h.delete_tag(Parameters(DeleteTagArgs { name: "v1".into(), remote: false })));
+        assert_destructive_gated!(h.delete_tag(Parameters(DeleteTagArgs {
+            name: "v1".into(),
+            remote: false
+        })));
     }
 
     /// destructive=true, git_write=false: the destructive tools must error naming the
@@ -1010,7 +1098,10 @@ mod tests {
             }))
             .await
             .expect_err("session branch delete should be refused");
-        assert!(err.to_string().contains("agent-session branch"), "got: {err}");
+        assert!(
+            err.to_string().contains("agent-session branch"),
+            "got: {err}"
+        );
 
         let err = h
             .rename_branch(Parameters(RenameBranchArgs {
@@ -1019,7 +1110,10 @@ mod tests {
             }))
             .await
             .expect_err("session branch rename should be refused");
-        assert!(err.to_string().contains("agent-session branch"), "got: {err}");
+        assert!(
+            err.to_string().contains("agent-session branch"),
+            "got: {err}"
+        );
 
         let err = h
             .delete_remote_branch(Parameters(DeleteRemoteBranchArgs {
@@ -1028,7 +1122,10 @@ mod tests {
             }))
             .await
             .expect_err("session remote branch delete should be refused");
-        assert!(err.to_string().contains("agent-session branch"), "got: {err}");
+        assert!(
+            err.to_string().contains("agent-session branch"),
+            "got: {err}"
+        );
 
         let err = h
             .checkout_branch(Parameters(BranchNameArgs {
@@ -1036,6 +1133,9 @@ mod tests {
             }))
             .await
             .expect_err("session branch checkout should be refused");
-        assert!(err.to_string().contains("agent-session branch"), "got: {err}");
+        assert!(
+            err.to_string().contains("agent-session branch"),
+            "got: {err}"
+        );
     }
 }

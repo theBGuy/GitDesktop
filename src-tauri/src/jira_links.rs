@@ -24,9 +24,11 @@
 //!
 //! The MCP server NEVER writes this file (linking happens only in the GUI), so — unlike
 //! `local_prs` — there is no create/mutate/atomic-write or fold/migration machinery
-//! here. A missing file, an absent entry, or a malformed entry all read as "no link"
-//! (`None`), never an error, so a hand-edited or partially-corrupt store can't crash a
-//! tool call.
+//! here. A missing file, an absent entry, or a malformed *entry* all read as "no link"
+//! (`None`), so a single hand-edited or partly-corrupt entry can't crash a tool call. A
+//! malformed store *file* (invalid JSON — genuine corruption of the whole store)
+//! deliberately surfaces an error instead of silently reading as "no link", so real
+//! corruption is visible rather than masked (both behaviors are unit-tested).
 
 use std::path::{Path, PathBuf};
 

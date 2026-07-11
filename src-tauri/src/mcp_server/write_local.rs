@@ -187,12 +187,9 @@ impl GitDesktopMcp {
     ) -> Result<CallToolResult, McpError> {
         self.ensure_write()?;
         let repo = self.local_issue_key().await?;
-        let record = crate::local_issues::create(
-            &repo,
-            &args.title,
-            args.body.as_deref().unwrap_or(""),
-        )
-        .map_err(app_err)?;
+        let record =
+            crate::local_issues::create(&repo, &args.title, args.body.as_deref().unwrap_or(""))
+                .map_err(app_err)?;
         json_result(&record)
     }
 
@@ -416,10 +413,12 @@ mod tests {
             id: "1".into(),
             body: "b".into(),
         })));
-        assert_gated!(h.set_local_issue_status(Parameters(SetLocalIssueStatusArgs {
-            id: "1".into(),
-            status: "open".into(),
-        })));
+        assert_gated!(
+            h.set_local_issue_status(Parameters(SetLocalIssueStatusArgs {
+                id: "1".into(),
+                status: "open".into(),
+            }))
+        );
     }
 
     /// The local READ tools are UNGATED (the user's own app-data) — with all flags off

@@ -592,10 +592,7 @@ impl GitDesktopMcp {
             let pr = crate::forge::forge_pr_view(self.repo.clone(), args.number)
                 .await
                 .map_err(app_err)?;
-            (
-                args.title.unwrap_or(pr.title),
-                args.body.unwrap_or(pr.body),
-            )
+            (args.title.unwrap_or(pr.title), args.body.unwrap_or(pr.body))
         } else {
             (args.title.unwrap(), args.body.unwrap())
         };
@@ -672,9 +669,13 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<RequestReviewersArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
-        crate::forge::forge_pr_set_reviewers(self.repo.clone(), args.number, args.reviewers.clone())
-            .await
-            .map_err(app_err)?;
+        crate::forge::forge_pr_set_reviewers(
+            self.repo.clone(),
+            args.number,
+            args.reviewers.clone(),
+        )
+        .await
+        .map_err(app_err)?;
         json_result(&serde_json::json!({
             "pull_request": args.number,
             "reviewers": args.reviewers,
@@ -819,10 +820,16 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<SetAssigneesArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
-        crate::forge::forge_mr_set_assignees(self.repo.clone(), args.number, args.assignees.clone())
-            .await
-            .map_err(app_err)?;
-        json_result(&serde_json::json!({ "pull_request": args.number, "assignees": args.assignees }))
+        crate::forge::forge_mr_set_assignees(
+            self.repo.clone(),
+            args.number,
+            args.assignees.clone(),
+        )
+        .await
+        .map_err(app_err)?;
+        json_result(
+            &serde_json::json!({ "pull_request": args.number, "assignees": args.assignees }),
+        )
     }
 
     #[tool(
@@ -1329,9 +1336,10 @@ impl GitDesktopMcp {
         self.ensure_remote_write()?;
         super::read_forge::ensure_github(&self.repo).await?;
         // add_comment is keyed by the discussion's node id, not its number — resolve it.
-        let discussion = crate::github::discussion::gh_discussion_view(self.repo.clone(), args.number)
-            .await
-            .map_err(app_err)?;
+        let discussion =
+            crate::github::discussion::gh_discussion_view(self.repo.clone(), args.number)
+                .await
+                .map_err(app_err)?;
         // Append the attribution footer so the comment is identifiable as ours.
         let body = format!("{}{GD_COMMENT_FOOTER}", args.body);
         crate::github::discussion::gh_discussion_add_comment(
@@ -1394,9 +1402,10 @@ impl GitDesktopMcp {
         self.ensure_remote_write()?;
         super::read_forge::ensure_github(&self.repo).await?;
         // close is keyed by the discussion's node id — resolve it from the number.
-        let discussion = crate::github::discussion::gh_discussion_view(self.repo.clone(), args.number)
-            .await
-            .map_err(app_err)?;
+        let discussion =
+            crate::github::discussion::gh_discussion_view(self.repo.clone(), args.number)
+                .await
+                .map_err(app_err)?;
         // Empty resolves to "RESOLVED" in the github core; mirror that in the reply.
         let resolved = if args.reason.is_empty() {
             "RESOLVED"
@@ -1428,9 +1437,10 @@ impl GitDesktopMcp {
         self.ensure_remote_write()?;
         super::read_forge::ensure_github(&self.repo).await?;
         // reopen is keyed by the discussion's node id — resolve it from the number.
-        let discussion = crate::github::discussion::gh_discussion_view(self.repo.clone(), args.number)
-            .await
-            .map_err(app_err)?;
+        let discussion =
+            crate::github::discussion::gh_discussion_view(self.repo.clone(), args.number)
+                .await
+                .map_err(app_err)?;
         crate::github::discussion::gh_discussion_reopen(self.repo.clone(), discussion.id)
             .await
             .map_err(app_err)?;
@@ -1504,10 +1514,12 @@ mod tests {
             title: Some("t".into()),
             body: Some("b".into()),
         })));
-        assert_gated!(h.set_pull_request_draft(Parameters(SetPullRequestDraftArgs {
-            number: 1,
-            draft: true,
-        })));
+        assert_gated!(
+            h.set_pull_request_draft(Parameters(SetPullRequestDraftArgs {
+                number: 1,
+                draft: true,
+            }))
+        );
         assert_gated!(h.close_pull_request(Parameters(NumberArg { number: 1 })));
         assert_gated!(h.reopen_pull_request(Parameters(NumberArg { number: 1 })));
         assert_gated!(h.request_reviewers(Parameters(RequestReviewersArgs {
@@ -1530,11 +1542,13 @@ mod tests {
         })));
         assert_gated!(h.approve_pull_request(Parameters(NumberArg { number: 1 })));
         assert_gated!(h.withdraw_pull_request_approval(Parameters(NumberArg { number: 1 })));
-        assert_gated!(h.reply_to_review_thread(Parameters(ReplyToReviewThreadArgs {
-            number: 1,
-            thread_id: "t".into(),
-            body: "b".into(),
-        })));
+        assert_gated!(
+            h.reply_to_review_thread(Parameters(ReplyToReviewThreadArgs {
+                number: 1,
+                thread_id: "t".into(),
+                body: "b".into(),
+            }))
+        );
         assert_gated!(h.resolve_review_thread(Parameters(ResolveReviewThreadArgs {
             number: 1,
             thread_id: "t".into(),
@@ -1604,10 +1618,12 @@ mod tests {
             number: 1,
             body: "b".into(),
         })));
-        assert_gated!(h.mark_discussion_answer(Parameters(MarkDiscussionAnswerArgs {
-            comment_id: "c".into(),
-            answer: true,
-        })));
+        assert_gated!(
+            h.mark_discussion_answer(Parameters(MarkDiscussionAnswerArgs {
+                comment_id: "c".into(),
+                answer: true,
+            }))
+        );
         assert_gated!(h.close_discussion(Parameters(CloseDiscussionArgs {
             number: 1,
             reason: String::new(),
@@ -1632,7 +1648,10 @@ mod tests {
             .expect_err("expected an unknown-reaction rejection");
         let msg = err.to_string();
         assert!(msg.contains("unknown reaction: PARTY"), "got: {msg}");
-        assert!(msg.contains("THUMBS_UP"), "should list valid values, got: {msg}");
+        assert!(
+            msg.contains("THUMBS_UP"),
+            "should list valid values, got: {msg}"
+        );
     }
 
     /// The reaction tools reject an unknown `kind` (not issue/pr) with an actionable
@@ -1649,10 +1668,6 @@ mod tests {
             }))
             .await
             .expect_err("expected an unknown-kind rejection");
-        assert!(
-            err.to_string().contains("kind must be"),
-            "got: {}",
-            err
-        );
+        assert!(err.to_string().contains("kind must be"), "got: {}", err);
     }
 }

@@ -15,7 +15,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
 use rmcp::{schemars, tool, tool_router, ErrorData as McpError};
 
-use super::{app_err, json_result, GitDesktopMcp, GD_COMMENT_FOOTER};
+use super::{app_err, ensure_key_in_project, json_result, GitDesktopMcp, GD_COMMENT_FOOTER};
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct CommentJiraIssueArgs {
@@ -65,8 +65,8 @@ impl GitDesktopMcp {
                        markdown (converted to Jira's ADF); a \"Posted by GitDesktop\" attribution \
                        footer is appended automatically. Jira is a per-repo linked provider \
                        (configured in GitDesktop; errors with a link hint when the repo has none) \
-                       and takes no site/project param. Requires --allow-remote-write. Returns the \
-                       created comment as JSON.",
+                       and takes no site/project param (the key must belong to the linked \
+                       project). Requires --allow-remote-write. Returns the created comment as JSON.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn comment_jira_issue(
@@ -75,6 +75,7 @@ impl GitDesktopMcp {
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
         let link = self.jira_link().await?;
+        ensure_key_in_project(&args.key, &link)?;
         let body = format!("{}{GD_COMMENT_FOOTER}", args.body);
         let comment = crate::forge::jira::issue_comment(&link.site_host, &args.key, &body)
             .await
@@ -89,7 +90,8 @@ impl GitDesktopMcp {
                        chosen from the project (ids are never hardcoded), and an actionable error \
                        is returned when the workflow/permissions offer no suitable transition. \
                        Jira is a per-repo linked provider (configured in GitDesktop; errors with a \
-                       link hint when the repo has none) and takes no site/project param. Requires \
+                       link hint when the repo has none) and takes no site/project param (the key \
+                       must belong to the linked project). Requires \
                        --allow-remote-write. Returns the issue's resulting status \
                        (name + category) as JSON.",
         annotations(read_only_hint = false, destructive_hint = false)
@@ -100,6 +102,7 @@ impl GitDesktopMcp {
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
         let link = self.jira_link().await?;
+        ensure_key_in_project(&args.key, &link)?;
         let result =
             crate::forge::jira::issue_transition(&link.site_host, &args.key, &args.direction)
                 .await
@@ -163,7 +166,8 @@ impl GitDesktopMcp {
                        repository's LINKED Jira project, under the stored Atlassian identity. Pass \
                        `account_id` (an Atlassian accountId) to assign; omit it to UNASSIGN. Jira \
                        is a per-repo linked provider (configured in GitDesktop; errors with a link \
-                       hint when the repo has none) and takes no site/project param. Requires \
+                       hint when the repo has none) and takes no site/project param (the key must \
+                       belong to the linked project). Requires \
                        --allow-remote-write. Returns a confirmation as JSON.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
@@ -173,6 +177,7 @@ impl GitDesktopMcp {
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
         let link = self.jira_link().await?;
+        ensure_key_in_project(&args.key, &link)?;
         let account_id = args.account_id.filter(|s| !s.trim().is_empty());
         crate::forge::jira::issue_assign(&link.site_host, &args.key, account_id.as_deref())
             .await
