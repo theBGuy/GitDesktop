@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { ErrorDialog } from "@/features/errors/ErrorDialog";
 import { initAnalytics, trackCaughtError } from "@/lib/analytics";
 import { calmTransition } from "@/lib/motion";
 import { queryClient } from "@/lib/query-client";
@@ -59,6 +60,7 @@ createRoot(document.getElementById("root")!).render(
           </LazyMotion>
         </ErrorBoundary>
         <Toaster position="bottom-right" closeButton />
+        <ErrorDialog />
       </TooltipProvider>
     </QueryClientProvider>
   </StrictMode>,
