@@ -637,6 +637,10 @@ function JiraLabelsPopover({
                   {options.length === 0 && !canCreate && known.isError ? (
                     <button
                       type="button"
+                      // data-label-row: keeps ArrowDown-from-input reaching the
+                      // retry row in the error state (it's the only row then).
+                      data-label-row
+                      tabIndex={-1}
                       onClick={() => known.refetch()}
                       className="flex w-full cursor-pointer items-center px-1 py-1 text-left text-xs text-muted-foreground hover:text-foreground"
                     >
