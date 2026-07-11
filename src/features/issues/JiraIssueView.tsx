@@ -10,7 +10,13 @@ import {
   TagIcon,
 } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  type KeyboardEvent as ReactKeyboardEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
@@ -460,11 +466,46 @@ function JiraLabelsPopover({
   const setLabels = useJiraSetLabels(repoPath, link);
   const [draft, setDraft] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
 
   // Jira labels can't contain whitespace — reject inline rather than let a bad
   // "create" slip through (the backend would 400).
   const trimmed = query.trim();
   const hasWhitespace = /\s/.test(trimmed);
+
+  // Roving arrow-key navigation across the traversable rows (the "Add…" create
+  // row, when present, then each option row — matching visual order). Each row
+  // carries `data-label-row` and `tabIndex={-1}`; we move DOM focus between them
+  // rather than tracking an active index in state, so the list and the Input
+  // stay a single Tab stop while arrows walk the rows (house list-nav rule).
+  function rows(): HTMLElement[] {
+    const el = listRef.current;
+    if (!el) return [];
+    return [...el.querySelectorAll<HTMLElement>("[data-label-row]")];
+  }
+  function focusRow(index: number) {
+    const list = rows();
+    if (list.length === 0) return;
+    const clamped = Math.max(0, Math.min(index, list.length - 1));
+    list[clamped]?.focus();
+  }
+  /** ArrowUp/Down within the row list; ArrowUp from the first row returns to the
+   *  Input. Returns true when it handled the key. */
+  function onRowKeyDown(e: ReactKeyboardEvent, index: number): boolean {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      focusRow(index + 1);
+      return true;
+    }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      if (index === 0) inputRef.current?.focus();
+      else focusRow(index - 1);
+      return true;
+    }
+    return false;
+  }
 
   function toggle(name: string, on: boolean) {
     setDraft((prev) => {
@@ -475,6 +516,11 @@ function JiraLabelsPopover({
     });
   }
 
+  // Commit-on-close (INCLUDING Escape) is deliberate: it mirrors the app's
+  // established labels idiom (conversations/LabelsPopover — "committed as one
+  // batched mutation on close") and GitHub's own labels UX. Changing to an
+  // explicit Save/Discard would diverge the two labels editors — if the idiom
+  // changes, both change together as their own change.
   function handleOpenChange(o: boolean) {
     if (o) {
       setDraft(new Set(labels));
@@ -537,6 +583,7 @@ function JiraLabelsPopover({
             <Popover.Popup className="w-64 rounded-none bg-popover p-2 text-popover-foreground shadow-md ring-1 ring-foreground/10">
               <p className="px-1 pb-1.5 text-xs font-medium">Labels</p>
               <Input
+                ref={inputRef}
                 autoFocus
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
@@ -544,6 +591,13 @@ function JiraLabelsPopover({
                   if (e.key === "Enter" && canCreate) {
                     e.preventDefault();
                     create();
+                    return;
+                  }
+                  // ArrowDown drops focus into the row list (create row first
+                  // when present, else the first option).
+                  if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    focusRow(0);
                   }
                 }}
                 placeholder="Filter or add a label…"
@@ -556,40 +610,83 @@ function JiraLabelsPopover({
                   Labels can't contain spaces.
                 </p>
               )}
-              {canCreate && (
-                <button
-                  type="button"
-                  onClick={create}
-                  className="mt-1 flex w-full cursor-pointer items-center gap-2 px-1 py-1.5 text-left text-xs hover:bg-muted/60"
-                >
-                  <TagIcon className="size-3 shrink-0" />
-                  Add “{trimmed}”
-                </button>
-              )}
-              <div className="mt-1 max-h-56 overflow-y-auto">
-                {options.length === 0 && !canCreate && (
-                  <p className="px-1 py-1 text-xs text-muted-foreground">
-                    {known.isPending
-                      ? "Loading labels…"
-                      : trimmed
-                        ? "No matching labels."
-                        : "This site has no labels."}
-                  </p>
-                )}
-                {options.map((name) => (
-                  <label
-                    key={name}
-                    className="flex cursor-pointer items-center gap-2 px-1 py-1.5 text-xs hover:bg-muted/60"
+              <div ref={listRef}>
+                {canCreate && (
+                  <button
+                    type="button"
+                    data-label-row
+                    tabIndex={-1}
+                    onClick={create}
+                    onKeyDown={(e) => {
+                      // Enter/Space activate the create row (it's a <button>, so
+                      // the browser already fires onClick for both — just guard
+                      // the arrows here). Its index is 0 (it renders first).
+                      onRowKeyDown(e, 0);
+                    }}
+                    className="mt-1 flex w-full cursor-pointer items-center gap-2 px-1 py-1.5 text-left text-xs outline-none hover:bg-muted/60 focus-visible:bg-muted/60"
                   >
-                    <Checkbox
-                      checked={draft.has(name)}
-                      onCheckedChange={(v) => toggle(name, v === true)}
-                    />
-                    <span className="flex-1 truncate" title={name}>
-                      {name}
-                    </span>
-                  </label>
-                ))}
+                    <TagIcon className="size-3 shrink-0" />
+                    Add “{trimmed}”
+                  </button>
+                )}
+                <div className="mt-1 max-h-56 overflow-y-auto">
+                  {/* Honest error copy + retry when the fetch failed and there are
+                    no local (drafted/checked) options to fall back on. Any
+                    drafted labels still merge into `options` below and stay
+                    toggleable even while the fetch is failing. */}
+                  {options.length === 0 && !canCreate && known.isError ? (
+                    <button
+                      type="button"
+                      onClick={() => known.refetch()}
+                      className="flex w-full cursor-pointer items-center px-1 py-1 text-left text-xs text-muted-foreground hover:text-foreground"
+                    >
+                      Couldn't load labels — retry
+                    </button>
+                  ) : (
+                    options.length === 0 &&
+                    !canCreate && (
+                      <p className="px-1 py-1 text-xs text-muted-foreground">
+                        {known.isPending
+                          ? "Loading labels…"
+                          : trimmed
+                            ? "No matching labels."
+                            : "This site has no labels."}
+                      </p>
+                    )
+                  )}
+                  {options.map((name, i) => {
+                    // Traversal index: the create row (when present) is 0, so the
+                    // option rows follow it.
+                    const rowIndex = (canCreate ? 1 : 0) + i;
+                    const checked = draft.has(name);
+                    return (
+                      // Roving-focus row: a checkbox stays visible (semantics
+                      // unchanged) but the ROW is the focusable, arrow-navigable
+                      // element (tabIndex={-1}); Space/Enter toggles the draft.
+                      <div
+                        key={name}
+                        data-label-row
+                        role="checkbox"
+                        aria-checked={checked}
+                        tabIndex={-1}
+                        onClick={() => toggle(name, !checked)}
+                        onKeyDown={(e) => {
+                          if (onRowKeyDown(e, rowIndex)) return;
+                          if (e.key === " " || e.key === "Enter") {
+                            e.preventDefault();
+                            toggle(name, !checked);
+                          }
+                        }}
+                        className="flex cursor-pointer items-center gap-2 px-1 py-1.5 text-xs outline-none hover:bg-muted/60 focus-visible:bg-muted/60"
+                      >
+                        <Checkbox checked={checked} tabIndex={-1} aria-hidden />
+                        <span className="flex-1 truncate" title={name}>
+                          {name}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
               <p className="mt-1 border-t px-1 pt-1.5 text-[11px] text-muted-foreground">
                 Changes apply when this closes.
@@ -628,7 +725,10 @@ function JiraCommentItem({
   canDelete,
 }: {
   repoPath: string;
-  link: JiraLink;
+  /** `null` during the link-pending window (a cached detail can still render
+   *  before the link query settles) — the read-only body/header always render;
+   *  the edit/delete affordances are simply absent until a link is present. */
+  link: JiraLink | null;
   issueKey: string;
   comment: JiraComment;
   isOwn: boolean;
@@ -651,7 +751,9 @@ function JiraCommentItem({
     return () => cancelAnimationFrame(raf);
   }, [editing]);
 
-  const showMenu = isOwn && (canEdit || canDelete);
+  // Edit/delete require a live link (the mutations key on its site). During the
+  // link-pending window the menu is simply absent — the comment still renders.
+  const showMenu = link !== null && isOwn && (canEdit || canDelete);
   const edited =
     comment.updatedAt != null && comment.updatedAt !== comment.createdAt;
 
@@ -1131,23 +1233,24 @@ export function JiraIssueView({
               </p>
             )}
           </div>
-          {issue.comments.map((c) =>
-            link.data ? (
-              <JiraCommentItem
-                key={c.id}
-                repoPath={repoPath}
-                link={link.data}
-                issueKey={issueKey}
-                comment={c}
-                isOwn={
-                  issue.viewerAccountId != null &&
-                  c.author?.id === issue.viewerAccountId
-                }
-                canEdit={canEditOwnComments}
-                canDelete={canDeleteOwnComments}
-              />
-            ) : null,
-          )}
+          {issue.comments.map((c) => (
+            <JiraCommentItem
+              key={c.id}
+              repoPath={repoPath}
+              // `?? null`: render read-only even during the link-pending window
+              // (a cached detail can show before the link query settles) — the
+              // early unlinked return only fires once the link settles null.
+              link={link.data ?? null}
+              issueKey={issueKey}
+              comment={c}
+              isOwn={
+                issue.viewerAccountId != null &&
+                c.author?.id === issue.viewerAccountId
+              }
+              canEdit={canEditOwnComments}
+              canDelete={canDeleteOwnComments}
+            />
+          ))}
           {issue.comments.length === 0 && (
             <p className="text-xs text-muted-foreground">No comments yet.</p>
           )}

@@ -589,13 +589,18 @@ async function applyOptimisticField(
       ...detailPatch,
     });
   }
-  const lists = queryClient.getQueriesData<JiraIssueInfo[]>({
-    predicate: (q) =>
-      q.queryKey[0] === "repo" &&
-      q.queryKey[1] === repo &&
-      q.queryKey[2] === "jira-issues",
-  });
+  // Only snapshot (and patch) the list caches when there's a list patch to
+  // apply. A detail-only field (due date) leaves `lists` empty, so rollback
+  // restores exactly what onMutate touched — never clobbering an unrelated list
+  // update that landed while the mutation was in flight.
+  let lists: [readonly unknown[], JiraIssueInfo[] | undefined][] = [];
   if (listPatch) {
+    lists = queryClient.getQueriesData<JiraIssueInfo[]>({
+      predicate: (q) =>
+        q.queryKey[0] === "repo" &&
+        q.queryKey[1] === repo &&
+        q.queryKey[2] === "jira-issues",
+    });
     for (const [listKey, list] of lists) {
       if (!list) continue;
       queryClient.setQueryData<JiraIssueInfo[]>(

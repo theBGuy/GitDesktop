@@ -2551,7 +2551,7 @@ pub async fn comment_edit(
     let adf = md_to_adf::markdown_to_adf(body_md);
     let body = json!({ "body": adf });
     let path = format!("issue/{key}/comment/{comment_id}");
-    let resp: Value = post_put_json(&creds, &path, &body, "comment").await?;
+    let resp: Value = put_json(&creds, &path, &body, "comment").await?;
     Ok(map_comment(&resp))
 }
 
@@ -2583,7 +2583,7 @@ pub async fn comment_delete(site: &str, key: &str, comment_id: &str) -> AppResul
 /// PUT JSON to a Jira endpoint and deserialize the 2xx body into `T` — the comment-edit
 /// endpoint returns the updated comment object (unlike the 204-returning property PUTs,
 /// which use [`send_no_content`]). Same error handling as [`post_json`].
-async fn post_put_json<T: serde::de::DeserializeOwned>(
+async fn put_json<T: serde::de::DeserializeOwned>(
     creds: &JiraCredentials,
     path: &str,
     body: &Value,
