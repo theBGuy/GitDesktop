@@ -12,6 +12,8 @@ import {
   jiraIssueCreate,
   jiraIssueList,
   jiraIssueTransition,
+  jiraIssueTransitions,
+  jiraIssueTransitionTo,
   jiraIssueTypes,
   jiraIssueView,
   jiraPermissions,
@@ -28,6 +30,7 @@ import type {
   JiraIssueDetails,
   JiraIssueInfo,
   JiraIssueState,
+  JiraStatusCategory,
   JiraTransitionDirection,
 } from "./types";
 
@@ -256,12 +259,120 @@ export function useJiraComment(
   });
 }
 
-/** Close/reopen via a workflow transition. Optimistic: patches the new status
- *  name + category onto the detail cache AND every list cache for this repo (so
- *  the row's chip flips instantly). Rollback on error restores both. The list
- *  patch may make a row fall out of the active state filter (e.g. closing while
- *  viewing Open) — that's fine: the detail view stays put and invalidation
- *  reconciles the list on settle. */
+/** The available workflow transitions from an issue's current status, for the
+ *  full status picker. Fetched lazily — the caller passes `enabled` (e.g. the
+ *  status menu being open) so nothing is fetched on mount. Site is part of the
+ *  key so a re-link can't serve the prior site's transitions for the same key. */
+export function useJiraTransitions(
+  repo: string,
+  link: JiraLink | null | undefined,
+  key: string,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: [
+      "repo",
+      repo,
+      "jira-transitions",
+      link?.siteHost ?? "",
+      key,
+    ] as const,
+    queryFn: () => jiraIssueTransitions((link as JiraLink).siteHost, key),
+    enabled: !!link && enabled,
+    staleTime: 30_000,
+  });
+}
+
+/** The shared optimistic context for a status change (detail snapshot + every
+ *  patched list cache), so rollback can restore exactly what onMutate touched. */
+type StatusPatchCtx = {
+  detailKey: readonly unknown[] | null;
+  prevDetail: JiraIssueDetails | undefined;
+  lists: [readonly unknown[], JiraIssueInfo[] | undefined][];
+};
+
+/** Optimistically flip an issue's status category (and, when known, its name)
+ *  across the detail cache AND every jira-issues list cache for this repo, so the
+ *  chip + any visible row update instantly. Shared by both transition mutations.
+ *  `name === undefined` (the directional path, which can't know the per-workflow
+ *  target name yet) leaves the existing name; the real values land on success. */
+async function applyOptimisticStatus(
+  queryClient: ReturnType<typeof useQueryClient>,
+  repo: string,
+  link: JiraLink,
+  issueKey: string,
+  category: JiraStatusCategory,
+  name: string | undefined,
+): Promise<StatusPatchCtx> {
+  const detailKey = jiraIssueDetailKey(repo, link.siteHost, issueKey);
+  await queryClient.cancelQueries({ queryKey: detailKey });
+  const prevDetail = queryClient.getQueryData<JiraIssueDetails>(detailKey);
+  if (prevDetail) {
+    queryClient.setQueryData<JiraIssueDetails>(detailKey, {
+      ...prevDetail,
+      statusCategory: category,
+      ...(name !== undefined ? { statusName: name } : {}),
+    });
+  }
+  const lists = queryClient.getQueriesData<JiraIssueInfo[]>({
+    predicate: (q) =>
+      q.queryKey[0] === "repo" &&
+      q.queryKey[1] === repo &&
+      q.queryKey[2] === "jira-issues",
+  });
+  for (const [listKey, list] of lists) {
+    if (!list) continue;
+    queryClient.setQueryData<JiraIssueInfo[]>(
+      listKey,
+      list.map((i) =>
+        i.key === issueKey
+          ? {
+              ...i,
+              statusCategory: category,
+              ...(name !== undefined ? { statusName: name } : {}),
+            }
+          : i,
+      ),
+    );
+  }
+  return { detailKey, prevDetail, lists };
+}
+
+/** Restore the detail + list caches from a StatusPatchCtx (rollback on error). */
+function rollbackOptimisticStatus(
+  queryClient: ReturnType<typeof useQueryClient>,
+  ctx: StatusPatchCtx | undefined,
+) {
+  if (ctx?.detailKey && ctx.prevDetail !== undefined) {
+    queryClient.setQueryData(ctx.detailKey, ctx.prevDetail);
+  }
+  for (const [listKey, list] of ctx?.lists ?? []) {
+    queryClient.setQueryData(listKey, list);
+  }
+}
+
+/** Land the server's REAL status name + category onto the detail cache (success),
+ *  so the chip reads e.g. "Done" not the generic optimistic guess. */
+function landRealStatus(
+  queryClient: ReturnType<typeof useQueryClient>,
+  repo: string,
+  link: JiraLink,
+  issueKey: string,
+  statusName: string,
+  statusCategory: JiraStatusCategory,
+) {
+  const detailKey = jiraIssueDetailKey(repo, link.siteHost, issueKey);
+  queryClient.setQueryData<JiraIssueDetails>(detailKey, (d) =>
+    d ? { ...d, statusName, statusCategory } : d,
+  );
+}
+
+/** Close/reopen via a directional workflow transition. Optimistic: flips the
+ *  category across the detail cache AND every list cache for this repo (so the
+ *  row's chip flips instantly). Rollback on error restores both. The list patch
+ *  may make a row fall out of the active state filter (e.g. closing while viewing
+ *  Open) — that's fine: the detail view stays put and invalidation reconciles the
+ *  list on settle. */
 export function useJiraTransition(
   repo: string,
   link: JiraLink | null | undefined,
@@ -278,61 +389,79 @@ export function useJiraTransition(
         args.direction,
       ),
     onMutate: async (args) => {
-      if (!link) return { detailKey: null, prevDetail: undefined, lists: [] };
-      const detailKey = jiraIssueDetailKey(repo, link.siteHost, args.issueKey);
-      await queryClient.cancelQueries({ queryKey: detailKey });
-      const prevDetail = queryClient.getQueryData<JiraIssueDetails>(detailKey);
+      if (!link) return undefined;
       // We don't yet know the real target status name (it's per-workflow), so
-      // the optimistic patch only flips the category — enough to move the chip's
-      // open/closed treatment; the returned real name lands on success and the
-      // settle invalidation reconciles everything.
-      const category = args.direction === "close" ? "done" : "new";
-      if (prevDetail) {
-        queryClient.setQueryData<JiraIssueDetails>(detailKey, {
-          ...prevDetail,
-          statusCategory: category,
-        });
-      }
-      // Snapshot + patch every jira-issues list cache for this repo (any site /
-      // project / state filter) so a visible row's chip flips too.
-      const lists = queryClient.getQueriesData<JiraIssueInfo[]>({
-        predicate: (q) =>
-          q.queryKey[0] === "repo" &&
-          q.queryKey[1] === repo &&
-          q.queryKey[2] === "jira-issues",
-      });
-      for (const [listKey, list] of lists) {
-        if (!list) continue;
-        queryClient.setQueryData<JiraIssueInfo[]>(
-          listKey,
-          list.map((i) =>
-            i.key === args.issueKey ? { ...i, statusCategory: category } : i,
-          ),
-        );
-      }
-      return { detailKey, prevDetail, lists };
+      // only flip the category (name undefined) — enough to move the chip's
+      // open/closed treatment; the returned real name lands on success.
+      const category: JiraStatusCategory =
+        args.direction === "close" ? "done" : "new";
+      return applyOptimisticStatus(
+        queryClient,
+        repo,
+        link,
+        args.issueKey,
+        category,
+        undefined,
+      );
     },
-    onError: (_e, _args, ctx) => {
-      if (ctx?.detailKey && ctx.prevDetail !== undefined) {
-        queryClient.setQueryData(ctx.detailKey, ctx.prevDetail);
-      }
-      for (const [listKey, list] of ctx?.lists ?? []) {
-        queryClient.setQueryData(listKey, list);
-      }
-    },
+    onError: (_e, _args, ctx) => rollbackOptimisticStatus(queryClient, ctx),
     onSuccess: (result, args) => {
-      // The server told us the REAL new status name — land it on the detail so
-      // the chip reads e.g. "Done", not the generic category guess.
       if (!link) return;
-      const detailKey = jiraIssueDetailKey(repo, link.siteHost, args.issueKey);
-      queryClient.setQueryData<JiraIssueDetails>(detailKey, (d) =>
-        d
-          ? {
-              ...d,
-              statusName: result.statusName,
-              statusCategory: result.statusCategory,
-            }
-          : d,
+      landRealStatus(
+        queryClient,
+        repo,
+        link,
+        args.issueKey,
+        result.statusName,
+        result.statusCategory,
+      );
+    },
+    onSettled: () => invalidateJiraForRepo(queryClient, repo),
+  });
+}
+
+/** Apply a specific transition by id (the full status picker). Same optimistic
+ *  plumbing as `useJiraTransition`, but the caller knows the target from the
+ *  chosen option, so we flip BOTH category and name up front; the server's real
+ *  values still land on success and invalidation reconciles on settle. */
+export function useJiraTransitionTo(
+  repo: string,
+  link: JiraLink | null | undefined,
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (args: {
+      issueKey: string;
+      transitionId: string;
+      toStatusName: string;
+      toStatusCategory: JiraStatusCategory;
+    }) =>
+      jiraIssueTransitionTo(
+        (link as JiraLink).siteHost,
+        args.issueKey,
+        args.transitionId,
+      ),
+    onMutate: async (args) => {
+      if (!link) return undefined;
+      return applyOptimisticStatus(
+        queryClient,
+        repo,
+        link,
+        args.issueKey,
+        args.toStatusCategory,
+        args.toStatusName,
+      );
+    },
+    onError: (_e, _args, ctx) => rollbackOptimisticStatus(queryClient, ctx),
+    onSuccess: (result, args) => {
+      if (!link) return;
+      landRealStatus(
+        queryClient,
+        repo,
+        link,
+        args.issueKey,
+        result.statusName,
+        result.statusCategory,
       );
     },
     onSettled: () => invalidateJiraForRepo(queryClient, repo),

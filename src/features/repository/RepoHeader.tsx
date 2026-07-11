@@ -2,6 +2,7 @@ import { ArrowLeftIcon, GearIcon, QuestionIcon } from "@phosphor-icons/react";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { BranchCiBadge } from "@/features/actions/BranchCiBadge";
+import { BranchJiraBadge } from "@/features/actions/BranchJiraBadge";
 import { ActivityDock } from "@/features/activity/ActivityDock";
 import { useUiStore } from "@/lib/stores/ui";
 import { BranchSwitcher } from "./BranchSwitcher";
@@ -29,6 +30,7 @@ export function RepoHeader({ repoPath }: { repoPath: string }) {
       <Separator orientation="vertical" className="h-5" />
       <BranchSwitcher repoPath={repoPath} />
       <BranchCiBadge repoPath={repoPath} />
+      <BranchJiraBadge repoPath={repoPath} />
       <div className="flex-1" />
       <SyncControls repoPath={repoPath} />
       <ActivityDock />

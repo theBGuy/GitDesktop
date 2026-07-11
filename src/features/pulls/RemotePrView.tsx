@@ -56,6 +56,7 @@ import {
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import type { LineWidget } from "@/features/diff/DiffSurface";
 import { AssigneesPopover } from "@/features/issues/IssueMetaPickers";
+import { JiraRefRow } from "@/features/issues/JiraRefRow";
 import {
   isDeletionBlocked,
   isMergeMethodAllowed,
@@ -786,6 +787,10 @@ export function RemotePrView({
             {remoteLabel}
           </Button>
         </div>
+        <JiraRefRow
+          repoPath={repoPath}
+          text={`${pr.title}\n${pr.body}\n${pr.headRefName}`}
+        />
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <Badge variant={pr.state === "OPEN" ? "default" : "secondary"}>
             {pr.isDraft ? "Draft" : pr.state.toLowerCase()}

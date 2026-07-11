@@ -325,6 +325,27 @@ pub async fn jira_issue_transition(
     jira::issue_transition(&site, &key, &direction).await
 }
 
+/// The full list of workflow transitions available for a Jira issue right now, for the
+/// status picker (`GET /issue/<key>/transitions`, server order).
+#[tauri::command]
+pub async fn jira_issue_transitions(
+    site: String,
+    key: String,
+) -> AppResult<Vec<jira::JiraTransitionOption>> {
+    jira::issue_transitions(&site, &key).await
+}
+
+/// Execute a specific workflow transition on a Jira issue by its id (from
+/// `jira_issue_transitions`). Returns the issue's fresh status after the transition.
+#[tauri::command]
+pub async fn jira_issue_transition_to(
+    site: String,
+    key: String,
+    transition_id: String,
+) -> AppResult<jira::JiraTransitionResult> {
+    jira::issue_transition_to(&site, &key, &transition_id).await
+}
+
 /// Create a Jira issue. Needs `project_key`, `issue_type_id`, and a non-empty `summary`;
 /// `description_md` (markdown → ADF) is optional. Returns the new issue's key + URL.
 #[tauri::command]

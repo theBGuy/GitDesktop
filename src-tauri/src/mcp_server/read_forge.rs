@@ -199,7 +199,8 @@ impl GitDesktopMcp {
 
     #[tool(
         description = "List issues from the repository's forge (GitHub or GitLab, per its remote; \
-                       Bitbucket issues aren't supported — its native tracker is deprecated). \
+                       Bitbucket issues aren't supported — its native tracker is deprecated; for a \
+                       repo with a linked Jira project, use list_jira_issues instead). \
                        `state` is \"open\" (default) or \"closed\". Without `limit`, returns the \
                        provider default (GitHub ~30; GitLab a full page); pass `limit` to raise or \
                        lower that cap. Per-call ceiling: GitHub 1000, GitLab 100 — a larger \
@@ -223,7 +224,8 @@ impl GitDesktopMcp {
     #[tool(
         description = "Get an issue's full details (title, body, comments, labels, assignees) by \
                        number from the repository's forge (GitHub or GitLab, per its remote; \
-                       Bitbucket issues aren't supported — its native tracker is deprecated). \
+                       Bitbucket issues aren't supported — its native tracker is deprecated; for a \
+                       repo with a linked Jira project, use get_jira_issue instead). \
                        Returns JSON."
     )]
     async fn get_issue(

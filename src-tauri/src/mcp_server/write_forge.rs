@@ -395,7 +395,8 @@ impl GitDesktopMcp {
     #[tool(
         description = "Create a real issue in the bound repository's forge (GitHub or GitLab, per \
                        its remote; Bitbucket issues aren't supported — its native tracker is \
-                       deprecated), under the authenticated forge user. NOT reversible without \
+                       deprecated; for a repo with a linked Jira project, use create_jira_issue \
+                       instead), under the authenticated forge user. NOT reversible without \
                        deleting it. Optional labels/assignees are applied by name/login (must \
                        already exist). Returns the created issue ref (number + URL) as JSON. \
                        Requires --allow-remote-write.",
@@ -423,7 +424,8 @@ impl GitDesktopMcp {
     #[tool(
         description = "Post a comment to an issue (by number) in the bound repository's forge \
                        (GitHub or GitLab, per its remote; Bitbucket issues aren't supported — its \
-                       native tracker is deprecated), under the authenticated forge user. \
+                       native tracker is deprecated; for a repo with a linked Jira project, use \
+                       comment_jira_issue instead), under the authenticated forge user. \
                        Requires --allow-remote-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
@@ -443,7 +445,8 @@ impl GitDesktopMcp {
     #[tool(
         description = "Close an issue (by number) in the bound repository's forge (GitHub or \
                        GitLab, per its remote; Bitbucket issues aren't supported — its native \
-                       tracker is deprecated). Reversible via reopen_issue. `reason` is \
+                       tracker is deprecated; for a repo with a linked Jira project, use \
+                       transition_jira_issue instead). Reversible via reopen_issue. `reason` is \
                        \"completed\" (default) or \"not_planned\" (GitHub; GitLab has no close \
                        reason and ignores it). Requires --allow-remote-write.",
         annotations(read_only_hint = false, destructive_hint = false)
@@ -470,7 +473,8 @@ impl GitDesktopMcp {
     #[tool(
         description = "Reopen a closed issue (by number) in the bound repository's forge (GitHub or \
                        GitLab, per its remote; Bitbucket issues aren't supported — its native \
-                       tracker is deprecated). Requires --allow-remote-write.",
+                       tracker is deprecated; for a repo with a linked Jira project, use \
+                       transition_jira_issue instead). Requires --allow-remote-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn reopen_issue(
@@ -780,7 +784,8 @@ impl GitDesktopMcp {
 
     #[tool(
         description = "Set an issue's assignees (by number) in the bound repository's forge (GitHub \
-                       or GitLab, per its remote; Bitbucket issues aren't supported). `assignees` \
+                       or GitLab, per its remote; Bitbucket issues aren't supported; for a repo \
+                       with a linked Jira project, use assign_jira_issue instead). `assignees` \
                        is the FULL desired set of logins — it REPLACES the current assignees (an \
                        empty list clears them). See list_assignable_users. Requires \
                        --allow-remote-write.",

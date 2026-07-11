@@ -11,6 +11,7 @@ mod github;
 mod health;
 mod hooks;
 mod instructions;
+mod jira_links;
 mod local_issues;
 mod local_prs;
 mod mcp;
@@ -261,6 +262,8 @@ pub fn run() {
             forge::jira_issue_view,
             forge::jira_issue_comment,
             forge::jira_issue_transition,
+            forge::jira_issue_transitions,
+            forge::jira_issue_transition_to,
             forge::jira_issue_create,
             forge::jira_issue_types,
             forge::jira_issue_assign,

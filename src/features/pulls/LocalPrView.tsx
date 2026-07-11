@@ -42,6 +42,7 @@ import { LocalComment } from "@/features/conversations/LocalComment";
 import { useLocalConversation } from "@/features/conversations/useLocalConversation";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { CommitDetailView } from "@/features/history/CommitDetailView";
+import { JiraRefRow } from "@/features/issues/JiraRefRow";
 import { isMergeMethodAllowed } from "@/lib/branch-rules/match";
 import { useEffectiveBranchRules } from "@/lib/branch-rules/queries";
 import { copyText } from "@/lib/clipboard";
@@ -341,6 +342,10 @@ export function LocalPrView({
               {pr.status}
             </Badge>
           </div>
+          <JiraRefRow
+            repoPath={repoPath}
+            text={`${pr.title}\n${pr.body}\n${pr.head}`}
+          />
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             <span className="font-mono">{pr.head}</span>
             <span>→</span>
@@ -382,6 +387,10 @@ export function LocalPrView({
           )}
           {pr.archived && <Badge variant="secondary">archived</Badge>}
         </div>
+        <JiraRefRow
+          repoPath={repoPath}
+          text={`${pr.title}\n${pr.body}\n${pr.head}`}
+        />
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <span className="font-mono">{pr.head}</span>
           <span>→</span>

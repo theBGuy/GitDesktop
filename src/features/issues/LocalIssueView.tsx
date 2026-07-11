@@ -5,9 +5,11 @@ import {
   DotsThreeIcon,
   GithubLogoIcon,
   GitlabLogoIcon,
+  KanbanIcon,
   PencilSimpleIcon,
   TagIcon,
   TrashIcon,
+  UploadSimpleIcon,
   XIcon,
 } from "@phosphor-icons/react";
 import { useState } from "react";
@@ -47,6 +49,7 @@ import {
   useLocalIssues,
   useUpdateLocalIssue,
 } from "@/lib/issues/queries";
+import { useJiraLink, useJiraPermissions } from "@/lib/jira/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
@@ -71,6 +74,14 @@ export function LocalIssueView({
   const del = useDeleteLocalIssue(repoPath);
   const selectIssue = useUiStore((s) => s.selectIssue);
   const ghStatus = useForgeStatus(repoPath);
+  // Two independent publish gates: the forge's static issue-create capability
+  // and a live per-user Jira permission probe. The Publish affordance shows when
+  // EITHER is available; the dialog itself parameterizes / offers a choice.
+  const canPublishForge = forgeFeatureReady(ghStatus.data, "issueCreate");
+  const jiraLink = useJiraLink(repoPath).data;
+  const jiraPerms = useJiraPermissions(repoPath, jiraLink);
+  const canPublishJira = !!jiraLink && (jiraPerms.data?.createIssues ?? false);
+  const canPublish = canPublishForge || canPublishJira;
   const {
     comment,
     setComment,
@@ -350,20 +361,33 @@ export function LocalIssueView({
         <span className="flex-1" />
         {isOpen && (
           <>
-            {forgeFeatureReady(ghStatus.data, "issueCreate") && (
+            {canPublish && (
               <Button
                 variant="outline"
                 size="sm"
                 onClick={() => setPromoteOpen(true)}
-                title={`Open this issue on ${ghStatus.data?.provider === "gitlab" ? "GitLab" : "GitHub"}, carrying its comments`}
+                title={
+                  canPublishForge && canPublishJira
+                    ? "Publish this issue to your forge or Jira, carrying its comments"
+                    : canPublishJira
+                      ? "Open this issue in Jira, carrying its comments"
+                      : `Open this issue on ${ghStatus.data?.provider === "gitlab" ? "GitLab" : "GitHub"}, carrying its comments`
+                }
               >
-                {ghStatus.data?.provider === "gitlab" ? (
+                {canPublishForge && canPublishJira ? (
+                  <UploadSimpleIcon data-icon="inline-start" />
+                ) : canPublishJira ? (
+                  <KanbanIcon data-icon="inline-start" />
+                ) : ghStatus.data?.provider === "gitlab" ? (
                   <GitlabLogoIcon data-icon="inline-start" />
                 ) : (
                   <GithubLogoIcon data-icon="inline-start" />
                 )}
-                Publish to{" "}
-                {ghStatus.data?.provider === "gitlab" ? "GitLab" : "GitHub"}
+                {canPublishForge && canPublishJira
+                  ? "Publish"
+                  : canPublishJira
+                    ? "Publish to Jira"
+                    : `Publish to ${ghStatus.data?.provider === "gitlab" ? "GitLab" : "GitHub"}`}
               </Button>
             )}
             <Button

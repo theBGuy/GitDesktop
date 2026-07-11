@@ -794,9 +794,23 @@ issue links out with **View in Jira**.
 You can work an issue without leaving the tab. **Create** one ({{kbd:create-jira-issue}}
 from the palette) with a summary, Markdown description, and an **issue-type** picker;
 **comment** in Markdown; **close or reopen** it by following the project's own workflow —
-the confirmation names the real resulting status, not a generic "closed"; and **assign or
-unassign** it by searching your project's users. Each action is gated on your Jira
+the confirmation names the real resulting status, not a generic "closed" — or move it to
+any workflow status from the **status menu** on the chip, which lists the transitions your
+role allows by their target status name; and **assign or unassign** it by searching your
+project's users. Each action is gated on your Jira
 permissions, so anything your token and role can't do simply doesn't appear.
+
+**Referenced issues follow your work.** When a **branch name**, a commit's message (in the
+commit detail view), or a pull request's title or description mentions one of the linked
+project's issue keys (e.g. \`PROJ-123\`), GitDesktop shows a compact **referenced Jira
+issues** row there. Click a key to jump to that issue in the **Jira** section of the Issues
+tab. Only the **linked project's** key is matched — no other project and no generic key
+pattern.
+
+You can also **promote a local issue to Jira.** When a repo is linked, the local issue's
+**publish** action offers Jira as a destination (alongside GitHub or GitLab when both are
+available); its comments carry over to the new Jira issue, and the local issue closes with a
+back-link to it.
 
 To connect, add an **Atlassian API token** (your Atlassian account email plus the
 token, validated against the site before it's saved and stored in your OS keychain); if
@@ -807,7 +821,8 @@ credential** with one button instead of re-entering it.
 
 A **local issue** is a private, offline to-do tracked in the app — create, edit, label,
 and close it with no remote. When it's ready to share, **promote** it to a GitHub or
-GitLab issue in one click.
+GitLab issue — or, when the repo has a **linked Jira project**, to a Jira issue — in one
+click.
 {{ai}}
 ## Hand off to an agent
 
@@ -1089,7 +1104,9 @@ diffs, blame, branches, file history/read, PRs, issues, CI logs, labels, milesto
 releases, and a PR's full timeline. The PR, issue, and CI tools work
 across **GitHub, GitLab, and Bitbucket** — they route through GitDesktop's forge layer and
 dispatch by the repo's remote (Bitbucket covers PRs and pipelines, but not issues — its
-native tracker is deprecated). The app itself runs as a stdio server — on macOS and Linux
+native tracker is deprecated). If the repo has a **linked Jira project**, a set of
+\`jira_*\` tools list and read that project's issues too — the tools resolve the repo's
+stored link themselves, so an agent never passes a site or project. The app itself runs as a stdio server — on macOS and Linux
 that's the app binary directly (a Personal config embeds its absolute path), and on Windows a
 dedicated update-safe \`gitdesktop-mcp\` copy (so running servers never block app updates) — so
 an agent can understand a repo without changing it.
@@ -1133,7 +1150,9 @@ authenticated identity (GitHub \`gh\`, GitLab \`glab\`, or a stored Bitbucket to
 **request changes**, or **withdraw** either, **start**, **reply to**, and **resolve** review
 threads, add or remove **reactions**, **rerun/cancel/dispatch** CI, **create/update releases**,
 **create, comment on, close/reopen**, and set the **milestone** of issues, and — on GitHub —
-**create, comment on, answer, and close/reopen discussions**. Issue
+**create, comment on, answer, and close/reopen discussions**. The same flag also unlocks the
+linked Jira project's write \`jira_*\` tools — **comment**, **close/reopen**, **create**, and
+**assign** its issues. Issue
 writes cover GitHub and GitLab (not Bitbucket); discussions are GitHub-only; PR comments cover all three. PR comments an
 agent posts carry a small **Posted by GitDesktop** footer so they're identifiable as
 automated, and on the read side an agent can pull a pull request's full comment set — the

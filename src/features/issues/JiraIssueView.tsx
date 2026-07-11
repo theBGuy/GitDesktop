@@ -1,6 +1,7 @@
 import {
   ArrowCounterClockwiseIcon,
   ArrowSquareOutIcon,
+  CaretDownIcon,
   CheckCircleIcon,
   CircleDashedIcon,
 } from "@phosphor-icons/react";
@@ -22,6 +23,13 @@ import {
   ComboboxItem,
   ComboboxList,
 } from "@/components/ui/combobox";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Markdown } from "@/components/ui/markdown";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -35,6 +43,8 @@ import {
   useJiraLink,
   useJiraPermissions,
   useJiraTransition,
+  useJiraTransitions,
+  useJiraTransitionTo,
   useJiraUserSearch,
 } from "@/lib/jira/queries";
 import type { JiraLink } from "@/lib/jira/store";
@@ -47,25 +57,133 @@ import { toastError } from "@/lib/toast";
  *  literal modifier (house platform-mod-key rule). */
 const SUBMIT_HINT = formatBinding("mod+enter");
 
-/** The status chip: category picks the open/closed icon+token, the REAL status
- *  name is the text (so meaning is never color-only). `done` → the closed/merged
- *  treatment; anything else → the open/success treatment. */
+/** The category icon + tone shared by the chip and every menu row (so meaning is
+ *  never color-only). `done` → the closed/merged treatment; else open/success. */
+function statusPresentation(category: JiraStatusCategory) {
+  const done = category === "done";
+  return {
+    Icon: done ? CheckCircleIcon : CircleDashedIcon,
+    tone: done ? "text-merged" : "text-success",
+  };
+}
+
+/** The static status chip: category picks the open/closed icon+token, the REAL
+ *  status name is the text. Used read-only, and as the trigger label inside the
+ *  interactive StatusMenu. `interactive` adds the dropdown-affordance chevron. */
 function StatusChip({
   category,
   name,
+  interactive = false,
 }: {
   category: JiraStatusCategory;
   name: string;
+  interactive?: boolean;
 }) {
-  const done = category === "done";
-  const Icon = done ? CheckCircleIcon : CircleDashedIcon;
+  const { Icon, tone } = statusPresentation(category);
   return (
     <span className="inline-flex items-center gap-1 border px-1.5 py-0.5 text-[11px]">
-      <Icon
-        className={`size-3.5 shrink-0 ${done ? "text-merged" : "text-success"}`}
-      />
+      <Icon className={`size-3.5 shrink-0 ${tone}`} />
       {name}
+      {interactive && <CaretDownIcon className="size-3 shrink-0 opacity-60" />}
     </span>
+  );
+}
+
+/**
+ * Interactive status picker: the chip becomes a DropdownMenu trigger. Transitions
+ * are fetched lazily on open (never on mount). Each menu item is a target status
+ * (labeled by its to-status name, dot-toned by category); a self-transition back
+ * to the current status renders as a checked, non-interactive current row.
+ * Selecting one fires the optimistic `jira_issue_transition_to` mutation. Only
+ * rendered when `transitionIssues` is permitted (the static chip covers the rest).
+ */
+function StatusMenu({
+  repoPath,
+  link,
+  issueKey,
+  category,
+  name,
+  busy,
+  transitionTo,
+}: {
+  repoPath: string;
+  link: JiraLink;
+  issueKey: string;
+  category: JiraStatusCategory;
+  name: string;
+  busy: boolean;
+  transitionTo: ReturnType<typeof useJiraTransitionTo>;
+}) {
+  const [open, setOpen] = useState(false);
+  const transitions = useJiraTransitions(repoPath, link, issueKey, open);
+
+  function apply(t: {
+    id: string;
+    toStatusName: string;
+    toStatusCategory: JiraStatusCategory;
+  }) {
+    transitionTo.mutate(
+      {
+        issueKey,
+        transitionId: t.id,
+        toStatusName: t.toStatusName,
+        toStatusCategory: t.toStatusCategory,
+      },
+      {
+        onSuccess: (r) => toast.success(`${issueKey} · ${r.statusName}`),
+        onError: toastError,
+      },
+    );
+  }
+
+  return (
+    <DropdownMenu open={open} onOpenChange={setOpen}>
+      <DropdownMenuTrigger
+        disabled={busy}
+        aria-label={`Status: ${name}. Change status`}
+        className="cursor-pointer rounded-none disabled:cursor-default disabled:opacity-60"
+      >
+        <StatusChip category={category} name={name} interactive />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="min-w-44">
+        {transitions.isPending ? (
+          <DropdownMenuItem disabled>Loading transitions…</DropdownMenuItem>
+        ) : transitions.isError ? (
+          <DropdownMenuItem
+            // Base UI item: onClick fires the action (Radix-style onSelect
+            // TYPECHECKS — it's the DOM text-selection event — but never fires
+            // on click); closeOnClick={false} keeps the menu open for retry.
+            closeOnClick={false}
+            onClick={() => transitions.refetch()}
+          >
+            Couldn't load transitions — retry
+          </DropdownMenuItem>
+        ) : (transitions.data ?? []).length === 0 ? (
+          <DropdownMenuItem disabled>No transitions available</DropdownMenuItem>
+        ) : (
+          (transitions.data ?? []).map((t) => {
+            const { Icon, tone } = statusPresentation(t.toStatusCategory);
+            // A self-transition (lands back on the current status) is shown as the
+            // checked, non-interactive current row.
+            const isCurrent = t.toStatusName === name;
+            if (isCurrent) {
+              return (
+                <DropdownMenuCheckboxItem key={t.id} checked disabled>
+                  <Icon className={`size-3.5 shrink-0 ${tone}`} />
+                  {t.toStatusName}
+                </DropdownMenuCheckboxItem>
+              );
+            }
+            return (
+              <DropdownMenuItem key={t.id} onClick={() => apply(t)}>
+                <Icon className={`size-3.5 shrink-0 ${tone}`} />
+                {t.toStatusName}
+              </DropdownMenuItem>
+            );
+          })
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
@@ -230,6 +348,7 @@ export function JiraIssueView({
 
   const comment = useJiraComment(repoPath, link.data);
   const transition = useJiraTransition(repoPath, link.data);
+  const transitionTo = useJiraTransitionTo(repoPath, link.data);
   const [composeBody, setComposeBody] = useState("");
   const composerRef = useRef<MarkdownEditorHandle>(null);
 
@@ -266,7 +385,8 @@ export function JiraIssueView({
 
   const issue: JiraIssueDetails = details.data;
   const isDone = issue.statusCategory === "done";
-  const busy = comment.isPending || transition.isPending;
+  const busy =
+    comment.isPending || transition.isPending || transitionTo.isPending;
 
   function submitComment() {
     const body = composeBody.trim();
@@ -347,7 +467,22 @@ export function JiraIssueView({
           </Button>
         </div>
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-          <StatusChip category={issue.statusCategory} name={issue.statusName} />
+          {canTransition && link.data ? (
+            <StatusMenu
+              repoPath={repoPath}
+              link={link.data}
+              issueKey={issueKey}
+              category={issue.statusCategory}
+              name={issue.statusName}
+              busy={busy}
+              transitionTo={transitionTo}
+            />
+          ) : (
+            <StatusChip
+              category={issue.statusCategory}
+              name={issue.statusName}
+            />
+          )}
           <IssueTypeMeta
             iconUrl={issue.issueTypeIconUrl}
             name={issue.issueTypeName}

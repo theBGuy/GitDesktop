@@ -108,6 +108,17 @@ export interface JiraTransitionResult {
  *  target category is `done`; `reopen` picks one targeting `new`/`indeterminate`. */
 export type JiraTransitionDirection = "close" | "reopen";
 
+/** One available workflow transition from the issue's current status, as offered
+ *  by the full status picker. `name` is the transition's own name; `toStatusName`
+ *  / `toStatusCategory` describe the status it lands on (what the menu labels and
+ *  dot-tones by, and what the chip flips to optimistically on select). */
+export interface JiraTransition {
+  id: string;
+  name: string;
+  toStatusName: string;
+  toStatusCategory: JiraStatusCategory;
+}
+
 /** The result of creating an issue: the new key + its browser URL. */
 export interface JiraCreatedIssue {
   key: string;

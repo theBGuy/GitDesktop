@@ -12,6 +12,7 @@ import type {
   JiraPermissions,
   JiraProject,
   JiraStoredAccount,
+  JiraTransition,
   JiraTransitionDirection,
   JiraTransitionResult,
 } from "./types";
@@ -98,6 +99,26 @@ export const jiraIssueTransition = (
     site,
     key,
     direction,
+  });
+
+/** The workflow transitions available from the issue's current status (for the
+ *  full status picker). Each carries the status it lands on so the menu can label
+ *  + dot-tone by target status and flip the chip optimistically on select. */
+export const jiraIssueTransitions = (site: string, key: string) =>
+  invoke<JiraTransition[]>("jira_issue_transitions", { site, key });
+
+/** Apply a specific transition by id (the full status picker's counterpart to the
+ *  directional `jiraIssueTransition`); returns the resulting real status name +
+ *  category to update the chip. */
+export const jiraIssueTransitionTo = (
+  site: string,
+  key: string,
+  transitionId: string,
+) =>
+  invoke<JiraTransitionResult>("jira_issue_transition_to", {
+    site,
+    key,
+    transitionId,
   });
 
 /** Create an issue; returns the new key + URL. `descriptionMd` optional (empty

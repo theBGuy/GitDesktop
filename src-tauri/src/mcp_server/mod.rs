@@ -10,8 +10,10 @@
 //!
 //! - [`read_git`]     — local-git read tools (status, log, diffs, blame, read_file, …)
 //! - [`read_forge`]   — forge/CI read tools (PRs, issues, workflow runs/logs)
+//! - [`read_jira`]    — linked-Jira issue read tools (list/get)
 //! - [`write_local`]  — local-PR write tools           (opt-in via `--allow-write`)
 //! - [`write_forge`]  — forge remote-write tools        (opt-in via `--allow-remote-write`)
+//! - [`write_jira`]   — linked-Jira issue write tools   (opt-in via `--allow-remote-write`)
 //! - [`write_git`]    — local-git write tools           (opt-in via `--allow-git-write`)
 //! - [`generate`]     — AI-generation recipe tools
 //!
@@ -26,8 +28,10 @@
 mod generate;
 mod read_forge;
 mod read_git;
+mod read_jira;
 mod write_forge;
 mod write_git;
+mod write_jira;
 mod write_local;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -174,8 +178,10 @@ impl GitDesktopMcp {
             // without touching this expression.
             tool_router: Self::read_git_router()
                 + Self::read_forge_router()
+                + Self::read_jira_router()
                 + Self::write_local_router()
                 + Self::write_forge_router()
+                + Self::write_jira_router()
                 + Self::write_git_router()
                 + Self::generate_router(),
             // The generation recipes are ALSO exposed as MCP prompts. Only one module
@@ -273,6 +279,26 @@ impl GitDesktopMcp {
         }
         Ok(identity)
     }
+
+    /// Resolve the bound repo's linked Jira project (`{siteHost, projectKey,
+    /// projectName}`) from the headless `jira-links.json` store. The `jira_*` tools
+    /// NEVER take a `site`/`projectKey` param — the stored link is the single source of
+    /// truth (an agent must not be able to point them at an arbitrary Jira site), so
+    /// every one resolves through here. A repo with no link returns an actionable error
+    /// telling the user how to create one in GitDesktop (the same call-time pattern the
+    /// Bitbucket-issue tools use — registration stays static).
+    async fn jira_link(&self) -> Result<crate::jira_links::JiraLinkEntry, McpError> {
+        crate::jira_links::get_link(&self.repo)
+            .await
+            .map_err(app_err)?
+            .ok_or_else(|| {
+                McpError::invalid_request(
+                    "This repository has no linked Jira project — link one in GitDesktop \
+                     (repo menu → Link Jira project).",
+                    None,
+                )
+            })
+    }
 }
 
 // The combined per-instance router (built in `with_options`) is what the handler
@@ -297,16 +323,23 @@ impl ServerHandler for GitDesktopMcp {
              `glab` CLI, Bitbucket a stored API token). One exception: Bitbucket's native issue \
              tracker is deprecated, so the issue tools (list/get/create/comment/close/reopen) work \
              on GitHub and GitLab only and return an actionable error on a Bitbucket repo. \
+             Separately, the `jira_*` tools operate on a per-repo LINKED Jira project — a Jira \
+             link is independent of the repo's git host, so those tools work on ANY repo that has \
+             one configured in GitDesktop (GitHub, GitLab, or Bitbucket), and are the issue story \
+             for Bitbucket repos; they read the linked project (site + key) server-side and take \
+             no site/project param, erroring with a link hint when the repo has none. \
              Capabilities are opt-in in an escalating ladder — each tier is a separate flag and \
              enabling one never grants another: (0) READ tools (status, log, diffs, blame, file \
-             history, PRs, issues, CI, releases, discussions) are always available and are the \
-             default. (1) --allow-write enables GitDesktop's own app-data write tools: local PRs \
+             history, PRs, issues, CI, releases, discussions, and linked-Jira issues) are always \
+             available and are the default. (1) --allow-write enables GitDesktop's own app-data \
+             write tools: local PRs \
              AND local issues (create/comment/status and equivalents). These are review artifacts \
              stored in GitDesktop's app data — never git commits and never remote/forge writes. \
              (2) --allow-remote-write enables the full forge remote-write surface under the \
              authenticated forge identity: the PR lifecycle (create/merge/edit), reviewers, \
              labels, assignees and approvals, review threads, CI actions, releases, GitHub \
-             discussions, and issue writes (create/comment/close/reopen). These are REAL, publicly \
+             discussions, issue writes (create/comment/close/reopen), and the linked-Jira issue \
+             writes (comment/transition/create/assign). These are REAL, publicly \
              visible writes to the repository's forge and are not freely reversible. (3) \
              --allow-git-write enables RECOVERABLE local-git mutations of the bound repository \
              (stage/commit/branch/push/…). (4) --allow-destructive is additionally required (on \
@@ -735,22 +768,24 @@ mod tests {
     }
 
     /// The COMBINED router's tool count must equal the sum of the per-module router
-    /// counts, and currently == 110. Deriving each term from the module's own router
+    /// counts, and currently == 116. Deriving each term from the module's own router
     /// means a package growing a module updates both sides of the equality
     /// automatically — this test never needs editing as modules gain tools.
-    /// (The `== 110` literal is the one line a package updates, and only if it
+    /// (The `== 116` literal is the one line a package updates, and only if it
     /// intends to change the current total.)
     #[test]
     fn combined_router_tool_count_is_sum_of_modules() {
         let handler = handler(false, false, false, false);
         let per_module = GitDesktopMcp::read_git_router().list_all().len()
             + GitDesktopMcp::read_forge_router().list_all().len()
+            + GitDesktopMcp::read_jira_router().list_all().len()
             + GitDesktopMcp::write_local_router().list_all().len()
             + GitDesktopMcp::write_forge_router().list_all().len()
+            + GitDesktopMcp::write_jira_router().list_all().len()
             + GitDesktopMcp::write_git_router().list_all().len()
             + GitDesktopMcp::generate_router().list_all().len();
         assert_eq!(handler.tool_router.list_all().len(), per_module);
-        assert_eq!(per_module, 110);
+        assert_eq!(per_module, 116);
     }
 
     /// The prompt router (separate from the tool router — prompts are NOT tools, so

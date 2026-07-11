@@ -1241,22 +1241,28 @@ pub struct JiraTransitionResult {
     pub status_category: String,
 }
 
-/// A workflow transition as `GET /issue/<key>/transitions` returns it — the id we `POST`
-/// and the category of the status it moves the issue *to*.
+/// A workflow transition as `GET /issue/<key>/transitions` returns it — the id we `POST`,
+/// the transition's own display `name` (e.g. "Start Progress"), and the status it moves
+/// the issue *to* (that status's display name + category).
 #[derive(Deserialize, Default)]
 struct JiraTransition {
     #[serde(default)]
     id: Option<String>,
     #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
     to: Option<JiraTransitionTo>,
 }
 
-/// The `to` block of a transition — the destination status's category key. Jira sends
-/// the key as `statusCategory` (camelCase), so this struct MUST rename or `to` never
-/// resolves a category and every transition looks category-less.
+/// The `to` block of a transition — the destination status's display `name` and its
+/// category key. Jira sends the category as `statusCategory` (camelCase), so this struct
+/// MUST rename or `to` never resolves a category and every transition looks
+/// category-less.
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct JiraTransitionTo {
+    #[serde(default)]
+    name: Option<String>,
     #[serde(default)]
     status_category: Option<JiraStatusCategory>,
 }
@@ -1316,6 +1322,48 @@ fn category_of(t: &JiraTransition) -> Option<&str> {
     t.to.as_ref()?.status_category.as_ref()?.key.as_deref()
 }
 
+/// The destination status display name of a transition (`to.name`), or `None` when the
+/// `to` block or its name is absent.
+fn to_status_name_of(t: &JiraTransition) -> Option<&str> {
+    t.to.as_ref()?.name.as_deref()
+}
+
+/// One workflow transition presented to the status picker: the id to POST, the
+/// transition's own name, and the status it leads to.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraTransitionOption {
+    pub id: String,
+    pub name: String,
+    pub to_status_name: String,
+    pub to_status_category: String,
+}
+
+/// Map the parsed transitions onto the picker's [`JiraTransitionOption`] shape, in server
+/// order. Entries missing an id are skipped (a transition we couldn't POST is useless to
+/// offer); every other field degrades to empty. Pure (unit-tested).
+fn transition_options(transitions: &[JiraTransition]) -> Vec<JiraTransitionOption> {
+    transitions
+        .iter()
+        .filter_map(|t| {
+            let id = t.id.clone().filter(|s| !s.is_empty())?;
+            Some(JiraTransitionOption {
+                id,
+                name: t.name.clone().unwrap_or_default(),
+                to_status_name: to_status_name_of(t).unwrap_or("").to_string(),
+                to_status_category: category_of(t).unwrap_or("").to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Whether a transition id is a non-empty run of ASCII digits — Jira transition ids are
+/// numeric strings, and this grammar-validates the id before it is spliced into the POST
+/// body. Pure (testable).
+fn is_valid_transition_id(id: &str) -> bool {
+    !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())
+}
+
 /// Extract `(statusName, statusCategoryKey)` from an `issue?fields=status` response. Pure.
 fn status_of_issue(issue: &Value) -> (String, String) {
     let fields = issue.get("fields").cloned().unwrap_or(Value::Null);
@@ -1367,9 +1415,21 @@ pub async fn issue_transition(
         ))
     })?;
 
+    post_transition_and_refetch(&creds, key, &transition_id).await
+}
+
+/// POST a chosen transition id for an issue and read back its fresh status. Shared by the
+/// direction-based [`issue_transition`] and the explicit-id [`issue_transition_to`] so the
+/// POST-then-refetch is written once. `key` is assumed already validated; `transition_id`
+/// is assumed already grammar-validated by the caller.
+async fn post_transition_and_refetch(
+    creds: &JiraCredentials,
+    key: &str,
+    transition_id: &str,
+) -> AppResult<JiraTransitionResult> {
     let body = json!({ "transition": { "id": transition_id } });
     send_no_content(
-        &creds,
+        creds,
         reqwest::Method::POST,
         &format!("issue/{key}/transitions"),
         Some(&body),
@@ -1377,12 +1437,53 @@ pub async fn issue_transition(
     .await?;
 
     // Read back the fresh status (the transition response is 204 with no body).
-    let issue: Value = get_json(&creds, &format!("issue/{key}?fields=status"), "issue").await?;
+    let issue: Value = get_json(creds, &format!("issue/{key}?fields=status"), "issue").await?;
     let (status_name, status_category) = status_of_issue(&issue);
     Ok(JiraTransitionResult {
         status_name,
         status_category,
     })
+}
+
+/// The full list of workflow transitions available for an issue right now, for the status
+/// picker. `GET /issue/<key>/transitions`, mapped onto [`JiraTransitionOption`] in server
+/// order (entries missing an id are skipped). The issue key is grammar-validated first.
+pub async fn issue_transitions(site: &str, key: &str) -> AppResult<Vec<JiraTransitionOption>> {
+    let site = normalize_site(site)?;
+    if !is_valid_issue_key(key) {
+        return Err(AppError::InvalidArgument(format!(
+            "invalid Jira issue key: {key}"
+        )));
+    }
+    let creds = load_credentials(&site).await?;
+    let list: JiraTransitionsResponse =
+        get_json(&creds, &format!("issue/{key}/transitions"), "transitions").await?;
+    Ok(transition_options(&list.transitions))
+}
+
+/// Execute a specific workflow transition on an issue by its id (the id comes from
+/// [`issue_transitions`]). The id is grammar-validated (non-empty ASCII digits) BEFORE it
+/// is spliced into the POST body; then the shared POST-then-refetch runs, returning the
+/// issue's fresh status. Unlike [`issue_transition`], the caller supplies the id directly
+/// rather than deriving it from a close/reopen direction.
+pub async fn issue_transition_to(
+    site: &str,
+    key: &str,
+    transition_id: &str,
+) -> AppResult<JiraTransitionResult> {
+    let site = normalize_site(site)?;
+    if !is_valid_issue_key(key) {
+        return Err(AppError::InvalidArgument(format!(
+            "invalid Jira issue key: {key}"
+        )));
+    }
+    if !is_valid_transition_id(transition_id) {
+        return Err(AppError::InvalidArgument(format!(
+            "invalid Jira transition id: {transition_id}"
+        )));
+    }
+    let creds = load_credentials(&site).await?;
+    post_transition_and_refetch(&creds, key, transition_id).await
 }
 
 /// The key + URL of a newly-created issue.
@@ -2060,7 +2161,9 @@ mod tests {
                     status_category: Some(JiraStatusCategory {
                         key: Some((*cat).to_string()),
                     }),
+                    ..Default::default()
                 }),
+                ..Default::default()
             })
             .collect()
     }
@@ -2123,12 +2226,15 @@ mod tests {
             JiraTransition {
                 id: Some("1".into()),
                 to: None,
+                ..Default::default()
             },
             JiraTransition {
                 id: Some("2".into()),
                 to: Some(JiraTransitionTo {
                     status_category: None,
+                    ..Default::default()
                 }),
+                ..Default::default()
             },
             JiraTransition {
                 id: Some("3".into()),
@@ -2136,7 +2242,9 @@ mod tests {
                     status_category: Some(JiraStatusCategory {
                         key: Some("done".into()),
                     }),
+                    ..Default::default()
                 }),
+                ..Default::default()
             },
         ];
         assert_eq!(
@@ -2290,14 +2398,20 @@ mod tests {
         let body = r#"{
             "transitions": [
                 { "id": "11", "name": "Start Progress",
-                  "to": { "statusCategory": { "key": "indeterminate" } } },
+                  "to": { "name": "In Progress", "statusCategory": { "key": "indeterminate" } } },
                 { "id": "21", "name": "Done",
-                  "to": { "statusCategory": { "key": "done" } } }
+                  "to": { "name": "Done", "statusCategory": { "key": "done" } } }
             ]
         }"#;
         let parsed: JiraTransitionsResponse = serde_json::from_str(body).unwrap();
         // The done category must actually deserialize (the crux of bug 1).
         assert_eq!(category_of(&parsed.transitions[1]), Some("done"));
+        // The destination status name (`to.name`) must also deserialize (phase-3 addition).
+        assert_eq!(
+            to_status_name_of(&parsed.transitions[0]),
+            Some("In Progress")
+        );
+        assert_eq!(to_status_name_of(&parsed.transitions[1]), Some("Done"));
         assert_eq!(
             pick_transition_id(&parsed.transitions, "close").unwrap(),
             Some("21".to_string())
@@ -2307,6 +2421,69 @@ mod tests {
             pick_transition_id(&parsed.transitions, "reopen").unwrap(),
             Some("11".to_string())
         );
+    }
+
+    #[test]
+    fn transition_options_maps_live_fixture_in_server_order() {
+        // The status picker consumes ALL transitions (not just close/reopen), mapping each
+        // to {id, name, toStatusName, toStatusCategory} in the order the server returned.
+        let body = r#"{
+            "transitions": [
+                { "id": "11", "name": "Start Progress",
+                  "to": { "name": "In Progress", "statusCategory": { "key": "indeterminate" } } },
+                { "id": "21", "name": "Done",
+                  "to": { "name": "Done", "statusCategory": { "key": "done" } } }
+            ]
+        }"#;
+        let parsed: JiraTransitionsResponse = serde_json::from_str(body).unwrap();
+        let opts = transition_options(&parsed.transitions);
+        assert_eq!(opts.len(), 2);
+        assert_eq!(opts[0].id, "11");
+        assert_eq!(opts[0].name, "Start Progress");
+        assert_eq!(opts[0].to_status_name, "In Progress");
+        assert_eq!(opts[0].to_status_category, "indeterminate");
+        assert_eq!(opts[1].id, "21");
+        assert_eq!(opts[1].name, "Done");
+        assert_eq!(opts[1].to_status_name, "Done");
+        assert_eq!(opts[1].to_status_category, "done");
+    }
+
+    #[test]
+    fn transition_options_skips_idless_and_degrades_missing_fields() {
+        // An entry with no id is dropped (can't POST it); missing name/to fields degrade
+        // to empty strings rather than sinking the whole list.
+        let body = r#"{
+            "transitions": [
+                { "name": "No Id Here", "to": { "name": "X", "statusCategory": { "key": "new" } } },
+                { "id": "31" },
+                { "id": "", "name": "Empty Id" }
+            ]
+        }"#;
+        let parsed: JiraTransitionsResponse = serde_json::from_str(body).unwrap();
+        let opts = transition_options(&parsed.transitions);
+        // Only the id-"31" entry survives (idless + empty-id are skipped).
+        assert_eq!(opts.len(), 1);
+        assert_eq!(opts[0].id, "31");
+        assert_eq!(opts[0].name, "");
+        assert_eq!(opts[0].to_status_name, "");
+        assert_eq!(opts[0].to_status_category, "");
+    }
+
+    #[test]
+    fn transition_options_empty_when_no_transitions() {
+        assert!(transition_options(&[]).is_empty());
+    }
+
+    #[test]
+    fn valid_transition_id_requires_nonempty_digits() {
+        assert!(is_valid_transition_id("21"));
+        assert!(is_valid_transition_id("10001"));
+        assert!(!is_valid_transition_id("")); // empty
+        assert!(!is_valid_transition_id("2a")); // non-digit
+        assert!(!is_valid_transition_id("a")); // non-digit
+        assert!(!is_valid_transition_id("2 1")); // space
+        assert!(!is_valid_transition_id("-1")); // sign
+        assert!(!is_valid_transition_id("2\"1")); // injection char
     }
 
     #[test]
