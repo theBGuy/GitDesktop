@@ -40,8 +40,10 @@ impl GitDesktopMcp {
                        with a Jira link (GitHub, GitLab, or Bitbucket), and errors with a link \
                        hint when the repo has none. It never takes a site or project — the stored \
                        link is the single source of truth. `state` is \"open\" (default), \
-                       \"closed\", or \"all\". Returns one page (up to 50, newest-updated first) as \
-                       JSON."
+                       \"closed\", or \"all\". Each issue also carries agile fields when the \
+                       project uses them: story points, active sprint (name + state), parent \
+                       (epic), components, and fix versions. Returns one page (up to 50, \
+                       newest-updated first) as JSON."
     )]
     async fn list_jira_issues(
         &self,
@@ -63,6 +65,8 @@ impl GitDesktopMcp {
                        reporter, labels, description, and comments — bodies converted to markdown) \
                        by key, e.g. \"PROJ-123\", from the repository's LINKED Jira project \
                        (configured in GitDesktop; errors with a link hint when the repo has none). \
+                       When the project uses them, agile fields are included too: story points, \
+                       active sprint (name + state), parent (epic), components, and fix versions. \
                        Never takes a site or project — the stored link is the single source of \
                        truth (the key must belong to the linked project). Returns JSON."
     )]

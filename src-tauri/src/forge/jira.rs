@@ -96,6 +96,20 @@ impl JiraApiBase {
         }
     }
 
+    /// Resolve a relative path against this base's Agile API root (`…/rest/agile/1.0/`).
+    /// The Agile API accepts the same Basic auth and the same Direct/Gateway bases as the
+    /// platform API — only the `rest/…` segment differs. Used for the best-effort
+    /// board-configuration story-points override.
+    fn resolve_agile(&self, path: &str) -> String {
+        let path = path.trim_start_matches('/');
+        match self {
+            JiraApiBase::Direct { site } => format!("https://{site}/rest/agile/1.0/{path}"),
+            JiraApiBase::Gateway { cloud_id } => {
+                format!("https://api.atlassian.com/ex/jira/{cloud_id}/rest/agile/1.0/{path}")
+            }
+        }
+    }
+
     /// The keyring value that persists this mode: `"direct"` or `"gateway:<cloudId>"`.
     fn to_keyring_value(&self) -> String {
         match self {
@@ -124,11 +138,14 @@ impl JiraApiBase {
 }
 
 /// The stored Jira credentials (email + token) plus the resolved API base for one site,
-/// from the OS keyring. Never logged, never returned across IPC.
+/// from the OS keyring. Never logged, never returned across IPC. `site` is the normalized
+/// host (kept alongside the base so the error path can resolve the in-process field-name
+/// map for that site — the Gateway base carries only a cloudId, not the host).
 struct JiraCredentials {
     email: String,
     token: String,
     base: JiraApiBase,
+    site: String,
 }
 
 /// Normalize and validate a Jira Cloud site host. Trims, strips a leading `https://`
@@ -200,14 +217,37 @@ struct JiraErrorEnvelope {
     errors: std::collections::HashMap<String, String>,
 }
 
+/// Whether `key` is a `customfield_NNNNN` id (the only keys eligible for name
+/// translation). Pure.
+fn is_customfield_key(key: &str) -> bool {
+    match key.strip_prefix("customfield_") {
+        Some(n) => !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()),
+        None => false,
+    }
+}
+
+/// Render a field-error key for display, given a `resolve` that maps a field id to its
+/// display name. A `customfield_NNNNN` key with a known name renders the NAME; an unknown
+/// custom id, or any non-customfield key, renders unchanged. Pure (testable) — `resolve`
+/// performs no I/O (it reads the in-process name map).
+fn translate_field_key(key: &str, resolve: impl Fn(&str) -> Option<String>) -> String {
+    if is_customfield_key(key) {
+        if let Some(name) = resolve(key) {
+            return name;
+        }
+    }
+    key.to_string()
+}
+
 impl JiraErrorEnvelope {
     /// The best human message. Prefer the top-level `errorMessages` (Jira's general
     /// failures), then fall back to the field-level `errors` map — but surface ALL field
     /// entries joined as `field: msg`, not just the first, so a create that fails on
     /// several mandatory custom fields names every one of them (rather than dropping all
-    /// but one). Field keys are sorted so the message is deterministic. Empty when neither
+    /// but one). Field keys are sorted so the message is deterministic. `resolve` maps a
+    /// `customfield_NNNNN` id to its display name (in-process, no I/O). Empty when neither
     /// half carries text.
-    fn best_message(&self) -> Option<String> {
+    fn best_message(&self, resolve: impl Fn(&str) -> Option<String>) -> Option<String> {
         if let Some(msg) = self
             .error_messages
             .iter()
@@ -216,12 +256,16 @@ impl JiraErrorEnvelope {
         {
             return Some(msg);
         }
-        self.field_errors_joined()
+        self.field_errors_joined(resolve)
     }
 
     /// Join every non-empty `errors` entry as `field: msg`, sorted by field key for a
-    /// deterministic message. `None` when there are no field errors. Pure (testable).
-    fn field_errors_joined(&self) -> Option<String> {
+    /// deterministic message. Each key is run through [`translate_field_key`] so a known
+    /// `customfield_NNNNN` renders its display name (unknown ids stay raw). `None` when
+    /// there are no field errors. Pure (testable): `resolve` is the only external input and
+    /// performs no I/O. NOTE the sort is on the RAW keys (deterministic and independent of
+    /// whether a name map is warm), then each is translated for display.
+    fn field_errors_joined(&self, resolve: impl Fn(&str) -> Option<String>) -> Option<String> {
         let mut pairs: Vec<(&String, &String)> = self
             .errors
             .iter()
@@ -234,7 +278,7 @@ impl JiraErrorEnvelope {
         Some(
             pairs
                 .into_iter()
-                .map(|(field, msg)| format!("{field}: {msg}"))
+                .map(|(field, msg)| format!("{}: {msg}", translate_field_key(field, &resolve)))
                 .collect::<Vec<_>>()
                 .join("; "),
         )
@@ -243,13 +287,36 @@ impl JiraErrorEnvelope {
 
 /// Turn a non-2xx response body + status into an [`AppError::Jira`], with the
 /// 401/403/429 special-casing the design requires. `body` is the raw response text
-/// (never contains our credentials — those live only in the request header).
+/// (never contains our credentials — those live only in the request header). Field-error
+/// keys are rendered raw (no name translation) — this variant is used where no site is in
+/// scope (base resolution / connect). [`http_error_for`] translates `customfield_NNNNN`
+/// keys for a known site.
 fn http_error(status: u16, body: &str) -> AppError {
+    http_error_with_resolver(status, body, |_| None)
+}
+
+/// [`http_error`] but resolving field-error `customfield_NNNNN` keys to their display
+/// names via the given site's in-process field-name map (populated at discovery time). NO
+/// network or disk I/O — a cold name map simply renders raw ids (today's behavior). Used
+/// by the request helpers, which know the creds' site.
+fn http_error_for(status: u16, body: &str, site: &str) -> AppError {
+    http_error_with_resolver(status, body, |key| {
+        crate::jira_field_maps::field_name(site, key)
+    })
+}
+
+/// The shared body of [`http_error`] / [`http_error_for`]: `resolve` maps a field id to a
+/// display name for the field-error rendering (no-op for the site-less path).
+fn http_error_with_resolver(
+    status: u16,
+    body: &str,
+    resolve: impl Fn(&str) -> Option<String>,
+) -> AppError {
     // Jira's envelope is `{errorMessages, errors}` — note this shape differs from
     // Bitbucket's `{error:{message}}`, so it is parsed with a Jira-local type.
     let api_msg = serde_json::from_str::<JiraErrorEnvelope>(body)
         .ok()
-        .and_then(|e| e.best_message());
+        .and_then(|e| e.best_message(&resolve));
     match status {
         401 => AppError::Jira(
             "Jira rejected the credentials (401) — the API token may be expired or \
@@ -321,7 +388,7 @@ async fn get_json<T: serde::de::DeserializeOwned>(
 ) -> AppResult<T> {
     let (status, body) = raw_request(creds, reqwest::Method::GET, path, None).await?;
     if !(200..300).contains(&status) {
-        return Err(http_error(status, &body));
+        return Err(http_error_for(status, &body, &creds.site));
     }
     serde_json::from_str(&body)
         .map_err(|e| AppError::Jira(format!("could not parse Jira {what}: {e}")))
@@ -337,7 +404,7 @@ async fn post_json<T: serde::de::DeserializeOwned>(
 ) -> AppResult<T> {
     let (status, resp_body) = raw_request(creds, reqwest::Method::POST, path, Some(body)).await?;
     if !(200..300).contains(&status) {
-        return Err(http_error(status, &resp_body));
+        return Err(http_error_for(status, &resp_body, &creds.site));
     }
     serde_json::from_str(&resp_body)
         .map_err(|e| AppError::Jira(format!("could not parse Jira {what}: {e}")))
@@ -354,7 +421,7 @@ async fn send_no_content(
 ) -> AppResult<()> {
     let (status, resp_body) = raw_request(creds, method, path, body).await?;
     if !(200..300).contains(&status) {
-        return Err(http_error(status, &resp_body));
+        return Err(http_error_for(status, &resp_body, &creds.site));
     }
     Ok(())
 }
@@ -376,7 +443,12 @@ async fn load_credentials(site: &str) -> AppResult<JiraCredentials> {
     match (email, token) {
         (Some(email), Some(token)) if !email.is_empty() && !token.is_empty() => {
             let base = JiraApiBase::from_keyring_value(api_base.as_deref(), site);
-            Ok(JiraCredentials { email, token, base })
+            Ok(JiraCredentials {
+                email,
+                token,
+                base,
+                site: site.to_string(),
+            })
         }
         _ => Err(AppError::Jira(
             "No Jira account is connected for this site. Connect it in the Jira link \
@@ -573,6 +645,7 @@ async fn resolve_base(
         base: JiraApiBase::Direct {
             site: site.to_string(),
         },
+        site: site.to_string(),
     };
     let (status, body) = raw_request(&direct, reqwest::Method::GET, "myself", None).await?;
     match decide_after_direct(status) {
@@ -589,6 +662,7 @@ async fn resolve_base(
                 email: email.to_string(),
                 token: token.to_string(),
                 base: JiraApiBase::Gateway { cloud_id },
+                site: site.to_string(),
             };
             let (g_status, g_body) =
                 raw_request(&gateway, reqwest::Method::GET, "myself", None).await?;
@@ -860,6 +934,15 @@ pub async fn project_search(site: &str, query: &str) -> AppResult<Vec<JiraProjec
 
 // ── Issue list ─────────────────────────────────────────────────────────────────
 
+/// Parent (epic) reference — Epic Link was removed from the REST API in 2025;
+/// `parent` is the unified field for team- AND company-managed projects.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraParentRef {
+    pub key: String,
+    pub summary: String,
+}
+
 /// A neutral issue-list row for a Jira issue.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -877,6 +960,19 @@ pub struct JiraIssueInfo {
     pub labels: Vec<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Story points (per-site `customfield_NNNNN`), or `None` when the site has no such
+    /// field or the issue doesn't set it. Serializes as `storyPoints`.
+    pub story_points: Option<f64>,
+    /// The name of the issue's first active sprint (`sprintName`), or `None`.
+    pub sprint_name: Option<String>,
+    /// That sprint's state (`sprintState`), or `None`.
+    pub sprint_state: Option<String>,
+    /// The parent (epic) reference, or `None`.
+    pub parent: Option<JiraParentRef>,
+    /// Component names (empty when none).
+    pub components: Vec<String>,
+    /// Fix-version names (`fixVersions`; empty when none).
+    pub fix_versions: Vec<String>,
     /// `https://<site>/browse/<KEY>`.
     pub url: String,
 }
@@ -928,8 +1024,14 @@ fn status_category_of(fields: &Value) -> String {
 
 /// Map one issue JSON object onto [`JiraIssueInfo`], defensively. Returns `None` when
 /// the object has no usable `key` (so one malformed issue doesn't sink the list); every
-/// other field degrades to empty/None rather than erroring.
-fn map_issue_info(site: &str, issue: &Value) -> Option<JiraIssueInfo> {
+/// other field degrades to empty/None rather than erroring. `map` supplies the site's
+/// discovered custom-field ids for the agile fields (points/sprint) — an empty map means
+/// those simply resolve to `None`.
+fn map_issue_info(
+    site: &str,
+    issue: &Value,
+    map: &crate::jira_field_maps::SiteFieldMap,
+) -> Option<JiraIssueInfo> {
     let key = issue.get("key").and_then(Value::as_str)?.to_string();
     if key.is_empty() {
         return None;
@@ -960,6 +1062,7 @@ fn map_issue_info(site: &str, issue: &Value) -> Option<JiraIssueInfo> {
         .to_string();
     let assignee = parse_user(fields.get("assignee"));
     let labels = parse_labels(fields.get("labels"));
+    let (sprint_name, sprint_state) = extract_sprint(&fields, map);
     Some(JiraIssueInfo {
         summary: fields
             .get("summary")
@@ -983,6 +1086,12 @@ fn map_issue_info(site: &str, issue: &Value) -> Option<JiraIssueInfo> {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string(),
+        story_points: extract_story_points(&fields, map),
+        sprint_name,
+        sprint_state,
+        parent: extract_parent(&fields),
+        components: extract_named_array(&fields, "components"),
+        fix_versions: extract_named_array(&fields, "fixVersions"),
         url: format!("https://{site}/browse/{key}"),
         key,
     })
@@ -1012,9 +1121,92 @@ fn parse_labels(value: Option<&Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The explicit field list the search/detail endpoints must request (they return
-/// almost nothing by default).
-const LIST_FIELDS: &[&str] = &[
+// ── Agile-field extraction (shared by the list + detail mappings) ───────────────
+
+/// The story-points value for an issue, given the site's discovered map. Reads
+/// `fields[<storyPointsFieldId>].as_f64()` only when the map carries an id; `None`
+/// otherwise (a site without a points field, or an issue that doesn't set it). Pure.
+fn extract_story_points(fields: &Value, map: &crate::jira_field_maps::SiteFieldMap) -> Option<f64> {
+    let id = map.story_points_field_id.as_deref()?;
+    fields.get(id).and_then(Value::as_f64)
+}
+
+/// The `(sprintName, sprintState)` of the issue's first ACTIVE sprint, given the site's
+/// map. The `/field` metadata claims the sprint field is `items:"string"`, but the REAL
+/// value is an ARRAY of sprint OBJECTS `{id, name, state, …}` (live-verified) — so we
+/// parse the payload, not the metadata. Takes the first entry whose `state` is not
+/// `"closed"` (case-insensitive). `(None, None)` when there's no id, no array, or no
+/// non-closed sprint. Pure.
+fn extract_sprint(
+    fields: &Value,
+    map: &crate::jira_field_maps::SiteFieldMap,
+) -> (Option<String>, Option<String>) {
+    let Some(id) = map.sprint_field_id.as_deref() else {
+        return (None, None);
+    };
+    let Some(arr) = fields.get(id).and_then(Value::as_array) else {
+        return (None, None);
+    };
+    for sprint in arr {
+        let state = sprint.get("state").and_then(Value::as_str).unwrap_or("");
+        if state.eq_ignore_ascii_case("closed") {
+            continue;
+        }
+        let name = sprint
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let state = if state.is_empty() {
+            None
+        } else {
+            Some(state.to_string())
+        };
+        return (name, state);
+    }
+    (None, None)
+}
+
+/// The parent (epic) reference from `fields.parent` → `{key, fields.summary}`. `None`
+/// when the parent is absent (very old unmigrated issues lack it entirely) or has an
+/// empty/missing key. Pure.
+fn extract_parent(fields: &Value) -> Option<JiraParentRef> {
+    let parent = fields.get("parent")?;
+    let key = parent.get("key").and_then(Value::as_str)?;
+    if key.is_empty() {
+        return None;
+    }
+    let summary = parent
+        .get("fields")
+        .and_then(|f| f.get("summary"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    Some(JiraParentRef {
+        key: key.to_string(),
+        summary,
+    })
+}
+
+/// Collect the non-empty `name` strings from an array-of-objects field (`components` /
+/// `fixVersions`). An absent or non-array value yields an empty vec. Pure.
+fn extract_named_array(fields: &Value, field: &str) -> Vec<String> {
+    fields
+        .get(field)
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.get("name").and_then(Value::as_str))
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The base field list the search/detail endpoints must request (they return almost
+/// nothing by default). The site's discovered custom ids + the agile object fields
+/// (`parent`, `components`, `fixVersions`) are appended by [`list_fields_for`].
+const BASE_LIST_FIELDS: &[&str] = &[
     "summary",
     "status",
     "issuetype",
@@ -1024,6 +1216,314 @@ const LIST_FIELDS: &[&str] = &[
     "created",
     "updated",
 ];
+
+/// Build the field list for `search/jql`: the base skeleton fields + the agile object
+/// fields + the site's discovered custom ids (story points, sprint) when present. Pure.
+fn list_fields_for(map: &crate::jira_field_maps::SiteFieldMap) -> Vec<String> {
+    let mut fields: Vec<String> = BASE_LIST_FIELDS.iter().map(|s| s.to_string()).collect();
+    fields.push("parent".to_string());
+    fields.push("components".to_string());
+    fields.push("fixVersions".to_string());
+    if let Some(id) = map.story_points_field_id.as_deref() {
+        fields.push(id.to_string());
+    }
+    if let Some(id) = map.sprint_field_id.as_deref() {
+        fields.push(id.to_string());
+    }
+    fields
+}
+
+/// The detail (`GET /issue`) `fields=` custom-id suffix — the discovered story-points and
+/// sprint ids joined with commas, each prefixed by `,`, or empty when the site has none.
+/// The base `fields=summary,…,comment` list is a constant in [`issue_view`]; this appends
+/// only the per-site ids (the agile OBJECT fields `parent,components,fixVersions` are in
+/// that constant). Pure.
+fn detail_custom_fields_suffix(map: &crate::jira_field_maps::SiteFieldMap) -> String {
+    let mut suffix = String::new();
+    if let Some(id) = map.story_points_field_id.as_deref() {
+        suffix.push(',');
+        suffix.push_str(id);
+    }
+    if let Some(id) = map.sprint_field_id.as_deref() {
+        suffix.push(',');
+        suffix.push_str(id);
+    }
+    suffix
+}
+
+// ── Custom-field discovery (agile fields — phase 4) ─────────────────────────────
+
+/// Schema keys the story-points / sprint discovery matches against Jira's `/field`
+/// metadata. Live-confirmed on a 2026 tenant.
+const SCHEMA_STORY_POINTS: &str = "com.pyxis.greenhopper.jira:jsw-story-points";
+const SCHEMA_SPRINT: &str = "com.pyxis.greenhopper.jira:gh-sprint";
+
+/// The current UTC timestamp in RFC3339 (millis + `Z`), for the field-map's `resolvedAt`.
+fn now_iso() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// One entry of `GET /rest/api/3/field` (`{id, name, custom, schema:{type, custom,
+/// customId}}`). `schema` is absent on some system fields (tolerated). Every field is
+/// optional/tolerant.
+#[derive(Deserialize, Default)]
+struct JiraFieldMeta {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    schema: Option<JiraFieldSchema>,
+}
+
+/// The `schema` block of a field — `type` (e.g. `"number"`, `"array"`) and `custom` (the
+/// greenhopper marker used to identify agile fields). Tolerant.
+#[derive(Deserialize, Default)]
+struct JiraFieldSchema {
+    #[serde(default, rename = "type")]
+    ty: Option<String>,
+    #[serde(default)]
+    custom: Option<String>,
+}
+
+/// Resolve the sprint + story-points custom-field ids from the `/field` metadata array.
+/// Returns `(storyPointsFieldId, sprintFieldId)`. Pure so the resolution rules are
+/// unit-tested against captured fixtures.
+///
+/// - **Sprint**: the entry whose `schema.custom == "…:gh-sprint"`.
+/// - **Story points**, in order:
+///   1. `schema.custom == "…:jsw-story-points"` (live-confirmed);
+///   2. else a name-match of "Story point estimate" / "Story Points" (case-insensitive)
+///      among entries whose `schema.type == "number"`;
+///   3. else `None`.
+///
+/// NEVER a bare number-type match — a decoy number field ("Budget") must not win.
+fn resolve_field_ids(fields: &[JiraFieldMeta]) -> (Option<String>, Option<String>) {
+    let sprint = fields
+        .iter()
+        .find(|f| f.schema.as_ref().and_then(|s| s.custom.as_deref()) == Some(SCHEMA_SPRINT))
+        .and_then(|f| f.id.clone());
+
+    // (1) schema-first: the greenhopper story-points marker.
+    let points_by_schema = fields
+        .iter()
+        .find(|f| f.schema.as_ref().and_then(|s| s.custom.as_deref()) == Some(SCHEMA_STORY_POINTS))
+        .and_then(|f| f.id.clone());
+
+    let points = points_by_schema.or_else(|| {
+        // (2) name-match, but ONLY among number-type fields (never a bare type match).
+        fields
+            .iter()
+            .find(|f| {
+                let is_number = f.schema.as_ref().and_then(|s| s.ty.as_deref()) == Some("number");
+                let name = f.name.as_deref().unwrap_or("");
+                is_number
+                    && (name.eq_ignore_ascii_case("Story point estimate")
+                        || name.eq_ignore_ascii_case("Story Points"))
+            })
+            .and_then(|f| f.id.clone())
+    });
+
+    (points, sprint)
+}
+
+/// The in-process `id → name` map from the `/field` metadata, for error translation.
+/// Only entries with both an id and a name are included. Pure.
+fn field_name_map(fields: &[JiraFieldMeta]) -> std::collections::HashMap<String, String> {
+    fields
+        .iter()
+        .filter_map(|f| Some((f.id.clone()?, f.name.clone()?)))
+        .collect()
+}
+
+/// The `estimation` block of an Agile board configuration
+/// (`GET /rest/agile/1.0/board/<id>/configuration`). When `type == "field"`, the
+/// `field.fieldId` OVERRIDES the `/field`-derived story-points id.
+#[derive(Deserialize, Default)]
+struct JiraBoardConfig {
+    #[serde(default)]
+    estimation: Option<JiraBoardEstimation>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct JiraBoardEstimation {
+    #[serde(default, rename = "type")]
+    ty: Option<String>,
+    #[serde(default)]
+    field: Option<JiraBoardEstimationField>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct JiraBoardEstimationField {
+    #[serde(default)]
+    field_id: Option<String>,
+}
+
+/// The story-points override a board config implies: `Some(fieldId)` ONLY when
+/// `estimation.type == "field"` and a non-empty `field.fieldId` is present; `None`
+/// otherwise (e.g. `type == "issueCount"`, or a missing field). Pure.
+fn board_config_points_override(config: &JiraBoardConfig) -> Option<String> {
+    let est = config.estimation.as_ref()?;
+    if est.ty.as_deref() != Some("field") {
+        return None;
+    }
+    est.field
+        .as_ref()
+        .and_then(|f| f.field_id.as_deref())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// The `board?projectKeyOrId=…` response — `{values:[{id, …}]}`. Only the first board's
+/// numeric `id` is read.
+#[derive(Deserialize, Default)]
+struct JiraBoardPage {
+    #[serde(default)]
+    values: Vec<JiraBoardRef>,
+}
+
+#[derive(Deserialize, Default)]
+struct JiraBoardRef {
+    #[serde(default)]
+    id: Option<i64>,
+}
+
+/// GET a Jira AGILE endpoint (`…/rest/agile/1.0/…`) expecting JSON, deserializing into
+/// `T`. Mirrors [`get_json`] but resolves the agile base. Non-2xx → [`http_error`]; a
+/// parse failure of a 2xx body → `Jira("could not parse …")`. Used only by the
+/// best-effort board-config override, whose caller swallows ANY error.
+async fn get_json_agile<T: serde::de::DeserializeOwned>(
+    creds: &JiraCredentials,
+    path: &str,
+    what: &str,
+) -> AppResult<T> {
+    let url = creds.base.resolve_agile(path);
+    let resp = client()
+        .get(&url)
+        .basic_auth(&creds.email, Some(&creds.token))
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()
+        .await
+        .map_err(|e| AppError::Jira(format!("Jira request failed: {e}")))?;
+    let status = resp.status().as_u16();
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| AppError::Jira(format!("could not read Jira response: {e}")))?;
+    if !(200..300).contains(&status) {
+        return Err(http_error(status, &body));
+    }
+    serde_json::from_str(&body)
+        .map_err(|e| AppError::Jira(format!("could not parse Jira {what}: {e}")))
+}
+
+/// Best-effort story-points override from the project's first Agile board configuration.
+/// The Agile API needs jira-software scopes many tokens lack, so ANY failure at any step
+/// (401/403/404/parse/missing) yields `None` and the `/field`-derived id stands. Never
+/// errors to the caller.
+async fn board_points_override(creds: &JiraCredentials, project_key: &str) -> Option<String> {
+    let board_path = format!(
+        "board?projectKeyOrId={}&maxResults=1",
+        crate::forge::encode_query_value(project_key)
+    );
+    let page: JiraBoardPage = get_json_agile(creds, &board_path, "board").await.ok()?;
+    let board_id = page.values.first().and_then(|b| b.id)?;
+    let config: JiraBoardConfig = get_json_agile(
+        creds,
+        &format!("board/{board_id}/configuration"),
+        "board config",
+    )
+    .await
+    .ok()?;
+    board_config_points_override(&config)
+}
+
+/// Discover the site's agile custom-field map: fetch `/rest/api/3/field`, resolve the
+/// sprint + story-points ids ([`resolve_field_ids`]), capture the in-process field-NAME
+/// map for error translation, then best-effort-override the story-points id from the
+/// project's board configuration. Persists the resolved entry (even when both ids are
+/// `None` — a site legitimately without agile fields shouldn't be re-probed). On a FAILED
+/// `/field` fetch, persists NOTHING and returns `None` (the caller marks an in-process
+/// empty marker so this process doesn't hammer per call). `project_key` may be empty (the
+/// board override is then skipped).
+async fn discover_field_map(
+    creds: &JiraCredentials,
+    site: &str,
+    project_key: &str,
+) -> Option<crate::jira_field_maps::SiteFieldMap> {
+    let fields: Vec<JiraFieldMeta> = get_json(creds, "field", "fields").await.ok()?;
+
+    // Capture the id→name map for error translation (in-process only).
+    crate::jira_field_maps::set_name_map(site, field_name_map(&fields));
+
+    let (mut points, sprint) = resolve_field_ids(&fields);
+
+    // Best-effort board-config override for the points id (silently degraded).
+    if !project_key.is_empty() {
+        if let Some(overridden) = board_points_override(creds, project_key).await {
+            points = Some(overridden);
+        }
+    }
+
+    let entry = crate::jira_field_maps::SiteFieldMap {
+        story_points_field_id: points,
+        sprint_field_id: sprint,
+        resolved_at: now_iso(),
+    };
+    // A successful /field fetch persists the entry even when both ids are None.
+    crate::jira_field_maps::put(site, entry.clone());
+    Some(entry)
+}
+
+/// The in-process marker set that records sites whose discovery FAILED this process, so
+/// we don't re-probe `/field` on every call. Cleared only by a fresh process launch.
+static DISCOVERY_FAILED: OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    OnceLock::new();
+
+fn discovery_failed() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    DISCOVERY_FAILED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Resolve the site's field map for a request, lazily. Order: (1) the persisted/in-process
+/// cache; (2) the in-process failed-marker (→ empty map, no re-probe); (3) discovery. A
+/// discovery failure records the failed marker and returns the empty (default) map — so the
+/// request proceeds with the skeleton fields and NEVER errors. `project_key` drives the
+/// board-config override (empty skips it).
+async fn resolve_site_map(
+    creds: &JiraCredentials,
+    site: &str,
+    project_key: &str,
+) -> crate::jira_field_maps::SiteFieldMap {
+    if let Some(entry) = crate::jira_field_maps::get(site) {
+        return entry;
+    }
+    // No cached entry — has discovery already failed this process?
+    if discovery_failed()
+        .lock()
+        .map(|s| s.contains(site))
+        .unwrap_or(false)
+    {
+        return crate::jira_field_maps::SiteFieldMap::default();
+    }
+    match discover_field_map(creds, site, project_key).await {
+        Some(entry) => entry,
+        None => {
+            if let Ok(mut s) = discovery_failed().lock() {
+                s.insert(site.to_string());
+            }
+            crate::jira_field_maps::SiteFieldMap::default()
+        }
+    }
+}
+
+/// The project key an issue key belongs to — the prefix before the last `-` (`MYT-5` →
+/// `MYT`). Used for the board-config lookup in `issue_view`. Empty when there's no `-`.
+/// Pure.
+fn project_key_of_issue(key: &str) -> &str {
+    key.rsplit_once('-').map(|(p, _)| p).unwrap_or("")
+}
 
 /// The repo's Jira issues for a linked project. `state` ∈ `"open"` | `"closed"` |
 /// `"all"`. One page of `POST /rest/api/3/search/jql` (`maxResults: 50`); the
@@ -1037,16 +1537,20 @@ pub async fn issue_list(
     // Grammar-validate the key and build the JQL BEFORE any network call.
     let jql = build_list_jql(project_key, state)?;
     let creds = load_credentials(&site).await?;
+    // Resolve the site's agile custom-field map (lazy discovery; failure degrades to the
+    // skeleton fields — never an error). The list uses the project key for the board
+    // override; issue keys always belong to this project.
+    let map = resolve_site_map(&creds, &site, project_key).await;
     let body = json!({
         "jql": jql,
         "maxResults": MAX_RESULTS,
-        "fields": LIST_FIELDS,
+        "fields": list_fields_for(&map),
     });
     let resp: JiraSearchResponse = post_json(&creds, "search/jql", &body, "issues").await?;
     Ok(resp
         .issues
         .iter()
-        .filter_map(|issue| map_issue_info(&site, issue))
+        .filter_map(|issue| map_issue_info(&site, issue, &map))
         .collect())
 }
 
@@ -1080,6 +1584,18 @@ pub struct JiraIssueDetails {
     pub updated_at: String,
     pub due_date: Option<String>,
     pub resolution_name: Option<String>,
+    /// Story points (per-site `customfield_NNNNN`), or `None`. Serializes as `storyPoints`.
+    pub story_points: Option<f64>,
+    /// The name of the issue's first active sprint (`sprintName`), or `None`.
+    pub sprint_name: Option<String>,
+    /// That sprint's state (`sprintState`), or `None`.
+    pub sprint_state: Option<String>,
+    /// The parent (epic) reference, or `None`.
+    pub parent: Option<JiraParentRef>,
+    /// Component names (empty when none).
+    pub components: Vec<String>,
+    /// Fix-version names (`fixVersions`; empty when none).
+    pub fix_versions: Vec<String>,
     /// The description ADF converted to markdown (empty when there's no description).
     pub description_md: String,
     pub comments: Vec<JiraComment>,
@@ -1130,14 +1646,21 @@ pub async fn issue_view(site: &str, key: &str) -> AppResult<JiraIssueDetails> {
         )));
     }
     let creds = load_credentials(&site).await?;
+    // Resolve the site's agile custom-field map (lazy discovery; failure degrades to the
+    // skeleton fields — never an error). Derive the project key from the issue key's prefix
+    // for the board-config override.
+    let map = resolve_site_map(&creds, &site, project_key_of_issue(key)).await;
+    let custom = detail_custom_fields_suffix(&map);
     let path = format!(
         "issue/{key}?fields=summary,description,status,issuetype,priority,assignee,\
-         reporter,labels,created,updated,duedate,resolution,comment"
+         reporter,labels,created,updated,duedate,resolution,parent,components,fixVersions,\
+         comment{custom}"
     );
     let issue: Value = get_json(&creds, &path, "issue").await?;
     let fields = issue.get("fields").cloned().unwrap_or(Value::Null);
 
     let issue_type = fields.get("issuetype");
+    let (sprint_name, sprint_state) = extract_sprint(&fields, &map);
     let description_md = fields
         .get("description")
         .filter(|d| !d.is_null())
@@ -1198,6 +1721,12 @@ pub async fn issue_view(site: &str, key: &str) -> AppResult<JiraIssueDetails> {
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
             .map(str::to_string),
+        story_points: extract_story_points(&fields, &map),
+        sprint_name,
+        sprint_state,
+        parent: extract_parent(&fields),
+        components: extract_named_array(&fields, "components"),
+        fix_versions: extract_named_array(&fields, "fixVersions"),
         description_md,
         comments: map_comments(&fields),
         url: format!("https://{site}/browse/{key}"),
@@ -2018,7 +2547,12 @@ mod tests {
                 "updated": "2026-01-02T00:00:00.000+0000"
             }
         });
-        let info = map_issue_info("team.atlassian.net", &issue).unwrap();
+        let info = map_issue_info(
+            "team.atlassian.net",
+            &issue,
+            &crate::jira_field_maps::SiteFieldMap::default(),
+        )
+        .unwrap();
         assert_eq!(info.key, "PROJ-7");
         assert_eq!(info.summary, "Fix the bug");
         assert_eq!(info.status_name, "To Do");
@@ -2032,6 +2566,12 @@ mod tests {
         assert_eq!(a.label, "Ada");
         assert_eq!(a.avatar_url, "https://av");
         assert_eq!(info.labels, vec!["backend", "urgent"]);
+        // With a default (empty) map, agile fields all degrade to None/empty.
+        assert!(info.story_points.is_none());
+        assert!(info.sprint_name.is_none());
+        assert!(info.parent.is_none());
+        assert!(info.components.is_empty());
+        assert!(info.fix_versions.is_empty());
     }
 
     #[test]
@@ -2041,7 +2581,12 @@ mod tests {
             "key": "PROJ-1",
             "fields": { "assignee": null, "priority": null, "labels": null }
         });
-        let info = map_issue_info("s.atlassian.net", &issue).unwrap();
+        let info = map_issue_info(
+            "s.atlassian.net",
+            &issue,
+            &crate::jira_field_maps::SiteFieldMap::default(),
+        )
+        .unwrap();
         assert_eq!(info.key, "PROJ-1");
         assert_eq!(info.summary, "");
         assert_eq!(info.priority_name, "");
@@ -2051,8 +2596,9 @@ mod tests {
 
     #[test]
     fn map_issue_info_skips_keyless_issue() {
-        assert!(map_issue_info("s.atlassian.net", &json!({ "fields": {} })).is_none());
-        assert!(map_issue_info("s.atlassian.net", &json!({ "key": "" })).is_none());
+        let empty = crate::jira_field_maps::SiteFieldMap::default();
+        assert!(map_issue_info("s.atlassian.net", &json!({ "fields": {} }), &empty).is_none());
+        assert!(map_issue_info("s.atlassian.net", &json!({ "key": "" }), &empty).is_none());
     }
 
     #[test]
@@ -2315,21 +2861,22 @@ mod tests {
                 ("blank".to_string(), "   ".to_string()), // empty → dropped
             ]),
         };
-        let joined = env.field_errors_joined().unwrap();
+        // With no name map (resolver returns None), keys render raw — today's behavior.
+        let joined = env.field_errors_joined(|_| None).unwrap();
         // Sorted by field key; the whitespace-only entry is dropped.
         assert_eq!(
             joined,
             "customfield_10020: Sprint is required.; summary: Summary is required."
         );
         // best_message uses field errors when errorMessages is empty.
-        assert_eq!(env.best_message().unwrap(), joined);
+        assert_eq!(env.best_message(|_| None).unwrap(), joined);
     }
 
     #[test]
     fn field_errors_joined_none_when_empty() {
         let env = JiraErrorEnvelope::default();
-        assert!(env.field_errors_joined().is_none());
-        assert!(env.best_message().is_none());
+        assert!(env.field_errors_joined(|_| None).is_none());
+        assert!(env.best_message(|_| None).is_none());
     }
 
     #[test]
@@ -2341,7 +2888,68 @@ mod tests {
                 "Summary is required.".to_string(),
             )]),
         };
-        assert_eq!(env.best_message().unwrap(), "Top-level failure");
+        assert_eq!(env.best_message(|_| None).unwrap(), "Top-level failure");
+    }
+
+    #[test]
+    fn is_customfield_key_matches_only_numeric_customfields() {
+        assert!(is_customfield_key("customfield_10016"));
+        assert!(is_customfield_key("customfield_1"));
+        assert!(!is_customfield_key("customfield_")); // no digits
+        assert!(!is_customfield_key("customfield_10a")); // non-digit
+        assert!(!is_customfield_key("summary"));
+        assert!(!is_customfield_key("customfield")); // no underscore/number
+        assert!(!is_customfield_key("Customfield_10")); // case-sensitive prefix
+    }
+
+    #[test]
+    fn translate_field_key_known_unknown_and_nonmatch() {
+        // Known custom id → name.
+        let resolve =
+            |k: &str| (k == "customfield_10016").then(|| "Story point estimate".to_string());
+        assert_eq!(
+            translate_field_key("customfield_10016", resolve),
+            "Story point estimate"
+        );
+        // Unknown custom id → raw.
+        assert_eq!(
+            translate_field_key("customfield_99999", resolve),
+            "customfield_99999"
+        );
+        // Non-customfield key → raw (resolver never consulted).
+        assert_eq!(translate_field_key("summary", resolve), "summary");
+        // No-map resolver → raw (today's behavior).
+        assert_eq!(
+            translate_field_key("customfield_10016", |_| None),
+            "customfield_10016"
+        );
+    }
+
+    #[test]
+    fn field_errors_joined_translates_known_customfield_names() {
+        // A warm name map renders friendly field names; unknown ids stay raw. The sort is
+        // on the RAW keys (deterministic regardless of the map).
+        let env = JiraErrorEnvelope {
+            error_messages: vec![],
+            errors: std::collections::HashMap::from([
+                (
+                    "customfield_10016".to_string(),
+                    "Story point estimate is required.".to_string(),
+                ),
+                (
+                    "customfield_99999".to_string(),
+                    "Mystery is required.".to_string(),
+                ),
+            ]),
+        };
+        let resolve =
+            |k: &str| (k == "customfield_10016").then(|| "Story point estimate".to_string());
+        let joined = env.field_errors_joined(resolve).unwrap();
+        assert_eq!(
+            joined,
+            "Story point estimate: Story point estimate is required.; \
+             customfield_99999: Mystery is required."
+        );
     }
 
     #[test]
@@ -2513,5 +3121,260 @@ mod tests {
         assert_eq!(types[1].id, "10002");
         assert_eq!(types[1].name, "Sub-task");
         assert!(types[1].subtask);
+    }
+
+    // ── Phase 4: agile custom-field discovery + extraction ───────────────────────
+
+    /// A verbatim-shaped `GET /rest/api/3/field` slice: the jsw-story-points entry, the
+    /// gh-sprint entry, a "Budget" number decoy, and a schema-less system field. Parsed
+    /// through the real `JiraFieldMeta` structs (the from-live-JSON rule).
+    fn field_metadata_body() -> &'static str {
+        r#"[
+            { "id": "summary", "name": "Summary", "custom": false },
+            { "id": "customfield_10016", "name": "Story point estimate", "custom": true,
+              "schema": { "type": "number", "custom": "com.pyxis.greenhopper.jira:jsw-story-points", "customId": 10016 } },
+            { "id": "customfield_10020", "name": "Sprint", "custom": true,
+              "schema": { "type": "array", "items": "string", "custom": "com.pyxis.greenhopper.jira:gh-sprint", "customId": 10020 } },
+            { "id": "customfield_10099", "name": "Budget", "custom": true,
+              "schema": { "type": "number", "custom": "com.example:budget", "customId": 10099 } }
+        ]"#
+    }
+
+    #[test]
+    fn resolve_field_ids_schema_first_and_decoy_never_matches() {
+        let fields: Vec<JiraFieldMeta> = serde_json::from_str(field_metadata_body()).unwrap();
+        let (points, sprint) = resolve_field_ids(&fields);
+        // Schema-first wins → the jsw-story-points id, NOT the "Budget" number decoy.
+        assert_eq!(points.as_deref(), Some("customfield_10016"));
+        assert_eq!(sprint.as_deref(), Some("customfield_10020"));
+
+        // The in-process name map covers every id+name entry.
+        let names = field_name_map(&fields);
+        assert_eq!(
+            names.get("customfield_10016").map(String::as_str),
+            Some("Story point estimate")
+        );
+        assert_eq!(
+            names.get("customfield_10099").map(String::as_str),
+            Some("Budget")
+        );
+    }
+
+    #[test]
+    fn resolve_field_ids_name_match_fallback_never_matches_decoy() {
+        // Remove the jsw-story-points entry → the name-match fallback resolves "Story point
+        // estimate" among number-type fields; the "Budget" number decoy still never wins.
+        let body = r#"[
+            { "id": "customfield_10016", "name": "Story point estimate", "custom": true,
+              "schema": { "type": "number", "custom": "com.example:points-lookalike", "customId": 10016 } },
+            { "id": "customfield_10020", "name": "Sprint", "custom": true,
+              "schema": { "type": "array", "custom": "com.pyxis.greenhopper.jira:gh-sprint", "customId": 10020 } },
+            { "id": "customfield_10099", "name": "Budget", "custom": true,
+              "schema": { "type": "number", "custom": "com.example:budget", "customId": 10099 } }
+        ]"#;
+        let fields: Vec<JiraFieldMeta> = serde_json::from_str(body).unwrap();
+        let (points, sprint) = resolve_field_ids(&fields);
+        assert_eq!(points.as_deref(), Some("customfield_10016"));
+        assert_eq!(sprint.as_deref(), Some("customfield_10020"));
+    }
+
+    #[test]
+    fn resolve_field_ids_none_when_no_agile_fields() {
+        // A site with only a number decoy and no sprint field → both None (never the decoy).
+        let body = r#"[
+            { "id": "summary", "name": "Summary", "custom": false },
+            { "id": "customfield_10099", "name": "Budget", "custom": true,
+              "schema": { "type": "number", "custom": "com.example:budget" } }
+        ]"#;
+        let fields: Vec<JiraFieldMeta> = serde_json::from_str(body).unwrap();
+        let (points, sprint) = resolve_field_ids(&fields);
+        assert!(points.is_none(), "decoy number field must not match");
+        assert!(sprint.is_none());
+    }
+
+    #[test]
+    fn full_issue_extraction_from_live_shape() {
+        // Verbatim-shaped issue JSON: points 3, a sprint array with one closed + one active
+        // sprint OBJECT (the metadata lies about items:"string" — the value is objects),
+        // a parent object {key, fields:{summary}}, and components/fixVersions arrays.
+        let map = crate::jira_field_maps::SiteFieldMap {
+            story_points_field_id: Some("customfield_10016".to_string()),
+            sprint_field_id: Some("customfield_10020".to_string()),
+            resolved_at: "2026-07-11T00:00:00.000Z".to_string(),
+        };
+        let issue = json!({
+            "key": "MYT-5",
+            "fields": {
+                "summary": "Agile issue",
+                "status": { "name": "In Progress", "statusCategory": { "key": "indeterminate" } },
+                "issuetype": { "name": "Story", "iconUrl": "https://icon" },
+                "customfield_10016": 3,
+                "customfield_10020": [
+                    { "id": 1, "name": "Sprint 1", "state": "closed" },
+                    { "id": 2, "name": "Sprint 2", "state": "active" }
+                ],
+                "parent": { "key": "MYT-1", "fields": { "summary": "The epic" } },
+                "components": [ { "name": "backend" }, { "name": "api" }, { "id": 9 } ],
+                "fixVersions": [ { "name": "v1.2" } ]
+            }
+        });
+        let info = map_issue_info("team.atlassian.net", &issue, &map).unwrap();
+        assert_eq!(info.story_points, Some(3.0));
+        // First non-closed sprint wins.
+        assert_eq!(info.sprint_name.as_deref(), Some("Sprint 2"));
+        assert_eq!(info.sprint_state.as_deref(), Some("active"));
+        let parent = info.parent.unwrap();
+        assert_eq!(parent.key, "MYT-1");
+        assert_eq!(parent.summary, "The epic");
+        assert_eq!(info.components, vec!["backend", "api"]); // name-less entry skipped
+        assert_eq!(info.fix_versions, vec!["v1.2"]);
+
+        // The same extraction helpers back issue_view — exercise them directly on the
+        // fields object so both mapping sites are covered.
+        let fields = issue.get("fields").unwrap();
+        assert_eq!(extract_story_points(fields, &map), Some(3.0));
+        let (sn, ss) = extract_sprint(fields, &map);
+        assert_eq!(sn.as_deref(), Some("Sprint 2"));
+        assert_eq!(ss.as_deref(), Some("active"));
+        assert_eq!(
+            extract_named_array(fields, "components"),
+            vec!["backend", "api"]
+        );
+    }
+
+    #[test]
+    fn extraction_absence_degrades_to_none_and_empty() {
+        // None of the agile fields present → all None/empty (a site/issue without them).
+        let map = crate::jira_field_maps::SiteFieldMap {
+            story_points_field_id: Some("customfield_10016".to_string()),
+            sprint_field_id: Some("customfield_10020".to_string()),
+            resolved_at: String::new(),
+        };
+        let issue = json!({
+            "key": "MYT-9",
+            "fields": { "summary": "Bare", "status": { "name": "To Do" } }
+        });
+        let info = map_issue_info("s.atlassian.net", &issue, &map).unwrap();
+        assert!(info.story_points.is_none());
+        assert!(info.sprint_name.is_none());
+        assert!(info.sprint_state.is_none());
+        assert!(info.parent.is_none());
+        assert!(info.components.is_empty());
+        assert!(info.fix_versions.is_empty());
+    }
+
+    #[test]
+    fn extract_sprint_all_closed_yields_none() {
+        let map = crate::jira_field_maps::SiteFieldMap {
+            sprint_field_id: Some("customfield_10020".to_string()),
+            ..Default::default()
+        };
+        let fields = json!({
+            "customfield_10020": [
+                { "name": "Sprint 1", "state": "CLOSED" },
+                { "name": "Sprint 0", "state": "closed" }
+            ]
+        });
+        assert_eq!(extract_sprint(&fields, &map), (None, None));
+        // A non-array sprint value → None.
+        let fields2 = json!({ "customfield_10020": "not an array" });
+        assert_eq!(extract_sprint(&fields2, &map), (None, None));
+    }
+
+    #[test]
+    fn extract_story_points_only_with_id() {
+        // No id in the map → None even when the field is present.
+        let empty = crate::jira_field_maps::SiteFieldMap::default();
+        let fields = json!({ "customfield_10016": 5 });
+        assert!(extract_story_points(&fields, &empty).is_none());
+        let map = crate::jira_field_maps::SiteFieldMap {
+            story_points_field_id: Some("customfield_10016".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(extract_story_points(&fields, &map), Some(5.0));
+    }
+
+    #[test]
+    fn extract_parent_empty_key_is_none() {
+        assert!(extract_parent(&json!({ "parent": { "key": "" } })).is_none());
+        assert!(extract_parent(&json!({})).is_none());
+        // Parent with a key but no nested summary → summary empty, still Some.
+        let p = extract_parent(&json!({ "parent": { "key": "EPIC-1" } })).unwrap();
+        assert_eq!(p.key, "EPIC-1");
+        assert_eq!(p.summary, "");
+    }
+
+    #[test]
+    fn list_fields_builder_appends_custom_ids_when_present() {
+        let empty = crate::jira_field_maps::SiteFieldMap::default();
+        let base = list_fields_for(&empty);
+        assert!(base.contains(&"parent".to_string()));
+        assert!(base.contains(&"components".to_string()));
+        assert!(base.contains(&"fixVersions".to_string()));
+        // No custom ids when the map is empty.
+        assert!(!base.iter().any(|f| f.starts_with("customfield_")));
+
+        let map = crate::jira_field_maps::SiteFieldMap {
+            story_points_field_id: Some("customfield_10016".to_string()),
+            sprint_field_id: Some("customfield_10020".to_string()),
+            resolved_at: String::new(),
+        };
+        let full = list_fields_for(&map);
+        assert!(full.contains(&"customfield_10016".to_string()));
+        assert!(full.contains(&"customfield_10020".to_string()));
+
+        // The detail suffix appends the same ids, comma-prefixed; empty for an empty map.
+        assert_eq!(detail_custom_fields_suffix(&empty), "");
+        assert_eq!(
+            detail_custom_fields_suffix(&map),
+            ",customfield_10016,customfield_10020"
+        );
+    }
+
+    #[test]
+    fn board_config_override_only_for_field_estimation() {
+        // estimation.type == "field" overrides with its fieldId.
+        let field_cfg: JiraBoardConfig = serde_json::from_str(
+            r#"{ "estimation": { "type": "field",
+                 "field": { "fieldId": "customfield_10030", "displayName": "Story Points" } } }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            board_config_points_override(&field_cfg).as_deref(),
+            Some("customfield_10030")
+        );
+        // estimation.type == "issueCount" → no override.
+        let count_cfg: JiraBoardConfig =
+            serde_json::from_str(r#"{ "estimation": { "type": "issueCount" } }"#).unwrap();
+        assert!(board_config_points_override(&count_cfg).is_none());
+        // Missing estimation entirely → no override.
+        let none_cfg: JiraBoardConfig = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(board_config_points_override(&none_cfg).is_none());
+    }
+
+    #[test]
+    fn project_key_of_issue_takes_prefix() {
+        assert_eq!(project_key_of_issue("MYT-5"), "MYT");
+        assert_eq!(project_key_of_issue("MY_PROJ-123"), "MY_PROJ");
+        // No hyphen → empty (board override then skipped).
+        assert_eq!(project_key_of_issue("nohyphen"), "");
+    }
+
+    #[test]
+    fn agile_base_builds_agile_urls() {
+        let direct = JiraApiBase::Direct {
+            site: "team.atlassian.net".into(),
+        };
+        assert_eq!(
+            direct.resolve_agile("board?projectKeyOrId=MYT"),
+            "https://team.atlassian.net/rest/agile/1.0/board?projectKeyOrId=MYT"
+        );
+        let gateway = JiraApiBase::Gateway {
+            cloud_id: "abc-123".into(),
+        };
+        assert_eq!(
+            gateway.resolve_agile("board/5/configuration"),
+            "https://api.atlassian.com/ex/jira/abc-123/rest/agile/1.0/board/5/configuration"
+        );
     }
 }

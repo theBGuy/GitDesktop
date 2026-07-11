@@ -11,6 +11,7 @@ mod github;
 mod health;
 mod hooks;
 mod instructions;
+mod jira_field_maps;
 mod jira_links;
 mod local_issues;
 mod local_prs;

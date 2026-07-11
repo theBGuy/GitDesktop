@@ -128,8 +128,10 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
   repo ⋯ menu's **Link Jira project…**, or the command palette) and its Issues tab gains a
   **Jira** section: browse and filter your project's issues (open / closed / all,
   mapped to Jira's status categories), and open one to read its **status**, **type**,
-  **priority**, **assignee**, **labels**, Markdown **description**, and **comments**, with
-  **View in Jira** link-outs. You can also **create** an issue (summary, description, and an
+  **priority**, **assignee**, **labels**, Markdown **description**, and **comments**, plus
+  the project's **agile fields** when it uses them — **story points** (also on the list rows),
+  **sprint**, a clickable **epic / parent**, **components**, and **fix versions**, discovered
+  automatically per site with nothing to configure — with **View in Jira** link-outs. You can also **create** an issue (summary, description, and an
   issue-type picker), **comment** in Markdown, **close / reopen** by following the project's
   own workflow (the confirmation names the real resulting status) — or jump to any workflow
   status from the **status menu** on the chip — and **assign / unassign** via

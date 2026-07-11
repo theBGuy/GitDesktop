@@ -27,7 +27,7 @@ import {
   useJiraLink,
   useJiraPermissions,
 } from "@/lib/jira/queries";
-import type { JiraIssueInfo } from "@/lib/jira/types";
+import { formatStoryPoints, type JiraIssueInfo } from "@/lib/jira/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
 import { formatRelativeTime } from "@/lib/time";
@@ -384,6 +384,15 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
                 <>
                   <div className="flex min-h-6 items-center gap-1.5">
                     <JiraStatusChip issue={issue} />
+                    {issue.storyPoints != null && (
+                      <span
+                        className="w-fit whitespace-nowrap border px-1 py-px text-[10px] text-muted-foreground"
+                        title="Story points"
+                        aria-label={`${formatStoryPoints(issue.storyPoints)} story points`}
+                      >
+                        {formatStoryPoints(issue.storyPoints)}
+                      </span>
+                    )}
                     {issue.assignee && (
                       <span className="ml-auto shrink-0">
                         <ForgeUserAvatar user={issue.assignee} ghHost={null} />

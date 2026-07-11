@@ -791,6 +791,11 @@ ones. The open / closed / all filter maps to Jira's status **categories** — "T
 **assignee**, and **labels**, plus the Markdown **description** and **comments**. Every
 issue links out with **View in Jira**.
 
+When the project uses them, issues also show their **agile fields** — **story points** (both
+on the list rows and in the detail), **sprint**, a clickable **epic / parent** (open it to
+jump to that issue), **components**, and **fix versions**. These are resolved automatically
+per Jira site, so there's nothing to configure; they're read-only here for now.
+
 You can work an issue without leaving the tab. **Create** one ({{kbd:create-jira-issue}}
 from the palette) with a summary, Markdown description, and an **issue-type** picker;
 **comment** in Markdown; **close or reopen** it by following the project's own workflow —

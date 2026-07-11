@@ -48,7 +48,11 @@ import {
   useJiraUserSearch,
 } from "@/lib/jira/queries";
 import type { JiraLink } from "@/lib/jira/store";
-import type { JiraIssueDetails, JiraStatusCategory } from "@/lib/jira/types";
+import {
+  formatStoryPoints,
+  type JiraIssueDetails,
+  type JiraStatusCategory,
+} from "@/lib/jira/types";
 import { useUiStore } from "@/lib/stores/ui";
 import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
@@ -519,6 +523,37 @@ export function JiraIssueView({
           {issue.resolutionName && (
             <span>Resolution: {issue.resolutionName}</span>
           )}
+          {issue.storyPoints != null && (
+            <span>Points: {formatStoryPoints(issue.storyPoints)}</span>
+          )}
+          {issue.sprintName && (
+            <span>
+              Sprint: {issue.sprintName}
+              {issue.sprintState ? ` (${issue.sprintState})` : ""}
+            </span>
+          )}
+          {issue.parent && (
+            <button
+              type="button"
+              // Navigate to the parent in-app. This view already lives inside
+              // the Issues tab, so `selectIssue` alone re-targets it — no
+              // `setRepoTab` needed (unlike JiraRefRow, which renders on OTHER
+              // tabs and must switch to Issues first).
+              onClick={() =>
+                issue.parent &&
+                selectIssue({ kind: "jira", id: issue.parent.key })
+              }
+              title={`${issue.parent.key} ${issue.parent.summary}`}
+              aria-label={`Open parent issue ${issue.parent.key}`}
+              className="inline-flex cursor-pointer items-center gap-1 border px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-accent"
+            >
+              <span>Parent:</span>
+              <span className="font-mono">{issue.parent.key}</span>
+              <span className="max-w-[16rem] truncate">
+                {issue.parent.summary}
+              </span>
+            </button>
+          )}
         </div>
         {issue.labels.length > 0 && (
           <div className="flex flex-wrap items-center gap-1.5">
@@ -528,6 +563,39 @@ export function JiraIssueView({
                 className="border px-1.5 py-0.5 text-[11px] text-muted-foreground"
               >
                 {label}
+              </span>
+            ))}
+          </div>
+        )}
+        {/* Each chip group is prefixed with a muted label so the three
+            visually-identical bare-chip sets (labels / components / fix
+            versions) are never ambiguous. Rendered only when non-empty. */}
+        {issue.components.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] text-muted-foreground">
+              Components
+            </span>
+            {issue.components.map((component) => (
+              <span
+                key={component}
+                className="border px-1.5 py-0.5 text-[11px] text-muted-foreground"
+              >
+                {component}
+              </span>
+            ))}
+          </div>
+        )}
+        {issue.fixVersions.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] text-muted-foreground">
+              Fix versions
+            </span>
+            {issue.fixVersions.map((version) => (
+              <span
+                key={version}
+                className="border px-1.5 py-0.5 text-[11px] text-muted-foreground"
+              >
+                {version}
               </span>
             ))}
           </div>

@@ -38,6 +38,15 @@ export type JiraStatusCategory = "new" | "indeterminate" | "done" | "";
 /** The open/closed/all filter, mapped through `statusCategory` on the backend. */
 export type JiraIssueState = "open" | "closed" | "all";
 
+/** A reference to an issue's parent, as surfaced by the agile fields. Jira's
+ *  `parent` field is the unified epic/parent reference — the dedicated "Epic
+ *  Link" custom field was removed from the REST API in 2025, so `parent` is the
+ *  single source for both an epic link and a subtask's parent story. */
+export interface JiraParentRef {
+  key: string;
+  summary: string;
+}
+
 /** A Jira issue as it appears in the list (one page, `maxResults` bounded). */
 export interface JiraIssueInfo {
   key: string;
@@ -53,6 +62,28 @@ export interface JiraIssueInfo {
   createdAt: string;
   updatedAt: string;
   url: string;
+  // ── Agile fields (phase 4, read-only) ──────────────────────────────────────
+  // Resolved lazily from per-site custom fields on the backend; every one is
+  // null/empty on a site without agile fields, so all UI omits-when-empty.
+  /** Story-points estimate; `null` when unset or the site has no points field. */
+  storyPoints: number | null;
+  /** Active/upcoming sprint name; `null` when the issue is in no sprint. */
+  sprintName: string | null;
+  /** The sprint's state, e.g. "active" | "future" — a display-only string. */
+  sprintState: string | null;
+  /** The unified epic/parent reference; `null` when the issue has no parent. */
+  parent: JiraParentRef | null;
+  /** Component names attached to the issue (empty when none). */
+  components: string[];
+  /** Fix-version names attached to the issue (empty when none). */
+  fixVersions: string[];
+}
+
+/** Format a story-points value for display: whole numbers without a decimal
+ *  (`3`, not `3.0`), non-integers to one decimal (`2.5`). Shared by the list
+ *  row pill and the detail meta row so the two never diverge. */
+export function formatStoryPoints(points: number): string {
+  return Number.isInteger(points) ? String(points) : points.toFixed(1);
 }
 
 /** One comment on a Jira issue, body already converted ADF → markdown. */
