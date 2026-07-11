@@ -524,7 +524,7 @@ export function JiraIssueView({
             <span>Resolution: {issue.resolutionName}</span>
           )}
           {issue.storyPoints != null && (
-            <span>Points: {formatStoryPoints(issue.storyPoints)}</span>
+            <span>Story points: {formatStoryPoints(issue.storyPoints)}</span>
           )}
           {issue.sprintName && (
             <span>
@@ -539,6 +539,9 @@ export function JiraIssueView({
               // the Issues tab, so `selectIssue` alone re-targets it — no
               // `setRepoTab` needed (unlike JiraRefRow, which renders on OTHER
               // tabs and must switch to Issues first).
+              // The `issue.parent &&` below is NOT dead: TS narrowing from the
+              // outer `{issue.parent && …}` doesn't extend into a callback
+              // (TS18047 without it) — it satisfies the compiler, not runtime.
               onClick={() =>
                 issue.parent &&
                 selectIssue({ kind: "jira", id: issue.parent.key })

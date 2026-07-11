@@ -1298,11 +1298,20 @@ struct JiraFieldSchema {
 ///   3. else `None`.
 ///
 /// NEVER a bare number-type match — a decoy number field ("Budget") must not win.
+///
+/// Both returned ids are grammar-validated against `^customfield_[0-9]+$`
+/// ([`crate::jira_field_maps::is_valid_field_id`]) — a hostile id from `/field` (e.g.
+/// `customfield_10016&extra=1`, which would inject query params when spliced unencoded into
+/// a request URL) is rejected here, degrading to `None`.
 fn resolve_field_ids(fields: &[JiraFieldMeta]) -> (Option<String>, Option<String>) {
-    let sprint = fields
-        .iter()
-        .find(|f| f.schema.as_ref().and_then(|s| s.custom.as_deref()) == Some(SCHEMA_SPRINT))
-        .and_then(|f| f.id.clone());
+    let valid = |id: Option<String>| id.filter(|s| crate::jira_field_maps::is_valid_field_id(s));
+
+    let sprint = valid(
+        fields
+            .iter()
+            .find(|f| f.schema.as_ref().and_then(|s| s.custom.as_deref()) == Some(SCHEMA_SPRINT))
+            .and_then(|f| f.id.clone()),
+    );
 
     // (1) schema-first: the greenhopper story-points marker.
     let points_by_schema = fields
@@ -1310,7 +1319,7 @@ fn resolve_field_ids(fields: &[JiraFieldMeta]) -> (Option<String>, Option<String
         .find(|f| f.schema.as_ref().and_then(|s| s.custom.as_deref()) == Some(SCHEMA_STORY_POINTS))
         .and_then(|f| f.id.clone());
 
-    let points = points_by_schema.or_else(|| {
+    let points = valid(points_by_schema.or_else(|| {
         // (2) name-match, but ONLY among number-type fields (never a bare type match).
         fields
             .iter()
@@ -1322,17 +1331,25 @@ fn resolve_field_ids(fields: &[JiraFieldMeta]) -> (Option<String>, Option<String
                         || name.eq_ignore_ascii_case("Story Points"))
             })
             .and_then(|f| f.id.clone())
-    });
+    }));
 
     (points, sprint)
 }
 
-/// The in-process `id → name` map from the `/field` metadata, for error translation.
-/// Only entries with both an id and a name are included. Pure.
+/// The `customfield_NNNNN → name` map from the `/field` metadata, for error translation.
+/// Only entries whose id is a well-formed `customfield_*` (and that carry a name) are kept
+/// — those are the only keys error translation ever looks up, and keeping the map small
+/// keeps the persisted entry small. Pure.
 fn field_name_map(fields: &[JiraFieldMeta]) -> std::collections::HashMap<String, String> {
     fields
         .iter()
-        .filter_map(|f| Some((f.id.clone()?, f.name.clone()?)))
+        .filter_map(|f| {
+            let id = f.id.clone()?;
+            if !crate::jira_field_maps::is_valid_field_id(&id) {
+                return None;
+            }
+            Some((id, f.name.clone()?))
+        })
         .collect()
 }
 
@@ -1362,8 +1379,10 @@ struct JiraBoardEstimationField {
 }
 
 /// The story-points override a board config implies: `Some(fieldId)` ONLY when
-/// `estimation.type == "field"` and a non-empty `field.fieldId` is present; `None`
-/// otherwise (e.g. `type == "issueCount"`, or a missing field). Pure.
+/// `estimation.type == "field"` and a `field.fieldId` that is a well-formed
+/// `customfield_NNNNN` ([`crate::jira_field_maps::is_valid_field_id`]) is present; `None`
+/// otherwise (e.g. `type == "issueCount"`, a missing field, or a hostile id that would
+/// inject into the request URL). Pure.
 fn board_config_points_override(config: &JiraBoardConfig) -> Option<String> {
     let est = config.estimation.as_ref()?;
     if est.ty.as_deref() != Some("field") {
@@ -1372,7 +1391,7 @@ fn board_config_points_override(config: &JiraBoardConfig) -> Option<String> {
     est.field
         .as_ref()
         .and_then(|f| f.field_id.as_deref())
-        .filter(|s| !s.is_empty())
+        .filter(|s| crate::jira_field_maps::is_valid_field_id(s))
         .map(str::to_string)
 }
 
@@ -1455,12 +1474,17 @@ async fn discover_field_map(
 ) -> Option<crate::jira_field_maps::SiteFieldMap> {
     let fields: Vec<JiraFieldMeta> = get_json(creds, "field", "fields").await.ok()?;
 
-    // Capture the id→name map for error translation (in-process only).
-    crate::jira_field_maps::set_name_map(site, field_name_map(&fields));
+    // The customfield_* id→name map for error translation. Captured from THIS /field
+    // response and PERSISTED on the entry (so restarts / the headless MCP get warm
+    // translation without a network round-trip), and also set in-process now for immediate
+    // warmth this call.
+    let names = field_name_map(&fields);
+    crate::jira_field_maps::set_name_map(site, names.clone());
 
     let (mut points, sprint) = resolve_field_ids(&fields);
 
-    // Best-effort board-config override for the points id (silently degraded).
+    // Best-effort board-config override for the points id (silently degraded). The override
+    // is itself grammar-validated in `board_config_points_override`.
     if !project_key.is_empty() {
         if let Some(overridden) = board_points_override(creds, project_key).await {
             points = Some(overridden);
@@ -1470,6 +1494,7 @@ async fn discover_field_map(
     let entry = crate::jira_field_maps::SiteFieldMap {
         story_points_field_id: points,
         sprint_field_id: sprint,
+        field_names: Some(names),
         resolved_at: now_iso(),
     };
     // A successful /field fetch persists the entry even when both ids are None.
@@ -1486,11 +1511,36 @@ fn discovery_failed() -> &'static std::sync::Mutex<std::collections::HashSet<Str
     DISCOVERY_FAILED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
 }
 
+/// Per-site async locks that COALESCE concurrent discovery: while one `resolve_site_map`
+/// for a cold site runs discovery, other racers for the SAME site await the same lock and
+/// then hit the cache the winner filled — so one `/field` probe serves all of them. Keyed
+/// per SITE, so different sites never serialize against each other. The outer std mutex
+/// guards only the registry lookup and is released before any `.await` (never held across
+/// one — `await_holding_lock` safe); the per-site [`tokio::sync::Mutex`] is the one held
+/// across discovery.
+static DISCOVERY_LOCKS: OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+> = OnceLock::new();
+
+/// The per-site async discovery lock, created on first use. The std registry mutex is held
+/// only for the `HashMap` lookup/insert, never across an `.await`.
+fn discovery_lock_for(site: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    let registry =
+        DISCOVERY_LOCKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut map = registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    map.entry(site.to_string())
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
 /// Resolve the site's field map for a request, lazily. Order: (1) the persisted/in-process
-/// cache; (2) the in-process failed-marker (→ empty map, no re-probe); (3) discovery. A
-/// discovery failure records the failed marker and returns the empty (default) map — so the
-/// request proceeds with the skeleton fields and NEVER errors. `project_key` drives the
-/// board-config override (empty skips it).
+/// cache; (2) the in-process failed-marker (→ empty map, no re-probe); (3) discovery,
+/// coalesced per site so concurrent racers share one `/field` probe. A discovery failure
+/// records the failed marker and returns the empty (default) map — so the request proceeds
+/// with the skeleton fields and NEVER errors. `project_key` drives the board-config override
+/// (empty skips it).
 async fn resolve_site_map(
     creds: &JiraCredentials,
     site: &str,
@@ -1499,14 +1549,23 @@ async fn resolve_site_map(
     if let Some(entry) = crate::jira_field_maps::get(site) {
         return entry;
     }
-    // No cached entry — has discovery already failed this process?
-    if discovery_failed()
-        .lock()
-        .map(|s| s.contains(site))
-        .unwrap_or(false)
-    {
+    if discovery_already_failed(site) {
         return crate::jira_field_maps::SiteFieldMap::default();
     }
+
+    // Coalesce: hold the per-site async lock across discovery so racers for this site queue
+    // and then re-check the cache the winner filled instead of each probing `/field`.
+    let lock = discovery_lock_for(site);
+    let _guard = lock.lock().await;
+
+    // Double-checked: a racer that lost the lock now finds the winner's result.
+    if let Some(entry) = crate::jira_field_maps::get(site) {
+        return entry;
+    }
+    if discovery_already_failed(site) {
+        return crate::jira_field_maps::SiteFieldMap::default();
+    }
+
     match discover_field_map(creds, site, project_key).await {
         Some(entry) => entry,
         None => {
@@ -1516,6 +1575,15 @@ async fn resolve_site_map(
             crate::jira_field_maps::SiteFieldMap::default()
         }
     }
+}
+
+/// Whether this process has already recorded a discovery failure for `site`. The std mutex
+/// is taken and released here, never held across an `.await`.
+fn discovery_already_failed(site: &str) -> bool {
+    discovery_failed()
+        .lock()
+        .map(|s| s.contains(site))
+        .unwrap_or(false)
 }
 
 /// The project key an issue key belongs to — the prefix before the last `-` (`MYT-5` →
@@ -3148,7 +3216,8 @@ mod tests {
         assert_eq!(points.as_deref(), Some("customfield_10016"));
         assert_eq!(sprint.as_deref(), Some("customfield_10020"));
 
-        // The in-process name map covers every id+name entry.
+        // The name map covers every customfield_* id+name entry — and ONLY those (the
+        // system `summary` field is filtered out; error translation never looks it up).
         let names = field_name_map(&fields);
         assert_eq!(
             names.get("customfield_10016").map(String::as_str),
@@ -3158,6 +3227,34 @@ mod tests {
             names.get("customfield_10099").map(String::as_str),
             Some("Budget")
         );
+        assert!(
+            !names.contains_key("summary"),
+            "system field must be excluded"
+        );
+    }
+
+    #[test]
+    fn resolve_field_ids_rejects_hostile_id_at_discovery() {
+        // A hostile field id from /field (URL-injection payload) is rejected at the
+        // discovery layer — the first of the two enforcement layers (persisted-load is the
+        // second, tested in jira_field_maps). It matches the sprint schema marker but its id
+        // fails the customfield_ grammar → sprint resolves to None, never spliced into a URL.
+        let body = r#"[
+            { "id": "customfield_10016&evil=1", "name": "Sprint", "custom": true,
+              "schema": { "type": "array", "custom": "com.pyxis.greenhopper.jira:gh-sprint" } },
+            { "id": "customfield_10099&x=y", "name": "Story point estimate", "custom": true,
+              "schema": { "type": "number", "custom": "com.pyxis.greenhopper.jira:jsw-story-points" } }
+        ]"#;
+        let fields: Vec<JiraFieldMeta> = serde_json::from_str(body).unwrap();
+        let (points, sprint) = resolve_field_ids(&fields);
+        assert!(points.is_none(), "hostile points id must be rejected");
+        assert!(sprint.is_none(), "hostile sprint id must be rejected");
+        // The board-config override id is likewise grammar-validated.
+        let cfg: JiraBoardConfig = serde_json::from_str(
+            r#"{ "estimation": { "type": "field", "field": { "fieldId": "customfield_1&x=1" } } }"#,
+        )
+        .unwrap();
+        assert!(board_config_points_override(&cfg).is_none());
     }
 
     #[test]
@@ -3201,6 +3298,7 @@ mod tests {
             story_points_field_id: Some("customfield_10016".to_string()),
             sprint_field_id: Some("customfield_10020".to_string()),
             resolved_at: "2026-07-11T00:00:00.000Z".to_string(),
+            ..Default::default()
         };
         let issue = json!({
             "key": "MYT-5",
@@ -3248,7 +3346,7 @@ mod tests {
         let map = crate::jira_field_maps::SiteFieldMap {
             story_points_field_id: Some("customfield_10016".to_string()),
             sprint_field_id: Some("customfield_10020".to_string()),
-            resolved_at: String::new(),
+            ..Default::default()
         };
         let issue = json!({
             "key": "MYT-9",
@@ -3317,7 +3415,7 @@ mod tests {
         let map = crate::jira_field_maps::SiteFieldMap {
             story_points_field_id: Some("customfield_10016".to_string()),
             sprint_field_id: Some("customfield_10020".to_string()),
-            resolved_at: String::new(),
+            ..Default::default()
         };
         let full = list_fields_for(&map);
         assert!(full.contains(&"customfield_10016".to_string()));
