@@ -18,6 +18,7 @@ export type RepoTab =
 export type CreateKind =
   | "issue"
   | "local-issue"
+  | "jira-issue"
   | "pr"
   | "local-pr"
   | "release"
@@ -27,6 +28,7 @@ export type CreateKind =
 const CREATE_TAB: Record<CreateKind, RepoTab> = {
   issue: "issues",
   "local-issue": "issues",
+  "jira-issue": "issues",
   pr: "pulls",
   "local-pr": "pulls",
   release: "tags",

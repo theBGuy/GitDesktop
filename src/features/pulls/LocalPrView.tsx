@@ -56,6 +56,7 @@ import {
   useRepoStatus,
   useUpdateBranchFrom,
 } from "@/lib/git/queries";
+import { formatBinding } from "@/lib/hotkeys/binding";
 import { useLocalPrs, useUpdateLocalPr } from "@/lib/pulls/queries";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
@@ -73,6 +74,10 @@ import { ResolveConflictsView } from "./ResolveConflictsView";
 import { useGeneratePrDescription } from "./useGeneratePrDescription";
 
 type Section = "conversation" | "commits" | "files" | "review";
+
+/** Platform-correct submit hint (Cmd+Enter on macOS, Ctrl+Enter else) — never a
+ *  literal modifier (house platform-mod-key rule). */
+const SUBMIT_HINT = formatBinding("mod+enter");
 
 export function LocalPrView({
   repoPath,
@@ -719,7 +724,7 @@ export function LocalPrView({
                 size="sm"
                 disabled={!comment.trim()}
                 onClick={addComment}
-                title="Ctrl+Enter"
+                title={SUBMIT_HINT}
               >
                 Comment
               </Button>

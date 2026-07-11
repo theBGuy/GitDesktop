@@ -11,11 +11,14 @@
 //! envelope (`{errorMessages, errors}`). Auth tokens are stored in the OS keyring under
 //! `forge/<site>/{email,token}` — the raw token never crosses IPC.
 //!
-//! Bodies are ADF (a JSON tree), converted to markdown by [`adf`]. Phase 1 is read-only:
-//! account connect/validate, project search, issue list, and issue detail. Writes
-//! (comment/transition/create/assign) are phase 2.
+//! Bodies are ADF (a JSON tree), converted to markdown by [`adf`] on the read path and
+//! built from markdown by [`md_to_adf`] on the write path. Phase 1 covered the reads
+//! (account connect/validate, project search, issue list, issue detail); phase 2 adds the
+//! writes: comment, transition (close/reopen), create, assign, plus the user search and
+//! per-project permission probe those write surfaces drive.
 
 mod adf;
+mod md_to_adf;
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -198,14 +201,43 @@ struct JiraErrorEnvelope {
 }
 
 impl JiraErrorEnvelope {
-    /// The best human message: the first `errorMessages` entry, else the first field
-    /// error, else empty.
+    /// The best human message. Prefer the top-level `errorMessages` (Jira's general
+    /// failures), then fall back to the field-level `errors` map — but surface ALL field
+    /// entries joined as `field: msg`, not just the first, so a create that fails on
+    /// several mandatory custom fields names every one of them (rather than dropping all
+    /// but one). Field keys are sorted so the message is deterministic. Empty when neither
+    /// half carries text.
     fn best_message(&self) -> Option<String> {
-        self.error_messages
+        if let Some(msg) = self
+            .error_messages
             .iter()
             .find(|m| !m.trim().is_empty())
             .cloned()
-            .or_else(|| self.errors.values().find(|m| !m.trim().is_empty()).cloned())
+        {
+            return Some(msg);
+        }
+        self.field_errors_joined()
+    }
+
+    /// Join every non-empty `errors` entry as `field: msg`, sorted by field key for a
+    /// deterministic message. `None` when there are no field errors. Pure (testable).
+    fn field_errors_joined(&self) -> Option<String> {
+        let mut pairs: Vec<(&String, &String)> = self
+            .errors
+            .iter()
+            .filter(|(_, msg)| !msg.trim().is_empty())
+            .collect();
+        if pairs.is_empty() {
+            return None;
+        }
+        pairs.sort_by(|a, b| a.0.cmp(b.0));
+        Some(
+            pairs
+                .into_iter()
+                .map(|(field, msg)| format!("{field}: {msg}"))
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
     }
 }
 
@@ -309,6 +341,22 @@ async fn post_json<T: serde::de::DeserializeOwned>(
     }
     serde_json::from_str(&resp_body)
         .map_err(|e| AppError::Jira(format!("could not parse Jira {what}: {e}")))
+}
+
+/// Send a write with an optional JSON body, expecting a no-content (or don't-care) 2xx
+/// response — used for the transition POST and assignee PUT, which return 204. The 2xx
+/// body is discarded; a non-2xx maps through [`http_error`] (so field errors surface).
+async fn send_no_content(
+    creds: &JiraCredentials,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<&Value>,
+) -> AppResult<()> {
+    let (status, resp_body) = raw_request(creds, method, path, body).await?;
+    if !(200..300).contains(&status) {
+        return Err(http_error(status, &resp_body));
+    }
+    Ok(())
 }
 
 /// Load the stored credentials + resolved API base for a site from the keyring (blocking
@@ -1038,6 +1086,27 @@ pub struct JiraIssueDetails {
     pub url: String,
 }
 
+/// Map one Jira comment object (`{id, author, body, created}`) onto the neutral
+/// [`JiraComment`], converting its ADF `body` to markdown. Used both for the embedded
+/// comment list and for the single comment a `POST …/comment` returns. Defensive: every
+/// field degrades to empty/None.
+fn map_comment(c: &Value) -> JiraComment {
+    JiraComment {
+        id: c
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        author: parse_user(c.get("author")),
+        body_md: c.get("body").map(adf::adf_to_markdown).unwrap_or_default(),
+        created_at: c
+            .get("created")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+    }
+}
+
 /// Map the issue's `fields.comment.comments[]` onto neutral comments (first page as
 /// returned; no pagination). Each comment's ADF body is converted to markdown; one
 /// malformed comment is skipped rather than sinking the list.
@@ -1046,24 +1115,7 @@ fn map_comments(fields: &Value) -> Vec<JiraComment> {
         .get("comment")
         .and_then(|c| c.get("comments"))
         .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .map(|c| JiraComment {
-                    id: c
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
-                    author: parse_user(c.get("author")),
-                    body_md: c.get("body").map(adf::adf_to_markdown).unwrap_or_default(),
-                    created_at: c
-                        .get("created")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
-                })
-                .collect()
-        })
+        .map(|arr| arr.iter().map(map_comment).collect())
         .unwrap_or_default()
 }
 
@@ -1151,6 +1203,413 @@ pub async fn issue_view(site: &str, key: &str) -> AppResult<JiraIssueDetails> {
         url: format!("https://{site}/browse/{key}"),
         key: key.to_string(),
     })
+}
+
+// ── Writes (phase 2): comment / transition / create / assign ───────────────────
+
+/// Add a comment to a Jira issue. The markdown `body_md` is converted to ADF (via
+/// [`md_to_adf`]) and posted to `POST /issue/<key>/comment`; the returned comment object
+/// is mapped back to a neutral [`JiraComment`] (its ADF body round-tripped to markdown).
+/// A whitespace-only body is rejected BEFORE any network call.
+pub async fn issue_comment(site: &str, key: &str, body_md: &str) -> AppResult<JiraComment> {
+    let site = normalize_site(site)?;
+    if !is_valid_issue_key(key) {
+        return Err(AppError::InvalidArgument(format!(
+            "invalid Jira issue key: {key}"
+        )));
+    }
+    if body_md.trim().is_empty() {
+        return Err(AppError::InvalidArgument(
+            "a comment body is required".into(),
+        ));
+    }
+    let creds = load_credentials(&site).await?;
+    let adf = md_to_adf::markdown_to_adf(body_md);
+    let body = json!({ "body": adf });
+    let path = format!("issue/{key}/comment");
+    let resp: Value = post_json(&creds, &path, &body, "comment").await?;
+    Ok(map_comment(&resp))
+}
+
+/// The result of a close/reopen transition — the issue's fresh status after the workflow
+/// step ran.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraTransitionResult {
+    pub status_name: String,
+    /// `status.statusCategory.key`: `"new"` | `"indeterminate"` | `"done"`.
+    pub status_category: String,
+}
+
+/// A workflow transition as `GET /issue/<key>/transitions` returns it — the id we `POST`
+/// and the category of the status it moves the issue *to*.
+#[derive(Deserialize, Default)]
+struct JiraTransition {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    to: Option<JiraTransitionTo>,
+}
+
+/// The `to` block of a transition — the destination status's category key. Jira sends
+/// the key as `statusCategory` (camelCase), so this struct MUST rename or `to` never
+/// resolves a category and every transition looks category-less.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct JiraTransitionTo {
+    #[serde(default)]
+    status_category: Option<JiraStatusCategory>,
+}
+
+/// A `statusCategory` block — only its `key` is read (`new`/`indeterminate`/`done`).
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct JiraStatusCategory {
+    #[serde(default)]
+    key: Option<String>,
+}
+
+/// The `transitions` list envelope.
+#[derive(Deserialize, Default)]
+struct JiraTransitionsResponse {
+    #[serde(default)]
+    transitions: Vec<JiraTransition>,
+}
+
+/// Pick the transition id for a `direction` ("close" | "reopen") from the available
+/// transitions. Pure (unit-tested) so the selection logic is isolated from the network.
+///
+/// - **close** → the first transition whose destination `statusCategory.key == "done"`.
+/// - **reopen** → prefer a transition to `"new"`; fall back to `"indeterminate"`.
+///
+/// Returns `Ok(Some(id))` on a match, `Ok(None)` when no suitable transition exists (the
+/// caller turns that into a workflow/permission error), or an `InvalidArgument` for an
+/// unknown direction.
+fn pick_transition_id(
+    transitions: &[JiraTransition],
+    direction: &str,
+) -> AppResult<Option<String>> {
+    // The id of the first transition whose destination status category matches `cat`.
+    fn first_with_category(transitions: &[JiraTransition], cat: &str) -> Option<String> {
+        transitions
+            .iter()
+            .find(|t| category_of(t) == Some(cat))
+            .and_then(|t| t.id.clone())
+    }
+    match direction {
+        "close" => Ok(first_with_category(transitions, "done")),
+        "reopen" => {
+            // Prefer a transition back to a "new" (To Do) status; fall back to any
+            // "indeterminate" (In Progress) transition.
+            Ok(first_with_category(transitions, "new")
+                .or_else(|| first_with_category(transitions, "indeterminate")))
+        }
+        other => Err(AppError::InvalidArgument(format!(
+            "unknown transition direction: {other}"
+        ))),
+    }
+}
+
+/// The destination status-category key of a transition (`to.statusCategory.key`), or
+/// `None` when any link in the chain is absent.
+fn category_of(t: &JiraTransition) -> Option<&str> {
+    t.to.as_ref()?.status_category.as_ref()?.key.as_deref()
+}
+
+/// Extract `(statusName, statusCategoryKey)` from an `issue?fields=status` response. Pure.
+fn status_of_issue(issue: &Value) -> (String, String) {
+    let fields = issue.get("fields").cloned().unwrap_or(Value::Null);
+    let status_name = fields
+        .get("status")
+        .and_then(|s| s.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    (status_name, status_category_of(&fields))
+}
+
+/// Close or reopen a Jira issue via its workflow. `direction` is `"close"` | `"reopen"`.
+/// Fetches the available transitions, picks the one matching the direction (see
+/// [`pick_transition_id`]), `POST`s it, then reads back the fresh status. Transition ids
+/// are per-project workflow and are never hardcoded. When no suitable transition is
+/// available (workflow or permissions), returns a clear, actionable error.
+pub async fn issue_transition(
+    site: &str,
+    key: &str,
+    direction: &str,
+) -> AppResult<JiraTransitionResult> {
+    let site = normalize_site(site)?;
+    if !is_valid_issue_key(key) {
+        return Err(AppError::InvalidArgument(format!(
+            "invalid Jira issue key: {key}"
+        )));
+    }
+    // Validate the direction up front (also validated inside pick_transition_id) so a bad
+    // direction fails before any network call.
+    if direction != "close" && direction != "reopen" {
+        return Err(AppError::InvalidArgument(format!(
+            "unknown transition direction: {direction}"
+        )));
+    }
+    let creds = load_credentials(&site).await?;
+
+    let list: JiraTransitionsResponse =
+        get_json(&creds, &format!("issue/{key}/transitions"), "transitions").await?;
+    let transition_id = pick_transition_id(&list.transitions, direction)?.ok_or_else(|| {
+        let verb = if direction == "close" {
+            "close"
+        } else {
+            "reopen"
+        };
+        AppError::Jira(format!(
+            "No workflow transition to {verb} this issue is available — the project's \
+             workflow or your permissions don't allow it."
+        ))
+    })?;
+
+    let body = json!({ "transition": { "id": transition_id } });
+    send_no_content(
+        &creds,
+        reqwest::Method::POST,
+        &format!("issue/{key}/transitions"),
+        Some(&body),
+    )
+    .await?;
+
+    // Read back the fresh status (the transition response is 204 with no body).
+    let issue: Value = get_json(&creds, &format!("issue/{key}?fields=status"), "issue").await?;
+    let (status_name, status_category) = status_of_issue(&issue);
+    Ok(JiraTransitionResult {
+        status_name,
+        status_category,
+    })
+}
+
+/// The key + URL of a newly-created issue.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraCreatedIssue {
+    pub key: String,
+    pub url: String,
+}
+
+/// The `POST /issue` response — `{id, key, self}`; only `key` is read.
+#[derive(Deserialize, Default)]
+struct JiraCreatedIssueRaw {
+    #[serde(default)]
+    key: Option<String>,
+}
+
+/// Create a Jira issue. Requires a valid `project_key`, an `issue_type_id`, and a
+/// non-empty trimmed `summary`; `description_md` becomes an ADF description only when it
+/// is `Some` and non-empty. `POST /issue`; field-validation failures (e.g. a project with
+/// mandatory custom fields) surface through the error envelope's field map — see
+/// [`JiraErrorEnvelope::best_message`].
+pub async fn issue_create(
+    site: &str,
+    project_key: &str,
+    issue_type_id: &str,
+    summary: &str,
+    description_md: Option<&str>,
+) -> AppResult<JiraCreatedIssue> {
+    let site = normalize_site(site)?;
+    if !is_valid_project_key(project_key) {
+        return Err(AppError::InvalidArgument(format!(
+            "invalid Jira project key: {project_key}"
+        )));
+    }
+    let summary = summary.trim();
+    if summary.is_empty() {
+        return Err(AppError::InvalidArgument("a summary is required".into()));
+    }
+    if issue_type_id.trim().is_empty() {
+        return Err(AppError::InvalidArgument(
+            "an issue type is required".into(),
+        ));
+    }
+    let creds = load_credentials(&site).await?;
+
+    let mut fields = serde_json::Map::new();
+    fields.insert("project".to_string(), json!({ "key": project_key }));
+    fields.insert("issuetype".to_string(), json!({ "id": issue_type_id }));
+    fields.insert("summary".to_string(), json!(summary));
+    if let Some(desc) = description_md.filter(|d| !d.trim().is_empty()) {
+        fields.insert("description".to_string(), md_to_adf::markdown_to_adf(desc));
+    }
+    let body = json!({ "fields": Value::Object(fields) });
+
+    let created: JiraCreatedIssueRaw = post_json(&creds, "issue", &body, "created issue").await?;
+    let key = created
+        .key
+        .filter(|k| !k.is_empty())
+        .ok_or_else(|| AppError::Jira("Jira created the issue but returned no key.".into()))?;
+    let url = format!("https://{site}/browse/{key}");
+    Ok(JiraCreatedIssue { key, url })
+}
+
+/// One issue type for the create picker.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraIssueType {
+    pub id: String,
+    pub name: String,
+    pub icon_url: String,
+    /// Whether this is a subtask type (the frontend filters these out of the top-level
+    /// create picker).
+    pub subtask: bool,
+}
+
+/// One issue type as the createmeta endpoint returns it. Every field is tolerant.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct JiraIssueTypeRaw {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    icon_url: Option<String>,
+    #[serde(default)]
+    subtask: bool,
+}
+
+impl JiraIssueTypeRaw {
+    fn into_type(self) -> JiraIssueType {
+        JiraIssueType {
+            id: self.id.unwrap_or_default(),
+            name: self.name.unwrap_or_default(),
+            icon_url: self.icon_url.unwrap_or_default(),
+            subtask: self.subtask,
+        }
+    }
+}
+
+/// The modern per-project createmeta issue-types response —
+/// `GET /issue/createmeta/<projectKey>/issuetypes` returns a paginated
+/// `{startAt, maxResults, total, issueTypes:[…]}` envelope. The array is under
+/// `issueTypes` (NOT `values`), so the field renames — otherwise it deserializes empty
+/// and the create picker shows "no issue types".
+#[derive(Deserialize, Default)]
+struct JiraCreatemetaIssueTypes {
+    #[serde(default, rename = "issueTypes")]
+    issue_types: Vec<JiraIssueTypeRaw>,
+}
+
+/// The available issue types for a project's create form. Uses the modern per-project
+/// sub-endpoint `GET /rest/api/3/issue/createmeta/<projectKey>/issuetypes`
+/// ([Atlassian REST v3](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issues/#api-rest-api-3-issue-createmeta-projectidorkey-issuetypes-get)).
+/// Returns ALL types including subtask types (the frontend decides what to show). The
+/// project key is grammar-validated before it is interpolated into the path.
+pub async fn issue_types(site: &str, project_key: &str) -> AppResult<Vec<JiraIssueType>> {
+    let site = normalize_site(site)?;
+    if !is_valid_project_key(project_key) {
+        return Err(AppError::InvalidArgument(format!(
+            "invalid Jira project key: {project_key}"
+        )));
+    }
+    let creds = load_credentials(&site).await?;
+    let path = format!("issue/createmeta/{project_key}/issuetypes?maxResults={MAX_RESULTS}");
+    let page: JiraCreatemetaIssueTypes = get_json(&creds, &path, "issue types").await?;
+    Ok(page
+        .issue_types
+        .into_iter()
+        .map(JiraIssueTypeRaw::into_type)
+        .collect())
+}
+
+/// Assign (or unassign) a Jira issue. `account_id = Some(id)` assigns; `None` unassigns
+/// (`PUT /issue/<key>/assignee` with `{"accountId": null}`). Returns unit on the 204.
+pub async fn issue_assign(site: &str, key: &str, account_id: Option<&str>) -> AppResult<()> {
+    let site = normalize_site(site)?;
+    if !is_valid_issue_key(key) {
+        return Err(AppError::InvalidArgument(format!(
+            "invalid Jira issue key: {key}"
+        )));
+    }
+    let creds = load_credentials(&site).await?;
+    // `accountId: null` unassigns; a bare id assigns. Serialize either explicitly.
+    let body = json!({ "accountId": account_id });
+    send_no_content(
+        &creds,
+        reqwest::Method::PUT,
+        &format!("issue/{key}/assignee"),
+        Some(&body),
+    )
+    .await
+}
+
+/// Search users assignable to an issue, for the assignee picker.
+/// `GET /user/assignable/search?issueKey=<key>&query=<q>&maxResults=30`. Maps each user
+/// onto the neutral [`ForgeUserRef`] (accountId / displayName / 48x48 avatar).
+pub async fn user_search(site: &str, key: &str, query: &str) -> AppResult<Vec<ForgeUserRef>> {
+    let site = normalize_site(site)?;
+    if !is_valid_issue_key(key) {
+        return Err(AppError::InvalidArgument(format!(
+            "invalid Jira issue key: {key}"
+        )));
+    }
+    let creds = load_credentials(&site).await?;
+    let path = format!(
+        "user/assignable/search?issueKey={}&query={}&maxResults=30",
+        crate::forge::encode_query_value(key),
+        crate::forge::encode_query_value(query),
+    );
+    let users: Vec<JiraUser> = get_json(&creds, &path, "assignable users").await?;
+    Ok(users.iter().map(JiraUser::to_ref).collect())
+}
+
+/// The per-project permissions the frontend uses to gate write actions.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraProjectPermissions {
+    pub add_comments: bool,
+    pub transition_issues: bool,
+    pub create_issues: bool,
+    pub assign_issues: bool,
+}
+
+/// Whether a single permission in a `mypermissions` response is granted. Defensive: an
+/// absent or malformed entry reads as `false` (never errors the whole probe on one key).
+/// Pure (testable).
+fn have_permission(permissions: &Value, name: &str) -> bool {
+    permissions
+        .get("permissions")
+        .and_then(|p| p.get(name))
+        .and_then(|entry| entry.get("havePermission"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Parse a `mypermissions` response into [`JiraProjectPermissions`]. Pure (testable): each
+/// flag defends independently, so one missing/malformed key never sinks the others.
+fn parse_permissions(body: &Value) -> JiraProjectPermissions {
+    JiraProjectPermissions {
+        add_comments: have_permission(body, "ADD_COMMENTS"),
+        transition_issues: have_permission(body, "TRANSITION_ISSUES"),
+        create_issues: have_permission(body, "CREATE_ISSUES"),
+        assign_issues: have_permission(body, "ASSIGN_ISSUES"),
+    }
+}
+
+/// The caller's permissions on a project, gating the write actions.
+/// `GET /rest/api/3/mypermissions?projectKey=<key>&permissions=…`. Each flag is
+/// `permissions.<KEY>.havePermission == true`; a missing/malformed key defaults to
+/// `false` rather than erroring the whole probe.
+pub async fn permissions(site: &str, project_key: &str) -> AppResult<JiraProjectPermissions> {
+    let site = normalize_site(site)?;
+    if !is_valid_project_key(project_key) {
+        return Err(AppError::InvalidArgument(format!(
+            "invalid Jira project key: {project_key}"
+        )));
+    }
+    let creds = load_credentials(&site).await?;
+    let path = format!(
+        "mypermissions?projectKey={}&permissions=ADD_COMMENTS,TRANSITION_ISSUES,\
+         CREATE_ISSUES,ASSIGN_ISSUES",
+        crate::forge::encode_query_value(project_key),
+    );
+    let body: Value = get_json(&creds, &path, "permissions").await?;
+    Ok(parse_permissions(&body))
 }
 
 #[cfg(test)]
@@ -1587,5 +2046,295 @@ mod tests {
             AppError::Jira(m) => assert_eq!(m, orig_429),
             other => panic!("got {other:?}"),
         }
+    }
+
+    // ── Write-path pure logic ────────────────────────────────────────────────────
+
+    /// Build a transitions list from `(id, categoryKey)` pairs.
+    fn transitions(pairs: &[(&str, &str)]) -> Vec<JiraTransition> {
+        pairs
+            .iter()
+            .map(|(id, cat)| JiraTransition {
+                id: Some((*id).to_string()),
+                to: Some(JiraTransitionTo {
+                    status_category: Some(JiraStatusCategory {
+                        key: Some((*cat).to_string()),
+                    }),
+                }),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pick_transition_close_finds_done() {
+        let ts = transitions(&[("11", "new"), ("21", "indeterminate"), ("31", "done")]);
+        assert_eq!(
+            pick_transition_id(&ts, "close").unwrap(),
+            Some("31".to_string())
+        );
+    }
+
+    #[test]
+    fn pick_transition_reopen_prefers_new_over_indeterminate() {
+        // Both a "new" and an "indeterminate" transition exist — reopen picks "new".
+        let ts = transitions(&[("31", "done"), ("21", "indeterminate"), ("11", "new")]);
+        assert_eq!(
+            pick_transition_id(&ts, "reopen").unwrap(),
+            Some("11".to_string())
+        );
+    }
+
+    #[test]
+    fn pick_transition_reopen_falls_back_to_indeterminate() {
+        // No "new" transition — reopen falls back to "indeterminate".
+        let ts = transitions(&[("31", "done"), ("21", "indeterminate")]);
+        assert_eq!(
+            pick_transition_id(&ts, "reopen").unwrap(),
+            Some("21".to_string())
+        );
+    }
+
+    #[test]
+    fn pick_transition_none_when_no_match() {
+        // Close with only non-done transitions → no id (caller raises the workflow error).
+        let ts = transitions(&[("11", "new"), ("21", "indeterminate")]);
+        assert_eq!(pick_transition_id(&ts, "close").unwrap(), None);
+        // Reopen with only a done transition → no id.
+        let ts2 = transitions(&[("31", "done")]);
+        assert_eq!(pick_transition_id(&ts2, "reopen").unwrap(), None);
+        // Empty list → no id for either direction.
+        assert_eq!(pick_transition_id(&[], "close").unwrap(), None);
+        assert_eq!(pick_transition_id(&[], "reopen").unwrap(), None);
+    }
+
+    #[test]
+    fn pick_transition_rejects_unknown_direction() {
+        let ts = transitions(&[("31", "done")]);
+        assert!(matches!(
+            pick_transition_id(&ts, "sideways"),
+            Err(AppError::InvalidArgument(_))
+        ));
+    }
+
+    #[test]
+    fn pick_transition_tolerates_missing_to_or_category() {
+        // A transition with no `to`, or a `to` with no category, is simply not matched.
+        let ts = vec![
+            JiraTransition {
+                id: Some("1".into()),
+                to: None,
+            },
+            JiraTransition {
+                id: Some("2".into()),
+                to: Some(JiraTransitionTo {
+                    status_category: None,
+                }),
+            },
+            JiraTransition {
+                id: Some("3".into()),
+                to: Some(JiraTransitionTo {
+                    status_category: Some(JiraStatusCategory {
+                        key: Some("done".into()),
+                    }),
+                }),
+            },
+        ];
+        assert_eq!(
+            pick_transition_id(&ts, "close").unwrap(),
+            Some("3".to_string())
+        );
+    }
+
+    #[test]
+    fn status_of_issue_reads_name_and_category() {
+        let issue = json!({
+            "fields": {
+                "status": { "name": "In Review", "statusCategory": { "key": "indeterminate" } }
+            }
+        });
+        assert_eq!(
+            status_of_issue(&issue),
+            ("In Review".to_string(), "indeterminate".to_string())
+        );
+        // Missing fields → empty strings, not a panic.
+        assert_eq!(status_of_issue(&json!({})), (String::new(), String::new()));
+    }
+
+    #[test]
+    fn parse_permissions_each_flag_independent() {
+        let body = json!({
+            "permissions": {
+                "ADD_COMMENTS": { "havePermission": true },
+                "TRANSITION_ISSUES": { "havePermission": false },
+                "CREATE_ISSUES": { "havePermission": true },
+                // ASSIGN_ISSUES absent entirely.
+            }
+        });
+        let p = parse_permissions(&body);
+        assert!(p.add_comments);
+        assert!(!p.transition_issues);
+        assert!(p.create_issues);
+        // Absent key → false, never an error.
+        assert!(!p.assign_issues);
+    }
+
+    #[test]
+    fn parse_permissions_malformed_defaults_false() {
+        // A completely malformed body (no `permissions` object) reads as all-false.
+        let p = parse_permissions(&json!({ "permissions": "nope" }));
+        assert!(!p.add_comments);
+        assert!(!p.transition_issues);
+        assert!(!p.create_issues);
+        assert!(!p.assign_issues);
+        // A present entry with a non-bool havePermission also defaults false.
+        let p2 = parse_permissions(&json!({
+            "permissions": { "ADD_COMMENTS": { "havePermission": "yes" } }
+        }));
+        assert!(!p2.add_comments);
+    }
+
+    #[test]
+    fn field_errors_joined_names_all_fields_sorted() {
+        // A create failing on several mandatory fields must name every one, deterministically.
+        let env = JiraErrorEnvelope {
+            error_messages: vec![],
+            errors: std::collections::HashMap::from([
+                (
+                    "customfield_10020".to_string(),
+                    "Sprint is required.".to_string(),
+                ),
+                ("summary".to_string(), "Summary is required.".to_string()),
+                ("blank".to_string(), "   ".to_string()), // empty → dropped
+            ]),
+        };
+        let joined = env.field_errors_joined().unwrap();
+        // Sorted by field key; the whitespace-only entry is dropped.
+        assert_eq!(
+            joined,
+            "customfield_10020: Sprint is required.; summary: Summary is required."
+        );
+        // best_message uses field errors when errorMessages is empty.
+        assert_eq!(env.best_message().unwrap(), joined);
+    }
+
+    #[test]
+    fn field_errors_joined_none_when_empty() {
+        let env = JiraErrorEnvelope::default();
+        assert!(env.field_errors_joined().is_none());
+        assert!(env.best_message().is_none());
+    }
+
+    #[test]
+    fn best_message_prefers_error_messages_over_fields() {
+        let env = JiraErrorEnvelope {
+            error_messages: vec!["Top-level failure".to_string()],
+            errors: std::collections::HashMap::from([(
+                "summary".to_string(),
+                "Summary is required.".to_string(),
+            )]),
+        };
+        assert_eq!(env.best_message().unwrap(), "Top-level failure");
+    }
+
+    #[test]
+    fn create_field_errors_surface_through_http_error() {
+        // The end-to-end path a create hits: a 400 with a field-only envelope surfaces the
+        // joined field messages (not a bare "HTTP 400").
+        let body = r#"{"errorMessages":[],"errors":{"customfield_1":"Epic Link is required.","summary":"You must specify a summary."}}"#;
+        match http_error(400, body) {
+            AppError::Jira(m) => {
+                assert!(m.contains("Epic Link is required."), "got {m}");
+                assert!(m.contains("You must specify a summary."), "got {m}");
+            }
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn issue_type_raw_maps_all_fields() {
+        let raw: JiraIssueTypeRaw = serde_json::from_value(json!({
+            "id": "10001",
+            "name": "Bug",
+            "iconUrl": "https://icon",
+            "subtask": false
+        }))
+        .unwrap();
+        let t = raw.into_type();
+        assert_eq!(t.id, "10001");
+        assert_eq!(t.name, "Bug");
+        assert_eq!(t.icon_url, "https://icon");
+        assert!(!t.subtask);
+
+        // A subtask type with missing icon degrades gracefully.
+        let sub: JiraIssueTypeRaw = serde_json::from_value(json!({
+            "id": "10002", "name": "Sub-task", "subtask": true
+        }))
+        .unwrap();
+        let st = sub.into_type();
+        assert!(st.subtask);
+        assert_eq!(st.icon_url, "");
+    }
+
+    // ── From-live-JSON regression guards (camelCase shape mismatches) ────────────
+    //
+    // These parse the EXACT camelCase JSON a real Jira Cloud tenant returns
+    // (thebguy.atlassian.net / project MYT, 2026-07-11) through the real structs —
+    // catching the class of bug the hand-built / snake_case fixtures above missed: a
+    // struct field whose name differs from the wire key.
+
+    #[test]
+    fn transitions_response_parses_live_camelcase_and_picks_done() {
+        // Verbatim shape from GET /issue/MYT-5/transitions. Before the
+        // `#[serde(rename_all = "camelCase")]` on JiraTransitionTo, `statusCategory` was
+        // dropped, `category_of` returned None for every entry, and close found nothing.
+        let body = r#"{
+            "transitions": [
+                { "id": "11", "name": "Start Progress",
+                  "to": { "statusCategory": { "key": "indeterminate" } } },
+                { "id": "21", "name": "Done",
+                  "to": { "statusCategory": { "key": "done" } } }
+            ]
+        }"#;
+        let parsed: JiraTransitionsResponse = serde_json::from_str(body).unwrap();
+        // The done category must actually deserialize (the crux of bug 1).
+        assert_eq!(category_of(&parsed.transitions[1]), Some("done"));
+        assert_eq!(
+            pick_transition_id(&parsed.transitions, "close").unwrap(),
+            Some("21".to_string())
+        );
+        // Reopen from here has no "new", falls back to the "indeterminate" transition.
+        assert_eq!(
+            pick_transition_id(&parsed.transitions, "reopen").unwrap(),
+            Some("11".to_string())
+        );
+    }
+
+    #[test]
+    fn createmeta_response_parses_live_issue_types_key() {
+        // Verbatim shape from GET /issue/createmeta/MYT/issuetypes. Before the
+        // `rename = "issueTypes"`, the array (under `issueTypes`, not `values`) parsed
+        // empty and the create picker claimed the project had no issue types.
+        let body = r#"{
+            "maxResults": 50,
+            "startAt": 0,
+            "total": 2,
+            "issueTypes": [
+                { "id": "10001", "name": "Task", "iconUrl": "https://icon/task", "subtask": false },
+                { "id": "10002", "name": "Sub-task", "iconUrl": "https://icon/sub", "subtask": true }
+            ]
+        }"#;
+        let parsed: JiraCreatemetaIssueTypes = serde_json::from_str(body).unwrap();
+        let types: Vec<JiraIssueType> = parsed
+            .issue_types
+            .into_iter()
+            .map(JiraIssueTypeRaw::into_type)
+            .collect();
+        assert_eq!(types.len(), 2);
+        assert_eq!(types[0].id, "10001");
+        assert_eq!(types[0].name, "Task");
+        assert!(!types[0].subtask);
+        assert_eq!(types[1].id, "10002");
+        assert_eq!(types[1].name, "Sub-task");
+        assert!(types[1].subtask);
     }
 }

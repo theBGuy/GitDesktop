@@ -65,6 +65,7 @@ import {
   useUnminimizeComment,
 } from "@/lib/git/queries";
 import { providerLabel } from "@/lib/git/types";
+import { formatBinding } from "@/lib/hotkeys/binding";
 import { useUiStore } from "@/lib/stores/ui";
 import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
@@ -85,6 +86,10 @@ const LOCK_REASONS: [string, LockReason | null][] = [
   ["Spam", "spam"],
   ["Too heated", "too_heated"],
 ];
+
+/** Platform-correct submit hint (Cmd+Enter on macOS, Ctrl+Enter else) — never a
+ *  literal modifier (house platform-mod-key rule). */
+const SUBMIT_HINT = formatBinding("mod+enter");
 
 /**
  * Full read+write view for a GitHub issue: header, description, threaded
@@ -679,7 +684,7 @@ export function RemoteIssueView({
                       size="sm"
                       disabled={!composeBody.trim() || busy}
                       onClick={submitComment}
-                      title="Ctrl+Enter"
+                      title={SUBMIT_HINT}
                     >
                       Comment
                     </Button>

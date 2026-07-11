@@ -19,7 +19,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { ForgeNotReady } from "@/features/repository/ForgeNotReady";
 import { cn } from "@/lib/utils";
 
-/** The "New ▾" dropdown's two items (GitHub + local). */
+/** The "New ▾" dropdown's items (GitHub + local, plus an optional third for a
+ *  linked Jira project on the issues panel). */
 export interface NewMenuConfig {
   ghLabel: string;
   ghDisabled: boolean;
@@ -27,6 +28,10 @@ export interface NewMenuConfig {
   onGh: () => void;
   localLabel: string;
   onLocal: () => void;
+  /** Optional Jira create item — present only when a Jira project is linked AND
+   *  the user can create issues in it (permission-gated at the call site). */
+  jiraLabel?: string;
+  onJira?: () => void;
 }
 
 const ROW_CLASS = "block w-full border-b px-3 py-2 text-left";
@@ -197,6 +202,11 @@ export function ConversationListPanel<L, R, J = never>(props: {
             <DropdownMenuItem onClick={newMenu.onLocal}>
               {newMenu.localLabel}
             </DropdownMenuItem>
+            {newMenu.jiraLabel && newMenu.onJira && (
+              <DropdownMenuItem onClick={newMenu.onJira}>
+                {newMenu.jiraLabel}
+              </DropdownMenuItem>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
         {filterSlot}

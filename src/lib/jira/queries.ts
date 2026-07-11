@@ -4,11 +4,19 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
+import type { ForgeUserRef } from "@/lib/git/types";
 import {
   jiraAccount,
+  jiraIssueAssign,
+  jiraIssueComment,
+  jiraIssueCreate,
   jiraIssueList,
+  jiraIssueTransition,
+  jiraIssueTypes,
   jiraIssueView,
+  jiraPermissions,
   jiraProjectSearch,
+  jiraUserSearch,
 } from "./api";
 import {
   clearJiraLink,
@@ -16,7 +24,12 @@ import {
   type JiraLink,
   setJiraLink,
 } from "./store";
-import type { JiraIssueState } from "./types";
+import type {
+  JiraIssueDetails,
+  JiraIssueInfo,
+  JiraIssueState,
+  JiraTransitionDirection,
+} from "./types";
 
 const jiraLinkKey = (repo: string) => ["jira-link", repo] as const;
 
@@ -131,5 +144,272 @@ export function useJiraProjectSearch(site: string, query: string) {
     enabled: site.length > 0,
     placeholderData: keepPreviousData,
     staleTime: 30_000,
+  });
+}
+
+// ── Write path (phase 2) ────────────────────────────────────────────────────
+
+/** The detail-cache key for one issue — must match `useJiraIssue`'s key exactly
+ *  so optimistic patches and reads land on the same entry. */
+const jiraIssueDetailKey = (repo: string, site: string, key: string) =>
+  ["repo", repo, "jira-issue", site, key] as const;
+
+/** The linked project's write permissions (server-resolved). Enabled only when
+ *  linked; permissions change rarely, so a generous staleTime keeps this off the
+ *  hot path. A failed probe surfaces as `isError` with `data === undefined`; the
+ *  gate callers read `data?.<flag> ?? false`, so a failure treats every write as
+ *  not-permitted (affordances absent) without touching the read path. */
+export function useJiraPermissions(
+  repo: string,
+  link: JiraLink | null | undefined,
+) {
+  return useQuery({
+    queryKey: [
+      "repo",
+      repo,
+      "jira-permissions",
+      link?.siteHost ?? "",
+      link?.projectKey ?? "",
+    ] as const,
+    queryFn: () =>
+      jiraPermissions(
+        (link as JiraLink).siteHost,
+        (link as JiraLink).projectKey,
+      ),
+    enabled: !!link,
+    staleTime: 5 * 60_000,
+    // A permission probe failing must not spam retries — one failure = treat
+    // writes as absent until the next natural refetch.
+    retry: 1,
+  });
+}
+
+/** The project's creatable issue types. Enabled only when linked and the caller
+ *  opts in (e.g. the create dialog is open). Surfaces its error so the dialog can
+ *  offer a retry rather than a dead Select. */
+export function useJiraIssueTypes(
+  repo: string,
+  link: JiraLink | null | undefined,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: [
+      "repo",
+      repo,
+      "jira-issue-types",
+      link?.siteHost ?? "",
+      link?.projectKey ?? "",
+    ] as const,
+    queryFn: () =>
+      jiraIssueTypes(
+        (link as JiraLink).siteHost,
+        (link as JiraLink).projectKey,
+      ),
+    enabled: !!link && enabled,
+    staleTime: 5 * 60_000,
+  });
+}
+
+/** Assignable-user search for the assignee picker. Debounced input driven by the
+ *  caller (mirrors the project-search idiom); enabled only when linked and the
+ *  picker is open. `key` scopes the search to the issue's project + permissions. */
+export function useJiraUserSearch(
+  link: JiraLink | null | undefined,
+  issueKey: string,
+  query: string,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: [
+      "jira-user-search",
+      link?.siteHost ?? "",
+      issueKey,
+      query,
+    ] as const,
+    queryFn: () => jiraUserSearch((link as JiraLink).siteHost, issueKey, query),
+    enabled: !!link && enabled,
+    placeholderData: keepPreviousData,
+    staleTime: 30_000,
+  });
+}
+
+/** Add a comment. Optimistic: appends the returned comment to the detail cache
+ *  on success (the server assigns the id + timestamp, so — unlike the transition
+ *  patch — there's nothing to show until it resolves). Invalidates the repo's
+ *  Jira caches on settle to reconcile. */
+export function useJiraComment(
+  repo: string,
+  link: JiraLink | null | undefined,
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { issueKey: string; bodyMd: string }) =>
+      jiraIssueComment((link as JiraLink).siteHost, args.issueKey, args.bodyMd),
+    onSuccess: (comment, args) => {
+      if (!link) return;
+      const key = jiraIssueDetailKey(repo, link.siteHost, args.issueKey);
+      queryClient.setQueryData<JiraIssueDetails>(key, (d) =>
+        d ? { ...d, comments: [...d.comments, comment] } : d,
+      );
+    },
+    onSettled: () => invalidateJiraForRepo(queryClient, repo),
+  });
+}
+
+/** Close/reopen via a workflow transition. Optimistic: patches the new status
+ *  name + category onto the detail cache AND every list cache for this repo (so
+ *  the row's chip flips instantly). Rollback on error restores both. The list
+ *  patch may make a row fall out of the active state filter (e.g. closing while
+ *  viewing Open) — that's fine: the detail view stays put and invalidation
+ *  reconciles the list on settle. */
+export function useJiraTransition(
+  repo: string,
+  link: JiraLink | null | undefined,
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (args: {
+      issueKey: string;
+      direction: JiraTransitionDirection;
+    }) =>
+      jiraIssueTransition(
+        (link as JiraLink).siteHost,
+        args.issueKey,
+        args.direction,
+      ),
+    onMutate: async (args) => {
+      if (!link) return { detailKey: null, prevDetail: undefined, lists: [] };
+      const detailKey = jiraIssueDetailKey(repo, link.siteHost, args.issueKey);
+      await queryClient.cancelQueries({ queryKey: detailKey });
+      const prevDetail = queryClient.getQueryData<JiraIssueDetails>(detailKey);
+      // We don't yet know the real target status name (it's per-workflow), so
+      // the optimistic patch only flips the category — enough to move the chip's
+      // open/closed treatment; the returned real name lands on success and the
+      // settle invalidation reconciles everything.
+      const category = args.direction === "close" ? "done" : "new";
+      if (prevDetail) {
+        queryClient.setQueryData<JiraIssueDetails>(detailKey, {
+          ...prevDetail,
+          statusCategory: category,
+        });
+      }
+      // Snapshot + patch every jira-issues list cache for this repo (any site /
+      // project / state filter) so a visible row's chip flips too.
+      const lists = queryClient.getQueriesData<JiraIssueInfo[]>({
+        predicate: (q) =>
+          q.queryKey[0] === "repo" &&
+          q.queryKey[1] === repo &&
+          q.queryKey[2] === "jira-issues",
+      });
+      for (const [listKey, list] of lists) {
+        if (!list) continue;
+        queryClient.setQueryData<JiraIssueInfo[]>(
+          listKey,
+          list.map((i) =>
+            i.key === args.issueKey ? { ...i, statusCategory: category } : i,
+          ),
+        );
+      }
+      return { detailKey, prevDetail, lists };
+    },
+    onError: (_e, _args, ctx) => {
+      if (ctx?.detailKey && ctx.prevDetail !== undefined) {
+        queryClient.setQueryData(ctx.detailKey, ctx.prevDetail);
+      }
+      for (const [listKey, list] of ctx?.lists ?? []) {
+        queryClient.setQueryData(listKey, list);
+      }
+    },
+    onSuccess: (result, args) => {
+      // The server told us the REAL new status name — land it on the detail so
+      // the chip reads e.g. "Done", not the generic category guess.
+      if (!link) return;
+      const detailKey = jiraIssueDetailKey(repo, link.siteHost, args.issueKey);
+      queryClient.setQueryData<JiraIssueDetails>(detailKey, (d) =>
+        d
+          ? {
+              ...d,
+              statusName: result.statusName,
+              statusCategory: result.statusCategory,
+            }
+          : d,
+      );
+    },
+    onSettled: () => invalidateJiraForRepo(queryClient, repo),
+  });
+}
+
+/** Set/clear the single assignee. Optimistic: patches the assignee onto the
+ *  detail cache (and the matching list row) with rollback. */
+export function useJiraAssign(repo: string, link: JiraLink | null | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { issueKey: string; assignee: ForgeUserRef | null }) =>
+      jiraIssueAssign(
+        (link as JiraLink).siteHost,
+        args.issueKey,
+        args.assignee?.id ?? null,
+      ),
+    onMutate: async (args) => {
+      if (!link) return { detailKey: null, prevDetail: undefined, lists: [] };
+      const detailKey = jiraIssueDetailKey(repo, link.siteHost, args.issueKey);
+      await queryClient.cancelQueries({ queryKey: detailKey });
+      const prevDetail = queryClient.getQueryData<JiraIssueDetails>(detailKey);
+      if (prevDetail) {
+        queryClient.setQueryData<JiraIssueDetails>(detailKey, {
+          ...prevDetail,
+          assignee: args.assignee,
+        });
+      }
+      const lists = queryClient.getQueriesData<JiraIssueInfo[]>({
+        predicate: (q) =>
+          q.queryKey[0] === "repo" &&
+          q.queryKey[1] === repo &&
+          q.queryKey[2] === "jira-issues",
+      });
+      for (const [listKey, list] of lists) {
+        if (!list) continue;
+        queryClient.setQueryData<JiraIssueInfo[]>(
+          listKey,
+          list.map((i) =>
+            i.key === args.issueKey ? { ...i, assignee: args.assignee } : i,
+          ),
+        );
+      }
+      return { detailKey, prevDetail, lists };
+    },
+    onError: (_e, _args, ctx) => {
+      if (ctx?.detailKey && ctx.prevDetail !== undefined) {
+        queryClient.setQueryData(ctx.detailKey, ctx.prevDetail);
+      }
+      for (const [listKey, list] of ctx?.lists ?? []) {
+        queryClient.setQueryData(listKey, list);
+      }
+    },
+    onSettled: () => invalidateJiraForRepo(queryClient, repo),
+  });
+}
+
+/** Create an issue. Invalidates the repo's Jira caches on settle so the new
+ *  issue appears in the list; the caller handles selecting it + the toast. */
+export function useJiraCreateIssue(
+  repo: string,
+  link: JiraLink | null | undefined,
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (args: {
+      issueTypeId: string;
+      summary: string;
+      descriptionMd?: string;
+    }) =>
+      jiraIssueCreate(
+        (link as JiraLink).siteHost,
+        (link as JiraLink).projectKey,
+        args.issueTypeId,
+        args.summary,
+        args.descriptionMd,
+      ),
+    onSettled: () => invalidateJiraForRepo(queryClient, repo),
   });
 }

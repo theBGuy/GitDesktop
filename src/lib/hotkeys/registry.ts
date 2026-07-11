@@ -217,6 +217,12 @@ export const ACTIONS = [
     defaultBinding: null,
   },
   {
+    id: "create-jira-issue",
+    label: "Create Jira issue…",
+    category: "Repository",
+    defaultBinding: null,
+  },
+  {
     id: "create-discussion",
     label: "Create discussion",
     category: "Repository",

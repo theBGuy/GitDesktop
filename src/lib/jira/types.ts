@@ -73,3 +73,43 @@ export interface JiraIssueDetails extends JiraIssueInfo {
   descriptionMd: string;
   comments: JiraComment[];
 }
+
+// ── Write path (phase 2) ────────────────────────────────────────────────────
+
+/** Per-project write permissions for the linked project, resolved server-side
+ *  (Jira's `mypermissions`). Each flag gates one affordance: permitted → the
+ *  control renders; not permitted (or a failed probe — every flag defaults
+ *  false) → the control is ABSENT, never disabled. */
+export interface JiraPermissions {
+  addComments: boolean;
+  transitionIssues: boolean;
+  createIssues: boolean;
+  assignIssues: boolean;
+}
+
+/** An issue type for the create picker (`createmeta`); `subtask` types are
+ *  filtered out — a subtask can't be created standalone. */
+export interface JiraIssueType {
+  id: string;
+  name: string;
+  iconUrl: string;
+  subtask: boolean;
+}
+
+/** The result of a close/reopen transition: the issue's new real status name +
+ *  category, applied to the chip so it reflects the workflow's actual target
+ *  status (e.g. "Done"), never a generic "Closed". */
+export interface JiraTransitionResult {
+  statusName: string;
+  statusCategory: JiraStatusCategory;
+}
+
+/** The direction of a workflow transition: `close` picks a transition whose
+ *  target category is `done`; `reopen` picks one targeting `new`/`indeterminate`. */
+export type JiraTransitionDirection = "close" | "reopen";
+
+/** The result of creating an issue: the new key + its browser URL. */
+export interface JiraCreatedIssue {
+  key: string;
+  url: string;
+}

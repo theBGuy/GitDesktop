@@ -781,7 +781,7 @@ local repository straight to GitLab (it creates the project, adds it as
 
 ## Jira issues
 
-Link a **Jira Cloud** project to any repository and the Issues tab gains a read-only
+Link a **Jira Cloud** project to any repository and the Issues tab gains a
 **Jira · PROJECTKEY** section. Link one from the repo **⋯** menu's **Link Jira project…**
 (pick your Jira site and a project), then browse the project's issues alongside any local
 ones. The open / closed / all filter maps to Jira's status **categories** — "To Do" and
@@ -791,8 +791,14 @@ ones. The open / closed / all filter maps to Jira's status **categories** — "T
 **assignee**, and **labels**, plus the Markdown **description** and **comments**. Every
 issue links out with **View in Jira**.
 
-This is **read-only for now** — creating, commenting, and transitioning Jira issues come
-later. To connect, add an **Atlassian API token** (your Atlassian account email plus the
+You can work an issue without leaving the tab. **Create** one ({{kbd:create-jira-issue}}
+from the palette) with a summary, Markdown description, and an **issue-type** picker;
+**comment** in Markdown; **close or reopen** it by following the project's own workflow —
+the button shows the real resulting status, not a generic "Close"; and **assign or
+unassign** it by searching your project's users. Each action is gated on your Jira
+permissions, so anything your token and role can't do simply doesn't appear.
+
+To connect, add an **Atlassian API token** (your Atlassian account email plus the
 token, validated against the site before it's saved and stored in your OS keychain); if
 you've already connected Bitbucket (see *Bitbucket repositories*), you can **reuse that
 credential** with one button instead of re-entering it.

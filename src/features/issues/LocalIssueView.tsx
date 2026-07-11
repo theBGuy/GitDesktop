@@ -41,6 +41,7 @@ import { useLocalConversation } from "@/features/conversations/useLocalConversat
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { copyText } from "@/lib/clipboard";
 import { forgeFeatureReady, useForgeStatus } from "@/lib/git/queries";
+import { formatBinding } from "@/lib/hotkeys/binding";
 import {
   useDeleteLocalIssue,
   useLocalIssues,
@@ -52,6 +53,10 @@ import { toastError } from "@/lib/toast";
 import { PlanIssueButton } from "../plan/PlanIssueButton";
 import { SolveIssueButton } from "../sessions/SolveIssueButton";
 import { PromoteLocalIssueDialog } from "./PromoteLocalIssueDialog";
+
+/** Platform-correct submit hint (Cmd+Enter on macOS, Ctrl+Enter else) — never a
+ *  literal modifier (house platform-mod-key rule). */
+const SUBMIT_HINT = formatBinding("mod+enter");
 
 export function LocalIssueView({
   repoPath,
@@ -293,7 +298,7 @@ export function LocalIssueView({
             size="sm"
             disabled={!comment.trim()}
             onClick={addComment}
-            title="Ctrl+Enter"
+            title={SUBMIT_HINT}
           >
             Comment
           </Button>

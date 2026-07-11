@@ -1,12 +1,19 @@
+import type { ForgeUserRef } from "@/lib/git/types";
 import { invoke } from "@/lib/tauri/invoke";
 import { COLD_START } from "@/lib/test-mode";
 import type {
   JiraAccountInfo,
+  JiraComment,
+  JiraCreatedIssue,
   JiraIssueDetails,
   JiraIssueInfo,
   JiraIssueState,
+  JiraIssueType,
+  JiraPermissions,
   JiraProject,
   JiraStoredAccount,
+  JiraTransitionDirection,
+  JiraTransitionResult,
 } from "./types";
 
 // Thin wrappers over the `jira.rs` command family. Jira credentials live in the
@@ -61,3 +68,64 @@ export const jiraIssueList = (
 /** The full read-only detail for one issue (description + comments as markdown). */
 export const jiraIssueView = (site: string, key: string) =>
   invoke<JiraIssueDetails>("jira_issue_view", { site, key });
+
+// ── Write path (phase 2) ────────────────────────────────────────────────────
+
+/** The linked project's per-project write permissions (server-resolved). Every
+ *  flag gates one affordance; a failed probe should be treated as all-false by
+ *  the caller (absent affordances) so the read path is never blocked. */
+export const jiraPermissions = (site: string, projectKey: string) =>
+  invoke<JiraPermissions>("jira_permissions", { site, projectKey });
+
+/** The project's creatable issue types (`createmeta`); subtasks are included —
+ *  the caller filters them out. */
+export const jiraIssueTypes = (site: string, projectKey: string) =>
+  invoke<JiraIssueType[]>("jira_issue_types", { site, projectKey });
+
+/** Add a comment (markdown → ADF Rust-side); returns the created comment with
+ *  its body already converted back to markdown. */
+export const jiraIssueComment = (site: string, key: string, bodyMd: string) =>
+  invoke<JiraComment>("jira_issue_comment", { site, key, bodyMd });
+
+/** Close or reopen the issue via a workflow transition; returns the resulting
+ *  real status name + category to update the chip. */
+export const jiraIssueTransition = (
+  site: string,
+  key: string,
+  direction: JiraTransitionDirection,
+) =>
+  invoke<JiraTransitionResult>("jira_issue_transition", {
+    site,
+    key,
+    direction,
+  });
+
+/** Create an issue; returns the new key + URL. `descriptionMd` optional (empty
+ *  becomes a single ADF paragraph Rust-side). */
+export const jiraIssueCreate = (
+  site: string,
+  projectKey: string,
+  issueTypeId: string,
+  summary: string,
+  descriptionMd?: string,
+) =>
+  invoke<JiraCreatedIssue>("jira_issue_create", {
+    site,
+    projectKey,
+    issueTypeId,
+    summary,
+    descriptionMd,
+  });
+
+/** Assign (accountId) or unassign (null) the issue's single assignee. */
+export const jiraIssueAssign = (
+  site: string,
+  key: string,
+  accountId: string | null,
+) => invoke<void>("jira_issue_assign", { site, key, accountId });
+
+/** Search assignable users for the issue (Jira scopes the search to the issue's
+ *  project + permissions). Returns neutral `ForgeUserRef`s carrying the API
+ *  avatar URL. */
+export const jiraUserSearch = (site: string, key: string, query: string) =>
+  invoke<ForgeUserRef[]>("jira_user_search", { site, key, query });

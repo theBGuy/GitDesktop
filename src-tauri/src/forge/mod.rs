@@ -300,6 +300,92 @@ pub async fn jira_issue_view(site: String, key: String) -> AppResult<jira::JiraI
     jira::issue_view(&site, &key).await
 }
 
+// ── Jira writes (phase 2) ──────────────────────────────────────────────────────
+
+/// Add a comment to a Jira issue. `body_md` is markdown (converted to ADF Rust-side); a
+/// whitespace-only body is rejected before any network call. Returns the created comment.
+#[tauri::command]
+pub async fn jira_issue_comment(
+    site: String,
+    key: String,
+    body_md: String,
+) -> AppResult<jira::JiraComment> {
+    jira::issue_comment(&site, &key, &body_md).await
+}
+
+/// Close or reopen a Jira issue via its workflow. `direction` ∈ `"close"` | `"reopen"`.
+/// Returns the issue's fresh status after the transition. Transition ids are per-project
+/// workflow and are never hardcoded.
+#[tauri::command]
+pub async fn jira_issue_transition(
+    site: String,
+    key: String,
+    direction: String,
+) -> AppResult<jira::JiraTransitionResult> {
+    jira::issue_transition(&site, &key, &direction).await
+}
+
+/// Create a Jira issue. Needs `project_key`, `issue_type_id`, and a non-empty `summary`;
+/// `description_md` (markdown → ADF) is optional. Returns the new issue's key + URL.
+#[tauri::command]
+pub async fn jira_issue_create(
+    site: String,
+    project_key: String,
+    issue_type_id: String,
+    summary: String,
+    description_md: Option<String>,
+) -> AppResult<jira::JiraCreatedIssue> {
+    jira::issue_create(
+        &site,
+        &project_key,
+        &issue_type_id,
+        &summary,
+        description_md.as_deref(),
+    )
+    .await
+}
+
+/// The available issue types for a project's create form (per-project `createmeta`
+/// sub-endpoint). Returns all types including subtasks; the frontend filters.
+#[tauri::command]
+pub async fn jira_issue_types(
+    site: String,
+    project_key: String,
+) -> AppResult<Vec<jira::JiraIssueType>> {
+    jira::issue_types(&site, &project_key).await
+}
+
+/// Assign (or unassign) a Jira issue. `account_id = Some(id)` assigns; `None` unassigns.
+#[tauri::command]
+pub async fn jira_issue_assign(
+    site: String,
+    key: String,
+    account_id: Option<String>,
+) -> AppResult<()> {
+    jira::issue_assign(&site, &key, account_id.as_deref()).await
+}
+
+/// Search users assignable to a Jira issue, for the assignee picker
+/// (`GET /user/assignable/search`).
+#[tauri::command]
+pub async fn jira_user_search(
+    site: String,
+    key: String,
+    query: String,
+) -> AppResult<Vec<model::ForgeUserRef>> {
+    jira::user_search(&site, &key, &query).await
+}
+
+/// The caller's per-project permissions, gating the Jira write actions
+/// (`GET /rest/api/3/mypermissions`).
+#[tauri::command]
+pub async fn jira_permissions(
+    site: String,
+    project_key: String,
+) -> AppResult<jira::JiraProjectPermissions> {
+    jira::permissions(&site, &project_key).await
+}
+
 /// The signed-in user's repositories on a provider, for the clone browser.
 /// Dispatches by provider — GitHub via `gh`, GitLab via `glab`; Bitbucket isn't
 /// implemented yet. Account-scoped (no repo path), unlike `forge_status`.

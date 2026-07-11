@@ -22,13 +22,18 @@ import {
 import { providerLabel } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useLocalIssues } from "@/lib/issues/queries";
-import { useJiraIssues, useJiraLink } from "@/lib/jira/queries";
+import {
+  useJiraIssues,
+  useJiraLink,
+  useJiraPermissions,
+} from "@/lib/jira/queries";
 import type { JiraIssueInfo } from "@/lib/jira/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
 import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { CreateIssueDialog } from "./CreateIssueDialog";
+import { CreateJiraIssueDialog } from "./CreateJiraIssueDialog";
 import { CreateLocalIssueDialog } from "./CreateLocalIssueDialog";
 import { RepoJiraDialog } from "./RepoJiraDialog";
 
@@ -56,7 +61,7 @@ function JiraStatusChip({ issue }: { issue: JiraIssueInfo }) {
   const done = issue.statusCategory === "done";
   const Icon = done ? CheckCircleIcon : CircleDashedIcon;
   return (
-    <span className="inline-flex items-center gap-1 border px-1 py-px text-[10px] text-muted-foreground">
+    <span className="inline-flex w-fit items-center gap-1 whitespace-nowrap border px-1 py-px text-[10px] text-muted-foreground">
       <Icon
         className={`size-3 shrink-0 ${done ? "text-merged" : "text-success"}`}
       />
@@ -86,12 +91,17 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
   const filterRef = useRef<HTMLInputElement>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [createLocalOpen, setCreateLocalOpen] = useState(false);
+  const [createJiraOpen, setCreateJiraOpen] = useState(false);
   const [jiraOpen, setJiraOpen] = useState(false);
   const localIssues = useLocalIssues(repoPath);
   // A linked Jira project is a third issue source, independent of the git host.
   const jiraLink = useJiraLink(repoPath);
   const link = jiraLink.data ?? null;
   const jiraIssues = useJiraIssues(repoPath, link, stateFilter);
+  // Per-project write permissions gate the Jira "New" option: present only when
+  // linked AND the user can create issues (a failed probe → `?? false` → absent).
+  const jiraPerms = useJiraPermissions(repoPath, link);
+  const canCreateJira = !!link && (jiraPerms.data?.createIssues ?? false);
   const pendingIssueDraft = useUiStore((s) => s.pendingIssueDraft);
   const setPendingIssueDraft = useUiStore((s) => s.setPendingIssueDraft);
   const pendingCreate = useUiStore((s) => s.pendingCreate);
@@ -102,6 +112,11 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
 
   useHotkeyAction("focus-filter", () => filterRef.current?.focus());
   useHotkeyAction("create-issue", () => setCreateOpen(true), canCreateGh);
+  useHotkeyAction(
+    "create-jira-issue",
+    () => setCreateJiraOpen(true),
+    canCreateJira,
+  );
   useHotkeyAction("link-jira-project", () => setJiraOpen(true));
 
   // "Reference in new issue" / "Duplicate issue" seeds + opens the create dialog.
@@ -126,8 +141,14 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
     } else if (pendingCreate === "local-issue") {
       setCreateLocalOpen(true);
       clearPendingCreate();
+    } else if (pendingCreate === "jira-issue") {
+      // Re-check the gate: RepositoryView's fallback fired from another tab, so
+      // its snapshot of the permission can lag this panel's — never open a
+      // create dialog that can't submit (mirrors the canCreateGh guard above).
+      if (canCreateJira) setCreateJiraOpen(true);
+      clearPendingCreate();
     }
-  }, [pendingCreate, clearPendingCreate, canCreateGh]);
+  }, [pendingCreate, clearPendingCreate, canCreateGh, canCreateJira]);
 
   const {
     filterText,
@@ -229,6 +250,10 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
         onGh: () => setCreateOpen(true),
         localLabel: "Local issue…",
         onLocal: () => setCreateLocalOpen(true),
+        jiraLabel: canCreateJira
+          ? `Jira issue in ${link?.projectKey}…`
+          : undefined,
+        onJira: canCreateJira ? () => setCreateJiraOpen(true) : undefined,
       }}
       filterSlot={
         <ConversationFilterPopover
@@ -349,20 +374,29 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
                 selectedIssue.id === issue.key,
               onSelect: (issue: JiraIssueInfo) =>
                 selectIssue({ kind: "jira", id: issue.key }),
+              // Three-line layout so the textual Jira status name never wraps
+              // inside its chip and squeezes the title: (1) status chip left +
+              // assignee avatar right, (2) full-width truncating title, (3)
+              // key · updated. Row heights stay consistent with/without an
+              // assignee (line 1 always reserves the avatar's height via the
+              // chip).
               renderRow: (issue: JiraIssueInfo) => (
                 <>
-                  <p className="flex items-center gap-1.5 text-xs font-medium">
+                  <div className="flex min-h-6 items-center gap-1.5">
                     <JiraStatusChip issue={issue} />
-                    <span className="truncate" title={issue.summary}>
-                      {issue.summary}
-                    </span>
                     {issue.assignee && (
                       <span className="ml-auto shrink-0">
                         <ForgeUserAvatar user={issue.assignee} ghHost={null} />
                       </span>
                     )}
+                  </div>
+                  <p
+                    className="mt-0.5 truncate text-xs font-medium"
+                    title={issue.summary}
+                  >
+                    {issue.summary}
                   </p>
-                  <p className="mt-0.5 truncate pl-4 font-mono text-[11px] text-muted-foreground">
+                  <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
                     {issue.key} · {formatRelativeTime(issue.updatedAt)}
                   </p>
                 </>
@@ -387,6 +421,14 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
         open={createLocalOpen}
         onOpenChange={setCreateLocalOpen}
       />
+      {link && (
+        <CreateJiraIssueDialog
+          repoPath={repoPath}
+          link={link}
+          open={createJiraOpen}
+          onOpenChange={setCreateJiraOpen}
+        />
+      )}
       <RepoJiraDialog
         repoPath={repoPath}
         open={jiraOpen}
