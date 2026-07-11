@@ -1,5 +1,5 @@
 import { CheckIcon, CopyIcon } from "@phosphor-icons/react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -21,6 +21,10 @@ export function ErrorDialog() {
   const presentation = useErrorDialog((s) => s.presentation);
   const close = useErrorDialog((s) => s.close);
   const [copied, setCopied] = useState(false);
+  // Hold the copy-feedback timer so handleClose can cancel it — otherwise a
+  // Copy → Close → reopen → Copy sequence lets the first dialog's orphaned
+  // timer fire mid-window and prematurely hide the new "Copied" feedback.
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const fullText = presentation?.fullText ?? "";
 
@@ -28,6 +32,10 @@ export function ErrorDialog() {
   // prop, so the Close button clears `copied` itself — otherwise a Copy → Close
   // within 1.5s leaves the next-opened dialog briefly showing "Copied".
   function handleClose() {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
     close();
     setCopied(false);
   }
@@ -37,7 +45,8 @@ export function ErrorDialog() {
       .writeText(fullText)
       .then(() => {
         setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
+        if (timerRef.current) clearTimeout(timerRef.current);
+        timerRef.current = setTimeout(() => setCopied(false), 1500);
       })
       .catch(() => {
         // Clipboard denied — nothing useful to do.
