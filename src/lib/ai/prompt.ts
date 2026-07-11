@@ -749,6 +749,10 @@ export function extractBranchName(raw: string): string {
   return line.replace(/^[`'"]+|[`'"]+$/g, "").trim();
 }
 
+// The prompt's 325 ceiling sits INTENTIONALLY below capDescription's 350 guard
+// (GitHub's real About limit): models overshoot stated ceilings (anchoring the
+// prompt at 350 produced a 353-char output live), so the soft target leaves
+// headroom and the parser only cuts what the field itself would reject.
 const DESCRIPTION_SYSTEM = `You write a GitHub repository's "About" metadata from its README.
 Output EXACTLY these two lines and nothing else:
 Description: <one information-dense line of roughly 200 to 325 characters (short one-liners read thin, so use the space — but never exceed 325; the field truncates anything longer), no trailing period, no quotes; describe what the project does and what makes it stand out — do not begin with "This repository", "A repository for", or the project's own name>
@@ -793,16 +797,16 @@ export function buildRepoDescriptionPrompt(input: {
 }
 
 /** Cap a description at `max` chars without chopping mid-word: cut at the last
- *  space inside `max` if it's past ~300, else a plain slice, then strip any
- *  trailing punctuation/whitespace the cut left behind. */
+ *  space inside `max` if it's within 50 chars of the cap, else a plain slice,
+ *  then strip any trailing punctuation/whitespace the cut left behind. */
 function capDescription(text: string, max: number): string {
   if (text.length <= max) {
     return text;
   }
   const window = text.slice(0, max);
   const lastSpace = window.lastIndexOf(" ");
-  const cut = lastSpace > 300 ? window.slice(0, lastSpace) : window;
-  return cut.replace(/[\s,;:—-]+$/, "");
+  const cut = lastSpace > max - 50 ? window.slice(0, lastSpace) : window;
+  return cut.replace(/[\s.,;:—-]+$/, "");
 }
 
 /** Parse the model's "Description:" / "Topics:" lines into clean values. */

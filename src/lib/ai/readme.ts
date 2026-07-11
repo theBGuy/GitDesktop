@@ -3,7 +3,9 @@
 // tail (features/highlights breadth) of long READMEs. This condenses a README to
 // fit a char budget while preserving the high-signal content — what the project
 // does and the breadth of what it can do — over install/dev boilerplate. Pure,
-// self-contained, no AI pre-pass: same input always yields the same output.
+// self-contained, no AI pre-pass: same input always yields the same output. The
+// output is always ≤ budget; a README that already fits passes through normalized
+// (CRLF→LF + trim) but otherwise untouched.
 
 // Heading text (lowercased) that marks a HIGH-signal section — its body is worth
 // keeping in full for as long as the budget allows.
@@ -58,10 +60,12 @@ const LOW_HEADINGS = [
  *  what-it-does / features content over install/dev boilerplate. */
 export function distillReadme(markdown: string, budget: number): string {
   // Phase 0 — normalize and short-circuit. A README that already fits passes
-  // through byte-identical (the ORIGINAL string, not the normalized copy).
+  // through in its normalized form (CRLF→LF + trim). Returning the raw markdown
+  // here would let content that's short but padded with trailing newlines ship
+  // over budget while skipping every phase (including the newline collapse).
   const normalized = markdown.replace(/\r\n/g, "\n").trim();
   if (normalized.length <= budget) {
-    return markdown;
+    return normalized;
   }
 
   // Phase 1 — strip markup noise (order matters: comments/fences before the
@@ -266,7 +270,7 @@ function hardCut(text: string, budget: number): string {
   return window.trim();
 }
 
-/** Does the lowercased heading text start with, or contain, any keyword? */
+/** Does the lowercased heading text contain any keyword? */
 function matches(title: string, keywords: readonly string[]): boolean {
-  return keywords.some((k) => title.startsWith(k) || title.includes(k));
+  return keywords.some((k) => title.includes(k));
 }
