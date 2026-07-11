@@ -1,5 +1,5 @@
 import { CheckIcon, CopyIcon } from "@phosphor-icons/react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -25,6 +25,19 @@ export function ErrorDialog() {
   // Copy → Close → reopen → Copy sequence lets the first dialog's orphaned
   // timer fire mid-window and prematurely hide the new "Copied" feedback.
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Reset copy feedback when the presentation identity changes — open() called
+  // while the dialog is already open swaps `presentation` without ever passing
+  // through handleClose(), so a prior Copy's "Copied" state and live timer would
+  // otherwise bleed into the new error's session. (Also fires harmlessly on close.)
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `presentation` is the reset trigger, not read in the body.
+  useEffect(() => {
+    setCopied(false);
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  }, [presentation]);
 
   const fullText = presentation?.fullText ?? "";
 
