@@ -794,7 +794,7 @@ issue links out with **View in Jira**.
 You can work an issue without leaving the tab. **Create** one ({{kbd:create-jira-issue}}
 from the palette) with a summary, Markdown description, and an **issue-type** picker;
 **comment** in Markdown; **close or reopen** it by following the project's own workflow —
-the button shows the real resulting status, not a generic "Close"; and **assign or
+the confirmation names the real resulting status, not a generic "closed"; and **assign or
 unassign** it by searching your project's users. Each action is gated on your Jira
 permissions, so anything your token and role can't do simply doesn't appear.
 

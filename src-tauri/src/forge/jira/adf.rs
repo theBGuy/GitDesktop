@@ -121,6 +121,10 @@ fn render_list(node: &Value, depth: usize, kind: ListKind) -> String {
         Some(items) => items,
         None => return String::new(),
     };
+    // Two spaces per depth level. Strict CommonMark can read ≥4 leading spaces as a
+    // code block at the TOP level, but list continuations are measured from the item
+    // marker, and the app's own Markdown component renders this correctly — revisit
+    // only if this output is ever exported as plain text outside the app.
     let indent = "  ".repeat(depth);
     let mut out = String::new();
     let mut index = 0usize;

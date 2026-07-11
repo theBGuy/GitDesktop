@@ -1,7 +1,7 @@
 import { SparkleIcon, XIcon } from "@phosphor-icons/react";
 import { useSelector } from "@tanstack/react-store";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffect, useEffectEvent, useState } from "react";
+import { useEffect, useEffectEvent, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -56,8 +56,15 @@ export function CreateJiraIssueDialog({
   const aiEnabled = useAiEnabled();
   const { generate, cancel, generating } = useGenerateIssueDraft(repoPath);
 
-  // Creatable types only (a subtask needs a parent — not offered here).
-  const creatable = (types.data ?? []).filter((t) => !t.subtask);
+  // Creatable types only (a subtask needs a parent — not offered here). Manual
+  // useMemo is LOAD-BEARING: the submit handler's try/catch bails this component
+  // out of the React Compiler, so nothing auto-memoizes this derived array — and
+  // it feeds the default-type effect's deps below (a fresh reference every render
+  // would re-fire that effect each time).
+  const creatable = useMemo(
+    () => (types.data ?? []).filter((t) => !t.subtask),
+    [types.data],
+  );
   const [issueTypeId, setIssueTypeId] = useState<string>("");
   // A Jira validation error the create command surfaced (field-level messages
   // the Rust side joins readably) — shown inline under the form, not a toast.

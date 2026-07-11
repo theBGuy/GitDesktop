@@ -46,7 +46,8 @@
       "Bash(git --no-pager diff *)",
       "mcp__gitdesktop__repo_status",
       "mcp__gitdesktop__list_pull_requests",
-      "mcp__gitdesktop__list_pull_request_comments"
+      "mcp__gitdesktop__list_pull_request_comments",
+      "mcp__gitdesktop__comment_pull_request"
     ]
   },
   "enabledMcpjsonServers": [

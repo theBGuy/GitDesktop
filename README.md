@@ -131,7 +131,7 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
   **priority**, **assignee**, **labels**, Markdown **description**, and **comments**, with
   **View in Jira** link-outs. You can also **create** an issue (summary, description, and an
   issue-type picker), **comment** in Markdown, **close / reopen** by following the project's
-  own workflow (the button shows the real resulting status), and **assign / unassign** via
+  own workflow (the confirmation names the real resulting status), and **assign / unassign** via
   user search — actions your Jira permissions don't allow simply don't appear. Connect with
   an **Atlassian API token** (email + token, validated before saving and kept in your OS
   keychain), or reuse an existing Bitbucket credential. Especially handy for **Bitbucket** repos, whose native tracker Atlassian
