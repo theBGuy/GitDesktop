@@ -128,8 +128,8 @@ function JiraAssigneePicker({
   }, [query]);
 
   const users = useJiraUserSearch(link, issueKey, debounced, open);
-  // Always offer Unassign first (only meaningful when someone's assigned, but a
-  // stable list keeps arrow-key nav simple); the search results follow. Drop
+  // Offer Unassign first when someone is currently assigned; the search results
+  // follow. Drop
   // users the backend couldn't resolve an accountId for (id === "") — they're
   // unassignable by definition, and picking one would POST `{accountId: ""}`
   // and 400 (and an empty id also slips past the no-op guard when clearing).
