@@ -11,6 +11,7 @@ export interface AppError {
     | "glab"
     | "bitbucketNotConfigured"
     | "bitbucket"
+    | "jira"
     | "keyring"
     | "invalidArgument"
     | "command"

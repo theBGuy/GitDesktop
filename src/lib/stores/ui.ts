@@ -54,8 +54,9 @@ export interface SelectedPr {
 }
 
 export interface SelectedIssue {
-  kind: "local" | "remote";
-  /** Local issue id, or the remote issue number as a string. */
+  kind: "local" | "remote" | "jira";
+  /** Local issue id, the remote issue number as a string, or the Jira issue key
+   *  (e.g. `PROJ-123`). */
   id: string;
 }
 

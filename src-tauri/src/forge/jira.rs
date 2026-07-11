@@ -1,0 +1,1591 @@
+//! Jira Cloud (read path) — a per-repo LINKED issue provider, orthogonal to the git
+//! host detection every `forge_issue_*` command dispatches on. Jira can never be
+//! detected from a git remote (no repo has a Jira remote), so it is *configured*: the
+//! frontend stores a per-repo `{site, projectKey}` link and passes `site`/`project_key`
+//! into these commands, keeping Rust stateless about linkage. See
+//! `docs/jira-issue-integration.md` for the architectural rationale.
+//!
+//! This module mirrors the Bitbucket provider's shape ([`super::bitbucket`] +
+//! [`super::http`]) but Jira-local: a per-tenant base URL (`https://<site>/rest/api/3/`)
+//! instead of a constant, HTTP Basic auth (`email:api_token`), and Jira's error
+//! envelope (`{errorMessages, errors}`). Auth tokens are stored in the OS keyring under
+//! `forge/<site>/{email,token}` — the raw token never crosses IPC.
+//!
+//! Bodies are ADF (a JSON tree), converted to markdown by [`adf`]. Phase 1 is read-only:
+//! account connect/validate, project search, issue list, and issue detail. Writes
+//! (comment/transition/create/assign) are phase 2.
+
+mod adf;
+
+use std::sync::OnceLock;
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use tauri_plugin_http::reqwest::{self, Client};
+
+use crate::error::{AppError, AppResult};
+use crate::forge::model::ForgeUserRef;
+
+// ── HTTP transport (Jira-local) ────────────────────────────────────────────────
+
+/// Keyring credential keys under `forge/<site>/*`.
+const KEY_EMAIL: &str = "email";
+const KEY_TOKEN: &str = "token";
+
+/// Mirror the Bitbucket transport's ceilings (`http.rs`): a per-request timeout and a
+/// tighter connect timeout so an unreachable host fails fast.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The single page size for list endpoints — the app's bounded-pagination policy
+/// (one page, no cursor-following).
+const MAX_RESULTS: u32 = 50;
+
+/// The process-wide Jira HTTP client. Built once (connection pooling, one TLS setup)
+/// and shared across all calls, exactly like the Bitbucket client.
+static CLIENT: OnceLock<Client> = OnceLock::new();
+
+fn client() -> &'static Client {
+    CLIENT.get_or_init(|| {
+        Client::builder()
+            .user_agent(concat!("GitDesktop/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            // The builder only fails on a broken TLS backend — unrecoverable; a plain
+            // `Client::new()` uses the same backend, so fall back rather than panic.
+            .unwrap_or_else(|_| Client::new())
+    })
+}
+
+/// Keyring key holding the resolved API base mode (`"direct"` | `"gateway:<cloudId>"`).
+const KEY_API_BASE: &str = "api_base";
+
+/// Which Atlassian API base a site's stored token authenticates against.
+///
+/// **Scoped vs classic tokens (support-doc + live-verified 2026-07-10):** Atlassian's
+/// "Manage API tokens" doc (support.atlassian.com) states that API tokens created WITH
+/// scopes must call the gateway `https://api.atlassian.com/ex/jira/{cloudId}` — a scoped
+/// token CANNOT authenticate site-direct against `https://<site>.atlassian.net` (it 401s
+/// there). Classic *unscoped* tokens use the site-direct base. Atlassian is steering all
+/// users to scoped tokens, so the gateway base is the path most new tokens need. Both
+/// bases use the same Basic auth header; only the URL differs. Do NOT collapse this back
+/// to site-direct only — a fresh Jira-scoped token AND a scoped Bitbucket token both 401
+/// site-direct (live-proven against thebguy.atlassian.net, 2026-07-10).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum JiraApiBase {
+    /// Classic unscoped token — `https://<site>/rest/api/3/`.
+    Direct { site: String },
+    /// Scoped token — `https://api.atlassian.com/ex/jira/<cloudId>/rest/api/3/`.
+    Gateway { cloud_id: String },
+}
+
+impl JiraApiBase {
+    /// Resolve a relative REST path against this base's `…/rest/api/3/` root.
+    fn resolve(&self, path: &str) -> String {
+        let path = path.trim_start_matches('/');
+        match self {
+            JiraApiBase::Direct { site } => format!("https://{site}/rest/api/3/{path}"),
+            JiraApiBase::Gateway { cloud_id } => {
+                format!("https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/{path}")
+            }
+        }
+    }
+
+    /// The keyring value that persists this mode: `"direct"` or `"gateway:<cloudId>"`.
+    fn to_keyring_value(&self) -> String {
+        match self {
+            JiraApiBase::Direct { .. } => "direct".to_string(),
+            JiraApiBase::Gateway { cloud_id } => format!("gateway:{cloud_id}"),
+        }
+    }
+
+    /// Parse a stored keyring value back into a mode, given the site (needed to rebuild
+    /// the Direct base). `"gateway:<id>"` → Gateway (empty id → None); anything else
+    /// (including `"direct"`, an empty/absent value, or an unknown string) → Direct, so
+    /// pre-existing creds with no `api_base` entry default to site-direct and a later
+    /// 401 surfaces normally (re-linking re-resolves). Pure (testable).
+    fn from_keyring_value(value: Option<&str>, site: &str) -> Self {
+        if let Some(rest) = value.and_then(|v| v.strip_prefix("gateway:")) {
+            if !rest.is_empty() {
+                return JiraApiBase::Gateway {
+                    cloud_id: rest.to_string(),
+                };
+            }
+        }
+        JiraApiBase::Direct {
+            site: site.to_string(),
+        }
+    }
+}
+
+/// The stored Jira credentials (email + token) plus the resolved API base for one site,
+/// from the OS keyring. Never logged, never returned across IPC.
+struct JiraCredentials {
+    email: String,
+    token: String,
+    base: JiraApiBase,
+}
+
+/// Normalize and validate a Jira Cloud site host. Trims, strips a leading `https://`
+/// (or `http://`) and any trailing slash, lowercases, and REQUIRES it match
+/// `^[a-z0-9-]+\.atlassian\.net$` — v1 is Jira Cloud only, and this also prevents
+/// sending the token to an arbitrary host. Returns the bare host (e.g.
+/// `yourteam.atlassian.net`) or a clear error.
+fn normalize_site(site: &str) -> AppResult<String> {
+    let s = site.trim();
+    let s = s
+        .strip_prefix("https://")
+        .or_else(|| s.strip_prefix("http://"))
+        .unwrap_or(s);
+    let s = s.trim_end_matches('/').to_ascii_lowercase();
+    if is_valid_site(&s) {
+        Ok(s)
+    } else {
+        Err(AppError::Jira(
+            "Enter your Jira Cloud site, e.g. yourteam.atlassian.net (custom domains \
+             and Server/DC aren't supported yet)."
+                .into(),
+        ))
+    }
+}
+
+/// Whether `s` is a bare `<subdomain>.atlassian.net` host: a non-empty label of
+/// `[a-z0-9-]` followed by exactly the `.atlassian.net` suffix. Pure (testable).
+fn is_valid_site(s: &str) -> bool {
+    let Some(label) = s.strip_suffix(".atlassian.net") else {
+        return false;
+    };
+    !label.is_empty()
+        && label.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        // A subdomain label can't itself contain a dot (that would be a nested
+        // subdomain — not a Cloud tenant host).
+        && !label.contains('.')
+}
+
+/// Validate a Jira project key (`^[A-Z][A-Z0-9_]*$`) before splicing it into JQL —
+/// grammar-validate untrusted config so a stored key can't inject JQL. Pure.
+fn is_valid_project_key(key: &str) -> bool {
+    let mut bytes = key.bytes();
+    match bytes.next() {
+        Some(b) if b.is_ascii_uppercase() => {}
+        _ => return false,
+    }
+    bytes.all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// Validate a Jira issue key (`^[A-Z][A-Z0-9_]*-[0-9]+$`) before interpolating it into
+/// an API path. Pure.
+fn is_valid_issue_key(key: &str) -> bool {
+    let Some((project, number)) = key.rsplit_once('-') else {
+        return false;
+    };
+    is_valid_project_key(project)
+        && !number.is_empty()
+        && number.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Jira's error envelope: `{"errorMessages": [..], "errors": {field: msg}}`. Either
+/// may be absent on a given response; parsing is best-effort and the caller falls back
+/// to a status+snippet message.
+#[derive(Deserialize, Default)]
+struct JiraErrorEnvelope {
+    #[serde(default)]
+    error_messages: Vec<String>,
+    #[serde(default)]
+    errors: std::collections::HashMap<String, String>,
+}
+
+impl JiraErrorEnvelope {
+    /// The best human message: the first `errorMessages` entry, else the first field
+    /// error, else empty.
+    fn best_message(&self) -> Option<String> {
+        self.error_messages
+            .iter()
+            .find(|m| !m.trim().is_empty())
+            .cloned()
+            .or_else(|| self.errors.values().find(|m| !m.trim().is_empty()).cloned())
+    }
+}
+
+/// Turn a non-2xx response body + status into an [`AppError::Jira`], with the
+/// 401/403/429 special-casing the design requires. `body` is the raw response text
+/// (never contains our credentials — those live only in the request header).
+fn http_error(status: u16, body: &str) -> AppError {
+    // Jira's envelope is `{errorMessages, errors}` — note this shape differs from
+    // Bitbucket's `{error:{message}}`, so it is parsed with a Jira-local type.
+    let api_msg = serde_json::from_str::<JiraErrorEnvelope>(body)
+        .ok()
+        .and_then(|e| e.best_message());
+    match status {
+        401 => AppError::Jira(
+            "Jira rejected the credentials (401) — the API token may be expired or \
+             revoked. Reconnect in the Jira link dialog."
+                .into(),
+        ),
+        403 => AppError::Jira(
+            "Your Atlassian account authenticated but doesn't have access to this Jira \
+             site or project (403)."
+                .into(),
+        ),
+        429 => AppError::Jira("Jira rate limit reached (429). Wait a moment and try again.".into()),
+        _ => {
+            let detail = api_msg.unwrap_or_else(|| {
+                let trimmed = body.trim();
+                if trimmed.is_empty() {
+                    format!("HTTP {status}")
+                } else {
+                    let snippet: String = trimmed.chars().take(300).collect();
+                    format!("HTTP {status}: {snippet}")
+                }
+            });
+            AppError::Jira(detail)
+        }
+    }
+}
+
+/// The low-level authenticated request: send `method` to the base-resolved `path` with
+/// HTTP Basic auth (and an optional JSON body), returning the raw `(status, body)`
+/// WITHOUT turning a non-2xx into an error — the caller decides (base resolution needs
+/// to inspect a 401 specifically). Only a transport/read failure is an `Err`.
+async fn raw_request(
+    creds: &JiraCredentials,
+    method: reqwest::Method,
+    path: &str,
+    json_body: Option<&Value>,
+) -> AppResult<(u16, String)> {
+    let url = creds.base.resolve(path);
+    let mut req = client()
+        .request(method, &url)
+        .basic_auth(&creds.email, Some(&creds.token))
+        .header(reqwest::header::ACCEPT, "application/json");
+    if let Some(b) = json_body {
+        let text = serde_json::to_string(b).unwrap_or_default();
+        req = req
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(text);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| AppError::Jira(format!("Jira request failed: {e}")))?;
+    let status = resp.status().as_u16();
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| AppError::Jira(format!("could not read Jira response: {e}")))?;
+    Ok((status, body))
+}
+
+/// GET a Jira endpoint expecting JSON, deserializing into `T` against the creds' resolved
+/// base. `Accept: application/json`, HTTP Basic auth. Non-2xx → [`http_error`]; a parse
+/// failure of a 2xx body → `Jira("could not parse …")` carrying the serde error verbatim
+/// (never mapped into a specific-cause message).
+async fn get_json<T: serde::de::DeserializeOwned>(
+    creds: &JiraCredentials,
+    path: &str,
+    what: &str,
+) -> AppResult<T> {
+    let (status, body) = raw_request(creds, reqwest::Method::GET, path, None).await?;
+    if !(200..300).contains(&status) {
+        return Err(http_error(status, &body));
+    }
+    serde_json::from_str(&body)
+        .map_err(|e| AppError::Jira(format!("could not parse Jira {what}: {e}")))
+}
+
+/// POST JSON to a Jira endpoint and deserialize the 2xx body into `T`. Same error
+/// handling as [`get_json`].
+async fn post_json<T: serde::de::DeserializeOwned>(
+    creds: &JiraCredentials,
+    path: &str,
+    body: &Value,
+    what: &str,
+) -> AppResult<T> {
+    let (status, resp_body) = raw_request(creds, reqwest::Method::POST, path, Some(body)).await?;
+    if !(200..300).contains(&status) {
+        return Err(http_error(status, &resp_body));
+    }
+    serde_json::from_str(&resp_body)
+        .map_err(|e| AppError::Jira(format!("could not parse Jira {what}: {e}")))
+}
+
+/// Load the stored credentials + resolved API base for a site from the keyring (blocking
+/// reads off-thread). `Jira("No Jira account…")` when no token is stored for that site.
+/// A missing `api_base` entry (pre-existing creds) defaults to site-direct — a later 401
+/// then surfaces normally and re-linking re-resolves the mode.
+async fn load_credentials(site: &str) -> AppResult<JiraCredentials> {
+    let site_owned = site.to_string();
+    let (email, token, api_base) = tauri::async_runtime::spawn_blocking(move || {
+        let email = crate::secrets::read_forge_secret(&site_owned, KEY_EMAIL)?;
+        let token = crate::secrets::read_forge_secret(&site_owned, KEY_TOKEN)?;
+        let api_base = crate::secrets::read_forge_secret(&site_owned, KEY_API_BASE)?;
+        Ok::<_, AppError>((email, token, api_base))
+    })
+    .await
+    .map_err(|e| AppError::Jira(format!("keyring task failed: {e}")))??;
+    match (email, token) {
+        (Some(email), Some(token)) if !email.is_empty() && !token.is_empty() => {
+            let base = JiraApiBase::from_keyring_value(api_base.as_deref(), site);
+            Ok(JiraCredentials { email, token, base })
+        }
+        _ => Err(AppError::Jira(
+            "No Jira account is connected for this site. Connect it in the Jira link \
+             dialog."
+                .into(),
+        )),
+    }
+}
+
+// ── JSON shapes (defensive; every nullable field is Option) ────────────────────
+
+/// A Jira user (`/myself`, or an embedded `assignee`/`reporter`/`author`). Every field
+/// is optional/tolerant — an embedded user can be a bare object or `null`.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct JiraUser {
+    #[serde(default)]
+    account_id: Option<String>,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    email_address: Option<String>,
+    #[serde(default)]
+    avatar_urls: Option<JiraAvatarUrls>,
+}
+
+/// The `avatarUrls` block — a map keyed by size. Only `48x48` is used.
+#[derive(Deserialize, Default)]
+struct JiraAvatarUrls {
+    #[serde(rename = "48x48", default)]
+    x48: Option<String>,
+}
+
+impl JiraUser {
+    /// The `48x48` avatar URL, or empty when absent.
+    fn avatar_url(&self) -> String {
+        self.avatar_urls
+            .as_ref()
+            .and_then(|a| a.x48.clone())
+            .unwrap_or_default()
+    }
+
+    /// Map onto the neutral [`ForgeUserRef`]: id = accountId, label = displayName,
+    /// avatar_url = the `48x48` avatar (or empty). A user with no accountId still maps
+    /// (id empty) — callers surface it as an unattributed ref rather than dropping it.
+    fn to_ref(&self) -> ForgeUserRef {
+        ForgeUserRef {
+            id: self.account_id.clone().unwrap_or_default(),
+            label: self.display_name.clone().unwrap_or_default(),
+            avatar_url: self.avatar_url(),
+        }
+    }
+}
+
+// ── Account commands (set / validate / clear / read) ───────────────────────────
+
+/// The account info returned after connecting (or on validate). The TOKEN is never
+/// included — it stays in the keyring only.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraAccountInfo {
+    pub display_name: String,
+    pub account_id: String,
+    pub avatar_url: String,
+    pub email: String,
+}
+
+/// The stored account (email only), for a no-network keyring read.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraStoredAccount {
+    pub email: String,
+}
+
+/// Map a `/myself` `JiraUser` onto `JiraAccountInfo`, filling `email` from the argument
+/// (Jira's `/myself` may omit `emailAddress` when the account hides it, but we know the
+/// email we authenticated as).
+fn account_info_from_myself(me: JiraUser, email_fallback: &str) -> JiraAccountInfo {
+    JiraAccountInfo {
+        display_name: me.display_name.clone().unwrap_or_default(),
+        account_id: me.account_id.clone().unwrap_or_default(),
+        avatar_url: me.avatar_url(),
+        email: me
+            .email_address
+            .filter(|e| !e.is_empty())
+            .unwrap_or_else(|| email_fallback.to_string()),
+    }
+}
+
+/// Probe `GET /rest/api/3/myself` with the given creds (against the creds' resolved base)
+/// and map the result onto `JiraAccountInfo`. Used by `validate` on STORED creds, whose
+/// base is already resolved — so no re-resolution here.
+async fn probe_myself(creds: &JiraCredentials, email_fallback: &str) -> AppResult<JiraAccountInfo> {
+    let me: JiraUser = get_json(creds, "myself", "account").await?;
+    Ok(account_info_from_myself(me, email_fallback))
+}
+
+/// The `/_edge/tenant_info` response — an UNAUTHENTICATED endpoint on the site host that
+/// returns the tenant's `cloudId` (verified live 2026-07-10: `GET
+/// https://<site>/_edge/tenant_info` returned a real cloudId for thebguy.atlassian.net
+/// with no auth). Only `cloudId` is read.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TenantInfo {
+    #[serde(default)]
+    cloud_id: Option<String>,
+}
+
+/// Fetch the site's `cloudId` from `GET https://<site>/_edge/tenant_info` (no auth) on the
+/// shared client. Type-guards the shape: a non-empty `cloudId` string, else a clear
+/// "couldn't resolve the site's cloud id" error (never `unwrap_or_default`). `site` is
+/// assumed already normalized/validated by the caller.
+async fn fetch_cloud_id(site: &str) -> AppResult<String> {
+    let url = format!("https://{site}/_edge/tenant_info");
+    let resp = client()
+        .get(&url)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()
+        .await
+        .map_err(|e| AppError::Jira(format!("Jira request failed: {e}")))?;
+    let status = resp.status().as_u16();
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| AppError::Jira(format!("could not read Jira response: {e}")))?;
+    if !(200..300).contains(&status) {
+        return Err(AppError::Jira(format!(
+            "couldn't resolve the site's cloud id (HTTP {status})"
+        )));
+    }
+    cloud_id_from_body(&body)
+}
+
+/// Type-guard a `tenant_info` body into a non-empty `cloudId` string. Pure (testable):
+/// a parse failure, a missing/null `cloudId`, or an empty/whitespace value all map to
+/// the same clear error — never `unwrap_or_default` (a blank cloudId would build a
+/// broken gateway URL).
+fn cloud_id_from_body(body: &str) -> AppResult<String> {
+    let info: TenantInfo = serde_json::from_str(body)
+        .map_err(|_| AppError::Jira("couldn't resolve the site's cloud id".into()))?;
+    match info.cloud_id {
+        Some(id) if !id.trim().is_empty() => Ok(id),
+        _ => Err(AppError::Jira(
+            "couldn't resolve the site's cloud id".into(),
+        )),
+    }
+}
+
+/// What to do after the site-direct `/myself` probe returns `status`. Pure (testable):
+/// isolates the resolution branch from the network so the decision can be unit-tested.
+#[derive(Debug, PartialEq, Eq)]
+enum DirectProbeStep {
+    /// 2xx — the token works site-direct; use the Direct base.
+    UseDirect,
+    /// 401 — likely a scoped token; resolve the cloudId and retry via the gateway.
+    TryGateway,
+    /// Any other status — a genuine direct-base failure; surface it unchanged.
+    Fail,
+}
+
+/// Decide the next step from a site-direct probe status. Only a 401 means "wrong base for
+/// this token type" (scoped tokens 401 site-direct — see [`JiraApiBase`]); a 2xx uses
+/// Direct; everything else (403/network-mapped/5xx) is a real failure. Pure.
+fn decide_after_direct(status: u16) -> DirectProbeStep {
+    if (200..300).contains(&status) {
+        DirectProbeStep::UseDirect
+    } else if status == 401 {
+        DirectProbeStep::TryGateway
+    } else {
+        DirectProbeStep::Fail
+    }
+}
+
+/// Resolve the API base for a token at credential-save time: probe `/myself` site-direct;
+/// on a 401 specifically, resolve the site's `cloudId` and retry via the gateway;
+/// whichever succeeds is the site's mode. Returns the resolved `(base, JiraAccountInfo)`.
+///
+/// Scoped tokens 401 site-direct and must use the gateway (support-doc + live-verified,
+/// see [`JiraApiBase`]); classic unscoped tokens work site-direct. A non-401 direct
+/// failure (403/network/parse) is returned as-is — only a 401 triggers the gateway
+/// retry, because only a 401 is the "wrong base for this token type" signal.
+///
+/// `email`/`token` are the candidate credentials (not yet stored). Errors from the
+/// gateway retry are returned to the caller, which decides the final failure copy.
+async fn resolve_base(
+    site: &str,
+    email: &str,
+    token: &str,
+) -> AppResult<(JiraApiBase, JiraAccountInfo)> {
+    // Try site-direct first.
+    let direct = JiraCredentials {
+        email: email.to_string(),
+        token: token.to_string(),
+        base: JiraApiBase::Direct {
+            site: site.to_string(),
+        },
+    };
+    let (status, body) = raw_request(&direct, reqwest::Method::GET, "myself", None).await?;
+    match decide_after_direct(status) {
+        DirectProbeStep::UseDirect => {
+            let me: JiraUser = serde_json::from_str(&body)
+                .map_err(|e| AppError::Jira(format!("could not parse Jira account: {e}")))?;
+            Ok((direct.base, account_info_from_myself(me, email)))
+        }
+        DirectProbeStep::Fail => Err(http_error(status, &body)),
+        DirectProbeStep::TryGateway => {
+            // 401 site-direct → the token is likely scoped. Resolve the cloudId and retry.
+            let cloud_id = fetch_cloud_id(site).await?;
+            let gateway = JiraCredentials {
+                email: email.to_string(),
+                token: token.to_string(),
+                base: JiraApiBase::Gateway { cloud_id },
+            };
+            let (g_status, g_body) =
+                raw_request(&gateway, reqwest::Method::GET, "myself", None).await?;
+            if (200..300).contains(&g_status) {
+                let me: JiraUser = serde_json::from_str(&g_body)
+                    .map_err(|e| AppError::Jira(format!("could not parse Jira account: {e}")))?;
+                Ok((gateway.base, account_info_from_myself(me, email)))
+            } else {
+                // Both bases failed — surface the gateway status (the token can't reach
+                // Jira on either base). The caller layers command-specific copy on top.
+                Err(http_error(g_status, &g_body))
+            }
+        }
+    }
+}
+
+/// Persist the credentials + resolved base for a site (blocking keyring writes
+/// off-thread). Writes email/token and the `api_base` mode value.
+async fn persist_account(
+    site: &str,
+    email: &str,
+    token: &str,
+    base: &JiraApiBase,
+) -> AppResult<()> {
+    let (kr_site, kr_email, kr_token, kr_base) = (
+        site.to_string(),
+        email.to_string(),
+        token.to_string(),
+        base.to_keyring_value(),
+    );
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::secrets::set_forge_secret(&kr_site, KEY_EMAIL, &kr_email)?;
+        crate::secrets::set_forge_secret(&kr_site, KEY_TOKEN, &kr_token)?;
+        crate::secrets::set_forge_secret(&kr_site, KEY_API_BASE, &kr_base)?;
+        Ok::<_, AppError>(())
+    })
+    .await
+    .map_err(|e| AppError::Jira(format!("keyring task failed: {e}")))?
+}
+
+/// Connect a Jira account for a site: normalize + validate the site, resolve the API base
+/// (site-direct vs gateway — see [`resolve_base`]) by validating the (site, email, token)
+/// triple via `GET /myself` BEFORE persisting anything (a pre-mutation guard — nothing is
+/// written if validation fails), then store email/token + the resolved base and return
+/// the account info (never the token).
+pub async fn set_account(site: &str, email: &str, token: &str) -> AppResult<JiraAccountInfo> {
+    let site = normalize_site(site)?;
+    let email = email.trim().to_string();
+    let token = token.trim().to_string();
+    if email.is_empty() || token.is_empty() {
+        return Err(AppError::InvalidArgument(
+            "an email and API token are both required".into(),
+        ));
+    }
+    // Resolve the base (probes direct, falls back to gateway on a 401) before writing.
+    // On failure, the manual-entry path frames the auth error as a possibly-wrong-product
+    // or expired token; a non-auth error passes through unchanged.
+    let (base, info) = resolve_base(&site, &email, &token)
+        .await
+        .map_err(specialize_manual_error)?;
+
+    // Validated — persist the creds + resolved base.
+    persist_account(&site, &email, &token, &base).await?;
+    Ok(info)
+}
+
+/// Specialize an AUTH error (401 or 403) from MANUAL credential entry (`set_account`,
+/// after base resolution has already tried BOTH bases). A token that 401s on both
+/// site-direct and the gateway is either for a different Atlassian product or
+/// expired/revoked — say so, keeping the status marker. Non-auth errors pass through
+/// unchanged.
+fn specialize_manual_error(err: AppError) -> AppError {
+    let code = match &err {
+        AppError::Jira(msg) if msg.contains("(401)") => "401",
+        AppError::Jira(msg) if msg.contains("(403)") => "403",
+        _ => return err,
+    };
+    AppError::Jira(format!(
+        "Jira couldn't authenticate this API token — it may be for a different Atlassian \
+         product (e.g. Bitbucket-only) or expired/revoked. Create a Jira API token and \
+         try again. ({code})"
+    ))
+}
+
+/// Whether a `(email, token)` pair read from the keyring is a usable credential —
+/// both present and non-empty. Pure (testable): the guard the Bitbucket-reuse path
+/// runs BEFORE any network call.
+fn bitbucket_creds_present(email: &Option<String>, token: &Option<String>) -> bool {
+    matches!((email, token), (Some(e), Some(t)) if !e.is_empty() && !t.is_empty())
+}
+
+/// Connect a Jira account for a site by REUSING the stored Bitbucket credentials
+/// (Bitbucket Cloud shares the Atlassian API-token mechanism). This must happen
+/// Rust-side because tokens never cross IPC — the frontend can't read the Bitbucket
+/// token to hand it to `jira_set_account`.
+///
+/// Flow: normalize + validate the site; read the stored Bitbucket creds
+/// (`forge/bitbucket.org/{email,token}`) on a blocking thread and GUARD their presence
+/// BEFORE any network call; resolve the API base (`/myself` site-direct, falling back to
+/// the gateway on a 401 — see [`resolve_base`]) with those creds; on success ONLY,
+/// persist the pair + resolved base under the SITE host (so `load_credentials(site)` finds
+/// them — NOT under the bitbucket.org entry) and return the account info. The token is
+/// never returned or logged. Because the stored Bitbucket token may not reach Jira on
+/// either base, a final auth failure (401 or 403 — a product-scoped token returns 401,
+/// live-verified 2026-07-10) gets reuse-specific copy pointing at the manual-entry
+/// fallback.
+pub async fn set_account_from_bitbucket(site: &str) -> AppResult<JiraAccountInfo> {
+    use crate::forge::http::{BB_HOST, KEY_EMAIL as BB_KEY_EMAIL, KEY_TOKEN as BB_KEY_TOKEN};
+
+    let site = normalize_site(site)?;
+
+    // Read the stored Bitbucket credentials (blocking keyring reads off-thread).
+    let (bb_email, bb_token) = tauri::async_runtime::spawn_blocking(|| {
+        let email = crate::secrets::read_forge_secret(BB_HOST, BB_KEY_EMAIL)?;
+        let token = crate::secrets::read_forge_secret(BB_HOST, BB_KEY_TOKEN)?;
+        Ok::<_, AppError>((email, token))
+    })
+    .await
+    .map_err(|e| AppError::Jira(format!("keyring task failed: {e}")))??;
+
+    // Pre-mutation guard: no usable Bitbucket credential → clear error, no network.
+    if !bitbucket_creds_present(&bb_email, &bb_token) {
+        return Err(AppError::Jira(
+            "No Bitbucket account is connected — add your Atlassian credentials \
+             manually instead."
+                .into(),
+        ));
+    }
+    let email = bb_email.unwrap_or_default();
+    let token = bb_token.unwrap_or_default();
+
+    // Resolve the base (probes /myself site-direct, falls back to the gateway on a 401)
+    // with the Bitbucket creds. If BOTH bases fail, an auth failure (401 OR 403) means the
+    // token can't reach Jira — a real product-scoped Atlassian token returns 401
+    // (live-verified 2026-07-10), so both codes are specialized into one "enter a Jira
+    // token manually" message rather than the misleading generic "expired/revoked" copy.
+    let (base, info) = resolve_base(&site, &email, &token)
+        .await
+        .map_err(specialize_reuse_error)?;
+
+    // Validated — persist the pair + resolved base under the SITE host (not bitbucket.org).
+    persist_account(&site, &email, &token, &base).await?;
+    Ok(info)
+}
+
+/// Specialize an AUTH error (401 or 403) from the Bitbucket-reuse probe into one
+/// actionable message pointing at the manual-entry fallback. Any non-auth error passes
+/// through unchanged.
+///
+/// Live-verified (thebguy.atlassian.net, 2026-07-10): a real product-scoped Atlassian
+/// token (Bitbucket-only) returns **401** on Jira's `/rest/api/3/myself`, not the 403 a
+/// scope-mismatch would suggest — so both codes mean "this token can't reach Jira" here,
+/// and the generic 401 "expired or revoked — reconnect" copy would be misleading (the
+/// token is alive; it's product-scoped). Do NOT narrow this back to 403 only. The
+/// original status marker (`(401)`/`(403)`) is preserved in the message so support keeps
+/// the code. This specialization is scoped to the reuse command ALONE —
+/// `jira_set_account` / `jira_validate` keep the generic 401 copy for genuinely
+/// expired/revoked tokens.
+fn specialize_reuse_error(err: AppError) -> AppError {
+    let code = match &err {
+        AppError::Jira(msg) if msg.contains("(401)") => "401",
+        AppError::Jira(msg) if msg.contains("(403)") => "403",
+        _ => return err,
+    };
+    AppError::Jira(format!(
+        "Your stored Bitbucket token couldn't access this Jira site — Atlassian API \
+         tokens are often product-scoped (Bitbucket-only). Create a Jira API token and \
+         enter it manually instead. ({code})"
+    ))
+}
+
+/// The stored account for a site (keyring existence read ONLY — no network). `None`
+/// when no token is stored. The token is never returned.
+pub async fn account(site: &str) -> AppResult<Option<JiraStoredAccount>> {
+    let site = normalize_site(site)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let email = crate::secrets::read_forge_secret(&site, KEY_EMAIL)?;
+        let token = crate::secrets::read_forge_secret(&site, KEY_TOKEN)?;
+        Ok::<_, AppError>(match (email, token) {
+            (Some(email), Some(token)) if !email.is_empty() && !token.is_empty() => {
+                Some(JiraStoredAccount { email })
+            }
+            _ => None,
+        })
+    })
+    .await
+    .map_err(|e| AppError::Jira(format!("keyring task failed: {e}")))?
+}
+
+/// Disconnect a Jira account for a site — delete all three keyring entries (email, token,
+/// and the resolved `api_base` mode; a missing entry is tolerated).
+pub async fn clear_account(site: &str) -> AppResult<()> {
+    let site = normalize_site(site)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::secrets::delete_forge_secret(&site, KEY_EMAIL)?;
+        crate::secrets::delete_forge_secret(&site, KEY_TOKEN)?;
+        crate::secrets::delete_forge_secret(&site, KEY_API_BASE)?;
+        Ok::<_, AppError>(())
+    })
+    .await
+    .map_err(|e| AppError::Jira(format!("keyring task failed: {e}")))?
+}
+
+/// Validate the STORED creds for a site by probing `/myself` against the stored API base
+/// (site-direct or gateway — resolved at connect time). Distinct errors for
+/// no-creds-stored (via [`load_credentials`]) / 401 / 403 (via [`http_error`]).
+pub async fn validate(site: &str) -> AppResult<JiraAccountInfo> {
+    let site = normalize_site(site)?;
+    let creds = load_credentials(&site).await?;
+    let email = creds.email.clone();
+    probe_myself(&creds, &email).await
+}
+
+// ── Project search (the picker) ────────────────────────────────────────────────
+
+/// A Jira project for the picker.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraProject {
+    pub id: String,
+    pub key: String,
+    pub name: String,
+    pub avatar_url: String,
+}
+
+/// The `project/search` response — a classic paginated envelope with `values[]`.
+#[derive(Deserialize, Default)]
+struct JiraProjectPage {
+    #[serde(default)]
+    values: Vec<JiraProjectRaw>,
+}
+
+/// One project as `project/search` returns it. `id` is a numeric string; every field
+/// is tolerant.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JiraProjectRaw {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    avatar_urls: Option<JiraAvatarUrls>,
+}
+
+/// Search projects for the picker — `GET /rest/api/3/project/search?query=&maxResults=50`,
+/// a single page. `query` is percent-encoded into the query string.
+pub async fn project_search(site: &str, query: &str) -> AppResult<Vec<JiraProject>> {
+    let site = normalize_site(site)?;
+    let creds = load_credentials(&site).await?;
+    let path = format!(
+        "project/search?query={}&maxResults={MAX_RESULTS}",
+        crate::forge::encode_query_value(query),
+    );
+    let page: JiraProjectPage = get_json(&creds, &path, "projects").await?;
+    Ok(page
+        .values
+        .into_iter()
+        .map(|p| JiraProject {
+            id: p.id.unwrap_or_default(),
+            key: p.key.unwrap_or_default(),
+            name: p.name.unwrap_or_default(),
+            avatar_url: p.avatar_urls.and_then(|a| a.x48).unwrap_or_default(),
+        })
+        .collect())
+}
+
+// ── Issue list ─────────────────────────────────────────────────────────────────
+
+/// A neutral issue-list row for a Jira issue.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraIssueInfo {
+    pub key: String,
+    pub summary: String,
+    pub status_name: String,
+    /// `status.statusCategory.key`: `"new"` | `"indeterminate"` | `"done"`.
+    pub status_category: String,
+    pub issue_type_name: String,
+    pub issue_type_icon_url: String,
+    /// Empty when the issue has no priority.
+    pub priority_name: String,
+    pub assignee: Option<ForgeUserRef>,
+    pub labels: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    /// `https://<site>/browse/<KEY>`.
+    pub url: String,
+}
+
+/// The `search/jql` response — `{issues: [...]}` (cursor field `nextPageToken` ignored
+/// under the single-page policy).
+#[derive(Deserialize, Default)]
+struct JiraSearchResponse {
+    #[serde(default)]
+    issues: Vec<Value>,
+}
+
+/// Build the JQL for the list, validating `project_key` first. `state` is
+/// `"open"` | `"closed"` | `"all"`; the category filter maps through `statusCategory`.
+/// Pure (unit-tested); returns the JQL string or an `InvalidArgument` for a bad key /
+/// unknown state.
+fn build_list_jql(project_key: &str, state: &str) -> AppResult<String> {
+    if !is_valid_project_key(project_key) {
+        return Err(AppError::InvalidArgument(format!(
+            "invalid Jira project key: {project_key}"
+        )));
+    }
+    let category = match state {
+        "open" => " AND statusCategory != Done",
+        "closed" => " AND statusCategory = Done",
+        "all" => "",
+        other => {
+            return Err(AppError::InvalidArgument(format!(
+                "unknown issue state filter: {other}"
+            )))
+        }
+    };
+    Ok(format!(
+        "project = \"{project_key}\"{category} ORDER BY updated DESC"
+    ))
+}
+
+/// Extract `status.statusCategory.key` from an issue's `fields` — `"new"` /
+/// `"indeterminate"` / `"done"`, or empty when absent. Pure.
+fn status_category_of(fields: &Value) -> String {
+    fields
+        .get("status")
+        .and_then(|s| s.get("statusCategory"))
+        .and_then(|c| c.get("key"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Map one issue JSON object onto [`JiraIssueInfo`], defensively. Returns `None` when
+/// the object has no usable `key` (so one malformed issue doesn't sink the list); every
+/// other field degrades to empty/None rather than erroring.
+fn map_issue_info(site: &str, issue: &Value) -> Option<JiraIssueInfo> {
+    let key = issue.get("key").and_then(Value::as_str)?.to_string();
+    if key.is_empty() {
+        return None;
+    }
+    let fields = issue.get("fields").cloned().unwrap_or(Value::Null);
+    let status_name = fields
+        .get("status")
+        .and_then(|s| s.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let issue_type = fields.get("issuetype");
+    let issue_type_name = issue_type
+        .and_then(|t| t.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let issue_type_icon_url = issue_type
+        .and_then(|t| t.get("iconUrl"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let priority_name = fields
+        .get("priority")
+        .and_then(|p| p.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let assignee = parse_user(fields.get("assignee"));
+    let labels = parse_labels(fields.get("labels"));
+    Some(JiraIssueInfo {
+        summary: fields
+            .get("summary")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        status_name,
+        status_category: status_category_of(&fields),
+        issue_type_name,
+        issue_type_icon_url,
+        priority_name,
+        assignee,
+        labels,
+        created_at: fields
+            .get("created")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        updated_at: fields
+            .get("updated")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        url: format!("https://{site}/browse/{key}"),
+        key,
+    })
+}
+
+/// Parse an embedded user value (`assignee`/`reporter`/comment `author`) into an
+/// `Option<ForgeUserRef>` — `None` for a null/absent/non-object value.
+fn parse_user(value: Option<&Value>) -> Option<ForgeUserRef> {
+    let value = value?;
+    if !value.is_object() {
+        return None;
+    }
+    let user: JiraUser = serde_json::from_value(value.clone()).ok()?;
+    Some(user.to_ref())
+}
+
+/// Parse a `labels` value into `Vec<String>` — a non-array or absent value yields an
+/// empty vec; non-string entries are skipped.
+fn parse_labels(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The explicit field list the search/detail endpoints must request (they return
+/// almost nothing by default).
+const LIST_FIELDS: &[&str] = &[
+    "summary",
+    "status",
+    "issuetype",
+    "priority",
+    "assignee",
+    "labels",
+    "created",
+    "updated",
+];
+
+/// The repo's Jira issues for a linked project. `state` ∈ `"open"` | `"closed"` |
+/// `"all"`. One page of `POST /rest/api/3/search/jql` (`maxResults: 50`); the
+/// `nextPageToken` cursor is ignored (bounded-pagination policy). `fields` is explicit.
+pub async fn issue_list(
+    site: &str,
+    project_key: &str,
+    state: &str,
+) -> AppResult<Vec<JiraIssueInfo>> {
+    let site = normalize_site(site)?;
+    // Grammar-validate the key and build the JQL BEFORE any network call.
+    let jql = build_list_jql(project_key, state)?;
+    let creds = load_credentials(&site).await?;
+    let body = json!({
+        "jql": jql,
+        "maxResults": MAX_RESULTS,
+        "fields": LIST_FIELDS,
+    });
+    let resp: JiraSearchResponse = post_json(&creds, "search/jql", &body, "issues").await?;
+    Ok(resp
+        .issues
+        .iter()
+        .filter_map(|issue| map_issue_info(&site, issue))
+        .collect())
+}
+
+// ── Issue detail ───────────────────────────────────────────────────────────────
+
+/// One Jira comment, body converted from ADF to markdown.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraComment {
+    pub id: String,
+    pub author: Option<ForgeUserRef>,
+    pub body_md: String,
+    pub created_at: String,
+}
+
+/// Full read view of one Jira issue.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraIssueDetails {
+    pub key: String,
+    pub summary: String,
+    pub status_name: String,
+    pub status_category: String,
+    pub issue_type_name: String,
+    pub issue_type_icon_url: String,
+    pub priority_name: String,
+    pub assignee: Option<ForgeUserRef>,
+    pub reporter: Option<ForgeUserRef>,
+    pub labels: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub due_date: Option<String>,
+    pub resolution_name: Option<String>,
+    /// The description ADF converted to markdown (empty when there's no description).
+    pub description_md: String,
+    pub comments: Vec<JiraComment>,
+    pub url: String,
+}
+
+/// Map the issue's `fields.comment.comments[]` onto neutral comments (first page as
+/// returned; no pagination). Each comment's ADF body is converted to markdown; one
+/// malformed comment is skipped rather than sinking the list.
+fn map_comments(fields: &Value) -> Vec<JiraComment> {
+    fields
+        .get("comment")
+        .and_then(|c| c.get("comments"))
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .map(|c| JiraComment {
+                    id: c
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                    author: parse_user(c.get("author")),
+                    body_md: c.get("body").map(adf::adf_to_markdown).unwrap_or_default(),
+                    created_at: c
+                        .get("created")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Full details for one Jira issue's read view. Validates `key`, then
+/// `GET /rest/api/3/issue/<key>?fields=…`. The description + comment bodies (ADF) are
+/// converted to markdown; every nullable field degrades to `None`/empty.
+pub async fn issue_view(site: &str, key: &str) -> AppResult<JiraIssueDetails> {
+    let site = normalize_site(site)?;
+    if !is_valid_issue_key(key) {
+        return Err(AppError::InvalidArgument(format!(
+            "invalid Jira issue key: {key}"
+        )));
+    }
+    let creds = load_credentials(&site).await?;
+    let path = format!(
+        "issue/{key}?fields=summary,description,status,issuetype,priority,assignee,\
+         reporter,labels,created,updated,duedate,resolution,comment"
+    );
+    let issue: Value = get_json(&creds, &path, "issue").await?;
+    let fields = issue.get("fields").cloned().unwrap_or(Value::Null);
+
+    let issue_type = fields.get("issuetype");
+    let description_md = fields
+        .get("description")
+        .filter(|d| !d.is_null())
+        .map(adf::adf_to_markdown)
+        .unwrap_or_default();
+
+    Ok(JiraIssueDetails {
+        summary: fields
+            .get("summary")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        status_name: fields
+            .get("status")
+            .and_then(|s| s.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        status_category: status_category_of(&fields),
+        issue_type_name: issue_type
+            .and_then(|t| t.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        issue_type_icon_url: issue_type
+            .and_then(|t| t.get("iconUrl"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        priority_name: fields
+            .get("priority")
+            .and_then(|p| p.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        assignee: parse_user(fields.get("assignee")),
+        reporter: parse_user(fields.get("reporter")),
+        labels: parse_labels(fields.get("labels")),
+        created_at: fields
+            .get("created")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        updated_at: fields
+            .get("updated")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        due_date: fields
+            .get("duedate")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        resolution_name: fields
+            .get("resolution")
+            .filter(|r| !r.is_null())
+            .and_then(|r| r.get("name"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        description_md,
+        comments: map_comments(&fields),
+        url: format!("https://{site}/browse/{key}"),
+        key: key.to_string(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn normalize_site_strips_scheme_slash_and_lowercases() {
+        assert_eq!(
+            normalize_site("https://YourTeam.atlassian.net/").unwrap(),
+            "yourteam.atlassian.net"
+        );
+        assert_eq!(
+            normalize_site("  team-1.atlassian.net  ").unwrap(),
+            "team-1.atlassian.net"
+        );
+        assert_eq!(
+            normalize_site("http://acme.atlassian.net").unwrap(),
+            "acme.atlassian.net"
+        );
+    }
+
+    #[test]
+    fn normalize_site_rejects_non_cloud_hosts() {
+        for bad in [
+            "example.com",
+            "jira.mycompany.com",
+            "atlassian.net",     // no subdomain label
+            ".atlassian.net",    // empty label
+            "a.b.atlassian.net", // nested subdomain
+            "team.atlassian.net.evil.com",
+            "",
+            "team_underscore.atlassian.net", // underscore not allowed in a host label
+        ] {
+            assert!(
+                normalize_site(bad).is_err(),
+                "expected {bad:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn valid_project_key() {
+        assert!(is_valid_project_key("PROJ"));
+        assert!(is_valid_project_key("A"));
+        assert!(is_valid_project_key("AB1"));
+        assert!(is_valid_project_key("MY_PROJ2"));
+        assert!(!is_valid_project_key(""));
+        assert!(!is_valid_project_key("1AB")); // must start with a letter
+        assert!(!is_valid_project_key("proj")); // lowercase
+        assert!(!is_valid_project_key("PR OJ")); // space
+        assert!(!is_valid_project_key("PR-OJ")); // hyphen
+        assert!(!is_valid_project_key("PR\"OJ")); // JQL-injection char
+    }
+
+    #[test]
+    fn valid_issue_key() {
+        assert!(is_valid_issue_key("PROJ-1"));
+        assert!(is_valid_issue_key("AB1-1234"));
+        assert!(is_valid_issue_key("MY_PROJ-99"));
+        assert!(!is_valid_issue_key("PROJ"));
+        assert!(!is_valid_issue_key("PROJ-"));
+        assert!(!is_valid_issue_key("proj-1"));
+        assert!(!is_valid_issue_key("PROJ-1a"));
+        assert!(!is_valid_issue_key("-1"));
+        assert!(!is_valid_issue_key("PROJ-1-2")); // rsplit keeps "2" numeric but "PROJ-1" isn't a valid project key
+    }
+
+    #[test]
+    fn build_list_jql_three_states() {
+        assert_eq!(
+            build_list_jql("PROJ", "open").unwrap(),
+            "project = \"PROJ\" AND statusCategory != Done ORDER BY updated DESC"
+        );
+        assert_eq!(
+            build_list_jql("PROJ", "closed").unwrap(),
+            "project = \"PROJ\" AND statusCategory = Done ORDER BY updated DESC"
+        );
+        assert_eq!(
+            build_list_jql("PROJ", "all").unwrap(),
+            "project = \"PROJ\" ORDER BY updated DESC"
+        );
+    }
+
+    #[test]
+    fn build_list_jql_rejects_bad_key_and_state() {
+        assert!(matches!(
+            build_list_jql("bad key", "open"),
+            Err(AppError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            build_list_jql("PROJ", "sideways"),
+            Err(AppError::InvalidArgument(_))
+        ));
+    }
+
+    #[test]
+    fn status_category_extraction() {
+        let fields = json!({
+            "status": { "name": "In Review", "statusCategory": { "key": "indeterminate" } }
+        });
+        assert_eq!(status_category_of(&fields), "indeterminate");
+        // Absent category → empty.
+        assert_eq!(status_category_of(&json!({})), "");
+        assert_eq!(status_category_of(&json!({ "status": {} })), "");
+    }
+
+    #[test]
+    fn error_envelope_prefers_first_error_message() {
+        let body = r#"{"errorMessages":["Issue does not exist"],"errors":{}}"#;
+        match http_error(404, body) {
+            AppError::Jira(m) => assert!(m.contains("Issue does not exist")),
+            other => panic!("expected Jira error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_envelope_falls_back_to_field_errors() {
+        let body = r#"{"errorMessages":[],"errors":{"project":"The project is invalid"}}"#;
+        match http_error(400, body) {
+            AppError::Jira(m) => assert!(m.contains("project is invalid")),
+            other => panic!("expected Jira error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_special_cases_401_403_429() {
+        match http_error(401, "") {
+            AppError::Jira(m) => assert!(m.contains("401") && m.to_lowercase().contains("token")),
+            other => panic!("got {other:?}"),
+        }
+        match http_error(403, "") {
+            AppError::Jira(m) => assert!(m.contains("403") && m.to_lowercase().contains("access")),
+            other => panic!("got {other:?}"),
+        }
+        match http_error(429, "") {
+            AppError::Jira(m) => assert!(m.to_lowercase().contains("rate limit")),
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_falls_back_to_status_and_snippet() {
+        match http_error(500, "upstream boom") {
+            AppError::Jira(m) => {
+                assert!(m.contains("500"));
+                assert!(m.contains("upstream boom"));
+            }
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_base_direct_builds_site_url() {
+        let base = JiraApiBase::Direct {
+            site: "team.atlassian.net".into(),
+        };
+        assert_eq!(
+            base.resolve("myself"),
+            "https://team.atlassian.net/rest/api/3/myself"
+        );
+        // A leading slash on the relative path is tolerated (not doubled).
+        assert_eq!(
+            base.resolve("/issue/PROJ-1"),
+            "https://team.atlassian.net/rest/api/3/issue/PROJ-1"
+        );
+    }
+
+    #[test]
+    fn api_base_gateway_builds_ex_jira_url() {
+        let base = JiraApiBase::Gateway {
+            cloud_id: "abc-123".into(),
+        };
+        assert_eq!(
+            base.resolve("myself"),
+            "https://api.atlassian.com/ex/jira/abc-123/rest/api/3/myself"
+        );
+        assert_eq!(
+            base.resolve("search/jql"),
+            "https://api.atlassian.com/ex/jira/abc-123/rest/api/3/search/jql"
+        );
+    }
+
+    #[test]
+    fn api_base_keyring_value_round_trips() {
+        let direct = JiraApiBase::Direct {
+            site: "team.atlassian.net".into(),
+        };
+        let gateway = JiraApiBase::Gateway {
+            cloud_id: "abc-123".into(),
+        };
+        assert_eq!(direct.to_keyring_value(), "direct");
+        assert_eq!(gateway.to_keyring_value(), "gateway:abc-123");
+        // Round-trip: parse the stored value back (site supplied for the Direct case).
+        assert_eq!(
+            JiraApiBase::from_keyring_value(Some("gateway:abc-123"), "team.atlassian.net"),
+            gateway
+        );
+        assert_eq!(
+            JiraApiBase::from_keyring_value(Some("direct"), "team.atlassian.net"),
+            direct
+        );
+    }
+
+    #[test]
+    fn api_base_from_keyring_defaults_to_direct() {
+        let site = "team.atlassian.net";
+        let expect_direct = JiraApiBase::Direct { site: site.into() };
+        // Missing entry (pre-existing creds), unknown value, and an empty gateway id all
+        // default to Direct — a later 401 surfaces normally and re-linking re-resolves.
+        assert_eq!(JiraApiBase::from_keyring_value(None, site), expect_direct);
+        assert_eq!(
+            JiraApiBase::from_keyring_value(Some(""), site),
+            expect_direct
+        );
+        assert_eq!(
+            JiraApiBase::from_keyring_value(Some("weird"), site),
+            expect_direct
+        );
+        assert_eq!(
+            JiraApiBase::from_keyring_value(Some("gateway:"), site),
+            expect_direct
+        );
+    }
+
+    #[test]
+    fn decide_after_direct_branches() {
+        assert_eq!(decide_after_direct(200), DirectProbeStep::UseDirect);
+        assert_eq!(decide_after_direct(204), DirectProbeStep::UseDirect);
+        // 401 site-direct is the scoped-token signal → try the gateway.
+        assert_eq!(decide_after_direct(401), DirectProbeStep::TryGateway);
+        // Everything else is a genuine direct-base failure, surfaced unchanged.
+        assert_eq!(decide_after_direct(403), DirectProbeStep::Fail);
+        assert_eq!(decide_after_direct(404), DirectProbeStep::Fail);
+        assert_eq!(decide_after_direct(500), DirectProbeStep::Fail);
+    }
+
+    #[test]
+    fn cloud_id_from_body_guards_shape() {
+        // A well-formed tenant_info yields the id.
+        assert_eq!(
+            cloud_id_from_body(r#"{"cloudId":"abc-123"}"#).unwrap(),
+            "abc-123"
+        );
+        // Missing, null, empty, whitespace, or a non-JSON body → the clear error, never
+        // a blank id (which would build a broken gateway URL).
+        for bad in [
+            r#"{}"#,
+            r#"{"cloudId":null}"#,
+            r#"{"cloudId":""}"#,
+            r#"{"cloudId":"   "}"#,
+            "not json",
+        ] {
+            match cloud_id_from_body(bad) {
+                Err(AppError::Jira(m)) => assert!(m.contains("cloud id"), "bad msg for {bad:?}"),
+                other => panic!("expected a cloud-id error for {bad:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn specialize_manual_error_rewrites_auth_codes_only() {
+        // Manual entry: after BOTH bases failed, an auth error frames the token as
+        // possibly-wrong-product or expired, keeping the code marker.
+        for code in ["401", "403"] {
+            let base = http_error(code.parse().unwrap(), "");
+            match specialize_manual_error(base) {
+                AppError::Jira(m) => {
+                    assert!(m.contains(&format!("({code})")), "missing marker: {m}");
+                    let lower = m.to_lowercase();
+                    assert!(lower.contains("jira api token"), "missing guidance: {m}");
+                }
+                other => panic!("got {other:?}"),
+            }
+        }
+        // A non-auth error (429) passes through unchanged.
+        let base_429 = http_error(429, "");
+        let AppError::Jira(orig) = &base_429 else {
+            panic!("expected Jira 429");
+        };
+        let orig = orig.clone();
+        match specialize_manual_error(base_429) {
+            AppError::Jira(m) => assert_eq!(m, orig),
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_issue_info_defensive_and_url() {
+        let issue = json!({
+            "key": "PROJ-7",
+            "fields": {
+                "summary": "Fix the bug",
+                "status": { "name": "To Do", "statusCategory": { "key": "new" } },
+                "issuetype": { "name": "Bug", "iconUrl": "https://icon" },
+                "priority": { "name": "High" },
+                "assignee": {
+                    "accountId": "acc-1",
+                    "displayName": "Ada",
+                    "avatarUrls": { "48x48": "https://av" }
+                },
+                "labels": ["backend", "urgent"],
+                "created": "2026-01-01T00:00:00.000+0000",
+                "updated": "2026-01-02T00:00:00.000+0000"
+            }
+        });
+        let info = map_issue_info("team.atlassian.net", &issue).unwrap();
+        assert_eq!(info.key, "PROJ-7");
+        assert_eq!(info.summary, "Fix the bug");
+        assert_eq!(info.status_name, "To Do");
+        assert_eq!(info.status_category, "new");
+        assert_eq!(info.issue_type_name, "Bug");
+        assert_eq!(info.issue_type_icon_url, "https://icon");
+        assert_eq!(info.priority_name, "High");
+        assert_eq!(info.url, "https://team.atlassian.net/browse/PROJ-7");
+        let a = info.assignee.unwrap();
+        assert_eq!(a.id, "acc-1");
+        assert_eq!(a.label, "Ada");
+        assert_eq!(a.avatar_url, "https://av");
+        assert_eq!(info.labels, vec!["backend", "urgent"]);
+    }
+
+    #[test]
+    fn map_issue_info_handles_nulls() {
+        // A minimal issue: no fields object, null assignee/priority.
+        let issue = json!({
+            "key": "PROJ-1",
+            "fields": { "assignee": null, "priority": null, "labels": null }
+        });
+        let info = map_issue_info("s.atlassian.net", &issue).unwrap();
+        assert_eq!(info.key, "PROJ-1");
+        assert_eq!(info.summary, "");
+        assert_eq!(info.priority_name, "");
+        assert!(info.assignee.is_none());
+        assert!(info.labels.is_empty());
+    }
+
+    #[test]
+    fn map_issue_info_skips_keyless_issue() {
+        assert!(map_issue_info("s.atlassian.net", &json!({ "fields": {} })).is_none());
+        assert!(map_issue_info("s.atlassian.net", &json!({ "key": "" })).is_none());
+    }
+
+    #[test]
+    fn parse_user_none_for_null_or_missing() {
+        assert!(parse_user(None).is_none());
+        assert!(parse_user(Some(&Value::Null)).is_none());
+        assert!(parse_user(Some(&json!("not an object"))).is_none());
+    }
+
+    #[test]
+    fn map_comments_converts_adf_bodies() {
+        let fields = json!({
+            "comment": {
+                "comments": [
+                    {
+                        "id": "10001",
+                        "author": { "accountId": "a1", "displayName": "Bob" },
+                        "body": {
+                            "type": "doc",
+                            "version": 1,
+                            "content": [
+                                { "type": "paragraph", "content": [
+                                    { "type": "text", "text": "Looks good" }
+                                ]}
+                            ]
+                        },
+                        "created": "2026-02-01T00:00:00.000+0000"
+                    }
+                ]
+            }
+        });
+        let comments = map_comments(&fields);
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].id, "10001");
+        assert_eq!(comments[0].body_md, "Looks good");
+        assert_eq!(comments[0].author.as_ref().unwrap().label, "Bob");
+    }
+
+    #[test]
+    fn map_comments_empty_when_absent() {
+        assert!(map_comments(&json!({})).is_empty());
+        assert!(map_comments(&json!({ "comment": {} })).is_empty());
+    }
+
+    #[test]
+    fn bitbucket_creds_present_requires_both_non_empty() {
+        let s = |v: &str| Some(v.to_string());
+        assert!(bitbucket_creds_present(&s("me@x.com"), &s("tok")));
+        // Missing either → not present.
+        assert!(!bitbucket_creds_present(&None, &s("tok")));
+        assert!(!bitbucket_creds_present(&s("me@x.com"), &None));
+        assert!(!bitbucket_creds_present(&None, &None));
+        // Empty string → not present (the guard the reuse path runs before any network).
+        assert!(!bitbucket_creds_present(&s(""), &s("tok")));
+        assert!(!bitbucket_creds_present(&s("me@x.com"), &s("")));
+    }
+
+    #[test]
+    fn specialize_reuse_error_rewrites_401_and_403_passes_others_through() {
+        // Both auth codes are rewritten to the product-scoped, enter-manually framing,
+        // preserving the status marker. A real product-scoped Bitbucket token returns
+        // 401 on Jira (live-verified 2026-07-10), so 401 must be rewritten too — NOT
+        // left as the generic "expired/revoked" copy.
+        for code in ["401", "403"] {
+            let base = http_error(code.parse().unwrap(), "");
+            match specialize_reuse_error(base) {
+                AppError::Jira(m) => {
+                    assert!(
+                        m.contains(&format!("({code})")),
+                        "missing marker for {code}: {m}"
+                    );
+                    let lower = m.to_lowercase();
+                    assert!(lower.contains("product-scoped"), "missing framing: {m}");
+                    assert!(lower.contains("manually"), "missing fallback: {m}");
+                    // The misleading generic 401 wording must be gone.
+                    assert!(
+                        !lower.contains("expired"),
+                        "still has generic 401 copy: {m}"
+                    );
+                }
+                other => panic!("got {other:?}"),
+            }
+        }
+        // A non-auth error (e.g. 429 rate limit) passes through UNCHANGED — the
+        // specialization is scoped to auth codes only.
+        let base_429 = http_error(429, "");
+        let AppError::Jira(orig_429) = &base_429 else {
+            panic!("expected a Jira 429");
+        };
+        let orig_429 = orig_429.clone();
+        match specialize_reuse_error(base_429) {
+            AppError::Jira(m) => assert_eq!(m, orig_429),
+            other => panic!("got {other:?}"),
+        }
+    }
+}

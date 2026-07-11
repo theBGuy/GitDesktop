@@ -14,6 +14,7 @@ pub mod github;
 pub mod gitlab;
 pub mod glab;
 pub mod http;
+pub mod jira;
 pub mod model;
 
 use crate::error::{AppError, AppResult};
@@ -217,6 +218,86 @@ pub async fn forge_bb_account() -> AppResult<Option<bitbucket::BbAccountInfo>> {
 #[tauri::command]
 pub async fn forge_bb_step_logs(repo_path: String, log_ref: String) -> AppResult<String> {
     bitbucket::step_logs(&repo_path, &log_ref).await
+}
+
+// ── Jira (linked issue provider) ───────────────────────────────────────────────
+//
+// Jira is a per-repo LINKED issue provider, orthogonal to the git-host detection every
+// `forge_issue_*` command dispatches on: no repo has a Jira git remote, so Jira is
+// never detected — it's configured. The frontend stores a per-repo `{site, projectKey}`
+// link and passes `site`/`project_key` into these commands, keeping Rust stateless about
+// linkage. Phase 1 is read-only. See `docs/jira-issue-integration.md`.
+
+/// Connect a Jira account for a site: normalize + validate the site, validate the
+/// (site, email, token) triple via `GET /rest/api/3/myself` BEFORE persisting (nothing
+/// stored on failure), then keep email/token in the keyring under `forge/<site>/*`.
+/// Returns the account info; the token is never returned.
+#[tauri::command]
+pub async fn jira_set_account(
+    site: String,
+    email: String,
+    token: String,
+) -> AppResult<jira::JiraAccountInfo> {
+    jira::set_account(&site, &email, &token).await
+}
+
+/// Connect a Jira account for a site by REUSING the stored Bitbucket credentials
+/// (Bitbucket Cloud shares the Atlassian API-token mechanism). Runs Rust-side because
+/// tokens never cross IPC — the frontend can't read the Bitbucket token to pass it to
+/// `jira_set_account`. Validates via `/myself` before persisting under the site host;
+/// a 403 gets reuse-specific copy pointing at manual entry. The token is never returned.
+#[tauri::command]
+pub async fn jira_set_account_from_bitbucket(site: String) -> AppResult<jira::JiraAccountInfo> {
+    jira::set_account_from_bitbucket(&site).await
+}
+
+/// The stored Jira account for a site (email only) — a keyring existence read (no
+/// network). `None` when no token is stored.
+#[tauri::command]
+pub async fn jira_account(site: String) -> AppResult<Option<jira::JiraStoredAccount>> {
+    jira::account(&site).await
+}
+
+/// Disconnect the Jira account for a site (delete both keyring entries; a missing entry
+/// is tolerated).
+#[tauri::command]
+pub async fn jira_clear_account(site: String) -> AppResult<()> {
+    jira::clear_account(&site).await
+}
+
+/// Validate the stored Jira creds for a site by probing `/myself` — distinct errors for
+/// no-creds-stored / 401 / 403.
+#[tauri::command]
+pub async fn jira_validate(site: String) -> AppResult<jira::JiraAccountInfo> {
+    jira::validate(&site).await
+}
+
+/// Search a site's Jira projects for the link picker (`GET
+/// /rest/api/3/project/search`, single page).
+#[tauri::command]
+pub async fn jira_project_search(
+    site: String,
+    query: String,
+) -> AppResult<Vec<jira::JiraProject>> {
+    jira::project_search(&site, &query).await
+}
+
+/// A linked Jira project's issues. `state` ∈ `"open"` | `"closed"` | `"all"` (mapped
+/// through `statusCategory`). One page of `POST /rest/api/3/search/jql`.
+#[tauri::command]
+pub async fn jira_issue_list(
+    site: String,
+    project_key: String,
+    state: String,
+) -> AppResult<Vec<jira::JiraIssueInfo>> {
+    jira::issue_list(&site, &project_key, &state).await
+}
+
+/// Full details for one Jira issue's read view (ADF description + comments converted to
+/// markdown).
+#[tauri::command]
+pub async fn jira_issue_view(site: String, key: String) -> AppResult<jira::JiraIssueDetails> {
+    jira::issue_view(&site, &key).await
 }
 
 /// The signed-in user's repositories on a provider, for the clone browser.

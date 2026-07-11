@@ -54,7 +54,20 @@ function serialize<T>(op: () => Promise<T>): Promise<T> {
 
 async function reloadRaw(): Promise<void> {
   const store = await getStore();
-  await store.reload({ ignoreDefaults: true });
+  // Tolerate a missing store file. Asymmetry: `load()` tolerates a missing file
+  // but `reload()` rejects with a raw io error ("The system cannot find the file
+  // specified. (os error 2)") — the file only exists after the first `save()`.
+  // Without this guard the first-ever mutation throws before reaching `save()`,
+  // so the store can never bootstrap (live-hit on first Save 2026-07-10); an
+  // external delete of the file breaks every mutation until restart the same way.
+  // Fall back to the loaded in-memory state on ANY reload failure — the
+  // serialized op-chain + force-save still protect the write path.
+  try {
+    await store.reload({ ignoreDefaults: true });
+  } catch {
+    // Missing/unreadable file — proceed with in-memory state; the next save()
+    // creates it.
+  }
 }
 
 const withLabels = (i: LocalIssue): LocalIssue => ({

@@ -779,6 +779,24 @@ GitLab**, **star / unstar**, and a **Fork on GitLab** link, **Repository setting
 local repository straight to GitLab (it creates the project, adds it as
 \`origin\`, and pushes).
 
+## Jira issues
+
+Link a **Jira Cloud** project to any repository and the Issues tab gains a read-only
+**Jira · PROJECTKEY** section. Link one from the repo **⋯** menu's **Link Jira project…**
+(pick your Jira site and a project), then browse the project's issues alongside any local
+ones. The open / closed / all filter maps to Jira's status **categories** — "To Do" and
+"In Progress" issues count as open, and anything in the **Done** category counts as closed
+— while each row still shows its real status name (e.g. *Selected for Development*,
+*In Review*, *Done*). Open an issue to read its **status**, **type**, **priority**,
+**assignee**, and **labels**, plus the Markdown **description** and **comments**. Every
+issue links out with **View in Jira**.
+
+This is **read-only for now** — creating, commenting, and transitioning Jira issues come
+later. To connect, add an **Atlassian API token** (your Atlassian account email plus the
+token, validated against the site before it's saved and stored in your OS keychain); if
+you've already connected Bitbucket (see *Bitbucket repositories*), you can **reuse that
+credential** with one button instead of re-entering it.
+
 ## Local issues
 
 A **local issue** is a private, offline to-do tracked in the app — create, edit, label,
@@ -941,7 +959,9 @@ Once connected:
   visibility, transfer, delete). See **Repository settings → Bitbucket repositories** for
   the details.
 - **Issues** — Bitbucket has retired its native issue tracker (issues live in **Jira**),
-  so issues aren't shown for Bitbucket repositories. Private **local to-dos** still work.
+  so a Bitbucket repo shows no native issues. Instead, **link a Jira project** to browse
+  its issues right here (see *Jira issues* under *Issues*) — the Issues tab's empty state
+  offers this directly. Private **local to-dos** still work too.
 
 If a Bitbucket panel says it can't sign in, your token may be expired, revoked, or
 missing scopes — update it in **Settings → Accounts**.`,

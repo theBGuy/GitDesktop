@@ -253,6 +253,12 @@ export const ACTIONS = [
     defaultBinding: null,
   },
   {
+    id: "link-jira-project",
+    label: "Link Jira project…",
+    category: "Repository",
+    defaultBinding: null,
+  },
+  {
     id: "repository-settings",
     label: "Repository settings",
     category: "Repository",

@@ -9,6 +9,7 @@ import {
   FolderOpenIcon,
   GearSixIcon,
   GitForkIcon,
+  KanbanIcon,
   LightningIcon,
   LinkIcon,
   PencilSimpleIcon,
@@ -44,6 +45,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { RepoAutomationsDialog } from "@/features/automations/RepoAutomationsDialog";
 import { BranchRulesDialog } from "@/features/branch-rules/BranchRulesDialog";
 import { HooksDialog } from "@/features/hooks/HooksDialog";
+import { RepoJiraDialog } from "@/features/issues/RepoJiraDialog";
 import { RepoSettingsDialog } from "@/features/repo-settings/RepoSettingsDialog";
 import { copyText } from "@/lib/clipboard";
 import {
@@ -65,6 +67,7 @@ import {
 } from "@/lib/git/queries";
 import { providerLabel } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
+import { useJiraLink } from "@/lib/jira/queries";
 import type { RecentRepo } from "@/lib/settings/api";
 import { useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
@@ -82,6 +85,7 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   const setRepoTab = useUiStore((s) => s.setRepoTab);
   const fork = useForkRepo(repoPath);
   const [automationsOpen, setAutomationsOpen] = useState(false);
+  const [jiraOpen, setJiraOpen] = useState(false);
   const [repoSettingsOpen, setRepoSettingsOpen] = useState(false);
   const [branchRulesOpen, setBranchRulesOpen] = useState(false);
   const [hooksOpen, setHooksOpen] = useState(false);
@@ -142,6 +146,10 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   const branchName = status.data?.branch.name ?? null;
   const headOid = status.data?.branch.oid ?? null;
 
+  // The repo's Jira link (if any), so the menu item reads "Change…" vs "Link…"
+  // and the dialog opens in edit mode.
+  const jiraLink = useJiraLink(repoPath);
+
   const onError = (e: unknown) => toastError(e);
 
   async function openWeb(suffix = "") {
@@ -185,6 +193,7 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   useHotkeyAction("repository-statistics", () => setRepoTab("insights"));
   useHotkeyAction("manage-files", () => setFilesOpen(true));
   useHotkeyAction("automations", () => setAutomationsOpen(true));
+  useHotkeyAction("link-jira-project", () => setJiraOpen(true));
   useHotkeyAction(
     "repository-settings",
     () => setRepoSettingsOpen(true),
@@ -330,6 +339,10 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
           <LightningIcon />
           Automations…
         </DropdownMenuItem>
+        <DropdownMenuItem onClick={() => setJiraOpen(true)}>
+          <KanbanIcon />
+          {jiraLink.data ? "Change Jira project…" : "Link Jira project…"}
+        </DropdownMenuItem>
         {settingsReady && admin.data?.admin && (
           <DropdownMenuItem onClick={() => setRepoSettingsOpen(true)}>
             <GearSixIcon />
@@ -398,6 +411,12 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
         repoPath={repoPath}
         open={automationsOpen}
         onOpenChange={setAutomationsOpen}
+      />
+      <RepoJiraDialog
+        repoPath={repoPath}
+        open={jiraOpen}
+        onOpenChange={setJiraOpen}
+        existingLink={jiraLink.data ?? null}
       />
       <RepoSettingsDialog
         repoPath={repoPath}

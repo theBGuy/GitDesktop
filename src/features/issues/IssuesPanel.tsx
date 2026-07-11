@@ -2,14 +2,16 @@ import {
   ArrowSquareOutIcon,
   CheckCircleIcon,
   CircleDashedIcon,
+  KanbanIcon,
 } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useRef, useState } from "react";
+import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { Button } from "@/components/ui/button";
 import { ConversationFilterPopover } from "@/features/conversations/ConversationFilterPopover";
 import { ConversationListPanel } from "@/features/conversations/ConversationListPanel";
 import { useLocalRemoteFilter } from "@/features/conversations/useLocalRemoteFilter";
-import { forgeRepoUrl, type IssueStateFilter } from "@/lib/git/api";
+import type { IssueStateFilter } from "@/lib/git/api";
 import {
   forgeFeatureReady,
   useForgeStatus,
@@ -20,33 +22,46 @@ import {
 import { providerLabel } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useLocalIssues } from "@/lib/issues/queries";
+import { useJiraIssues, useJiraLink } from "@/lib/jira/queries";
+import type { JiraIssueInfo } from "@/lib/jira/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
 import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { CreateIssueDialog } from "./CreateIssueDialog";
 import { CreateLocalIssueDialog } from "./CreateLocalIssueDialog";
+import { RepoJiraDialog } from "./RepoJiraDialog";
 
 /** Bitbucket has retired its native issue tracker (deleted platform-wide
- *  2026-08-20), so a connected Bitbucket repo has no issues to list — issues
- *  moved to Jira. Explain that instead of prompting a connection. */
-function BitbucketIssuesSunset({ repoPath }: { repoPath: string }) {
+ *  2026-08-20); issues moved to Jira. When the repo has no Jira link yet, invite
+ *  the user to link one — that's the only issue story for a Bitbucket repo. */
+function BitbucketLinkJiraCta({ onLink }: { onLink: () => void }) {
   return (
     <div className="space-y-2.5 px-3 py-4 text-xs text-muted-foreground">
       <p>
-        Bitbucket has retired its native issue tracker — issues for Bitbucket
-        repositories live in Jira.
+        Bitbucket has retired its native issue tracker — link a Jira project to
+        browse its issues here.
       </p>
-      <Button
-        variant="outline"
-        size="sm"
-        className="cursor-pointer"
-        onClick={() => forgeRepoUrl(repoPath).then(openUrl).catch(toastError)}
-      >
-        <ArrowSquareOutIcon data-icon="inline-start" />
-        View repository on Bitbucket
+      <Button size="sm" className="cursor-pointer" onClick={onLink}>
+        <KanbanIcon data-icon="inline-start" />
+        Link your Jira project
       </Button>
     </div>
+  );
+}
+
+/** The Jira status chip: category picks the open/closed icon+token, the REAL
+ *  status name is the text (meaning is never color-only). */
+function JiraStatusChip({ issue }: { issue: JiraIssueInfo }) {
+  const done = issue.statusCategory === "done";
+  const Icon = done ? CheckCircleIcon : CircleDashedIcon;
+  return (
+    <span className="inline-flex items-center gap-1 border px-1 py-px text-[10px] text-muted-foreground">
+      <Icon
+        className={`size-3 shrink-0 ${done ? "text-merged" : "text-success"}`}
+      />
+      {issue.statusName}
+    </span>
   );
 }
 
@@ -71,7 +86,12 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
   const filterRef = useRef<HTMLInputElement>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [createLocalOpen, setCreateLocalOpen] = useState(false);
+  const [jiraOpen, setJiraOpen] = useState(false);
   const localIssues = useLocalIssues(repoPath);
+  // A linked Jira project is a third issue source, independent of the git host.
+  const jiraLink = useJiraLink(repoPath);
+  const link = jiraLink.data ?? null;
+  const jiraIssues = useJiraIssues(repoPath, link, stateFilter);
   const pendingIssueDraft = useUiStore((s) => s.pendingIssueDraft);
   const setPendingIssueDraft = useUiStore((s) => s.setPendingIssueDraft);
   const pendingCreate = useUiStore((s) => s.pendingCreate);
@@ -82,6 +102,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
 
   useHotkeyAction("focus-filter", () => filterRef.current?.focus());
   useHotkeyAction("create-issue", () => setCreateOpen(true), canCreateGh);
+  useHotkeyAction("link-jira-project", () => setJiraOpen(true));
 
   // "Reference in new issue" / "Duplicate issue" seeds + opens the create dialog.
   // Re-check the gate (like the PR panel): the seeder's own gate can lag this
@@ -132,10 +153,28 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
     stateFilter,
   });
 
-  // Arrow keys walk the visible rows, local section first like the list.
+  // Jira issues aren't part of the local/remote filter hook (their author/label
+  // vocabulary is Jira's, not the repo host's); apply just the free-text search
+  // so the shared search box narrows them too. An author-filter selection has no
+  // Jira analogue, so it excludes the whole section (matching how it excludes
+  // locals).
+  const jiraQuery = filterText.trim().toLowerCase();
+  const visibleJira =
+    authorFilter.size > 0 || labelFilter.size > 0
+      ? []
+      : (jiraIssues.data ?? []).filter(
+          (i) =>
+            !jiraQuery ||
+            i.key.toLowerCase().includes(jiraQuery) ||
+            i.summary.toLowerCase().includes(jiraQuery),
+        );
+
+  // Arrow keys walk the visible rows: local → remote → jira, matching the render
+  // order (navTargets is flattened for the shared keyboard-nav helper).
   const navTargets = [
     ...visibleLocal.map((i) => ({ kind: "local" as const, id: i.id })),
     ...visible.map((i) => ({ kind: "remote" as const, id: String(i.number) })),
+    ...visibleJira.map((i) => ({ kind: "jira" as const, id: i.key })),
   ];
 
   const onListKeyDown = listKeyboardNav({
@@ -148,6 +187,21 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
   });
 
   const RowIcon = stateFilter === "open" ? CircleDashedIcon : CheckCircleIcon;
+
+  // The Bitbucket remote (host) section never has issues — its tracker is
+  // retired. Unlinked, it invites linking a Jira project; linked, the Jira
+  // section below IS the content, so the host section collapses to a one-line
+  // pointer rather than the ForgeNotReady connection ladder. Non-BB repos never
+  // see a Jira CTA here (quiet promotion — dialog via menu/palette).
+  const bitbucketNotReadySlot = isBitbucket ? (
+    link ? (
+      <p className="px-3 py-2 text-[11px] text-muted-foreground">
+        Issues for this repository live in Jira, below.
+      </p>
+    ) : (
+      <BitbucketLinkJiraCta onLink={() => setJiraOpen(true)} />
+    )
+  ) : undefined;
 
   return (
     <ConversationListPanel
@@ -166,7 +220,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
         ghReason: canCreateGh
           ? undefined
           : isBitbucket
-            ? "Bitbucket has retired its native issue tracker — issues for Bitbucket repositories live in Jira."
+            ? "Bitbucket has retired its native issue tracker — link a Jira project to track issues."
             : isGitLab
               ? gh.data?.installed
                 ? "Sign in to GitLab (glab auth login) to open issues here."
@@ -218,9 +272,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
       onToggleArchived={() => setShowArchived((v) => !v)}
       ghPending={gh.isPending}
       ghReady={ghReady}
-      remoteNotReadySlot={
-        isBitbucket ? <BitbucketIssuesSunset repoPath={repoPath} /> : undefined
-      }
+      remoteNotReadySlot={bitbucketNotReadySlot}
       listPending={issueList.isPending}
       stateRemote={issues}
       visibleRemote={visible}
@@ -252,6 +304,74 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
       remoteSkeletonRows={3}
       localNoun="issues"
       remoteNoun="issues"
+      jira={
+        link
+          ? {
+              header: `Jira · ${link.projectKey}`,
+              headerAction: (
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  className="cursor-pointer text-muted-foreground"
+                  onClick={() =>
+                    openUrl(
+                      `https://${link.siteHost}/browse/${link.projectKey}`,
+                    ).catch(toastError)
+                  }
+                  title={`Open ${link.projectKey} in Jira`}
+                >
+                  <ArrowSquareOutIcon data-icon="inline-start" />
+                  View in Jira
+                </Button>
+              ),
+              pending: jiraIssues.isPending,
+              isError: jiraIssues.isError,
+              errorSlot: (
+                <div className="space-y-2 px-3 py-4 text-xs text-muted-foreground">
+                  <p>
+                    Couldn't load {link.projectKey} — your Jira credential may
+                    have expired.
+                  </p>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="cursor-pointer"
+                    onClick={() => setJiraOpen(true)}
+                  >
+                    Reconnect
+                  </Button>
+                </div>
+              ),
+              items: visibleJira,
+              itemKey: (issue: JiraIssueInfo) => issue.key,
+              isActive: (issue: JiraIssueInfo) =>
+                selectedIssue?.kind === "jira" &&
+                selectedIssue.id === issue.key,
+              onSelect: (issue: JiraIssueInfo) =>
+                selectIssue({ kind: "jira", id: issue.key }),
+              renderRow: (issue: JiraIssueInfo) => (
+                <>
+                  <p className="flex items-center gap-1.5 text-xs font-medium">
+                    <JiraStatusChip issue={issue} />
+                    <span className="truncate" title={issue.summary}>
+                      {issue.summary}
+                    </span>
+                    {issue.assignee && (
+                      <span className="ml-auto shrink-0">
+                        <ForgeUserAvatar user={issue.assignee} ghHost={null} />
+                      </span>
+                    )}
+                  </p>
+                  <p className="mt-0.5 truncate pl-4 font-mono text-[11px] text-muted-foreground">
+                    {issue.key} · {formatRelativeTime(issue.updatedAt)}
+                  </p>
+                </>
+              ),
+              skeletonRows: 3,
+              emptyLabel: `No ${stateFilter} issues in ${link.projectKey} — switch the filter or view the project in Jira.`,
+            }
+          : undefined
+      }
     >
       <CreateIssueDialog
         repoPath={repoPath}
@@ -266,6 +386,12 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
         repoPath={repoPath}
         open={createLocalOpen}
         onOpenChange={setCreateLocalOpen}
+      />
+      <RepoJiraDialog
+        repoPath={repoPath}
+        open={jiraOpen}
+        onOpenChange={setJiraOpen}
+        existingLink={link}
       />
     </ConversationListPanel>
   );

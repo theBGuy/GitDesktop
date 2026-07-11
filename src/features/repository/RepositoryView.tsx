@@ -38,6 +38,7 @@ import { DiscussionView } from "@/features/discussions/DiscussionView";
 import { CommitDetailView } from "@/features/history/CommitDetailView";
 import { HistoryPanel } from "@/features/history/HistoryPanel";
 import { IssuesPanel } from "@/features/issues/IssuesPanel";
+import { JiraIssueView } from "@/features/issues/JiraIssueView";
 import { LocalIssueView } from "@/features/issues/LocalIssueView";
 import { RemoteIssueView } from "@/features/issues/RemoteIssueView";
 import { LocalPrView } from "@/features/pulls/LocalPrView";
@@ -370,6 +371,8 @@ export function RepositoryView() {
               />
             ) : deferredIssue?.kind === "local" ? (
               <LocalIssueView repoPath={repoPath} id={deferredIssue.id} />
+            ) : deferredIssue?.kind === "jira" ? (
+              <JiraIssueView repoPath={repoPath} issueKey={deferredIssue.id} />
             ) : (
               <DiffPlaceholder
                 icon={CircleDashedIcon}
