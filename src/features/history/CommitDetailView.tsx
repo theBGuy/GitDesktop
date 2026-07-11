@@ -299,7 +299,10 @@ export function CommitDetailView({
         </div>
         <JiraRefRow
           repoPath={repoPath}
-          text={`${commit.subject}\n${commit.body ?? ""}`}
+          sources={[
+            { label: "commit subject", text: commit.subject },
+            { label: "commit message body", text: commit.body },
+          ]}
         />
       </header>
 

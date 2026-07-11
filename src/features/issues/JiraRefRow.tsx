@@ -3,6 +3,13 @@ import { extractJiraKeys } from "@/lib/jira/keys";
 import { useJiraIssues, useJiraLink } from "@/lib/jira/queries";
 import { useUiStore } from "@/lib/stores/ui";
 
+/** One place a Jira key can be referenced, with a human label for attribution
+ *  (e.g. `{label: "branch name", text: headRefName}`). */
+export interface JiraRefSource {
+  label: string;
+  text: string | null | undefined;
+}
+
 /**
  * The shared "Jira issues referenced" presentation: one full-width row per
  * matched key (icon + key + the cached issue title when available), in the house
@@ -11,19 +18,38 @@ import { useUiStore } from "@/lib/stores/ui";
  * `selectIssue` alone never changes tabs. A bare key with no cached title still
  * renders and still navigates (the detail view fetches it by key).
  *
- * Renders nothing when the repo is unlinked or `text` references no keys — the
+ * `sources` are scanned in order; a key referenced in several sources is
+ * attributed to the FIRST one it appears in (so callers put the noisier source —
+ * a branch name — LAST, letting title/description attribution win). The overall
+ * row order preserves first-occurrence across all sources.
+ *
+ * Renders nothing when the repo is unlinked or no source references a key — the
  * omit-when-empty precedent (no persistent empty state).
  */
 export function JiraRefRow({
   repoPath,
-  text,
+  sources,
 }: {
   repoPath: string;
-  /** The git text to scan (e.g. `subject + "\n" + body`). */
-  text: string;
+  sources: JiraRefSource[];
 }) {
   const link = useJiraLink(repoPath).data;
-  const keys = link ? extractJiraKeys(text, link.projectKey) : [];
+  // Extract per source in order (reusing extractJiraKeys); first source wins a
+  // key, and overall first-occurrence order is preserved. `attribution` maps each
+  // key → the label of the source it was first seen in.
+  const keys: string[] = [];
+  const attribution = new Map<string, string>();
+  if (link) {
+    for (const source of sources) {
+      for (const key of extractJiraKeys(source.text, link.projectKey)) {
+        if (!attribution.has(key)) {
+          attribution.set(key, source.label);
+          keys.push(key);
+        }
+      }
+    }
+  }
+
   // Titles are best-effort from whatever list is already cached; "all" is the
   // broadest filter so it covers open and closed referenced issues. Passing the
   // link only when there's something to resolve keeps the query disabled (so a
@@ -52,13 +78,20 @@ export function JiraRefRow({
       </p>
       {keys.map((key) => {
         const title = titleFor(key);
+        const source = attribution.get(key);
+        // One title per element: fold the (optional) issue title AND the source
+        // attribution into a single tooltip so neither is lost.
+        const attributionSuffix = source
+          ? ` — referenced in the ${source}`
+          : "";
+        const tooltip = (title ? `${key} ${title}` : key) + attributionSuffix;
         return (
           <button
             key={key}
             type="button"
             onClick={() => open(key)}
             className="flex w-full cursor-pointer items-center gap-1.5 text-left text-xs hover:underline"
-            title={title ? `${key} ${title}` : key}
+            title={tooltip}
           >
             <KanbanIcon className="size-3.5 shrink-0 text-muted-foreground" />
             <span className="shrink-0 font-mono text-muted-foreground">

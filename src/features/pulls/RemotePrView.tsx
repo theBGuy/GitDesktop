@@ -789,7 +789,11 @@ export function RemotePrView({
         </div>
         <JiraRefRow
           repoPath={repoPath}
-          text={`${pr.title}\n${pr.body}\n${pr.headRefName}`}
+          sources={[
+            { label: "title", text: pr.title },
+            { label: "description", text: pr.body },
+            { label: "branch name", text: pr.headRefName },
+          ]}
         />
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <Badge variant={pr.state === "OPEN" ? "default" : "secondary"}>

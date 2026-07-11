@@ -344,7 +344,11 @@ export function LocalPrView({
           </div>
           <JiraRefRow
             repoPath={repoPath}
-            text={`${pr.title}\n${pr.body}\n${pr.head}`}
+            sources={[
+              { label: "title", text: pr.title },
+              { label: "description", text: pr.body },
+              { label: "branch name", text: pr.head },
+            ]}
           />
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             <span className="font-mono">{pr.head}</span>
@@ -389,7 +393,11 @@ export function LocalPrView({
         </div>
         <JiraRefRow
           repoPath={repoPath}
-          text={`${pr.title}\n${pr.body}\n${pr.head}`}
+          sources={[
+            { label: "title", text: pr.title },
+            { label: "description", text: pr.body },
+            { label: "branch name", text: pr.head },
+          ]}
         />
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <span className="font-mono">{pr.head}</span>

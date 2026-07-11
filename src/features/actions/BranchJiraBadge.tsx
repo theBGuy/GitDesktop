@@ -33,8 +33,8 @@ export function BranchJiraBadge({ repoPath }: { repoPath: string }) {
       className="flex min-w-0 shrink-4 items-center gap-1.5 rounded-none px-1.5 py-1 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground"
       title={
         extra > 0
-          ? `${keys.join(", ")} — view in Issues`
-          : `${first} — view in Issues`
+          ? `${keys.join(", ")} — referenced in the branch name, view in Issues`
+          : `${first} — referenced in the branch name, view in Issues`
       }
       onClick={() => {
         selectIssue({ kind: "jira", id: first });
