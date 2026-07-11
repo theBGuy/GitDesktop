@@ -217,21 +217,13 @@ struct JiraErrorEnvelope {
     errors: std::collections::HashMap<String, String>,
 }
 
-/// Whether `key` is a `customfield_NNNNN` id (the only keys eligible for name
-/// translation). Pure.
-fn is_customfield_key(key: &str) -> bool {
-    match key.strip_prefix("customfield_") {
-        Some(n) => !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()),
-        None => false,
-    }
-}
-
 /// Render a field-error key for display, given a `resolve` that maps a field id to its
-/// display name. A `customfield_NNNNN` key with a known name renders the NAME; an unknown
+/// display name. A `customfield_NNNNN` key with a known name renders the NAME (the
+/// eligibility predicate is [`crate::jira_field_maps::is_valid_field_id`]); an unknown
 /// custom id, or any non-customfield key, renders unchanged. Pure (testable) — `resolve`
 /// performs no I/O (it reads the in-process name map).
 fn translate_field_key(key: &str, resolve: impl Fn(&str) -> Option<String>) -> String {
-    if is_customfield_key(key) {
+    if crate::jira_field_maps::is_valid_field_id(key) {
         if let Some(name) = resolve(key) {
             return name;
         }
@@ -2957,17 +2949,6 @@ mod tests {
             )]),
         };
         assert_eq!(env.best_message(|_| None).unwrap(), "Top-level failure");
-    }
-
-    #[test]
-    fn is_customfield_key_matches_only_numeric_customfields() {
-        assert!(is_customfield_key("customfield_10016"));
-        assert!(is_customfield_key("customfield_1"));
-        assert!(!is_customfield_key("customfield_")); // no digits
-        assert!(!is_customfield_key("customfield_10a")); // non-digit
-        assert!(!is_customfield_key("summary"));
-        assert!(!is_customfield_key("customfield")); // no underscore/number
-        assert!(!is_customfield_key("Customfield_10")); // case-sensitive prefix
     }
 
     #[test]
