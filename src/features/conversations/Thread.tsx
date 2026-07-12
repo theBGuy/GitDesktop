@@ -1,8 +1,8 @@
 import { DotsThreeIcon } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { type ReactNode, useState } from "react";
+import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { MarkdownEditor } from "@/components/markdown-editor";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -71,10 +71,6 @@ export function AuthorAvatar({
   const host = useActiveGhHost();
   const ghHost = useActiveForgeGhHost();
   if (!login) return null;
-  // Prefer the provider's real avatar; otherwise derive from the login only on
-  // GitHub (its login serves at `<host>/<login>.png`). Off GitHub with no avatarUrl,
-  // fall through to the initial rather than requesting a bogus `<glhost>/<login>.png`.
-  const src = avatarUrl || (ghHost ? `https://${ghHost}/${login}.png?size=48` : "");
   return (
     <Button
       variant="ghost"
@@ -83,10 +79,7 @@ export function AuthorAvatar({
       title={`@${login} on ${host}`}
       className="shrink-0 rounded-full hover:opacity-80 cursor-pointer"
     >
-      <Avatar size="sm">
-        {src && <AvatarImage src={src} alt={login} />}
-        <AvatarFallback>{login.charAt(0).toUpperCase()}</AvatarFallback>
-      </Avatar>
+      <ForgeUserAvatar login={login} avatarUrl={avatarUrl} ghHost={ghHost} />
     </Button>
   );
 }

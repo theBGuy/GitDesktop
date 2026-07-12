@@ -478,8 +478,12 @@ async function deliver(
 
   if (event.target.type === "remote") {
     await forgePrComment(event.repoPath, event.target.number, body, true);
+    // Narrow to the PR's own key family (prefix-matches its detail/reactions/
+    // timeline/review-threads) rather than the whole-repo subtree — a posted
+    // conversation comment only touches this PR. Mirrors the local-target path
+    // below, which invalidates just its own store.
     await queryClient.invalidateQueries({
-      queryKey: ["repo", event.repoPath],
+      queryKey: ["repo", event.repoPath, "pr", event.target.number],
     });
     toast.success(`AI ${label} posted on #${event.target.number}`);
     if (notify) {

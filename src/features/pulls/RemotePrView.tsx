@@ -235,10 +235,16 @@ export function RemotePrView({
   const unrequestChangesPr = useUnrequestChangesPr(repoPath);
   // Auto-merge state (GitLab-only): read only for a ready GitLab repo with an open
   // MR (null disables the read for GitHub / closed MRs). It polls server-side so the
-  // view notices the pipeline completing and the auto-merge firing.
+  // view notices the pipeline completing and the auto-merge firing. Gate on the Pulls
+  // tab being active too: the <Activity>-hidden subtree still renders, so the composite
+  // gate is load-bearing — a disabled query (null number) stops the refetchInterval, and
+  // staleTime (5s) means returning to the tab refetches immediately.
+  const repoTab = useUiStore((s) => s.repoTab);
   const mergeState = useGlMrMergeState(
     repoPath,
-    canAutoMerge && details.data?.state === "OPEN" ? number : null,
+    repoTab === "pulls" && canAutoMerge && details.data?.state === "OPEN"
+      ? number
+      : null,
   );
   const armAutoMerge = useGlArmAutoMerge(repoPath);
   const cancelAutoMerge = useGlCancelAutoMerge(repoPath);

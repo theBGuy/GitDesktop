@@ -954,6 +954,59 @@ const commitCommentsKey = (repo: string, sha: string) =>
   ["repo", repo, "commit", sha, "comments"] as const;
 
 /**
+ * The shared skeleton behind every optimistic-cache mutation in this file:
+ * cancel in-flight fetches on the target key, snapshot it, apply an optimistic
+ * `setQueryData` patch, roll the snapshot back on error, and reconcile on
+ * settle. The five exported factories below (`useOptimisticCommitCommentMutation`,
+ * `useOptimisticIssueMutation`, `useOptimisticCreateCommentMutation`,
+ * `useOptimisticCommentMutation`, `useOptimisticReviewCommentMutation`) are thin
+ * wrappers over this — they only differ in the *deltas*:
+ *
+ * - `keyFor(args)` — the cache key to patch (derived from the mutation args at
+ *   mutate time, so a mid-flight repo/number/sha switch never corrupts another
+ *   key's cache).
+ * - `patch(prev, args)` — the optimistic `setQueryData` updater.
+ * - `reconcile(queryClient, args)` — the onSettled invalidation. Four factories
+ *   pass a repo-wide invalidate (server-truth reconciliation, matching what
+ *   `useRepoMutation`'s default did before they were made optimistic); the issue
+ *   factory passes a narrow single-issue invalidate.
+ *
+ * `TCache` is the shape stored at the key (a list, a detail object, …); the
+ * rollback context carries the exact key + prior value so onError restores
+ * precisely what onMutate captured.
+ */
+function useOptimisticCacheMutation<TArgs, TData, TCache>(
+  mutationFn: (args: TArgs) => Promise<TData>,
+  keyFor: (args: TArgs) => QueryKey,
+  patch: (prev: TCache | undefined, args: TArgs) => TCache | undefined,
+  reconcile: (
+    queryClient: ReturnType<typeof useQueryClient>,
+    args: TArgs,
+  ) => void,
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn,
+    onMutate: async (args: TArgs) => {
+      const key = keyFor(args);
+      await queryClient.cancelQueries({ queryKey: key });
+      const prev = queryClient.getQueryData<TCache>(key);
+      queryClient.setQueryData<TCache>(key, (data) => patch(data, args));
+      return { prev, key };
+    },
+    onError: (
+      _e: unknown,
+      _args: TArgs,
+      ctx: { prev: TCache | undefined; key: QueryKey } | undefined,
+    ) => {
+      if (ctx?.prev !== undefined) queryClient.setQueryData(ctx.key, ctx.prev);
+    },
+    onSettled: (_d: TData | undefined, _e: unknown, args: TArgs) =>
+      reconcile(queryClient, args),
+  });
+}
+
+/**
  * Optimistically append a synthetic commit comment to the commit-comments cache,
  * with exact-key rollback — mirroring {@link useOptimisticCreateCommentMutation}
  * for the flat commit-comment list. The synthetic row carries a collision-proof
@@ -1036,32 +1089,22 @@ function useOptimisticCommitCommentMutation<TData>(
     args: { sha: string; commentId: string; body?: string },
   ) => CommitCommentOut | null,
 ) {
-  const queryClient = useQueryClient();
-  return useMutation({
+  return useOptimisticCacheMutation<
+    { sha: string; commentId: string; body?: string },
+    TData,
+    CommitCommentOut[]
+  >(
     mutationFn,
-    onMutate: async (args: {
-      sha: string;
-      commentId: string;
-      body?: string;
-    }) => {
-      const key = commitCommentsKey(repo, args.sha);
-      await queryClient.cancelQueries({ queryKey: key });
-      const prev = queryClient.getQueryData<CommitCommentOut[]>(key);
-      queryClient.setQueryData<CommitCommentOut[]>(key, (list) =>
-        list?.flatMap((c) => {
-          if (c.id !== args.commentId) return [c];
-          const patched = patchComment(c, args);
-          return patched ? [patched] : [];
-        }),
-      );
-      return { prev, key };
-    },
-    onError: (_e, _args, ctx) => {
-      if (ctx?.prev !== undefined) queryClient.setQueryData(ctx.key, ctx.prev);
-    },
-    onSettled: () =>
+    (args) => commitCommentsKey(repo, args.sha),
+    (list, args) =>
+      list?.flatMap((c) => {
+        if (c.id !== args.commentId) return [c];
+        const patched = patchComment(c, args);
+        return patched ? [patched] : [];
+      }),
+    (queryClient) =>
       void queryClient.invalidateQueries({ queryKey: repoKeys.all(repo) }),
-  });
+  );
 }
 
 export function useEditCommitComment(repo: string) {
@@ -1336,26 +1379,16 @@ function useOptimisticIssueMutation<TArgs extends { number: number }, TData>(
   mutationFn: (args: TArgs) => Promise<TData>,
   patch: (issue: IssueDetails, args: TArgs) => IssueDetails,
 ) {
-  const queryClient = useQueryClient();
-  return useMutation({
+  return useOptimisticCacheMutation<TArgs, TData, IssueDetails>(
     mutationFn,
-    onMutate: async (args: TArgs) => {
-      const key = ["repo", repo, "issue", args.number] as const;
-      await queryClient.cancelQueries({ queryKey: key });
-      const prev = queryClient.getQueryData<IssueDetails>(key);
-      queryClient.setQueryData<IssueDetails>(key, (d) =>
-        d ? patch(d, args) : d,
-      );
-      return { prev, key };
-    },
-    onError: (_e, _args, ctx) => {
-      if (ctx?.prev !== undefined) queryClient.setQueryData(ctx.key, ctx.prev);
-    },
-    onSettled: (_d, _e, args) =>
-      queryClient.invalidateQueries({
+    (args) => ["repo", repo, "issue", args.number] as const,
+    (d, args) => (d ? patch(d, args) : d),
+    // Narrow reconciliation: only the one issue's detail subtree (not repo-wide).
+    (queryClient, args) =>
+      void queryClient.invalidateQueries({
         queryKey: ["repo", repo, "issue", args.number],
       }),
-  });
+  );
 }
 
 export function useSetIssueAssignees(repo: string) {
@@ -1580,25 +1613,63 @@ export function useSetIssueType(repo: string) {
   );
 }
 
+/**
+ * An issue-lifecycle write (close/reopen/edit/pin/lock/unlock/transfer/delete)
+ * that reconciles NARROWLY on settle instead of the whole-repo default: the one
+ * issue's detail subtree (`["repo", repo, "issue", n]`, prefix-matched so its
+ * reactions/relations/dependencies/development sub-queries refresh too) + every
+ * issue-list state variant (`["repo", repo, "issue-list"]` — the list row shows
+ * state/title/labels/assignees/pinned/locked, and transfer/delete change list
+ * membership). `numberOf` extracts the issue number from the mutation args (the
+ * arg shapes differ — a bare `number` vs `{ number, … }`). No optimistic patch:
+ * these change fields the details view re-reads wholesale, so a scoped refetch is
+ * the reconciliation.
+ */
+function useIssueLifecycleMutation<TArgs, TData>(
+  repo: string,
+  mutationFn: (args: TArgs) => Promise<TData>,
+  numberOf: (args: TArgs) => number,
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn,
+    onSettled: (_d, _e, args) =>
+      void Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: ["repo", repo, "issue-list"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["repo", repo, "issue", numberOf(args)],
+        }),
+      ]),
+  });
+}
+
 export function usePinIssue(repo: string) {
-  return useRepoMutation(repo, (args: { number: number; pinned: boolean }) =>
-    args.pinned
-      ? api.ghIssuePin(repo, args.number)
-      : api.ghIssueUnpin(repo, args.number),
+  return useIssueLifecycleMutation(
+    repo,
+    (args: { number: number; pinned: boolean }) =>
+      args.pinned
+        ? api.ghIssuePin(repo, args.number)
+        : api.ghIssueUnpin(repo, args.number),
+    (args) => args.number,
   );
 }
 
 export function useLockIssue(repo: string) {
-  return useRepoMutation(
+  return useIssueLifecycleMutation(
     repo,
     (args: { number: number; reason: api.LockReason | null }) =>
       api.forgeIssueLock(repo, args.number, args.reason),
+    (args) => args.number,
   );
 }
 
 export function useUnlockIssue(repo: string) {
-  return useRepoMutation(repo, (number: number) =>
-    api.forgeIssueUnlock(repo, number),
+  return useIssueLifecycleMutation(
+    repo,
+    (number: number) => api.forgeIssueUnlock(repo, number),
+    (number) => number,
   );
 }
 
@@ -1911,36 +1982,45 @@ export function useCommentIssue(repo: string) {
 }
 
 export function useCloseIssue(repo: string) {
-  return useRepoMutation(repo, (args: { number: number; reason: string }) =>
-    api.forgeIssueClose(repo, args.number, args.reason),
+  return useIssueLifecycleMutation(
+    repo,
+    (args: { number: number; reason: string }) =>
+      api.forgeIssueClose(repo, args.number, args.reason),
+    (args) => args.number,
   );
 }
 
 export function useReopenIssue(repo: string) {
-  return useRepoMutation(repo, (number: number) =>
-    api.forgeIssueReopen(repo, number),
+  return useIssueLifecycleMutation(
+    repo,
+    (number: number) => api.forgeIssueReopen(repo, number),
+    (number) => number,
   );
 }
 
 export function useEditIssue(repo: string) {
-  return useRepoMutation(
+  return useIssueLifecycleMutation(
     repo,
     (args: { number: number; title: string; body: string }) =>
       api.forgeIssueEdit(repo, args.number, args.title, args.body),
+    (args) => args.number,
   );
 }
 
 export function useTransferIssue(repo: string) {
-  return useRepoMutation(
+  return useIssueLifecycleMutation(
     repo,
     (args: { number: number; destination: string }) =>
       api.forgeIssueTransfer(repo, args.number, args.destination),
+    (args) => args.number,
   );
 }
 
 export function useDeleteIssue(repo: string) {
-  return useRepoMutation(repo, (number: number) =>
-    api.forgeIssueDelete(repo, number),
+  return useIssueLifecycleMutation(
+    repo,
+    (number: number) => api.forgeIssueDelete(repo, number),
+    (number) => number,
   );
 }
 
@@ -1989,9 +2069,9 @@ export function useCreateLinkedBranch(repo: string) {
 }
 
 export function useSetIssueDependency(repo: string) {
-  return useRepoMutation(
-    repo,
-    (args: {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (args: {
       number: number;
       relation: IssueRelation;
       target: number;
@@ -2004,7 +2084,18 @@ export function useSetIssueDependency(repo: string) {
         args.target,
         args.add,
       ),
-  );
+    // Cross-issue: a dependency touches BOTH the source's and the target's detail
+    // subtrees (their `dependencies` sub-query is keyed by number) — no list-
+    // membership change, so scope to the two issues' details rather than repo-wide.
+    onSettled: (_d, _e, args) =>
+      void Promise.all(
+        [args.number, args.target].map((n) =>
+          queryClient.invalidateQueries({
+            queryKey: ["repo", repo, "issue", n],
+          }),
+        ),
+      ),
+  });
 }
 
 export function useRemoveSubIssue(repo: string) {
@@ -2028,6 +2119,9 @@ export function useSwitchAccount() {
     mutationFn: (args: { host: string; login: string }) =>
       api.ghSwitchAccount(args.host, args.login),
     // The active account changes what every gh query returns.
+    // Deliberately app-wide (no key filter): the collateral refetch of non-gh
+    // caches is accepted because account switches are rare, and correctness of
+    // every gh-derived answer wins over the narrow-invalidation policy elsewhere.
     onSettled: () => queryClient.invalidateQueries(),
   });
 }
@@ -3489,23 +3583,14 @@ function useOptimisticCreateCommentMutation<TData>(
     asBot?: boolean;
   }) => Promise<TData>,
 ) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (args: {
-      number: number;
-      body: string;
-      author: string;
-      asBot?: boolean;
-    }) => mutationFn(args),
-    onMutate: async (args: {
-      number: number;
-      body: string;
-      author: string;
-      asBot?: boolean;
-    }) => {
-      const key = ["repo", repo, kind, args.number] as const;
-      await queryClient.cancelQueries({ queryKey: key });
-      const prev = queryClient.getQueryData<PrDetails | IssueDetails>(key);
+  return useOptimisticCacheMutation<
+    { number: number; body: string; author: string; asBot?: boolean },
+    TData,
+    PrDetails | IssueDetails
+  >(
+    (args) => mutationFn(args),
+    (args) => ["repo", repo, kind, args.number] as const,
+    (d, args) => {
       const synthetic: PrThreadOut = {
         author: args.author,
         // Optimistic: login-derived (GitHub) / initial until the refetch fills it.
@@ -3519,17 +3604,11 @@ function useOptimisticCreateCommentMutation<TData>(
         isMinimized: false,
         minimizedReason: "",
       };
-      queryClient.setQueryData<PrDetails | IssueDetails>(key, (d) =>
-        d ? { ...d, comments: [...d.comments, synthetic] } : d,
-      );
-      return { prev, key };
+      return d ? { ...d, comments: [...d.comments, synthetic] } : d;
     },
-    onError: (_e, _args, ctx) => {
-      if (ctx?.prev !== undefined) queryClient.setQueryData(ctx.key, ctx.prev);
-    },
-    onSettled: () =>
+    (queryClient) =>
       void queryClient.invalidateQueries({ queryKey: repoKeys.all(repo) }),
-  });
+  );
 }
 
 /**
@@ -3552,33 +3631,23 @@ function useOptimisticCommentMutation<
   mutationFn: (args: TArgs) => Promise<TData>,
   patchComment: (comment: PrThreadOut, args: TArgs) => PrThreadOut | null,
 ) {
-  const queryClient = useQueryClient();
-  return useMutation({
+  return useOptimisticCacheMutation<TArgs, TData, PrDetails | IssueDetails>(
     mutationFn,
-    onMutate: async (args: TArgs) => {
-      const key = ["repo", repo, kind, args.number] as const;
-      await queryClient.cancelQueries({ queryKey: key });
-      const prev = queryClient.getQueryData<PrDetails | IssueDetails>(key);
-      queryClient.setQueryData<PrDetails | IssueDetails>(key, (d) =>
-        d
-          ? {
-              ...d,
-              comments: d.comments.flatMap((c) => {
-                if (c.id !== args.commentId) return [c];
-                const patched = patchComment(c, args);
-                return patched ? [patched] : [];
-              }),
-            }
-          : d,
-      );
-      return { prev, key };
-    },
-    onError: (_e, _args, ctx) => {
-      if (ctx?.prev !== undefined) queryClient.setQueryData(ctx.key, ctx.prev);
-    },
-    onSettled: () =>
+    (args) => ["repo", repo, kind, args.number] as const,
+    (d, args) =>
+      d
+        ? {
+            ...d,
+            comments: d.comments.flatMap((c) => {
+              if (c.id !== args.commentId) return [c];
+              const patched = patchComment(c, args);
+              return patched ? [patched] : [];
+            }),
+          }
+        : d,
+    (queryClient) =>
       void queryClient.invalidateQueries({ queryKey: repoKeys.all(repo) }),
-  });
+  );
 }
 
 export function useEditPrComment(repo: string) {
@@ -3639,33 +3708,23 @@ function useOptimisticReviewCommentMutation<
   mutationFn: (args: TArgs) => Promise<TData>,
   patchComment: (comment: PrThreadOut, args: TArgs) => PrThreadOut | null,
 ) {
-  const queryClient = useQueryClient();
-  return useMutation({
+  return useOptimisticCacheMutation<TArgs, TData, ReviewThreadOut[]>(
     mutationFn,
-    onMutate: async (args: TArgs) => {
-      const key = prReviewThreadsKey(repo, args.number);
-      await queryClient.cancelQueries({ queryKey: key });
-      const prev = queryClient.getQueryData<ReviewThreadOut[]>(key);
-      queryClient.setQueryData<ReviewThreadOut[]>(key, (threads) =>
-        threads?.flatMap((t) => {
-          if (!t.comments.some((c) => c.id === args.commentId)) return [t];
-          const comments = t.comments.flatMap((c) => {
-            if (c.id !== args.commentId) return [c];
-            const patched = patchComment(c, args);
-            return patched ? [patched] : [];
-          });
-          // A delete that empties the thread drops the whole card (server does too).
-          return comments.length === 0 ? [] : [{ ...t, comments }];
-        }),
-      );
-      return { prev, key };
-    },
-    onError: (_e, _args, ctx) => {
-      if (ctx?.prev !== undefined) queryClient.setQueryData(ctx.key, ctx.prev);
-    },
-    onSettled: () =>
+    (args) => prReviewThreadsKey(repo, args.number),
+    (threads, args) =>
+      threads?.flatMap((t) => {
+        if (!t.comments.some((c) => c.id === args.commentId)) return [t];
+        const comments = t.comments.flatMap((c) => {
+          if (c.id !== args.commentId) return [c];
+          const patched = patchComment(c, args);
+          return patched ? [patched] : [];
+        });
+        // A delete that empties the thread drops the whole card (server does too).
+        return comments.length === 0 ? [] : [{ ...t, comments }];
+      }),
+    (queryClient) =>
       void queryClient.invalidateQueries({ queryKey: repoKeys.all(repo) }),
-  });
+  );
 }
 
 export function useEditReviewComment(repo: string) {

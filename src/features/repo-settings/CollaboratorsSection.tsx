@@ -1,6 +1,7 @@
 import { UserPlusIcon, XIcon } from "@phosphor-icons/react";
 import { useState } from "react";
 import { toast } from "sonner";
+import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -264,13 +265,7 @@ function PersonRow({
 }) {
   return (
     <div className="flex items-center gap-2 rounded-md border p-2 text-xs">
-      <div
-        aria-hidden
-        className="size-6 shrink-0 rounded-full bg-muted bg-cover bg-center"
-        style={
-          avatarUrl ? { backgroundImage: `url("${avatarUrl}")` } : undefined
-        }
-      />
+      <ForgeUserAvatar login={login} avatarUrl={avatarUrl} decorative />
       <div className="min-w-0 flex-1">
         <p className="truncate font-medium" title={login}>
           {login}

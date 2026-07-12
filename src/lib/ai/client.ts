@@ -7,7 +7,7 @@ import {
 } from "ai";
 import { getSecret } from "@/lib/git/api";
 import { errorMessage } from "@/lib/tauri/invoke";
-import { createModel, PROVIDERS_REQUIRING_KEY } from "./providers";
+import { PROVIDERS_REQUIRING_KEY } from "./providers";
 import { httpToolStatusLine } from "./review-tools";
 import type { AiClient, AiSettings, AiStreamRequest } from "./types";
 
@@ -38,6 +38,10 @@ export async function resolveModel(
   if (needsKey && !apiKey) {
     throw new MissingApiKeyError(settings.provider);
   }
+  // The heavy AI-SDK provider packages live in `model-factory` and load only
+  // here, on the first real generation — after the key check above, so the
+  // MissingApiKeyError path never pays for (or surfaces) the import.
+  const { createModel } = await import("./model-factory");
   return createModel(settings, apiKey, allowedHostsOverride);
 }
 

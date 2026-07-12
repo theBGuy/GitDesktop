@@ -70,6 +70,33 @@ function invalidateJiraForRepo(
   });
 }
 
+/**
+ * Narrower reconciliation for a single-issue PROPERTY write (due date, priority,
+ * labels, comment create/edit/delete): invalidate just that one issue's detail
+ * key + the repo's jira-issues LIST keys (lists render priority/due/labels, so
+ * they must reconcile). Unlike {@link invalidateJiraForRepo} it does NOT touch
+ * the link key or the whole jira-issue namespace — a property write on one issue
+ * can't affect another issue's detail. `link` supplies the site that keys the
+ * detail entry; when it's absent (unlinked) there's nothing to reconcile beyond
+ * the (empty) list keys. Reserve the broad helper for writes that change list
+ * membership or need cross-issue effects (create, transition, assign).
+ */
+function invalidateJiraIssue(
+  queryClient: ReturnType<typeof useQueryClient>,
+  repo: string,
+  link: JiraLink | null | undefined,
+  issueKey: string,
+) {
+  if (link) {
+    queryClient.invalidateQueries({
+      queryKey: jiraIssueDetailKey(repo, link.siteHost, issueKey),
+    });
+  }
+  queryClient.invalidateQueries({
+    queryKey: ["repo", repo, "jira-issues"],
+  });
+}
+
 export function useSaveJiraLink(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
@@ -294,7 +321,8 @@ export function useJiraComment(
         d ? { ...d, comments: [...d.comments, comment] } : d,
       );
     },
-    onSettled: () => invalidateJiraForRepo(queryClient, repo),
+    onSettled: (_d, _e, args) =>
+      invalidateJiraIssue(queryClient, repo, link, args.issueKey),
   });
 }
 
@@ -646,7 +674,8 @@ export function useJiraSetDueDate(
       });
     },
     onError: (_e, _args, ctx) => rollbackOptimisticField(queryClient, ctx),
-    onSettled: () => invalidateJiraForRepo(queryClient, repo),
+    onSettled: (_d, _e, args) =>
+      invalidateJiraIssue(queryClient, repo, link, args.issueKey),
   });
 }
 
@@ -681,7 +710,8 @@ export function useJiraSetPriority(
       );
     },
     onError: (_e, _args, ctx) => rollbackOptimisticField(queryClient, ctx),
-    onSettled: () => invalidateJiraForRepo(queryClient, repo),
+    onSettled: (_d, _e, args) =>
+      invalidateJiraIssue(queryClient, repo, link, args.issueKey),
   });
 }
 
@@ -711,7 +741,8 @@ export function useJiraSetLabels(
       );
     },
     onError: (_e, _args, ctx) => rollbackOptimisticField(queryClient, ctx),
-    onSettled: () => invalidateJiraForRepo(queryClient, repo),
+    onSettled: (_d, _e, args) =>
+      invalidateJiraIssue(queryClient, repo, link, args.issueKey),
   });
 }
 
@@ -773,7 +804,8 @@ export function useJiraCommentEdit(
           : d,
       );
     },
-    onSettled: () => invalidateJiraForRepo(queryClient, repo),
+    onSettled: (_d, _e, args) =>
+      invalidateJiraIssue(queryClient, repo, link, args.issueKey),
   });
 }
 
@@ -809,7 +841,8 @@ export function useJiraCommentDelete(
         queryClient.setQueryData(ctx.detailKey, ctx.prevDetail);
       }
     },
-    onSettled: () => invalidateJiraForRepo(queryClient, repo),
+    onSettled: (_d, _e, args) =>
+      invalidateJiraIssue(queryClient, repo, link, args.issueKey),
   });
 }
 

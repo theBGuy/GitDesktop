@@ -32,7 +32,6 @@ import { CommitBox } from "@/features/commit/CommitBox";
 import { BranchDiffView } from "@/features/compare/BranchDiffView";
 import { ComparePanel } from "@/features/compare/ComparePanel";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
-import { DiffViewer } from "@/features/diff/DiffViewer";
 import { DiscussionsPanel } from "@/features/discussions/DiscussionsPanel";
 import { DiscussionView } from "@/features/discussions/DiscussionView";
 import { CommitDetailView } from "@/features/history/CommitDetailView";
@@ -46,8 +45,6 @@ import { PullRequestsPanel } from "@/features/pulls/PullRequestsPanel";
 import { RemotePrView } from "@/features/pulls/RemotePrView";
 import { useCleanupResolveWorktrees } from "@/features/pulls/useCleanupResolveWorktrees";
 import { useWatchPrHeads } from "@/features/pulls/useWatchPrHeads";
-import { SessionList } from "@/features/sessions/SessionList";
-import { SessionView } from "@/features/sessions/SessionView";
 import { TagDetailView } from "@/features/tags/TagDetailView";
 import { TagsPanel } from "@/features/tags/TagsPanel";
 import {
@@ -77,6 +74,29 @@ const APP_TITLE = import.meta.env.DEV ? "GitDesktop (Dev)" : "GitDesktop";
 const InsightsBoard = lazy(() =>
   import("./insights/InsightsBoard").then((m) => ({
     default: m.InsightsBoard,
+  })),
+);
+
+// The Agent surface (write-capable sessions) is a heavy, AI-only graph; lazy it
+// the same way so its chunk stays off the boot path until the Agent tab is first
+// opened. Gated by `aiEnabled` too — with Hide AI on, it never loads.
+const SessionList = lazy(() =>
+  import("@/features/sessions/SessionList").then((m) => ({
+    default: m.SessionList,
+  })),
+);
+const SessionView = lazy(() =>
+  import("@/features/sessions/SessionView").then((m) => ({
+    default: m.SessionView,
+  })),
+);
+
+// The diff viewer pulls in the @git-diff-view stack; lazy it so that chunk
+// loads with the first diff render rather than on boot. It sits in the default
+// "changes" tab, so the load happens on first paint (tens of ms from disk).
+const DiffViewer = lazy(() =>
+  import("@/features/diff/DiffViewer").then((m) => ({
+    default: m.DiffViewer,
   })),
 );
 
@@ -145,6 +165,11 @@ export function RepositoryView() {
   // its chunk + heavy queries off the boot path until the user opens Insights.
   const [insightsSeen, setInsightsSeen] = useState(false);
   if (repoTab === "insights" && !insightsSeen) setInsightsSeen(true);
+  // Same latch for the (lazy) Agent surface: mount it once its tab is first
+  // opened, then keep it mounted so <Activity> preserves session state. Keeps
+  // the agent chunk off the boot path until the user opens the Agent tab.
+  const [agentSeen, setAgentSeen] = useState(false);
+  if (repoTab === "agent" && !agentSeen) setAgentSeen(true);
 
   // OS notifications for PR/check and workflow-run events while this repo is open.
   usePrNotifications(repoPath ?? "");
@@ -322,13 +347,19 @@ export function RepositoryView() {
           </Activity>
           {aiEnabled && (
             <Activity mode={mode("agent")}>
-              <SessionList repoPath={repoPath} />
+              {agentSeen && (
+                <Suspense fallback={null}>
+                  <SessionList repoPath={repoPath} />
+                </Suspense>
+              )}
             </Activity>
           )}
         </aside>
         <main className="min-w-0 flex-1">
           <Activity mode={mode("changes")}>
-            <DiffViewer repoPath={repoPath} />
+            <Suspense fallback={null}>
+              <DiffViewer repoPath={repoPath} />
+            </Suspense>
           </Activity>
           <Activity mode={mode("history")}>
             {deferredCommitHash ? (
@@ -440,7 +471,11 @@ export function RepositoryView() {
           </Activity>
           {aiEnabled && (
             <Activity mode={mode("agent")}>
-              <SessionView repoPath={repoPath} />
+              {agentSeen && (
+                <Suspense fallback={null}>
+                  <SessionView repoPath={repoPath} />
+                </Suspense>
+              )}
             </Activity>
           )}
         </main>

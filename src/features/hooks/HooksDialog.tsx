@@ -1,7 +1,6 @@
 import { CaretDownIcon } from "@phosphor-icons/react";
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { CodeEditor } from "@/components/code-editor";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -30,6 +29,13 @@ import {
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { HOOK_TEMPLATES } from "./templates";
+
+// CodeMirror is heavy; lazy-load it so its chunk stays off the boot path and
+// only loads when the hooks dialog first opens. The dialog chrome (header,
+// hook list) renders instantly; a skeleton fills the editor area meanwhile.
+const CodeEditor = lazy(() =>
+  import("@/components/code-editor").then((m) => ({ default: m.CodeEditor })),
+);
 
 const DEFAULT_HOOK = "#!/bin/sh\n\n";
 
@@ -289,7 +295,11 @@ export function HooksDialog({
                   </div>
                   <div className="relative min-h-0 flex-1">
                     <div className="absolute inset-0">
-                      <CodeEditor value={draft} onChange={setDraft} />
+                      <Suspense
+                        fallback={<Skeleton className="h-full w-full" />}
+                      >
+                        <CodeEditor value={draft} onChange={setDraft} />
+                      </Suspense>
                     </div>
                   </div>
                   {noShebang && (

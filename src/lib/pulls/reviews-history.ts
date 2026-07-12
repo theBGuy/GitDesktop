@@ -50,6 +50,40 @@ function getStore(): Promise<Store> {
   return storePromise;
 }
 
+// Serialize every read-modify-write on this store through one in-process queue.
+// Without it, two overlapping mutations each reload the SAME pre-flush disk snapshot
+// — autoSave persists on a ~100ms debounce, so the first write isn't on disk yet — and
+// the later write drops the earlier one's change (a lost update). Unlike local-prs.json,
+// pr-reviews.json is NOT written by the MCP server; the realistic overlap is entirely
+// in-process — e.g. an automation's review finishing while the user edits or deletes a
+// review's text, or two automation instances finishing close together. Running them one
+// at a time, plus the force-save in writeAll, guarantees each reload sees a current snapshot.
+let opChain: Promise<unknown> = Promise.resolve();
+function serialize<T>(op: () => Promise<T>): Promise<T> {
+  const run = opChain.then(op, op);
+  // Keep the queue alive whether `op` fulfilled or rejected; callers still get `run`.
+  opChain = run.catch(() => undefined);
+  return run;
+}
+
+async function reloadRaw(): Promise<void> {
+  const store = await getStore();
+  // Tolerate a missing store file. Asymmetry: `load()` tolerates a missing file
+  // but `reload()` rejects with a raw io error ("The system cannot find the file
+  // specified. (os error 2)") — the file only exists after the first `save()`.
+  // Without this guard the first-ever mutation throws before reaching `save()`,
+  // so the store can never bootstrap; an external delete of the file breaks every
+  // mutation until restart the same way. Fall back to the loaded in-memory state
+  // on ANY reload failure — the serialized op-chain + force-save still protect the
+  // write path.
+  try {
+    await store.reload({ ignoreDefaults: true });
+  } catch {
+    // Missing/unreadable file — proceed with in-memory state; the next save()
+    // creates it.
+  }
+}
+
 // Records are keyed by the repo's worktree-stable identity (not its checkout
 // path) so a PR's review history is shared across the main checkout and every
 // worktree. Reads merge in any records still under a legacy checkout-path key
@@ -63,6 +97,10 @@ async function readMerged(repo: string): Promise<PersistedReview[]> {
   return mergeById(primary, legacy);
 }
 
+/** The identity store key for `repo`, folding any legacy checkout-path-keyed
+ *  records onto it once. Call inside the serialized queue (after `reloadRaw`) so
+ *  the fold is ordered with the mutation and a delete can't leave a lingering
+ *  legacy record that would reappear via `readMerged`'s read-merge. */
 async function keyFor(repo: string): Promise<string> {
   const store = await getStore();
   return identityKeyFor<PersistedReview[]>(
@@ -84,6 +122,9 @@ async function writeAll(
 ): Promise<void> {
   const store = await getStore();
   await store.set(key, records);
+  // Flush now instead of on autoSave's debounce, so the next serialized reload can't
+  // re-read a pre-write disk snapshot and drop this change.
+  await store.save();
 }
 
 /** Keeps only the newest `MAX_PER_GROUP` reviews per `(kind, ref, mode)`. */
@@ -134,10 +175,15 @@ export async function saveReview(
   repo: string,
   record: PersistedReview,
 ): Promise<void> {
-  const key = await keyFor(repo);
-  const all = await readByKey(key);
-  const without = all.filter((r) => r.id !== record.id);
-  await writeAll(key, prune([record, ...without]));
+  return serialize(async () => {
+    // Fresh disk state first, then key-fold, then read-modify-write — all inside the
+    // serialized op so an overlapping mutation can't reload a pre-flush snapshot.
+    await reloadRaw();
+    const key = await keyFor(repo);
+    const all = await readByKey(key);
+    const without = all.filter((r) => r.id !== record.id);
+    await writeAll(key, prune([record, ...without]));
+  });
 }
 
 /** Replaces a stored review's text — backs "trim before re-running" so a user
@@ -147,21 +193,27 @@ export async function updateReviewText(
   id: string,
   text: string,
 ): Promise<void> {
-  const key = await keyFor(repo);
-  const all = await readByKey(key);
-  await writeAll(
-    key,
-    all.map((r) => (r.id === id ? { ...r, text } : r)),
-  );
+  return serialize(async () => {
+    await reloadRaw();
+    const key = await keyFor(repo);
+    const all = await readByKey(key);
+    await writeAll(
+      key,
+      all.map((r) => (r.id === id ? { ...r, text } : r)),
+    );
+  });
 }
 
 export async function deleteReview(repo: string, id: string): Promise<void> {
-  const key = await keyFor(repo);
-  const all = await readByKey(key);
-  await writeAll(
-    key,
-    all.filter((r) => r.id !== id),
-  );
+  return serialize(async () => {
+    await reloadRaw();
+    const key = await keyFor(repo);
+    const all = await readByKey(key);
+    await writeAll(
+      key,
+      all.filter((r) => r.id !== id),
+    );
+  });
 }
 
 /** Clears every persisted review for ONE PR (both modes) — scoped so clearing
@@ -171,10 +223,13 @@ export async function clearReviewsFor(
   kind: "remote" | "local",
   ref: string,
 ): Promise<void> {
-  const key = await keyFor(repo);
-  const all = await readByKey(key);
-  await writeAll(
-    key,
-    all.filter((r) => !(r.kind === kind && r.ref === ref)),
-  );
+  return serialize(async () => {
+    await reloadRaw();
+    const key = await keyFor(repo);
+    const all = await readByKey(key);
+    await writeAll(
+      key,
+      all.filter((r) => !(r.kind === kind && r.ref === ref)),
+    );
+  });
 }
