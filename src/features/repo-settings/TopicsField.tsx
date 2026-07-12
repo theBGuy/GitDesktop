@@ -60,13 +60,23 @@ export function TopicsField({
 
   const atCap = rules.maxTopics != null && topics.length >= rules.maxTopics;
 
-  /** Normalize the buffer and append it (deduped) — a no-op if it normalizes to
-   *  empty, is already present, or we're at the cap. Clears the buffer either way. */
+  /** Commit the buffer as one or more chips. Splits on the same delimiters that
+   *  commit while typing (comma always; whitespace where space commits) so a
+   *  pasted or space-separated list ("react typescript") becomes multiple chips
+   *  rather than one mangled token — matching the field's documented behavior.
+   *  Each part is normalized, deduped, and capped; the buffer clears either way. */
   function commit() {
-    const topic = rules.normalize(draft);
+    const raw = draft;
     setDraft("");
-    if (!topic || atCap || topics.includes(topic)) return;
-    onChange([...topics, topic]);
+    const splitter = rules.commitKeys.includes("space") ? /[\s,]+/ : /,+/;
+    let next = topics;
+    for (const part of raw.split(splitter)) {
+      const topic = rules.normalize(part);
+      if (!topic || next.includes(topic)) continue;
+      if (rules.maxTopics != null && next.length >= rules.maxTopics) break;
+      next = [...next, topic];
+    }
+    if (next.length !== topics.length) onChange(next);
   }
 
   function removeAt(index: number) {
@@ -100,12 +110,10 @@ export function TopicsField({
       onChange(topics.slice(0, -1));
       return;
     }
-    // ← from the start of an empty-ish buffer hops onto the last chip.
-    if (
-      e.key === "ArrowLeft" &&
-      topics.length > 0 &&
-      inputRef.current?.selectionStart === 0
-    ) {
+    // ← from an EMPTY buffer hops onto the last chip; with a non-empty draft, ←
+    // stays normal cursor movement so it never commits the draft (matches the
+    // Backspace branch above — focusing a chip blurs the input and would `commit()`).
+    if (e.key === "ArrowLeft" && topics.length > 0 && draft === "") {
       e.preventDefault();
       focusChip(topics.length - 1);
     }
