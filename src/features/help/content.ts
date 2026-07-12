@@ -513,6 +513,10 @@ files with diffs, and CI checks. From there you can **comment** (with quote-repl
 **labels**, **assignees**, and **reviewers** (request a review from a collaborator — the
 picker excludes the PR author, whom GitHub won't let you request), mark a draft **ready**,
 **merge** (merge commit, squash, or rebase, with optional branch deletion), and **close**.
+Reviewers who've already reviewed show as read-only chips carrying their verdict — a check
+for **approved**, an X for **requested changes**, a speech bubble for **commented** (icon
+shape plus the word, never color alone) — so a finished review (including Copilot's) stays
+visible after the reviewer leaves the pending-request list.
 
 The Conversation tab is a single **date-sorted activity feed** — reviews, comments,
 pushed commits, and events all interleaved oldest-to-newest. A run of pushes collapses
