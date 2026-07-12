@@ -999,6 +999,13 @@ function useOptimisticCacheMutation<TArgs, TData, TCache>(
       _args: TArgs,
       ctx: { prev: TCache | undefined; key: QueryKey } | undefined,
     ) => {
+      // The explicit guard is deliberate: in TanStack Query v5,
+      // setQueryData(key, undefined) BAILS without updating (it does not
+      // remove the entry), so an unguarded call would be a silent no-op, not
+      // a rollback. A future "create from nothing" patch (prev === undefined,
+      // patch returns data) would need removeQueries here instead — but
+      // onSettled's reconcile invalidates immediately after, so there is no
+      // observable window today.
       if (ctx?.prev !== undefined) queryClient.setQueryData(ctx.key, ctx.prev);
     },
     onSettled: (_d: TData | undefined, _e: unknown, args: TArgs) =>

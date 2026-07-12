@@ -11,7 +11,10 @@ import { type ComponentProps, lazy, Suspense } from "react";
 //
 // Prop types are derived from the real components via a type-only import of
 // the module below — types erase at build time, so this does NOT drag the
-// eager module back into the graph.
+// eager module back into the graph. NOTE: `typeof <type-only-imported value>`
+// is a TYPE QUERY and is valid TypeScript (the standard way to take a
+// component's props without a runtime import); only *value*-position use of a
+// type-only import is illegal. `tsc -b` compiles this file clean.
 import type {
   DiffContent as DiffContentImpl,
   DiffSurface as DiffSurfaceImpl,
