@@ -32,7 +32,8 @@ use crate::forge::http::{
     self, BbCredentials, BB_HOST, KEY_DISPLAY_NAME, KEY_EMAIL, KEY_TOKEN, KEY_USERNAME,
 };
 use crate::forge::model::{
-    Capabilities, ForgeRepo, ForgeRepoList, ForgeStatus, ForgeUserRef, Implemented, Provider,
+    Capabilities, CompletedReviewerOut, ForgeRepo, ForgeRepoList, ForgeStatus, ForgeUserRef,
+    Implemented, Provider,
 };
 use crate::forge::Forge;
 use crate::github::actions::{RunDetail, RunJob, WorkflowRun};
@@ -527,6 +528,13 @@ struct BbPr {
     /// commenters/approvers who were never asked to review.
     #[serde(default)]
     reviewers: Vec<BbUser>,
+    /// The participant list (present on the unfielded single-PR GET, avatars and
+    /// all). Carries each participant's approval `state`, so `view_pr` derives the
+    /// completed reviewers (approved / changes-requested) from it without a second
+    /// fetch. Distinct from `reviewers`: this also includes commenters/approvers
+    /// who were never formally asked to review.
+    #[serde(default, deserialize_with = "null_to_default")]
+    participants: Vec<BbParticipant>,
 }
 
 /// Best display login for a Bitbucket user: display_name else nickname (other users
@@ -937,7 +945,9 @@ fn commit_author(c: &BbCommit) -> String {
 /// `PrDetails`. Reviews are left empty: the frontend renders `reviews` generically
 /// (author + body + state), but a Bitbucket "approved" participant has no body/state
 /// text to show — so like GitLab's `view_pr` this returns `Vec::new()` rather than
-/// bare author lines. Assignees/labels are always empty (Bitbucket has neither).
+/// bare author lines. Participants who acted DO surface as `completed_reviewers`
+/// (verdict chips) instead, derived from participant state. Assignees/labels are
+/// always empty (Bitbucket has neither).
 pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
     let creds = http::load_credentials().await?;
     let (ws, slug) = workspace_slug(repo_path).await?;
@@ -1075,6 +1085,15 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         .unwrap_or_default()
     };
 
+    // Completed reviewers = participants who acted (approved or requested changes),
+    // derived from participant state (Bitbucket has no GitHub-style review objects).
+    // These are DISPLAYED separately from the pending reviewers; the frontend de-dups
+    // the display so an acted reviewer doesn't render as both a pending and a completed
+    // chip. `reviewers` below stays the FULL assigned set on purpose — it feeds the
+    // reviewers picker's full-replacement PUT, so dropping an acted reviewer here would
+    // silently un-assign them on the next reviewer edit.
+    let completed_reviewers = completed_reviewers_from(&pr.participants);
+
     Ok(PrDetails {
         // No node ids on Bitbucket.
         id: String::new(),
@@ -1115,6 +1134,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
                 })
             })
             .collect(),
+        completed_reviewers,
     })
 }
 
@@ -2898,6 +2918,42 @@ fn build_approval_state(
         approvals_left: 0,
         viewer_requested_changes,
     }
+}
+
+/// The completed reviewers of a PR — every participant who cast a verdict — derived
+/// from participant `state`. Bitbucket has no GitHub-style review objects, so a
+/// participant's `state` (`"approved"` / `"changes_requested"` / null) IS the verdict:
+/// `"approved"` → `"APPROVED"`, `"changes_requested"` → `"CHANGES_REQUESTED"`.
+/// Commenters who never acted carry `state: null` (and any unrecognized state) and are
+/// skipped, as are participants with no resolvable braced uuid. Identity = braced uuid
+/// (the one field present on participant objects), matching the reviewers picker so the
+/// caller can subtract these from the pending reviewer list. Pure (testable).
+fn completed_reviewers_from(participants: &[BbParticipant]) -> Vec<CompletedReviewerOut> {
+    participants
+        .iter()
+        .filter_map(|p| {
+            let state = match p.state.as_deref() {
+                Some("approved") => "APPROVED",
+                Some("changes_requested") => "CHANGES_REQUESTED",
+                // Commenters (null) and any unrecognized state didn't cast a verdict.
+                _ => return None,
+            };
+            let u = p.user.as_ref()?;
+            let id = u.uuid.clone().unwrap_or_default();
+            if id.is_empty() {
+                return None;
+            }
+            Some(CompletedReviewerOut {
+                user: ForgeUserRef {
+                    id,
+                    label: user_login(u),
+                    avatar_url: user_avatar(u),
+                    is_bot: false,
+                },
+                state: state.to_string(),
+            })
+        })
+        .collect()
 }
 
 /// The viewer's + the PR's approval state (`GET …/pullrequests/{n}` participants). The
@@ -5527,6 +5583,45 @@ mod tests {
         assert!(!state.viewer_requested_changes);
         // The approver is not the viewer, so their nickname (not the login) is used.
         assert_eq!(state.approved_by, vec!["someone".to_string()]);
+    }
+
+    #[test]
+    fn completed_reviewers_maps_states_avatars_and_skips_commenters() {
+        // approved → APPROVED (with avatar), changes_requested → CHANGES_REQUESTED,
+        // null (a commenter) → skipped, unrecognized state → skipped.
+        let ps = participants(
+            r#"{"participants":[
+                {"user":{"uuid":"{app}","display_name":"Approver",
+                         "links":{"avatar":{"href":"https://avatars/app.png"}}},
+                 "approved":true,"state":"approved"},
+                {"user":{"uuid":"{cr}","nickname":"Reviewer"},
+                 "approved":false,"state":"changes_requested"},
+                {"user":{"uuid":"{c}","nickname":"Commenter"},"approved":false,"state":null},
+                {"user":{"uuid":"{u}","nickname":"Unknown"},"approved":false,"state":"weird"}
+            ]}"#,
+        );
+        let out = completed_reviewers_from(&ps);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].user.id, "{app}");
+        assert_eq!(out[0].user.label, "Approver");
+        assert_eq!(out[0].user.avatar_url, "https://avatars/app.png");
+        assert!(!out[0].user.is_bot);
+        assert_eq!(out[0].state, "APPROVED");
+        assert_eq!(out[1].user.id, "{cr}");
+        assert_eq!(out[1].user.label, "Reviewer");
+        assert_eq!(out[1].state, "CHANGES_REQUESTED");
+    }
+
+    #[test]
+    fn completed_reviewers_skips_participant_with_no_uuid() {
+        // A participant with a verdict but no braced uuid can't round-trip, so it's
+        // dropped rather than emitted with an empty id.
+        let ps = participants(
+            r#"{"participants":[
+                {"user":{"nickname":"NoUuid"},"approved":true,"state":"approved"}
+            ]}"#,
+        );
+        assert!(completed_reviewers_from(&ps).is_empty());
     }
 
     #[test]

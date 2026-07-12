@@ -624,6 +624,17 @@ pub struct ForgeUserRef {
     pub is_bot: bool,
 }
 
+/// A reviewer who has submitted a verdict (GitLab approval/requested-changes,
+/// Bitbucket participant state). GitHub derives its own completed reviewers on
+/// the frontend from `reviews`, so it leaves this empty.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletedReviewerOut {
+    pub user: ForgeUserRef,
+    /// Uppercased: "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED".
+    pub state: String,
+}
+
 /// A repository as listed for cloning — neutral across providers (the clone
 /// browser's row). GitHub fields map 1:1 from `GhRepo`; GitLab fills it from a
 /// `glab` project.

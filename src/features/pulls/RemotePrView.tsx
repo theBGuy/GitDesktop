@@ -723,7 +723,22 @@ export function RemotePrView({
   // state, so we surface each as a read-only chip carrying that state. Derived
   // like humanReviewers/botReviewers above (plain, not a hook — this is past the
   // component's early returns).
-  const completedReviewers = deriveCompletedReviewers(pr.reviews, pr.reviewers);
+  const completedReviewers = [
+    ...deriveCompletedReviewers(pr.reviews, pr.reviewers),
+    ...pr.completedReviewers.map((cr) => ({
+      login: cr.user.id,
+      label: cr.user.label,
+      isBot: cr.user.isBot,
+      avatarUrl: cr.user.avatarUrl,
+      state: cr.state.toUpperCase(),
+    })),
+  ];
+  // Logins that already render as completed chips. For GitLab/Bitbucket an acted
+  // reviewer stays in `pr.reviewers` (the full assigned set — the picker preserves
+  // them on save) AND appears in `pr.completedReviewers`, so the read-only pending
+  // list filters these out to avoid a duplicate pending+completed chip. GitHub never
+  // overlaps (its completed reviewers have already left `pr.reviewers`).
+  const completedLogins = new Set(completedReviewers.map((c) => c.login));
   const busy =
     comment.isPending ||
     mergePr.isPending ||
@@ -947,22 +962,24 @@ export function RemotePrView({
         ) : (
           (pr.reviewers.length > 0 || completedReviewers.length > 0) && (
             <div className="flex flex-wrap items-center gap-1.5">
-              {humanReviewers.map((user) => {
-                const hint = userRefHint(user, humanReviewers);
-                return (
-                  <span
-                    key={user.id}
-                    title={hint ? `${user.label} (${hint})` : undefined}
-                    className="inline-flex items-center gap-1 border py-0.5 pr-1.5 pl-0.5 text-[11px] text-muted-foreground"
-                  >
-                    <ForgeUserAvatar user={user} ghHost={ghHost} />
-                    {user.label}
-                    {hint && (
-                      <span className="text-muted-foreground"> · {hint}</span>
-                    )}
-                  </span>
-                );
-              })}
+              {humanReviewers
+                .filter((h) => !completedLogins.has(h.id))
+                .map((user) => {
+                  const hint = userRefHint(user, humanReviewers);
+                  return (
+                    <span
+                      key={user.id}
+                      title={hint ? `${user.label} (${hint})` : undefined}
+                      className="inline-flex items-center gap-1 border py-0.5 pr-1.5 pl-0.5 text-[11px] text-muted-foreground"
+                    >
+                      <ForgeUserAvatar user={user} ghHost={ghHost} />
+                      {user.label}
+                      {hint && (
+                        <span className="text-muted-foreground"> · {hint}</span>
+                      )}
+                    </span>
+                  );
+                })}
               {botReviewers.map((user) => (
                 <BotReviewerChip key={user.id} user={user} ghHost={ghHost} />
               ))}
@@ -2107,6 +2124,9 @@ interface CompletedReviewer {
   login: string;
   label: string;
   isBot: boolean;
+  /** The reviewer's avatar URL when the provider supplies one (GitLab/Bitbucket).
+   *  Empty for GitHub, where `ForgeUserAvatar` derives it from the login. */
+  avatarUrl: string;
   /** Uppercased review state — APPROVED / CHANGES_REQUESTED / COMMENTED. */
   state: string;
 }
@@ -2145,6 +2165,8 @@ function deriveCompletedReviewers(
       login,
       label: isCopilot ? "Copilot" : login,
       isBot,
+      // GitHub avatars are login-derived; ForgeUserAvatar falls back when empty.
+      avatarUrl: "",
       state: review.state.toUpperCase(),
     };
   });
@@ -2204,7 +2226,7 @@ function CompletedReviewerChip({
           user={{
             id: reviewer.login,
             label: reviewer.label,
-            avatarUrl: "",
+            avatarUrl: reviewer.avatarUrl,
             isBot: false,
           }}
           ghHost={ghHost}

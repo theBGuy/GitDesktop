@@ -1,0 +1,4 @@
+- **GitLab MR reviewers who've acted now show as completed chips.** On a GitLab merge
+  request, reviewers who have approved or requested changes now appear as read-only
+  completed-reviewer chips carrying their verdict, and drop off the pending-request list
+  so they no longer double-render as still-pending.

@@ -1687,6 +1687,11 @@ pub struct PrDetails {
     /// is true; the id is the provider's stable handle (GitHub login, GitLab username,
     /// Bitbucket the braced account uuid), the label the display name.
     pub reviewers: Vec<crate::forge::model::ForgeUserRef>,
+    /// Reviewers who have submitted a verdict, supplied by the backend for providers
+    /// that don't populate `reviews` (GitLab approvals, Bitbucket participant states).
+    /// GitHub derives its completed reviewers on the frontend from `reviews`, so it
+    /// leaves this empty.
+    pub completed_reviewers: Vec<crate::forge::model::CompletedReviewerOut>,
 }
 
 /// A merge/pull request's approval summary — who has approved and whether the
@@ -1909,6 +1914,8 @@ pub async fn gh_pr_view(repo_path: String, number: u64) -> AppResult<PrDetails> 
                 }
             })
             .collect(),
+        // GitHub derives its completed reviewers on the frontend from `reviews`.
+        completed_reviewers: Vec::new(),
     })
 }
 

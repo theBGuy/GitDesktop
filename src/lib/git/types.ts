@@ -1508,6 +1508,19 @@ export interface PrDetails {
    *  is true; the id is the provider's stable handle (GitHub login, GitLab username,
    *  Bitbucket the braced account uuid), the label the display name, never the id. */
   reviewers: ForgeUserRef[];
+  /** Reviewers who have submitted a verdict, supplied by the backend for providers
+   *  that don't populate `reviews` (GitLab approvals, Bitbucket participant states).
+   *  GitHub derives its completed reviewers on the frontend from `reviews`, so it
+   *  leaves this empty. */
+  completedReviewers: CompletedReviewerWithState[];
+}
+
+/** A reviewer who has submitted a verdict, as supplied by the backend (GitLab
+ *  approvals, Bitbucket participant states). The `state` is uppercased —
+ *  APPROVED / CHANGES_REQUESTED / COMMENTED. */
+export interface CompletedReviewerWithState {
+  user: ForgeUserRef;
+  state: string;
 }
 
 /** A provider user reference for pickers — a stable id + a human label.

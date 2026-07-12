@@ -15,7 +15,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::{AppError, AppResult};
 use crate::forge::glab::{run_glab, run_glab_ex, run_glab_raw, GLAB_NETWORK_TIMEOUT, GLAB_TIMEOUT};
 use crate::forge::model::{
-    Capabilities, ForgeRepo, ForgeRepoList, ForgeStatus, ForgeUserRef, Implemented, Provider,
+    Capabilities, CompletedReviewerOut, ForgeRepo, ForgeRepoList, ForgeStatus, ForgeUserRef,
+    Implemented, Provider,
 };
 use crate::forge::Forge;
 use crate::github::actions::{RunDetail, RunJob, WorkflowRun};
@@ -866,6 +867,52 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         .author
         .map(|a| (a.username, a.avatar_url))
         .unwrap_or_default();
+
+    // Reviewer verdicts. GitLab MRs carry no reviewable review objects, so a
+    // completed reviewer is an assigned reviewer whose per-reviewer state is
+    // `approved` or `requested_changes` (from `…/reviewers`). Best-effort: a
+    // failed/omitted fetch just leaves `completed_reviewers` empty (never fails
+    // the view). NOTE: `reviewers` below stays the FULL assigned set — on GitLab
+    // an approver remains an assigned reviewer, and that list drives a
+    // full-replacement reviewer PUT, so dropping acted reviewers from it would
+    // un-assign them on the next edit. The frontend de-dups the display instead.
+    let reviewer_states: std::collections::HashMap<String, String> =
+        mr_reviewers(repo_path, &enc, number)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|r| {
+                r.user
+                    .map(|u| (u.username, r.state.to_ascii_lowercase()))
+                    .filter(|(name, _)| !name.is_empty())
+            })
+            .collect();
+
+    // The acted subset (approved / requested-changes), with each reviewer's
+    // verdict — built by borrowing `mr.reviewers` so the full list below can
+    // still consume it.
+    let completed_reviewers: Vec<CompletedReviewerOut> = mr
+        .reviewers
+        .iter()
+        .filter(|u| !u.username.is_empty())
+        .filter_map(|u| {
+            let state = match reviewer_states.get(&u.username).map(String::as_str) {
+                Some("approved") => "APPROVED",
+                Some("requested_changes") => "CHANGES_REQUESTED",
+                _ => return None,
+            };
+            Some(CompletedReviewerOut {
+                user: ForgeUserRef {
+                    id: u.username.clone(),
+                    label: u.username.clone(),
+                    avatar_url: u.avatar_url.clone(),
+                    is_bot: false,
+                },
+                state: state.to_string(),
+            })
+        })
+        .collect();
+
     Ok(PrDetails {
         // No GraphQL node id on GitLab; the GitLab mutations key on the iid (labels
         // by name, assignees by resolved numeric id), so an empty id is fine.
@@ -898,9 +945,11 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
                 is_bot: false,
             })
             .collect(),
-        // Reviewers, keyed by username (like assignees — the setter resolves
-        // username→id, candidates use username), so the picker's selected chips
-        // match its candidate ids.
+        // The FULL assigned reviewer set, keyed by username (like assignees — the
+        // setter resolves username→id, candidates use username), so the picker's
+        // selected chips match its candidate ids. Acted reviewers stay here (this
+        // list drives a full-replacement PUT); `completed_reviewers` carries their
+        // verdicts and the frontend de-dups the display.
         reviewers: mr
             .reviewers
             .into_iter()
@@ -912,6 +961,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
                 is_bot: false,
             })
             .collect(),
+        completed_reviewers,
     })
 }
 
