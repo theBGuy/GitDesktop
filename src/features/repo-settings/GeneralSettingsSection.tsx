@@ -196,6 +196,8 @@ function normalizeTopics(raw: string[]): string[] {
     const topic = GITHUB_TOPIC_RULES.normalize(t);
     if (topic) seen.add(topic);
   }
+  // `maxTopics` is optional on `TopicRules`, so the `?? 20` satisfies the type;
+  // the GitHub preset always sets 20, so the fallback never fires at runtime.
   return [...seen].slice(0, GITHUB_TOPIC_RULES.maxTopics ?? 20);
 }
 
