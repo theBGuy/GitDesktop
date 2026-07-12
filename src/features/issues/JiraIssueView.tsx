@@ -50,22 +50,28 @@ import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { DueDateRow } from "@/features/issues/RemoteIssueViewParts";
 import type { ForgeUserRef } from "@/lib/git/types";
 import { formatBinding } from "@/lib/hotkeys/binding";
+import { formatHmDelta, isValidJiraDuration } from "@/lib/jira/duration";
 import {
   useJiraAssign,
   useJiraComment,
   useJiraCommentDelete,
   useJiraCommentEdit,
+  useJiraDeleteWorklog,
   useJiraIssue,
   useJiraLabels,
   useJiraLink,
+  useJiraLogWork,
   useJiraPermissions,
   useJiraPriorities,
   useJiraSetDueDate,
   useJiraSetLabels,
+  useJiraSetOriginalEstimate,
   useJiraSetPriority,
+  useJiraSetRemainingEstimate,
   useJiraTransition,
   useJiraTransitions,
   useJiraTransitionTo,
+  useJiraUpdateWorklog,
   useJiraUserSearch,
 } from "@/lib/jira/queries";
 import type { JiraLink } from "@/lib/jira/store";
@@ -74,10 +80,13 @@ import {
   type JiraComment,
   type JiraIssueDetails,
   type JiraStatusCategory,
+  type JiraTimeTracking as JiraTimeTrackingData,
+  type JiraWorklog,
 } from "@/lib/jira/types";
 import { useUiStore } from "@/lib/stores/ui";
 import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
+import { cn } from "@/lib/utils";
 
 /** Platform-correct submit hint (Cmd+Enter on macOS, Ctrl+Enter else) — never a
  *  literal modifier (house platform-mod-key rule). */
@@ -907,10 +916,551 @@ function JiraCommentItem({
 }
 
 /**
- * Read-only detail for one Jira issue: header (key + summary + status chip), a
- * muted meta row (type, priority, assignee, reporter, due date / resolution),
- * label chips, the description and comments rendered as markdown, and a "View in
- * Jira" link-out. No write affordances in phase 1 — none rendered, not disabled.
+ * One worklog entry. Read-only for everyone; on the viewer's OWN entries (matched
+ * by accountId) and with the matching permission it grows an always-visible
+ * Edit/Delete pair (never hover-revealed). Edit is an inline row: duration + note
+ * inputs prefilled, Enter commits, Esc cancels. The note is send-only-when-changed
+ * (unchanged ⇒ duration-only update); EMPTYING a previously non-empty note is
+ * blocked with an explanatory warning (Jira can't remove a note). Delete confirms.
+ */
+function JiraWorklogItem({
+  repoPath,
+  link,
+  issueKey,
+  worklog,
+  isOwn,
+  canEdit,
+  canDelete,
+}: {
+  repoPath: string;
+  /** `null` during the link-pending window — the read-only row always renders;
+   *  the edit/delete affordances are simply absent until a link is present. */
+  link: JiraLink | null;
+  issueKey: string;
+  worklog: JiraWorklog;
+  isOwn: boolean;
+  canEdit: boolean;
+  canDelete: boolean;
+}) {
+  const update = useJiraUpdateWorklog(repoPath, link);
+  const del = useJiraDeleteWorklog(repoPath, link);
+  const [editing, setEditing] = useState(false);
+  const [durationDraft, setDurationDraft] = useState("");
+  const [noteDraft, setNoteDraft] = useState("");
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  // Edit/delete require a live link (the mutations key on its site). During the
+  // link-pending window the actions are simply absent — the row still renders.
+  const showActions = link !== null && isOwn && (canEdit || canDelete);
+  const hadNote = worklog.commentMd.trim().length > 0;
+
+  const durationTrimmed = durationDraft.trim();
+  const durationValid = isValidJiraDuration(durationTrimmed);
+  const noteChanged = noteDraft !== worklog.commentMd;
+  // Blocked: the user cleared a note that previously existed. Jira can't remove a
+  // note once set — explain rather than silently drop or 400.
+  const noteRemoved = hadNote && noteChanged && noteDraft.trim().length === 0;
+  const canSaveEdit =
+    durationValid && !noteRemoved && !update.isPending;
+
+  function beginEdit() {
+    setDurationDraft(worklog.timeSpent);
+    setNoteDraft(worklog.commentMd);
+    setEditing(true);
+  }
+
+  function saveEdit() {
+    if (!canSaveEdit) return;
+    update.mutate(
+      {
+        issueKey,
+        worklogId: worklog.id,
+        timeSpent: durationTrimmed,
+        // Send the note ONLY when it actually changed (unchanged ⇒ undefined =
+        // leave as-is). A non-empty replacement is sent verbatim; an emptied
+        // note is blocked above, so we never send "".
+        commentMd: noteChanged ? noteDraft : undefined,
+      },
+      {
+        onSuccess: () => setEditing(false),
+        onError: toastError,
+      },
+    );
+  }
+
+  function doDelete() {
+    del.mutate(
+      { issueKey, worklogId: worklog.id },
+      {
+        onSuccess: () => toast.success("Worklog deleted"),
+        onError: toastError,
+      },
+    );
+    setConfirmDelete(false);
+  }
+
+  return (
+    <div className="space-y-1">
+      <p className="flex items-center gap-2 text-xs">
+        {worklog.author && <ForgeUserAvatar user={worklog.author} ghHost={null} />}
+        <span className="font-medium">{worklog.author?.label ?? "unknown"}</span>
+        <span className="tabular-nums text-muted-foreground">
+          {worklog.timeSpent}
+        </span>
+        <span className="text-muted-foreground">
+          {formatRelativeTime(worklog.started)}
+        </span>
+        {showActions && !editing && (
+          <>
+            <span className="flex-1" />
+            {canEdit && (
+              <Button
+                variant="ghost"
+                size="xs"
+                className="text-muted-foreground hover:text-foreground"
+                aria-label="Edit worklog"
+                onClick={beginEdit}
+              >
+                Edit
+              </Button>
+            )}
+            {canDelete && (
+              <Button
+                variant="ghost"
+                size="xs"
+                className="text-muted-foreground hover:text-destructive"
+                aria-label="Delete worklog"
+                onClick={() => setConfirmDelete(true)}
+              >
+                Delete
+              </Button>
+            )}
+          </>
+        )}
+      </p>
+      {editing ? (
+        <div className="space-y-1.5">
+          <Input
+            className="h-7"
+            value={durationDraft}
+            onChange={(e) => setDurationDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                e.preventDefault();
+                setEditing(false);
+                return;
+              }
+              if (e.key === "Enter" && canSaveEdit) {
+                e.preventDefault();
+                saveEdit();
+              }
+            }}
+            placeholder="Time spent (e.g. 3h 30m)"
+            aria-label="Edit time spent"
+            aria-invalid={durationTrimmed.length > 0 && !durationValid}
+            disabled={update.isPending}
+          />
+          <Input
+            className="h-7"
+            value={noteDraft}
+            onChange={(e) => setNoteDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                e.preventDefault();
+                setEditing(false);
+                return;
+              }
+              if (e.key === "Enter" && canSaveEdit) {
+                e.preventDefault();
+                saveEdit();
+              }
+            }}
+            placeholder="Note (optional)"
+            aria-label="Edit worklog note"
+            disabled={update.isPending}
+          />
+          {durationTrimmed.length > 0 && !durationValid && (
+            <p className="text-[11px] text-destructive">
+              Enter a Jira duration like 3h 30m or 1d.
+            </p>
+          )}
+          {noteRemoved && (
+            <p className="text-[11px] text-destructive">
+              A note can't be removed once set — replace it, or delete this entry
+              and log again.
+            </p>
+          )}
+          <div className="flex items-center gap-2">
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={!canSaveEdit}
+              onClick={saveEdit}
+            >
+              Save
+            </Button>
+            <Button
+              size="xs"
+              variant="ghost"
+              disabled={update.isPending}
+              onClick={() => setEditing(false)}
+            >
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : (
+        worklog.commentMd.trim() && <Markdown>{worklog.commentMd}</Markdown>
+      )}
+      <ConfirmDialog
+        open={confirmDelete}
+        onCancel={() => setConfirmDelete(false)}
+        title="Delete worklog?"
+        body="This permanently deletes your logged work on this Jira issue and restores the remaining estimate. This cannot be undone."
+        confirmLabel="Delete worklog"
+        confirmVariant="destructive"
+        pending={del.isPending}
+        onConfirm={doDelete}
+      />
+    </div>
+  );
+}
+
+/**
+ * The permission-gated "Time tracking" section for the issue rail. Rendered ONLY
+ * when the feature is enabled on the project (`timeTracking !== null`) — feature
+ * disabled ⇒ no section at all, regardless of permissions. Shows the
+ * Original/Remaining/Spent figures with a spent-vs-original progress bar (values
+ * always spelled out so meaning never rests on the bar color), then — gated per
+ * permission — log-work inputs, original/remaining estimate editors, and the
+ * worklog list. All mutations are non-optimistic; the section re-fetches on
+ * settle, so a typed value may differ from the server-derived truth that lands.
+ */
+function JiraTimeTrackingSection({
+  repoPath,
+  link,
+  issueKey,
+  tracking,
+  worklogs,
+  worklogsTotal,
+  viewerAccountId,
+  issueUrl,
+  canLogWork,
+  canEditEstimates,
+  canEditOwnWorklogs,
+  canDeleteOwnWorklogs,
+}: {
+  repoPath: string;
+  link: JiraLink | null;
+  issueKey: string;
+  tracking: JiraTimeTrackingData;
+  worklogs: JiraWorklog[];
+  worklogsTotal: number;
+  viewerAccountId: string | null;
+  issueUrl: string;
+  canLogWork: boolean;
+  canEditEstimates: boolean;
+  canEditOwnWorklogs: boolean;
+  canDeleteOwnWorklogs: boolean;
+}) {
+  const logWork = useJiraLogWork(repoPath, link);
+  const setOriginal = useJiraSetOriginalEstimate(repoPath, link);
+  const setRemaining = useJiraSetRemainingEstimate(repoPath, link);
+
+  const [logDuration, setLogDuration] = useState("");
+  const [logNote, setLogNote] = useState("");
+
+  const originalSeconds = tracking.originalEstimateSeconds ?? 0;
+  const spentSeconds = tracking.timeSpentSeconds ?? 0;
+  // 0 seconds is treated the same as "none" in the display: after all worklogs
+  // are deleted Jira lingers timeSpent as "0m"/0s (probed), and an unset field
+  // is null/0 too — both read as "—".
+  const originalStr = originalSeconds > 0 ? tracking.originalEstimate : null;
+  const remainingStr =
+    (tracking.remainingEstimateSeconds ?? 0) > 0
+      ? tracking.remainingEstimate
+      : null;
+  const spentStr = spentSeconds > 0 ? tracking.timeSpent : null;
+
+  // Progress + overage are only meaningful when both an estimate and spent exist.
+  const pct =
+    originalSeconds > 0
+      ? Math.min(100, Math.round((spentSeconds / originalSeconds) * 100))
+      : 0;
+  const overSpent = originalSeconds > 0 && spentSeconds > originalSeconds;
+
+  const logTrimmed = logDuration.trim();
+  const logValid = isValidJiraDuration(logTrimmed);
+
+  function submitLog() {
+    if (!logValid || logWork.isPending) return;
+    const note = logNote.trim();
+    logWork.mutate(
+      {
+        issueKey,
+        timeSpent: logTrimmed,
+        // Only send a note when the user typed one (empty ⇒ noteless entry).
+        commentMd: note ? note : undefined,
+      },
+      {
+        onSuccess: () => {
+          setLogDuration("");
+          setLogNote("");
+          toast.success(`Logged ${logTrimmed} on ${issueKey}`);
+        },
+        onError: toastError,
+      },
+    );
+  }
+
+  return (
+    <section className="space-y-2" aria-label="Time tracking">
+      <p className="text-[11px] font-medium text-muted-foreground">
+        Time tracking
+      </p>
+      {/* Display (always) — the three figures + optional progress bar. */}
+      <div className="space-y-1">
+        <div className="flex items-center justify-between gap-2 text-xs">
+          <span className="text-muted-foreground">Original</span>
+          <span className="tabular-nums">{originalStr ?? "—"}</span>
+        </div>
+        <div className="flex items-center justify-between gap-2 text-xs">
+          <span className="text-muted-foreground">Remaining</span>
+          <span className="tabular-nums">{remainingStr ?? "—"}</span>
+        </div>
+        <div className="flex items-center justify-between gap-2 text-xs">
+          <span className="text-muted-foreground">Spent</span>
+          <span className={cn("tabular-nums", overSpent && "text-warning")}>
+            {spentStr ?? "—"}
+          </span>
+        </div>
+        {originalSeconds > 0 && spentSeconds > 0 && (
+          <div
+            className="h-1 w-full bg-muted"
+            aria-hidden
+            title={`${spentStr} of ${originalStr}`}
+          >
+            <div
+              className={cn(
+                "h-full transition-[width]",
+                overSpent ? "bg-warning" : "bg-primary",
+              )}
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+        )}
+        {overSpent && (
+          <p className="text-[11px] text-warning">
+            {formatHmDelta(spentSeconds - originalSeconds)} over
+          </p>
+        )}
+        {originalSeconds === 0 && spentSeconds === 0 && (
+          <p className="text-[11px] text-muted-foreground">No time tracked.</p>
+        )}
+      </div>
+
+      {/* Log work (when permitted). Enter in either input commits. */}
+      {canLogWork && (
+        <div className="space-y-1.5 pt-0.5">
+          <Input
+            className="h-7"
+            value={logDuration}
+            onChange={(e) => setLogDuration(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                submitLog();
+              }
+            }}
+            placeholder="Log work (e.g. 3h 30m)"
+            aria-label="Log work"
+            aria-invalid={logTrimmed.length > 0 && !logValid}
+            disabled={logWork.isPending}
+          />
+          <Input
+            className="h-7"
+            value={logNote}
+            onChange={(e) => setLogNote(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                submitLog();
+              }
+            }}
+            placeholder="Note (optional)"
+            aria-label="Worklog note"
+            disabled={logWork.isPending}
+          />
+          {logTrimmed.length > 0 && !logValid && (
+            <p className="text-[11px] text-destructive">
+              Enter a Jira duration like 3h 30m or 1d.
+            </p>
+          )}
+          <Button
+            size="xs"
+            variant="outline"
+            disabled={!logValid || logWork.isPending}
+            onClick={submitLog}
+          >
+            Log
+          </Button>
+        </div>
+      )}
+
+      {/* Estimates (when permitted). Commit on blur/Enter; uncontrolled-while-
+          focused (key + defaultValue), matching the GitLab TimeTrackingControls
+          idiom. Grammar-validated before send; a redundant same-value edit is
+          skipped. Server derivation may change what lands — that's expected. */}
+      {canEditEstimates && (
+        <div className="space-y-1.5 pt-0.5">
+          <JiraEstimateInput
+            label="Set original estimate"
+            placeholder="Original estimate (e.g. 2d)"
+            currentDisplay={tracking.originalEstimate ?? ""}
+            hasValue={originalSeconds > 0}
+            pending={setOriginal.isPending}
+            onSet={(estimate) =>
+              setOriginal.mutate({ issueKey, estimate }, { onError: toastError })
+            }
+          />
+          <JiraEstimateInput
+            label="Set remaining estimate"
+            placeholder="Remaining estimate (e.g. 1d)"
+            currentDisplay={tracking.remainingEstimate ?? ""}
+            hasValue={(tracking.remainingEstimateSeconds ?? 0) > 0}
+            pending={setRemaining.isPending}
+            onSet={(estimate) =>
+              setRemaining.mutate({ issueKey, estimate }, { onError: toastError })
+            }
+          />
+        </div>
+      )}
+
+      {/* Worklog list (all authors, read-only; own entries gain edit/delete). */}
+      {worklogs.length > 0 && (
+        <div className="space-y-2 border-t pt-2">
+          {worklogs.map((w) => (
+            <JiraWorklogItem
+              key={w.id}
+              repoPath={repoPath}
+              link={link}
+              issueKey={issueKey}
+              worklog={w}
+              isOwn={viewerAccountId != null && w.author?.id === viewerAccountId}
+              canEdit={canEditOwnWorklogs}
+              canDelete={canDeleteOwnWorklogs}
+            />
+          ))}
+          {worklogsTotal > worklogs.length && (
+            <button
+              type="button"
+              onClick={() => openUrl(issueUrl)}
+              className="inline-flex cursor-pointer items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+            >
+              <ArrowSquareOutIcon className="size-3 shrink-0" />
+              View all {worklogsTotal} in Jira
+            </button>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/**
+ * One estimate input (original or remaining). Uncontrolled-while-focused: `key`
+ * on the display string + `defaultValue` reset it whenever the server value
+ * changes, exactly the GitLab TimeTrackingControls idiom. Commits on blur/Enter
+ * when the trimmed value both changed and is a valid Jira duration; an invalid
+ * grammar surfaces an inline warning and blocks the commit. A Clear button
+ * (present only when a value is set) clears the estimate (`null`).
+ */
+function JiraEstimateInput({
+  label,
+  placeholder,
+  currentDisplay,
+  hasValue,
+  pending,
+  onSet,
+}: {
+  label: string;
+  placeholder: string;
+  currentDisplay: string;
+  hasValue: boolean;
+  pending: boolean;
+  onSet: (estimate: string | null) => void;
+}) {
+  // Local invalid flag so the warning renders while the field is focused (the
+  // input itself stays uncontrolled). Reset whenever the server value changes.
+  const [invalid, setInvalid] = useState(false);
+
+  function commit(raw: string) {
+    const next = raw.trim();
+    // No-op: unchanged from the current display — never fire a redundant PUT.
+    if (next === currentDisplay.trim()) {
+      setInvalid(false);
+      return;
+    }
+    if (next.length > 0 && !isValidJiraDuration(next)) {
+      setInvalid(true);
+      return;
+    }
+    setInvalid(false);
+    onSet(next.length > 0 ? next : null);
+  }
+
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center gap-1.5">
+        <Input
+          key={currentDisplay}
+          defaultValue={currentDisplay}
+          className="h-7"
+          placeholder={placeholder}
+          aria-label={label}
+          aria-invalid={invalid}
+          disabled={pending}
+          onChange={() => {
+            if (invalid) setInvalid(false);
+          }}
+          onBlur={(e) => commit(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") e.currentTarget.blur();
+          }}
+        />
+        {hasValue && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            className="shrink-0 text-muted-foreground"
+            disabled={pending}
+            onClick={() => {
+              setInvalid(false);
+              onSet(null);
+            }}
+          >
+            Clear
+          </Button>
+        )}
+      </div>
+      {invalid && (
+        <p className="text-[11px] text-destructive">
+          Enter a Jira duration like 3h 30m or 1d.
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Detail view for one Jira issue: header (key + summary + status chip), a muted
+ * meta row (type, priority, assignee, reporter, due date / resolution), agile
+ * fields, label chips, time tracking, the description and comments rendered as
+ * markdown, and a "View in Jira" link-out. Every write affordance (transition,
+ * assign, due date, priority, labels, comment, time tracking) is gated on the
+ * caller's Jira project permissions — anything not permitted simply isn't
+ * rendered, never disabled.
  */
 export function JiraIssueView({
   repoPath,
@@ -933,6 +1483,9 @@ export function JiraIssueView({
   const canEditIssue = perms.data?.editIssues ?? false;
   const canEditOwnComments = perms.data?.editOwnComments ?? false;
   const canDeleteOwnComments = perms.data?.deleteOwnComments ?? false;
+  const canLogWork = perms.data?.workOnIssues ?? false;
+  const canEditOwnWorklogs = perms.data?.editOwnWorklogs ?? false;
+  const canDeleteOwnWorklogs = perms.data?.deleteOwnWorklogs ?? false;
 
   const comment = useJiraComment(repoPath, link.data);
   const transition = useJiraTransition(repoPath, link.data);
@@ -1224,6 +1777,26 @@ export function JiraIssueView({
               </span>
             ))}
           </div>
+        )}
+        {/* Time tracking — only when the feature is enabled on the project
+            (timeTracking !== null); disabled ⇒ no section at all. */}
+        {issue.timeTracking !== null && (
+          <JiraTimeTrackingSection
+            repoPath={repoPath}
+            // `?? null`: render read-only during the link-pending window; the
+            // write affordances are gated on `link` inside the section.
+            link={link.data ?? null}
+            issueKey={issueKey}
+            tracking={issue.timeTracking}
+            worklogs={issue.worklogs}
+            worklogsTotal={issue.worklogsTotal}
+            viewerAccountId={issue.viewerAccountId}
+            issueUrl={issue.url}
+            canLogWork={canLogWork}
+            canEditEstimates={canEditIssue}
+            canEditOwnWorklogs={canEditOwnWorklogs}
+            canDeleteOwnWorklogs={canDeleteOwnWorklogs}
+          />
         )}
       </header>
 

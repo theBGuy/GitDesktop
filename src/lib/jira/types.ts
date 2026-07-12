@@ -97,8 +97,41 @@ export interface JiraComment {
   updatedAt: string | null;
 }
 
+/** The issue's time-tracking figures, all server-derived. Jira maintains these
+ *  itself (adding a worklog decrements remaining; deleting one restores it;
+ *  setting an original with no worklogs initializes remaining), so the display
+ *  strings are Jira's own (`"2d"`, `"1d 5h"`) and the seconds counterparts drive
+ *  progress + overage math. Each field is `null` when unset. `null` for the whole
+ *  object means the feature is DISABLED on the project (no section renders). */
+export interface JiraTimeTracking {
+  /** Jira's display string for the original estimate, e.g. "2d"; `null` unset. */
+  originalEstimate: string | null;
+  remainingEstimate: string | null;
+  timeSpent: string | null;
+  originalEstimateSeconds: number | null;
+  remainingEstimateSeconds: number | null;
+  timeSpentSeconds: number | null;
+}
+
+/** One worklog entry on a Jira issue. `commentMd` is `""` when the entry has no
+ *  note (already converted ADF → markdown); once set, a note can only be REPLACED,
+ *  never removed. `author` is `null` when Jira couldn't resolve the actor. */
+export interface JiraWorklog {
+  id: string;
+  author: ForgeUserRef | null;
+  /** Jira's display string for the logged time, e.g. "3h 30m". */
+  timeSpent: string;
+  timeSpentSeconds: number;
+  /** When the work was performed (RFC3339). */
+  started: string;
+  /** The note, ADF → markdown; `""` when the entry has no note. */
+  commentMd: string;
+  createdAt: string;
+  updatedAt: string | null;
+}
+
 /** The full read-only detail for one Jira issue (list fields + description,
- *  reporter, comments, due date, resolution). */
+ *  reporter, comments, due date, resolution, time tracking). */
 export interface JiraIssueDetails extends JiraIssueInfo {
   reporter: ForgeUserRef | null;
   dueDate: string | null;
@@ -110,6 +143,14 @@ export interface JiraIssueDetails extends JiraIssueInfo {
    *  comments to offer edit/delete. `null` = unknown (hide own-comment
    *  affordances); Jira still enforces ownership server-side regardless. */
   viewerAccountId: string | null;
+  /** The issue's time-tracking figures, or `null` when the feature is disabled on
+   *  the project — in which case the whole time-tracking section is absent. */
+  timeTracking: JiraTimeTracking | null;
+  /** The embedded first page of worklogs (Jira caps this at 20 server-side). */
+  worklogs: JiraWorklog[];
+  /** The true worklog count, which may exceed `worklogs.length` — when it does the
+   *  UI offers a "View all in Jira" link-out. */
+  worklogsTotal: number;
 }
 
 // ── Write path (phase 2) ────────────────────────────────────────────────────
@@ -131,6 +172,12 @@ export interface JiraPermissions {
   editOwnComments: boolean;
   /** Delete the viewer's own comments (Jira's DELETE_OWN_COMMENTS). */
   deleteOwnComments: boolean;
+  /** Log work on the issue (Jira's WORK_ON_ISSUES). */
+  workOnIssues: boolean;
+  /** Edit the viewer's own worklogs (Jira's EDIT_OWN_WORKLOGS). */
+  editOwnWorklogs: boolean;
+  /** Delete the viewer's own worklogs (Jira's DELETE_OWN_WORKLOGS). */
+  deleteOwnWorklogs: boolean;
 }
 
 /** A priority option for the priority picker (`/priority`). */

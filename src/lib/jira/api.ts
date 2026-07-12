@@ -16,6 +16,7 @@ import type {
   JiraTransition,
   JiraTransitionDirection,
   JiraTransitionResult,
+  JiraWorklog,
 } from "./types";
 
 // Thin wrappers over the `jira.rs` command family. Jira credentials live in the
@@ -198,3 +199,62 @@ export const jiraCommentDelete = (
   key: string,
   commentId: string,
 ) => invoke<void>("jira_comment_delete", { site, key, commentId });
+
+// ── Write path (phase 6): time tracking (estimates + worklogs) ────────────────
+// Jira DERIVES these values server-side (adding a worklog decrements remaining,
+// setting original initializes remaining, …), so — unlike the phase-5 field
+// writes — the frontend does NOT patch optimistically; it re-fetches the issue.
+
+/** Set (`"2d"`) or clear (`null`) the issue's original estimate. Clearing while
+ *  worklogs exist snaps the original to the current remaining (server behavior). */
+export const jiraIssueSetOriginalEstimate = (
+  site: string,
+  key: string,
+  estimate: string | null,
+) =>
+  invoke<void>("jira_issue_set_original_estimate", { site, key, estimate });
+
+/** Set (`"1d"`) or clear (`null`) the issue's remaining estimate. */
+export const jiraIssueSetRemainingEstimate = (
+  site: string,
+  key: string,
+  estimate: string | null,
+) =>
+  invoke<void>("jira_issue_set_remaining_estimate", { site, key, estimate });
+
+/** Log work against the issue; returns the created worklog. `commentMd` optional
+ *  (a note); omit/empty leaves the entry noteless. Jira decrements the remaining
+ *  estimate server-side, so the caller re-fetches rather than patches. */
+export const jiraWorklogAdd = (
+  site: string,
+  key: string,
+  timeSpent: string,
+  commentMd?: string,
+) => invoke<JiraWorklog>("jira_worklog_add", { site, key, timeSpent, commentMd });
+
+/** Update one of the viewer's own worklogs; returns the updated worklog.
+ *  `commentMd` semantics: `null`/`undefined` leaves the note UNCHANGED; a
+ *  non-empty string replaces it. An empty string is REJECTED by the backend
+ *  (Jira can't remove a note), so the caller must never send `""`. */
+export const jiraWorklogUpdate = (
+  site: string,
+  key: string,
+  worklogId: string,
+  timeSpent: string,
+  commentMd?: string | null,
+) =>
+  invoke<JiraWorklog>("jira_worklog_update", {
+    site,
+    key,
+    worklogId,
+    timeSpent,
+    commentMd,
+  });
+
+/** Delete one of the viewer's own worklogs (Jira restores the remaining
+ *  estimate server-side). */
+export const jiraWorklogDelete = (
+  site: string,
+  key: string,
+  worklogId: string,
+) => invoke<void>("jira_worklog_delete", { site, key, worklogId });

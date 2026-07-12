@@ -15,7 +15,9 @@ import {
   jiraIssueList,
   jiraIssueSetDueDate,
   jiraIssueSetLabels,
+  jiraIssueSetOriginalEstimate,
   jiraIssueSetPriority,
+  jiraIssueSetRemainingEstimate,
   jiraIssueTransition,
   jiraIssueTransitions,
   jiraIssueTransitionTo,
@@ -26,6 +28,9 @@ import {
   jiraPriorities,
   jiraProjectSearch,
   jiraUserSearch,
+  jiraWorklogAdd,
+  jiraWorklogDelete,
+  jiraWorklogUpdate,
 } from "./api";
 import {
   clearJiraLink,
@@ -867,5 +872,122 @@ export function useJiraCreateIssue(
         args.descriptionMd,
       ),
     onSettled: () => invalidateJiraForRepo(queryClient, repo),
+  });
+}
+
+// ── Write path (phase 6): time tracking (estimates + worklogs) ────────────────
+// Jira DERIVES every time-tracking value server-side — adding a worklog
+// decrements the remaining estimate, deleting one restores it, setting an
+// original with no worklogs initializes remaining, clearing an original while
+// worklogs exist snaps original := remaining. We CANNOT reconstruct those
+// derivations client-side, so — unlike the phase-5 field writes — these five
+// mutations are deliberately NON-optimistic: no applyOptimisticField, plain
+// useMutation, `invalidateJiraIssue` on settle re-fetches the server truth. The
+// mutation's own `isPending` drives the UI's disabled/busy state.
+
+/** Set/clear the issue's original estimate. Non-optimistic (server-derived) —
+ *  see the section note above. */
+export function useJiraSetOriginalEstimate(
+  repo: string,
+  link: JiraLink | null | undefined,
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { issueKey: string; estimate: string | null }) =>
+      jiraIssueSetOriginalEstimate(
+        (link as JiraLink).siteHost,
+        args.issueKey,
+        args.estimate,
+      ),
+    onSettled: (_d, _e, args) =>
+      invalidateJiraIssue(queryClient, repo, link, args.issueKey),
+  });
+}
+
+/** Set/clear the issue's remaining estimate. Non-optimistic (server-derived). */
+export function useJiraSetRemainingEstimate(
+  repo: string,
+  link: JiraLink | null | undefined,
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { issueKey: string; estimate: string | null }) =>
+      jiraIssueSetRemainingEstimate(
+        (link as JiraLink).siteHost,
+        args.issueKey,
+        args.estimate,
+      ),
+    onSettled: (_d, _e, args) =>
+      invalidateJiraIssue(queryClient, repo, link, args.issueKey),
+  });
+}
+
+/** Log work against the issue. Non-optimistic — Jira decrements the remaining
+ *  estimate and mints the worklog id/timestamps server-side, so we re-fetch. */
+export function useJiraLogWork(
+  repo: string,
+  link: JiraLink | null | undefined,
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (args: {
+      issueKey: string;
+      timeSpent: string;
+      commentMd?: string;
+    }) =>
+      jiraWorklogAdd(
+        (link as JiraLink).siteHost,
+        args.issueKey,
+        args.timeSpent,
+        args.commentMd,
+      ),
+    onSettled: (_d, _e, args) =>
+      invalidateJiraIssue(queryClient, repo, link, args.issueKey),
+  });
+}
+
+/** Update one of the viewer's own worklogs. Non-optimistic. `commentMd`
+ *  null/undefined leaves the note unchanged; a non-empty string replaces it (the
+ *  caller must never pass `""` — the backend rejects it). */
+export function useJiraUpdateWorklog(
+  repo: string,
+  link: JiraLink | null | undefined,
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (args: {
+      issueKey: string;
+      worklogId: string;
+      timeSpent: string;
+      commentMd?: string | null;
+    }) =>
+      jiraWorklogUpdate(
+        (link as JiraLink).siteHost,
+        args.issueKey,
+        args.worklogId,
+        args.timeSpent,
+        args.commentMd,
+      ),
+    onSettled: (_d, _e, args) =>
+      invalidateJiraIssue(queryClient, repo, link, args.issueKey),
+  });
+}
+
+/** Delete one of the viewer's own worklogs. Non-optimistic — Jira restores the
+ *  remaining estimate server-side, so we re-fetch. */
+export function useJiraDeleteWorklog(
+  repo: string,
+  link: JiraLink | null | undefined,
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { issueKey: string; worklogId: string }) =>
+      jiraWorklogDelete(
+        (link as JiraLink).siteHost,
+        args.issueKey,
+        args.worklogId,
+      ),
+    onSettled: (_d, _e, args) =>
+      invalidateJiraIssue(queryClient, repo, link, args.issueKey),
   });
 }

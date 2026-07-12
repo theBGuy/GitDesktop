@@ -801,6 +801,17 @@ jump to that issue), **components**, and **fix versions**. These are resolved au
 per Jira site, so there's nothing to configure; all of these agile fields are read-only
 here (edit them in Jira).
 
+**Time tracking** appears when the linked project has it enabled (on projects without it,
+the section simply doesn't show). You'll see the **original estimate**, **remaining**, and
+**time spent** — Jira's own values — with a progress bar. **Log work** using Jira's duration
+grammar (\`2d 4h 30m\` — weeks, days, hours, and minutes) with an optional note, and Jira
+decrements the remaining estimate for you; you can also **set or clear the original and
+remaining estimates** directly. The most recent **worklog entries** are listed (Jira returns
+the first 20), you can **edit or delete your own** entries, and the full history is a **View
+all in Jira** link away. As with every other action here, these are gated on your Jira
+permissions — logging work, editing estimates, and worklog edits each need the matching
+permission, so a control appears only when your role allows it.
+
 You can work an issue without leaving the tab. **Create** one ({{kbd:create-jira-issue}}
 from the palette) with a summary, Markdown description, and an **issue-type** picker;
 **comment** in Markdown; **close or reopen** it by following the project's own workflow —

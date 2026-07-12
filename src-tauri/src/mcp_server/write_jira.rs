@@ -61,6 +61,19 @@ struct AssignJiraIssueArgs {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct LogWorkJiraIssueArgs {
+    /// The Jira issue key, e.g. "PROJ-123".
+    key: String,
+    /// The time spent as a Jira duration ("Nw Nd Nh Nm", e.g. "2d 4h 30m"; units are
+    /// weeks/days/hours/minutes). Validated before any network call.
+    time_spent: String,
+    /// Optional worklog note (markdown; converted to Jira's ADF). Omit for none. The server
+    /// times the entry at "now" (no start time is sent).
+    #[serde(default)]
+    comment: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct UpdateJiraIssueArgs {
     /// The Jira issue key, e.g. "PROJ-123".
     key: String,
@@ -77,15 +90,31 @@ struct UpdateJiraIssueArgs {
     /// array clears all labels). Omit to leave labels unchanged.
     #[serde(default)]
     labels: Option<Vec<String>>,
+    /// Optional ORIGINAL time estimate as a Jira duration ("Nw Nd Nh Nm", e.g. "2d 4h") to
+    /// set it, or the empty string "" to CLEAR it. Omit to leave the original estimate
+    /// unchanged.
+    #[serde(default)]
+    original_estimate: Option<String>,
+    /// Optional REMAINING time estimate as a Jira duration ("Nw Nd Nh Nm", e.g. "1d 5h") to
+    /// set it, or the empty string "" to CLEAR it. Omit to leave the remaining estimate
+    /// unchanged.
+    #[serde(default)]
+    remaining_estimate: Option<String>,
 }
 
 /// Reject an `update_jira_issue` call that changes nothing — at least one of `due_date`,
 /// `priority`, or `labels` must be present. Pure (unit-tested): the local guard that runs
 /// after the remote-write gate and before any network call.
 fn ensure_update_has_a_field(args: &UpdateJiraIssueArgs) -> Result<(), McpError> {
-    if args.due_date.is_none() && args.priority.is_none() && args.labels.is_none() {
+    if args.due_date.is_none()
+        && args.priority.is_none()
+        && args.labels.is_none()
+        && args.original_estimate.is_none()
+        && args.remaining_estimate.is_none()
+    {
         return Err(McpError::invalid_params(
-            "Provide at least one of due_date, priority, or labels to update.",
+            "Provide at least one of due_date, priority, labels, original_estimate, or \
+             remaining_estimate to update.",
             None,
         ));
     }
@@ -254,7 +283,9 @@ impl GitDesktopMcp {
                        one of: `due_date` (\"YYYY-MM-DD\" to set, or \"\" to clear); `priority` (a \
                        priority NAME like \"High\", resolved case-insensitively — an unknown name \
                        errors with the valid names); `labels` (the full REPLACEMENT set — labels \
-                       can't contain spaces, and an empty array clears all labels). Editing or \
+                       can't contain spaces, and an empty array clears all labels); \
+                       `original_estimate` / `remaining_estimate` (a Jira duration like \"2d 4h\" \
+                       — units w/d/h/m — to set, or \"\" to clear). Editing or \
                        deleting comments is deliberately NOT offered here (use View in Jira). Jira \
                        is a per-repo linked provider (configured in GitDesktop; errors with a link \
                        hint when the repo has none) and takes no site/project param (the key must \
@@ -324,6 +355,34 @@ impl GitDesktopMcp {
             crate::forge::jira::issue_set_labels(&link.site_host, &args.key, labels)
                 .await
                 .map_err(|e| partial_write_err(&applied, e))?;
+            applied.push("labels were already updated");
+        }
+
+        // Original estimate: an empty string clears (→ None → send ""); a non-empty string
+        // sets (grammar-checked in the core). Serde `Option` distinguishes omitted from
+        // present.
+        if let Some(raw) = args.original_estimate.as_deref() {
+            let estimate = if raw.trim().is_empty() {
+                None
+            } else {
+                Some(raw)
+            };
+            crate::forge::jira::issue_set_original_estimate(&link.site_host, &args.key, estimate)
+                .await
+                .map_err(|e| partial_write_err(&applied, e))?;
+            applied.push("original estimate was already updated");
+        }
+
+        // Remaining estimate: same empty-clears / non-empty-sets convention.
+        if let Some(raw) = args.remaining_estimate.as_deref() {
+            let estimate = if raw.trim().is_empty() {
+                None
+            } else {
+                Some(raw)
+            };
+            crate::forge::jira::issue_set_remaining_estimate(&link.site_host, &args.key, estimate)
+                .await
+                .map_err(|e| partial_write_err(&applied, e))?;
         }
 
         json_result(&serde_json::json!({
@@ -331,6 +390,47 @@ impl GitDesktopMcp {
             "dueDate": args.due_date,
             "priority": applied_priority,
             "labels": args.labels,
+            "originalEstimate": args.original_estimate,
+            "remainingEstimate": args.remaining_estimate,
+        }))
+    }
+
+    #[tool(
+        description = "Log work on an issue (by key, e.g. \"PROJ-123\") in the repository's LINKED \
+                       Jira project, under the stored Atlassian identity. `time_spent` is a Jira \
+                       duration (\"Nw Nd Nh Nm\", e.g. \"2d 4h 30m\"; units w/d/h/m) — validated \
+                       before any network call. `comment` is optional markdown (converted to \
+                       Jira's ADF). The entry is timed at \"now\" (no start time is sent); the \
+                       server decrements the remaining estimate automatically. Editing or deleting \
+                       worklogs is deliberately NOT offered here (use View in Jira). Jira is a \
+                       per-repo linked provider (configured in GitDesktop; errors with a link hint \
+                       when the repo has none) and takes no site/project param (the key must belong \
+                       to the linked project). Requires --allow-remote-write. Returns the created \
+                       worklog as JSON.",
+        annotations(read_only_hint = false, destructive_hint = false)
+    )]
+    async fn jira_log_work(
+        &self,
+        Parameters(args): Parameters<LogWorkJiraIssueArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_remote_write()?;
+        let link = self.jira_link().await?;
+        ensure_key_in_project(&args.key, &link)?;
+        let worklog = crate::forge::jira::worklog_add(
+            &link.site_host,
+            &args.key,
+            &args.time_spent,
+            args.comment.as_deref(),
+        )
+        .await
+        .map_err(app_err)?;
+        json_result(&serde_json::json!({
+            "key": args.key,
+            "worklog": worklog,
+            "message": format!(
+                "Logged {} on {} (started {}).",
+                worklog.time_spent, args.key, worklog.started
+            ),
         }))
     }
 }
@@ -399,6 +499,8 @@ mod tests {
                 due_date: Some("2026-07-11".into()),
                 priority: None,
                 labels: None,
+                original_estimate: None,
+                remaining_estimate: None,
             }))
             .await
             .expect_err("expected the remote-write gate to fire");
@@ -419,12 +521,14 @@ mod tests {
                 due_date: None,
                 priority: None,
                 labels: None,
+                original_estimate: None,
+                remaining_estimate: None,
             }))
             .await
             .expect_err("expected a no-op-args rejection");
         let msg = err.to_string();
         assert!(
-            msg.contains("at least one of due_date, priority, or labels"),
+            msg.contains("at least one of due_date, priority, labels, original_estimate, or"),
             "got: {msg}"
         );
     }
@@ -437,29 +541,53 @@ mod tests {
             due_date: None,
             priority: None,
             labels: None,
+            original_estimate: None,
+            remaining_estimate: None,
         };
         assert!(ensure_update_has_a_field(&none).is_err());
 
-        // Any single field present is enough — including a due_date of "" (clear) and an
-        // empty labels vec (clear all).
+        // Any single field present is enough — including a due_date of "" (clear), an empty
+        // labels vec (clear all), and an estimate of "" (clear).
         for args in [
             UpdateJiraIssueArgs {
                 key: "MYT-1".into(),
                 due_date: Some(String::new()),
                 priority: None,
                 labels: None,
+                original_estimate: None,
+                remaining_estimate: None,
             },
             UpdateJiraIssueArgs {
                 key: "MYT-1".into(),
                 due_date: None,
                 priority: Some("High".into()),
                 labels: None,
+                original_estimate: None,
+                remaining_estimate: None,
             },
             UpdateJiraIssueArgs {
                 key: "MYT-1".into(),
                 due_date: None,
                 priority: None,
                 labels: Some(Vec::new()),
+                original_estimate: None,
+                remaining_estimate: None,
+            },
+            UpdateJiraIssueArgs {
+                key: "MYT-1".into(),
+                due_date: None,
+                priority: None,
+                labels: None,
+                original_estimate: Some("2d 4h".into()),
+                remaining_estimate: None,
+            },
+            UpdateJiraIssueArgs {
+                key: "MYT-1".into(),
+                due_date: None,
+                priority: None,
+                labels: None,
+                original_estimate: None,
+                remaining_estimate: Some(String::new()),
             },
         ] {
             assert!(ensure_update_has_a_field(&args).is_ok());

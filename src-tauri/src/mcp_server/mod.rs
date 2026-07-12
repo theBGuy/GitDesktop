@@ -845,7 +845,7 @@ mod tests {
     }
 
     /// The COMBINED router's tool count must equal the sum of the per-module router
-    /// counts, and currently == 117. Deriving each term from the module's own router
+    /// counts, and currently == 118. Deriving each term from the module's own router
     /// means a package growing a module updates both sides of the equality
     /// automatically — this test never needs editing as modules gain tools.
     /// (The `== 117` literal is the one line a package updates, and only if it
@@ -862,7 +862,7 @@ mod tests {
             + GitDesktopMcp::write_git_router().list_all().len()
             + GitDesktopMcp::generate_router().list_all().len();
         assert_eq!(handler.tool_router.list_all().len(), per_module);
-        assert_eq!(per_module, 117);
+        assert_eq!(per_module, 118);
     }
 
     /// `ensure_key_in_project` gates a key-taking Jira tool to the linked project: the

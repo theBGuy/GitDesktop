@@ -477,6 +477,68 @@ pub async fn jira_comment_delete(
     jira::comment_delete(&site, &key, &comment_id).await
 }
 
+// ── Jira writes (phase 6): time tracking (estimates + worklogs) ──
+
+/// Set (or clear) a Jira issue's original estimate. `estimate = Some("2d 4h")` sets it;
+/// `None` clears it. The duration grammar is validated before any network call.
+#[tauri::command]
+pub async fn jira_issue_set_original_estimate(
+    site: String,
+    key: String,
+    estimate: Option<String>,
+) -> AppResult<()> {
+    jira::issue_set_original_estimate(&site, &key, estimate.as_deref()).await
+}
+
+/// Set (or clear) a Jira issue's remaining estimate. `estimate = Some("2d 4h")` sets it;
+/// `None` clears it. The duration grammar is validated before any network call.
+#[tauri::command]
+pub async fn jira_issue_set_remaining_estimate(
+    site: String,
+    key: String,
+    estimate: Option<String>,
+) -> AppResult<()> {
+    jira::issue_set_remaining_estimate(&site, &key, estimate.as_deref()).await
+}
+
+/// Log work on a Jira issue. `time_spent` is a duration (e.g. "2d 4h 30m", validated before
+/// any network call); `comment_md` is optional markdown (converted to ADF). Returns the
+/// created worklog.
+#[tauri::command]
+pub async fn jira_worklog_add(
+    site: String,
+    key: String,
+    time_spent: String,
+    comment_md: Option<String>,
+) -> AppResult<jira::JiraWorklog> {
+    jira::worklog_add(&site, &key, &time_spent, comment_md.as_deref()).await
+}
+
+/// Edit one of your own worklog entries on a Jira issue. `comment_md = None` preserves the
+/// existing note; a note can't be REMOVED via the API (an empty note is rejected). The
+/// duration and the worklog id are validated before any network call. Returns the updated
+/// worklog.
+#[tauri::command]
+pub async fn jira_worklog_update(
+    site: String,
+    key: String,
+    worklog_id: String,
+    time_spent: String,
+    comment_md: Option<String>,
+) -> AppResult<jira::JiraWorklog> {
+    jira::worklog_update(&site, &key, &worklog_id, &time_spent, comment_md.as_deref()).await
+}
+
+/// Delete one of your own worklog entries on a Jira issue.
+#[tauri::command]
+pub async fn jira_worklog_delete(
+    site: String,
+    key: String,
+    worklog_id: String,
+) -> AppResult<()> {
+    jira::worklog_delete(&site, &key, &worklog_id).await
+}
+
 /// The signed-in user's repositories on a provider, for the clone browser.
 /// Dispatches by provider — GitHub via `gh`, GitLab via `glab`; Bitbucket isn't
 /// implemented yet. Account-scoped (no repo path), unlike `forge_status`.

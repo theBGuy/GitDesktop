@@ -233,6 +233,43 @@ fn is_valid_comment_id(id: &str) -> bool {
     !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())
 }
 
+/// Whether `s` is a valid Jira time-tracking duration: one or more whitespace-separated
+/// tokens, each matching `^\d+(\.\d+)?[wdhm]$` (weeks/days/hours/minutes), with at least one
+/// token. This is a SHAPE check only — Jira enforces the semantics (e.g. it rejects a
+/// zero-length worklog itself), matching the due-date "grammar only" precedent. Pure
+/// (testable).
+fn is_valid_duration(s: &str) -> bool {
+    let mut tokens = 0;
+    for token in s.split_whitespace() {
+        // The unit is the final byte; it must be one of w/d/h/m (all ASCII). Splitting on the
+        // last byte is safe because the unit set is ASCII — a multi-byte trailing char would
+        // fail the `matches!` below rather than split mid-codepoint.
+        let Some((&unit, num)) = token.as_bytes().split_last() else {
+            return false;
+        };
+        if !matches!(unit, b'w' | b'd' | b'h' | b'm') {
+            return false;
+        }
+        let num = &token[..num.len()];
+        // The numeric part: `\d+(\.\d+)?` — one or more digits, optionally a single dot
+        // followed by one or more digits. No leading/trailing dot, no sign, no exponent.
+        let mantissa = match num.split_once('.') {
+            Some((int, frac)) => {
+                if int.is_empty() || frac.is_empty() {
+                    return false;
+                }
+                int.bytes().all(|b| b.is_ascii_digit()) && frac.bytes().all(|b| b.is_ascii_digit())
+            }
+            None => !num.is_empty() && num.bytes().all(|b| b.is_ascii_digit()),
+        };
+        if !mantissa {
+            return false;
+        }
+        tokens += 1;
+    }
+    tokens > 0
+}
+
 /// Jira's error envelope: `{"errorMessages": [..], "errors": {field: msg}}`. Either
 /// may be absent on a given response; parsing is best-effort and the caller falls back
 /// to a status+snippet message.
@@ -1687,6 +1724,43 @@ pub struct JiraComment {
     pub updated_at: Option<String>,
 }
 
+/// An issue's time-tracking summary (the `timetracking` field). Every member is
+/// individually tolerant: Jira omits members it hasn't derived (e.g. no remaining estimate
+/// until an original is set), and the whole object can be present-but-empty (`{}`) when the
+/// feature is enabled on the project but nothing is tracked yet. The display strings are
+/// the server's own (e.g. `"2d"`), never recomputed client-side.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraTimeTracking {
+    pub original_estimate: Option<String>,
+    pub remaining_estimate: Option<String>,
+    pub time_spent: Option<String>,
+    // Durations in seconds — far below 2^53, so safe as JS numbers over IPC (the
+    // string-serialization rule is for IDs, not durations).
+    pub original_estimate_seconds: Option<u64>,
+    pub remaining_estimate_seconds: Option<u64>,
+    pub time_spent_seconds: Option<u64>,
+}
+
+/// One worklog entry, its ADF `comment` converted to markdown. Used for the embedded
+/// first-page worklog list and for the single worklog a `POST`/`PUT …/worklog` returns.
+/// Defensive: every field degrades to empty/0/None rather than sinking the map.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraWorklog {
+    pub id: String,
+    pub author: Option<ForgeUserRef>,
+    pub time_spent: String,
+    pub time_spent_seconds: u64,
+    /// The worklog's `started` timestamp (RFC3339 as returned by Jira).
+    pub started: String,
+    /// The worklog note (ADF) converted to markdown; `""` when the comment is null/absent.
+    pub comment_md: String,
+    pub created_at: String,
+    /// The worklog's `updated` timestamp, or `None` when Jira omits it (or it equals empty).
+    pub updated_at: Option<String>,
+}
+
 /// Full read view of one Jira issue.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1727,6 +1801,14 @@ pub struct JiraIssueDetails {
     /// Jira enforces comment ownership server-side (EDIT_OWN/DELETE_OWN) regardless, so a
     /// stale or missing value can never grant a write the server wouldn't allow.
     pub viewer_account_id: Option<String>,
+    /// `None` = time tracking disabled on the project (the `timetracking` field is absent
+    /// or JSON-null); `Some` with all-None members = enabled but nothing tracked yet.
+    pub time_tracking: Option<JiraTimeTracking>,
+    /// The embedded first page of worklogs (Jira caps this at 20). Serializes as `worklogs`.
+    pub worklogs: Vec<JiraWorklog>,
+    /// The server's total worklog count (may exceed `worklogs.len()` when there are more
+    /// than the embedded first page).
+    pub worklogs_total: u64,
 }
 
 /// Map one Jira comment object (`{id, author, body, created}`) onto the neutral
@@ -1767,6 +1849,95 @@ fn map_comments(fields: &Value) -> Vec<JiraComment> {
         .unwrap_or_default()
 }
 
+/// Map one Jira worklog object onto the neutral [`JiraWorklog`], converting its ADF
+/// `comment` to markdown. Used for the embedded worklog list and for the single worklog a
+/// `POST`/`PUT …/worklog` returns. Defensive like [`map_comment`]: every field degrades
+/// (id → `""`, seconds → 0) rather than panicking, and a null/absent comment yields `""`.
+fn map_worklog(w: &Value) -> JiraWorklog {
+    JiraWorklog {
+        id: w
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        author: parse_user(w.get("author")),
+        time_spent: w
+            .get("timeSpent")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        time_spent_seconds: w
+            .get("timeSpentSeconds")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        started: w
+            .get("started")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        comment_md: w
+            .get("comment")
+            .filter(|c| !c.is_null())
+            .map(adf::adf_to_markdown)
+            .unwrap_or_default(),
+        created_at: w
+            .get("created")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        updated_at: w
+            .get("updated")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+    }
+}
+
+/// Map the issue's `fields.worklog.worklogs[]` (the embedded first page) onto neutral
+/// worklogs — one malformed worklog is skipped rather than sinking the list (mirrors
+/// [`map_comments`]). No pagination beyond the embedded page.
+fn map_worklogs(fields: &Value) -> Vec<JiraWorklog> {
+    fields
+        .get("worklog")
+        .and_then(|w| w.get("worklogs"))
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().map(map_worklog).collect())
+        .unwrap_or_default()
+}
+
+/// One string member of a `timetracking` object (e.g. `originalEstimate`), or `None` when
+/// absent/empty. Kept trivial; the seconds members use [`Value::as_u64`] directly.
+fn tt_string(tt: &Value, member: &str) -> Option<String> {
+    tt.get(member)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Parse the issue's `fields.timetracking` into [`JiraTimeTracking`]. An absent field OR
+/// JSON-null → `None` (time tracking disabled on the project); a present object (even the
+/// empty `{}`) → `Some` with each member individually tolerant. Pure (testable).
+fn parse_time_tracking(fields: &Value) -> Option<JiraTimeTracking> {
+    let tt = fields.get("timetracking").filter(|v| v.is_object())?;
+    Some(JiraTimeTracking {
+        original_estimate: tt_string(tt, "originalEstimate"),
+        remaining_estimate: tt_string(tt, "remainingEstimate"),
+        time_spent: tt_string(tt, "timeSpent"),
+        original_estimate_seconds: tt.get("originalEstimateSeconds").and_then(Value::as_u64),
+        remaining_estimate_seconds: tt.get("remainingEstimateSeconds").and_then(Value::as_u64),
+        time_spent_seconds: tt.get("timeSpentSeconds").and_then(Value::as_u64),
+    })
+}
+
+/// The server's total worklog count from `fields.worklog.total` (0 when absent).
+fn worklogs_total_of(fields: &Value) -> u64 {
+    fields
+        .get("worklog")
+        .and_then(|w| w.get("total"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+}
+
 /// Full details for one Jira issue's read view. Validates `key`, then
 /// `GET /rest/api/3/issue/<key>?fields=…`. The description + comment bodies (ADF) are
 /// converted to markdown; every nullable field degrades to `None`/empty.
@@ -1786,7 +1957,7 @@ pub async fn issue_view(site: &str, key: &str) -> AppResult<JiraIssueDetails> {
     let path = format!(
         "issue/{key}?fields=summary,description,status,issuetype,priority,assignee,\
          reporter,labels,created,updated,duedate,resolution,parent,components,fixVersions,\
-         comment{custom}"
+         comment,timetracking,worklog{custom}"
     );
     let issue: Value = get_json(&creds, &path, "issue").await?;
     let fields = issue.get("fields").cloned().unwrap_or(Value::Null);
@@ -1868,6 +2039,9 @@ pub async fn issue_view(site: &str, key: &str) -> AppResult<JiraIssueDetails> {
         url: format!("https://{site}/browse/{key}"),
         key: key.to_string(),
         viewer_account_id,
+        time_tracking: parse_time_tracking(&fields),
+        worklogs: map_worklogs(&fields),
+        worklogs_total: worklogs_total_of(&fields),
     })
 }
 
@@ -2341,6 +2515,12 @@ pub struct JiraProjectPermissions {
     pub edit_own_comments: bool,
     /// `DELETE_OWN_COMMENTS` — gates deleting your own comment.
     pub delete_own_comments: bool,
+    /// `WORK_ON_ISSUES` — gates logging work.
+    pub work_on_issues: bool,
+    /// `EDIT_OWN_WORKLOGS` — gates editing your own worklog entries.
+    pub edit_own_worklogs: bool,
+    /// `DELETE_OWN_WORKLOGS` — gates deleting your own worklog entries.
+    pub delete_own_worklogs: bool,
 }
 
 /// Whether a single permission in a `mypermissions` response is granted. Defensive: an
@@ -2367,6 +2547,9 @@ fn parse_permissions(body: &Value) -> JiraProjectPermissions {
         edit_issues: have_permission(body, "EDIT_ISSUES"),
         edit_own_comments: have_permission(body, "EDIT_OWN_COMMENTS"),
         delete_own_comments: have_permission(body, "DELETE_OWN_COMMENTS"),
+        work_on_issues: have_permission(body, "WORK_ON_ISSUES"),
+        edit_own_worklogs: have_permission(body, "EDIT_OWN_WORKLOGS"),
+        delete_own_worklogs: have_permission(body, "DELETE_OWN_WORKLOGS"),
     }
 }
 
@@ -2385,7 +2568,7 @@ pub async fn permissions(site: &str, project_key: &str) -> AppResult<JiraProject
     let path = format!(
         "mypermissions?projectKey={}&permissions=ADD_COMMENTS,TRANSITION_ISSUES,\
          CREATE_ISSUES,ASSIGN_ISSUES,SCHEDULE_ISSUES,EDIT_ISSUES,EDIT_OWN_COMMENTS,\
-         DELETE_OWN_COMMENTS",
+         DELETE_OWN_COMMENTS,WORK_ON_ISSUES,EDIT_OWN_WORKLOGS,DELETE_OWN_WORKLOGS",
         crate::forge::encode_query_value(project_key),
     );
     let body: Value = get_json(&creds, &path, "permissions").await?;
@@ -2576,6 +2759,187 @@ pub async fn comment_delete(site: &str, key: &str, comment_id: &str) -> AppResul
         &creds,
         reqwest::Method::DELETE,
         &format!("issue/{key}/comment/{comment_id}"),
+        None,
+    )
+    .await
+}
+
+// ── Writes (phase 6): time tracking (estimates + worklogs) ──────────────────────
+
+/// Set (or clear) an issue's ORIGINAL estimate via a PARTIAL `timetracking` update
+/// (`PUT /issue/<key>` with `{fields:{timetracking:{originalEstimate: <val>}}}`).
+/// `estimate = Some(d)` sets it (the duration grammar is validated BEFORE any network
+/// call — shape only, Jira enforces semantics); `None` CLEARS it by sending the EMPTY
+/// STRING `""` — NOT `null`, which Jira treats as a silent no-op (live-probed). The issue
+/// key is grammar-validated first. The server derives the remaining estimate (setting the
+/// original with no worklogs auto-initializes remaining; clearing while worklogs exist
+/// snaps original := remaining) — nothing is recomputed here.
+pub async fn issue_set_original_estimate(
+    site: &str,
+    key: &str,
+    estimate: Option<&str>,
+) -> AppResult<()> {
+    set_estimate_member(site, key, "originalEstimate", estimate).await
+}
+
+/// Set (or clear) an issue's REMAINING estimate via a PARTIAL `timetracking` update
+/// (`PUT /issue/<key>` with `{fields:{timetracking:{remainingEstimate: <val>}}}`). Same
+/// clear-via-empty-string / validate-before-network contract as
+/// [`issue_set_original_estimate`].
+pub async fn issue_set_remaining_estimate(
+    site: &str,
+    key: &str,
+    estimate: Option<&str>,
+) -> AppResult<()> {
+    set_estimate_member(site, key, "remainingEstimate", estimate).await
+}
+
+/// Shared body of the two set-estimate fns: validate the key and (when setting) the
+/// duration grammar BEFORE any network call, then PUT a partial `timetracking` update
+/// touching only `member`. Clearing sends `""` (never `null` — a silent no-op, probed).
+async fn set_estimate_member(
+    site: &str,
+    key: &str,
+    member: &str,
+    estimate: Option<&str>,
+) -> AppResult<()> {
+    let site = normalize_site(site)?;
+    if !is_valid_issue_key(key) {
+        return Err(AppError::InvalidArgument(format!(
+            "invalid Jira issue key: {key}"
+        )));
+    }
+    if let Some(d) = estimate {
+        if !is_valid_duration(d) {
+            return Err(AppError::InvalidArgument(format!(
+                "invalid duration (expected e.g. \"2d 4h 30m\" — units w/d/h/m): {d}"
+            )));
+        }
+    }
+    let creds = load_credentials(&site).await?;
+    // Clearing = the EMPTY STRING (never null — null is a silent no-op on timetracking).
+    let value = estimate.unwrap_or("");
+    let body = json!({ "fields": { "timetracking": { member: value } } });
+    send_no_content(
+        &creds,
+        reqwest::Method::PUT,
+        &format!("issue/{key}"),
+        Some(&body),
+    )
+    .await
+}
+
+/// Log work on an issue (`POST /issue/<key>/worklog`). The `time_spent` grammar is
+/// validated BEFORE any network call (shape only). An optional markdown `comment_md` is
+/// converted to ADF and sent only when present and non-empty after trimming (like
+/// `issue_create`'s description). No `started` member is sent — the server defaults it to
+/// now (live-probed). The full worklog object the API returns is mapped to a neutral
+/// [`JiraWorklog`].
+pub async fn worklog_add(
+    site: &str,
+    key: &str,
+    time_spent: &str,
+    comment_md: Option<&str>,
+) -> AppResult<JiraWorklog> {
+    let site = normalize_site(site)?;
+    if !is_valid_issue_key(key) {
+        return Err(AppError::InvalidArgument(format!(
+            "invalid Jira issue key: {key}"
+        )));
+    }
+    if !is_valid_duration(time_spent) {
+        return Err(AppError::InvalidArgument(format!(
+            "invalid duration (expected e.g. \"2d 4h 30m\" — units w/d/h/m): {time_spent}"
+        )));
+    }
+    let creds = load_credentials(&site).await?;
+    let mut body = serde_json::Map::new();
+    body.insert("timeSpent".to_string(), json!(time_spent));
+    if let Some(md) = comment_md.filter(|c| !c.trim().is_empty()) {
+        body.insert("comment".to_string(), md_to_adf::markdown_to_adf(md));
+    }
+    let path = format!("issue/{key}/worklog");
+    let resp: Value = post_json(&creds, &path, &Value::Object(body), "worklog").await?;
+    Ok(map_worklog(&resp))
+}
+
+/// Edit one of your own worklog entries (`PUT /issue/<key>/worklog/<id>`). The `time_spent`
+/// grammar and the digits-only worklog id are validated BEFORE any network call.
+///
+/// A worklog note is REPLACE-ONLY via this API (live-probed): a duration-only PUT (no
+/// `comment` member) PRESERVES the existing note, and `comment: null` is a silent no-op —
+/// so there is no way to REMOVE a note through the API. `comment_md = None` omits the
+/// member (preserve); `Some(non-empty)` replaces it; `Some(empty-after-trim)` is rejected
+/// as an `InvalidArgument` BEFORE any network call rather than silently doing nothing. The
+/// returned worklog object is mapped to a neutral [`JiraWorklog`].
+pub async fn worklog_update(
+    site: &str,
+    key: &str,
+    worklog_id: &str,
+    time_spent: &str,
+    comment_md: Option<&str>,
+) -> AppResult<JiraWorklog> {
+    let site = normalize_site(site)?;
+    if !is_valid_issue_key(key) {
+        return Err(AppError::InvalidArgument(format!(
+            "invalid Jira issue key: {key}"
+        )));
+    }
+    if !is_valid_comment_id(worklog_id) {
+        return Err(AppError::InvalidArgument(format!(
+            "invalid Jira worklog id: {worklog_id}"
+        )));
+    }
+    if !is_valid_duration(time_spent) {
+        return Err(AppError::InvalidArgument(format!(
+            "invalid duration (expected e.g. \"2d 4h 30m\" — units w/d/h/m): {time_spent}"
+        )));
+    }
+    // A present-but-empty note can't be cleared through the API — reject it up front rather
+    // than sending a silent no-op the caller would read as success.
+    if let Some(md) = comment_md {
+        if md.trim().is_empty() {
+            return Err(AppError::InvalidArgument(
+                "a worklog note can't be removed via the Jira API — replace it, or delete the \
+                 entry and log again"
+                    .into(),
+            ));
+        }
+    }
+    let creds = load_credentials(&site).await?;
+    let mut body = serde_json::Map::new();
+    body.insert("timeSpent".to_string(), json!(time_spent));
+    // Present ⇒ replace (validated non-empty above); None ⇒ omit (duration-only PUT
+    // preserves the existing note).
+    if let Some(md) = comment_md {
+        body.insert("comment".to_string(), md_to_adf::markdown_to_adf(md));
+    }
+    let path = format!("issue/{key}/worklog/{worklog_id}");
+    let resp: Value = put_json(&creds, &path, &Value::Object(body), "worklog").await?;
+    Ok(map_worklog(&resp))
+}
+
+/// Delete one of your own worklog entries (`DELETE /issue/<key>/worklog/<id>`; returns
+/// 204). The issue key and the digits-only worklog id are grammar-validated BEFORE any
+/// network call. Deleting restores the issue's remaining estimate server-side (probed) —
+/// nothing is recomputed here. Ownership is enforced server-side by DELETE_OWN_WORKLOGS.
+pub async fn worklog_delete(site: &str, key: &str, worklog_id: &str) -> AppResult<()> {
+    let site = normalize_site(site)?;
+    if !is_valid_issue_key(key) {
+        return Err(AppError::InvalidArgument(format!(
+            "invalid Jira issue key: {key}"
+        )));
+    }
+    if !is_valid_comment_id(worklog_id) {
+        return Err(AppError::InvalidArgument(format!(
+            "invalid Jira worklog id: {worklog_id}"
+        )));
+    }
+    let creds = load_credentials(&site).await?;
+    send_no_content(
+        &creds,
+        reqwest::Method::DELETE,
+        &format!("issue/{key}/worklog/{worklog_id}"),
         None,
     )
     .await
@@ -3182,6 +3546,9 @@ mod tests {
                 "EDIT_ISSUES": { "havePermission": false },
                 "EDIT_OWN_COMMENTS": { "havePermission": true },
                 // DELETE_OWN_COMMENTS absent entirely.
+                "WORK_ON_ISSUES": { "havePermission": true },
+                "EDIT_OWN_WORKLOGS": { "havePermission": false },
+                // DELETE_OWN_WORKLOGS absent entirely.
             }
         });
         let p = parse_permissions(&body);
@@ -3196,6 +3563,10 @@ mod tests {
         assert!(p.edit_own_comments);
         // Absent key → false.
         assert!(!p.delete_own_comments);
+        // The phase-6 worklog keys: present-true, present-false, absent-false.
+        assert!(p.work_on_issues);
+        assert!(!p.edit_own_worklogs);
+        assert!(!p.delete_own_worklogs);
     }
 
     #[test]
@@ -3210,6 +3581,9 @@ mod tests {
         assert!(!p.edit_issues);
         assert!(!p.edit_own_comments);
         assert!(!p.delete_own_comments);
+        assert!(!p.work_on_issues);
+        assert!(!p.edit_own_worklogs);
+        assert!(!p.delete_own_worklogs);
         // A present entry with a non-bool havePermission also defaults false.
         let p2 = parse_permissions(&json!({
             "permissions": { "ADD_COMMENTS": { "havePermission": "yes" } }
@@ -3694,6 +4068,105 @@ mod tests {
     }
 
     #[test]
+    fn parse_time_tracking_absent_and_null_are_none() {
+        // Field absent entirely → None (time tracking disabled on the project).
+        assert!(parse_time_tracking(&json!({})).is_none());
+        // JSON null → None as well.
+        assert!(parse_time_tracking(&json!({ "timetracking": null })).is_none());
+    }
+
+    #[test]
+    fn parse_time_tracking_empty_object_is_some_all_none() {
+        // `{}` → Some with every member None (enabled but nothing tracked yet).
+        let tt = parse_time_tracking(&json!({ "timetracking": {} })).expect("empty {} → Some");
+        assert!(tt.original_estimate.is_none());
+        assert!(tt.remaining_estimate.is_none());
+        assert!(tt.time_spent.is_none());
+        assert!(tt.original_estimate_seconds.is_none());
+        assert!(tt.remaining_estimate_seconds.is_none());
+        assert!(tt.time_spent_seconds.is_none());
+    }
+
+    #[test]
+    fn parse_time_tracking_full_and_partial_objects() {
+        // Full object → all six members populated.
+        let full = parse_time_tracking(&json!({
+            "timetracking": {
+                "originalEstimate": "2d",
+                "remainingEstimate": "1d 5h",
+                "timeSpent": "3h",
+                "originalEstimateSeconds": 57600u64,
+                "remainingEstimateSeconds": 46800u64,
+                "timeSpentSeconds": 10800u64,
+            }
+        }))
+        .expect("full object → Some");
+        assert_eq!(full.original_estimate.as_deref(), Some("2d"));
+        assert_eq!(full.remaining_estimate.as_deref(), Some("1d 5h"));
+        assert_eq!(full.time_spent.as_deref(), Some("3h"));
+        assert_eq!(full.original_estimate_seconds, Some(57600));
+        assert_eq!(full.remaining_estimate_seconds, Some(46800));
+        assert_eq!(full.time_spent_seconds, Some(10800));
+
+        // After all worklogs are deleted, `timeSpent:"0m"`/`timeSpentSeconds:0` linger while
+        // the estimate members are absent → Some with just those two set.
+        let residual = parse_time_tracking(&json!({
+            "timetracking": { "timeSpent": "0m", "timeSpentSeconds": 0u64 }
+        }))
+        .expect("residual object → Some");
+        assert_eq!(residual.time_spent.as_deref(), Some("0m"));
+        assert_eq!(residual.time_spent_seconds, Some(0));
+        assert!(residual.original_estimate.is_none());
+        assert!(residual.remaining_estimate_seconds.is_none());
+    }
+
+    #[test]
+    fn map_worklog_full_object_maps_all_fields() {
+        let w = map_worklog(&json!({
+            "id": "100123",
+            "author": { "accountId": "a1", "displayName": "Bob" },
+            "timeSpent": "3h",
+            "timeSpentSeconds": 10800u64,
+            "started": "2026-02-01T09:00:00.000+0000",
+            "comment": { "type": "doc", "version": 1, "content": [
+                { "type": "paragraph", "content": [ { "type": "text", "text": "Worked on it" } ] }
+            ]},
+            "created": "2026-02-01T09:05:00.000+0000",
+            "updated": "2026-02-01T09:06:00.000+0000"
+        }));
+        assert_eq!(w.id, "100123");
+        assert_eq!(w.author.map(|a| a.label), Some("Bob".to_string()));
+        assert_eq!(w.time_spent, "3h");
+        assert_eq!(w.time_spent_seconds, 10800);
+        assert_eq!(w.started, "2026-02-01T09:00:00.000+0000");
+        assert!(w.comment_md.contains("Worked on it"));
+        assert_eq!(w.created_at, "2026-02-01T09:05:00.000+0000");
+        assert_eq!(w.updated_at.as_deref(), Some("2026-02-01T09:06:00.000+0000"));
+    }
+
+    #[test]
+    fn map_worklog_null_comment_and_missing_fields_degrade() {
+        // A null comment → empty markdown (the ADF conversion is skipped defensively).
+        let null_comment = map_worklog(&json!({
+            "id": "5",
+            "timeSpent": "45m",
+            "timeSpentSeconds": 2700u64,
+            "started": "2026-02-02T10:00:00.000+0000",
+            "comment": null,
+            "created": "2026-02-02T10:00:00.000+0000"
+        }));
+        assert_eq!(null_comment.comment_md, "");
+        assert!(null_comment.updated_at.is_none()); // absent `updated` → None.
+
+        // Missing id/seconds degrade to ""/0 rather than panicking.
+        let sparse = map_worklog(&json!({ "timeSpent": "1h" }));
+        assert_eq!(sparse.id, "");
+        assert_eq!(sparse.time_spent_seconds, 0);
+        assert_eq!(sparse.comment_md, "");
+        assert!(sparse.author.is_none());
+    }
+
+    #[test]
     fn list_fields_builder_appends_custom_ids_when_present() {
         let empty = crate::jira_field_maps::SiteFieldMap::default();
         let base = list_fields_for(&empty);
@@ -3820,6 +4293,26 @@ mod tests {
         assert!(cleared["fields"]["duedate"].is_null());
         let set = json!({ "fields": { "duedate": Some("2026-07-11") } });
         assert_eq!(set["fields"]["duedate"], "2026-07-11");
+    }
+
+    #[test]
+    fn valid_duration_grammar() {
+        // Accepts a single unit token and multi-token whitespace-separated durations,
+        // including fractional mantissas.
+        assert!(is_valid_duration("3h"));
+        assert!(is_valid_duration("2d 4h 30m"));
+        assert!(is_valid_duration("1.5h"));
+        assert!(is_valid_duration("45m"));
+        assert!(is_valid_duration("1w"));
+        // Rejects: empty, unitless, unit-only, unknown unit, comma-joined, whitespace-only,
+        // and a space between the number and its unit.
+        assert!(!is_valid_duration(""));
+        assert!(!is_valid_duration("3"));
+        assert!(!is_valid_duration("h"));
+        assert!(!is_valid_duration("3x"));
+        assert!(!is_valid_duration("3h,4m"));
+        assert!(!is_valid_duration(" "));
+        assert!(!is_valid_duration("3 h"));
     }
 
     #[test]

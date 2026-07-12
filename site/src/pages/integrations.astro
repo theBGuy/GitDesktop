@@ -65,6 +65,7 @@ const jiraFeatures = [
   "Browse and filter issues (open / closed / all), and read status, type, priority, assignee, labels, a Markdown description, and comments",
   "Agile fields when the project uses them — story points, sprint, a clickable epic / parent, components, and fix versions — discovered automatically per site",
   "Create, comment in Markdown, assign, set a due date, change priority, edit labels, and close/reopen along the project's own workflow",
+  "Time tracking, when the project has it on — log work with Jira's duration grammar (2d 4h 30m), set the original and remaining estimates, and edit or delete your own worklog entries",
   "Edit or delete your own comments — and every action is gated on your Jira permissions, so what you can't do simply doesn't appear",
   "Issue keys in your branch, commits, and PR titles are linked back to the Issues tab; a local issue can be promoted to Jira",
 ];
@@ -186,7 +187,8 @@ const jiraFeatures = [
         <p data-view="ai" class="mt-6 border-t border-line pt-5 text-sm leading-relaxed text-muted">
           <span class="text-ink">And for agents — </span>a connected MCP client gets
           <code class="text-ink">jira_*</code> tools to list and read the linked project,
-          and (behind the remote-write opt-in) comment, create, assign, and update issues.
+          and (behind the remote-write opt-in) comment, create, assign, log work, and
+          update issues, including their estimates.
         </p>
       </div>
       </div>

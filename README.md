@@ -121,15 +121,18 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
     versions** — auto-discovered per site, nothing to configure
   - **Act** — create (summary, description, type), comment in Markdown, close/reopen
     along the project's workflow (or jump to any status from the chip's status menu),
-    assign/unassign, set a due date, change priority, edit labels, and edit/delete your
-    own comments — actions your permissions don't allow simply don't appear
+    assign/unassign, set a due date, change priority, edit labels, **log work** (Jira's
+    `2d 4h 30m` duration grammar, with an optional note), **set the original/remaining
+    estimates**, and edit/delete your own comments and worklog entries — actions your
+    permissions don't allow simply don't appear
   - **Linked in** — issue keys (e.g. `PROJ-123`) spotted in your branch name, commits,
     and PR titles surface as a **referenced Jira issues** row that jumps to the issue;
     a **local issue** can be promoted to Jira (comments carry over, with a back-link)
 
   Agents reach the linked project through GitDesktop's **MCP server** — `jira_*` tools
   to list and read, and (behind `--allow-remote-write`) comment, close/reopen, create,
-  assign, and update an issue's due date, priority, and labels.
+  assign, log work (`jira_log_work`), and update an issue's due date, priority, labels,
+  and original/remaining estimates.
 - **Delegate a task to an agent** — hand a coding task to a **Claude Code**, **Codex**,
   **GitHub Copilot**, or **opencode** agent (the CLI you already have — opencode's
   hosted models are free, no extra subscription). It works in an isolated worktree that
