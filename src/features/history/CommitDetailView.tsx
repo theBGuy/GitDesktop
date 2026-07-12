@@ -14,7 +14,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AmendForcePushDialog } from "@/features/commit/AmendForcePushDialog";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
-import { DiffSurface, type LineWidget } from "@/features/diff/DiffSurface";
+import { DiffSurface, type LineWidget } from "@/features/diff/DiffSurfaceLazy";
 import { JiraRefRow } from "@/features/issues/JiraRefRow";
 import {
   CommitComments,

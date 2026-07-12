@@ -10,7 +10,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { ButtonGroup } from "@/components/ui/button-group";
 import { Spinner } from "@/components/ui/spinner";
-import { GitDiffView } from "@/features/diff/DiffSurface";
+import { GitDiffView } from "@/features/diff/DiffSurfaceLazy";
 import { HighlightedCode } from "@/features/diff/HighlightedCode";
 import {
   buildConflictPrompt,

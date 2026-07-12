@@ -15,6 +15,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { BUILTIN_COMMANDS } from "@/lib/ai/slash";
 import { withForm } from "@/lib/form";
+import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import type { CustomCommand } from "@/lib/settings/api";
 import { settingsFormOpts } from "./settings-form";
 
@@ -171,8 +172,22 @@ export const CommandsSection = withForm({
   render: function CommandsSectionRender({ form }) {
     const commands = useSelector(form.store, (s) => s.values.customCommands);
     const [editing, setEditing] = useState<CustomCommand | "new" | null>(null);
+    const [activeIndex, setActiveIndex] = useState(-1);
 
     const list = commands ?? [];
+
+    // Removing rows shrinks `list` but not `activeIndex`, so clamp the stale
+    // value (keeping -1 = "nothing active yet") to keep a row focusable.
+    const safeActive =
+      activeIndex >= list.length ? list.length - 1 : activeIndex;
+
+    const onKeyDown = listKeyboardNav<CustomCommand>({
+      items: list,
+      activeIndex: safeActive,
+      onActivate: (_c, to) => setActiveIndex(to),
+      rowKey: (c) => c.id,
+      rowAttr: "data-cc-row",
+    });
 
     function setCommands(next: CustomCommand[]) {
       form.setFieldValue("customCommands", next);
@@ -234,11 +249,26 @@ export const CommandsSection = withForm({
             in a repo to share them with your team.
           </p>
         ) : (
-          <div className="space-y-2">
-            {list.map((cmd) => (
+          // A roving-focus list — arrow keys move between rows, Enter edits.
+          <div className="space-y-2" onKeyDown={onKeyDown}>
+            {list.map((cmd, i) => (
               <div
                 key={cmd.id}
-                className="flex items-center gap-2 rounded border px-3 py-2"
+                data-cc-row={cmd.id}
+                aria-label={`/${cmd.name}${cmd.description ? `, ${cmd.description}` : ""}. Press Enter to edit.`}
+                tabIndex={
+                  i === safeActive || (safeActive === -1 && i === 0) ? 0 : -1
+                }
+                onFocus={() => setActiveIndex(i)}
+                onKeyDown={(e) => {
+                  // Only the row itself edits on Enter — not when a child
+                  // control (the Edit/Remove buttons) is focused.
+                  if (e.key === "Enter" && e.target === e.currentTarget) {
+                    e.preventDefault();
+                    setEditing(cmd);
+                  }
+                }}
+                className="flex items-center gap-2 rounded border px-3 py-2 outline-none focus-visible:ring-1 focus-visible:ring-ring"
               >
                 <code className="shrink-0 font-mono text-xs font-medium">
                   /{cmd.name}

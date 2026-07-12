@@ -2,7 +2,7 @@ import { useDeferredValue, useState } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
-import { DiffSurface } from "@/features/diff/DiffSurface";
+import { DiffSurface } from "@/features/diff/DiffSurfaceLazy";
 import { useBranchDiffFiles, useBranchFileDiff } from "@/lib/git/queries";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { cn } from "@/lib/utils";

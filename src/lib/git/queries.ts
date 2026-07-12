@@ -4904,16 +4904,21 @@ export function useEditPr(repo: string) {
   );
 }
 
-/** Add/remove labels on an issue or MR (also used by GitHub-only Discussions).
+/** Add/remove labels on an issue, MR, or GitHub Discussion.
  *  GitHub uses the node-id path (`labelableId` + `addIds`/`removeIds`); GitLab uses
- *  names (`target` + `number` + `addNames`/`removeNames`). The name/target/number
- *  fields are optional so GitHub-only callers (Discussions) stay byte-identical. */
+ *  names (`target` + `number` + `addNames`/`removeNames`). `kind` is the reconcile
+ *  discriminator (the args carry no reliable entity id otherwise); `number` every
+ *  entity has — for the GitHub node-id path it is used only for invalidation, so a
+ *  discussion still sends `0` on the wire (byte-identical to the old default). The
+ *  wire `target` derives from `kind`: issue→"issue", mr→"mr", discussion→"issue"
+ *  (the old default). Reconciles per-kind on settle instead of the whole-repo
+ *  default, since the args now carry a reliable discriminator. */
 export function useEditPrLabels(repo: string) {
-  return useRepoMutation(
-    repo,
-    (args: {
-      target?: "issue" | "mr";
-      number?: number;
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (args: {
+      kind: "issue" | "mr" | "discussion";
+      number: number;
       labelableId: string;
       addIds: string[];
       removeIds: string[];
@@ -4922,15 +4927,41 @@ export function useEditPrLabels(repo: string) {
     }) =>
       api.forgeEditLabels(
         repo,
-        args.target ?? "issue",
-        args.number ?? 0,
+        args.kind === "mr" ? "mr" : "issue",
+        // GitHub Discussions use the node-id path; the wire number is unused and
+        // stays 0 to match the old `args.number ?? 0` default byte-for-byte.
+        args.kind === "discussion" ? 0 : args.number,
         args.labelableId,
         args.addIds,
         args.removeIds,
         args.addNames ?? [],
         args.removeNames ?? [],
       ),
-  );
+    onSettled: (_d, _e, args) => {
+      const keys =
+        args.kind === "issue"
+          ? [
+              ["repo", repo, "issue-list"],
+              ["repo", repo, "issue", args.number],
+            ]
+          : args.kind === "mr"
+            ? [
+                ["repo", repo, "pr", args.number],
+                ["repo", repo, "pr-list"],
+              ]
+            : args.kind === "discussion"
+              ? [
+                  ["repo", repo, "discussion", args.number],
+                  ["repo", repo, "discussion-list"],
+                ]
+              : [repoKeys.all(repo)];
+      return void Promise.all(
+        keys.map((queryKey) =>
+          queryClient.invalidateQueries({ queryKey }),
+        ),
+      );
+    },
+  });
 }
 
 export function useCreatePr(repo: string) {

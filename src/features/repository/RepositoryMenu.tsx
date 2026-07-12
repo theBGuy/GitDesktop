@@ -22,7 +22,7 @@ import {
   WarningCircleIcon,
 } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -46,7 +46,6 @@ import { RepoAutomationsDialog } from "@/features/automations/RepoAutomationsDia
 import { BranchRulesDialog } from "@/features/branch-rules/BranchRulesDialog";
 import { HooksDialog } from "@/features/hooks/HooksDialog";
 import { RepoJiraDialog } from "@/features/issues/RepoJiraDialog";
-import { RepoSettingsDialog } from "@/features/repo-settings/RepoSettingsDialog";
 import { copyText } from "@/lib/clipboard";
 import {
   forgeRepoUrl,
@@ -77,6 +76,21 @@ import { RemoveRepoDialog, RepoAliasDialog } from "./RepoDialogs";
 import { RepositoryFilesDialog } from "./RepositoryFilesDialog";
 import { SubmodulesDialog } from "./SubmodulesDialog";
 import { WorktreesDialog } from "./WorktreesDialog";
+
+// RepoSettingsDialog's tree pulls in the Shiki highlighter (via parts.tsx →
+// shiki-highlighter's highlightJson), which is heavy and only needed once an
+// admin opens repository settings. Loading it lazily keeps that chunk off the
+// boot path. The dialog is rendered ONLY while open (not always-mounted like
+// the sibling dialogs): a lazy component that is always rendered loads its
+// chunk immediately, defeating the split — the open-gate is what defers the
+// import to first open. Trade-off: the dialog no longer stays mounted across
+// close/reopen, so its remembered rail section resets to "general" each open
+// (see the state note at its render site).
+const RepoSettingsDialog = lazy(() =>
+  import("@/features/repo-settings/RepoSettingsDialog").then((m) => ({
+    default: m.RepoSettingsDialog,
+  })),
+);
 
 export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   const gh = useForgeStatus(repoPath);
@@ -418,11 +432,22 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
         onOpenChange={setJiraOpen}
         existingLink={jiraLink.data ?? null}
       />
-      <RepoSettingsDialog
-        repoPath={repoPath}
-        open={repoSettingsOpen}
-        onOpenChange={setRepoSettingsOpen}
-      />
+      {/* Open-gated (unlike the always-mounted siblings above) so its lazy
+          chunk loads on first open, not on boot. `open` stays true while
+          mounted; `onOpenChange(false)` flips the gate, unmounting the subtree
+          — the same immediate-unmount-on-close idiom the other open-gated
+          dialogs in this app use (e.g. ImportMcpDialog). The dialog's remembered
+          rail section (its internal `section` state) no longer persists across
+          close/reopen and resets to "general" each open. */}
+      {repoSettingsOpen && (
+        <Suspense fallback={null}>
+          <RepoSettingsDialog
+            repoPath={repoPath}
+            open={repoSettingsOpen}
+            onOpenChange={setRepoSettingsOpen}
+          />
+        </Suspense>
+      )}
       <BranchRulesDialog
         repoPath={repoPath}
         open={branchRulesOpen}

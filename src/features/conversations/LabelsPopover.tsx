@@ -67,7 +67,9 @@ export function LabelsPopover({
     if (addNames.length > 0 || removeNames.length > 0) {
       editLabels.mutate(
         {
-          target,
+          // `target` is this popover's surface ("issue" | "mr"); it doubles as the
+          // reconcile `kind`. (Discussions use their own view, not this popover.)
+          kind: target,
           number,
           labelableId,
           addIds: ids(addNames),

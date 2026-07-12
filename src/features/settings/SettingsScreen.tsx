@@ -1,6 +1,6 @@
 import { ArrowLeftIcon } from "@phosphor-icons/react";
 import { useSelector } from "@tanstack/react-store";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { NavRail } from "@/components/NavRail";
 import { Button } from "@/components/ui/button";
@@ -36,10 +36,21 @@ import { InstructionsSection } from "./InstructionsSection";
 import { KeyboardSection } from "./KeyboardSection";
 import { McpServersSection } from "./McpServersSection";
 import { NotificationsSection } from "./NotificationsSection";
-import { SyntaxSection } from "./SyntaxSection";
 import { settingsFormOpts, toDraft } from "./settings-form";
 import { TerminalSection } from "./TerminalSection";
 import { UpdatesSection } from "./UpdatesSection";
+
+// The Syntax panel pulls in the Shiki TextMate highlighter (@git-diff-view +
+// @shikijs/core), which is heavy and only needed once this panel is visited.
+// Loading it lazily keeps that whole chunk off the boot path — its render is
+// already gated on `activePanel === "syntax"`, so the import fires on first
+// visit, not on launch. `lazy` on the named export preserves the `form` prop's
+// full type. The fallback is null: the panel renders instantly once loaded (tens
+// of ms from local disk) and, like the other panels, shows no intermediate
+// state before its data — a spinner would flash where nothing otherwise does.
+const SyntaxSection = lazy(() =>
+  import("./SyntaxSection").then((m) => ({ default: m.SyntaxSection })),
+);
 
 const PANELS = [
   { id: "general", label: "General" },
@@ -273,7 +284,11 @@ export function SettingsScreen() {
                   {repoPath && <RepoIdentitySection repoPath={repoPath} />}
                 </>
               )}
-              {activePanel === "syntax" && <SyntaxSection form={form} />}
+              {activePanel === "syntax" && (
+                <Suspense fallback={null}>
+                  <SyntaxSection form={form} />
+                </Suspense>
+              )}
               {activePanel === "editor" && <EditorSection form={form} />}
               {activePanel === "terminal" && <TerminalSection form={form} />}
               {activePanel === "updates" && <UpdatesSection form={form} />}

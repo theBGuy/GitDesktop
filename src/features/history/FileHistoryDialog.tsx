@@ -10,7 +10,7 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
-import { DiffSurface } from "@/features/diff/DiffSurface";
+import { DiffSurface } from "@/features/diff/DiffSurfaceLazy";
 import { useCommitFileDiff, useFileLog } from "@/lib/git/queries";
 import { formatRelativeTime } from "@/lib/time";
 import { cn } from "@/lib/utils";

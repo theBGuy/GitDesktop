@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
-import { DiffContent, type LineWidget } from "@/features/diff/DiffSurface";
+import { DiffContent, type LineWidget } from "@/features/diff/DiffSurfaceLazy";
 import { copyText } from "@/lib/clipboard";
 import { splitUnifiedDiff } from "@/lib/git/diff-split";
 import { useCommitComments, usePrCommitDiff } from "@/lib/git/queries";

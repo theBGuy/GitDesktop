@@ -3,7 +3,7 @@ import { useDeferredValue, useState } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
-import { DiffSurface } from "@/features/diff/DiffSurface";
+import { DiffSurface } from "@/features/diff/DiffSurfaceLazy";
 import { gitDiffFile, gitStatus } from "@/lib/git/api";
 import type { ChangeKind, FileEntry } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";

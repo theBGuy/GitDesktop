@@ -13,7 +13,7 @@ import {
 import type { UseQueryResult } from "@tanstack/react-query";
 import { type ComponentType, useState } from "react";
 import { Markdown } from "@/components/ui/markdown";
-import { GitDiffView } from "@/features/diff/DiffSurface";
+import { GitDiffView } from "@/features/diff/DiffSurfaceLazy";
 import type { AgentToolKind, TranscriptSegment } from "@/lib/ai/agent";
 import { useSessionFileDiff } from "@/lib/git/queries";
 import type { FileDiff } from "@/lib/git/types";

@@ -22,7 +22,7 @@ import {
   DiffContent,
   type DiffLineAnchor,
   type LineWidget,
-} from "@/features/diff/DiffSurface";
+} from "@/features/diff/DiffSurfaceLazy";
 import { TimeTrackingControls } from "@/features/issues/RemoteIssueViewParts";
 import {
   useAddMrSpentTime,
