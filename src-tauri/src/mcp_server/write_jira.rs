@@ -383,6 +383,7 @@ impl GitDesktopMcp {
             crate::forge::jira::issue_set_remaining_estimate(&link.site_host, &args.key, estimate)
                 .await
                 .map_err(|e| partial_write_err(&applied, e))?;
+            applied.push("remaining estimate was already updated");
         }
 
         json_result(&serde_json::json!({
@@ -462,7 +463,10 @@ fn join_applied(applied: &[&str]) -> String {
     // stays a small, closed vocabulary.
     let subjects: Vec<&str> = applied
         .iter()
-        .map(|p| p.trim_end_matches(" was already updated"))
+        .map(|p| {
+            p.trim_end_matches(" was already updated")
+                .trim_end_matches(" were already updated")
+        })
         .collect();
     let list = match subjects.as_slice() {
         [] => String::new(),
@@ -703,6 +707,15 @@ mod tests {
                 "c was already updated"
             ]),
             "a, b, and c were already updated"
+        );
+        // A plural phrase ("labels were …") must strip like the singular ones — the
+        // labels + estimate combination garbled before the dual-form strip.
+        assert_eq!(
+            join_applied(&[
+                "labels were already updated",
+                "original estimate was already updated"
+            ]),
+            "labels and original estimate were already updated"
         );
     }
 }

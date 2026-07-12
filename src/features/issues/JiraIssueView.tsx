@@ -976,10 +976,12 @@ function JiraWorklogItem({
         issueKey,
         worklogId: worklog.id,
         timeSpent: durationTrimmed,
-        // Send the note ONLY when it actually changed (unchanged ⇒ undefined =
-        // leave as-is). A non-empty replacement is sent verbatim; an emptied
-        // note is blocked above, so we never send "".
-        commentMd: noteChanged ? noteDraft : undefined,
+        // Send the note ONLY when it changed to non-empty text (unchanged ⇒
+        // undefined = leave as-is). Emptying an existing note is blocked above;
+        // a whitespace-only draft on a note-less entry degrades to duration-only
+        // rather than tripping the backend's can't-remove-a-note error.
+        commentMd:
+          noteChanged && noteDraft.trim().length > 0 ? noteDraft : undefined,
       },
       {
         onSuccess: () => setEditing(false),

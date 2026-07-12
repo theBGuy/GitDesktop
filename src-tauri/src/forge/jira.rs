@@ -1894,8 +1894,9 @@ fn map_worklog(w: &Value) -> JiraWorklog {
 }
 
 /// Map the issue's `fields.worklog.worklogs[]` (the embedded first page) onto neutral
-/// worklogs — one malformed worklog is skipped rather than sinking the list (mirrors
-/// [`map_comments`]). No pagination beyond the embedded page.
+/// worklogs — every field of a malformed worklog degrades to an empty default rather
+/// than erroring, so one bad entry can't sink the list. No pagination beyond the
+/// embedded page.
 fn map_worklogs(fields: &Value) -> Vec<JiraWorklog> {
     fields
         .get("worklog")
