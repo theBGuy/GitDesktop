@@ -3681,6 +3681,9 @@ pub async fn rename_repo(state: &crate::state::AppState, repo_path: &str, new_na
                  set it to {new_url} manually. ({e})"
             )));
         }
+        // origin now points at the new slug — drop any cached (stale) URL so a forge query
+        // within the TTL re-resolves it instead of hitting the old, now-404 URL.
+        crate::git::remote::invalidate_remote_url_cache(repo_path, "origin");
     }
     Ok(())
 }

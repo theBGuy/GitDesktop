@@ -14,8 +14,8 @@ use rmcp::model::{CallToolResult, Content};
 use rmcp::{schemars, tool, tool_router, ErrorData as McpError};
 
 use super::{
-    app_err, cap_head, cap_tail, json_result, json_result_untrusted, GitDesktopMcp, JobIdArg,
-    NumberArg, RunIdArg, GH_TEXT_MAX_BYTES,
+    app_err, cap_head, cap_hunk_lines, cap_tail, json_result, json_result_untrusted, GitDesktopMcp,
+    JobIdArg, NumberArg, RunIdArg, GH_TEXT_MAX_BYTES, HUNK_MAX_LINES,
 };
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -47,6 +47,22 @@ struct IssueListArgs {
     /// Max issues to return. Omit for the provider default (GitHub ~30; GitLab a full page).
     #[serde(default)]
     limit: Option<u32>,
+}
+
+/// Default for `PrCommentsArgs::include_diff_hunk`: include the (capped) hunk.
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct PrCommentsArgs {
+    /// The pull request number.
+    number: u64,
+    /// Include each review thread's `diffHunk` code-context excerpt, capped to the
+    /// last few lines (default true). Set false to drop hunks entirely — useful when
+    /// you only need the threads' structure (path, line, resolution, replies).
+    #[serde(default = "default_true")]
+    include_diff_hunk: bool,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -173,22 +189,37 @@ impl GitDesktopMcp {
                        (GitHub, GitLab, or Bitbucket, per its remote): `comments` (the top-level \
                        conversation), `reviews` (review summaries), and `review_threads` (file:line \
                        -anchored threads, each with its full reply chain) — every entry carries the \
-                       author, date, and the original markdown body. Read-only; returns JSON. (For \
-                       the PR's metadata + changed files use get_pull_request; for its diff, \
-                       pull_request_diff.)"
+                       author, date, and the original markdown body. Each thread's `diffHunk` \
+                       code-context excerpt (GitHub only) is capped to its last few lines; set \
+                       `include_diff_hunk` false to drop hunks entirely (default true). Read-only; \
+                       returns JSON. (For the PR's metadata + changed files use get_pull_request; \
+                       for its diff, pull_request_diff.)"
     )]
     async fn list_pull_request_comments(
         &self,
-        Parameters(args): Parameters<NumberArg>,
+        Parameters(args): Parameters<PrCommentsArgs>,
     ) -> Result<CallToolResult, McpError> {
         let pr = crate::forge::forge_pr_view(self.repo.clone(), args.number)
             .await
             .map_err(app_err)?;
-        let review_threads = crate::forge::forge_pr_review_threads(self.repo.clone(), args.number)
-            .await
-            .map_err(app_err)?;
+        let mut review_threads =
+            crate::forge::forge_pr_review_threads(self.repo.clone(), args.number)
+                .await
+                .map_err(app_err)?;
+        // Bound each thread's diffHunk so a comment on a new file can't drag the
+        // whole file into the payload (GitHub-only; GitLab/Bitbucket set it ""),
+        // or drop it entirely when the caller opts out. Mutating this OWNED Vec
+        // never touches the shared IPC struct's serialized shape.
+        for t in &mut review_threads {
+            t.diff_hunk = if args.include_diff_hunk {
+                cap_hunk_lines(std::mem::take(&mut t.diff_hunk), HUNK_MAX_LINES)
+            } else {
+                String::new()
+            };
+        }
         // KEEP IN SYNC: src/lib/ai/review-tools.ts (`list_pull_request_comments`)
-        // mirrors this composed shape for the HTTP review tool loop.
+        // mirrors this composed shape (and the diffHunk cap) for the HTTP review
+        // tool loop.
         json_result_untrusted(&serde_json::json!({
             "number": args.number,
             "comments": pr.comments,

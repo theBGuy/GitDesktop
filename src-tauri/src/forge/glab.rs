@@ -131,7 +131,11 @@ fn glab_config_paths() -> Vec<PathBuf> {
     }
     #[cfg(target_os = "macos")]
     if let Some(h) = &home {
-        dirs.push(h.join("Library").join("Application Support").join("glab-cli"));
+        dirs.push(
+            h.join("Library")
+                .join("Application Support")
+                .join("glab-cli"),
+        );
     }
     dirs.into_iter().map(|d| d.join("config.yml")).collect()
 }
@@ -278,7 +282,10 @@ pub async fn run_glab_ex(
     })?;
     if let Some(body) = input {
         if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(body.as_bytes()).await.map_err(AppError::Io)?;
+            stdin
+                .write_all(body.as_bytes())
+                .await
+                .map_err(AppError::Io)?;
             stdin.shutdown().await.ok();
         }
     }
@@ -356,7 +363,10 @@ hosts:
             normalize_host("https://GitLab.Example.com:8443/gitlab"),
             Some("gitlab.example.com".into())
         );
-        assert_eq!(normalize_host("gitlab.example.com"), Some("gitlab.example.com".into()));
+        assert_eq!(
+            normalize_host("gitlab.example.com"),
+            Some("gitlab.example.com".into())
+        );
         assert_eq!(normalize_host("  "), None);
     }
 }

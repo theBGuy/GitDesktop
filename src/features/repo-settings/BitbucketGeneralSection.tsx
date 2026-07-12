@@ -13,7 +13,6 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
-import { Textarea } from "@/components/ui/textarea";
 import {
   useBbRepoSettings,
   useBbUpdateRepoSettings,
@@ -27,6 +26,7 @@ import type {
 import { useAiConfigured, useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
+import { DescriptionField } from "./DescriptionField";
 import { useGenerateRepoDescription } from "./useGenerateRepoDescription";
 
 /** The Bitbucket counterpart of {@link GeneralSettingsSection}: Bitbucket's
@@ -137,59 +137,55 @@ function BitbucketGeneralForm({
 
   return (
     <div className="min-w-0 space-y-4">
-      <div className="space-y-1.5">
-        <div className="flex items-center justify-between">
-          <Label htmlFor="bb-repo-description">Description</Label>
-          {aiEnabled &&
-            (!aiConfigured ? (
-              <Button
-                type="button"
-                variant="ghost"
-                size="xs"
-                className="text-muted-foreground"
-                onClick={() => openSettings("ai")}
-              >
-                <SparkleIcon data-icon="inline-start" />
-                Set up AI
-              </Button>
-            ) : descGen.generating ? (
-              <Button
-                type="button"
-                variant="ghost"
-                size="xs"
-                className="text-muted-foreground"
-                onClick={descGen.cancel}
-              >
-                <Spinner data-icon="inline-start" />
-                Cancel
-              </Button>
-            ) : (
-              <Button
-                type="button"
-                variant="ghost"
-                size="xs"
-                onClick={() =>
-                  descGen.generate({
-                    repoName,
-                    onResult: ({ description }) => {
-                      if (description) set("description", description);
-                    },
-                  })
-                }
-              >
-                <SparkleIcon data-icon="inline-start" />
-                Generate
-              </Button>
-            ))}
-        </div>
-        <Textarea
-          id="bb-repo-description"
-          value={form.description}
-          onChange={(e) => set("description", e.target.value)}
-          placeholder="Short description of this repository"
-          rows={3}
-        />
-      </div>
+      <DescriptionField
+        id="bb-repo-description"
+        value={form.description}
+        onChange={(v) => set("description", v)}
+        placeholder="Short description of this repository"
+        generate={
+          aiEnabled &&
+          (!aiConfigured ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="xs"
+              className="text-muted-foreground"
+              onClick={() => openSettings("ai")}
+            >
+              <SparkleIcon data-icon="inline-start" />
+              Set up AI
+            </Button>
+          ) : descGen.generating ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="xs"
+              className="text-muted-foreground"
+              onClick={descGen.cancel}
+            >
+              <Spinner data-icon="inline-start" />
+              Cancel
+            </Button>
+          ) : (
+            <Button
+              type="button"
+              variant="ghost"
+              size="xs"
+              onClick={() =>
+                descGen.generate({
+                  repoName,
+                  onResult: ({ description }) => {
+                    if (description) set("description", description);
+                  },
+                })
+              }
+            >
+              <SparkleIcon data-icon="inline-start" />
+              Generate
+            </Button>
+          ))
+        }
+      />
 
       <div className="grid grid-cols-2 gap-4">
         <div className="space-y-1.5">

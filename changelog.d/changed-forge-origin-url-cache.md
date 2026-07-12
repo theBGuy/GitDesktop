@@ -1,0 +1,1 @@
+- Forge views feel snappier. Repeated origin-remote lookups from the many forge queries a pull-request or merge-request view fires are now served from a short-lived in-memory cache instead of re-shelling out to `git` each time — noticeably fewer process spawns on Windows.

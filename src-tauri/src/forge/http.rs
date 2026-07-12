@@ -428,7 +428,8 @@ mod tests {
     #[test]
     fn http_error_other_403_falls_through_to_envelope_message() {
         // A 403 that is NOT a missing-scope error keeps the API's own message.
-        let body = r#"{"type":"error","error":{"message":"You do not have access to this repository."}}"#;
+        let body =
+            r#"{"type":"error","error":{"message":"You do not have access to this repository."}}"#;
         match http_error(403, body) {
             AppError::Bitbucket(m) => {
                 assert!(m.contains("access to this repository"));

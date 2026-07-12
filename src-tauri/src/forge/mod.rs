@@ -2506,6 +2506,10 @@ pub async fn forge_repo_delete(
             )));
         }
     }
+    // origin is gone (either just removed, or already absent) — drop any cached URL so a
+    // forge query within the TTL sees the repo as unpublished instead of serving the stale
+    // (now-deleted) remote URL.
+    crate::git::remote::invalidate_remote_url_cache(&repo_path, "origin");
     Ok(())
 }
 

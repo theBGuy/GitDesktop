@@ -7,7 +7,9 @@
 //! methods, each delegating to the matching `gh_*` function.
 
 use crate::error::AppResult;
-use crate::forge::model::{Capabilities, ForgeRepo, ForgeRepoList, ForgeStatus, Implemented, Provider};
+use crate::forge::model::{
+    Capabilities, ForgeRepo, ForgeRepoList, ForgeStatus, Implemented, Provider,
+};
 use crate::forge::Forge;
 use crate::github::pr::{gh_list_repos, gh_status, GhRepo, GhStatus};
 
@@ -125,11 +127,7 @@ pub async fn commit_comment_create(
     crate::github::pr::commit_comment_create(repo_path, sha, body, path, position).await
 }
 
-pub async fn commit_comment_edit(
-    repo_path: &str,
-    comment_id: &str,
-    body: &str,
-) -> AppResult<()> {
+pub async fn commit_comment_edit(repo_path: &str, comment_id: &str, body: &str) -> AppResult<()> {
     crate::github::pr::commit_comment_edit(repo_path, comment_id, body).await
 }
 
@@ -570,23 +568,21 @@ pub async fn assignable_users(
 ) -> AppResult<Vec<crate::forge::model::ForgeUserRef>> {
     // GitHub carries no avatar in the assignees endpoint; the picker derives it
     // from the login (id), so leave `avatar_url` empty and let the frontend fill it.
-    Ok(crate::github::issue::gh_assignable_users(repo_path.to_string())
-        .await?
-        .into_iter()
-        .map(|l| crate::forge::model::ForgeUserRef {
-            id: l.clone(),
-            label: l,
-            avatar_url: String::new(),
-            is_bot: false,
-        })
-        .collect())
+    Ok(
+        crate::github::issue::gh_assignable_users(repo_path.to_string())
+            .await?
+            .into_iter()
+            .map(|l| crate::forge::model::ForgeUserRef {
+                id: l.clone(),
+                label: l,
+                avatar_url: String::new(),
+                is_bot: false,
+            })
+            .collect(),
+    )
 }
 
-pub async fn set_pr_reviewers(
-    repo_path: &str,
-    number: u64,
-    reviewers: &[String],
-) -> AppResult<()> {
+pub async fn set_pr_reviewers(repo_path: &str, number: u64, reviewers: &[String]) -> AppResult<()> {
     crate::github::pr::set_pr_reviewers(repo_path, number, reviewers).await
 }
 

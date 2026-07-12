@@ -31,6 +31,24 @@ function capHead(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)}\n[... truncated]` : text;
 }
 
+/** Max review-thread `diffHunk` lines surfaced by `list_pull_request_comments`.
+ *  KEEP IN SYNC with `HUNK_MAX_LINES` in src-tauri/src/mcp_server/mod.rs. */
+const HUNK_MAX_LINES = 24;
+
+/** Caps a review-thread diff hunk to its last `maxLines` lines (GitHub's
+ *  `diffHunk` ends at the anchored line, so the tail is the relevant context),
+ *  prefixing a marker when it overflows. Mirrors `cap_hunk_lines` in
+ *  src-tauri/src/mcp_server/mod.rs — an already-short (or empty) hunk is
+ *  returned unchanged. */
+function capHunkLines(hunk: string, maxLines: number): string {
+  // Mirror Rust `str::lines()` (mcp_server/mod.rs): strip one trailing line
+  // terminator, then split on \r?\n so CRLF and a final newline can't shift the
+  // window vs the Rust side.
+  const lines = hunk.replace(/\r?\n$/, "").split(/\r?\n/);
+  if (lines.length <= maxLines) return hunk;
+  return `…[hunk truncated]\n${lines.slice(lines.length - maxLines).join("\n")}`;
+}
+
 /** One line prepended to every forge tool's output so the model treats the
  *  third-party content strictly as data (parity with the MCP server's framing). */
 const UNTRUSTED_PREFIX =
@@ -304,22 +322,42 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
       description:
         "This pull request's conversation from the forge: top-level comments, " +
         "review summaries, and file:line-anchored review threads with their " +
-        "reply chains.",
-      inputSchema: z.object({}),
-      execute: async (_input, { abortSignal }) => {
+        "reply chains. Each thread's diffHunk code-context excerpt (GitHub only) " +
+        "is capped to its last few lines; set include_diff_hunk false to drop " +
+        "hunks entirely (default true).",
+      inputSchema: z.object({
+        include_diff_hunk: z
+          .boolean()
+          .default(true)
+          .describe(
+            "Include each review thread's capped diffHunk excerpt (default true); " +
+              "false drops hunks entirely.",
+          ),
+      }),
+      execute: async ({ include_diff_hunk }, { abortSignal }) => {
         try {
           if (abortSignal?.aborted) return "Error: cancelled";
           const [pr, reviewThreads] = await Promise.all([
             forgePrView(ctx.repoPath, prNumber),
             forgePrReviewThreads(ctx.repoPath, prNumber),
           ]);
+          // Bound (or drop) each thread's diffHunk so a comment on a new file
+          // can't drag the whole file into the payload (GitHub-only; other
+          // providers already set it "").
+          const cappedThreads = reviewThreads.map((t) => ({
+            ...t,
+            diffHunk: include_diff_hunk
+              ? capHunkLines(t.diffHunk, HUNK_MAX_LINES)
+              : "",
+          }));
           // KEEP IN SYNC: src-tauri/src/mcp_server/read_forge.rs (the
-          // list_pull_request_comments MCP tool) composes the same shape.
+          // list_pull_request_comments MCP tool) composes the same shape (and
+          // the diffHunk cap).
           const composed = {
             number: prNumber,
             comments: pr.comments,
             reviews: pr.reviews,
-            review_threads: reviewThreads,
+            review_threads: cappedThreads,
           };
           return (
             UNTRUSTED_PREFIX +

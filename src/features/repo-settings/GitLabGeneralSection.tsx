@@ -2,7 +2,6 @@ import { SparkleIcon } from "@phosphor-icons/react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -27,6 +26,8 @@ import type {
 import { useAiConfigured, useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
+import { DescriptionField } from "./DescriptionField";
+import { GITLAB_TOPIC_RULES, TopicsField } from "./TopicsField";
 import { useGenerateRepoDescription } from "./useGenerateRepoDescription";
 
 /** The GitLab counterpart of {@link GeneralSettingsSection}: GitLab's settings
@@ -141,16 +142,11 @@ const SQUASH_OPTION_ITEMS: Record<string, string> = Object.fromEntries(
   SQUASH_OPTIONS.map((o) => [o.value, o.label]),
 );
 
-/** Comma-separated text → GitLab's topic list (topics may contain spaces, so
- *  only commas separate; trimmed, deduped). */
-function parseTopics(text: string): string[] {
+/** Normalize AI-suggested topics per GitLab's rules (trim only, case + spaces
+ *  preserved), deduped and with no cap — used when the Generate result seeds topics. */
+function normalizeGlTopics(raw: string[]): string[] {
   return [
-    ...new Set(
-      text
-        .split(",")
-        .map((t) => t.trim())
-        .filter(Boolean),
-    ),
+    ...new Set(raw.map((t) => GITLAB_TOPIC_RULES.normalize(t)).filter(Boolean)),
   ];
 }
 
@@ -166,8 +162,6 @@ function GitLabGeneralForm({
   const update = useUpdateGlRepoSettings(repoPath);
   const base = toInput(settings);
   const [form, setForm] = useState<GitLabRepoSettingsInput>(base);
-  // Topics edit as free text (comma-separated) but persist as a parsed array.
-  const [topicsText, setTopicsText] = useState(settings.topics.join(", "));
 
   const aiEnabled = useAiEnabled();
   const aiConfigured = useAiConfigured();
@@ -183,11 +177,6 @@ function GitLabGeneralForm({
     setForm((f) => ({ ...f, [key]: value }));
   }
 
-  function applyTopics(text: string) {
-    setTopicsText(text);
-    set("topics", parseTopics(text));
-  }
-
   const dirty = JSON.stringify(form) !== JSON.stringify(base);
 
   // Keep the current default selectable even if that branch isn't local.
@@ -199,98 +188,93 @@ function GitLabGeneralForm({
 
   return (
     <div className="min-w-0 space-y-4">
+      <DescriptionField
+        id="gl-repo-description"
+        value={form.description}
+        onChange={(v) => set("description", v)}
+        placeholder="Short description of this project"
+        generate={
+          aiEnabled &&
+          (!aiConfigured ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="xs"
+              className="text-muted-foreground"
+              onClick={() => openSettings("ai")}
+            >
+              <SparkleIcon data-icon="inline-start" />
+              Set up AI
+            </Button>
+          ) : descGen.generating ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="xs"
+              className="text-muted-foreground"
+              onClick={descGen.cancel}
+            >
+              <Spinner data-icon="inline-start" />
+              Cancel
+            </Button>
+          ) : (
+            <Button
+              type="button"
+              variant="ghost"
+              size="xs"
+              onClick={() =>
+                descGen.generate({
+                  repoName,
+                  onResult: ({ description, topics }) => {
+                    if (description) set("description", description);
+                    if (topics.length)
+                      set("topics", normalizeGlTopics(topics));
+                  },
+                })
+              }
+            >
+              <SparkleIcon data-icon="inline-start" />
+              Generate
+            </Button>
+          ))
+        }
+      />
+
       <div className="space-y-1.5">
         <div className="flex items-center justify-between">
-          <Label htmlFor="gl-repo-description">Description</Label>
-          {aiEnabled &&
-            (!aiConfigured ? (
-              <Button
-                type="button"
-                variant="ghost"
-                size="xs"
-                className="text-muted-foreground"
-                onClick={() => openSettings("ai")}
-              >
-                <SparkleIcon data-icon="inline-start" />
-                Set up AI
-              </Button>
-            ) : descGen.generating ? (
-              <Button
-                type="button"
-                variant="ghost"
-                size="xs"
-                className="text-muted-foreground"
-                onClick={descGen.cancel}
-              >
-                <Spinner data-icon="inline-start" />
-                Cancel
-              </Button>
-            ) : (
-              <Button
-                type="button"
-                variant="ghost"
-                size="xs"
-                onClick={() =>
-                  descGen.generate({
-                    repoName,
-                    onResult: ({ description, topics }) => {
-                      if (description) set("description", description);
-                      if (topics.length) applyTopics(topics.join(", "));
-                    },
-                  })
-                }
-              >
-                <SparkleIcon data-icon="inline-start" />
-                Generate
-              </Button>
-            ))}
+          <Label htmlFor="gl-repo-topics">Topics</Label>
+          <span className="text-[11px] text-muted-foreground tabular-nums">
+            {form.topics.length}
+          </span>
         </div>
-        <Input
-          id="gl-repo-description"
-          value={form.description}
-          onChange={(e) => set("description", e.target.value)}
-          placeholder="Short description of this project"
+        <TopicsField
+          id="gl-repo-topics"
+          topics={form.topics}
+          onChange={(next) => set("topics", next)}
+          rules={GITLAB_TOPIC_RULES}
         />
       </div>
 
-      <div className="grid grid-cols-2 gap-4">
-        <div className="space-y-1.5">
-          <Label htmlFor="gl-repo-topics">
-            Topics{" "}
-            <span className="font-normal text-muted-foreground">
-              (separate with commas)
-            </span>
-          </Label>
-          <Input
-            id="gl-repo-topics"
-            value={topicsText}
-            onChange={(e) => applyTopics(e.target.value)}
-            placeholder="react, typescript, cli"
-            autoComplete="off"
-            spellCheck={false}
-          />
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="gl-repo-default-branch">Default branch</Label>
-          <Select
-            items={Object.fromEntries(branchOptions.map((b) => [b, b]))}
-            value={form.defaultBranch ?? ""}
-            onValueChange={(v) => {
-              if (v) set("defaultBranch", v);
-            }}
-          >
-            <SelectTrigger id="gl-repo-default-branch" className="w-full">
-              <SelectValue placeholder="No default branch yet" />
-            </SelectTrigger>
-            <SelectContent>
-              {branchOptions.map((b) => (
-                <SelectItem key={b} value={b}>
-                  {b}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
+      <div className="space-y-1.5">
+        <Label htmlFor="gl-repo-default-branch">Default branch</Label>
+        <Select
+          items={Object.fromEntries(branchOptions.map((b) => [b, b]))}
+          value={form.defaultBranch ?? ""}
+          onValueChange={(v) => {
+            if (v) set("defaultBranch", v);
+          }}
+        >
+          <SelectTrigger id="gl-repo-default-branch" className="w-full">
+            <SelectValue placeholder="No default branch yet" />
+          </SelectTrigger>
+          <SelectContent>
+            {branchOptions.map((b) => (
+              <SelectItem key={b} value={b}>
+                {b}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
 
       <div className="space-y-2">

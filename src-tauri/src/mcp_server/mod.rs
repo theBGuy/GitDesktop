@@ -503,6 +503,25 @@ fn cap_tail(s: String, max: usize) -> String {
     format!("…[truncated]\n\n{}", &s[start..])
 }
 
+/// Max review-thread `diffHunk` lines surfaced by `list_pull_request_comments`
+/// (both this MCP tool and its TS review-loop twin — KEEP IN SYNC). A GitHub
+/// comment on a brand-new file drags the whole file into `diffHunk`, so it is
+/// bounded here rather than at the shared IPC struct.
+const HUNK_MAX_LINES: usize = 24;
+
+/// Caps a review-thread diff hunk to at most `max_lines` lines, keeping the
+/// **tail** (GitHub's `diffHunk` ends at the anchored line, so the last lines are
+/// the relevant context) and prefixing a marker when it overflows. Pure so it's
+/// unit-testable; an already-short hunk (including empty) is returned unchanged.
+fn cap_hunk_lines(hunk: String, max_lines: usize) -> String {
+    let total = hunk.lines().count();
+    if total <= max_lines {
+        return hunk;
+    }
+    let tail: Vec<&str> = hunk.lines().skip(total - max_lines).collect();
+    format!("…[hunk truncated]\n{}", tail.join("\n"))
+}
+
 /// Entry point for the `gitdesktop-mcp` binary. Parses `--repo <path>` (falling
 /// back to the current working directory), then runs the stdio MCP server until
 /// the client disconnects.
@@ -605,6 +624,37 @@ mod tests {
 
     fn parse(argv: &[&str]) -> McpArgs {
         McpArgs::parse(argv.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn cap_hunk_lines_passes_short_hunks_through() {
+        // At or under the cap → returned byte-for-byte, no marker.
+        let three = "a\nb\nc".to_string();
+        assert_eq!(cap_hunk_lines(three.clone(), 24), three);
+        let exactly = (0..24)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(cap_hunk_lines(exactly.clone(), 24), exactly);
+        // Empty stays empty.
+        assert_eq!(cap_hunk_lines(String::new(), 24), "");
+    }
+
+    #[test]
+    fn cap_hunk_lines_keeps_last_max_lines_with_marker() {
+        // 30-line hunk, cap 24 → marker + exactly the last 24 lines (6..29).
+        let hunk = (0..30)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let capped = cap_hunk_lines(hunk, 24);
+        let expected_tail = (6..30)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(capped, format!("…[hunk truncated]\n{expected_tail}"));
+        // The body is exactly 24 lines (the marker adds one more).
+        assert_eq!(capped.lines().count(), 25);
     }
 
     #[test]

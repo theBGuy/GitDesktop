@@ -27,6 +27,8 @@ import type { Branch, RepoSettings, RepoSettingsInput } from "@/lib/git/types";
 import { useAiConfigured, useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
+import { DescriptionField } from "./DescriptionField";
+import { GITHUB_TOPIC_RULES, TopicsField } from "./TopicsField";
 import { useGenerateRepoDescription } from "./useGenerateRepoDescription";
 
 export function GeneralSettingsSection({
@@ -186,16 +188,15 @@ function CommitMessageSelect({
   );
 }
 
-/** Space/comma-separated text → GitHub's lowercase, deduped, capped topic list. */
-function parseTopics(text: string): string[] {
-  return [
-    ...new Set(
-      text
-        .split(/[\s,]+/)
-        .map((t) => t.toLowerCase().replace(/[^a-z0-9-]/g, ""))
-        .filter(Boolean),
-    ),
-  ].slice(0, 20);
+/** Normalize a list of raw topic strings per GitHub's rules (slugified,
+ *  deduped, capped 20) — used when the AI Generate result seeds topics. */
+function normalizeTopics(raw: string[]): string[] {
+  const seen = new Set<string>();
+  for (const t of raw) {
+    const topic = GITHUB_TOPIC_RULES.normalize(t);
+    if (topic) seen.add(topic);
+  }
+  return [...seen].slice(0, GITHUB_TOPIC_RULES.maxTopics ?? 20);
 }
 
 function GeneralForm({
@@ -210,8 +211,6 @@ function GeneralForm({
   const update = useUpdateRepoSettings(repoPath);
   const base = toInput(settings);
   const [form, setForm] = useState<RepoSettingsInput>(base);
-  // Topics edit as free text (space-separated) but persist as a parsed array.
-  const [topicsText, setTopicsText] = useState(settings.topics.join(" "));
 
   const aiEnabled = useAiEnabled();
   const aiConfigured = useAiConfigured();
@@ -227,13 +226,6 @@ function GeneralForm({
     setForm((f) => ({ ...f, [key]: value }));
   }
 
-  // Keep the raw text (so trailing spaces survive typing) and the parsed array
-  // (used for the dirty check and save) in sync.
-  function applyTopics(text: string) {
-    setTopicsText(text);
-    set("topics", parseTopics(text));
-  }
-
   const mergeValid =
     form.allowSquashMerge || form.allowMergeCommit || form.allowRebaseMerge;
   const dirty = JSON.stringify(form) !== JSON.stringify(base);
@@ -246,74 +238,70 @@ function GeneralForm({
 
   return (
     <div className="min-w-0 space-y-4">
-      <div className="space-y-1.5">
-        <div className="flex items-center justify-between">
-          <Label htmlFor="repo-description">Description</Label>
-          {aiEnabled &&
-            (!aiConfigured ? (
-              <Button
-                type="button"
-                variant="ghost"
-                size="xs"
-                className="text-muted-foreground"
-                onClick={() => openSettings("ai")}
-              >
-                <SparkleIcon data-icon="inline-start" />
-                Set up AI
-              </Button>
-            ) : descGen.generating ? (
-              <Button
-                type="button"
-                variant="ghost"
-                size="xs"
-                className="text-muted-foreground"
-                onClick={descGen.cancel}
-              >
-                <Spinner data-icon="inline-start" />
-                Cancel
-              </Button>
-            ) : (
-              <Button
-                type="button"
-                variant="ghost"
-                size="xs"
-                onClick={() =>
-                  descGen.generate({
-                    repoName,
-                    onResult: ({ description, topics }) => {
-                      if (description) set("description", description);
-                      if (topics.length) applyTopics(topics.join(" "));
-                    },
-                  })
-                }
-              >
-                <SparkleIcon data-icon="inline-start" />
-                Generate
-              </Button>
-            ))}
-        </div>
-        <Input
-          id="repo-description"
-          value={form.description}
-          onChange={(e) => set("description", e.target.value)}
-          placeholder="Short description of this repository"
-        />
-      </div>
+      <DescriptionField
+        id="repo-description"
+        value={form.description}
+        onChange={(v) => set("description", v)}
+        placeholder="Short description of this repository"
+        generate={
+          aiEnabled &&
+          (!aiConfigured ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="xs"
+              className="text-muted-foreground"
+              onClick={() => openSettings("ai")}
+            >
+              <SparkleIcon data-icon="inline-start" />
+              Set up AI
+            </Button>
+          ) : descGen.generating ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="xs"
+              className="text-muted-foreground"
+              onClick={descGen.cancel}
+            >
+              <Spinner data-icon="inline-start" />
+              Cancel
+            </Button>
+          ) : (
+            <Button
+              type="button"
+              variant="ghost"
+              size="xs"
+              onClick={() =>
+                descGen.generate({
+                  repoName,
+                  onResult: ({ description, topics }) => {
+                    if (description) set("description", description);
+                    if (topics.length)
+                      set("topics", normalizeTopics(topics));
+                  },
+                })
+              }
+            >
+              <SparkleIcon data-icon="inline-start" />
+              Generate
+            </Button>
+          ))
+        }
+      />
 
       <div className="space-y-1.5">
-        <Label htmlFor="repo-topics">
-          Topics{" "}
-          <span className="font-normal text-muted-foreground">
-            (separate with spaces)
+        <div className="flex items-center justify-between">
+          <Label htmlFor="repo-topics">Topics</Label>
+          <span className="text-[11px] text-muted-foreground tabular-nums">
+            {form.topics.length} / 20
           </span>
-        </Label>
-        <Input
+        </div>
+        <TopicsField
           id="repo-topics"
-          value={topicsText}
-          onChange={(e) => applyTopics(e.target.value)}
-          placeholder="react typescript cli"
-          autoComplete="off"
-          spellCheck={false}
+          topics={form.topics}
+          onChange={(next) => set("topics", next)}
+          rules={GITHUB_TOPIC_RULES}
         />
       </div>
 

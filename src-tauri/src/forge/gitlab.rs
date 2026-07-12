@@ -25,8 +25,8 @@ use crate::github::pr::{
     PrCommitOut, PrDetails, PrFileOut, PrInfo, PrListLabel, PrPollInfo, PrRef, PrThreadOut,
     PrTimelineEventOut, RepoLabel, ReviewSubmitOut, ReviewThreadOut,
 };
-use crate::state::AppState;
 use crate::github::release::{ReleaseAsset, ReleaseDetails, ReleaseInfo};
+use crate::state::AppState;
 
 /// GitLab via the `glab` CLI. Carries the repo's host (gitlab.com today; a
 /// self-managed host list arrives with the Settings → Accounts work).
@@ -151,7 +151,10 @@ pub async fn list_repos() -> AppResult<ForgeRepoList> {
         .unwrap_or_default();
     let out = run_glab(
         None,
-        &["api", "projects?membership=true&order_by=last_activity_at&per_page=100"],
+        &[
+            "api",
+            "projects?membership=true&order_by=last_activity_at&per_page=100",
+        ],
         GLAB_NETWORK_TIMEOUT,
     )
     .await?;
@@ -201,7 +204,8 @@ use crate::forge::encode_query_value;
 
 /// The project's full path (`group/name`) from the repo's origin remote.
 async fn project_path(repo_path: &str) -> AppResult<String> {
-    let url = crate::git::remote::git_remote_url(repo_path.to_string(), "origin".to_string()).await?;
+    let url =
+        crate::git::remote::git_remote_url(repo_path.to_string(), "origin".to_string()).await?;
     crate::forge::remote_path(&url).ok_or_else(|| {
         AppError::Glab("could not determine the GitLab project from the origin remote".into())
     })
@@ -628,7 +632,11 @@ fn gl_build_line_range(
     start: u64,
     line: u64,
 ) -> serde_json::Value {
-    let line_field = if side == "old" { "old_line" } else { "new_line" };
+    let line_field = if side == "old" {
+        "old_line"
+    } else {
+        "new_line"
+    };
     let make_ref = |ln: u64| {
         let mut r = serde_json::json!({ "type": side, line_field: ln });
         if let Some((old_pos, new_pos)) = gl_diff_line_refs(file_diff, side, ln) {
@@ -731,7 +739,10 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
     // Core fields + changed files in one call.
     let out = run_glab(
         Some(repo_path),
-        &["api", &format!("projects/{enc}/merge_requests/{number}/changes")],
+        &[
+            "api",
+            &format!("projects/{enc}/merge_requests/{number}/changes"),
+        ],
         GLAB_NETWORK_TIMEOUT,
     )
     .await?;
@@ -763,7 +774,10 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
     // so reverse to oldest-first (matching gh's GraphQL order).
     let mut commits: Vec<PrCommitOut> = run_glab(
         Some(repo_path),
-        &["api", &format!("projects/{enc}/merge_requests/{number}/commits?per_page=100")],
+        &[
+            "api",
+            &format!("projects/{enc}/merge_requests/{number}/commits?per_page=100"),
+        ],
         GLAB_NETWORK_TIMEOUT,
     )
     .await
@@ -791,7 +805,10 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
     // real file/line context instead of leaking into the flat conversation list.
     let comments: Vec<PrThreadOut> = run_glab(
         Some(repo_path),
-        &["api", &format!("projects/{enc}/merge_requests/{number}/notes?sort=asc&per_page=100")],
+        &[
+            "api",
+            &format!("projects/{enc}/merge_requests/{number}/notes?sort=asc&per_page=100"),
+        ],
         GLAB_NETWORK_TIMEOUT,
     )
     .await
@@ -1077,7 +1094,10 @@ pub async fn mr_timeline(repo_path: &str, number: u64) -> AppResult<Vec<PrTimeli
 async fn fetch_mr_changes(repo_path: &str, enc: &str, number: u64) -> Vec<GlabChange> {
     let out = match run_glab(
         Some(repo_path),
-        &["api", &format!("projects/{enc}/merge_requests/{number}/changes")],
+        &[
+            "api",
+            &format!("projects/{enc}/merge_requests/{number}/changes"),
+        ],
         GLAB_NETWORK_TIMEOUT,
     )
     .await
@@ -1095,7 +1115,10 @@ async fn fetch_mr_changes(repo_path: &str, enc: &str, number: u64) -> Vec<GlabCh
 async fn fetch_commit_changes(repo_path: &str, enc: &str, sha: &str) -> Vec<GlabChange> {
     let out = match run_glab(
         Some(repo_path),
-        &["api", &format!("projects/{enc}/repository/commits/{sha}/diff?per_page=100")],
+        &[
+            "api",
+            &format!("projects/{enc}/repository/commits/{sha}/diff?per_page=100"),
+        ],
         GLAB_NETWORK_TIMEOUT,
     )
     .await
@@ -1145,7 +1168,10 @@ pub async fn diff_pr(repo_path: &str, number: u64) -> AppResult<String> {
     let enc = encode_project(&project_path(repo_path).await?);
     let out = run_glab(
         Some(repo_path),
-        &["api", &format!("projects/{enc}/merge_requests/{number}/changes")],
+        &[
+            "api",
+            &format!("projects/{enc}/merge_requests/{number}/changes"),
+        ],
         GLAB_NETWORK_TIMEOUT,
     )
     .await?;
@@ -1167,7 +1193,9 @@ pub async fn diff_pr(repo_path: &str, number: u64) -> AppResult<String> {
 /// before any network call.
 fn validate_commit_sha(sha: &str) -> AppResult<()> {
     if sha.is_empty() || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(AppError::InvalidArgument(format!("invalid commit id: {sha}")));
+        return Err(AppError::InvalidArgument(format!(
+            "invalid commit id: {sha}"
+        )));
     }
     Ok(())
 }
@@ -1181,7 +1209,10 @@ pub async fn commit_diff(repo_path: &str, sha: &str) -> AppResult<String> {
     let enc = encode_project(&project_path(repo_path).await?);
     let out = run_glab(
         Some(repo_path),
-        &["api", &format!("projects/{enc}/repository/commits/{sha}/diff?per_page=100")],
+        &[
+            "api",
+            &format!("projects/{enc}/repository/commits/{sha}/diff?per_page=100"),
+        ],
         GLAB_NETWORK_TIMEOUT,
     )
     .await?;
@@ -1289,7 +1320,10 @@ pub async fn commit_comments(repo_path: &str, sha: &str) -> AppResult<Vec<Commit
     let viewer = current_user_login(repo_path).await;
     let out = run_glab(
         Some(repo_path),
-        &["api", &format!("projects/{enc}/repository/commits/{sha}/discussions?per_page=100")],
+        &[
+            "api",
+            &format!("projects/{enc}/repository/commits/{sha}/discussions?per_page=100"),
+        ],
         GLAB_NETWORK_TIMEOUT,
     )
     .await?;
@@ -1351,7 +1385,8 @@ async fn commit_parent_sha(repo_path: &str, enc: &str, sha: &str) -> AppResult<S
         .map_err(|e| AppError::Glab(format!("could not parse the GitLab commit: {e}")))?;
     c.parent_ids.into_iter().next().ok_or_else(|| {
         AppError::InvalidArgument(
-            "can't anchor a comment on this commit — it has no parent commit to diff against.".into(),
+            "can't anchor a comment on this commit — it has no parent commit to diff against."
+                .into(),
         )
     })
 }
@@ -1440,8 +1475,7 @@ pub async fn commit_comment_edit(
     validate_commit_sha(sha)?;
     let (did, nid) = parse_commit_comment_id(comment_id)?;
     let enc = encode_project(&project_path(repo_path).await?);
-    let endpoint =
-        format!("projects/{enc}/repository/commits/{sha}/discussions/{did}/notes/{nid}");
+    let endpoint = format!("projects/{enc}/repository/commits/{sha}/discussions/{did}/notes/{nid}");
     let body_arg = format!("body={body}");
     run_glab(
         Some(repo_path),
@@ -1454,16 +1488,11 @@ pub async fn commit_comment_edit(
 
 /// Delete a commit comment (`DELETE …/commits/{sha}/discussions/{did}/notes/{nid}`).
 /// Composite-id parse runs BEFORE the request.
-pub async fn commit_comment_delete(
-    repo_path: &str,
-    sha: &str,
-    comment_id: &str,
-) -> AppResult<()> {
+pub async fn commit_comment_delete(repo_path: &str, sha: &str, comment_id: &str) -> AppResult<()> {
     validate_commit_sha(sha)?;
     let (did, nid) = parse_commit_comment_id(comment_id)?;
     let enc = encode_project(&project_path(repo_path).await?);
-    let endpoint =
-        format!("projects/{enc}/repository/commits/{sha}/discussions/{did}/notes/{nid}");
+    let endpoint = format!("projects/{enc}/repository/commits/{sha}/discussions/{did}/notes/{nid}");
     run_glab(
         Some(repo_path),
         &["api", "--method", "DELETE", &endpoint],
@@ -1658,9 +1687,10 @@ pub async fn edit_mr(repo_path: &str, number: u64, title: &str, body: &str) -> A
 /// Parse a comment id (a note id, sent as a string over IPC) to the numeric id
 /// GitLab's notes endpoint takes — a pre-mutation guard, before any network call.
 fn parse_note_id(comment_id: &str) -> AppResult<u64> {
-    comment_id.trim().parse::<u64>().map_err(|_| {
-        AppError::InvalidArgument(format!("invalid comment id: {comment_id}"))
-    })
+    comment_id
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| AppError::InvalidArgument(format!("invalid comment id: {comment_id}")))
 }
 
 /// Edit a merge request note's body (`PUT …/merge_requests/{n}/notes/{id}`).
@@ -1813,7 +1843,10 @@ pub async fn pr_approvals(repo_path: &str, number: u64) -> AppResult<ApprovalSta
     let enc = encode_project(&project_path(repo_path).await?);
     let out = run_glab(
         Some(repo_path),
-        &["api", &format!("projects/{enc}/merge_requests/{number}/approvals")],
+        &[
+            "api",
+            &format!("projects/{enc}/merge_requests/{number}/approvals"),
+        ],
         GLAB_NETWORK_TIMEOUT,
     )
     .await?;
@@ -1889,14 +1922,22 @@ struct GlabGqlRequestChangesErrors {
 }
 
 /// Replace the MR's reviewers with `ids` (`0` clears — the assignees CSV shape).
-async fn set_mr_reviewer_ids(repo_path: &str, enc: &str, number: u64, ids: &[u64]) -> AppResult<()> {
+async fn set_mr_reviewer_ids(
+    repo_path: &str,
+    enc: &str,
+    number: u64,
+    ids: &[u64],
+) -> AppResult<()> {
     let endpoint = format!("projects/{enc}/merge_requests/{number}");
     let ids_arg = format!(
         "reviewer_ids={}",
         if ids.is_empty() {
             "0".to_string()
         } else {
-            ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",")
+            ids.iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
         }
     );
     run_glab(
@@ -2114,7 +2155,14 @@ async fn merge_mr_inner(
     let squash_arg = format!("squash={squash}");
     let remove_arg = format!("should_remove_source_branch={delete_branch}");
     let mut args = vec![
-        "api", "--method", "PUT", &endpoint, "-f", &squash_arg, "-f", &remove_arg,
+        "api",
+        "--method",
+        "PUT",
+        &endpoint,
+        "-f",
+        &squash_arg,
+        "-f",
+        &remove_arg,
     ];
     // Only guard on a non-empty SHA — an empty `sha=` would itself be rejected.
     let sha_arg;
@@ -2422,7 +2470,10 @@ pub async fn view_issue(repo_path: &str, number: u64) -> AppResult<IssueDetails>
     // Comments — drop GitLab's system notes (auto "changed the milestone", etc.).
     let comments: Vec<PrThreadOut> = run_glab(
         Some(repo_path),
-        &["api", &format!("projects/{enc}/issues/{number}/notes?sort=asc&per_page=100")],
+        &[
+            "api",
+            &format!("projects/{enc}/issues/{number}/notes?sort=asc&per_page=100"),
+        ],
         GLAB_NETWORK_TIMEOUT,
     )
     .await
@@ -2619,11 +2670,7 @@ pub async fn edit_issue_comment(
 
 /// Delete an issue note (`DELETE …/issues/{n}/notes/{id}`). Comment-id parse runs
 /// BEFORE the request.
-pub async fn delete_issue_comment(
-    repo_path: &str,
-    number: u64,
-    comment_id: &str,
-) -> AppResult<()> {
+pub async fn delete_issue_comment(repo_path: &str, number: u64, comment_id: &str) -> AppResult<()> {
     let note_id = parse_note_id(comment_id)?;
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/issues/{number}/notes/{note_id}");
@@ -2772,9 +2819,8 @@ pub async fn delete_issue(repo_path: &str, number: u64) -> AppResult<()> {
 /// group milestone, and the global-id write accepts either kind).
 pub async fn list_milestones(repo_path: &str) -> AppResult<Vec<Milestone>> {
     let enc = encode_project(&project_path(repo_path).await?);
-    let endpoint = format!(
-        "projects/{enc}/milestones?state=active&include_ancestor_groups=true&per_page=100"
-    );
+    let endpoint =
+        format!("projects/{enc}/milestones?state=active&include_ancestor_groups=true&per_page=100");
     let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
     let milestones: Vec<GlabMilestone> = serde_json::from_str(&out.stdout_lossy())
         .map_err(|e| AppError::Glab(format!("could not parse GitLab milestones: {e}")))?;
@@ -3040,7 +3086,13 @@ async fn award_read(
     let viewer = data.current_user.map(|u| u.username).unwrap_or_default();
     let target = data
         .project
-        .and_then(|p| if target_field == "issue" { p.issue } else { p.merge_request })
+        .and_then(|p| {
+            if target_field == "issue" {
+                p.issue
+            } else {
+                p.merge_request
+            }
+        })
         .ok_or_else(|| AppError::Glab("GitLab returned no such issue/MR".into()))?;
     let body = tally_awards(
         target.award_emoji.map(|a| a.nodes).unwrap_or_default(),
@@ -3128,9 +3180,17 @@ struct GlabNotePosition {
 /// last arm labels `"old"` because the path came from the old side). Pure/testable.
 fn gl_thread_anchor(position: &GlabNotePosition) -> (String, u32, &'static str) {
     if position.new_line.is_some() && !position.new_path.is_empty() {
-        (position.new_path.clone(), position.new_line.unwrap_or(0), "new")
+        (
+            position.new_path.clone(),
+            position.new_line.unwrap_or(0),
+            "new",
+        )
     } else if position.old_line.is_some() && !position.old_path.is_empty() {
-        (position.old_path.clone(), position.old_line.unwrap_or(0), "old")
+        (
+            position.old_path.clone(),
+            position.old_line.unwrap_or(0),
+            "old",
+        )
     } else if !position.new_path.is_empty() {
         (position.new_path.clone(), 0, "new")
     } else {
@@ -3172,7 +3232,11 @@ struct GlabLineRangeRef {
 /// for the old side, the new part for the new side). `None` when neither yields a
 /// value — a garbage or absent `line_code` and no explicit field. Pure (testable).
 fn gl_range_ref_line(r: &GlabLineRangeRef, side: &str) -> Option<u32> {
-    let explicit = if side == "old" { r.old_line } else { r.new_line };
+    let explicit = if side == "old" {
+        r.old_line
+    } else {
+        r.new_line
+    };
     if explicit.is_some() {
         return explicit;
     }
@@ -3299,9 +3363,8 @@ async fn fetch_mr_discussions(
 ) -> AppResult<Vec<GlabDiscussion>> {
     let mut all: Vec<GlabDiscussion> = Vec::new();
     for page in 1..=5u32 {
-        let endpoint = format!(
-            "projects/{enc}/merge_requests/{number}/discussions?per_page=100&page={page}"
-        );
+        let endpoint =
+            format!("projects/{enc}/merge_requests/{number}/discussions?per_page=100&page={page}");
         let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
         let batch: Vec<GlabDiscussion> = match serde_json::from_str(&out.stdout_lossy()) {
             Ok(b) => b,
@@ -3741,7 +3804,12 @@ pub async fn review_submit(
 
 /// The award endpoint for a subject: the issue/MR body (`note_id` None) or one
 /// of its notes. `target` is `"issue"` or `"mr"`.
-fn award_endpoint(enc: &str, target: &str, number: u64, note_id: Option<&str>) -> AppResult<String> {
+fn award_endpoint(
+    enc: &str,
+    target: &str,
+    number: u64,
+    note_id: Option<&str>,
+) -> AppResult<String> {
     let seg = match target {
         "issue" => "issues",
         "mr" => "merge_requests",
@@ -3904,8 +3972,10 @@ async fn project_members(repo_path: &str) -> AppResult<Vec<GlabMember>> {
 /// read is capped at one page).
 async fn resolve_assignee_ids(repo_path: &str, assignees: &[String]) -> AppResult<Vec<u64>> {
     let members = project_members(repo_path).await?;
-    let by_name: HashMap<&str, u64> =
-        members.iter().map(|m| (m.username.as_str(), m.id)).collect();
+    let by_name: HashMap<&str, u64> = members
+        .iter()
+        .map(|m| (m.username.as_str(), m.id))
+        .collect();
     let mut ids = Vec::with_capacity(assignees.len());
     let mut missing: Vec<&str> = Vec::new();
     for u in assignees {
@@ -3988,7 +4058,11 @@ pub async fn set_pr_reviewers(repo_path: &str, number: u64, desired: &[String]) 
         .into_iter()
         .filter_map(|r| r.user.map(|u| u.username))
         .collect();
-    let dropped: Vec<String> = desired.iter().filter(|d| !now.contains(*d)).cloned().collect();
+    let dropped: Vec<String> = desired
+        .iter()
+        .filter(|d| !now.contains(*d))
+        .cloned()
+        .collect();
     if !dropped.is_empty() {
         return Err(AppError::Glab(format!(
             "GitLab didn't set reviewer(s) {} — this GitLab tier may allow only one \
@@ -4088,11 +4162,7 @@ pub async fn set_issue_assignees(
 
 /// Set a merge request's assignees (usernames; empty clears). GitLab-only — GitHub
 /// PRs have no assignee picker in this app.
-pub async fn set_mr_assignees(
-    repo_path: &str,
-    number: u64,
-    assignees: &[String],
-) -> AppResult<()> {
+pub async fn set_mr_assignees(repo_path: &str, number: u64, assignees: &[String]) -> AppResult<()> {
     set_target_assignees(repo_path, "merge_requests", number, assignees).await
 }
 
@@ -4179,9 +4249,7 @@ pub async fn repo_star_status(repo_path: &str) -> AppResult<bool> {
         );
         let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
         let starred: Vec<GlabStarredProject> = serde_json::from_str(&out.stdout_lossy())
-            .map_err(|e| {
-                AppError::Glab(format!("could not parse GitLab starred projects: {e}"))
-            })?;
+            .map_err(|e| AppError::Glab(format!("could not parse GitLab starred projects: {e}")))?;
         if starred.iter().any(|p| p.path_with_namespace == path) {
             return Ok(true);
         }
@@ -4278,8 +4346,7 @@ pub async fn publish_repo(
         // failure (not a repo, git missing, …) keeps its real message.
         match &e {
             AppError::Git { stderr, .. }
-                if stderr.contains("ambiguous argument")
-                    || stderr.contains("unknown revision") =>
+                if stderr.contains("ambiguous argument") || stderr.contains("unknown revision") =>
             {
                 AppError::InvalidArgument(
                     "make an initial commit before publishing (this repository has none yet)"
@@ -4715,7 +4782,9 @@ fn clean_trace(raw: &str) -> String {
             .char_indices()
             .find(|(_, ch)| !ch.is_ascii_digit())
             .map_or(after.len(), |(i, _)| i);
-        let named = after[digits_end..].strip_prefix(':').unwrap_or(&after[digits_end..]);
+        let named = after[digits_end..]
+            .strip_prefix(':')
+            .unwrap_or(&after[digits_end..]);
         let name_end = named
             .char_indices()
             .find(|(_, ch)| !(ch.is_ascii_alphanumeric() || *ch == '_' || *ch == '-' || *ch == '.'))
@@ -4883,7 +4952,10 @@ pub async fn view_run(repo_path: &str, run_id: u64) -> AppResult<RunDetail> {
     // matching how view_pr reorders commits oldest-first.
     let mut jobs: Vec<GlabJob> = run_glab(
         Some(repo_path),
-        &["api", &format!("projects/{enc}/pipelines/{run_id}/jobs?per_page=100")],
+        &[
+            "api",
+            &format!("projects/{enc}/pipelines/{run_id}/jobs?per_page=100"),
+        ],
         GLAB_NETWORK_TIMEOUT,
     )
     .await
@@ -4946,7 +5018,10 @@ pub async fn run_failed_logs(repo_path: &str, run_id: u64) -> AppResult<String> 
     let enc = encode_project(&project_path(repo_path).await?);
     let jobs: Vec<GlabJob> = run_glab(
         Some(repo_path),
-        &["api", &format!("projects/{enc}/pipelines/{run_id}/jobs?per_page=100")],
+        &[
+            "api",
+            &format!("projects/{enc}/pipelines/{run_id}/jobs?per_page=100"),
+        ],
         GLAB_NETWORK_TIMEOUT,
     )
     .await
@@ -5391,7 +5466,9 @@ pub async fn delete_release_asset(repo_path: &str, tag: &str, asset_name: &str) 
         return Err(AppError::InvalidArgument("a tag is required".into()));
     }
     if asset_name.is_empty() {
-        return Err(AppError::InvalidArgument("an asset name is required".into()));
+        return Err(AppError::InvalidArgument(
+            "an asset name is required".into(),
+        ));
     }
     let enc = encode_project(&project_path(repo_path).await?);
     let enc_tag = encode_query_value(tag);
@@ -5640,27 +5717,15 @@ pub async fn update_repo_settings(
     input: GitLabRepoSettingsInput,
 ) -> AppResult<GitLabRepoSettings> {
     for (field, value, allowed) in [
-        (
-            "issues",
-            &input.issues_access_level,
-            &ACCESS_LEVELS[..],
-        ),
+        ("issues", &input.issues_access_level, &ACCESS_LEVELS[..]),
         (
             "merge requests",
             &input.merge_requests_access_level,
             &ACCESS_LEVELS[..],
         ),
         ("wiki", &input.wiki_access_level, &ACCESS_LEVELS[..]),
-        (
-            "snippets",
-            &input.snippets_access_level,
-            &ACCESS_LEVELS[..],
-        ),
-        (
-            "forking",
-            &input.forking_access_level,
-            &ACCESS_LEVELS[..],
-        ),
+        ("snippets", &input.snippets_access_level, &ACCESS_LEVELS[..]),
+        ("forking", &input.forking_access_level, &ACCESS_LEVELS[..]),
         ("merge method", &input.merge_method, &MERGE_METHODS[..]),
         ("squash option", &input.squash_option, &SQUASH_OPTIONS[..]),
     ] {
@@ -6366,9 +6431,7 @@ pub async fn list_variables(repo_path: &str) -> AppResult<Vec<GitLabVariable>> {
 fn validate_variable_key(key: &str) -> AppResult<()> {
     let valid = !key.is_empty()
         && key.len() <= 255
-        && key
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_');
+        && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
     if !valid {
         return Err(AppError::InvalidArgument(
             "variable keys use only letters, digits, and underscores".into(),
@@ -6529,7 +6592,9 @@ fn map_protected_branch(pb: GlabProtectedBranch) -> GitLabProtectedBranch {
 /// address it in the URL) and can't be blank.
 fn validate_branch_name(name: &str) -> AppResult<()> {
     if name.trim().is_empty() {
-        return Err(AppError::InvalidArgument("branch name can't be empty".into()));
+        return Err(AppError::InvalidArgument(
+            "branch name can't be empty".into(),
+        ));
     }
     Ok(())
 }
@@ -6551,8 +6616,8 @@ pub async fn list_protected_branches(repo_path: &str) -> AppResult<Vec<GitLabPro
     for page in 1..=10 {
         let endpoint = format!("projects/{enc}/protected_branches?per_page=100&page={page}");
         let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
-        let batch: Vec<GlabProtectedBranch> = serde_json::from_str(&out.stdout_lossy())
-            .map_err(|e| {
+        let batch: Vec<GlabProtectedBranch> =
+            serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
                 AppError::Glab(format!("could not parse GitLab protected branches: {e}"))
             })?;
         let done = batch.len() < 100;
@@ -6783,7 +6848,14 @@ pub async fn issue_set_time_estimate(
     number: u64,
     duration: Option<&str>,
 ) -> AppResult<GitLabTimeStats> {
-    write_time(repo_path, TimeTarget::Issue, number, TimeWrite::Estimate, duration).await
+    write_time(
+        repo_path,
+        TimeTarget::Issue,
+        number,
+        TimeWrite::Estimate,
+        duration,
+    )
+    .await
 }
 
 /// Add to (or, when blank, reset) an issue's spent time; returns the new stats.
@@ -6792,7 +6864,14 @@ pub async fn issue_add_spent_time(
     number: u64,
     duration: Option<&str>,
 ) -> AppResult<GitLabTimeStats> {
-    write_time(repo_path, TimeTarget::Issue, number, TimeWrite::Spent, duration).await
+    write_time(
+        repo_path,
+        TimeTarget::Issue,
+        number,
+        TimeWrite::Spent,
+        duration,
+    )
+    .await
 }
 
 /// Set (or, when blank, reset) a merge request's time estimate; returns new stats.
@@ -6948,7 +7027,14 @@ mod tests {
         assert_eq!(map_job_check_status("canceled"), "CANCELLED");
         assert_eq!(map_job_check_status("cancelled"), "CANCELLED");
         // Everything else (in-flight, skipped, manual, unknown) → pending bucket.
-        for s in ["running", "pending", "manual", "skipped", "created", "weird_new_state"] {
+        for s in [
+            "running",
+            "pending",
+            "manual",
+            "skipped",
+            "created",
+            "weird_new_state",
+        ] {
             assert_eq!(map_job_check_status(s), "PENDING", "status {s}");
         }
     }
@@ -7559,7 +7645,10 @@ mod tests {
             "discussion_locked": true
         }"#;
         let issue: GlabIssueDetail = serde_json::from_str(json).unwrap();
-        assert_eq!(issue.labels, vec!["enhancement".to_string(), "ui".to_string()]);
+        assert_eq!(
+            issue.labels,
+            vec!["enhancement".to_string(), "ui".to_string()]
+        );
         assert_eq!(issue.assignees.len(), 2);
         assert_eq!(issue.assignees[0].username, "bob");
         let m = issue.milestone.as_ref().unwrap();
@@ -7571,13 +7660,31 @@ mod tests {
 
     #[test]
     fn ci_status_maps_to_neutral_two_field_model() {
-        assert_eq!(map_ci_status("success"), ("completed".into(), "success".into()));
-        assert_eq!(map_ci_status("failed"), ("completed".into(), "failure".into()));
-        assert_eq!(map_ci_status("canceled"), ("completed".into(), "cancelled".into()));
-        assert_eq!(map_ci_status("skipped"), ("completed".into(), "skipped".into()));
-        assert_eq!(map_ci_status("manual"), ("completed".into(), "action_required".into()));
+        assert_eq!(
+            map_ci_status("success"),
+            ("completed".into(), "success".into())
+        );
+        assert_eq!(
+            map_ci_status("failed"),
+            ("completed".into(), "failure".into())
+        );
+        assert_eq!(
+            map_ci_status("canceled"),
+            ("completed".into(), "cancelled".into())
+        );
+        assert_eq!(
+            map_ci_status("skipped"),
+            ("completed".into(), "skipped".into())
+        );
+        assert_eq!(
+            map_ci_status("manual"),
+            ("completed".into(), "action_required".into())
+        );
         // In-flight states map to a non-completed lifecycle (so the UI keeps polling).
-        assert_eq!(map_ci_status("running"), ("in_progress".into(), String::new()));
+        assert_eq!(
+            map_ci_status("running"),
+            ("in_progress".into(), String::new())
+        );
         assert_eq!(map_ci_status("pending"), ("pending".into(), String::new()));
         assert_eq!(map_ci_status("created"), ("queued".into(), String::new()));
     }
@@ -7633,7 +7740,10 @@ mod tests {
     fn cleans_gitlab_trace_of_ansi_and_section_markers() {
         let raw = "\u{1b}[0Ksection_start:1718000000:prepare\rPreparing\u{1b}[0;m\nsection_end:1718000000:prepare\r\u{1b}[32;1mDone\u{1b}[0m\n";
         let cleaned = clean_trace(raw);
-        assert!(!cleaned.contains('\u{1b}'), "ANSI escapes remain: {cleaned:?}");
+        assert!(
+            !cleaned.contains('\u{1b}'),
+            "ANSI escapes remain: {cleaned:?}"
+        );
         assert!(!cleaned.contains('\r'));
         assert!(!cleaned.contains("section_start"));
         assert!(!cleaned.contains("section_end"));
@@ -7695,7 +7805,10 @@ mod tests {
     fn encodes_query_significant_chars_in_a_branch_ref() {
         // The plain branch name survives; `/` and query-significant chars encode so
         // `glab api`'s verbatim query can't be corrupted/split.
-        assert_eq!(encode_query_value("feature/dark-mode"), "feature%2Fdark-mode");
+        assert_eq!(
+            encode_query_value("feature/dark-mode"),
+            "feature%2Fdark-mode"
+        );
         assert_eq!(encode_query_value("fix_bug.v2"), "fix_bug.v2");
         assert_eq!(encode_query_value("a&b=c#d"), "a%26b%3Dc%23d");
     }
@@ -7822,7 +7935,11 @@ mod tests {
             ))
             .unwrap()
         };
-        let list = vec![mk("v2.0.0-next", true), mk("v1.1.0", false), mk("v1.0.0", false)];
+        let list = vec![
+            mk("v2.0.0-next", true),
+            mk("v1.1.0", false),
+            mk("v1.0.0", false),
+        ];
         let infos = releases_to_infos(&list);
         assert!(!infos[0].is_latest, "an upcoming release is never latest");
         assert!(infos[1].is_latest, "the newest published release is latest");
@@ -7848,9 +7965,18 @@ mod tests {
         // glab CSV-splits the --variables flag value; the token must be a fully
         // quoted CSV field with embedded quotes doubled (forms validated live).
         assert_eq!(variable_token("KEY", "simple"), "\"KEY:simple\"");
-        assert_eq!(variable_token("REGIONS", "us-east-1,eu-west-1"), "\"REGIONS:us-east-1,eu-west-1\"");
-        assert_eq!(variable_token("NOTE", "say \"hi\", ok"), "\"NOTE:say \"\"hi\"\", ok\"");
-        assert_eq!(variable_token("MSG", "hello: world"), "\"MSG:hello: world\"");
+        assert_eq!(
+            variable_token("REGIONS", "us-east-1,eu-west-1"),
+            "\"REGIONS:us-east-1,eu-west-1\""
+        );
+        assert_eq!(
+            variable_token("NOTE", "say \"hi\", ok"),
+            "\"NOTE:say \"\"hi\"\", ok\""
+        );
+        assert_eq!(
+            variable_token("MSG", "hello: world"),
+            "\"MSG:hello: world\""
+        );
     }
 
     #[test]
@@ -7948,7 +8074,8 @@ mod tests {
         assert!(env.errors.is_empty());
         assert!(env.data.unwrap().request_changes.unwrap().errors.is_empty());
 
-        let refused = r#"{"data":{"mergeRequestRequestChanges":{"errors":["Reviewer not found"]}}}"#;
+        let refused =
+            r#"{"data":{"mergeRequestRequestChanges":{"errors":["Reviewer not found"]}}}"#;
         let env: GlabGqlRequestChangesEnvelope = serde_json::from_str(refused).unwrap();
         assert_eq!(
             env.data.unwrap().request_changes.unwrap().errors,
@@ -8090,7 +8217,9 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, AppError::InvalidArgument(_)));
-        let err = update_protected_branch("/repo", "", false).await.unwrap_err();
+        let err = update_protected_branch("/repo", "", false)
+            .await
+            .unwrap_err();
         assert!(matches!(err, AppError::InvalidArgument(_)));
         let err = delete_protected_branch("/repo", "  ").await.unwrap_err();
         assert!(matches!(err, AppError::InvalidArgument(_)));
@@ -8286,7 +8415,10 @@ mod tests {
     fn parse_hunk_header_ignores_untrusted_heading() {
         // Direct unit coverage of the range/heading split (input is the text AFTER the
         // leading `@@`, as `gl_diff_line_refs` passes it).
-        assert_eq!(parse_hunk_header(" -40,3 +40,4 @@ fn f() -> T"), Some((40, 40)));
+        assert_eq!(
+            parse_hunk_header(" -40,3 +40,4 @@ fn f() -> T"),
+            Some((40, 40))
+        );
         assert_eq!(parse_hunk_header(" -1,2 +1,2 @@ x +5"), Some((1, 1)));
         assert_eq!(parse_hunk_header(" -5,2 +5,3 @@ @@count"), Some((5, 5)));
         // A malformed range (no `+` start) is still None.
@@ -8389,15 +8521,13 @@ mod tests {
 
     #[test]
     fn file_diff_matches_by_side_path() {
-        let changes = vec![
-            GlabChange {
-                old_path: "old_name.rs".into(),
-                new_path: "new_name.rs".into(),
-                new_file: false,
-                deleted_file: false,
-                diff: "@@ -1 +1 @@\n-a\n+b\n".into(),
-            },
-        ];
+        let changes = vec![GlabChange {
+            old_path: "old_name.rs".into(),
+            new_path: "new_name.rs".into(),
+            new_file: false,
+            deleted_file: false,
+            diff: "@@ -1 +1 @@\n-a\n+b\n".into(),
+        }];
         // New side matches on new_path; old side on old_path.
         assert!(gl_file_diff(&changes, "new_name.rs", "new").is_some());
         assert!(gl_file_diff(&changes, "old_name.rs", "old").is_some());
