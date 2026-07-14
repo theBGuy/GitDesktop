@@ -21,7 +21,6 @@ import { BranchDiffView } from "@/features/compare/BranchDiffView";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { PlanView } from "@/features/plan/PlanView";
 import { usePlanStore } from "@/features/plan/store";
-import { CreateLocalPrDialog } from "@/features/pulls/CreateLocalPrDialog";
 import { ResearchView } from "@/features/research/ResearchView";
 import { useResearchStore } from "@/features/research/store";
 import { TerminalDock } from "@/features/terminal/TerminalDock";
@@ -29,6 +28,7 @@ import { formatUsd } from "@/lib/ai/cost";
 import { openContainerShell } from "@/lib/ai/sandbox";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { usePrAuditByBranch } from "@/lib/pulls/audit";
+import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { ContainerLaunchPanel } from "./ContainerLaunchPanel";
 import { PrAuditChip } from "./PrAuditChip";
@@ -91,7 +91,7 @@ function SessionCanvas({
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmKeepEnsemble, setConfirmKeepEnsemble] = useState(false);
-  const [createPr, setCreatePr] = useState(false);
+  const openLocalPrCreate = useUiStore((s) => s.openLocalPrCreate);
   // Integrated terminal state + actions (dock visibility, launch, the container
   // port popover) live in their own hook.
   const {
@@ -170,7 +170,7 @@ function SessionCanvas({
   // Promote a kept session: open a local PR from its (finalized) branch. Gated on
   // `kept` so the branch is squashed/settled before it's proposed for merge.
   const doCreatePr = () => {
-    if (!blocked && kept) setCreatePr(true);
+    if (!blocked && kept) openLocalPrCreate({ defaultHead: session.branch });
   };
   const toggleView = () =>
     setSegment((s) => (s === "conversation" ? "changes" : "conversation"));
@@ -472,16 +472,6 @@ function SessionCanvas({
           </DialogFooter>
         </DialogContent>
       </Dialog>
-
-      {/* Promote a kept session into a local PR — head is its branch, base
-          defaults to the repo's default branch. The dialog navigates to the new
-          PR on success. */}
-      <CreateLocalPrDialog
-        repoPath={session.repoPath}
-        defaultHead={session.branch}
-        open={createPr}
-        onOpenChange={setCreatePr}
-      />
     </div>
   );
 }

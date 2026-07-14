@@ -25,6 +25,9 @@ import { toastError } from "@/lib/toast";
 import { useBranchPickerOptions } from "./useBranchPickerOptions";
 import { useGeneratePrDescription } from "./useGeneratePrDescription";
 
+// Rendered exactly ONCE, hoisted in RepositoryView — never render it inside a tab
+// panel. Its success handler's `setRepoTab("pulls")` would hide a panel host's
+// <Activity> subtree and defer the `onOpenChange(false)`, stranding the dialog open.
 export function CreateLocalPrDialog({
   repoPath,
   defaultBase,

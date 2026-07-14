@@ -34,7 +34,6 @@ import {
 import { useUiStore } from "@/lib/stores/ui";
 import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
-import { CreateLocalPrDialog } from "./CreateLocalPrDialog";
 import { CreatePrDialog } from "./CreatePrDialog";
 import { LocalPrContextMenu } from "./LocalPrContextMenu";
 import { useReconcileLocalPrs } from "./useReconcileLocalPrs";
@@ -77,7 +76,6 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   const selectPr = useUiStore((s) => s.selectPr);
   const prefetchPr = usePrefetchPr(repoPath);
   const hoverPrefetch = useHoverPrefetch();
-  const [createOpen, setCreateOpen] = useState(false);
   const [ghCreateOpen, setGhCreateOpen] = useState(false);
   const filterRef = useRef<HTMLInputElement>(null);
   const {
@@ -119,9 +117,10 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
         : "Connect this repository to GitHub to open a pull request here.";
   const pendingCreate = useUiStore((s) => s.pendingCreate);
   const clearPendingCreate = useUiStore((s) => s.clearPendingCreate);
+  const openLocalPrCreate = useUiStore((s) => s.openLocalPrCreate);
 
   useHotkeyAction("focus-filter", () => filterRef.current?.focus());
-  useHotkeyAction("create-local-pr", () => setCreateOpen(true));
+  useHotkeyAction("create-local-pr", () => openLocalPrCreate());
   useHotkeyAction("create-pr", () => setGhCreateOpen(true), canCreateGhPr);
 
   // Palette path for the row context menu's record-management actions: they act
@@ -169,10 +168,10 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
       if (canCreateGhPr) setGhCreateOpen(true);
       clearPendingCreate();
     } else if (pendingCreate === "local-pr") {
-      setCreateOpen(true);
+      openLocalPrCreate();
       clearPendingCreate();
     }
-  }, [pendingCreate, clearPendingCreate, canCreateGhPr]);
+  }, [pendingCreate, clearPendingCreate, canCreateGhPr, openLocalPrCreate]);
 
   const { localCollapsed, remoteCollapsed, toggleLocal, toggleRemote } =
     useCollapsedSections("pulls");
@@ -216,7 +215,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
         ghReason: ghCreateReason ?? undefined,
         onGh: () => setGhCreateOpen(true),
         localLabel: "Local pull request…",
-        onLocal: () => setCreateOpen(true),
+        onLocal: () => openLocalPrCreate(),
       }}
       filterSlot={
         <ConversationFilterPopover
@@ -362,12 +361,6 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
       localNoun="pull requests"
       remoteNoun={remoteNoun}
     >
-      <CreateLocalPrDialog
-        repoPath={repoPath}
-        open={createOpen}
-        onOpenChange={setCreateOpen}
-      />
-
       <CreatePrDialog
         repoPath={repoPath}
         open={ghCreateOpen}

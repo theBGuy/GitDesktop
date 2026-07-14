@@ -25,7 +25,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { CreateLocalPrDialog } from "@/features/pulls/CreateLocalPrDialog";
 import { CreatePrDialog } from "@/features/pulls/CreatePrDialog";
 import {
   forgeFeatureReady,
@@ -54,12 +53,12 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
   const setCompareBranch = useUiStore((s) => s.setCompareBranch);
   const compareCommitHash = useUiStore((s) => s.compareCommitHash);
   const selectCompareCommit = useUiStore((s) => s.selectCompareCommit);
+  const openLocalPrCreate = useUiStore((s) => s.openLocalPrCreate);
   const prefetchCommit = usePrefetchCommit(repoPath);
   const hoverPrefetch = useHoverPrefetch();
   const onHoverCommit = (hash: string) =>
     hoverPrefetch(() => prefetchCommit(hash));
   const [prOpen, setPrOpen] = useState(false);
-  const [localPrOpen, setLocalPrOpen] = useState(false);
 
   const currentName = status.data?.branch?.name ?? null;
   const detached = status.data?.branch?.detached ?? false;
@@ -107,7 +106,11 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
   );
   useHotkeyAction(
     "create-local-pr",
-    () => setLocalPrOpen(true),
+    () =>
+      openLocalPrCreate({
+        defaultHead: currentName ?? undefined,
+        defaultBase: compareBranch ?? undefined,
+      }),
     Boolean(compareBranch && compareBranch !== currentName && ahead.length > 0),
   );
 
@@ -259,7 +262,12 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
               size="sm"
               className="w-full"
               disabled={ahead.length === 0}
-              onClick={() => setLocalPrOpen(true)}
+              onClick={() =>
+                openLocalPrCreate({
+                  defaultHead: currentName,
+                  defaultBase: compareBranch,
+                })
+              }
             >
               <GitBranchIcon data-icon="inline-start" />
               Create local PR…
@@ -275,15 +283,6 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
           defaultHead={currentName}
           open={prOpen}
           onOpenChange={setPrOpen}
-        />
-      )}
-      {compareBranch && (
-        <CreateLocalPrDialog
-          repoPath={repoPath}
-          defaultBase={compareBranch}
-          defaultHead={currentName}
-          open={localPrOpen}
-          onOpenChange={setLocalPrOpen}
         />
       )}
 

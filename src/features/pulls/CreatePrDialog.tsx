@@ -127,6 +127,10 @@ export function CreatePrDialog({
           description: url,
           action: { label: "View", onClick: () => openUrl(url) },
         });
+        // This dialog is panel-hosted under <Activity>, so the success path must
+        // only close — never setRepoTab/selectPr (a hidden Activity subtree would
+        // defer the close and strand the dialog). Want navigation? Hoist it to
+        // RepositoryView first, like CreateLocalPrDialog.
         onOpenChange(false);
         triggerAutomations({
           kind: "pr-open",

@@ -90,6 +90,7 @@ const EMPTY_COMMIT_DRAFT: CommitDraft = {
  *  stay in lockstep. Staying in the same repo keeps the user's other selections. */
 const CROSS_REPO_RESET: Partial<UiState> = {
   compareBranch: null,
+  localPrCreate: null,
   selectedPr: null,
   pendingPrSection: null,
   selectedIssue: null,
@@ -166,6 +167,12 @@ interface UiState {
    *  opens its dialog when this matches its kind, then clears it. Survives the
    *  tab switch requestCreate performs. */
   pendingCreate: CreateKind | null;
+  /** The hoisted "create local PR" dialog: null = closed; an object = open, with
+   *  optional branch seeds. Lives at RepositoryView level (outside the tab
+   *  <Activity> wrappers) because its success handler navigates to the Pulls tab —
+   *  a panel-hosted instance would have its close deferred by the newly-hidden
+   *  Activity subtree and stick open. */
+  localPrCreate: { defaultHead?: string; defaultBase?: string } | null;
   /** Selected workflow run (databaseId) on the Actions tab. */
   selectedRunId: number | null;
   /** Selected tag (by name) on the Tags tab. */
@@ -233,6 +240,12 @@ interface UiState {
   /** Switch to the create's tab and flag its panel to open the dialog. */
   requestCreate: (kind: CreateKind) => void;
   clearPendingCreate: () => void;
+  /** Open the hoisted create-local-PR dialog, optionally seeding its branches. */
+  openLocalPrCreate: (seeds?: {
+    defaultHead?: string;
+    defaultBase?: string;
+  }) => void;
+  closeLocalPrCreate: () => void;
   selectRun: (id: number | null) => void;
   selectTag: (tag: { tag: string } | null) => void;
   selectFile: (file: SelectedFile | null) => void;
@@ -312,6 +325,7 @@ export const useUiStore = create<UiState>()((set, get) => {
     selectedDiscussion: null,
     pendingIssueDraft: null,
     pendingCreate: null,
+    localPrCreate: null,
     selectedRunId: null,
     selectedTag: null,
     selectedFile: null,
@@ -457,6 +471,8 @@ export const useUiStore = create<UiState>()((set, get) => {
     requestCreate: (kind) =>
       set({ repoTab: CREATE_TAB[kind], pendingCreate: kind }),
     clearPendingCreate: () => set({ pendingCreate: null }),
+    openLocalPrCreate: (seeds) => set({ localPrCreate: seeds ?? {} }),
+    closeLocalPrCreate: () => set({ localPrCreate: null }),
     selectRun: (id) => set({ selectedRunId: id }),
     selectTag: (tag) => set({ selectedTag: tag }),
     selectCommit: (hash) => set({ selectedCommitHash: hash }),

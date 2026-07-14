@@ -42,6 +42,7 @@ import { IssuesPanel } from "@/features/issues/IssuesPanel";
 import { JiraIssueView } from "@/features/issues/JiraIssueView";
 import { LocalIssueView } from "@/features/issues/LocalIssueView";
 import { RemoteIssueView } from "@/features/issues/RemoteIssueView";
+import { CreateLocalPrDialog } from "@/features/pulls/CreateLocalPrDialog";
 import { LocalPrView } from "@/features/pulls/LocalPrView";
 import { PullRequestsPanel } from "@/features/pulls/PullRequestsPanel";
 import { RemotePrView } from "@/features/pulls/RemotePrView";
@@ -129,6 +130,8 @@ export function RepositoryView() {
   const selectedDiscussion = useUiStore((s) => s.selectedDiscussion);
   const selectedRunId = useUiStore((s) => s.selectedRunId);
   const selectedTag = useUiStore((s) => s.selectedTag);
+  const localPrCreate = useUiStore((s) => s.localPrCreate);
+  const closeLocalPrCreate = useUiStore((s) => s.closeLocalPrCreate);
   // The detail panes run off deferred selections so rapidly arrowing a list
   // (commits, PRs) only loads + renders the item landed on, not every one
   // passed. The lists' own highlights use the live values, so they stay snappy.
@@ -508,6 +511,18 @@ export function RepositoryView() {
           }}
         />
       )}
+      {/* Hoisted: its success handler navigates to the Pulls tab, which hides whichever
+          tab launched it — a panel-hosted instance under <Activity> would have its
+          close deferred and stick open. One instance here serves every opener. */}
+      <CreateLocalPrDialog
+        repoPath={repoPath}
+        defaultHead={localPrCreate?.defaultHead}
+        defaultBase={localPrCreate?.defaultBase}
+        open={localPrCreate !== null}
+        onOpenChange={(o) => {
+          if (!o) closeLocalPrCreate();
+        }}
+      />
     </div>
   );
 }
