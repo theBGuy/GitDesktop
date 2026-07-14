@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+use tokio::sync::OnceCell;
 
 use crate::error::{AppError, AppResult};
 
@@ -33,6 +34,29 @@ impl GlabOutput {
     }
 }
 
+/// The resolved `glab` binary, memoized for the process lifetime.
+///
+/// A packaged GUI app on macOS doesn't inherit the user's shell PATH, so we
+/// resolve `glab` via `crate::agent::resolve_named` (PATH + known install dirs +
+/// a macOS login-shell fallback / the live Windows registry PATH) rather than a
+/// bare `Command::new("glab")`, which reads "not found" when launched from
+/// Finder/Dock. Cached exactly like the `git`/`gh` runners
+/// (`git::runner::git_bin`): the login-shell fallback isn't free, and only a
+/// *successful* resolution is cached, so a glab installed after launch is still
+/// picked up on the next call without a restart.
+static GLAB_BIN: OnceCell<PathBuf> = OnceCell::const_new();
+
+async fn glab_bin() -> AppResult<PathBuf> {
+    GLAB_BIN
+        .get_or_try_init(|| async {
+            crate::agent::resolve_named(&["glab"], None)
+                .await
+                .ok_or(AppError::GlabNotFound)
+        })
+        .await
+        .cloned()
+}
+
 /// Runs `glab` and returns raw output regardless of exit code. Only a missing
 /// `glab` binary or a timeout is an error here (mirrors `run_gh_raw`).
 pub async fn run_glab_raw(
@@ -40,14 +64,7 @@ pub async fn run_glab_raw(
     args: &[&str],
     timeout: Duration,
 ) -> AppResult<GlabOutput> {
-    // Resolve glab the way the agent CLIs + the About screen do (`resolve_named`:
-    // PATH + known install dirs + the live registry PATH on Windows). A bare
-    // `Command::new("glab")` only searches the app process's inherited PATH —
-    // which often lacks glab's installer dir even when it's on the user's registry
-    // PATH — so it reported "not found" while About showed glab installed.
-    let Some(glab) = crate::agent::resolve_named(&["glab"], None).await else {
-        return Err(AppError::GlabNotFound);
-    };
+    let glab = glab_bin().await?;
     let mut cmd = Command::new(&glab);
     cmd.args(args);
     if let Some(repo) = repo_path {
@@ -247,9 +264,7 @@ pub async fn run_glab_ex(
     envs: &[(&str, &str)],
     timeout: Duration,
 ) -> AppResult<GlabOutput> {
-    let Some(glab) = crate::agent::resolve_named(&["glab"], None).await else {
-        return Err(AppError::GlabNotFound);
-    };
+    let glab = glab_bin().await?;
     let mut cmd = Command::new(&glab);
     cmd.args(args);
     if let Some(repo) = repo_path {
