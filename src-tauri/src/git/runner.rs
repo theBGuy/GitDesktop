@@ -39,7 +39,16 @@ pub async fn run_git_raw_input(
     input: Option<&str>,
     timeout: Duration,
 ) -> AppResult<GitOutput> {
-    let mut cmd = Command::new("git");
+    // Resolve `git` the way the About screen does (`resolve_named`: PATH + known
+    // install dirs + a macOS login-shell fallback / the live Windows registry
+    // PATH). A packaged GUI app launched from Finder/Dock doesn't inherit the
+    // user's shell PATH, so a bare `Command::new("git")` misses a Homebrew-only
+    // git (no Xcode command-line tools at `/usr/bin/git`) — mirroring the gh and
+    // glab runners.
+    let Some(git) = crate::agent::resolve_named(&["git"], None).await else {
+        return Err(AppError::GitNotFound);
+    };
+    let mut cmd = Command::new(&git);
     cmd.args(["-c", "core.quotePath=false", "-c", "color.ui=false"]);
     cmd.args(args);
     if let Some(repo) = repo_path {

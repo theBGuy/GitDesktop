@@ -27,7 +27,17 @@ pub async fn run_gh_raw(
     args: &[&str],
     timeout: Duration,
 ) -> AppResult<GhOutput> {
-    let mut cmd = Command::new("gh");
+    // Resolve `gh` the way the About screen and the glab runner do
+    // (`resolve_named`: PATH + known install dirs + a macOS login-shell fallback /
+    // the live Windows registry PATH). A packaged GUI app launched from Finder,
+    // the Dock, or a desktop launcher does NOT inherit the user's shell PATH, so a
+    // bare `Command::new("gh")` misses a Homebrew-installed gh (`/opt/homebrew/bin`)
+    // — which is why every gh-backed surface read "not found" while About, which
+    // uses resolve_named, showed gh installed.
+    let Some(gh) = crate::agent::resolve_named(&["gh"], None).await else {
+        return Err(AppError::GhNotFound);
+    };
+    let mut cmd = Command::new(&gh);
     cmd.args(args);
     if let Some(repo) = repo_path {
         cmd.current_dir(repo);
@@ -92,7 +102,12 @@ pub async fn run_gh_input(
 ) -> AppResult<GhOutput> {
     use tokio::io::AsyncWriteExt;
 
-    let mut cmd = Command::new("gh");
+    // Resolve `gh` via `resolve_named` (see `run_gh_raw` for why a bare
+    // `Command::new("gh")` fails in a packaged GUI app on macOS).
+    let Some(gh) = crate::agent::resolve_named(&["gh"], None).await else {
+        return Err(AppError::GhNotFound);
+    };
+    let mut cmd = Command::new(&gh);
     cmd.args(args);
     if let Some(repo) = repo_path {
         cmd.current_dir(repo);
