@@ -17,6 +17,7 @@ import { GitMissingScreen } from "@/features/welcome/GitMissingScreen";
 import { useRepoDrop } from "@/features/welcome/useRepoDrop";
 import { WelcomeScreen } from "@/features/welcome/WelcomeScreen";
 import { syncAnalytics, track } from "@/lib/analytics";
+import { useBackgroundPrSync } from "@/lib/automations/useBackgroundPrSync";
 import { useGitInstalled } from "@/lib/git/queries";
 import { useHotkeyAction, useHotkeysListener } from "@/lib/hotkeys/hotkeys";
 import { reloadLocalPrs } from "@/lib/pulls/local";
@@ -107,6 +108,12 @@ function App() {
 
   // Drop a repo folder anywhere on the window to open it.
   useRepoDrop();
+
+  // Keep pr-sync (auto re-review) automations firing for recent repos that
+  // AREN'T the one currently open — the active repo's own poller covers it, but
+  // this catches pushes to repos you've switched away from. Always mounted (any
+  // view, welcome included); no-op unless a recent repo carries a pr-sync rule.
+  useBackgroundPrSync();
 
   // The app-wide hotkey dispatcher plus the always-available actions.
   useHotkeysListener();
