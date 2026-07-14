@@ -264,8 +264,8 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
               disabled={ahead.length === 0}
               onClick={() =>
                 openLocalPrCreate({
-                  defaultHead: currentName,
-                  defaultBase: compareBranch,
+                  defaultHead: currentName ?? undefined,
+                  defaultBase: compareBranch ?? undefined,
                 })
               }
             >
