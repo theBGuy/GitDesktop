@@ -1,7 +1,9 @@
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
 use tokio::process::Command;
+use tokio::sync::OnceCell;
 
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -19,6 +21,35 @@ impl GitOutput {
     pub fn stdout_lossy(&self) -> String {
         String::from_utf8_lossy(&self.stdout).into_owned()
     }
+}
+
+/// The resolved `git` binary, memoized for the process lifetime.
+///
+/// `run_git_raw_input` is the base of the whole git call stack (status, diffs,
+/// history, staging — all firing continuously as the user works), and a packaged
+/// GUI app on macOS doesn't inherit the user's shell PATH. So we resolve `git`
+/// the way the About screen does (`crate::agent::resolve_named`: PATH + known
+/// install dirs + a macOS login-shell fallback / the live Windows registry PATH)
+/// rather than a bare `Command::new("git")`, which finds nothing when the app is
+/// launched from Finder/Dock.
+///
+/// The result is cached because resolving isn't free: the login-shell fallback
+/// (for a git install outside `candidate_dirs()`, e.g. MacPorts `/opt/local/bin`)
+/// spawns `$SHELL -lic` with a 20s timeout, and re-running it on every git call
+/// would serialize the whole app behind it. Only a *successful* resolution is
+/// cached — `get_or_try_init` leaves the cell empty on error — so a git installed
+/// after launch is still picked up on the next call without a restart.
+static GIT_BIN: OnceCell<PathBuf> = OnceCell::const_new();
+
+async fn git_bin() -> AppResult<PathBuf> {
+    GIT_BIN
+        .get_or_try_init(|| async {
+            crate::agent::resolve_named(&["git"], None)
+                .await
+                .ok_or(AppError::GitNotFound)
+        })
+        .await
+        .cloned()
 }
 
 /// Runs git and returns the raw output regardless of exit code.
@@ -39,15 +70,7 @@ pub async fn run_git_raw_input(
     input: Option<&str>,
     timeout: Duration,
 ) -> AppResult<GitOutput> {
-    // Resolve `git` the way the About screen does (`resolve_named`: PATH + known
-    // install dirs + a macOS login-shell fallback / the live Windows registry
-    // PATH). A packaged GUI app launched from Finder/Dock doesn't inherit the
-    // user's shell PATH, so a bare `Command::new("git")` misses a Homebrew-only
-    // git (no Xcode command-line tools at `/usr/bin/git`) — mirroring the gh and
-    // glab runners.
-    let Some(git) = crate::agent::resolve_named(&["git"], None).await else {
-        return Err(AppError::GitNotFound);
-    };
+    let git = git_bin().await?;
     let mut cmd = Command::new(&git);
     cmd.args(["-c", "core.quotePath=false", "-c", "color.ui=false"]);
     cmd.args(args);
@@ -68,6 +91,9 @@ pub async fn run_git_raw_input(
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     cmd.kill_on_drop(true);
 
+    // `git_bin()` already confirmed the binary exists, so a spawn-time NotFound
+    // means the memoized path went stale mid-session (git moved/removed) — still
+    // "git not found" to the user; anything else is a genuine I/O error.
     let spawn_err = |e: std::io::Error| {
         if e.kind() == std::io::ErrorKind::NotFound {
             AppError::GitNotFound

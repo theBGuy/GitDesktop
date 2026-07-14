@@ -7,13 +7,13 @@ pub enum AppError {
     Git { code: i32, stderr: String },
     #[error("not a git repository: {0}")]
     NotARepo(String),
-    #[error("git executable not found on PATH")]
+    #[error("git executable not found")]
     GitNotFound,
-    #[error("GitHub CLI (gh) not found on PATH")]
+    #[error("GitHub CLI (gh) not found")]
     GhNotFound,
     #[error("{0}")]
     Gh(String),
-    #[error("GitLab CLI (glab) not found on PATH")]
+    #[error("GitLab CLI (glab) not found")]
     GlabNotFound,
     #[error("{0}")]
     Glab(String),

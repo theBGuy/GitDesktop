@@ -1,7 +1,9 @@
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
 use tokio::process::Command;
+use tokio::sync::OnceCell;
 
 use crate::error::{AppError, AppResult};
 
@@ -20,6 +22,30 @@ impl GhOutput {
     }
 }
 
+/// The resolved `gh` binary, memoized for the process lifetime.
+///
+/// A packaged GUI app on macOS doesn't inherit the user's shell PATH, so we
+/// resolve `gh` the way the About screen does (`crate::agent::resolve_named`:
+/// PATH + known install dirs + a macOS login-shell fallback / the live Windows
+/// registry PATH) rather than a bare `Command::new("gh")`, which reads "not
+/// found" when launched from Finder/Dock — the reason every gh-backed surface
+/// failed while About showed gh installed. Cached like `git` (see
+/// `git::runner::git_bin`): the login-shell fallback isn't free, and only a
+/// *successful* resolution is cached, so a gh installed after launch is still
+/// picked up on the next call.
+static GH_BIN: OnceCell<PathBuf> = OnceCell::const_new();
+
+async fn gh_bin() -> AppResult<PathBuf> {
+    GH_BIN
+        .get_or_try_init(|| async {
+            crate::agent::resolve_named(&["gh"], None)
+                .await
+                .ok_or(AppError::GhNotFound)
+        })
+        .await
+        .cloned()
+}
+
 /// Runs the GitHub CLI and returns raw output regardless of exit code. Only a
 /// missing `gh` binary or a timeout is an error here.
 pub async fn run_gh_raw(
@@ -27,16 +53,7 @@ pub async fn run_gh_raw(
     args: &[&str],
     timeout: Duration,
 ) -> AppResult<GhOutput> {
-    // Resolve `gh` the way the About screen and the glab runner do
-    // (`resolve_named`: PATH + known install dirs + a macOS login-shell fallback /
-    // the live Windows registry PATH). A packaged GUI app launched from Finder,
-    // the Dock, or a desktop launcher does NOT inherit the user's shell PATH, so a
-    // bare `Command::new("gh")` misses a Homebrew-installed gh (`/opt/homebrew/bin`)
-    // — which is why every gh-backed surface read "not found" while About, which
-    // uses resolve_named, showed gh installed.
-    let Some(gh) = crate::agent::resolve_named(&["gh"], None).await else {
-        return Err(AppError::GhNotFound);
-    };
+    let gh = gh_bin().await?;
     let mut cmd = Command::new(&gh);
     cmd.args(args);
     if let Some(repo) = repo_path {
@@ -102,11 +119,7 @@ pub async fn run_gh_input(
 ) -> AppResult<GhOutput> {
     use tokio::io::AsyncWriteExt;
 
-    // Resolve `gh` via `resolve_named` (see `run_gh_raw` for why a bare
-    // `Command::new("gh")` fails in a packaged GUI app on macOS).
-    let Some(gh) = crate::agent::resolve_named(&["gh"], None).await else {
-        return Err(AppError::GhNotFound);
-    };
+    let gh = gh_bin().await?;
     let mut cmd = Command::new(&gh);
     cmd.args(args);
     if let Some(repo) = repo_path {
