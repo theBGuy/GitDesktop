@@ -425,6 +425,8 @@ export function persistRepoOwners(
     // Index the incoming probes by the repo IDENTITY of their path, and resolve
     // each existing row's identity too, so a row matches an entry for a sibling
     // worktree of the same repo (not just the exact checkout that was probed).
+    // repoIdentity is promise-memoized per path, so the per-row fan-out costs
+    // one IPC round per path per session, not per probe.
     const byIdentity = new Map(
       await Promise.all(
         owners.map(async (o) => [await repoIdentity(o.path), o] as const),
@@ -491,6 +493,7 @@ export function persistRepoVisibility(
   if (entries.length === 0) return Promise.resolve();
   return serializedRecentRepoWrite(async () => {
     const settings = await loadSettings();
+    // Identity lookups are promise-memoized per path (see persistRepoOwners).
     const byIdentity = new Map(
       await Promise.all(
         entries.map(async (e) => [await repoIdentity(e.path), e] as const),
