@@ -125,9 +125,8 @@ pub struct CommitAuthorAvatar {
 /// PR parses reuse — don't touch that type).
 #[derive(Deserialize)]
 struct GhCommitsListAuthor {
-    #[serde(default)]
-    #[allow(dead_code)]
-    login: String,
+    // Only `avatar_url` is consumed; the account's `login` is deliberately not
+    // deserialized (serde ignores unknown JSON fields).
     #[serde(default)]
     avatar_url: String,
 }
@@ -210,9 +209,13 @@ pub async fn gh_commit_author_avatars(repo_path: String) -> AppResult<Vec<Commit
     // Pin the origin slug: `gh api`'s `{owner}/{repo}` placeholders auto-resolve
     // to the PARENT on a fork with an `upstream` remote, so build the literal
     // `repos/<slug>` path to keep this on the user's own fork (precedent:
-    // `gh_rulesets_list`). `gh_origin_slug` errors on an unparseable origin
-    // rather than passing garbage, so `?` here can only fail closed.
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    // `gh_rulesets_list`). An unparseable/missing origin resolves to the empty
+    // list — every OTHER gh_origin_slug caller is a user-initiated command where
+    // propagating is right; this one is a decoration bound by the "never errors"
+    // contract above.
+    let Ok(slug) = crate::github::gh_origin_slug(&repo_path).await else {
+        return Ok(Vec::new());
+    };
     // One non-paginated call — intentionally NOT `--paginate`: this is a partial
     // decoration, not the exhaustive completion `gh_pr_commits_paginated` does.
     let out = match run_gh(

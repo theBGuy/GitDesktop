@@ -325,6 +325,10 @@ export function McpServerDialog({
                   disables Save. Gated on a PARSEABLE host (so a half-typed
                   "http://" shows nothing, not an empty note) that isn't already
                   allowed; empty/allowlisted/local URLs show nothing. */}
+              {/* The outer guard duplicates HostAllowNote's internal checks ON
+                  PURPOSE: with `defaultNote={null}` the component's all-clear
+                  branch would render an empty <p>, so it must never mount for a
+                  parseable-and-allowed (or unparseable mid-typing) URL. */}
               {normalizeHost(draft.url) &&
                 !isHostAllowed(draft.url, allowedHosts) && (
                   <HostAllowNote

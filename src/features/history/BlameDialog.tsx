@@ -103,7 +103,14 @@ export function BlameDialog({
             resolves (max-h would leave it unbounded → 0). */}
         <div
           ref={setScrollEl}
-          role="list"
+          // List semantics only while listitem rows are actually rendered — the
+          // pending/error/empty branches would otherwise sit as non-listitem
+          // children of a role="list" (an invalid a11y tree).
+          role={
+            !blame.isPending && !blame.isError && lines.length > 0
+              ? "list"
+              : undefined
+          }
           aria-label={`Blame for ${name}`}
           className="min-h-0 flex-1 overflow-auto border"
         >
