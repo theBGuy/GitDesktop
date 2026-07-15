@@ -179,6 +179,10 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
 
   // Hotkeys mirror the buttons' disabled states exactly.
   useHotkeyAction("fetch", () => doFetch(false), !noOrigin && !busy);
+  // Pull needs no explicit `!detached` term: `hasUpstream` is already false on a
+  // detached HEAD (the backend leaves `head.upstream` null, mirroring git's "no
+  // upstream for a detached HEAD"), so this hotkey and the Pull button below are
+  // disabled there for free — unlike Push, which has no upstream precondition.
   useHotkeyAction(
     "pull",
     () => doPull("ffOnly"),
