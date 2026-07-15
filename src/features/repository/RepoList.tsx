@@ -353,7 +353,9 @@ export function RepoList({
           placeholder="Filter repositories"
           aria-label="Filter repositories"
           role="combobox"
-          aria-expanded={visible.length > 0}
+          // The listbox is always rendered (the empty state lives inside it), and
+          // aria-expanded reflects popup visibility, not result count.
+          aria-expanded={true}
           aria-controls={REPO_LISTBOX_ID}
           aria-autocomplete="list"
           aria-activedescendant={

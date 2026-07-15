@@ -117,6 +117,10 @@ export function McpServerDialog({
   // The Select's value must equal an option value. A draft scoped to the current
   // repo under a legacy raw path (curScope) won't equal the canonical "This repo"
   // option value (the identity); normalize to it so the option stays selected.
+  // The `?? curScope` arm is type-level only: `scopedToThisRepo` implies repoKeys
+  // is non-empty, so `thisRepoKey` is non-null here — the fallback is unreachable
+  // at runtime, but TS can't narrow `thisRepoKey` across the `scopedToThisRepo`
+  // check, so removing it fails the null check.
   const selectedScope = scopedToThisRepo ? (thisRepoKey ?? curScope) : curScope;
 
   // Reconstruct a candidate server from the live draft + rows for validation.

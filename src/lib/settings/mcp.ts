@@ -27,7 +27,7 @@ export type RepoKeys = readonly string[];
 /** The override/scope value that wins for `repoKeys`, preferring the LATER key
  *  (the resolved identity) over an earlier one (the raw path) so a folded
  *  identity entry beats a stale legacy one. */
-function pickForRepo<T>(
+export function pickForRepo<T>(
   byKey: Record<string, T> | undefined,
   repoKeys: RepoKeys,
 ): T | undefined {

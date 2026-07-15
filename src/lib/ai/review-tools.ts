@@ -57,7 +57,12 @@ function capHunkLines(hunk: string, maxLines: number): string {
  *  strip would eat those load-bearing `false`s.
  *
  *  KEEP IN SYNC: src-tauri/src/mcp_server/read_forge.rs
- *  (`strip_empty_comment_defaults`) mirrors this drop-list character-for-character. */
+ *  (`strip_empty_comment_defaults`) mirrors this drop-list character-for-character.
+ *
+ *  INVARIANT: the param is deliberately `object`, not `<T extends Record<string,
+ *  unknown>>`. Callers pass interface types (`PrThreadOut` etc.) that have no index
+ *  signature and so do not extend `Record<string, unknown>`; the generic form fails
+ *  tsc. */
 function stripEmptyCommentDefaults(obj: object): Record<string, unknown> {
   const out: Record<string, unknown> = { ...obj };
   // (key, empty-default) pairs — remove the key only on an exact match.

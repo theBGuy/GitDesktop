@@ -75,6 +75,11 @@ export const McpServersSection = withForm({
     }
 
     async function saveServer(server: McpServer) {
+      // Close optimistically FIRST: foldServerScopeKeys' cold repoIdentity IPC
+      // call would otherwise visibly delay the dialog closing. It never rejects,
+      // and the write below composes via the functional setter, so closing before
+      // the await is safe.
+      setEditing(null);
       // Fold the dialog's scope/override keys onto the repo IDENTITY before
       // storing: the dialog's "This repo" option carries the raw checkout path,
       // and folding here (rather than editing the dialog) is what makes a
@@ -89,7 +94,6 @@ export const McpServersSection = withForm({
           ? cur.map((s) => (s.id === folded.id ? folded : s))
           : [...cur, folded];
       });
-      setEditing(null);
     }
 
     function removeServer(server: McpServer) {
@@ -308,9 +312,10 @@ export const McpServersSection = withForm({
                         {isGlobal && repoPath && repoScopeKey ? (
                           <PerRepoStateControl
                             server={server}
-                            // Read the override under the identity key (where writes
-                            // land); the write resolves identity from repoPath itself.
-                            repoPath={repoScopeKey}
+                            // Read the override across ALL the repo's keys (raw path
+                            // AND identity) so a legacy raw-path override still shows;
+                            // the write resolves identity from repoPath itself.
+                            repoKeys={repoKeys}
                             disabled={incomplete}
                             onChange={(state) =>
                               void setRepoOverride(server, repoPath, state)

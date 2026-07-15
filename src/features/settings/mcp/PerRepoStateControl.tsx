@@ -6,24 +6,37 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import type { McpServer } from "@/lib/settings/api";
-import type { McpRepoState } from "@/lib/settings/mcp";
+import {
+  type McpRepoState,
+  pickForRepo,
+  type RepoKeys,
+} from "@/lib/settings/mcp";
 
 /** Per-repo state picker for a GLOBAL server, shown on its row when a repo is
  *  open: On (available + default-on) / Optional (available, off by default) /
  *  Off (not offered here), or "Default" to follow the global Enabled. Muted
- *  while inheriting; solid once this repo overrides it. */
+ *  while inheriting; solid once this repo overrides it.
+ *
+ *  The override lookup spans ALL of the repo's keys (raw checkout path AND the
+ *  worktree-stable identity) via `pickForRepo`, so a pre-identity-keying override
+ *  stored under the legacy raw path still displays correctly during the migration
+ *  window — an exact-identity-only lookup would show "Default" for a legacy
+ *  override that `effectiveMcpState` still honors, inviting the user to
+ *  unknowingly overwrite it. `pickForRepo`'s last-hit-wins order means the
+ *  identity key (last in `repoKeys`) beats a legacy raw-path override — the
+ *  wanted preference. */
 export function PerRepoStateControl({
   server,
-  repoPath,
+  repoKeys,
   disabled,
   onChange,
 }: {
   server: McpServer;
-  repoPath: string;
+  repoKeys: RepoKeys;
   disabled?: boolean;
   onChange: (state: McpRepoState | null) => void;
 }) {
-  const override = server.repoOverrides?.[repoPath];
+  const override = pickForRepo(server.repoOverrides, repoKeys);
   const baseline = server.enabled ? "On" : "Optional";
   return (
     <Select
