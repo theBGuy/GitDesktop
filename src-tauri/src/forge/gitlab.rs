@@ -1099,6 +1099,11 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
             })
             .collect(),
         completed_reviewers,
+        // Repository-level merge-method gating is a GitHub-only concept here; the
+        // fields are honestly "unknown" for GitLab (the picker never gates on `None`).
+        merge_commit_allowed: None,
+        squash_merge_allowed: None,
+        rebase_merge_allowed: None,
     })
 }
 

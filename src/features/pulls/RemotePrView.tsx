@@ -114,6 +114,7 @@ import {
   type ApprovalState,
   type ForgeProvider,
   type ForgeUserRef,
+  type PrDetails,
   type PrThreadOut,
   providerLabel,
   type ReviewThreadOut,
@@ -166,6 +167,24 @@ const MERGE_LABEL: Record<MergeStrategy, string> = {
   rebase: "Rebase and merge",
   fast_forward: "Fast-forward",
 };
+
+/** Whether a GitHub merge method is disabled by the repository's server-side merge
+ *  settings (allow merge commit / squash / rebase). Only an explicit `false` gates —
+ *  `null`/`undefined` is "unknown" (fetch failed, or a non-GitHub provider) and is
+ *  treated as NOT disabled, so the picker behaves exactly as before when unknown.
+ *  Fast-forward is a Bitbucket-only method with no GitHub server toggle, so it's
+ *  never server-disabled here. */
+function isServerMergeDisabled(pr: PrDetails, s: MergeStrategy): boolean {
+  const flag =
+    s === "merge"
+      ? pr.mergeCommitAllowed
+      : s === "squash"
+        ? pr.squashMergeAllowed
+        : s === "rebase"
+          ? pr.rebaseMergeAllowed
+          : null;
+  return flag === false;
+}
 
 export function RemotePrView({
   repoPath,
@@ -637,6 +656,22 @@ export function RemotePrView({
   // we can't guard — so for GitLab we disable Merge rather than merge unguarded on an
   // irreversible op; reloading refetches the head. (GitHub has no guard, so it's exempt.)
   const mergeGuardMissing = provider === "gitlab" && pr?.commits.length === 0;
+
+  // GitHub-only: when the server ∩ branch-rule intersection is empty — every one of
+  // the three GitHub merge methods is disabled either in the repo's settings or by a
+  // GitDesktop branch rule — opening a menu of all-disabled items is useless, so the
+  // Merge trigger itself is disabled with an explanation. `null`/`unknown` server
+  // flags never count as disabled, so a failed settings fetch can never trip this
+  // (behaviour stays exactly as today). GitLab/Bitbucket gate their methods elsewhere.
+  const allMergeMethodsBlocked =
+    pr != null &&
+    provider !== "gitlab" &&
+    provider !== "bitbucket" &&
+    (["merge", "squash", "rebase"] as const).every(
+      (s) =>
+        isServerMergeDisabled(pr, s) ||
+        !isMergeMethodAllowed(rulesConfig, pr.baseRefName, s),
+    );
 
   // Auto-merge derived state (GitLab-only). The arm affordance shows only while the
   // head pipeline is in flight; the footer indicator shows once armed. Both classify
@@ -1883,23 +1918,38 @@ export function RemotePrView({
           )}
           {canMerge && (
             <DropdownMenu>
+              {/* A natively-disabled Button swallows `title`, so the hint rides a
+                  wrapping span (same idiom as the "Checked out" button above and
+                  documented in DangerZone.tsx). Existing disabled causes (draft,
+                  merge-guard) keep their exact reasons; the all-methods-blocked cause
+                  adds its own only when it's the blocker. */}
               <DropdownMenuTrigger
                 render={
-                  <Button
-                    size="sm"
-                    disabled={busy || pr.isDraft || mergeGuardMissing}
+                  <span
                     title={
                       pr.isDraft
                         ? `Mark the ${prNoun} ready before merging`
                         : mergeGuardMissing
                           ? "Reload to merge — couldn't load the head commit to guard the merge"
-                          : `Merge this ${prNoun}`
+                          : allMergeMethodsBlocked
+                            ? "No merge method is enabled by both this repository's settings and its branch rules"
+                            : `Merge this ${prNoun}`
                     }
                   >
-                    <GitMergeIcon data-icon="inline-start" />
-                    Merge
-                    <CaretDownIcon data-icon="inline-end" />
-                  </Button>
+                    <Button
+                      size="sm"
+                      disabled={
+                        busy ||
+                        pr.isDraft ||
+                        mergeGuardMissing ||
+                        allMergeMethodsBlocked
+                      }
+                    >
+                      <GitMergeIcon data-icon="inline-start" />
+                      Merge
+                      <CaretDownIcon data-icon="inline-end" />
+                    </Button>
+                  </span>
                 }
               />
               <DropdownMenuContent align="end" className="w-56">
@@ -1913,14 +1963,22 @@ export function RemotePrView({
                     ? (["merge", "squash", "fast_forward"] as const)
                     : (["merge", "squash", "rebase"] as const)
                 ).map((s) => {
-                  const blocked =
+                  const isGitHub =
                     provider !== "gitlab" &&
                     provider !== "bitbucket" &&
                     // Bitbucket's "fast_forward" isn't a GitHub MergeMethod and
                     // never reaches this arm (bitbucket is excluded above) — the
-                    // narrowing also keeps `s` a valid MergeMethod for the check.
-                    s !== "fast_forward" &&
+                    // narrowing also keeps `s` a valid MergeMethod for the checks.
+                    s !== "fast_forward";
+                  // Repository-level server setting (allow merge/squash/rebase). Only
+                  // an explicit `false` disables — `null`/`undefined` is "unknown" and
+                  // never gates (behaviour then matches today's, GitLab/BB included).
+                  const serverDisabled =
+                    isGitHub && isServerMergeDisabled(pr, s);
+                  const locallyBlocked =
+                    isGitHub &&
                     !isMergeMethodAllowed(rulesConfig, pr.baseRefName, s);
+                  const blocked = serverDisabled || locallyBlocked;
                   return (
                     <DropdownMenuItem
                       key={s}
@@ -1933,7 +1991,9 @@ export function RemotePrView({
                       }}
                     >
                       {MERGE_LABEL[s]}
-                      {blocked && " — blocked by branch rule"}
+                      {serverDisabled
+                        ? " — disabled in repository settings"
+                        : locallyBlocked && " — blocked by branch rule"}
                     </DropdownMenuItem>
                   );
                 })}

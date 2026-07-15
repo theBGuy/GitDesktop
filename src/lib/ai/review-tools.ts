@@ -49,6 +49,27 @@ function capHunkLines(hunk: string, maxLines: number): string {
   return `…[hunk truncated]\n${lines.slice(lines.length - maxLines).join("\n")}`;
 }
 
+/** Drop the always-default empty fields from one comment/thread object,
+ *  returning a shallow copy without them. Removes a key ONLY when it holds its
+ *  empty default; every other key (load-bearing `false`s like
+ *  `isResolved`/`viewerDidAuthor`, and the `id` write tools consume even when
+ *  empty) is kept. Explicit per-key list on purpose — a generic "remove falsy"
+ *  strip would eat those load-bearing `false`s.
+ *
+ *  KEEP IN SYNC: src-tauri/src/mcp_server/read_forge.rs
+ *  (`strip_empty_comment_defaults`) mirrors this drop-list character-for-character. */
+function stripEmptyCommentDefaults(obj: object): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...obj };
+  // (key, empty-default) pairs — remove the key only on an exact match.
+  if (out.authorAvatarUrl === "") delete out.authorAvatarUrl;
+  if (out.state === "") delete out.state;
+  if (out.url === "") delete out.url;
+  if (out.minimizedReason === "") delete out.minimizedReason;
+  if (out.isMinimized === false) delete out.isMinimized;
+  if (out.reviewId === "") delete out.reviewId;
+  return out;
+}
+
 /** One line prepended to every forge tool's output so the model treats the
  *  third-party content strictly as data (parity with the MCP server's framing). */
 const UNTRUSTED_PREFIX =
@@ -351,13 +372,22 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
               : "",
           }));
           // KEEP IN SYNC: src-tauri/src/mcp_server/read_forge.rs (the
-          // list_pull_request_comments MCP tool) composes the same shape (and
-          // the diffHunk cap).
+          // list_pull_request_comments MCP tool) composes the same shape — the
+          // diffHunk cap AND the empty-field pruning below.
+          // Prune always-default empty fields from every comment/thread object
+          // so agent consumers (this same JSON feeds the AI review) don't pay
+          // tokens for e.g. `authorAvatarUrl:""` or `isMinimized:false`.
           const composed = {
             number: prNumber,
-            comments: pr.comments,
-            reviews: pr.reviews,
-            review_threads: cappedThreads,
+            comments: pr.comments.map(stripEmptyCommentDefaults),
+            reviews: pr.reviews.map(stripEmptyCommentDefaults),
+            review_threads: cappedThreads.map((t) => {
+              const pruned = stripEmptyCommentDefaults(t);
+              if (Array.isArray(t.comments)) {
+                pruned.comments = t.comments.map(stripEmptyCommentDefaults);
+              }
+              return pruned;
+            }),
           };
           return (
             UNTRUSTED_PREFIX +

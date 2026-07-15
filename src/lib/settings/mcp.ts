@@ -1,3 +1,4 @@
+import { repoIdentity } from "@/lib/git/repo-identity";
 import type { McpKeyValue, McpServer } from "./api";
 
 /** Server name = the key in the generated MCP config: letters/digits/`-`/`_`,
@@ -14,53 +15,140 @@ export function serverScope(server: McpServer): string {
   return s ? s : MCP_SCOPE_GLOBAL;
 }
 
-/** Whether a server is in SCOPE for `repoPath` (ignores per-repo on/off):
- *  global servers always are; a repo-scoped server only in its own repo. */
-export function isServerInScope(
-  server: McpServer,
-  repoPath: string | null,
-): boolean {
-  const scope = serverScope(server);
-  return scope === MCP_SCOPE_GLOBAL || scope === repoPath;
+/** The scope / override keys that identify "the current repo", most-preferred
+ *  LAST. A worktree-stable identity key ({@link repoIdentity}) and the raw
+ *  checkout path both appear so scope/override lookups match a value stored under
+ *  either — new writes land under the identity key, legacy ones under the raw
+ *  path stay honored (read-both). Callers build this via `useRepoKeys`
+ *  (queries.ts); pass `[repoPath]` while the identity is still resolving (exactly
+ *  today's raw-path behavior), and `[]` when no repo is open. */
+export type RepoKeys = readonly string[];
+
+/** The override/scope value that wins for `repoKeys`, preferring the LATER key
+ *  (the resolved identity) over an earlier one (the raw path) so a folded
+ *  identity entry beats a stale legacy one. */
+function pickForRepo<T>(
+  byKey: Record<string, T> | undefined,
+  repoKeys: RepoKeys,
+): T | undefined {
+  if (!byKey) return undefined;
+  let hit: T | undefined;
+  for (const k of repoKeys) {
+    const v = byKey[k];
+    if (v !== undefined) hit = v;
+  }
+  return hit;
 }
 
-/** A server's resolved state in `repoPath`: "on" (available + default-on),
- *  "optional" (available, off by default), or "off" (not offered). A global
- *  server can be overridden per repo (`repoOverrides`); otherwise — and always
- *  for repo-scoped servers — it follows `enabled` (on / optional). */
+/** Whether a server is in SCOPE for `repoKeys` (ignores per-repo on/off):
+ *  global servers always are; a repo-scoped server only when its scope matches
+ *  one of the repo's keys (identity or raw checkout path). */
+export function isServerInScope(
+  server: McpServer,
+  repoKeys: RepoKeys,
+): boolean {
+  const scope = serverScope(server);
+  return scope === MCP_SCOPE_GLOBAL || repoKeys.includes(scope);
+}
+
+/** A server's resolved state in the repo named by `repoKeys`: "on" (available +
+ *  default-on), "optional" (available, off by default), or "off" (not offered).
+ *  A global server can be overridden per repo (`repoOverrides`, keyed by identity
+ *  or a legacy raw path); otherwise — and always for repo-scoped servers — it
+ *  follows `enabled` (on / optional). */
 export type McpRepoState = "on" | "optional" | "off";
 export function effectiveMcpState(
   server: McpServer,
-  repoPath: string | null,
+  repoKeys: RepoKeys,
 ): McpRepoState {
-  if (repoPath && serverScope(server) === MCP_SCOPE_GLOBAL) {
-    const override = server.repoOverrides?.[repoPath];
+  if (repoKeys.length > 0 && serverScope(server) === MCP_SCOPE_GLOBAL) {
+    const override = pickForRepo(server.repoOverrides, repoKeys);
     if (override) return override;
   }
   return server.enabled ? "on" : "optional";
 }
 
-/** Whether a server is OFFERED to sessions in `repoPath` (in scope and not
- *  per-repo "off"). The composer picker + resume both use this. */
+/** Whether a server is OFFERED to sessions in the repo named by `repoKeys` (in
+ *  scope and not per-repo "off"). The composer picker + resume both use this. */
 export function isServerAvailable(
   server: McpServer,
-  repoPath: string | null,
+  repoKeys: RepoKeys,
 ): boolean {
   return (
-    isServerInScope(server, repoPath) &&
-    effectiveMcpState(server, repoPath) !== "off"
+    isServerInScope(server, repoKeys) &&
+    effectiveMcpState(server, repoKeys) !== "off"
   );
 }
 
-/** Whether a server is pre-selected by default for a new session in `repoPath`. */
+/** Whether a server is pre-selected by default for a new session in the repo
+ *  named by `repoKeys`. */
 export function isServerDefaultOn(
   server: McpServer,
-  repoPath: string | null,
+  repoKeys: RepoKeys,
 ): boolean {
   return (
-    isServerAvailable(server, repoPath) &&
-    effectiveMcpState(server, repoPath) === "on"
+    isServerAvailable(server, repoKeys) &&
+    effectiveMcpState(server, repoKeys) === "on"
   );
+}
+
+/** A repo-scope key rendered for humans: strip a trailing `.git` common-dir
+ *  segment (the identity key is `<repo>/.git`) so the label shows the containing
+ *  repo folder, not a bare `.git`. Global stays "global"; a raw legacy path (no
+ *  `.git` suffix) is returned unchanged. The STORED value is never altered — this
+ *  is display-only. */
+export function scopeRepoPath(scope: string): string {
+  return scope.replace(/[/\\]\.git\/?$/, "");
+}
+
+/** Fold a written server's LEGACY raw-path scope/override keys onto the repo's
+ *  worktree-stable identity key, so a value set from one checkout is honored from
+ *  a sibling worktree. Resolves {@link repoIdentity} for `scope` (when repo-scoped)
+ *  and for each `repoOverrides` key; rewrites each under its identity, and where a
+ *  value already exists under the identity key that value WINS (conservative
+ *  merge). A key that already IS its identity (or whose git can't be resolved, so
+ *  identity === the raw key) folds to a no-op. Call at write time (dialog save /
+ *  override toggle) on the single server being written — never a global sweep, so
+ *  legacy entries stay harmless until touched (reads already match both). */
+export async function foldServerScopeKeys(
+  server: McpServer,
+): Promise<McpServer> {
+  let next = server;
+
+  // Repo-scoped servers: migrate the scope key itself onto the identity.
+  const scope = server.scope?.trim();
+  if (scope && scope !== MCP_SCOPE_GLOBAL) {
+    const id = await repoIdentity(scope);
+    if (id !== scope) next = { ...next, scope: id };
+  }
+
+  const overrides = server.repoOverrides;
+  if (overrides && Object.keys(overrides).length > 0) {
+    // Resolve every non-global override key to its identity, then rebuild the map
+    // under identity keys. An existing identity value wins over a legacy one.
+    const keys = Object.keys(overrides);
+    const ids = await Promise.all(
+      keys.map(async (key) =>
+        key === MCP_SCOPE_GLOBAL
+          ? key
+          : await repoIdentity(key).catch(() => key),
+      ),
+    );
+    // Seed the folded map with entries already stored under their identity key
+    // (`id === key`) FIRST, so a legacy raw-path value never clobbers one that's
+    // already on the identity — the identity value wins regardless of key order.
+    const folded: Record<string, McpRepoState> = {};
+    keys.forEach((key, i) => {
+      if (ids[i] === key) folded[key] = overrides[key];
+    });
+    keys.forEach((key, i) => {
+      const id = ids[i];
+      if (folded[id] === undefined) folded[id] = overrides[key];
+    });
+    next = { ...next, repoOverrides: folded };
+  }
+
+  return next;
 }
 
 /** Whether an (agent, isolation) combination can run MCP servers at all.

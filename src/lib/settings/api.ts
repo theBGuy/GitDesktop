@@ -1,5 +1,6 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
 import type { AiSettings } from "@/lib/ai/types";
+import { repoIdentity } from "@/lib/git/repo-identity";
 import { storeName } from "@/lib/test-mode";
 
 export interface RecentRepo {
@@ -123,13 +124,19 @@ export interface McpServer {
   /** Offered to new sessions by default when true. */
   enabled: boolean;
   /** Where this server is available: "global" (or absent) = every repo; otherwise
-   *  a repo root path = only sessions in that repo. Organization only — un-scoped
-   *  servers are still never auto-inherited (strict mode gags un-registered ones). */
+   *  a repo's worktree-stable identity key (`repoIdentity` — the git common dir,
+   *  shared by a repo's main checkout and all its worktrees) = only sessions in
+   *  that repo. Values written before identity-keying are a raw checkout path and
+   *  are still honored on read (and folded onto the identity on the next write).
+   *  Organization only — un-scoped servers are still never auto-inherited (strict
+   *  mode gags un-registered ones). */
   scope?: string;
-  /** Per-repo overrides of a GLOBAL server's state, keyed by repo root path:
-   *  "on" (available + on by default), "optional" (available, off by default),
-   *  "off" (not offered in that repo). Absent for a repo = inherit `enabled`.
-   *  Only meaningful for global servers; repo-scoped ones use `enabled` directly. */
+  /** Per-repo overrides of a GLOBAL server's state, keyed by the repo's
+   *  worktree-stable identity key (see `scope`; legacy raw-path keys still honored
+   *  on read, folded on write): "on" (available + on by default), "optional"
+   *  (available, off by default), "off" (not offered in that repo). Absent for a
+   *  repo = inherit `enabled`. Only meaningful for global servers; repo-scoped
+   *  ones use `enabled` directly. */
   repoOverrides?: Record<string, "on" | "optional" | "off">;
   /** "stdio" = a local subprocess; "http" = a remote streamable-HTTP server. */
   transport: "stdio" | "http";
@@ -396,6 +403,13 @@ export function addRecentRepo(repo: {
  * the context menu names the right provider from the first frame. Touches only
  * records whose stored values actually changed; an empty remote clears them.
  * No-op when nothing changed, so it never loops with its own settings refetch.
+ *
+ * Matching is by worktree-stable identity ({@link repoIdentity}, git common
+ * dir), not raw checkout path, so a probe from one checkout of a repo updates
+ * EVERY recentRepos row for the same underlying repo (its other worktrees'
+ * rows) — the rows keep their own `.path` identity; only the probed fields fan
+ * out. `repoIdentity` falls back to the raw path on a git error, so a repo that
+ * can't be resolved matches by path exactly as before.
  */
 export function persistRepoOwners(
   owners: {
@@ -408,10 +422,20 @@ export function persistRepoOwners(
   if (owners.length === 0) return Promise.resolve();
   return serializedRecentRepoWrite(async () => {
     const settings = await loadSettings();
-    const byPath = new Map(owners.map((o) => [o.path, o]));
+    // Index the incoming probes by the repo IDENTITY of their path, and resolve
+    // each existing row's identity too, so a row matches an entry for a sibling
+    // worktree of the same repo (not just the exact checkout that was probed).
+    const byIdentity = new Map(
+      await Promise.all(
+        owners.map(async (o) => [await repoIdentity(o.path), o] as const),
+      ),
+    );
+    const rowIdentities = await Promise.all(
+      settings.recentRepos.map((r) => repoIdentity(r.path)),
+    );
     let changed = false;
-    const recentRepos = settings.recentRepos.map((r) => {
-      const resolved = byPath.get(r.path);
+    const recentRepos = settings.recentRepos.map((r, i) => {
+      const resolved = byIdentity.get(rowIdentities[i]);
       if (!resolved) return r;
       const owner = resolved.owner || undefined;
       const host = resolved.host || undefined;
@@ -448,6 +472,11 @@ export function persistRepoOwners(
  * has no resolvable remote anymore). Touches only records whose stored values
  * actually changed; no-op when nothing changed, so it never loops with its own
  * settings refetch (mirrors {@link persistRepoOwners}).
+ *
+ * Matched by worktree-stable identity ({@link repoIdentity}), like
+ * {@link persistRepoOwners}, so a probe from one checkout updates every
+ * recentRepos row for the same underlying repo (its other worktrees). Falls back
+ * to the raw path when git can't resolve it — exactly today's behavior.
  */
 export function persistRepoVisibility(
   entries: {
@@ -462,10 +491,17 @@ export function persistRepoVisibility(
   if (entries.length === 0) return Promise.resolve();
   return serializedRecentRepoWrite(async () => {
     const settings = await loadSettings();
-    const byPath = new Map(entries.map((e) => [e.path, e]));
+    const byIdentity = new Map(
+      await Promise.all(
+        entries.map(async (e) => [await repoIdentity(e.path), e] as const),
+      ),
+    );
+    const rowIdentities = await Promise.all(
+      settings.recentRepos.map((r) => repoIdentity(r.path)),
+    );
     let changed = false;
-    const recentRepos = settings.recentRepos.map((r) => {
-      const resolved = byPath.get(r.path);
+    const recentRepos = settings.recentRepos.map((r, i) => {
+      const resolved = byIdentity.get(rowIdentities[i]);
       if (!resolved) return r;
       const visibility = resolved.visibility || undefined;
       // Fork provenance shares visibility's lifecycle: a null visibility (remote
@@ -475,7 +511,9 @@ export function persistRepoVisibility(
       // re-probes; only `undefined` (never probed / cleared) triggers a refetch.
       // `forkParent` stays undefined-when-absent (a non-fork has no upstream).
       const isFork = visibility ? (resolved.isFork ?? false) : undefined;
-      const forkParent = visibility ? resolved.forkParent || undefined : undefined;
+      const forkParent = visibility
+        ? resolved.forkParent || undefined
+        : undefined;
       if (
         visibility === r.visibility &&
         isFork === r.isFork &&

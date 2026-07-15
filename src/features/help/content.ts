@@ -827,10 +827,11 @@ the section simply doesn't show). You'll see the **original estimate**, **remain
 grammar (\`2d 4h 30m\` — weeks, days, hours, and minutes) with an optional note, and Jira
 decrements the remaining estimate for you; you can also **set or clear the original and
 remaining estimates** directly. The most recent **worklog entries** are listed (Jira returns
-the first 20), you can **edit or delete your own** entries, and the full history is a **View
-all in Jira** link away. As with every other action here, these are gated on your Jira
-permissions — logging work, editing estimates, and worklog edits each need the matching
-permission, so a control appears only when your role allows it.
+the first 20), you can **edit or delete your own** entries — or anyone's, if you hold Jira's
+project-admin worklog permissions — and the full history is a **View all in Jira** link away.
+As with every other action here, these are gated on your Jira permissions — logging work,
+editing estimates, and worklog edits each need the matching permission, so a control appears
+only when your role allows it.
 
 You can work an issue without leaving the tab. **Create** one ({{kbd:create-jira-issue}}
 from the palette) with a summary, Markdown description, and an **issue-type** picker;
@@ -839,9 +840,10 @@ the confirmation names the real resulting status, not a generic "closed" — or 
 any workflow status from the **status menu** on the chip, which lists the transitions your
 role allows by their target status name; **assign or unassign** it by searching your
 project's users; set or clear its **due date**, change its **priority**, and edit its
-**labels**; and **edit or delete your own comments**. Each action is gated on your Jira
-permissions, so anything your token and role can't do simply doesn't appear — a control shows
-up only when your permissions allow it.
+**labels**; and **edit or delete your own comments** (or anyone's, with Jira's project-admin
+comment permissions). Each action is gated on your Jira permissions, so anything your token
+and role can't do simply doesn't appear — a control shows up only when your permissions allow
+it.
 
 **Referenced issues follow your work.** When a **branch name**, a commit's message (in the
 commit detail view), or a pull request's title or description mentions one of the linked

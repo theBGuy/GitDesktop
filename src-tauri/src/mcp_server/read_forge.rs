@@ -216,14 +216,42 @@ impl GitDesktopMcp {
             };
         }
         // KEEP IN SYNC: src/lib/ai/review-tools.ts (`list_pull_request_comments`)
-        // mirrors this composed shape (and the diffHunk cap) for the HTTP review
-        // tool loop.
-        json_result_untrusted(&serde_json::json!({
+        // mirrors this composed shape — the diffHunk cap AND the empty-field
+        // pruning below — for the HTTP review tool loop.
+        let mut payload = serde_json::json!({
             "number": args.number,
             "comments": pr.comments,
             "reviews": pr.reviews,
             "review_threads": review_threads,
-        }))
+        });
+        // Prune always-default empty fields from every comment/thread object so
+        // agent consumers (the AI review eats the same JSON) don't pay tokens for
+        // e.g. `authorAvatarUrl:""` or `isMinimized:false`. Mutates the OWNED
+        // Value; the shared IPC struct's serialized shape is untouched.
+        if let Some(arr) = payload.get_mut("comments").and_then(|v| v.as_array_mut()) {
+            for c in arr {
+                strip_empty_comment_defaults(c);
+            }
+        }
+        if let Some(arr) = payload.get_mut("reviews").and_then(|v| v.as_array_mut()) {
+            for c in arr {
+                strip_empty_comment_defaults(c);
+            }
+        }
+        if let Some(arr) = payload
+            .get_mut("review_threads")
+            .and_then(|v| v.as_array_mut())
+        {
+            for thread in arr {
+                strip_empty_comment_defaults(thread);
+                if let Some(nested) = thread.get_mut("comments").and_then(|v| v.as_array_mut()) {
+                    for c in nested {
+                        strip_empty_comment_defaults(c);
+                    }
+                }
+            }
+        }
+        json_result_untrusted(&payload)
     }
 
     #[tool(
@@ -465,6 +493,40 @@ impl GitDesktopMcp {
     }
 }
 
+/// Drop the always-default empty fields from one comment/thread JSON object,
+/// in place. Removes a key ONLY when it holds its empty default; every other
+/// key (including load-bearing `false`s like `isResolved`/`viewerDidAuthor`,
+/// and the `id` write tools consume even when empty) is left as-is. Explicit
+/// per-key list on purpose — a generic "remove falsy" strip would eat those
+/// load-bearing `false`s. Non-object values are ignored.
+///
+/// KEEP IN SYNC: src/lib/ai/review-tools.ts (`list_pull_request_comments`)
+/// mirrors this drop-list character-for-character.
+fn strip_empty_comment_defaults(v: &mut serde_json::Value) {
+    let serde_json::Value::Object(map) = v else {
+        return;
+    };
+    // (key, empty-default) pairs — remove the key only on an exact match.
+    if map.get("authorAvatarUrl") == Some(&serde_json::Value::String(String::new())) {
+        map.remove("authorAvatarUrl");
+    }
+    if map.get("state") == Some(&serde_json::Value::String(String::new())) {
+        map.remove("state");
+    }
+    if map.get("url") == Some(&serde_json::Value::String(String::new())) {
+        map.remove("url");
+    }
+    if map.get("minimizedReason") == Some(&serde_json::Value::String(String::new())) {
+        map.remove("minimizedReason");
+    }
+    if map.get("isMinimized") == Some(&serde_json::Value::Bool(false)) {
+        map.remove("isMinimized");
+    }
+    if map.get("reviewId") == Some(&serde_json::Value::String(String::new())) {
+        map.remove("reviewId");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -486,5 +548,107 @@ mod tests {
         // A host present in glab's known-hosts is a self-managed GitLab → refused.
         let glab_hosts = vec!["gitlab.acme.com".to_string()];
         assert!(!host_is_github("gitlab.acme.com", &glab_hosts));
+    }
+
+    /// The empty-default prune: a populated comment keeps every field; an
+    /// all-defaults comment loses exactly the six empty-default keys; nested
+    /// thread comments are pruned too; and load-bearing `false`s survive.
+    #[test]
+    fn strip_empty_comment_defaults_only_drops_empty_defaults() {
+        // A populated object: every field holds a non-default value → untouched.
+        let mut populated = serde_json::json!({
+            "author": "octocat",
+            "authorAvatarUrl": "https://example/avatar.png",
+            "state": "APPROVED",
+            "body": "looks good",
+            "date": "2026-07-15T00:00:00Z",
+            "id": "PRRC_1",
+            "url": "https://example/pr/1#c",
+            "viewerDidAuthor": true,
+            "isMinimized": true,
+            "minimizedReason": "spam",
+            "reviewId": "PRR_1",
+        });
+        let before = populated.clone();
+        strip_empty_comment_defaults(&mut populated);
+        assert_eq!(populated, before, "populated object must survive untouched");
+
+        // An all-defaults object: loses exactly the six empty-default keys, and
+        // keeps the load-bearing ones (including an empty-string `id`).
+        let mut defaults = serde_json::json!({
+            "author": "octocat",
+            "authorAvatarUrl": "",
+            "state": "",
+            "body": "hi",
+            "date": "2026-07-15T00:00:00Z",
+            "id": "",
+            "url": "",
+            "viewerDidAuthor": false,
+            "isMinimized": false,
+            "minimizedReason": "",
+            "reviewId": "",
+        });
+        strip_empty_comment_defaults(&mut defaults);
+        let obj = defaults.as_object().unwrap();
+        for dropped in [
+            "authorAvatarUrl",
+            "state",
+            "url",
+            "minimizedReason",
+            "isMinimized",
+            "reviewId",
+        ] {
+            assert!(!obj.contains_key(dropped), "{dropped} should be dropped");
+        }
+        // Load-bearing keys survive, including empty-string id and false viewerDidAuthor.
+        assert_eq!(obj.get("id"), Some(&serde_json::Value::String(String::new())));
+        assert_eq!(obj.get("viewerDidAuthor"), Some(&serde_json::Value::Bool(false)));
+        assert_eq!(obj.get("author"), Some(&serde_json::json!("octocat")));
+        assert_eq!(obj.get("body"), Some(&serde_json::json!("hi")));
+        assert_eq!(obj.len(), 5, "exactly six of eleven keys removed");
+
+        // Nested thread comments are pruned when the caller walks them, and a
+        // thread's own `isResolved:false` / `viewerDidAuthor:false` survive.
+        let mut thread = serde_json::json!({
+            "id": "T1",
+            "path": "src/main.rs",
+            "line": 10,
+            "isResolved": false,
+            "isOutdated": false,
+            "diffHunk": "@@ -1 +1 @@",
+            "reviewId": "",
+            "state": "",
+            "comments": [serde_json::json!({
+                "author": "octocat",
+                "authorAvatarUrl": "",
+                "state": "",
+                "body": "nit",
+                "viewerDidAuthor": false,
+                "isMinimized": false,
+                "minimizedReason": "",
+                "url": "",
+                "reviewId": "",
+                "id": "C1",
+            })],
+        });
+        strip_empty_comment_defaults(&mut thread);
+        if let Some(nested) = thread.get_mut("comments").and_then(|v| v.as_array_mut()) {
+            for c in nested {
+                strip_empty_comment_defaults(c);
+            }
+        }
+        let t = thread.as_object().unwrap();
+        // Thread-level empty defaults dropped; load-bearing false fields survive.
+        assert!(!t.contains_key("state"));
+        assert!(!t.contains_key("reviewId"));
+        assert_eq!(t.get("isResolved"), Some(&serde_json::Value::Bool(false)));
+        assert_eq!(t.get("isOutdated"), Some(&serde_json::Value::Bool(false)));
+        assert_eq!(t.get("diffHunk"), Some(&serde_json::json!("@@ -1 +1 @@")));
+        let nested = t.get("comments").unwrap().as_array().unwrap();
+        let nc = nested[0].as_object().unwrap();
+        assert!(!nc.contains_key("authorAvatarUrl"));
+        assert!(!nc.contains_key("isMinimized"));
+        assert_eq!(nc.get("viewerDidAuthor"), Some(&serde_json::Value::Bool(false)));
+        assert_eq!(nc.get("id"), Some(&serde_json::json!("C1")));
     }
 }

@@ -2522,6 +2522,14 @@ pub struct JiraProjectPermissions {
     pub edit_own_worklogs: bool,
     /// `DELETE_OWN_WORKLOGS` — gates deleting your own worklog entries.
     pub delete_own_worklogs: bool,
+    /// `EDIT_ALL_WORKLOGS` — gates editing anyone's worklog entries (project admins).
+    pub edit_all_worklogs: bool,
+    /// `DELETE_ALL_WORKLOGS` — gates deleting anyone's worklog entries (project admins).
+    pub delete_all_worklogs: bool,
+    /// `EDIT_ALL_COMMENTS` — gates editing anyone's comment (project admins).
+    pub edit_all_comments: bool,
+    /// `DELETE_ALL_COMMENTS` — gates deleting anyone's comment (project admins).
+    pub delete_all_comments: bool,
 }
 
 /// Whether a single permission in a `mypermissions` response is granted. Defensive: an
@@ -2551,6 +2559,10 @@ fn parse_permissions(body: &Value) -> JiraProjectPermissions {
         work_on_issues: have_permission(body, "WORK_ON_ISSUES"),
         edit_own_worklogs: have_permission(body, "EDIT_OWN_WORKLOGS"),
         delete_own_worklogs: have_permission(body, "DELETE_OWN_WORKLOGS"),
+        edit_all_worklogs: have_permission(body, "EDIT_ALL_WORKLOGS"),
+        delete_all_worklogs: have_permission(body, "DELETE_ALL_WORKLOGS"),
+        edit_all_comments: have_permission(body, "EDIT_ALL_COMMENTS"),
+        delete_all_comments: have_permission(body, "DELETE_ALL_COMMENTS"),
     }
 }
 
@@ -2569,7 +2581,8 @@ pub async fn permissions(site: &str, project_key: &str) -> AppResult<JiraProject
     let path = format!(
         "mypermissions?projectKey={}&permissions=ADD_COMMENTS,TRANSITION_ISSUES,\
          CREATE_ISSUES,ASSIGN_ISSUES,SCHEDULE_ISSUES,EDIT_ISSUES,EDIT_OWN_COMMENTS,\
-         DELETE_OWN_COMMENTS,WORK_ON_ISSUES,EDIT_OWN_WORKLOGS,DELETE_OWN_WORKLOGS",
+         DELETE_OWN_COMMENTS,WORK_ON_ISSUES,EDIT_OWN_WORKLOGS,DELETE_OWN_WORKLOGS,\
+         EDIT_ALL_WORKLOGS,DELETE_ALL_WORKLOGS,EDIT_ALL_COMMENTS,DELETE_ALL_COMMENTS",
         crate::forge::encode_query_value(project_key),
     );
     let body: Value = get_json(&creds, &path, "permissions").await?;
@@ -3550,6 +3563,10 @@ mod tests {
                 "WORK_ON_ISSUES": { "havePermission": true },
                 "EDIT_OWN_WORKLOGS": { "havePermission": false },
                 // DELETE_OWN_WORKLOGS absent entirely.
+                "EDIT_ALL_WORKLOGS": { "havePermission": true },
+                "DELETE_ALL_WORKLOGS": { "havePermission": false },
+                "EDIT_ALL_COMMENTS": { "havePermission": true },
+                // DELETE_ALL_COMMENTS absent entirely.
             }
         });
         let p = parse_permissions(&body);
@@ -3568,6 +3585,12 @@ mod tests {
         assert!(p.work_on_issues);
         assert!(!p.edit_own_worklogs);
         assert!(!p.delete_own_worklogs);
+        // The ALL-scoped admin keys: present-true, present-false, absent-false.
+        assert!(p.edit_all_worklogs);
+        assert!(!p.delete_all_worklogs);
+        assert!(p.edit_all_comments);
+        // Absent key → false.
+        assert!(!p.delete_all_comments);
     }
 
     #[test]
@@ -3585,6 +3608,10 @@ mod tests {
         assert!(!p.work_on_issues);
         assert!(!p.edit_own_worklogs);
         assert!(!p.delete_own_worklogs);
+        assert!(!p.edit_all_worklogs);
+        assert!(!p.delete_all_worklogs);
+        assert!(!p.edit_all_comments);
+        assert!(!p.delete_all_comments);
         // A present entry with a non-bool havePermission also defaults false.
         let p2 = parse_permissions(&json!({
             "permissions": { "ADD_COMMENTS": { "havePermission": "yes" } }

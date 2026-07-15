@@ -191,6 +191,18 @@ function PagesEnabled({
   })();
   const sourceChanged =
     branch !== pages.sourceBranch || path !== (pages.sourcePath || "/");
+  // HTTPS can only be enforced once GitHub has issued the TLS certificate for a
+  // custom domain. Without a custom domain (default *.github.io) there's no
+  // certificate object at all and HTTPS is always available, so never gate on it.
+  const certReady = !pages.cname || pages.httpsCertificateState === "approved";
+  const certFailed =
+    pages.httpsCertificateState === "errored" ||
+    pages.httpsCertificateState === "bad_authz";
+  const httpsHint = certReady
+    ? undefined
+    : certFailed
+      ? "HTTPS certificate provisioning failed — check the domain's DNS configuration"
+      : "Waiting for the HTTPS certificate to be issued for this domain";
 
   return (
     <div className="min-w-0 space-y-4">
@@ -307,23 +319,29 @@ function PagesEnabled({
       <label className="flex cursor-pointer items-center justify-between gap-3 text-xs">
         <span>
           Enforce HTTPS
-          <span className="ml-1 text-[11px] text-muted-foreground">
-            (available once the certificate is ready)
-          </span>
+          {!certReady && (
+            <span className="ml-1 text-[11px] text-muted-foreground">
+              {certFailed
+                ? "(certificate provisioning failed)"
+                : "(available once the certificate is ready)"}
+            </span>
+          )}
         </span>
-        <Switch
-          checked={pages.httpsEnforced}
-          disabled={update.isPending}
-          onCheckedChange={(v) =>
-            update.mutate(
-              { httpsEnforced: v },
-              {
-                onSuccess: () => toast.success("Updated"),
-                onError: toastError,
-              },
-            )
-          }
-        />
+        <span title={certReady ? undefined : httpsHint} className="inline-flex">
+          <Switch
+            checked={pages.httpsEnforced}
+            disabled={update.isPending || !certReady}
+            onCheckedChange={(v) =>
+              update.mutate(
+                { httpsEnforced: v },
+                {
+                  onSuccess: () => toast.success("Updated"),
+                  onError: toastError,
+                },
+              )
+            }
+          />
+        </span>
       </label>
 
       <div className="flex items-center justify-end gap-2 border-t pt-3">

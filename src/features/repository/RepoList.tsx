@@ -48,6 +48,13 @@ import { useOpenRepoByPath } from "./useOpenRepoByPath";
 const RECENT_COUNT = 5;
 const OTHER_GROUP = "Other";
 
+const REPO_LISTBOX_ID = "repo-list-listbox";
+/** Stable DOM id per repo row, so the filter's aria-activedescendant can point
+ *  at the keyboard-highlighted option for screen readers. `repo.path` is the
+ *  unique key (already the row's `data-repo-path`). */
+const repoOptionId = (path: string) =>
+  `repo-list-${path.replace(/[^\w-]/g, "_")}`;
+
 // Paths whose visibility probe has already been attempted this app session, so
 // a failing probe (e.g. a signed-out provider) is retried at most once per
 // session — no probe storms on every dropdown open. Module-level and read only
@@ -345,6 +352,13 @@ export function RepoList({
           onKeyDown={handleKeyDown}
           placeholder="Filter repositories"
           aria-label="Filter repositories"
+          role="combobox"
+          aria-expanded={visible.length > 0}
+          aria-controls={REPO_LISTBOX_ID}
+          aria-autocomplete="list"
+          aria-activedescendant={
+            highlightedPath ? repoOptionId(highlightedPath) : undefined
+          }
           className="h-7"
         />
       </div>
@@ -354,7 +368,14 @@ export function RepoList({
       >
         <ContextMenu>
           <ContextMenuTrigger
-            render={<div onContextMenuCapture={handleContextMenu} />}
+            render={
+              <div
+                onContextMenuCapture={handleContextMenu}
+                role="listbox"
+                id={REPO_LISTBOX_ID}
+                aria-label="Repositories"
+              />
+            }
           >
             {filtered.length === 0 ? (
               <p className="px-3 py-6 text-center text-xs text-muted-foreground">
@@ -415,7 +436,9 @@ function RepoSection({
 }: RepoRowsProps & { title: string; repos: RecentRepo[] }) {
   if (repos.length === 0) return null;
   return (
-    <div>
+    // Presentation wrapper so this section div (and its header <p>) doesn't sit
+    // as a non-option node between the listbox and its options in the a11y tree.
+    <div role="presentation">
       <p className="px-3 pt-2 pb-1 text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
         {title}
       </p>
@@ -472,6 +495,9 @@ function RepoRow({
     >
       <button
         type="button"
+        id={repoOptionId(repo.path)}
+        role="option"
+        aria-selected={highlighted}
         className="flex min-w-0 flex-1 items-center gap-2 px-3 py-1.5 text-left"
         onClick={() => onOpen(repo.path)}
         disabled={openingPath !== null}

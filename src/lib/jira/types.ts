@@ -178,6 +178,14 @@ export interface JiraPermissions {
   editOwnWorklogs: boolean;
   /** Delete the viewer's own worklogs (Jira's DELETE_OWN_WORKLOGS). */
   deleteOwnWorklogs: boolean;
+  /** Edit anyone's worklogs — project admins (Jira's EDIT_ALL_WORKLOGS). */
+  editAllWorklogs: boolean;
+  /** Delete anyone's worklogs — project admins (Jira's DELETE_ALL_WORKLOGS). */
+  deleteAllWorklogs: boolean;
+  /** Edit anyone's comments — project admins (Jira's EDIT_ALL_COMMENTS). */
+  editAllComments: boolean;
+  /** Delete anyone's comments — project admins (Jira's DELETE_ALL_COMMENTS). */
+  deleteAllComments: boolean;
 }
 
 /** A priority option for the priority picker (`/priority`). */

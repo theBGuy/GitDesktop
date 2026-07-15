@@ -1,7 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMemo } from "react";
 import { PROVIDERS_REQUIRING_KEY } from "@/lib/ai/providers";
 import type { AiProviderId } from "@/lib/ai/types";
 import { getSecret } from "@/lib/git/api";
+import { repoIdentity } from "@/lib/git/repo-identity";
 import {
   type AppSettings,
   addRecentRepo,
@@ -11,6 +13,7 @@ import {
   saveSettings,
   setRepoAlias,
 } from "./api";
+import type { RepoKeys } from "./mcp";
 
 export const settingsKeys = {
   settings: ["settings"] as const,
@@ -23,6 +26,35 @@ export function useSettings() {
     queryFn: loadSettings,
     staleTime: Number.POSITIVE_INFINITY,
   });
+}
+
+/**
+ * The scope/override lookup keys for a repo, most-preferred LAST: `[repoPath]`
+ * while the identity is still resolving (or when null — no repo open → `[]`), and
+ * `[repoPath, identity]` (deduped) once `repoIdentity` resolves. Feeds the MCP
+ * scope helpers ({@link isServerAvailable} et al.) so a repo-scoped server or
+ * per-repo override set from one checkout matches from a sibling worktree, while
+ * a value still under a raw checkout path (pre-identity-keying) keeps matching.
+ *
+ * Identity is stable for a session, so this never refetches (`staleTime`
+ * Infinity) — a plain query, safe to read inside an `<Activity>`-managed tab
+ * (no effects).
+ */
+export function useRepoKeys(repoPath: string | null): RepoKeys {
+  const { data: identity } = useQuery({
+    queryKey: ["repo-identity", repoPath],
+    queryFn: () => repoIdentity(repoPath as string),
+    enabled: !!repoPath,
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+  // Stable reference across renders (same repoPath/identity) so it can sit in
+  // downstream `useMemo` dependency arrays without churning them.
+  return useMemo(() => {
+    if (!repoPath) return [];
+    return identity && identity !== repoPath
+      ? [repoPath, identity]
+      : [repoPath];
+  }, [repoPath, identity]);
 }
 
 /** Whether AI features are shown. False once the user hides them in Settings;

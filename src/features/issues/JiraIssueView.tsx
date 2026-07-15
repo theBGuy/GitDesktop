@@ -739,8 +739,10 @@ function JiraCommentItem({
   issueKey,
   comment,
   isOwn,
-  canEdit,
-  canDelete,
+  canEditOwn,
+  canDeleteOwn,
+  canEditAll,
+  canDeleteAll,
 }: {
   repoPath: string;
   /** `null` during the link-pending window (a cached detail can still render
@@ -750,8 +752,14 @@ function JiraCommentItem({
   issueKey: string;
   comment: JiraComment;
   isOwn: boolean;
-  canEdit: boolean;
-  canDelete: boolean;
+  /** Edit the viewer's OWN comment (EDIT_OWN_COMMENTS). */
+  canEditOwn: boolean;
+  /** Delete the viewer's OWN comment (DELETE_OWN_COMMENTS). */
+  canDeleteOwn: boolean;
+  /** Edit ANYONE's comment — project admins (EDIT_ALL_COMMENTS). */
+  canEditAll: boolean;
+  /** Delete ANYONE's comment — project admins (DELETE_ALL_COMMENTS). */
+  canDeleteAll: boolean;
 }) {
   const edit = useJiraCommentEdit(repoPath, link);
   const del = useJiraCommentDelete(repoPath, link);
@@ -769,9 +777,13 @@ function JiraCommentItem({
     return () => cancelAnimationFrame(raf);
   }, [editing]);
 
+  // Own-scoped perms apply to the viewer's own comment; ALL-scoped perms (project
+  // admins) apply to anyone's — so the affordance shows for others' comments too.
+  const canEdit = (isOwn && canEditOwn) || canEditAll;
+  const canDelete = (isOwn && canDeleteOwn) || canDeleteAll;
   // Edit/delete require a live link (the mutations key on its site). During the
   // link-pending window the menu is simply absent — the comment still renders.
-  const showMenu = link !== null && isOwn && (canEdit || canDelete);
+  const showMenu = link !== null && (canEdit || canDelete);
   const edited =
     comment.updatedAt != null && comment.updatedAt !== comment.createdAt;
 
@@ -909,7 +921,11 @@ function JiraCommentItem({
         open={confirmDelete}
         onCancel={() => setConfirmDelete(false)}
         title="Delete comment?"
-        body="This permanently deletes your comment on this Jira issue. This cannot be undone."
+        body={
+          isOwn
+            ? "This permanently deletes your comment on this Jira issue. This cannot be undone."
+            : "This permanently deletes this comment on this Jira issue. This cannot be undone."
+        }
         confirmLabel="Delete comment"
         confirmVariant="destructive"
         pending={del.isPending}
@@ -933,8 +949,10 @@ function JiraWorklogItem({
   issueKey,
   worklog,
   isOwn,
-  canEdit,
-  canDelete,
+  canEditOwn,
+  canDeleteOwn,
+  canEditAll,
+  canDeleteAll,
 }: {
   repoPath: string;
   /** `null` during the link-pending window — the read-only row always renders;
@@ -943,8 +961,14 @@ function JiraWorklogItem({
   issueKey: string;
   worklog: JiraWorklog;
   isOwn: boolean;
-  canEdit: boolean;
-  canDelete: boolean;
+  /** Edit the viewer's OWN worklog (EDIT_OWN_WORKLOGS). */
+  canEditOwn: boolean;
+  /** Delete the viewer's OWN worklog (DELETE_OWN_WORKLOGS). */
+  canDeleteOwn: boolean;
+  /** Edit ANYONE's worklog — project admins (EDIT_ALL_WORKLOGS). */
+  canEditAll: boolean;
+  /** Delete ANYONE's worklog — project admins (DELETE_ALL_WORKLOGS). */
+  canDeleteAll: boolean;
 }) {
   const update = useJiraUpdateWorklog(repoPath, link);
   const del = useJiraDeleteWorklog(repoPath, link);
@@ -953,9 +977,13 @@ function JiraWorklogItem({
   const [noteDraft, setNoteDraft] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
 
+  // Own-scoped perms apply to the viewer's own entry; ALL-scoped perms (project
+  // admins) apply to anyone's — so the affordance shows for others' entries too.
+  const canEdit = (isOwn && canEditOwn) || canEditAll;
+  const canDelete = (isOwn && canDeleteOwn) || canDeleteAll;
   // Edit/delete require a live link (the mutations key on its site). During the
   // link-pending window the actions are simply absent — the row still renders.
-  const showActions = link !== null && isOwn && (canEdit || canDelete);
+  const showActions = link !== null && (canEdit || canDelete);
   const hadNote = worklog.commentMd.trim().length > 0;
 
   const durationTrimmed = durationDraft.trim();
@@ -1125,7 +1153,11 @@ function JiraWorklogItem({
         open={confirmDelete}
         onCancel={() => setConfirmDelete(false)}
         title="Delete worklog?"
-        body="This permanently deletes your logged work on this Jira issue and restores the remaining estimate. This cannot be undone."
+        body={
+          isOwn
+            ? "This permanently deletes your logged work on this Jira issue and restores the remaining estimate. This cannot be undone."
+            : "This permanently deletes this logged work on this Jira issue and restores the remaining estimate. This cannot be undone."
+        }
         confirmLabel="Delete worklog"
         confirmVariant="destructive"
         pending={del.isPending}
@@ -1158,6 +1190,8 @@ export function JiraTimeTrackingSection({
   canEditEstimates,
   canEditOwnWorklogs,
   canDeleteOwnWorklogs,
+  canEditAllWorklogs,
+  canDeleteAllWorklogs,
 }: {
   repoPath: string;
   link: JiraLink | null;
@@ -1171,6 +1205,8 @@ export function JiraTimeTrackingSection({
   canEditEstimates: boolean;
   canEditOwnWorklogs: boolean;
   canDeleteOwnWorklogs: boolean;
+  canEditAllWorklogs: boolean;
+  canDeleteAllWorklogs: boolean;
 }) {
   const logWork = useJiraLogWork(repoPath, link);
   const setOriginal = useJiraSetOriginalEstimate(repoPath, link);
@@ -1364,8 +1400,10 @@ export function JiraTimeTrackingSection({
               isOwn={
                 viewerAccountId != null && w.author?.id === viewerAccountId
               }
-              canEdit={canEditOwnWorklogs}
-              canDelete={canDeleteOwnWorklogs}
+              canEditOwn={canEditOwnWorklogs}
+              canDeleteOwn={canDeleteOwnWorklogs}
+              canEditAll={canEditAllWorklogs}
+              canDeleteAll={canDeleteAllWorklogs}
             />
           ))}
           {worklogsTotal > worklogs.length && (
@@ -1500,9 +1538,13 @@ export function JiraIssueView({
   const canEditIssue = perms.data?.editIssues ?? false;
   const canEditOwnComments = perms.data?.editOwnComments ?? false;
   const canDeleteOwnComments = perms.data?.deleteOwnComments ?? false;
+  const canEditAllComments = perms.data?.editAllComments ?? false;
+  const canDeleteAllComments = perms.data?.deleteAllComments ?? false;
   const canLogWork = perms.data?.workOnIssues ?? false;
   const canEditOwnWorklogs = perms.data?.editOwnWorklogs ?? false;
   const canDeleteOwnWorklogs = perms.data?.deleteOwnWorklogs ?? false;
+  const canEditAllWorklogs = perms.data?.editAllWorklogs ?? false;
+  const canDeleteAllWorklogs = perms.data?.deleteAllWorklogs ?? false;
 
   const comment = useJiraComment(repoPath, link.data);
   const transition = useJiraTransition(repoPath, link.data);
@@ -1679,8 +1721,10 @@ export function JiraIssueView({
                     issue.viewerAccountId != null &&
                     c.author?.id === issue.viewerAccountId
                   }
-                  canEdit={canEditOwnComments}
-                  canDelete={canDeleteOwnComments}
+                  canEditOwn={canEditOwnComments}
+                  canDeleteOwn={canDeleteOwnComments}
+                  canEditAll={canEditAllComments}
+                  canDeleteAll={canDeleteAllComments}
                 />
               ))}
               {issue.comments.length === 0 && (
@@ -1753,6 +1797,8 @@ export function JiraIssueView({
           canLogWork={canLogWork}
           canEditOwnWorklogs={canEditOwnWorklogs}
           canDeleteOwnWorklogs={canDeleteOwnWorklogs}
+          canEditAllWorklogs={canEditAllWorklogs}
+          canDeleteAllWorklogs={canDeleteAllWorklogs}
         />
       </div>
     </div>

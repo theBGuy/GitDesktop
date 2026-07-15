@@ -12,14 +12,18 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { withForm } from "@/lib/form";
 import { deleteMcpSecret } from "@/lib/git/api";
+import { repoIdentity } from "@/lib/git/repo-identity";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import type { McpServer } from "@/lib/settings/api";
 import {
   effectiveMcpState,
+  foldServerScopeKeys,
+  isServerInScope,
   MCP_SCOPE_GLOBAL,
   type McpRepoState,
   serverScope,
 } from "@/lib/settings/mcp";
+import { useRepoKeys } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { BrowseRegistryDialog } from "./mcp/BrowseRegistryDialog";
 import { GitDesktopAsServer } from "./mcp/GitDesktopAsServer";
@@ -39,6 +43,15 @@ export const McpServersSection = withForm({
     const listRef = useRef<HTMLDivElement>(null);
     const repoPath = useUiStore((s) => s.repoPath);
     const repoName = useUiStore((s) => s.repoName);
+    // Scope/override lookup keys for the open repo: [repoPath] while the identity
+    // resolves, [repoPath, identity] once it does. Matches a server scoped/overridden
+    // under EITHER the raw checkout path (legacy) or the worktree-stable identity,
+    // so a scope set from a sibling worktree is recognized here.
+    const repoKeys = useRepoKeys(repoPath);
+    // The single key writes land under (the resolved identity, or the raw path
+    // while it's still resolving / unresolvable). PerRepoStateControl does an
+    // exact-key override lookup, so it must read under this same key.
+    const repoScopeKey = repoKeys.length ? repoKeys[repoKeys.length - 1] : null;
     // The registry browser's open state lives in the store so the command
     // palette can deep-link to it (see openMcpBrowse).
     const browseOpen = useUiStore((s) => s.mcpBrowseOpen);
@@ -61,13 +74,21 @@ export const McpServersSection = withForm({
       form.setFieldValue("mcpServers", (prev) => [...(prev ?? []), server]);
     }
 
-    function saveServer(server: McpServer) {
-      const exists = list.some((s) => s.id === server.id);
-      setServers(
-        exists
-          ? list.map((s) => (s.id === server.id ? server : s))
-          : [...list, server],
-      );
+    async function saveServer(server: McpServer) {
+      // Fold the dialog's scope/override keys onto the repo IDENTITY before
+      // storing: the dialog's "This repo" option carries the raw checkout path,
+      // and folding here (rather than editing the dialog) is what makes a
+      // repo-scoped server cross the repo's worktrees. A no-op for global servers
+      // and for paths git can't resolve.
+      const folded = await foldServerScopeKeys(server);
+      // Re-read via the functional setter so this async write composes with any
+      // interleaving edit instead of clobbering it.
+      form.setFieldValue("mcpServers", (prev) => {
+        const cur = prev ?? [];
+        return cur.some((s) => s.id === folded.id)
+          ? cur.map((s) => (s.id === folded.id ? folded : s))
+          : [...cur, folded];
+      });
       setEditing(null);
     }
 
@@ -84,23 +105,26 @@ export const McpServersSection = withForm({
     }
 
     // Set (or clear, when null = "follow the global default") a global server's
-    // per-repo state override for the open repo.
-    function setRepoOverride(
+    // per-repo state override for the open repo. Writes under the repo's
+    // worktree-stable IDENTITY key (resolved from the checkout path `rp`), and
+    // folds the server's legacy raw-path keys onto their identities in the same
+    // write, so an override set from any checkout is honored from its siblings.
+    async function setRepoOverride(
       server: McpServer,
       rp: string,
       state: McpRepoState | null,
     ) {
-      setServers(
-        list.map((s) => {
-          if (s.id !== server.id) return s;
-          const overrides = { ...(s.repoOverrides ?? {}) };
-          if (state) overrides[rp] = state;
-          else delete overrides[rp];
-          const next: McpServer = { ...s, repoOverrides: overrides };
-          if (Object.keys(overrides).length === 0)
-            next.repoOverrides = undefined;
-          return next;
-        }),
+      const key = await repoIdentity(rp);
+      const folded = await foldServerScopeKeys(server);
+      const overrides = { ...(folded.repoOverrides ?? {}) };
+      if (state) overrides[key] = state;
+      else delete overrides[key];
+      const next: McpServer = { ...folded, repoOverrides: overrides };
+      if (Object.keys(overrides).length === 0) next.repoOverrides = undefined;
+      // Re-read `list` via the functional setter so this async write composes with
+      // any interleaving edit rather than clobbering it.
+      form.setFieldValue("mcpServers", (prev) =>
+        (prev ?? []).map((s) => (s.id === server.id ? next : s)),
       );
     }
 
@@ -123,8 +147,15 @@ export const McpServersSection = withForm({
       {
         key: "repo",
         label: `This repo — ${repoName ?? (repoPath ? repoBasename(repoPath) : "")}`,
+        // "This repo" = scoped to any of the open repo's keys (identity or a
+        // legacy raw checkout path), so a server scoped from a sibling worktree
+        // groups here too.
         servers: repoPath
-          ? list.filter((s) => serverScope(s) === repoPath)
+          ? list.filter(
+              (s) =>
+                serverScope(s) !== MCP_SCOPE_GLOBAL &&
+                isServerInScope(s, repoKeys),
+            )
           : [],
       },
       {
@@ -132,7 +163,7 @@ export const McpServersSection = withForm({
         label: "Other repositories",
         servers: list.filter((s) => {
           const sc = serverScope(s);
-          return sc !== MCP_SCOPE_GLOBAL && sc !== repoPath;
+          return sc !== MCP_SCOPE_GLOBAL && !isServerInScope(s, repoKeys);
         }),
       },
     ].filter((g) => g.servers.length > 0);
@@ -236,7 +267,7 @@ export const McpServersSection = withForm({
                       data-mcp-row={server.id}
                       aria-label={`${server.name}, ${server.transport}, ${effectiveMcpState(
                         server,
-                        repoPath,
+                        repoKeys,
                       )}. Press Enter to edit.`}
                       tabIndex={
                         i === safeActive || (safeActive === -1 && i === 0)
@@ -274,13 +305,15 @@ export const McpServersSection = withForm({
                         </span>
                       )}
                       <div className="ml-auto flex shrink-0 items-center gap-1">
-                        {isGlobal && repoPath ? (
+                        {isGlobal && repoPath && repoScopeKey ? (
                           <PerRepoStateControl
                             server={server}
-                            repoPath={repoPath}
+                            // Read the override under the identity key (where writes
+                            // land); the write resolves identity from repoPath itself.
+                            repoPath={repoScopeKey}
                             disabled={incomplete}
                             onChange={(state) =>
-                              setRepoOverride(server, repoPath, state)
+                              void setRepoOverride(server, repoPath, state)
                             }
                           />
                         ) : (

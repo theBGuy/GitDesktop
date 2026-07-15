@@ -20,6 +20,11 @@ pub struct PagesInfo {
     pub source_path: String,
     pub cname: String,
     pub https_enforced: bool,
+    /// TLS certificate provisioning state for a custom domain, e.g. "new",
+    /// "authorization_created", "authorization_pending", "authorized",
+    /// "uploaded", "approved", "errored", "bad_authz". `None` when the repo has
+    /// no custom domain (the `https_certificate` object is absent entirely).
+    pub https_certificate_state: Option<String>,
 }
 
 #[tauri::command]
@@ -56,6 +61,10 @@ pub async fn gh_pages_get(repo_path: String) -> AppResult<Option<PagesInfo>> {
             .get("https_enforced")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        https_certificate_state: v
+            .pointer("/https_certificate/state")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     }))
 }
 

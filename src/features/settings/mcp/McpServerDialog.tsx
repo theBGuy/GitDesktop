@@ -25,9 +25,11 @@ import {
   emptyMcpServer,
   entriesFor,
   MCP_SCOPE_GLOBAL,
+  scopeRepoPath,
   serverScope,
   validateMcpServer,
 } from "@/lib/settings/mcp";
+import { useRepoKeys } from "@/lib/settings/queries";
 import { toastError } from "@/lib/toast";
 import { EntryEditor } from "./EntryEditor";
 import { type EntryRow, repoBasename } from "./shared";
@@ -77,23 +79,45 @@ export function McpServerDialog({
       rs.map((r) => (r.rowId === rowId ? { ...r, ...patch } : r)),
     );
 
+  // Scope/override lookup keys for the open repo: [repoPath] while its identity
+  // resolves, [repoPath, identity] once it does. A server scoped under EITHER the
+  // raw checkout path (legacy) or the worktree-stable identity counts as "this
+  // repo", so a scope set from a sibling worktree is recognized here.
+  const repoKeys = useRepoKeys(repoPath);
+  // The canonical value the "This repo" option stores + selects with: the resolved
+  // identity when available (so new/changed scopes are identity-keyed, matching
+  // fold-on-write), else the raw path.
+  const thisRepoKey = repoKeys.length ? repoKeys[repoKeys.length - 1] : null;
+
+  const curScope = serverScope(draft);
+  // Is the draft repo-scoped to the OPEN repo (under any of its keys)? Legacy
+  // raw-path scopes for the current repo read as "this repo" too — repoKeys
+  // includes the raw path — so they select the "This repo" option, not "other".
+  const scopedToThisRepo =
+    curScope !== MCP_SCOPE_GLOBAL && repoKeys.includes(curScope);
+
   // Scope choices: always Global; "This repo" when one is open; plus the server's
   // own scope when it points at a DIFFERENT repo (editing it elsewhere), so that
   // assignment is preserved rather than silently dropped.
   const scopeOptions: { value: string; label: string }[] = [
     { value: MCP_SCOPE_GLOBAL, label: "Global — all repositories" },
   ];
-  if (repoPath)
+  if (repoPath && thisRepoKey)
     scopeOptions.push({
-      value: repoPath,
+      value: thisRepoKey,
       label: `This repo — ${repoName ?? repoBasename(repoPath)}`,
     });
-  const curScope = serverScope(draft);
-  if (curScope !== MCP_SCOPE_GLOBAL && curScope !== repoPath)
+  if (curScope !== MCP_SCOPE_GLOBAL && !scopedToThisRepo)
     scopeOptions.push({
       value: curScope,
-      label: `${repoBasename(curScope)} — other repo`,
+      // The stored scope is a worktree-stable identity key (`…/.git`); show the
+      // containing repo folder, never a bare ".git".
+      label: `${repoBasename(scopeRepoPath(curScope))} — other repo`,
     });
+  // The Select's value must equal an option value. A draft scoped to the current
+  // repo under a legacy raw path (curScope) won't equal the canonical "This repo"
+  // option value (the identity); normalize to it so the option stays selected.
+  const selectedScope = scopedToThisRepo ? (thisRepoKey ?? curScope) : curScope;
 
   // Reconstruct a candidate server from the live draft + rows for validation.
   function candidate(): McpServer {
@@ -209,7 +233,7 @@ export function McpServerDialog({
             <div className="space-y-2">
               <Label>Available in</Label>
               <Select
-                value={serverScope(draft)}
+                value={selectedScope}
                 onValueChange={(v) => v && set("scope", v)}
               >
                 <SelectTrigger size="sm" className="w-full">

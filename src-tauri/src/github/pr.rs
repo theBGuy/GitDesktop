@@ -1900,6 +1900,15 @@ pub struct PrDetails {
     /// GitHub derives its completed reviewers on the frontend from `reviews`, so it
     /// leaves this empty.
     pub completed_reviewers: Vec<crate::forge::model::CompletedReviewerOut>,
+    /// Whether the repository the PR lives in (its base/parent repo, not origin on a
+    /// fork) allows the merge-commit method. GitHub only, best-effort — `None` means
+    /// unknown (fetch failed, or GitLab/Bitbucket). The merge-method picker pre-gates
+    /// on `false`; `None` never gates (the raw server error on merge is the fallback).
+    pub merge_commit_allowed: Option<bool>,
+    /// Whether the repository allows the squash-merge method. See `merge_commit_allowed`.
+    pub squash_merge_allowed: Option<bool>,
+    /// Whether the repository allows the rebase-merge method. See `merge_commit_allowed`.
+    pub rebase_merge_allowed: Option<bool>,
 }
 
 /// A merge/pull request's approval summary — who has approved and whether the
@@ -1930,6 +1939,60 @@ pub struct ApprovalState {
 }
 
 const PR_VIEW_FIELDS: &str = "id,number,title,body,author,state,isDraft,baseRefName,headRefName,additions,deletions,url,commits,files,reviews,comments,statusCheckRollup,labels,assignees,reviewRequests";
+
+const REPO_MERGE_SETTINGS_QUERY: &str = "query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed } }";
+
+/// The three repository-level merge-method toggles (allow merge / squash / rebase),
+/// each `None` when unknown.
+#[derive(Default)]
+struct RepoMergeSettings {
+    merge_commit_allowed: Option<bool>,
+    squash_merge_allowed: Option<bool>,
+    rebase_merge_allowed: Option<bool>,
+}
+
+/// Fetch the repository's server-side merge-method settings for the repo the PR
+/// LIVES IN. `pr_url` is the PR's html url — for a fork's outgoing PR this is the
+/// PARENT/base repo (a PR url is always on the base repo), so we derive owner/name
+/// from it rather than from origin (which is the fork). Best-effort by contract:
+/// the caller treats any `Err` as "unknown" (all fields `None`) and never fails the
+/// PR view over it. Owner/name are passed as GraphQL variables (validated by
+/// [`parse_pr_url_repo`]), never interpolated into the query.
+async fn gh_repo_merge_settings(repo_path: &str, pr_url: &str) -> AppResult<RepoMergeSettings> {
+    let (host, owner, name) = parse_pr_url_repo(pr_url)?;
+    let hostname_arg = (host != "github.com").then_some(host);
+
+    let query_arg = format!("query={REPO_MERGE_SETTINGS_QUERY}");
+    let owner_arg = format!("owner={owner}");
+    let name_arg = format!("name={name}");
+    let mut args: Vec<&str> = vec!["api", "graphql"];
+    if let Some(h) = &hostname_arg {
+        args.push("--hostname");
+        args.push(h);
+    }
+    args.push("-f");
+    args.push(&query_arg);
+    args.push("-f");
+    args.push(&owner_arg);
+    args.push("-f");
+    args.push(&name_arg);
+
+    let out = run_gh(Some(repo_path), &args, GH_NETWORK_TIMEOUT).await?;
+    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
+        .map_err(|e| AppError::Gh(format!("could not parse merge settings: {e}")))?;
+    let repo = value.pointer("/data/repository");
+    // A field GitHub omits/nulls stays `None` (unknown) rather than defaulting to a
+    // gating value — the picker never disables an option on unknown.
+    let flag = |key: &str| {
+        repo.and_then(|r| r.get(key))
+            .and_then(serde_json::Value::as_bool)
+    };
+    Ok(RepoMergeSettings {
+        merge_commit_allowed: flag("mergeCommitAllowed"),
+        squash_merge_allowed: flag("squashMergeAllowed"),
+        rebase_merge_allowed: flag("rebaseMergeAllowed"),
+    })
+}
 
 /// Full details for one PR's read view.
 #[tauri::command]
@@ -2114,6 +2177,16 @@ pub async fn gh_pr_view(repo_path: String, number: u64) -> AppResult<PrDetails> 
             .collect()
     };
 
+    // Repository-level merge-method settings (allow merge / squash / rebase). The
+    // `gh pr view --json` surface can't return these, so it's one extra `gh api
+    // graphql` call, best-effort: on any failure the three fields stay `None` and the
+    // picker gates exactly as before (raw server error on merge as the fallback). The
+    // repo is derived from the PR's own url, so a fork's PR reports its BASE repo's
+    // settings — the repo the merge actually lands in.
+    let merge_settings = gh_repo_merge_settings(&repo_path, &raw.url)
+        .await
+        .unwrap_or_default();
+
     Ok(PrDetails {
         id: raw.id,
         number: raw.number,
@@ -2204,6 +2277,9 @@ pub async fn gh_pr_view(repo_path: String, number: u64) -> AppResult<PrDetails> 
             .collect(),
         // GitHub derives its completed reviewers on the frontend from `reviews`.
         completed_reviewers: Vec::new(),
+        merge_commit_allowed: merge_settings.merge_commit_allowed,
+        squash_merge_allowed: merge_settings.squash_merge_allowed,
+        rebase_merge_allowed: merge_settings.rebase_merge_allowed,
     })
 }
 
@@ -4010,10 +4086,20 @@ mod tests {
         assert_eq!(owner, "my-org");
         assert_eq!(name, "my_repo.js");
 
+        // Trailing garbage after `/pull/N` is fine — owner/name are the two segments
+        // before `/pull/`, so the merge-settings fetch still targets the right repo.
+        let (host, owner, name) =
+            parse_pr_url_repo("https://github.com/biomejs/biome/pull/10937/files#diff-1").unwrap();
+        assert_eq!(host, "github.com");
+        assert_eq!(owner, "biomejs");
+        assert_eq!(name, "biome");
+
         // Malformed / non-PR urls → Err.
         assert!(parse_pr_url_repo("https://github.com/biomejs/biome/issues/1").is_err());
         assert!(parse_pr_url_repo("https://github.com/onlyowner/pull/1").is_err());
         assert!(parse_pr_url_repo("not a url").is_err());
+        // Empty string → Err (no host, no segments).
+        assert!(parse_pr_url_repo("").is_err());
         // A `-`-prefixed segment (flag-injection guard) → Err.
         assert!(parse_pr_url_repo("https://github.com/-evil/repo/pull/1").is_err());
         assert!(parse_pr_url_repo("https://github.com/owner/-evil/pull/1").is_err());

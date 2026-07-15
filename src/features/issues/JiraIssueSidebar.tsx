@@ -37,6 +37,8 @@ export function JiraIssueSidebar({
   canLogWork,
   canEditOwnWorklogs,
   canDeleteOwnWorklogs,
+  canEditAllWorklogs,
+  canDeleteAllWorklogs,
 }: {
   repoPath: string;
   issueKey: string;
@@ -50,6 +52,8 @@ export function JiraIssueSidebar({
   canLogWork: boolean;
   canEditOwnWorklogs: boolean;
   canDeleteOwnWorklogs: boolean;
+  canEditAllWorklogs: boolean;
+  canDeleteAllWorklogs: boolean;
 }) {
   const setDueDate = useJiraSetDueDate(repoPath, link);
   const selectIssue = useUiStore((s) => s.selectIssue);
@@ -288,6 +292,8 @@ export function JiraIssueSidebar({
           canEditEstimates={canEditIssue}
           canEditOwnWorklogs={canEditOwnWorklogs}
           canDeleteOwnWorklogs={canDeleteOwnWorklogs}
+          canEditAllWorklogs={canEditAllWorklogs}
+          canDeleteAllWorklogs={canDeleteAllWorklogs}
         />
       )}
     </aside>

@@ -8,6 +8,7 @@ import {
   type TranscriptSegment,
 } from "@/lib/ai/agent";
 import { cleanupContainerSandbox, stopTestContainer } from "@/lib/ai/sandbox";
+import { repoIdentity } from "@/lib/git/repo-identity";
 import {
   commitWorktreeAll,
   createWorktree,
@@ -277,11 +278,19 @@ async function runTurn(
   // setting it per-repo "off" stops it applying, matching what the picker would
   // now offer. The backend resolves secret env/header values from the keychain.
   const mcpIds = s0.mcpServers ?? [];
+  // Scope/override lookup keys for the session's repo (its worktree-stable
+  // identity + the raw checkout path), so a server scoped/overridden from a
+  // sibling worktree still resolves as OFFERED here.
+  const repoKeys = mcpIds.length
+    ? await repoIdentity(s0.repoPath).then((id) =>
+        id !== s0.repoPath ? [s0.repoPath, id] : [s0.repoPath],
+      )
+    : [];
   const mcpServers = mcpIds.length
     ? ((await loadSettings().catch(() => null))?.mcpServers ?? []).filter(
         (srv) =>
           mcpIds.includes(srv.id) &&
-          isServerAvailable(srv, s0.repoPath) &&
+          isServerAvailable(srv, repoKeys) &&
           mcpServerUsableBy(srv, s0.agent),
       )
     : undefined;

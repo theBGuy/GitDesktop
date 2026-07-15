@@ -27,7 +27,7 @@ import {
   mcpServerUsableBy,
   mcpSupportedFor,
 } from "@/lib/settings/mcp";
-import { useSettings } from "@/lib/settings/queries";
+import { useRepoKeys, useSettings } from "@/lib/settings/queries";
 import { cn } from "@/lib/utils";
 import {
   AgentPicker,
@@ -229,6 +229,10 @@ export function SessionComposer({
   // (each CLI reads different dirs).
   const settings = useSettings();
   const customCommands = settings.data?.customCommands;
+  // Scope/override lookup keys for this repo (identity + raw path), so a
+  // repo-scoped server or per-repo override set from a sibling worktree is
+  // OFFERED here. A plain query hook (no effects) — safe under <Activity>.
+  const repoKeys = useRepoKeys(repoPath);
   // MCP registry (Settings → MCP servers) → the new-session opt-in, narrowed to
   // the servers OFFERED in THIS repo (in scope and not per-repo "off"). Default
   // selection is the per-repo "on" set; the picker lets you pare it down. Applied to
@@ -237,9 +241,9 @@ export function SessionComposer({
   const mcpRegistry = useMemo(
     () =>
       (settings.data?.mcpServers ?? []).filter((s) =>
-        isServerAvailable(s, repoPath),
+        isServerAvailable(s, repoKeys),
       ),
-    [settings.data?.mcpServers, repoPath],
+    [settings.data?.mcpServers, repoKeys],
   );
   const isContainer = settings.data?.agentIsolation === "container";
   // Servers the chosen agent can actually run (Codex = local/stdio only).
@@ -250,9 +254,9 @@ export function SessionComposer({
   const enabledMcpIds = useMemo(
     () =>
       mcpServersForAgent
-        .filter((s) => isServerDefaultOn(s, repoPath))
+        .filter((s) => isServerDefaultOn(s, repoKeys))
         .map((s) => s.id),
-    [mcpServersForAgent, repoPath],
+    [mcpServersForAgent, repoKeys],
   );
   const effectiveMcp = startMcp ?? enabledMcpIds;
   // MCP runs on host + container for Claude/Copilot/opencode, and on container Codex.

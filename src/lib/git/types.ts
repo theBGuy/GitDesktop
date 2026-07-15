@@ -1201,6 +1201,11 @@ export interface PagesInfo {
   sourcePath: string;
   cname: string;
   httpsEnforced: boolean;
+  /** TLS certificate state for a custom domain — one of "new",
+   * "authorization_created", "authorization_pending", "authorized",
+   * "uploaded", "approved", "errored", "bad_authz". `null` when the repo has no
+   * custom domain (no certificate is provisioned). */
+  httpsCertificateState: string | null;
 }
 
 export type RulesetEnforcement = "active" | "evaluate" | "disabled";
@@ -1534,6 +1539,17 @@ export interface PrDetails {
    *  GitHub derives its completed reviewers on the frontend from `reviews`, so it
    *  leaves this empty. */
   completedReviewers: CompletedReviewerWithState[];
+  /** Whether the repository allows the merge-commit method (server-side setting of
+   *  the repo the PR lives in — its base/parent repo on a fork). GitHub only; `null`
+   *  = unknown — do not gate on `null`. The merge-method picker pre-disables an
+   *  option only when its flag is explicitly `false`. */
+  mergeCommitAllowed: boolean | null;
+  /** Whether the repository allows the squash-merge method. GitHub only; `null` =
+   *  unknown — do not gate on `null`. */
+  squashMergeAllowed: boolean | null;
+  /** Whether the repository allows the rebase-merge method. GitHub only; `null` =
+   *  unknown — do not gate on `null`. */
+  rebaseMergeAllowed: boolean | null;
 }
 
 /** A reviewer who has submitted a verdict, as supplied by the backend (GitLab
