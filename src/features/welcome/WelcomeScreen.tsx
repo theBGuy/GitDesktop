@@ -101,6 +101,7 @@ export function WelcomeScreen() {
             variant="ghost"
             size="icon-sm"
             aria-label="Settings"
+            title="Settings"
             onClick={() => openSettings()}
           >
             <GearIcon />

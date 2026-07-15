@@ -41,6 +41,7 @@ import {
 } from "@/features/conversations/Thread";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { copyText } from "@/lib/clipboard";
+import { presentError } from "@/lib/error-summary";
 import type { LockReason, MinimizeReason } from "@/lib/git/api";
 import {
   forgeFeatureReady,
@@ -220,7 +221,27 @@ export function RemoteIssueView({
     );
   }
   if (details.isError || !issue) {
-    return <DiffPlaceholder message="Could not load this issue" />;
+    return (
+      <DiffPlaceholder
+        message={
+          details.error
+            ? presentError(details.error).summary
+            : "Could not load this issue"
+        }
+        action={
+          details.isError ? (
+            <Button
+              variant="outline"
+              size="sm"
+              className="cursor-pointer"
+              onClick={() => details.refetch()}
+            >
+              Retry
+            </Button>
+          ) : undefined
+        }
+      />
+    );
   }
 
   const isOpen = issue.state === "OPEN";
@@ -516,7 +537,10 @@ export function RemoteIssueView({
                 : ""}
             </Badge>
           )}
-          <AuthorAvatar login={issue.author} avatarUrl={issue.authorAvatarUrl} />
+          <AuthorAvatar
+            login={issue.author}
+            avatarUrl={issue.authorAvatarUrl}
+          />
           <span>{issue.author || "unknown"}</span>
           <span>•</span>
           <span>opened {formatRelativeTime(issue.createdAt)}</span>
@@ -530,7 +554,10 @@ export function RemoteIssueView({
             <div className="space-y-4 p-4">
               <div className="group space-y-1">
                 <p className="flex items-center gap-2 text-xs">
-                  <AuthorAvatar login={issue.author} avatarUrl={issue.authorAvatarUrl} />
+                  <AuthorAvatar
+                    login={issue.author}
+                    avatarUrl={issue.authorAvatarUrl}
+                  />
                   <span className="font-medium">
                     {issue.author || "unknown"}
                   </span>

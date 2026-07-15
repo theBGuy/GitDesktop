@@ -273,7 +273,7 @@ export function CreateJiraIssueDialog({
               Cancel
             </Button>
             <form.AppForm>
-              <span title={submitReason ?? undefined}>
+              <span className="inline-flex" title={submitReason ?? undefined}>
                 <form.SubmitButton disabled={generating || !issueTypeId}>
                   Create issue
                 </form.SubmitButton>

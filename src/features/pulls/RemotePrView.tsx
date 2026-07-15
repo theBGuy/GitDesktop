@@ -65,6 +65,7 @@ import {
 } from "@/lib/branch-rules/match";
 import { useEffectiveBranchRules } from "@/lib/branch-rules/queries";
 import { copyText } from "@/lib/clipboard";
+import { presentError } from "@/lib/error-summary";
 import type { MergeStrategy, MinimizeReason } from "@/lib/git/api";
 import { displayLogin } from "@/lib/git/bot-login";
 import { splitUnifiedDiff } from "@/lib/git/diff-split";
@@ -384,10 +385,14 @@ export function RemotePrView({
   // The status lives in a *separate* glab query, so we flip it OPTIMISTICALLY here:
   // otherwise the label lags a click by a full approve-POST + approvals-refetch and
   // looks broken. The success invalidation reconciles the real count; errors roll back.
-  function toggleApproval() {
+  async function toggleApproval() {
     const approved = approvals.data?.viewerHasApproved ?? false;
     const action = approved ? unapprovePr : approvePr;
     const key = ["repo", repoPath, "pr", number, "approvals"] as const;
+    // Cancel any in-flight approvals refetch first — otherwise it can resolve
+    // AFTER this optimistic flip and silently revert the click (the approval
+    // state lives in a separate query, so nothing else guards it).
+    await queryClient.cancelQueries({ queryKey: key });
     const prev = queryClient.getQueryData<ApprovalState>(key);
     const login = forge.data?.login ?? "";
     if (prev) {
@@ -421,13 +426,16 @@ export function RemotePrView({
   // clears the state, is the natural Free-tier exit). Same optimistic flip as the
   // approve toggle: the state lives in the separate approvals query, so waiting
   // on the write + refetch would look broken.
-  function requestChanges() {
+  async function requestChanges() {
     const requested = approvals.data?.viewerRequestedChanges ?? false;
     // Already requested on GitLab: the button is a focusable state indicator
     // (its title says how to clear); a re-click must not fire the Premium-only
     // undo path. Bitbucket falls through to the revoke below.
     if (requested && !canUnrequestChanges) return;
     const key = ["repo", repoPath, "pr", number, "approvals"] as const;
+    // Same guard as toggleApproval: cancel an in-flight approvals refetch so it
+    // can't land after the optimistic flip and revert it.
+    await queryClient.cancelQueries({ queryKey: key });
     const prev = queryClient.getQueryData<ApprovalState>(key);
     if (prev) {
       queryClient.setQueryData<ApprovalState>(key, {
@@ -653,7 +661,27 @@ export function RemotePrView({
     );
   }
   if (details.isError || !pr) {
-    return <DiffPlaceholder message="Could not load this pull request" />;
+    return (
+      <DiffPlaceholder
+        message={
+          details.error
+            ? presentError(details.error).summary
+            : "Could not load this pull request"
+        }
+        action={
+          details.isError ? (
+            <Button
+              variant="outline"
+              size="sm"
+              className="cursor-pointer"
+              onClick={() => details.refetch()}
+            >
+              Retry
+            </Button>
+          ) : undefined
+        }
+      />
+    );
   }
 
   const fileDiff = effectivePath

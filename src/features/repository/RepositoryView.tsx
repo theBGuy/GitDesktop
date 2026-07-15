@@ -145,7 +145,16 @@ export function RepositoryView() {
   const alias = useRepoAlias(repoPath);
   // The write-capable agent is an AI feature — hide its tab when AI is hidden.
   const aiEnabled = useAiEnabled();
-  const currentName = status.data?.branch?.name ?? null;
+  const branchHead = status.data?.branch;
+  const currentName = branchHead?.name ?? null;
+  // A detached HEAD (mid-rebase, or a raw `git checkout <sha>`) has no branch
+  // name — show `detached @ <oid>` in the OS title bar so it keeps context
+  // instead of collapsing to the bare repo name (mirrors BranchSwitcher's
+  // label). `currentName` stays the real branch name for Compare, which is
+  // correctly unavailable while detached.
+  const headLabel = branchHead?.detached
+    ? `detached @ ${branchHead.oid?.slice(0, 7) ?? "?"}`
+    : currentName;
   const gh = useForgeStatus(repoPath ?? "");
   // Palette create actions: discussion stays a GitHub-only write; the issue /
   // PR / release creates follow their per-action forge flags (GitHub + GitLab).
@@ -245,11 +254,11 @@ export function RepositoryView() {
   useEffect(() => {
     const display = alias ?? repoName;
     if (!display) return;
-    const title = currentName ? `${display} • ${currentName}` : display;
+    const title = headLabel ? `${display} • ${headLabel}` : display;
     getCurrentWindow()
       .setTitle(`${title} — ${APP_TITLE}`)
       .catch(() => undefined);
-  }, [repoName, alias, currentName]);
+  }, [repoName, alias, headLabel]);
   // Reset to the bare title only when the repo view unmounts (repo closed).
   useEffect(() => {
     return () => {

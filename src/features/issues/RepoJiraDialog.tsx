@@ -419,7 +419,9 @@ export function RepoJiraDialog({
                 <ComboboxEmpty>
                   {projectSearch.isFetching
                     ? "Searching…"
-                    : "No matching projects."}
+                    : projectSearch.isError
+                      ? "Couldn't search projects — your Jira connection may have expired. Reconnect and try again."
+                      : "No matching projects."}
                 </ComboboxEmpty>
                 <ComboboxList>
                   {(item: JiraProject) => (

@@ -104,6 +104,20 @@ pub async fn git_file_log(
     skip: u32,
 ) -> AppResult<Vec<CommitSummary>> {
     validate_path(&path)?;
+    // A zero-commit repo has no HEAD to walk, so `git log --follow` would surface
+    // raw git stderr. Mirror `git_log`'s guard: an unborn HEAD has no history, so
+    // return an empty list rather than an error.
+    let head_exists = run_git_raw(
+        Some(&repo_path),
+        &["rev-parse", "--verify", "--quiet", "HEAD"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?
+    .code
+        == 0;
+    if !head_exists {
+        return Ok(Vec::new());
+    }
     let limit_arg = limit.to_string();
     let skip_arg = skip.to_string();
     let out = run_git(

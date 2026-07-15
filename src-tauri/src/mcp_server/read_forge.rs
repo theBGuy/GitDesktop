@@ -10,12 +10,13 @@
 //! there (GitHub and GitLab only).
 
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::CallToolResult;
 use rmcp::{schemars, tool, tool_router, ErrorData as McpError};
 
 use super::{
-    app_err, cap_head, cap_hunk_lines, cap_tail, json_result, json_result_untrusted, GitDesktopMcp,
-    JobIdArg, NumberArg, RunIdArg, GH_TEXT_MAX_BYTES, HUNK_MAX_LINES,
+    app_err, cap_head, cap_hunk_lines, cap_tail, json_result, json_result_untrusted,
+    text_result_untrusted, GitDesktopMcp, JobIdArg, NumberArg, RunIdArg, GH_TEXT_MAX_BYTES,
+    HUNK_MAX_LINES,
 };
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -178,10 +179,7 @@ impl GitDesktopMcp {
         let diff = crate::forge::forge_pr_diff(self.repo.clone(), args.number)
             .await
             .map_err(app_err)?;
-        Ok(CallToolResult::success(vec![Content::text(cap_head(
-            diff,
-            GH_TEXT_MAX_BYTES,
-        ))]))
+        text_result_untrusted(cap_head(diff, GH_TEXT_MAX_BYTES))
     }
 
     #[tool(
@@ -316,10 +314,7 @@ impl GitDesktopMcp {
         let logs = crate::forge::forge_ci_run_failed_logs(self.repo.clone(), args.run_id)
             .await
             .map_err(app_err)?;
-        Ok(CallToolResult::success(vec![Content::text(cap_tail(
-            logs,
-            GH_TEXT_MAX_BYTES,
-        ))]))
+        text_result_untrusted(cap_tail(logs, GH_TEXT_MAX_BYTES))
     }
 
     #[tool(
@@ -336,10 +331,7 @@ impl GitDesktopMcp {
         let logs = crate::forge::forge_ci_job_logs(self.repo.clone(), args.job_id)
             .await
             .map_err(app_err)?;
-        Ok(CallToolResult::success(vec![Content::text(cap_tail(
-            logs,
-            GH_TEXT_MAX_BYTES,
-        ))]))
+        text_result_untrusted(cap_tail(logs, GH_TEXT_MAX_BYTES))
     }
 
     #[tool(

@@ -88,7 +88,7 @@ export function useRepoIdentity(repo: string) {
  * `repoKeys.*` and the `["repo", repo, …]` literals here put it at index 1).
  */
 function keepPreviousDataForRepo(repo: string, repoKeyIndex = 1) {
-  return <T,>(
+  return <T>(
     previousData: T | undefined,
     previousQuery: { queryKey: QueryKey } | undefined,
   ): T | undefined =>
@@ -493,7 +493,11 @@ export function useFileLog(repo: string, path: string | null) {
 }
 
 /** `git blame` for a file — at the working tree, or as of `rev` when given. */
-export function useBlame(repo: string, path: string | null, rev?: string | null) {
+export function useBlame(
+  repo: string,
+  path: string | null,
+  rev?: string | null,
+) {
   return useQuery({
     queryKey: ["repo", repo, "blame", path ?? "", rev ?? ""] as const,
     queryFn: () => api.gitBlame(repo, path ?? "", rev),
@@ -1454,21 +1458,55 @@ export function useMilestones(repo: string, enabled: boolean) {
  * extra display fields callers pass (milestone title, the full type) are only
  * for this patch — the backend takes just the id/name.
  */
+/** Shallow-diff two objects, returning the keys whose value changed (`Object.is`).
+ *  Lets an optimistic mutation capture exactly which fields it touched, so a
+ *  rollback restores only those — never reverting a concurrent edit to a sibling
+ *  field on the same cache entry. */
+function changedKeys<T extends object>(prev: T, next: T): (keyof T)[] {
+  const keys = new Set<keyof T>([
+    ...(Object.keys(prev) as (keyof T)[]),
+    ...(Object.keys(next) as (keyof T)[]),
+  ]);
+  return [...keys].filter((k) => !Object.is(prev[k], next[k]));
+}
+
 function useOptimisticIssueMutation<TArgs extends { number: number }, TData>(
   repo: string,
   mutationFn: (args: TArgs) => Promise<TData>,
   patch: (issue: IssueDetails, args: TArgs) => IssueDetails,
 ) {
-  return useOptimisticCacheMutation<TArgs, TData, IssueDetails>(
+  const queryClient = useQueryClient();
+  return useMutation({
     mutationFn,
-    (args) => ["repo", repo, "issue", args.number] as const,
-    (d, args) => (d ? patch(d, args) : d),
+    onMutate: async (args: TArgs) => {
+      const key = ["repo", repo, "issue", args.number] as const;
+      await queryClient.cancelQueries({ queryKey: key });
+      const prev = queryClient.getQueryData<IssueDetails>(key);
+      if (!prev) return { key, restore: undefined };
+      const next = patch(prev, args);
+      queryClient.setQueryData<IssueDetails>(key, next);
+      // Field-scoped rollback: remember only the fields this patch changed, so
+      // onError restores exactly those onto the CURRENT cache. A wholesale
+      // snapshot restore would revert a concurrent field mutation on the same
+      // issue (e.g. setMilestone landing while setAssignees is in flight).
+      const restore: Partial<IssueDetails> = {};
+      for (const k of changedKeys(prev, next)) {
+        (restore as Record<string, unknown>)[k as string] = prev[k];
+      }
+      return { key, restore };
+    },
+    onError: (_e, _args, ctx) => {
+      if (!ctx?.restore) return;
+      queryClient.setQueryData<IssueDetails>(ctx.key, (cur) =>
+        cur ? { ...cur, ...ctx.restore } : cur,
+      );
+    },
     // Narrow reconciliation: only the one issue's detail subtree (not repo-wide).
-    (queryClient, args) =>
+    onSettled: (_d, _e, args) =>
       void queryClient.invalidateQueries({
         queryKey: ["repo", repo, "issue", args.number],
       }),
-  );
+  });
 }
 
 export function useSetIssueAssignees(repo: string) {
@@ -3540,10 +3578,18 @@ export function useSetPrReviewers(repo: string) {
       queryClient.setQueryData<PrDetails>(key, (d) =>
         d ? { ...d, reviewers: args.reviewers } : d,
       );
-      return { prev, key };
+      // Field-scoped rollback: capture only the reviewers we replaced, not the
+      // whole PrDetails, so a failed reviewer-set doesn't revert a concurrent
+      // assignee-set sharing this PR key.
+      return { key, prevReviewers: prev?.reviewers };
     },
     onError: (_e, _args, ctx) => {
-      if (ctx?.prev !== undefined) queryClient.setQueryData(ctx.key, ctx.prev);
+      const prevReviewers = ctx?.prevReviewers;
+      const key = ctx?.key;
+      if (prevReviewers === undefined || key === undefined) return;
+      queryClient.setQueryData<PrDetails>(key, (cur) =>
+        cur ? { ...cur, reviewers: prevReviewers } : cur,
+      );
     },
     onSettled: (_d, _e, args) =>
       queryClient.invalidateQueries({
@@ -3574,10 +3620,18 @@ export function useSetPrAssignees(repo: string) {
       queryClient.setQueryData<PrDetails>(key, (d) =>
         d ? { ...d, assignees: args.assignees } : d,
       );
-      return { prev, key };
+      // Field-scoped rollback: capture only the assignees we replaced, not the
+      // whole PrDetails, so a failed assignee-set doesn't revert a concurrent
+      // reviewer-set sharing this PR key.
+      return { key, prevAssignees: prev?.assignees };
     },
     onError: (_e, _args, ctx) => {
-      if (ctx?.prev !== undefined) queryClient.setQueryData(ctx.key, ctx.prev);
+      const prevAssignees = ctx?.prevAssignees;
+      const key = ctx?.key;
+      if (prevAssignees === undefined || key === undefined) return;
+      queryClient.setQueryData<PrDetails>(key, (cur) =>
+        cur ? { ...cur, assignees: prevAssignees } : cur,
+      );
     },
     onSettled: (_d, _e, args) =>
       queryClient.invalidateQueries({
@@ -5107,9 +5161,7 @@ export function useEditPrLabels(repo: string) {
                 ]
               : [repoKeys.all(repo)];
       return void Promise.all(
-        keys.map((queryKey) =>
-          queryClient.invalidateQueries({ queryKey }),
-        ),
+        keys.map((queryKey) => queryClient.invalidateQueries({ queryKey })),
       );
     },
   });

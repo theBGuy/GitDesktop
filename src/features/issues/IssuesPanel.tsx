@@ -324,6 +324,20 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
       ghReady={ghReady}
       remoteNotReadySlot={bitbucketNotReadySlot}
       listPending={issueList.isPending}
+      remoteError={issueList.isError}
+      remoteErrorSlot={
+        <div className="space-y-2 px-3 py-4 text-xs text-muted-foreground">
+          <p>Couldn't load issues.</p>
+          <Button
+            variant="outline"
+            size="sm"
+            className="cursor-pointer"
+            onClick={() => issueList.refetch()}
+          >
+            Retry
+          </Button>
+        </div>
+      }
       // More may exist server-side exactly when this page filled the requested
       // limit (compared against the raw loaded count, not the filtered view).
       hasMore={(issueList.data?.length ?? 0) === limit}

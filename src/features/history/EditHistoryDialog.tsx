@@ -332,7 +332,10 @@ export function EditHistoryDialog({
                       ) : (
                         // Wrap so the title still shows when the button is
                         // disabled — a native-disabled button swallows it.
-                        <span title="Generate this commit's message with AI">
+                        <span
+                          className="inline-flex"
+                          title="Generate this commit's message with AI"
+                        >
                           <Button
                             type="button"
                             variant="ghost"
