@@ -4,6 +4,7 @@ import { maybeFireSync } from "@/lib/automations/sync";
 import { effectiveActions } from "@/lib/automations/types";
 import { forgePrPoll, forgeStatus } from "@/lib/git/api";
 import { forgeFeatureReady } from "@/lib/git/queries";
+import { repoIdentity } from "@/lib/git/repo-identity";
 import { loadSettings } from "@/lib/settings/api";
 import { useUiStore } from "@/lib/stores/ui";
 
@@ -23,7 +24,10 @@ import { useUiStore } from "@/lib/stores/ui";
  *
  * Cost bound: one forge poll per rule-bearing recent repo per minute — the loop
  * only polls repos that carry an explicit pr-sync rule (an opt-in), so a user
- * with no automations makes no background calls here.
+ * with no automations makes no background calls here. React Query runs the first
+ * tick immediately on mount (app startup), so the initial settings/automations
+ * read happens once at launch; it stays cheap because every forge call is gated
+ * behind an explicit rule and an empty-recents early-exit.
  *
  * Active-repo exclusion: the repo open in the app is SKIPPED, because
  * RepositoryView's `usePrNotifications` poller already covers it (with the OS
@@ -45,10 +49,16 @@ export function useBackgroundPrSync(): void {
     retry: false,
     queryFn: async () => {
       const settings = await loadSettings();
+      // No recents → nothing to watch; skip the config read and the loop.
+      if (settings.recentRepos.length === 0) return { polled: 0 };
       const config = await loadAutomations();
       // Read the active repo imperatively at poll time (not reactively) so the
-      // exclusion reflects wherever the user is right now.
+      // exclusion reflects wherever the user is right now. Resolve its
+      // worktree-stable identity once (memoized) so a WORKTREE of the active repo
+      // — a different checkout path but the SAME identity — is excluded too: a raw
+      // path compare would miss it and double-fire against usePrNotifications.
       const activeRepo = useUiStore.getState().repoPath;
+      const activeIdentity = activeRepo ? await repoIdentity(activeRepo) : null;
 
       let polled = 0;
       for (const repo of settings.recentRepos) {
@@ -60,6 +70,12 @@ export function useBackgroundPrSync(): void {
           // the pr-sync gate: only rule-bearing repos are worth a forge poll.
           const entry = await repoAutomationsFor(config, path);
           if (effectiveActions(config, entry, "pr-sync").length === 0) continue;
+          // Skip a worktree/alias of the active repo: same identity, different
+          // path (usePrNotifications already polls that identity). After the rule
+          // gate so only rule-bearing repos pay it — and repoAutomationsFor above
+          // already warmed this path's memoized identity, so it's a cache hit.
+          if (activeIdentity && (await repoIdentity(path)) === activeIdentity)
+            continue;
 
           // Forge-ready gate: skip repos whose hosted integration isn't wired up
           // for PRs (unauth'd, non-hosted, or a provider we haven't built yet).
