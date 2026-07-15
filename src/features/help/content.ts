@@ -1135,7 +1135,11 @@ Register **Model Context Protocol** servers under **Settings → MCP servers** �
 the ones you choose from the composer's **MCP** picker. **Claude**, **Copilot**, and
 **opencode** run MCP servers on the **host** *or* in a **container**; **Codex** runs them
 in a **container** only (local/\`stdio\` servers — host Codex can't approve MCP tool calls,
-so it needs the container's sandbox). In a container the servers run *inside* the sandbox,
+so it needs the container's sandbox). A **remote (HTTP)** server whose host isn't on your
+**AI allowed hosts** list is flagged with a **host not allowed** badge (and an advisory note
+in its editor with a one-click **Allow host**) — a reminder that the CLI connects to that
+host outside GitDesktop's AI host allowlist. It's advisory only: nothing is blocked, and the
+server keeps working. In a container the servers run *inside* the sandbox,
 sharing an npm cache so an \`npx\` server is downloaded only once. A Claude run is **strict** —
 it gets *only* the servers you picked and never inherits others on your machine — while
 Copilot and opencode layer your picks onto their own config. The composer's **MCP** picker

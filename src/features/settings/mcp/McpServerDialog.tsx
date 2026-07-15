@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import { isHostAllowed, normalizeHost } from "@/lib/ai/allowed-hosts";
 import { deleteMcpSecret, setMcpSecret } from "@/lib/git/api";
 import type { McpServer } from "@/lib/settings/api";
 import {
@@ -31,6 +32,7 @@ import {
 } from "@/lib/settings/mcp";
 import { useRepoKeys } from "@/lib/settings/queries";
 import { toastError } from "@/lib/toast";
+import { HostAllowNote } from "../HostAllowNote";
 import { EntryEditor } from "./EntryEditor";
 import { type EntryRow, repoBasename } from "./shared";
 
@@ -53,6 +55,8 @@ export function McpServerDialog({
   others,
   repoPath,
   repoName,
+  allowedHosts,
+  onAllowHost,
   onSave,
   onClose,
 }: {
@@ -62,6 +66,12 @@ export function McpServerDialog({
   /** The repo open behind Settings (for the "This repo" scope option). */
   repoPath: string | null;
   repoName: string | null;
+  /** The draft AI allow list (the settings form both screens share), so an http
+   *  URL pointing at a not-yet-allowed host can surface the advisory note. */
+  allowedHosts: string[];
+  /** Add a URL's host to the draft allow list — the one-click fix behind the
+   *  advisory note. Mutates the draft settings, not persisted settings. */
+  onAllowHost: (url: string) => void;
   onSave: (server: McpServer) => void;
   onClose: () => void;
 }) {
@@ -239,6 +249,12 @@ export function McpServerDialog({
               <Select
                 value={selectedScope}
                 onValueChange={(v) => v && set("scope", v)}
+                // Without `items`, Base UI's SelectValue renders the RAW value in
+                // the trigger — for an identity-keyed scope that's a bare
+                // "…/.git" path. The map makes the trigger show the option label.
+                items={Object.fromEntries(
+                  scopeOptions.map((o) => [o.value, o.label]),
+                )}
               >
                 <SelectTrigger size="sm" className="w-full">
                   <SelectValue />
@@ -304,6 +320,21 @@ export function McpServerDialog({
                 className="font-mono"
                 spellCheck={false}
               />
+              {/* The CLI connects to this URL outside GitDesktop's AI host
+                  allowlist. Advisory only — never feeds validationError or
+                  disables Save. Gated on a PARSEABLE host (so a half-typed
+                  "http://" shows nothing, not an empty note) that isn't already
+                  allowed; empty/allowlisted/local URLs show nothing. */}
+              {normalizeHost(draft.url) &&
+                !isHostAllowed(draft.url, allowedHosts) && (
+                  <HostAllowNote
+                    url={draft.url}
+                    allowedHosts={allowedHosts}
+                    onAllowHost={onAllowHost}
+                    defaultNote={null}
+                    consequence="the agent CLI will still connect to it — it sits outside GitDesktop's AI host allowlist."
+                  />
+                )}
             </div>
           )}
 

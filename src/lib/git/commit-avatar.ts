@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { CommitAuthorAvatar } from "./api";
 import { ghBotAvatar } from "./api";
 
 // Commit-author avatars for the History surfaces.
@@ -45,6 +46,41 @@ const gravatarPending = new Map<string, Promise<string>>();
 const botAvatarCache = new Map<string, string>();
 const botAvatarPending = new Map<string, Promise<string>>();
 
+// The fourth tier: commit-author `email → avatar_url` resolved in a batch from
+// the GitHub commits API (see `useCommitAuthorAvatarIndex`), for human authors
+// whose email is neither a GitHub no-reply nor has a Gravatar. Keyed by
+// lowercased email. Unlike the caches above (populated on demand, one email at a
+// time), this arrives asynchronously per repo AFTER rows have already painted, so
+// a listener set lets mounted rows re-resolve when it lands — the index wins over
+// an already-resolved Gravatar, since a real GitHub avatar beats an identicon.
+const authorIndexCache = new Map<string, string>();
+const authorIndexListeners = new Set<() => void>();
+
+function subscribeAuthorIndex(listener: () => void): () => void {
+  authorIndexListeners.add(listener);
+  return () => {
+    authorIndexListeners.delete(listener);
+  };
+}
+
+/** Merge a batch of commit-author `email → avatarUrl` pairs into the module index
+ *  and notify mounted rows so any showing initials (or a Gravatar) upgrade to the
+ *  real avatar. Idempotent; safe to call repeatedly as the query refetches. */
+export function primeCommitAuthorIndex(entries: CommitAuthorAvatar[]): void {
+  let changed = false;
+  for (const { email, avatarUrl } of entries) {
+    const key = email.trim().toLowerCase();
+    if (!key || !avatarUrl) continue;
+    if (authorIndexCache.get(key) !== avatarUrl) {
+      authorIndexCache.set(key, avatarUrl);
+      changed = true;
+    }
+  }
+  if (changed) {
+    for (const listener of authorIndexListeners) listener();
+  }
+}
+
 /**
  * The avatar URL for a commit author's email, `""` when there's nothing to show
  * (no email / no crypto), or `null` when the answer needs an async Gravatar hash
@@ -65,6 +101,11 @@ function commitAvatarUrlSync(email: string): string | null {
   if (bot) {
     return botAvatarCache.get(bot[1]) ?? null;
   }
+  // Fourth tier, ahead of Gravatar: a batch-resolved GitHub avatar for this
+  // email (a real avatar beats a Gravatar identicon). A miss falls through — the
+  // index is partial by design, so most emails still resolve via Gravatar/initials.
+  const indexed = authorIndexCache.get(normalized);
+  if (indexed) return indexed;
   return gravatarCache.get(normalized) ?? null;
 }
 
@@ -108,6 +149,19 @@ export function useCommitAvatarUrl(email: string): string {
   // Lazy init reads the sync answer (no-reply URL, cached Gravatar, or "") once
   // on mount, so a cache hit paints immediately with no flash. `null` → pending.
   const [url, setUrl] = useState(() => commitAvatarUrlSync(email) ?? "");
+
+  // The author-index tier arrives asynchronously per repo, often AFTER this row
+  // has already resolved to a Gravatar or initials. Subscribe so that when the
+  // index lands with an entry for this email, we upgrade to the real avatar (the
+  // index wins over an already-resolved Gravatar). No-op for emails never in the
+  // index — the notify just re-checks the map and finds nothing.
+  useEffect(() => {
+    const normalized = email.trim().toLowerCase();
+    return subscribeAuthorIndex(() => {
+      const indexed = authorIndexCache.get(normalized);
+      if (indexed) setUrl(indexed);
+    });
+  }, [email]);
 
   useEffect(() => {
     const sync = commitAvatarUrlSync(email);

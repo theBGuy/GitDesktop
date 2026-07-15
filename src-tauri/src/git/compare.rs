@@ -340,6 +340,33 @@ pub async fn git_review_worktree(repo_path: String, sha: String) -> AppResult<Op
     Ok(Some(path_str))
 }
 
+/// Whether `path` is a `git_review_worktree`-shaped review temp dir: located
+/// DIRECTLY under the OS temp dir with a basename starting `gd-review-`. This is
+/// the guard for the `remove_dir_all` fallback in `git_remove_worktree` — the
+/// fallback must NEVER widen that `#[tauri::command]` into an arbitrary recursive
+/// delete of any caller-supplied path (git's own `worktree remove` refuses a
+/// non-worktree path, so the fallback is the only unbounded-delete risk). Only
+/// paths this returns `true` for get the fallback; every other path degrades to
+/// git-only baseline. Comparison is component-wise (robust to trailing
+/// separators) and case-insensitive on the file name to match Windows semantics.
+fn is_review_worktree_temp_path(path: &std::path::Path) -> bool {
+    let temp = std::env::temp_dir();
+    // The path's parent must be exactly the temp dir. Compare component sequences
+    // rather than raw strings so a trailing separator on either side can't matter.
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    if parent.components().collect::<Vec<_>>() != temp.components().collect::<Vec<_>>() {
+        return false;
+    }
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    // Windows temp paths are case-insensitive; a lowercased compare is safe here
+    // because the prefix is pure ASCII.
+    name.to_ascii_lowercase().starts_with("gd-review-")
+}
+
 /// Removes a review worktree created by `git_review_worktree` and prunes stale
 /// administrative entries. Best-effort and idempotent.
 #[tauri::command]
@@ -351,7 +378,68 @@ pub async fn git_remove_worktree(repo_path: String, worktree_path: String) -> Ap
     )
     .await;
     let _ = run_git_raw(Some(&repo_path), &["worktree", "prune"], DEFAULT_TIMEOUT).await;
+    // `git worktree remove` deletes the directory itself, but on Windows that
+    // recursive delete can lose a handle race (an antivirus/indexer still holding
+    // the temp dir) and leave an EMPTY husk behind, and `git_remove_worktree`
+    // discards every result above — so the husk leaks in %TEMP% forever. Finish
+    // the delete ourselves best-effort with a short backoff. GUARDED to exactly
+    // the `gd-review-*` temp shape the only caller passes: git's own remove can
+    // never delete a non-worktree path, so an unguarded `remove_dir_all` here
+    // would widen this command into an arbitrary recursive-delete primitive on any
+    // caller-supplied path. Off the guard, behavior degrades to the git-only
+    // baseline. Still returns Ok(()) regardless (best-effort; the caller swallows).
+    if is_review_worktree_temp_path(std::path::Path::new(&worktree_path)) {
+        for _ in 0..2 {
+            if !std::path::Path::new(&worktree_path).exists() {
+                break;
+            }
+            let _ = std::fs::remove_dir_all(&worktree_path);
+            if !std::path::Path::new(&worktree_path).exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+        }
+    }
     Ok(())
+}
+
+/// Sweep leaked empty `gd-review-*` worktree husks from the OS temp dir. A review
+/// worktree (`git_review_worktree`) lives its whole life NON-empty — populated by
+/// `worktree add`, then deleted whole by `git_remove_worktree` — so unlike the
+/// paused-state `gd-resolve-*` worktrees (which need a keep-list), a `gd-review-*`
+/// dir that is *empty* can only be a husk whose delete lost the Windows handle
+/// race; there is no in-flight review it could belong to. That makes "empty" a
+/// sufficient exclusion with no keep-list needed. Best-effort housekeeping, run
+/// once fire-and-forget on startup; every failure is skipped conservatively.
+pub fn sweep_review_worktree_husks() {
+    let _ = sweep_review_husks_in(&std::env::temp_dir());
+}
+
+/// The testable core of [`sweep_review_worktree_husks`], parameterized on the
+/// directory so a unit test can drive it against a real fixture dir. Deletes only
+/// entries whose basename starts with exactly `gd-review-` AND are empty
+/// directories: `remove_dir` HARD-FAILS on a non-empty dir, so it is the real
+/// TOCTOU-safe guard (not just the name filter) — a review that repopulates
+/// between the filter and the delete simply fails the `remove_dir` and is spared.
+/// Returns how many husks were removed (for the test); a dir it can't list is
+/// skipped, not an error.
+fn sweep_review_husks_in(dir: &std::path::Path) -> std::io::Result<usize> {
+    let mut removed = 0;
+    // "Can't list it" ⇒ skip the whole sweep conservatively.
+    let entries = std::fs::read_dir(dir)?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with("gd-review-") {
+            continue;
+        }
+        // NEVER remove_dir_all here: `remove_dir` refuses a non-empty dir, which is
+        // exactly the guard that keeps a live review's populated worktree safe.
+        if std::fs::remove_dir(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 /// Best-effort fetch of specific commit objects from `origin`, so a remote PR's
@@ -755,5 +843,70 @@ mod tests {
         assert!(matches!(err, AppError::InvalidArgument(_)));
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The review-husk sweep removes only EMPTY `gd-review-*` dirs: a non-empty
+    /// `gd-review-*` (a live review's populated worktree) and a non-matching name
+    /// are both spared.
+    #[test]
+    fn sweep_review_husks_removes_only_empty_gd_review_dirs() {
+        let base = std::env::temp_dir().join(format!(
+            "gd-sweep-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+
+        // An empty gd-review-* husk → removed.
+        let empty_husk = base.join("gd-review-abc123-42");
+        std::fs::create_dir(&empty_husk).unwrap();
+        // A non-empty gd-review-* (live review worktree) → kept.
+        let live = base.join("gd-review-def456-7");
+        std::fs::create_dir(&live).unwrap();
+        std::fs::write(live.join("file.txt"), b"content").unwrap();
+        // A non-matching empty dir → kept (name filter).
+        let other = base.join("gd-resolve-xyz-1");
+        std::fs::create_dir(&other).unwrap();
+
+        let removed = super::sweep_review_husks_in(&base).unwrap();
+        assert_eq!(removed, 1, "exactly the one empty gd-review-* husk is removed");
+        assert!(!empty_husk.exists(), "empty gd-review-* husk was removed");
+        assert!(live.exists(), "non-empty gd-review-* (live review) is kept");
+        assert!(other.exists(), "non-matching name is kept");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The `remove_dir_all` fallback guard admits only `gd-review-*` dirs directly
+    /// under the OS temp dir, so the command can't become an arbitrary recursive
+    /// delete of any caller-supplied path.
+    #[test]
+    fn is_review_worktree_temp_path_admits_only_temp_gd_review() {
+        let temp = std::env::temp_dir();
+        // A real review-worktree-shaped husk path → true (need not exist on disk).
+        assert!(super::is_review_worktree_temp_path(
+            &temp.join("gd-review-abc123-42")
+        ));
+        // A temp dir but the wrong prefix (e.g. a resolve worktree, or anything
+        // else) → false.
+        assert!(!super::is_review_worktree_temp_path(
+            &temp.join("gd-resolve-abc123-42")
+        ));
+        assert!(!super::is_review_worktree_temp_path(&temp.join("random-dir")));
+        // A gd-review-* name OUTSIDE the temp dir → false (a user's Documents, say).
+        assert!(!super::is_review_worktree_temp_path(std::path::Path::new(
+            "C:\\Users\\me\\Documents\\gd-review-evil"
+        )));
+        assert!(!super::is_review_worktree_temp_path(std::path::Path::new(
+            "/home/me/gd-review-evil"
+        )));
+        // NESTED under temp (not a direct child) → false: the fallback must not
+        // reach a path a level below the temp root.
+        assert!(!super::is_review_worktree_temp_path(
+            &temp.join("sub").join("gd-review-abc123-42")
+        ));
     }
 }

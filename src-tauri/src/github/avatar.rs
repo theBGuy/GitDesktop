@@ -14,8 +14,10 @@
 //! github.com only: `gh api users/…` targets github.com, so Enterprise bots stay
 //! on the initials fallback.
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::AppResult;
-use crate::github::runner::{run_gh_raw, GH_TIMEOUT};
+use crate::github::runner::{run_gh, run_gh_raw, GH_NETWORK_TIMEOUT, GH_TIMEOUT};
 
 /// The bare bot name for a bot login, or `None` if `login` isn't a valid bot
 /// handle. Accepts three shapes gh emits or callers hold — `app/<name>`,
@@ -104,9 +106,133 @@ pub async fn gh_bot_avatar(login: String) -> AppResult<String> {
     }
 }
 
+/// A `commit.author.email → avatar_url` pairing the History surfaces use to
+/// upgrade a commit author's initials to their real GitHub avatar. Only pairs
+/// whose email matches a GitHub account (so the API returns a non-null `author`)
+/// and whose avatar host we trust survive; everyone else keeps initials.
+#[derive(Serialize, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitAuthorAvatar {
+    pub email: String,
+    pub avatar_url: String,
+}
+
+/// The GitHub *account* attached to a commit in the commits-list response — null
+/// whenever the commit's author email matches no GitHub user (common: any
+/// non-GitHub email, a since-changed address). Mirrors the `Option<…>` account
+/// shape the PR file/commit parses use (see `pr.rs`), but with its own struct so
+/// it can also read `avatar_url` (which `RawLogin` doesn't carry, and which the
+/// PR parses reuse — don't touch that type).
+#[derive(Deserialize)]
+struct GhCommitsListAuthor {
+    #[serde(default)]
+    #[allow(dead_code)]
+    login: String,
+    #[serde(default)]
+    avatar_url: String,
+}
+
+#[derive(Deserialize, Default)]
+struct GhCommitsListCommitAuthor {
+    #[serde(default)]
+    email: String,
+}
+
+#[derive(Deserialize, Default)]
+struct GhCommitsListCommitInner {
+    #[serde(default)]
+    author: GhCommitsListCommitAuthor,
+}
+
+/// One entry of `repos/{owner}/{repo}/commits`. `commit.author.email` is the git
+/// author email (always present); the top-level `author` is the GitHub account,
+/// null when the email maps to no user.
+#[derive(Deserialize)]
+struct GhCommitsListItem {
+    #[serde(default)]
+    commit: GhCommitsListCommitInner,
+    #[serde(default)]
+    author: Option<GhCommitsListAuthor>,
+}
+
+/// Parse a commits-list JSON body into the trusted `email → avatar_url` pairs.
+/// Pure (no I/O), so it's unit-tested directly: skips entries with a null GitHub
+/// account (email matches no user), an empty email, or an empty/untrusted avatar
+/// URL; lowercases emails; and dedupes on email (first occurrence wins — the
+/// list is newest-first, so the freshest avatar for an email is kept).
+fn parse_commit_author_avatars(body: &str) -> Vec<CommitAuthorAvatar> {
+    let items: Vec<GhCommitsListItem> = match serde_json::from_str(body) {
+        Ok(items) => items,
+        // A malformed/empty body (or the object an error response returns) yields
+        // no avatars — a decoration never errors.
+        Err(_) => return Vec::new(),
+    };
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for item in items {
+        let Some(author) = item.author else { continue };
+        let email = item.commit.author.email.trim().to_ascii_lowercase();
+        if email.is_empty() {
+            continue;
+        }
+        let avatar_url = author.avatar_url.trim();
+        if avatar_url.is_empty() || !is_trusted_avatar_url(avatar_url) {
+            continue;
+        }
+        if seen.insert(email.clone()) {
+            out.push(CommitAuthorAvatar {
+                email,
+                avatar_url: avatar_url.to_string(),
+            });
+        }
+    }
+    out
+}
+
+/// Resolve `commit-author email → GitHub avatar URL` for one recent-commits page
+/// of a GitHub repo — the History surfaces' fourth avatar tier, for human
+/// authors whose email is neither a GitHub no-reply nor has a Gravatar. This is a
+/// **decoration with deliberately partial coverage**: a single non-paginated
+/// commits-API call (the most recent 100 commits), NOT the completion pagination
+/// `gh_pr_commits_paginated` needs — emails outside that window simply keep their
+/// initials, matching this module's existing silent-miss philosophy.
+///
+/// github.com only: `is_trusted_avatar_url` filters every returned URL to
+/// https + github.com/githubusercontent hosts, so a GitHub Enterprise repo's
+/// GHE-hosted avatars are dropped and GHE repos keep initials — the same
+/// github.com-only stance `gh_bot_avatar` takes, by design.
+///
+/// Never errors: any gh failure — no gh, offline, or the 409 an EMPTY repo's
+/// commits endpoint returns — resolves to an empty list, because a decoration
+/// must not raise a toast.
+#[tauri::command]
+pub async fn gh_commit_author_avatars(repo_path: String) -> AppResult<Vec<CommitAuthorAvatar>> {
+    // Pin the origin slug: `gh api`'s `{owner}/{repo}` placeholders auto-resolve
+    // to the PARENT on a fork with an `upstream` remote, so build the literal
+    // `repos/<slug>` path to keep this on the user's own fork (precedent:
+    // `gh_rulesets_list`). `gh_origin_slug` errors on an unparseable origin
+    // rather than passing garbage, so `?` here can only fail closed.
+    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    // One non-paginated call — intentionally NOT `--paginate`: this is a partial
+    // decoration, not the exhaustive completion `gh_pr_commits_paginated` does.
+    let out = match run_gh(
+        Some(&repo_path),
+        &["api", &format!("repos/{slug}/commits?per_page=100")],
+        GH_NETWORK_TIMEOUT,
+    )
+    .await
+    {
+        Ok(out) => out,
+        // gh failed (offline / no auth / the 409 an empty repo returns) → no
+        // avatars, no error.
+        Err(_) => return Ok(Vec::new()),
+    };
+    Ok(parse_commit_author_avatars(&out.stdout_lossy()))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{is_trusted_avatar_url, normalize_bot_login};
+    use super::{is_trusted_avatar_url, normalize_bot_login, parse_commit_author_avatars};
 
     #[test]
     fn normalize_accepts_the_three_bot_login_shapes() {
@@ -155,5 +281,57 @@ mod tests {
         assert!(!is_trusted_avatar_url("https://evil.com/x"));
         // Empty.
         assert!(!is_trusted_avatar_url(""));
+    }
+
+    #[test]
+    fn parse_keeps_only_valid_first_entries_lowercased() {
+        // Newest-first, with: a valid entry; a null-account entry (no GitHub
+        // user); an empty-avatar entry (account present but blank URL); a
+        // duplicate email (later, older — must lose to the first); an
+        // untrusted-host avatar (GHE-style) that must be filtered; and an
+        // empty-email entry.
+        let body = r#"[
+            {
+                "commit": { "author": { "email": "Alice@Example.com" } },
+                "author": { "login": "alice", "avatar_url": "https://avatars.githubusercontent.com/u/1?v=4" }
+            },
+            {
+                "commit": { "author": { "email": "nomatch@example.com" } },
+                "author": null
+            },
+            {
+                "commit": { "author": { "email": "blank@example.com" } },
+                "author": { "login": "blank", "avatar_url": "" }
+            },
+            {
+                "commit": { "author": { "email": "alice@example.com" } },
+                "author": { "login": "alice2", "avatar_url": "https://avatars.githubusercontent.com/u/999?v=4" }
+            },
+            {
+                "commit": { "author": { "email": "ghe@example.com" } },
+                "author": { "login": "ghe", "avatar_url": "https://ghe.corp.example.com/avatars/u/2" }
+            },
+            {
+                "commit": { "author": { "email": "" } },
+                "author": { "login": "noemail", "avatar_url": "https://avatars.githubusercontent.com/u/3?v=4" }
+            }
+        ]"#;
+        let got = parse_commit_author_avatars(body);
+        // Only Alice survives: lowercased, and the FIRST (newest) avatar wins over
+        // the later duplicate.
+        assert_eq!(
+            got,
+            vec![super::CommitAuthorAvatar {
+                email: "alice@example.com".to_string(),
+                avatar_url: "https://avatars.githubusercontent.com/u/1?v=4".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_tolerates_a_malformed_body() {
+        // The 409/empty-repo body (an object, not an array) or any junk → no avatars.
+        assert!(parse_commit_author_avatars("").is_empty());
+        assert!(parse_commit_author_avatars(r#"{"message":"Git Repository is empty."}"#).is_empty());
     }
 }

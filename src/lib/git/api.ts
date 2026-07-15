@@ -2366,6 +2366,20 @@ export const ghTokenScopes = (host?: string) =>
 export const ghBotAvatar = (login: string) =>
   invoke<string>("gh_bot_avatar", { login });
 
+/** One commit-author `email → avatar_url` pairing from the commits API. */
+export interface CommitAuthorAvatar {
+  email: string;
+  avatarUrl: string;
+}
+
+/** Batch-resolve commit-author `email → GitHub avatar URL` for one recent-commits
+ *  page (the History surfaces' fourth avatar tier, for human authors whose email
+ *  is neither a GitHub no-reply nor has a Gravatar). GitHub-only; deliberately
+ *  partial (one page) and never errors — an empty repo / offline / non-github
+ *  repo resolves to `[]`, so callers keep initials. */
+export const ghCommitAuthorAvatars = (repoPath: string) =>
+  invoke<CommitAuthorAvatar[]>("gh_commit_author_avatars", { repoPath });
+
 export const ghHooksList = (repoPath: string) =>
   invoke<Webhook[]>("gh_hooks_list", { repoPath });
 

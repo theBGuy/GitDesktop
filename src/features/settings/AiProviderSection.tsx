@@ -2,13 +2,12 @@ import {
   CheckCircleIcon,
   CopyIcon,
   PlusIcon,
-  WarningIcon,
   XCircleIcon,
   XIcon,
 } from "@phosphor-icons/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSelector } from "@tanstack/react-store";
-import { type ReactNode, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -62,6 +61,7 @@ import { useUiStore } from "@/lib/stores/ui";
 import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 import { AgentSandboxField } from "./AgentSandboxField";
+import { HostAllowNote } from "./HostAllowNote";
 import { settingsFormOpts } from "./settings-form";
 
 /** Typical key shapes per provider; used for a soft warning, never to block. */
@@ -270,46 +270,6 @@ const PRESET_ITEMS: Record<string, string> = {
   ...Object.fromEntries(OPENAI_COMPATIBLE_PRESETS.map((p) => [p.id, p.label])),
   custom: "Custom…",
 };
-
-/**
- * The note under a custom provider URL. When the URL points at a host that isn't
- * built-in / local / already allowed, it surfaces *why* requests will fail and a
- * one-click **Allow host** that adds it to the allowlist — turning a silent block
- * into a guided fix. Otherwise it shows the muted default note.
- */
-function HostAllowNote({
-  url,
-  allowedHosts,
-  onAllowHost,
-  defaultNote,
-}: {
-  url: string;
-  allowedHosts: string[];
-  onAllowHost: (url: string) => void;
-  defaultNote: ReactNode;
-}) {
-  const host = normalizeHost(url);
-  if (!host || isHostAllowed(url, allowedHosts)) {
-    return <p className="text-xs text-muted-foreground">{defaultNote}</p>;
-  }
-  return (
-    <p className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-warning">
-      <WarningIcon className="size-4 shrink-0" />
-      <span>
-        <code className="font-mono">{host}</code> isn't an allowed host yet — AI
-        requests to it are blocked.
-      </span>
-      <Button
-        type="button"
-        variant="outline"
-        size="xs"
-        onClick={() => onAllowHost(url)}
-      >
-        Allow host
-      </Button>
-    </p>
-  );
-}
 
 /** Ollama base-URL field — the URL the local/LAN Ollama server is reached at. */
 function OllamaConfig({

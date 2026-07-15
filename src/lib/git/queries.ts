@@ -9,6 +9,7 @@ import {
 import { useCallback, useEffect, useRef } from "react";
 import { COLD_START_NO_GH, COLD_START_NO_GIT } from "@/lib/test-mode";
 import * as api from "./api";
+import { primeCommitAuthorIndex } from "./commit-avatar";
 import {
   checkoutConflictSide,
   conflictSides,
@@ -4054,6 +4055,34 @@ export function useBotAvatarUrl(name: string | null) {
     gcTime: 24 * 60 * 60 * 1000,
     retry: false,
   });
+}
+
+/** Batch-resolve commit-author `email → GitHub avatar` for a repo's recent-commits
+ *  window and prime the commit-avatar module, so History rows for human authors
+ *  whose email isn't a GitHub no-reply and has no Gravatar upgrade from initials.
+ *  Call once from each History surface (react-query dedupes by key). GitHub-only:
+ *  gated on the repo being open AND its detected provider being GitHub, so a
+ *  GitLab/Bitbucket repo never fires the commits-API call. Unlike
+ *  {@link useBotAvatarUrl}'s infinite staleTime (a bot's avatar URL is stable), the
+ *  recent-commits window shifts as commits land, so this goes stale after 15min
+ *  and re-primes newer authors. Best-effort decoration — `retry: false` and the
+ *  backend never errors (empty repo / offline → `[]`). */
+export function useCommitAuthorAvatarIndex(repo: string) {
+  const provider = useForgeStatus(repo).data?.provider;
+  const query = useQuery({
+    queryKey: ["commit-author-avatars", repo] as const,
+    queryFn: () => api.ghCommitAuthorAvatars(repo),
+    enabled: repo !== "" && provider === "github",
+    staleTime: 15 * 60 * 1000,
+    retry: false,
+  });
+  // Prime the commit-avatar module whenever fresh data arrives, notifying mounted
+  // rows so already-painted initials/Gravatars upgrade to the real avatar.
+  const entries = query.data;
+  useEffect(() => {
+    if (entries) primeCommitAuthorIndex(entries);
+  }, [entries]);
+  return query;
 }
 
 const webhooksKey = (repo: string) => ["repo", repo, "webhooks"] as const;

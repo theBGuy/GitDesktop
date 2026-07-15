@@ -89,6 +89,14 @@ pub fn run() {
                         mcp_launcher::refresh_if_present(&version);
                     });
                 }
+                // Sweep leaked empty `gd-review-*` worktree husks from %TEMP%
+                // (a Windows handle race can leave one behind; see
+                // `git::compare::sweep_review_worktree_husks`). Plain fs op —
+                // harmless everywhere, so not cfg(windows)-gated; fire-and-forget
+                // so startup never blocks on it.
+                tauri::async_runtime::spawn_blocking(|| {
+                    git::compare::sweep_review_worktree_husks();
+                });
             }
             Ok(())
         })
@@ -518,6 +526,7 @@ pub fn run() {
             github::repo_settings::gh_repo_admin,
             github::auth::gh_token_scopes,
             github::avatar::gh_bot_avatar,
+            github::avatar::gh_commit_author_avatars,
             github::collaborators::gh_collaborators_list,
             github::collaborators::gh_collaborator_add,
             github::collaborators::gh_collaborator_remove,

@@ -11,7 +11,11 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { DiffSurface } from "@/features/diff/DiffSurfaceLazy";
-import { useCommitFileDiff, useFileLog } from "@/lib/git/queries";
+import {
+  useCommitAuthorAvatarIndex,
+  useCommitFileDiff,
+  useFileLog,
+} from "@/lib/git/queries";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { formatRelativeTime } from "@/lib/time";
 import { cn } from "@/lib/utils";
@@ -29,6 +33,9 @@ export function FileHistoryDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const fileLog = useFileLog(repoPath, open ? path : null);
+  // Batch-resolve commit-author avatars (GitHub-only; deduped by react-query with
+  // the other History surfaces, so this shares one call per repo per 15min).
+  useCommitAuthorAvatarIndex(repoPath);
   const commits = fileLog.data?.pages.flat() ?? [];
   const [selected, setSelected] = useState<string | null>(null);
   // Default to the newest commit; reset when the dialog closes.

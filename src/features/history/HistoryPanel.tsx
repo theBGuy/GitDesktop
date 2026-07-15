@@ -36,6 +36,7 @@ import {
   useBranches,
   useCheckoutCommit,
   useCherryPick,
+  useCommitAuthorAvatarIndex,
   useCommitSearch,
   useCreateBranch,
   useCreateTag,
@@ -70,6 +71,9 @@ import { useAmendWithConfirm } from "./useAmendCommit";
 
 export function HistoryPanel({ repoPath }: { repoPath: string }) {
   const log = useLog(repoPath);
+  // Batch-resolve commit-author avatars for the log's authors (GitHub-only,
+  // deduped by react-query across the History surfaces).
+  useCommitAuthorAvatarIndex(repoPath);
   const status = useRepoStatus(repoPath);
   const opState = useOpState(repoPath);
   const undoCommit = useUndoCommit(repoPath);

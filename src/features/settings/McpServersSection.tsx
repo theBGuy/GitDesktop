@@ -10,6 +10,7 @@ import { useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
+import { isHostAllowed, normalizeHost } from "@/lib/ai/allowed-hosts";
 import { withForm } from "@/lib/form";
 import { deleteMcpSecret } from "@/lib/git/api";
 import { repoIdentity } from "@/lib/git/repo-identity";
@@ -37,6 +38,13 @@ export const McpServersSection = withForm({
   ...settingsFormOpts,
   render: function McpServersSectionRender({ form }) {
     const servers = useSelector(form.store, (s) => s.values.mcpServers);
+    // The draft AI allow list, shared with the AI provider screen. An http MCP
+    // URL the CLI will connect to outside this allowlist gets an advisory badge
+    // (row) / note (dialog) — never a block, exactly like the AI URL fields.
+    const allowedHosts = useSelector(
+      form.store,
+      (s) => s.values.aiAllowedHosts,
+    );
     const [editing, setEditing] = useState<McpServer | "new" | null>(null);
     const [importOpen, setImportOpen] = useState(false);
     const [activeIndex, setActiveIndex] = useState(-1);
@@ -106,6 +114,17 @@ export const McpServersSection = withForm({
 
     function toggleEnabled(server: McpServer, enabled: boolean) {
       setServers(list.map((s) => (s.id === server.id ? { ...s, enabled } : s)));
+    }
+
+    /** Add a URL's host to the draft allow list — the one-click fix behind the
+     *  dialog's advisory host note. Mutates the shared settings draft, committed
+     *  by the screen's Save bar, exactly like the AI URL fields. Dedups via
+     *  `isHostAllowed` (not a bare `includes`), so a host already covered by a
+     *  built-in/local entry or a no-port entry isn't added redundantly. */
+    function allowHost(url: string) {
+      const host = normalizeHost(url);
+      if (host && !isHostAllowed(url, allowedHosts))
+        form.setFieldValue("aiAllowedHosts", [...allowedHosts, host]);
     }
 
     // Set (or clear, when null = "follow the global default") a global server's
@@ -265,6 +284,14 @@ export const McpServersSection = withForm({
                     server.transport === "stdio"
                       ? !server.command.trim()
                       : !server.url.trim();
+                  // An http server whose URL host isn't on the AI allowlist: the
+                  // CLI still connects (outside GitDesktop's AI host gate), so
+                  // flag it non-blockingly. Empty URLs are covered by `needs
+                  // setup`; stdio/allowlisted/local hosts show nothing.
+                  const hostNotAllowed =
+                    server.transport === "http" &&
+                    !!server.url.trim() &&
+                    !isHostAllowed(server.url, allowedHosts);
                   return (
                     <div
                       key={server.id}
@@ -301,6 +328,14 @@ export const McpServersSection = withForm({
                           title={`Set the ${server.transport === "stdio" ? "command" : "URL"} before enabling — edit this server.`}
                         >
                           needs setup
+                        </span>
+                      )}
+                      {hostNotAllowed && (
+                        <span
+                          className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-warning"
+                          title="The CLI connects to this host outside GitDesktop's AI host allowlist. Allow the host in AI settings to clear this."
+                        >
+                          host not allowed
                         </span>
                       )}
                       {server.description && (
@@ -366,6 +401,8 @@ export const McpServersSection = withForm({
             )}
             repoPath={repoPath}
             repoName={repoName}
+            allowedHosts={allowedHosts}
+            onAllowHost={allowHost}
             onSave={saveServer}
             onClose={() => setEditing(null)}
           />

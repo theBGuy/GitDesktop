@@ -28,6 +28,7 @@ import {
   forgeReady,
   useCheckoutCommit,
   useCherryPick,
+  useCommitAuthorAvatarIndex,
   useCommitComments,
   useCommitDetails,
   useCommitFileDiff,
@@ -57,6 +58,8 @@ export function CommitDetailView({
 }) {
   const details = useCommitDetails(repoPath, hash);
   const files = useCommitFiles(repoPath, hash);
+  // Batch-resolve commit-author avatars (GitHub-only; deduped by react-query).
+  useCommitAuthorAvatarIndex(repoPath);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   // Reset the manual selection when a different commit is shown — a render
   // -time state adjustment, not an effect.
