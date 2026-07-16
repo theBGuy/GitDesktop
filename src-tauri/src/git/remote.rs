@@ -143,6 +143,33 @@ pub async fn git_remote_set_url(
     Ok(())
 }
 
+/// Add a new remote (`git remote add <name> <url>`) — used to give a fork the
+/// `upstream` remote it was cloned without, so the fork/upstream lens and
+/// create-on-parent path light up. Mirrors [`git_remote_set_url`]'s validation
+/// and cache handling; git itself errors (surfaced readably) if the remote name
+/// already exists.
+#[tauri::command]
+pub async fn git_remote_add(
+    state: State<'_, AppState>,
+    repo_path: String,
+    name: String,
+    url: String,
+) -> AppResult<()> {
+    validate_remote_arg(&name, "remote name")?;
+    validate_remote_arg(url.trim(), "remote URL")?;
+    run_git_mutating(
+        &state,
+        &repo_path,
+        &["remote", "add", &name, url.trim()],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    // A stale negative entry (a prior get-url miss for this name) would otherwise
+    // linger until the TTL — drop it so the next read resolves the new remote.
+    cache_invalidate(&repo_path, &name);
+    Ok(())
+}
+
 /// Names of the configured remotes (e.g. `["origin"]`), empty for a local repo.
 #[tauri::command]
 pub async fn git_remotes(repo_path: String) -> AppResult<Vec<String>> {

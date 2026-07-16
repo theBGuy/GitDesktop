@@ -3,4 +3,5 @@
   **upstream** repository (defaulting to upstream), listing the chosen
   repository's base branches; previously the target was left to `gh`'s implicit
   resolution. Labels and assignees aren't available when you open the PR on the
-  upstream repository.
+  upstream repository. Targeting the upstream repository requires an `upstream`
+  remote; on a fork cloned without one, the create dialog now offers to add it.

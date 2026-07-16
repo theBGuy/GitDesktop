@@ -624,6 +624,7 @@ pub fn run() {
             git::remote::git_remotes,
             git::remote::git_remote_url,
             git::remote::git_remote_set_url,
+            git::remote::git_remote_add,
             git::submodule::git_submodules,
             git::submodule::git_submodule_update,
             secrets::set_secret,

@@ -538,7 +538,9 @@ you're looking at. Switch back to **Fork** for your own. The switch shows only o
 fork (never on GitLab or Bitbucket, or a repo with no upstream remote). Two palette
 commands do the same thing without the mouse: **Switch to fork view** ({{kbd:repo-lens-origin}})
 and **Switch to upstream view** ({{kbd:repo-lens-upstream}}). The same lens scopes the
-**Issues** tab (see *Issues*).
+**Issues** tab (see *Issues*). Opening a PR against the parent — and this whole switch —
+needs an \`upstream\` remote; if you cloned your fork without one, the **Create pull
+request** dialog offers an **Add upstream remote** button that wires it up for you.
 
 ## GitHub PRs
 

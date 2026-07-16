@@ -29,6 +29,7 @@ import { required, useAppForm } from "@/lib/form";
 import * as api from "@/lib/git/api";
 import {
   forgeFeatureReady,
+  useAddRemote,
   useCompareBranches,
   useCreatePr,
   useDefaultBranch,
@@ -47,7 +48,7 @@ import {
   useRemoteSlug,
   useSetRepoLens,
 } from "@/lib/repo-lens/queries";
-import { useAiEnabled } from "@/lib/settings/queries";
+import { useAiEnabled, useSettings } from "@/lib/settings/queries";
 import { toastError } from "@/lib/toast";
 import { ReviewersPopover } from "./ReviewersPopover";
 import { useBranchPickerOptions } from "./useBranchPickerOptions";
@@ -90,6 +91,40 @@ export function CreatePrDialog({
   // The effective lens for this create — always "origin" when the gate is off.
   const createLens: RemoteLens = targetIsParent ? "upstream" : "origin";
   const targetSlug = targetIsParent ? upstreamSlug : forkSlug;
+
+  // Fork-without-upstream affordance: a fork cloned by plain `git clone` has no
+  // `upstream` remote, so the lens gate is off and the pinned origin path opens
+  // the PR on the fork — a silent regression from gh's old parent auto-resolution.
+  // When the persisted fork provenance says this GitHub repo IS a fork with a
+  // known parent, offer to add the remote so the parent-target path returns.
+  const settings = useSettings();
+  const isGithub = forge.data?.provider === "github";
+  const forkRecord = settings.data?.recentRepos.find(
+    (r) => r.path === repoPath,
+  );
+  const forkParent = forkRecord?.forkParent ?? null;
+  // Only when: GitHub, the lens gate is OFF (no upstream remote), settings have
+  // loaded (no flash), the repo is a fork, AND the parent slug is known. A fork
+  // whose parent is unreadable renders nothing rather than a broken hint.
+  const canOfferUpstream =
+    isGithub &&
+    !lensGate &&
+    settings.isSuccess &&
+    forkRecord?.isFork === true &&
+    forkParent !== null;
+  const addRemote = useAddRemote(repoPath);
+  function addUpstreamRemote() {
+    if (!forkParent) return;
+    addRemote.mutate(
+      { name: "upstream", url: `https://github.com/${forkParent}.git` },
+      {
+        // On success the broad invalidation refreshes the remotes query →
+        // `useLensGate` flips true → the "Create in" picker appears (default
+        // Parent). No local state to reset; the effect chain handles it.
+        onError: (e) => toastError(e),
+      },
+    );
+  }
 
   // Create-TIME reviewers stay Bitbucket-only: `forge_pr_create` rejects a reviewer
   // list for GitHub/GitLab (their create arms don't accept one yet). The
@@ -433,6 +468,36 @@ export function CreatePrDialog({
                     </Button>
                   ))}
                 </div>
+              </div>
+            )}
+
+            {/* Fork without an `upstream` remote: the picker can't render (no
+                remote to read), so offer to add it. Mutually exclusive with the
+                picker above — `canOfferUpstream` requires the gate to be OFF. */}
+            {canOfferUpstream && (
+              <div className="space-y-1.5 rounded-none bg-muted/40 p-2.5 ring-1 ring-foreground/10">
+                <p className="text-xs text-muted-foreground">
+                  This repository is a fork of{" "}
+                  <span className="font-mono text-foreground/80">
+                    {forkParent}
+                  </span>
+                  . Add an upstream remote to open pull requests against{" "}
+                  <span className="font-mono text-foreground/80">
+                    {forkParent}
+                  </span>
+                  .
+                </p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="xs"
+                  disabled={addRemote.isPending}
+                  onClick={addUpstreamRemote}
+                >
+                  {addRemote.isPending
+                    ? "Adding upstream remote…"
+                    : "Add upstream remote"}
+                </Button>
               </div>
             )}
 

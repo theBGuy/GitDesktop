@@ -2726,6 +2726,16 @@ export function useSetRemoteUrl(repo: string) {
   );
 }
 
+/** Adds a remote (e.g. `upstream` on a fork cloned without one). The default
+ *  broad invalidation (`["repo", repo]`) prefix-covers the `remotes` and
+ *  `remote-url` queries, so `useLensGate` re-reads and the fork/upstream UI
+ *  lights up live once the remote exists. */
+export function useAddRemote(repo: string) {
+  return useRepoMutation(repo, (args: { name: string; url: string }) =>
+    api.gitRemoteAdd(repo, args.name, args.url),
+  );
+}
+
 export function useOpState(repo: string) {
   return useQuery({
     queryKey: ["repo", repo, "op-state"] as const,
