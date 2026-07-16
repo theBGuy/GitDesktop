@@ -17,6 +17,17 @@ fn validate_remote_arg(value: &str, what: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Prefix one-shot credential `-c` entries before a git subcommand's args.
+fn with_credentials(cred: &[String], sub: &[&str]) -> Vec<String> {
+    let mut v = Vec::with_capacity(cred.len() * 2 + sub.len());
+    for c in cred {
+        v.push("-c".to_string());
+        v.push(c.clone());
+    }
+    v.extend(sub.iter().map(|s| s.to_string()));
+    v
+}
+
 /// How long a resolved remote URL stays trusted before we re-shell to `git`. A few seconds
 /// is enough to collapse the burst of concurrent `forge_*` queries a single forge view fires
 /// (each of which otherwise spawns `git remote get-url origin` twice), while staying short
@@ -132,7 +143,15 @@ pub async fn git_fetch(state: State<'_, AppState>, repo_path: String) -> AppResu
 }
 
 pub(crate) async fn git_fetch_core(state: &AppState, repo_path: String) -> AppResult<()> {
-    run_git_mutating(state, &repo_path, &["fetch", "--prune"], NETWORK_TIMEOUT).await?;
+    let cred = crate::forge::credential_config_for_remote(&repo_path, "origin").await?;
+    let args = with_credentials(&cred, &["fetch", "--prune"]);
+    run_git_mutating(
+        state,
+        &repo_path,
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
+        NETWORK_TIMEOUT,
+    )
+    .await?;
     Ok(())
 }
 
@@ -165,10 +184,12 @@ pub async fn git_fetch_remote(
     remote: String,
 ) -> AppResult<()> {
     ensure_remote_exists(&repo_path, &remote).await?;
+    let cred = crate::forge::credential_config_for_remote(&repo_path, &remote).await?;
+    let args = with_credentials(&cred, &["fetch", "--prune", &remote]);
     run_git_mutating(
         &state,
         &repo_path,
-        &["fetch", "--prune", &remote],
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
         NETWORK_TIMEOUT,
     )
     .await?;
@@ -204,10 +225,12 @@ pub async fn git_remote_default_branch(
 
     // The local ref is unset — ask the remote for its HEAD (one network call),
     // then re-read. `set-head --auto` writes `refs/remotes/<remote>/HEAD`.
+    let cred = crate::forge::credential_config_for_remote(&repo_path, &remote).await?;
+    let args = with_credentials(&cred, &["remote", "set-head", &remote, "--auto"]);
     run_git_mutating(
         &state,
         &repo_path,
-        &["remote", "set-head", &remote, "--auto"],
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
         NETWORK_TIMEOUT,
     )
     .await?;
@@ -268,7 +291,15 @@ pub(crate) async fn git_pull_core(
         "merge" => "--no-rebase",
         _ => "--ff-only",
     };
-    run_git_mutating(state, &repo_path, &["pull", flag], NETWORK_TIMEOUT).await?;
+    let cred = crate::forge::credential_config_for_remote(&repo_path, "origin").await?;
+    let args = with_credentials(&cred, &["pull", flag]);
+    run_git_mutating(
+        state,
+        &repo_path,
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
+        NETWORK_TIMEOUT,
+    )
+    .await?;
     Ok(())
 }
 
@@ -296,7 +327,15 @@ pub(crate) async fn git_push_core(
     if set_upstream {
         args.extend(["-u", "origin", "HEAD"]);
     }
-    run_git_mutating(state, &repo_path, &args, NETWORK_TIMEOUT).await?;
+    let cred = crate::forge::credential_config_for_remote(&repo_path, "origin").await?;
+    let args = with_credentials(&cred, &args);
+    run_git_mutating(
+        state,
+        &repo_path,
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
+        NETWORK_TIMEOUT,
+    )
+    .await?;
     Ok(())
 }
 

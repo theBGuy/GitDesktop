@@ -6,7 +6,7 @@
 //! `gh_status` → the neutral [`ForgeStatus`]; later phases add the PR/issue/CI
 //! methods, each delegating to the matching `gh_*` function.
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::forge::model::{
     Capabilities, ForgeRepo, ForgeRepoList, ForgeStatus, Implemented, Provider,
 };
@@ -651,9 +651,44 @@ pub async fn create_issue(
     .await
 }
 
+/// The `git -c credential.https://<host>.helper=…` entry that lets a private
+/// GitHub repo authenticate via gh's token with an ABSOLUTE gh path — so it works
+/// even when git's ambient `!gh` helper can't find gh on a GUI-launch minimal PATH
+/// (macOS launchd), or when gh was configured for SSH and never installed the
+/// HTTPS helper. One-shot per `git` invocation; nothing written to git config, no
+/// token in the remote URL. Mirrors gitlab::clone_credential_config.
+pub async fn clone_credential_config(clone_url: &str) -> AppResult<Vec<String>> {
+    let gh = crate::agent::resolve_named(&["gh"], None)
+        .await
+        .ok_or(AppError::GhNotFound)?;
+    let host = crate::forge::remote_host(clone_url).unwrap_or_else(|| "github.com".to_string());
+    Ok(vec![github_credential_entry(&host, &gh.display().to_string())])
+}
+
+/// The one-shot `-c` credential-helper config value for a GitHub host. Pure/format-only.
+fn github_credential_entry(host: &str, gh_path: &str) -> String {
+    format!("credential.https://{host}.helper=!\"{gh_path}\" auth git-credential")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_entry_uses_host_and_absolute_gh_path() {
+        assert_eq!(
+            github_credential_entry("github.com", "/abs/gh"),
+            "credential.https://github.com.helper=!\"/abs/gh\" auth git-credential"
+        );
+    }
+
+    #[test]
+    fn credential_entry_substitutes_enterprise_host() {
+        assert_eq!(
+            github_credential_entry("github.example.com", "/abs/gh"),
+            "credential.https://github.example.com.helper=!\"/abs/gh\" auth git-credential"
+        );
+    }
 
     #[test]
     fn recognized_repo_maps_to_github_with_full_capabilities() {

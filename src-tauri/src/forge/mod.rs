@@ -133,6 +133,41 @@ async fn detect_non_github(repo_path: &str) -> Option<(Provider, String)> {
     None
 }
 
+/// The one-shot `-c credential.helper` entries to authenticate a network op on
+/// `remote`, resolved to the provider CLI's ABSOLUTE path. Empty (→ git's ambient
+/// behavior, so this never breaks a local, SSH, or already-authenticated repo) for:
+/// SSH remotes (credential helpers don't apply), Bitbucket (its push flow injects
+/// auth its own way), a repo with no such remote, and when the provider CLI isn't
+/// installed (fail open — ambient helpers like git-credential-manager still work).
+/// An unknown HTTPS host follows the app's GitHub-default routing and gets the gh
+/// helper — harmless, since a one-shot `-c` helper only ADDS to git's helper list,
+/// so a non-answering gh falls through to git's ambient helpers.
+pub async fn credential_config_for_remote(repo_path: &str, remote: &str) -> AppResult<Vec<String>> {
+    let url = match crate::git::remote::git_remote_url(repo_path.to_string(), remote.to_string()).await
+    {
+        Ok(u) => u,
+        Err(_) => return Ok(Vec::new()),
+    };
+    if !is_https_remote(&url) {
+        return Ok(Vec::new()); // SSH → keys, not helpers
+    }
+    // Fail open when the CLI can't be resolved: a user with working ambient auth
+    // (e.g. git-credential-manager) must not have every HTTPS fetch/pull/push hard-
+    // fail just because gh/glab isn't installed.
+    match detect_non_github(repo_path).await {
+        Some((Provider::GitLab, _)) => Ok(gitlab::clone_credential_config(&url).await.unwrap_or_default()),
+        Some((Provider::Bitbucket, _)) => Ok(Vec::new()),
+        _ => Ok(github::clone_credential_config(&url).await.unwrap_or_default()),
+    }
+}
+
+/// True when a remote URL uses HTTPS (credential helpers apply). SSH forms
+/// (`git@host:…`, `ssh://…`) and others return false.
+fn is_https_remote(url: &str) -> bool {
+    let u = url.trim();
+    u.starts_with("https://") || u.starts_with("http://")
+}
+
 /// The provider a host resolves to, as the lowercase tag the frontend keys
 /// labels on (`"github"` / `"gitlab"` / `"bitbucket"`), or `None` for hosts the
 /// app doesn't recognize (the UI treats those as GitHub, matching the routing
@@ -564,7 +599,8 @@ pub async fn forge_clone(
 ) -> AppResult<String> {
     let extra = match provider {
         Provider::GitLab => gitlab::clone_credential_config(&url).await?,
-        _ => Vec::new(),
+        Provider::GitHub => github::clone_credential_config(&url).await?,
+        Provider::Bitbucket => Vec::new(),
     };
     crate::git::repo::clone_repo_core(&url, &parent_dir, dir_name, &extra).await
 }
@@ -3135,6 +3171,13 @@ mod tests {
         assert_eq!(remote_host("https://GitLab.com/o/r").as_deref(), Some("gitlab.com"));
         // No host → None (local path).
         assert_eq!(remote_host("/local/path"), None);
+    }
+
+    #[test]
+    fn is_https_remote_distinguishes_https_from_ssh() {
+        assert!(is_https_remote("https://github.com/o/r.git"));
+        assert!(!is_https_remote("git@github.com:o/r.git"));
+        assert!(!is_https_remote("ssh://git@github.com/o/r.git"));
     }
 
     #[test]
