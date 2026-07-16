@@ -115,8 +115,11 @@ export function CreatePrDialog({
   const addRemote = useAddRemote(repoPath);
   function addUpstreamRemote() {
     if (!forkParent) return;
+    // Derive the host — on GitHub Enterprise `isGithub` still holds, and a
+    // hardcoded github.com would add a wrong-host remote that fails later.
+    const ghHost = forge.data?.host || "github.com";
     addRemote.mutate(
-      { name: "upstream", url: `https://github.com/${forkParent}.git` },
+      { name: "upstream", url: `https://${ghHost}/${forkParent}.git` },
       {
         // On success the broad invalidation refreshes the remotes query →
         // `useLensGate` flips true → the "Create in" picker appears (default
