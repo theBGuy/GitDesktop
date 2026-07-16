@@ -21,6 +21,7 @@ const KIND_LABELS: Record<AppError["kind"], string> = {
   gitNotFound: "Git not found",
   ghNotFound: "GitHub CLI not found",
   gh: "GitHub error",
+  issuesDisabled: "Issues disabled",
   glabNotFound: "GitLab CLI not found",
   glab: "GitLab error",
   bitbucketNotConfigured: "Bitbucket not configured",

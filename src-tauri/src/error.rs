@@ -13,6 +13,8 @@ pub enum AppError {
     GhNotFound,
     #[error("{0}")]
     Gh(String),
+    #[error("This repository has issues disabled.")]
+    IssuesDisabled,
     #[error("GitLab CLI (glab) not found")]
     GlabNotFound,
     #[error("{0}")]
@@ -52,6 +54,9 @@ impl Serialize for AppError {
             AppError::GitNotFound => "gitNotFound",
             AppError::GhNotFound => "ghNotFound",
             AppError::Gh(_) => "gh",
+            // Stable serialized kind — the frontend branches on this exact string
+            // to render the "issues are disabled" notice (no retry).
+            AppError::IssuesDisabled => "issuesDisabled",
             AppError::GlabNotFound => "glabNotFound",
             AppError::Glab(_) => "glab",
             AppError::Bitbucket(_) => "bitbucket",

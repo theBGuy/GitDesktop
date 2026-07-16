@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::error::{AppError, AppResult};
 use crate::github::issue::{map_reaction_groups, IssueReactions};
 use crate::github::pr::{PrAuthor, PrRef, RepoLabel};
-use crate::github::runner::{run_gh, GhOutput, GH_NETWORK_TIMEOUT, GH_TIMEOUT};
+use crate::github::runner::{run_gh, GhOutput, GH_NETWORK_TIMEOUT};
 
 /// Discussions are Labelable, so labels come back as a `{ nodes: [...] }`
 /// connection (name + color; id stays empty, like PR-embedded labels).
@@ -34,15 +34,16 @@ fn strip_html(s: &str) -> String {
     out.trim().to_string()
 }
 
+/// The repo's GraphQL `owner`/`name`, pinned to the ORIGIN slug (via
+/// `gh_origin_slug`), NOT a bare `gh repo view`: on a fork with an `upstream`
+/// remote a bare `gh repo view` auto-resolves to the PARENT, so every discussion
+/// read built on this pair (categories/list/view/reactions) would answer for the
+/// upstream instead of the fork. On a non-fork the slug equals gh's resolution,
+/// so behavior is unchanged. (The discussion MUTATIONS below are node-id
+/// addressed and carry no repo argument, so they're already fork-safe.)
 async fn owner_name(repo_path: &str) -> AppResult<(String, String)> {
-    let out = run_gh(
-        Some(repo_path),
-        &["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-        GH_TIMEOUT,
-    )
-    .await?;
-    let nwo = out.stdout_lossy().trim().to_string();
-    nwo.split_once('/')
+    let slug = crate::github::gh_origin_slug(repo_path).await?;
+    slug.split_once('/')
         .map(|(o, n)| (o.to_string(), n.to_string()))
         .ok_or_else(|| AppError::Gh("could not determine the repository owner".into()))
 }

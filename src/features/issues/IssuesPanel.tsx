@@ -32,6 +32,7 @@ import {
 import { formatStoryPoints, type JiraIssueInfo } from "@/lib/jira/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
+import { isAppError } from "@/lib/tauri/invoke";
 import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { CreateIssueDialog } from "./CreateIssueDialog";
@@ -88,6 +89,17 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
   // How many remote issues to load; "Load more" bumps it. A tab switch resets it.
   const [limit, setLimit] = useState(PAGE_SIZE);
   const issueList = useIssueList(repoPath, ghReady, stateFilter, limit);
+  // A fork (issues off by default on GitHub) surfaces a typed error here. It's a
+  // permanent repo condition, not a transient fetch failure, so the section shows
+  // an informative notice with no Retry — and issue creation is offered as
+  // disabled-with-reason rather than a call that can only ever fail.
+  const issuesDisabled =
+    issueList.isError &&
+    isAppError(issueList.error) &&
+    issueList.error.kind === "issuesDisabled";
+  // Creation is possible only when the forge allows it AND the repo hasn't turned
+  // issues off — gates every path that opens the GitHub create dialog.
+  const canOpenGhCreate = canCreateGh && !issuesDisabled;
   const onStateFilter = (s: IssueStateFilter) => {
     setStateFilter(s);
     setLimit(PAGE_SIZE);
@@ -119,7 +131,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
   >();
 
   useHotkeyAction("focus-filter", () => filterRef.current?.focus());
-  useHotkeyAction("create-issue", () => setCreateOpen(true), canCreateGh);
+  useHotkeyAction("create-issue", () => setCreateOpen(true), canOpenGhCreate);
   useHotkeyAction(
     "create-jira-issue",
     () => setCreateJiraOpen(true),
@@ -132,19 +144,19 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
   // panel's — never open a create dialog that can't submit.
   useEffect(() => {
     if (pendingIssueDraft) {
-      if (canCreateGh) {
+      if (canOpenGhCreate) {
         setIssueDraft(pendingIssueDraft);
         setCreateOpen(true);
       }
       setPendingIssueDraft(null);
     }
-  }, [pendingIssueDraft, setPendingIssueDraft, canCreateGh]);
+  }, [pendingIssueDraft, setPendingIssueDraft, canOpenGhCreate]);
 
   // Opened from the command palette / New menu via requestCreate (works from any
   // tab — RepositoryView switches here first, then this fires).
   useEffect(() => {
     if (pendingCreate === "issue") {
-      if (canCreateGh) setCreateOpen(true);
+      if (canOpenGhCreate) setCreateOpen(true);
       clearPendingCreate();
     } else if (pendingCreate === "local-issue") {
       setCreateLocalOpen(true);
@@ -156,7 +168,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
       if (canCreateJira) setCreateJiraOpen(true);
       clearPendingCreate();
     }
-  }, [pendingCreate, clearPendingCreate, canCreateGh, canCreateJira]);
+  }, [pendingCreate, clearPendingCreate, canOpenGhCreate, canCreateJira]);
 
   const {
     filterText,
@@ -258,16 +270,22 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
           : isGitLab
             ? "Issue on GitLab…"
             : "Issue on GitHub…",
-        ghDisabled: !canCreateGh,
-        ghReason: canCreateGh
-          ? undefined
-          : isBitbucket
-            ? "Bitbucket has retired its native issue tracker — link a Jira project to track issues."
-            : isGitLab
-              ? gh.data?.installed
-                ? "Sign in to GitLab (glab auth login) to open issues here."
-                : "Install the GitLab CLI (glab) to open issues here."
-              : "Connect this repository to GitHub to open an issue.",
+        // Issues disabled on the repo (a fork's default) also blocks creation, even
+        // when the forge is otherwise ready — gate it with the reason so "New" isn't
+        // a button that can only fail.
+        ghDisabled: !canCreateGh || issuesDisabled,
+        ghReason:
+          canCreateGh && !issuesDisabled
+            ? undefined
+            : isBitbucket
+              ? "Bitbucket has retired its native issue tracker — link a Jira project to track issues."
+              : isGitLab
+                ? gh.data?.installed
+                  ? "Sign in to GitLab (glab auth login) to open issues here."
+                  : "Install the GitLab CLI (glab) to open issues here."
+                : issuesDisabled
+                  ? "Issues are disabled on this repository — enable them in the repository settings on GitHub."
+                  : "Connect this repository to GitHub to open an issue.",
         onGh: () => setCreateOpen(true),
         localLabel: "Local issue…",
         onLocal: () => setCreateLocalOpen(true),
@@ -326,17 +344,27 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
       listPending={issueList.isPending}
       remoteError={issueList.isError}
       remoteErrorSlot={
-        <div className="space-y-2 px-3 py-4 text-xs text-muted-foreground">
-          <p>Couldn't load issues.</p>
-          <Button
-            variant="outline"
-            size="sm"
-            className="cursor-pointer"
-            onClick={() => issueList.refetch()}
-          >
-            Retry
-          </Button>
-        </div>
+        issuesDisabled ? (
+          <div className="space-y-1 px-3 py-4 text-xs text-muted-foreground">
+            <p>Issues are disabled on this repository.</p>
+            <p className="text-[11px]">
+              Forks start with issues turned off — enable them in the repository
+              settings on GitHub.
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-2 px-3 py-4 text-xs text-muted-foreground">
+            <p>Couldn't load issues.</p>
+            <Button
+              variant="outline"
+              size="sm"
+              className="cursor-pointer"
+              onClick={() => issueList.refetch()}
+            >
+              Retry
+            </Button>
+          </div>
+        )
       }
       // More may exist server-side exactly when this page filled the requested
       // limit (compared against the raw loaded count, not the filtered view).

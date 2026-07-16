@@ -7,6 +7,7 @@ export interface AppError {
     | "gitNotFound"
     | "ghNotFound"
     | "gh"
+    | "issuesDisabled"
     | "glabNotFound"
     | "glab"
     | "bitbucketNotConfigured"

@@ -14,6 +14,25 @@ pub struct Milestone {
     pub title: String,
 }
 
+/// Whether a gh failure is the "issues are turned off on this repo" error.
+/// GitHub forks disable issues by default, so pinning to the origin slug surfaces
+/// this where a bare `gh` would have silently resolved to the parent. gh's line is
+/// `the '<owner>/<repo>' repository has disabled issues`; match the stable
+/// substring case-insensitively so a wording tweak doesn't slip past.
+fn is_issues_disabled(stderr: &str) -> bool {
+    stderr.to_ascii_lowercase().contains("has disabled issues")
+}
+
+/// Remaps a gh failure to [`AppError::IssuesDisabled`] when its message is the
+/// disabled-issues signature, leaving every other error untouched. `run_gh`
+/// carries gh's stderr as the `Gh` variant's message, so that's what we inspect.
+fn map_issues_disabled(err: AppError) -> AppError {
+    match &err {
+        AppError::Gh(msg) if is_issues_disabled(msg) => AppError::IssuesDisabled,
+        _ => err,
+    }
+}
+
 /// An org-defined issue type (Bug/Feature/Task/…). `color` is a GitHub color
 /// NAME (GRAY/BLUE/GREEN/…), mapped to a swatch on the frontend.
 #[derive(Serialize, Deserialize, Clone)]
@@ -67,16 +86,17 @@ pub fn map_reaction_groups(groups: Option<&serde_json::Value>) -> Vec<Reaction> 
 
 /// Resolves the repo's GraphQL `owner` and `name`. GraphQL (unlike REST) has no
 /// `{owner}/{repo}` substitution, so callers must pass them explicitly.
+///
+/// Pinned to the ORIGIN slug (via `gh_origin_slug`), NOT a bare `gh repo view`:
+/// on a fork with an `upstream` remote a bare `gh repo view` auto-resolves to the
+/// PARENT, so every GraphQL read built on this pair (issue types/reactions/
+/// relations/dependencies/development, PR reactions/timeline/review-threads/
+/// external-reviews) would answer for the upstream instead of the fork. This one
+/// resolver pins them all. For a single-remote repo the slug equals what gh
+/// resolved before, so behavior is unchanged there.
 pub(crate) async fn repo_owner_name(repo_path: &str) -> AppResult<(String, String)> {
-    let out = run_gh(
-        Some(repo_path),
-        &["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-        GH_TIMEOUT,
-    )
-    .await?;
-    let name_with_owner = out.stdout_lossy().trim().to_string();
-    name_with_owner
-        .split_once('/')
+    let slug = crate::github::gh_origin_slug(repo_path).await?;
+    slug.split_once('/')
         .map(|(o, n)| (o.to_string(), n.to_string()))
         .ok_or_else(|| AppError::Gh("could not determine the repository owner".into()))
 }
@@ -113,9 +133,16 @@ pub async fn gh_issue_list(
     state: String,
     limit: Option<u32>,
 ) -> AppResult<Vec<IssueInfo>> {
+    // Pin the origin slug so a fork lists its OWN issues, not the parent's (a bare
+    // `gh issue list` on a fork auto-resolves to the upstream repo).
+    let slug = crate::github::gh_origin_slug(&repo_path).await?;
     let mut args: Vec<&str> = match state.as_str() {
-        "open" => vec!["issue", "list", "--state", "open", "--json", ISSUE_LIST_FIELDS],
-        "closed" => vec!["issue", "list", "--state", "closed", "--json", ISSUE_LIST_FIELDS],
+        "open" => vec![
+            "issue", "list", "--repo", &slug, "--state", "open", "--json", ISSUE_LIST_FIELDS,
+        ],
+        "closed" => vec![
+            "issue", "list", "--repo", &slug, "--state", "closed", "--json", ISSUE_LIST_FIELDS,
+        ],
         _ => {
             return Err(AppError::InvalidArgument(format!(
                 "unknown issue state filter: {state}"
@@ -133,7 +160,12 @@ pub async fn gh_issue_list(
         args.push("--limit");
         args.push(&limit_str);
     }
-    let out = run_gh(Some(&repo_path), &args, GH_TIMEOUT).await?;
+    // A fork with issues turned off (GitHub's default) fails here with a stable
+    // signature — remap it to a typed variant the UI renders as an informative,
+    // non-retryable state instead of a generic "couldn't load" + Retry.
+    let out = run_gh(Some(&repo_path), &args, GH_TIMEOUT)
+        .await
+        .map_err(map_issues_disabled)?;
     serde_json::from_str(&out.stdout_lossy())
         .map_err(|e| AppError::Gh(format!("could not parse gh issue list: {e}")))
 }
@@ -238,11 +270,15 @@ const ISSUE_VIEW_FIELDS: &str =
 /// conversation comments (with node ids for editing/hiding).
 #[tauri::command]
 pub async fn gh_issue_view(repo_path: String, number: u64) -> AppResult<IssueDetails> {
+    // Pin the origin slug so a fork's issue number resolves against the fork, not
+    // the parent gh would auto-detect from an `upstream` remote (used by both the
+    // `issue view --repo` read and the literal `repos/<slug>` lock-state path).
+    let slug = crate::github::gh_origin_slug(&repo_path).await?;
     // The conversation view and the (REST-only) lock state are fetched
     // concurrently so the lock state adds no extra round-trip latency.
     let n = number.to_string();
-    let issue_path = format!("repos/{{owner}}/{{repo}}/issues/{number}");
-    let view_args = ["issue", "view", &n, "--json", ISSUE_VIEW_FIELDS];
+    let issue_path = format!("repos/{slug}/issues/{number}");
+    let view_args = ["issue", "view", &n, "--repo", &slug, "--json", ISSUE_VIEW_FIELDS];
     let lock_args = [
         "api",
         &issue_path,
@@ -253,7 +289,9 @@ pub async fn gh_issue_view(repo_path: String, number: u64) -> AppResult<IssueDet
         run_gh(Some(&repo_path), &view_args, GH_TIMEOUT),
         run_gh(Some(&repo_path), &lock_args, GH_TIMEOUT),
     );
-    let out = view_res?;
+    // On a fork with issues disabled, viewing an issue fails with the same gh
+    // signature — remap it to the typed variant (consistent with `gh_issue_list`).
+    let out = view_res.map_err(map_issues_disabled)?;
     let raw: RawIssue = serde_json::from_str(&out.stdout_lossy())
         .map_err(|e| AppError::Gh(format!("could not parse gh issue view: {e}")))?;
     // Best-effort: a failed lock lookup just leaves the issue shown as unlocked.
@@ -352,20 +390,20 @@ pub async fn gh_issue_create(
     }
     let input = serde_json::to_string(&payload)
         .map_err(|e| AppError::Gh(format!("could not encode issue: {e}")))?;
+    // Pin the origin slug so a new issue is filed on the fork, not the parent gh
+    // would auto-detect from an `upstream` remote (on a non-fork this is a no-op).
+    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    let endpoint = format!("repos/{slug}/issues");
+    // Creating an issue on a fork with issues disabled fails with the same gh
+    // signature — remap it so the toast carries the readable variant message.
     let out = run_gh_input(
         Some(&repo_path),
-        &[
-            "api",
-            "--method",
-            "POST",
-            "repos/{owner}/{repo}/issues",
-            "--input",
-            "-",
-        ],
+        &["api", "--method", "POST", &endpoint, "--input", "-"],
         &input,
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(map_issues_disabled)?;
     let created: CreatedIssue = serde_json::from_str(&out.stdout_lossy())
         .map_err(|e| AppError::Gh(format!("could not parse created issue: {e}")))?;
     Ok(PrRef {
@@ -377,14 +415,12 @@ pub async fn gh_issue_create(
 /// Logins that can be assigned to issues/PRs in this repo (collaborators).
 #[tauri::command]
 pub async fn gh_assignable_users(repo_path: String) -> AppResult<Vec<String>> {
+    // Pin the origin slug so a fork lists its own assignees, not the parent's.
+    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    let endpoint = format!("repos/{slug}/assignees");
     let out = run_gh(
         Some(&repo_path),
-        &[
-            "api",
-            "repos/{owner}/{repo}/assignees",
-            "--jq",
-            "[.[].login]",
-        ],
+        &["api", &endpoint, "--jq", "[.[].login]"],
         GH_TIMEOUT,
     )
     .await?;
@@ -395,14 +431,12 @@ pub async fn gh_assignable_users(repo_path: String) -> AppResult<Vec<String>> {
 /// Open milestones for the milestone picker.
 #[tauri::command]
 pub async fn gh_milestones(repo_path: String) -> AppResult<Vec<Milestone>> {
+    // Pin the origin slug so a fork lists its own milestones, not the parent's.
+    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    let endpoint = format!("repos/{slug}/milestones?state=open&per_page=100");
     let out = run_gh(
         Some(&repo_path),
-        &[
-            "api",
-            "repos/{owner}/{repo}/milestones?state=open&per_page=100",
-            "--jq",
-            "[.[] | {number, title}]",
-        ],
+        &["api", &endpoint, "--jq", "[.[] | {number, title}]"],
         GH_TIMEOUT,
     )
     .await?;
@@ -419,16 +453,12 @@ pub async fn gh_issue_set_assignees(
 ) -> AppResult<()> {
     let input = serde_json::to_string(&serde_json::json!({ "assignees": assignees }))
         .map_err(|e| AppError::Gh(format!("could not encode assignees: {e}")))?;
+    // Pin the origin slug so a fork's issue is edited on the fork, not the parent.
+    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    let endpoint = format!("repos/{slug}/issues/{number}");
     run_gh_input(
         Some(&repo_path),
-        &[
-            "api",
-            "--method",
-            "PATCH",
-            &format!("repos/{{owner}}/{{repo}}/issues/{number}"),
-            "--input",
-            "-",
-        ],
+        &["api", "--method", "PATCH", &endpoint, "--input", "-"],
         &input,
         GH_NETWORK_TIMEOUT,
     )
@@ -450,16 +480,12 @@ pub async fn gh_issue_set_milestone(
     let input =
         serde_json::to_string(&serde_json::json!({ "milestone": milestone_value }))
             .map_err(|e| AppError::Gh(format!("could not encode milestone: {e}")))?;
+    // Pin the origin slug so a fork's issue is edited on the fork, not the parent.
+    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    let endpoint = format!("repos/{slug}/issues/{number}");
     run_gh_input(
         Some(&repo_path),
-        &[
-            "api",
-            "--method",
-            "PATCH",
-            &format!("repos/{{owner}}/{{repo}}/issues/{number}"),
-            "--input",
-            "-",
-        ],
+        &["api", "--method", "PATCH", &endpoint, "--input", "-"],
         &input,
         GH_NETWORK_TIMEOUT,
     )
@@ -526,9 +552,13 @@ pub async fn gh_issue_set_type(
     type_name: Option<String>,
 ) -> AppResult<()> {
     let n = number.to_string();
+    // Pin the origin slug so a fork's issue is edited on the fork, not the parent.
+    let slug = crate::github::gh_origin_slug(&repo_path).await?;
     let args: Vec<&str> = match type_name.as_deref() {
-        Some(t) if !t.trim().is_empty() => vec!["issue", "edit", &n, "--type", t],
-        _ => vec!["issue", "edit", &n, "--remove-type"],
+        Some(t) if !t.trim().is_empty() => {
+            vec!["issue", "edit", &n, "--repo", &slug, "--type", t]
+        }
+        _ => vec!["issue", "edit", &n, "--repo", &slug, "--remove-type"],
     };
     run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await?;
     Ok(())
@@ -545,9 +575,11 @@ pub async fn gh_issue_comment(
         return Err(AppError::InvalidArgument("a comment is required".into()));
     }
     let n = number.to_string();
+    // Pin the origin slug so the comment lands on the fork's issue, not the parent's.
+    let slug = crate::github::gh_origin_slug(&repo_path).await?;
     run_gh(
         Some(&repo_path),
-        &["issue", "comment", &n, "--body", &body],
+        &["issue", "comment", &n, "--repo", &slug, "--body", &body],
         GH_NETWORK_TIMEOUT,
     )
     .await?;
@@ -572,9 +604,11 @@ pub async fn gh_issue_close(
             )));
         }
     };
+    // Pin the origin slug so a fork's issue closes on the fork, not the parent.
+    let slug = crate::github::gh_origin_slug(&repo_path).await?;
     run_gh(
         Some(&repo_path),
-        &["issue", "close", &n, "--reason", reason],
+        &["issue", "close", &n, "--repo", &slug, "--reason", reason],
         GH_NETWORK_TIMEOUT,
     )
     .await?;
@@ -585,9 +619,11 @@ pub async fn gh_issue_close(
 #[tauri::command]
 pub async fn gh_issue_reopen(repo_path: String, number: u64) -> AppResult<()> {
     let n = number.to_string();
+    // Pin the origin slug so a fork's issue reopens on the fork, not the parent.
+    let slug = crate::github::gh_origin_slug(&repo_path).await?;
     run_gh(
         Some(&repo_path),
-        &["issue", "reopen", &n],
+        &["issue", "reopen", &n, "--repo", &slug],
         GH_NETWORK_TIMEOUT,
     )
     .await?;
@@ -611,13 +647,16 @@ pub async fn gh_issue_edit(
             "an issue title is required".into(),
         ));
     }
+    // Pin the origin slug so a fork's issue is edited on the fork, not the parent.
+    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    let endpoint = format!("repos/{slug}/issues/{number}");
     run_gh(
         Some(&repo_path),
         &[
             "api",
             "--method",
             "PATCH",
-            &format!("repos/{{owner}}/{{repo}}/issues/{number}"),
+            &endpoint,
             "-f",
             &format!("title={title}"),
             "-f",
@@ -633,14 +672,28 @@ pub async fn gh_issue_edit(
 #[tauri::command]
 pub async fn gh_issue_pin(repo_path: String, number: u64) -> AppResult<()> {
     let n = number.to_string();
-    run_gh(Some(&repo_path), &["issue", "pin", &n], GH_NETWORK_TIMEOUT).await?;
+    // Pin the origin slug so a fork's issue is pinned on the fork, not the parent.
+    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    run_gh(
+        Some(&repo_path),
+        &["issue", "pin", &n, "--repo", &slug],
+        GH_NETWORK_TIMEOUT,
+    )
+    .await?;
     Ok(())
 }
 
 #[tauri::command]
 pub async fn gh_issue_unpin(repo_path: String, number: u64) -> AppResult<()> {
     let n = number.to_string();
-    run_gh(Some(&repo_path), &["issue", "unpin", &n], GH_NETWORK_TIMEOUT).await?;
+    // Pin the origin slug so a fork's issue is unpinned on the fork, not the parent.
+    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    run_gh(
+        Some(&repo_path),
+        &["issue", "unpin", &n, "--repo", &slug],
+        GH_NETWORK_TIMEOUT,
+    )
+    .await?;
     Ok(())
 }
 
@@ -653,7 +706,9 @@ pub async fn gh_issue_lock(
     reason: Option<String>,
 ) -> AppResult<()> {
     let n = number.to_string();
-    let mut args = vec!["issue", "lock", &n];
+    // Pin the origin slug so a fork's issue is locked on the fork, not the parent.
+    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    let mut args = vec!["issue", "lock", &n, "--repo", &slug];
     if let Some(r) = reason.as_deref() {
         if !matches!(r, "off_topic" | "resolved" | "spam" | "too_heated") {
             return Err(AppError::InvalidArgument(format!(
@@ -670,7 +725,14 @@ pub async fn gh_issue_lock(
 #[tauri::command]
 pub async fn gh_issue_unlock(repo_path: String, number: u64) -> AppResult<()> {
     let n = number.to_string();
-    run_gh(Some(&repo_path), &["issue", "unlock", &n], GH_NETWORK_TIMEOUT).await?;
+    // Pin the origin slug so a fork's issue is unlocked on the fork, not the parent.
+    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    run_gh(
+        Some(&repo_path),
+        &["issue", "unlock", &n, "--repo", &slug],
+        GH_NETWORK_TIMEOUT,
+    )
+    .await?;
     Ok(())
 }
 
@@ -823,9 +885,12 @@ pub async fn gh_issue_transfer(
         ));
     }
     let n = number.to_string();
+    // Pin the origin slug so the SOURCE issue resolves against the fork, not the
+    // parent (the `destination` arg is explicit and unaffected).
+    let slug = crate::github::gh_origin_slug(&repo_path).await?;
     let out = run_gh(
         Some(&repo_path),
-        &["issue", "transfer", &n, destination],
+        &["issue", "transfer", &n, destination, "--repo", &slug],
         GH_NETWORK_TIMEOUT,
     )
     .await?;
@@ -838,9 +903,11 @@ pub async fn gh_issue_transfer(
 #[tauri::command]
 pub async fn gh_issue_delete(repo_path: String, number: u64) -> AppResult<()> {
     let n = number.to_string();
+    // Pin the origin slug so a fork's issue is deleted on the fork, not the parent.
+    let slug = crate::github::gh_origin_slug(&repo_path).await?;
     run_gh(
         Some(&repo_path),
-        &["issue", "delete", &n, "--yes"],
+        &["issue", "delete", &n, "--repo", &slug, "--yes"],
         GH_NETWORK_TIMEOUT,
     )
     .await?;
@@ -945,10 +1012,12 @@ pub async fn gh_issue_add_sub_issue(
     sub_number: u64,
 ) -> AppResult<()> {
     // Resolve the child's node id (this also rejects PRs / missing numbers).
+    // Pin the origin slug so the child number resolves against the fork, not the parent.
+    let slug = crate::github::gh_origin_slug(&repo_path).await?;
     let n = sub_number.to_string();
     let id_out = run_gh(
         Some(&repo_path),
-        &["issue", "view", &n, "--json", "id", "-q", ".id"],
+        &["issue", "view", &n, "--repo", &slug, "--json", "id", "-q", ".id"],
         GH_TIMEOUT,
     )
     .await?;
@@ -1076,9 +1145,11 @@ pub async fn gh_issue_set_dependency(
     };
     let n = number.to_string();
     let t = target.to_string();
+    // Pin the origin slug so the dependency is edited on the fork's issue, not the parent.
+    let slug = crate::github::gh_origin_slug(&repo_path).await?;
     run_gh(
         Some(&repo_path),
-        &["issue", "edit", &n, flag, &t],
+        &["issue", "edit", &n, "--repo", &slug, flag, &t],
         GH_NETWORK_TIMEOUT,
     )
     .await?;
@@ -1282,4 +1353,30 @@ pub fn read_issue_templates(repo_path: String) -> AppResult<Vec<String>> {
     }
 
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_issues_disabled;
+
+    #[test]
+    fn detects_the_disabled_issues_signature() {
+        // The full line gh prints on a repo with issues turned off.
+        assert!(is_issues_disabled(
+            "the 'theBGuy/biome' repository has disabled issues"
+        ));
+        // Match is case-insensitive (gh capitalization can drift).
+        assert!(is_issues_disabled("The 'a/b' repository HAS DISABLED ISSUES"));
+    }
+
+    #[test]
+    fn leaves_other_gh_failures_alone() {
+        assert!(!is_issues_disabled(""));
+        assert!(!is_issues_disabled(
+            "GraphQL: Could not resolve to a Repository with the name 'a/b'."
+        ));
+        assert!(!is_issues_disabled(
+            "gh: To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN environment variable"
+        ));
+    }
 }
