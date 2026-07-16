@@ -193,9 +193,10 @@ fn parse_scan(stdout: &str, markers: &[String], max_hits: usize) -> TodoScan {
 /// design — a lowercase `todo` in an identifier or prose is noise.
 ///
 /// `run_git_raw` (not `run_git`) so `git grep`'s documented no-match exit (code
-/// 1 with empty stdout) stays a success signal: exit 0 → parse, exit 1 + empty
-/// → empty result, any other code → a real error. This also makes the unborn
-/// (no-commit) repo path a clean empty result — `git grep` exits 1 there.
+/// 1) stays a success signal: exit 0 → parse, exit 1 → parse stdout anyway
+/// (empty stdout yields an empty scan), any other code → a real error. This
+/// also makes the unborn (no-commit) repo path a clean empty result — `git
+/// grep` exits 1 there.
 #[tauri::command]
 pub async fn git_todo_scan(
     repo_path: String,
@@ -228,11 +229,11 @@ pub async fn git_todo_scan(
     let out = run_git_raw(Some(&repo_path), &args, TODO_SCAN_TIMEOUT).await?;
     match out.code {
         0 => Ok(parse_scan(&out.stdout_lossy(), &markers, max_hits)),
-        // git grep's documented no-matches exit (also fires on an unborn repo).
-        1 if out.stdout.is_empty() => Ok(TodoScan {
-            items: Vec::new(),
-            truncated: false,
-        }),
+        // Exit 1 is git grep's documented no-matches exit (also fires on an
+        // unborn repo). Parse stdout anyway as best-effort in case a
+        // non-standard git emitted partial results before exiting 1 — parsing
+        // empty stdout yields an empty scan, so this subsumes the no-match case.
+        1 => Ok(parse_scan(&out.stdout_lossy(), &markers, max_hits)),
         _ => Err(AppError::Git {
             code: out.code,
             stderr: out.stderr,

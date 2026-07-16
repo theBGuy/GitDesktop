@@ -139,7 +139,9 @@ export function CodeTodosPanel({
   // virtualization (its DOM node may not be mounted). Selection stays visible
   // via the row's `bg-accent` styling + `aria-selected`; row focus doesn't move.
   const activeFlatIndex = activeKey
-    ? flatRows.findIndex((r) => r.type === "item" && itemKey(r.item) === activeKey)
+    ? flatRows.findIndex(
+        (r) => r.type === "item" && itemKey(r.item) === activeKey,
+      )
     : -1;
 
   // The ChangesPanel recipe: pass `rowKey` so the focus ring tracks the active
@@ -275,7 +277,7 @@ export function CodeTodosPanel({
               deselect markers to scan fewer, or filter the text below.
             </p>
           )}
-          {navItems.length === 0 && flatRows.length === 0 ? (
+          {flatRows.length === 0 ? (
             <p className="px-3 py-8 text-center text-xs text-muted-foreground">
               No matches for this filter.
             </p>

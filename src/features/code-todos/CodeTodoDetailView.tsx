@@ -88,12 +88,18 @@ export function CodeTodoDetailView({
   // { lineNo, content } rows the excerpt renders identically. When blame errored
   // but the fallback hasn't resolved yet, `data` is undefined and this stays
   // empty (so nothing renders until the read lands — pending is handled below).
+  // Strip one trailing terminator then split CRLF-safely (mirroring `capHunkLines`
+  // in ai/review-tools.ts) so CRLF worktrees + a final newline can't skew the
+  // stale boundary or render stray CRs.
   const excerptLines: { lineNo: number; content: string }[] = blame.isError
     ? fileText.data !== undefined
-      ? fileText.data.split("\n").map((content, i) => ({
-          lineNo: i + 1,
-          content,
-        }))
+      ? fileText.data
+          .replace(/\r?\n$/, "")
+          .split(/\r?\n/)
+          .map((content, i) => ({
+            lineNo: i + 1,
+            content,
+          }))
       : []
     : blameLines.map((bl) => ({ lineNo: bl.lineNo, content: bl.content }));
 
@@ -126,14 +132,15 @@ export function CodeTodoDetailView({
   // "no preview" verdict computed against a not-yet-known length.
   const sourcePending =
     blame.isPending || (blame.isError && fileText.isPending);
-  // The file drifted: the scan pointed past the current file length. Only judged
-  // once a source has resolved with content.
-  const stale =
-    !sourcePending && excerptLines.length > 0 && line > excerptLines.length;
   // Both sources failed (blame refused AND the file couldn't be read — e.g.
   // deleted mid-session): no preview to show.
   const previewUnavailable =
     !sourcePending && blame.isError && fileText.isError;
+  // The file drifted: the scan pointed past the current file length (including a
+  // file emptied to zero lines — an empty successful blame is stale, not "no
+  // preview", so Rescan stays reachable). Only judged once a source resolved.
+  const stale =
+    !sourcePending && !previewUnavailable && line > excerptLines.length;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -253,7 +260,13 @@ export function CodeTodoDetailView({
         repoPath={repoPath}
         open={promoteOpen}
         onOpenChange={setPromoteOpen}
-        initialDraft={{ title: draftTitle.slice(0, 80), body: draftBody }}
+        initialDraft={{
+          // Codepoint-safe cap: UTF-16 `slice` can end on a lone high surrogate;
+          // the spread splits by codepoint (consistent with the Rust `chars()`
+          // text cap).
+          title: [...draftTitle].slice(0, 80).join(""),
+          body: draftBody,
+        }}
       />
     </div>
   );

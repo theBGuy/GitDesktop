@@ -544,7 +544,7 @@ export function useTodoScan(
   enabled: boolean,
 ) {
   return useQuery({
-    queryKey: ["todo-scan", repo, markers, maxHits] as const,
+    queryKey: ["repo", repo, "todo-scan", markers, maxHits] as const,
     queryFn: () => api.gitTodoScan(repo, markers, maxHits),
     enabled: Boolean(repo) && enabled,
     staleTime: 30_000,
@@ -556,7 +556,8 @@ export function useTodoScan(
  *  key owned here rather than leaking the literal into the feature. */
 export function useTodoScanInvalidate(repo: string) {
   const queryClient = useQueryClient();
-  return () => queryClient.invalidateQueries({ queryKey: ["todo-scan", repo] });
+  return () =>
+    queryClient.invalidateQueries({ queryKey: ["repo", repo, "todo-scan"] });
 }
 
 export function useGlobalIdentity() {
