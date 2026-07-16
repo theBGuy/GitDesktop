@@ -137,13 +137,16 @@ export function createCliClient(settings: AiSettings): AiClient {
             yield event.text;
           } else if (event.kind === "done") {
             settled = true;
+            // An errored run throws BEFORE the tail is yielded, matching the
+            // `error`-kind branch — a failed run never paints its final text
+            // into the caller's draft field.
+            if (event.isError) throw new Error("The run ended with an error.");
             // The terminal event carries the authoritative full text. A coalescing
             // CLI (Codex emits NO deltas — only this final text) has emitted nothing
             // yet, so yield the untold tail; streaming CLIs already emitted it all.
             if (event.text.length > emitted) {
               yield event.text.slice(emitted);
             }
-            if (event.isError) throw new Error("The run ended with an error.");
             return;
           } else if (event.kind === "error") {
             settled = true;

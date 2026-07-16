@@ -196,7 +196,8 @@ function ModelPicker({
  * Detection + optional binary-path override for a CLI provider (generation or
  * review). Shows whether the CLI is installed and signed in, since there's no
  * API key to save. `idPrefix` keeps the input id unique when both the generation
- * and review pickers have a CLI selected; `description` carries the
+ * and review pickers have a CLI selected — load-bearing for ARIA correctness
+ * (duplicate DOM ids), so never default or remove it; `description` carries the
  * surface-specific footer copy.
  */
 function CliProviderConfig({
