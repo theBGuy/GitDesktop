@@ -134,14 +134,17 @@ async fn detect_non_github(repo_path: &str) -> Option<(Provider, String)> {
 }
 
 /// The one-shot `-c credential.helper` entries to authenticate a network op on
-/// `remote`, resolved to the provider CLI's ABSOLUTE path. Empty (→ git's ambient
-/// behavior, so this never breaks a local, SSH, or already-authenticated repo) for:
-/// SSH remotes (credential helpers don't apply), Bitbucket (its push flow injects
-/// auth its own way), a repo with no such remote, and when the provider CLI isn't
-/// installed (fail open — ambient helpers like git-credential-manager still work).
-/// An unknown HTTPS host follows the app's GitHub-default routing and gets the gh
-/// helper — harmless, since a one-shot `-c` helper only ADDS to git's helper list,
-/// so a non-answering gh falls through to git's ambient helpers.
+/// `remote`, resolved to the provider CLI's ABSOLUTE path. The provider comes from
+/// the REQUESTED remote's OWN host (not always `origin`), so a cross-forge
+/// origin/upstream pair — e.g. an `origin` on GitLab with a `github.com` `upstream`
+/// — each gets the right CLI's helper. Empty (→ git's ambient behavior, so this
+/// never breaks a local, SSH, or already-authenticated repo) for: SSH remotes
+/// (credential helpers don't apply), Bitbucket (its push flow injects auth its own
+/// way), a repo with no such remote, and when the provider CLI isn't installed
+/// (fail open — ambient helpers like git-credential-manager still work). An unknown
+/// HTTPS host follows the app's GitHub-default routing and gets the gh helper —
+/// harmless, since a one-shot `-c` helper only ADDS to git's helper list, so a
+/// non-answering gh falls through to git's ambient helpers.
 pub async fn credential_config_for_remote(repo_path: &str, remote: &str) -> AppResult<Vec<String>> {
     let url = match crate::git::remote::git_remote_url(repo_path.to_string(), remote.to_string()).await
     {
@@ -151,21 +154,52 @@ pub async fn credential_config_for_remote(repo_path: &str, remote: &str) -> AppR
     if !is_https_remote(&url) {
         return Ok(Vec::new()); // SSH → keys, not helpers
     }
+    let Some(host) = remote_host(&url) else {
+        return Ok(Vec::new());
+    };
+    // Classify by the requested remote's OWN host, reproducing `detect_non_github`'s
+    // logic on `url` — identical when `remote == "origin"`, correct for other
+    // remotes. The glab-known-hosts config read is skipped for canonical hosts and
+    // github.com; only an unrecognized host reads it (as `detect_non_github` does).
+    let provider = if host == "github.com" || provider_for_host(&host).is_some() {
+        provider_for_remote_host(&host, &[])
+    } else {
+        // Any other host glab is signed in to is self-managed GitLab — mirrors detect_non_github.
+        provider_for_remote_host(&host, &glab::known_hosts().await)
+    };
     // Fail open when the CLI can't be resolved: a user with working ambient auth
     // (e.g. git-credential-manager) must not have every HTTPS fetch/pull/push hard-
     // fail just because gh/glab isn't installed.
-    match detect_non_github(repo_path).await {
-        Some((Provider::GitLab, _)) => Ok(gitlab::clone_credential_config(&url).await.unwrap_or_default()),
-        Some((Provider::Bitbucket, _)) => Ok(Vec::new()),
+    match provider {
+        Some(Provider::GitLab) => Ok(gitlab::clone_credential_config(&url).await.unwrap_or_default()),
+        Some(Provider::Bitbucket) => Ok(Vec::new()),
         _ => Ok(github::clone_credential_config(&url).await.unwrap_or_default()),
     }
 }
 
+/// The provider a remote's host maps to, mirroring [`detect_non_github`] but on an
+/// arbitrary remote's host rather than always `origin`. Canonical hosts match
+/// directly; any *other* host in `glab_hosts` (the hosts `glab` is signed in to) is
+/// self-managed GitLab; `github.com`, GHE, and unknown hosts return `None` (→ the
+/// app's gh-default routing). Pure/sync so it's unit-testable — the caller supplies
+/// `glab_hosts` (empty when the host is canonical/github.com and the config read is
+/// skipped).
+fn provider_for_remote_host(host: &str, glab_hosts: &[String]) -> Option<Provider> {
+    if let Some(p) = provider_for_host(host) {
+        return Some(p);
+    }
+    if host != "github.com" && glab_hosts.iter().any(|h| h == host) {
+        return Some(Provider::GitLab);
+    }
+    None
+}
+
 /// True when a remote URL uses HTTPS (credential helpers apply). SSH forms
-/// (`git@host:…`, `ssh://…`) and others return false.
+/// (`git@host:…`, `ssh://…`) and others return false — as does plain `http://`,
+/// since the helper entry we format keys on `credential.https://…` and would
+/// never match an http remote anyway.
 fn is_https_remote(url: &str) -> bool {
-    let u = url.trim();
-    u.starts_with("https://") || u.starts_with("http://")
+    url.trim().starts_with("https://")
 }
 
 /// The provider a host resolves to, as the lowercase tag the frontend keys
@@ -586,10 +620,13 @@ pub async fn forge_list_repos(provider: Provider) -> AppResult<ForgeRepoList> {
     }
 }
 
-/// Clone a repo, supplying provider auth that plain `git clone` lacks. GitHub
-/// (and the URL tab) clone fine via git + the gh credential helper; a private
+/// Clone a repo, supplying provider auth that plain `git clone` lacks. A private
 /// GitLab repo needs glab's token, injected as a ONE-SHOT `git -c` credential
-/// helper (no persistent config, no token in the remote URL). Returns the path.
+/// helper (no persistent config, no token in the remote URL) — glab IS GitLab's
+/// auth path here, so that arm stays strict. GitHub gets the same one-shot gh
+/// helper when gh is present, but falls open to git's ambient auth when gh is
+/// absent (public repos need none; a GCM user already has HTTPS auth), matching
+/// how GitHub clone worked before this helper existed. Returns the path.
 #[tauri::command]
 pub async fn forge_clone(
     provider: Provider,
@@ -599,7 +636,7 @@ pub async fn forge_clone(
 ) -> AppResult<String> {
     let extra = match provider {
         Provider::GitLab => gitlab::clone_credential_config(&url).await?,
-        Provider::GitHub => github::clone_credential_config(&url).await?,
+        Provider::GitHub => github::clone_credential_config(&url).await.unwrap_or_default(),
         Provider::Bitbucket => Vec::new(),
     };
     crate::git::repo::clone_repo_core(&url, &parent_dir, dir_name, &extra).await
@@ -3178,6 +3215,22 @@ mod tests {
         assert!(is_https_remote("https://github.com/o/r.git"));
         assert!(!is_https_remote("git@github.com:o/r.git"));
         assert!(!is_https_remote("ssh://git@github.com/o/r.git"));
+        // Plain http never matches the https-keyed helper entry we format.
+        assert!(!is_https_remote("http://github.example.com/o/r.git"));
+    }
+
+    #[test]
+    fn provider_for_remote_host_classifies_by_requested_host() {
+        let glab_hosts = vec!["gitlab.acme.com".to_string()];
+        // Canonical hosts route directly, no glab config needed.
+        assert_eq!(provider_for_remote_host("gitlab.com", &[]), Some(Provider::GitLab));
+        assert_eq!(provider_for_remote_host("bitbucket.org", &[]), Some(Provider::Bitbucket));
+        // github.com → None (gh-default routing), even if it somehow appears in glab_hosts.
+        assert_eq!(provider_for_remote_host("github.com", &glab_hosts), None);
+        // A glab-known custom host is self-managed GitLab.
+        assert_eq!(provider_for_remote_host("gitlab.acme.com", &glab_hosts), Some(Provider::GitLab));
+        // An unknown host (GHE or otherwise) → None.
+        assert_eq!(provider_for_remote_host("github.example.com", &glab_hosts), None);
     }
 
     #[test]
