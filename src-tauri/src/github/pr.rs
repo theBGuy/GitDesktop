@@ -4113,6 +4113,22 @@ fn rest_pull_to_pr_info(p: GhPrRestPull) -> PrInfo {
     }
 }
 
+/// Build the REST endpoint for the upstream-lens duplicate probe:
+/// `repos/<parent_slug>/pulls?head=<fork_owner>:<head>&state=open`. `fork_owner`
+/// and `head` are the only untrusted query VALUES, so each is percent-encoded via
+/// the shared [`encode_query_value`](crate::forge::encode_query_value) (escapes
+/// `&`, `%`, `#`, `+`, `?`, `=`, space, `/`, `:`, … — everything outside the
+/// RFC-3986 unreserved set) so a legal-but-hostile refname like `feat&state=all`
+/// can't inject query parameters. The `:` separator is added LITERALLY between the
+/// two encoded parts because GitHub's `?head=owner:branch` filter needs a real
+/// colon there; `parent_slug` is a validated `owner/repo` remote path whose `/` is
+/// a real path segment, so it stays unencoded. Pure — unit-tested.
+fn upstream_pulls_endpoint(parent_slug: &str, fork_owner: &str, head: &str) -> String {
+    let owner = crate::forge::encode_query_value(fork_owner);
+    let head = crate::forge::encode_query_value(head);
+    format!("repos/{parent_slug}/pulls?head={owner}:{head}&state=open")
+}
+
 /// Open PRs whose head is `head` (there's at most one per base). Lets the UI
 /// offer "View pull request" instead of "Create" once one already exists.
 ///
@@ -4139,10 +4155,7 @@ pub async fn gh_prs_for_branch(
         let parent_slug = crate::github::gh_lens_slug(&repo_path, Some("upstream")).await?;
         let origin_slug = crate::github::gh_lens_slug(&repo_path, None).await?;
         let fork_owner = crate::github::fork_owner_of(&origin_slug);
-        // `head`/`owner`/`ref` are all `[A-Za-z0-9_./-]` (branch validated above),
-        // so they're query-safe interpolated literally into the endpoint.
-        let endpoint =
-            format!("repos/{parent_slug}/pulls?head={fork_owner}:{head}&state=open");
+        let endpoint = upstream_pulls_endpoint(&parent_slug, fork_owner, &head);
         let out = run_gh(
             Some(&repo_path),
             &["api", "--method", "GET", &endpoint],
@@ -4412,8 +4425,9 @@ mod tests {
         parse_auth_accounts, parse_pr_url_repo, reconstruct_pr_diff,
         reject_upstream_create_metadata, rest_comment_to_out, rest_commit_to_out,
         rest_pull_to_pr_info, rest_review_to_out, rollup_state_to_ci, scrape_pr_ref,
-        split_commit_message, GhPrFile, GhPrRestComment, GhPrRestCommit, GhPrRestCommitGitAuthor,
-        GhPrRestCommitInner, GhPrRestPull, GhPrRestReview, PrTimelineEventOut, RawLogin,
+        split_commit_message, upstream_pulls_endpoint, GhPrFile, GhPrRestComment, GhPrRestCommit,
+        GhPrRestCommitGitAuthor, GhPrRestCommitInner, GhPrRestPull, GhPrRestReview,
+        PrTimelineEventOut, RawLogin,
     };
     use crate::error::AppError;
 
@@ -4952,6 +4966,33 @@ github.acme.com
                 "expected InvalidArgument, got {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn upstream_pulls_endpoint_encodes_hostile_refnames() {
+        // Plain refname: nothing to escape but the reserved `:` separator stays literal.
+        assert_eq!(
+            upstream_pulls_endpoint("biomejs/biome", "PhoenixMputu", "feat/x"),
+            "repos/biomejs/biome/pulls?head=PhoenixMputu:feat%2Fx&state=open",
+        );
+        // A legal refname carrying `&` can't inject a second query parameter — the
+        // `&` is encoded, so `state=all` lands inside the head VALUE, not as a param.
+        let ep = upstream_pulls_endpoint("o/r", "me", "feat&state=all");
+        assert_eq!(ep, "repos/o/r/pulls?head=me:feat%26state%3Dall&state=open");
+        // Exactly one `&` (the real separator) and one `state=` (the real filter).
+        assert_eq!(ep.matches('&').count(), 1);
+        assert_eq!(ep.matches("state=").count(), 1);
+        // `%` and space are escaped too (no half-open percent-escape, no raw space).
+        assert_eq!(
+            upstream_pulls_endpoint("o/r", "me", "a b%c"),
+            "repos/o/r/pulls?head=me:a%20b%25c&state=open",
+        );
+        // A hostile FORK OWNER is encoded the same way (defense in depth, though a
+        // real login is alphanumeric).
+        assert_eq!(
+            upstream_pulls_endpoint("o/r", "ev&il", "b"),
+            "repos/o/r/pulls?head=ev%26il:b&state=open",
+        );
     }
 
     #[test]

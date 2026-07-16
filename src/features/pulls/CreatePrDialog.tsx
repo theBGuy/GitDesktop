@@ -339,11 +339,18 @@ export function CreatePrDialog({
   // bare upstream branch name, so qualify it as `upstream/<base>` (the ref that
   // exists locally after the fetch) — otherwise `git log main..head` would
   // resolve against a *local* `main`, a stale proxy for the parent's branch.
-  const compareBaseRef = base
-    ? targetIsParent
-      ? `upstream/${base}`
+  // While the parent fetch is in flight, `base` is still the fork-seeded local
+  // name and `upstream/<name>` may not exist yet — yield null so the compare
+  // query stays idle (baseLoading already gates the hint + submit) rather than
+  // erroring on a not-yet-fetched ref.
+  const compareBaseRef =
+    targetIsParent && parentBranches.isPending
+      ? null
       : base
-    : null;
+        ? targetIsParent
+          ? `upstream/${base}`
+          : base
+        : null;
   const comparison = useCompareBranches(repoPath, compareBaseRef, head || null);
   const ahead = comparison.data?.ahead ?? [];
   // A head equal to the parent's base name is still a distinct ref (local branch
@@ -485,8 +492,8 @@ export function CreatePrDialog({
               )}
               {targetIsParent && (
                 <p className="text-xs text-muted-foreground">
-                  Labels and assignees can be added on {remoteLabel} after
-                  opening.
+                  Labels and assignees can be added on{" "}
+                  {upstreamSlug ?? remoteLabel} after opening.
                 </p>
               )}
             </div>

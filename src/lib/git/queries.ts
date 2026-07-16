@@ -2711,6 +2711,12 @@ export function useRemoteUrl(repo: string, name: string, enabled: boolean) {
     queryKey: ["repo", repo, "remote-url", name] as const,
     queryFn: () => api.gitRemoteUrl(repo, name),
     enabled,
+    // Consumed by the always-visible RepoLensSwitcher + CreatePrDialog via
+    // useRemoteSlug, so leave the house default (not Infinity): the Rust cache's
+    // short 5s TTL exists so an external `git remote set-url` is picked up
+    // promptly, and in-app edits invalidate this key eagerly (useSetRemoteUrl).
+    // Without this, every window focus re-spawned `git remote get-url` twice.
+    staleTime: 30_000,
   });
 }
 
