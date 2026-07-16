@@ -243,11 +243,6 @@ function buildHast(
 }
 
 /**
- * A @git-diff-view DiffFileHighlighter that tokenizes with Shiki and emits
- * style-based spans (the renderer applies `properties.style` directly). AST
- * post-processing is reused from the default highlighter's exported `processAST`.
- */
-/**
  * Line cap on the RECONSTRUCTED file, deciding whether a small edit deep in a
  * big file gets highlighted at all (not the diff's own size). Placeholder-
  * reconstructed lines tokenize cheaply (measured 61ms at 12K lines). The ONE
@@ -257,6 +252,11 @@ function buildHast(
  */
 export const SYNTAX_LINE_CAP = 15_000;
 
+/**
+ * A @git-diff-view DiffFileHighlighter that tokenizes with Shiki and emits
+ * style-based spans (the renderer applies `properties.style` directly). AST
+ * post-processing is reused from the default highlighter's exported `processAST`.
+ */
 export function shikiDiffHighlighter(
   // When set, forces the token theme instead of sniffing the `.dark` class —
   // required off the main thread (the highlight worker has no `document`), and
