@@ -178,6 +178,27 @@ export interface CommitResult {
   hash: string;
 }
 
+/** One TODO/FIXME/HACK/… comment found in the working tree by `git_todo_scan`. */
+export interface TodoScanItem {
+  /** Repo-relative path, forward slashes. */
+  path: string;
+  /** 1-based line number of the match. */
+  line: number;
+  /** The marker word that matched, e.g. `"TODO"`. */
+  marker: string;
+  /** The comment text after the marker (may be `""`); capped at 300 chars
+   *  server-side. */
+  text: string;
+}
+
+/** Result of a working-tree TODO scan (`git_todo_scan`). */
+export interface TodoScan {
+  /** Matches in git grep output order (grouped by path). */
+  items: TodoScanItem[];
+  /** The global cap (default 2000) was hit — more matches may exist. */
+  truncated: boolean;
+}
+
 /** Result of applying a review suggestion to the working tree
  *  ({@link ReviewThreadOut} → {@link ApplyLinesResult}). The backend verifies the
  *  expected lines still match before editing, preserves EOL/BOM/trailing newline,

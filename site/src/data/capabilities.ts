@@ -86,6 +86,7 @@ export const capabilities: Capability[] = [
 
   // — Issues & discussions —
   { group: "Issues & discussions", label: "GitHub issues & private local to-dos" },
+  { group: "Issues & discussions", label: "Code TODOs — scan TODO/FIXME/HACK comments, jump to blame, promote to an issue" },
   { group: "Issues & discussions", label: "Issue types, sub-issues & dependencies" },
   { group: "Issues & discussions", label: "GitHub Discussions — read, post & react" },
 

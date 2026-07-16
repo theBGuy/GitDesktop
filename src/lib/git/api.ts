@@ -120,6 +120,7 @@ import type {
   StashFile,
   Submodule,
   TagInfo,
+  TodoScan,
   UnignoreRule,
   Webhook,
   WebhookInput,
@@ -1003,6 +1004,15 @@ export const gitGrepAtRef = (
   maxHits?: number,
 ) => invoke<string>("git_grep_at_ref", { repoPath, pattern, atRef, maxHits });
 
+/** Scans the working tree for TODO/FIXME/HACK/… code comments (case-sensitive
+ *  fixed-string `git grep`), grouped by path in output order. `maxHits` caps the
+ *  total (default 2000 server-side); `truncated` reports when the cap was hit. */
+export const gitTodoScan = (
+  repoPath: string,
+  markers: string[],
+  maxHits?: number,
+) => invoke<TodoScan>("git_todo_scan", { repoPath, markers, maxHits });
+
 /** Current tip SHA of each requested local branch (one for-each-ref call).
  *  Branches that don't exist are omitted. Used to watch open local PRs' heads. */
 export const gitBranchTips = (repoPath: string, branches: string[]) =>
@@ -1505,7 +1515,8 @@ export const ghDiscussionList = (
   repoPath: string,
   category: string | null,
   limit?: number,
-) => invoke<DiscussionInfo[]>("gh_discussion_list", { repoPath, category, limit });
+) =>
+  invoke<DiscussionInfo[]>("gh_discussion_list", { repoPath, category, limit });
 
 export const ghDiscussionView = (repoPath: string, number: number) =>
   invoke<DiscussionDetails>("gh_discussion_view", { repoPath, number });

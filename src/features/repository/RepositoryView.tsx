@@ -5,6 +5,7 @@ import {
   GitBranchIcon,
   GitCommitIcon,
   GitPullRequestIcon,
+  ListChecksIcon,
   PlayIcon,
   TagIcon,
 } from "@phosphor-icons/react";
@@ -28,6 +29,8 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ActionsPanel } from "@/features/actions/ActionsPanel";
 import { RunDetailView } from "@/features/actions/RunDetailView";
 import { useRunNotifications } from "@/features/actions/useRunNotifications";
+import { CodeTodoDetailView } from "@/features/code-todos/CodeTodoDetailView";
+import { CodeTodosPanel } from "@/features/code-todos/CodeTodosPanel";
 import { CommitBox } from "@/features/commit/CommitBox";
 import { BranchDiffView } from "@/features/compare/BranchDiffView";
 import { ComparePanel } from "@/features/compare/ComparePanel";
@@ -109,6 +112,7 @@ const DiffViewer = lazy(() =>
 const SECONDARY_TABS: { tab: RepoTab; label: string; ai?: boolean }[] = [
   { tab: "agent", label: "Agent", ai: true },
   { tab: "issues", label: "Issues" },
+  { tab: "code-todos", label: "Code TODOs" },
   { tab: "discussions", label: "Discussions" },
   { tab: "actions", label: "Actions" },
   { tab: "tags", label: "Tags" },
@@ -130,6 +134,7 @@ export function RepositoryView() {
   const selectedDiscussion = useUiStore((s) => s.selectedDiscussion);
   const selectedRunId = useUiStore((s) => s.selectedRunId);
   const selectedTag = useUiStore((s) => s.selectedTag);
+  const selectedTodo = useUiStore((s) => s.selectedTodo);
   const localPrCreate = useUiStore((s) => s.localPrCreate);
   const closeLocalPrCreate = useUiStore((s) => s.closeLocalPrCreate);
   // The detail panes run off deferred selections so rapidly arrowing a list
@@ -141,6 +146,7 @@ export function RepositoryView() {
   const deferredIssue = useDeferredValue(selectedIssue);
   const deferredDiscussion = useDeferredValue(selectedDiscussion);
   const deferredTag = useDeferredValue(selectedTag);
+  const deferredTodo = useDeferredValue(selectedTodo);
   const status = useRepoStatus(repoPath ?? "");
   const alias = useRepoAlias(repoPath);
   // The write-capable agent is an AI feature — hide its tab when AI is hidden.
@@ -216,6 +222,7 @@ export function RepositoryView() {
   useHotkeyAction("tab-actions", () => changeTab("actions"));
   useHotkeyAction("tab-tags", () => changeTab("tags"));
   useHotkeyAction("tab-insights", () => changeTab("insights"));
+  useHotkeyAction("tab-code-todos", () => changeTab("code-todos"));
   // The Agent tab only exists when AI features are shown (palette-only binding).
   useHotkeyAction("tab-agent", () => changeTab("agent"), aiEnabled);
   useHotkeyAction("back-to-repositories", closeRepo);
@@ -366,6 +373,12 @@ export function RepositoryView() {
               active={repoTab === "insights"}
             />
           </Activity>
+          <Activity mode={mode("code-todos")}>
+            <CodeTodosPanel
+              repoPath={repoPath}
+              active={repoTab === "code-todos"}
+            />
+          </Activity>
           {aiEnabled && (
             <Activity mode={mode("agent")}>
               {agentSeen && (
@@ -478,6 +491,19 @@ export function RepositoryView() {
               <TagDetailView repoPath={repoPath} tag={deferredTag.tag} />
             ) : (
               <DiffPlaceholder icon={TagIcon} message="Select a tag" />
+            )}
+          </Activity>
+          <Activity mode={mode("code-todos")}>
+            {deferredTodo ? (
+              <CodeTodoDetailView
+                repoPath={repoPath}
+                path={deferredTodo.path}
+                line={deferredTodo.line}
+                marker={deferredTodo.marker}
+                text={deferredTodo.text}
+              />
+            ) : (
+              <DiffPlaceholder icon={ListChecksIcon} message="Select a TODO" />
             )}
           </Activity>
           <Activity mode={mode("insights")}>

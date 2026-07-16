@@ -13,6 +13,7 @@ export type RepoTab =
   | "actions"
   | "tags"
   | "insights"
+  | "code-todos"
   | "agent";
 /** A create dialog the command palette / New menus can request from any tab. */
 export type CreateKind =
@@ -98,6 +99,7 @@ const CROSS_REPO_RESET: Partial<UiState> = {
   pendingIssueDraft: null,
   selectedRunId: null,
   selectedTag: null,
+  selectedTodo: null,
   selectedFile: null,
   selectedCommitHash: null,
   compareCommitHash: null,
@@ -177,6 +179,15 @@ interface UiState {
   selectedRunId: number | null;
   /** Selected tag (by name) on the Tags tab. */
   selectedTag: { tag: string } | null;
+  /** Selected TODO on the Code TODOs tab. Carries the scan's authoritative
+   *  `marker`/`text` (the Rust scanner gates markers to real comment openers, so
+   *  these beat any client-side re-derivation) alongside its path + line. */
+  selectedTodo: {
+    path: string;
+    line: number;
+    marker: string;
+    text: string;
+  } | null;
   selectedFile: SelectedFile | null;
   selectedCommitHash: string | null;
   /** Commit selected on the Compare tab. Kept separate from `selectedCommitHash`
@@ -255,6 +266,14 @@ interface UiState {
   closeLocalPrCreate: () => void;
   selectRun: (id: number | null) => void;
   selectTag: (tag: { tag: string } | null) => void;
+  setSelectedTodo: (
+    todo: {
+      path: string;
+      line: number;
+      marker: string;
+      text: string;
+    } | null,
+  ) => void;
   selectFile: (file: SelectedFile | null) => void;
   selectCommit: (hash: string | null) => void;
   selectCompareCommit: (hash: string | null) => void;
@@ -335,6 +354,7 @@ export const useUiStore = create<UiState>()((set, get) => {
     localPrCreate: null,
     selectedRunId: null,
     selectedTag: null,
+    selectedTodo: null,
     selectedFile: null,
     selectedCommitHash: null,
     compareCommitHash: null,
@@ -436,6 +456,7 @@ export const useUiStore = create<UiState>()((set, get) => {
     closeLocalPrCreate: () => set({ localPrCreate: null }),
     selectRun: (id) => set({ selectedRunId: id }),
     selectTag: (tag) => set({ selectedTag: tag }),
+    setSelectedTodo: (todo) => set({ selectedTodo: todo }),
     selectCommit: (hash) => set({ selectedCommitHash: hash }),
     selectCompareCommit: (hash) => set({ compareCommitHash: hash }),
     openSettings: (target) =>

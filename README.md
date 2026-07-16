@@ -422,6 +422,14 @@ pin/unpin, lock/unlock, or delete.
 
 ![An issue open in GitDesktop with its description, labels, assignees, milestone, sub-issues, and a linked development branch and pull request; local and GitHub issues appear together in the sidebar.](site/src/assets/app-issues.png)
 
+**Code TODOs** — a tab that scans your working tree for real `TODO`, `FIXME`,
+`HACK`, `BUG`, and `XXX` comment markers (tracked and new-but-not-ignored files),
+groups them by file, and lets you filter by text/path or marker. Select one for a
+syntax-highlighted excerpt with blame attribution (who wrote the line, and how long
+ago); then **open it in your editor**, **copy its `path:line`**, or **promote it to a
+local issue** — pre-filled with the comment and a `path:line` reference — from where
+it's publishable to GitHub or Jira like any other local issue.
+
 **Discussions** — browse and read a repository's GitHub Discussions, create and
 edit them, and react or upvote, with Write/Preview markdown throughout.
 

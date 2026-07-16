@@ -1057,6 +1057,45 @@ Bitbucket).
   or Bitbucket's Commits, Branches, Pipelines, and Deployments.`,
   },
   {
+    id: "code-todos",
+    label: "Code TODOs",
+    body: `# Code TODOs
+
+The **Code TODOs** tab (in the More ▾ menu; palette-only by default — bind a key in
+Settings) scans your working tree for the TODO-style markers left in your code comments
+and gathers them in one place.
+
+## What it scans
+
+It searches for whole-word, case-sensitive **\`TODO\`**, **\`FIXME\`**, **\`HACK\`**,
+**\`BUG\`**, and **\`XXX\`** markers in your files' comments — across both **tracked** files
+and **new files that aren't ignored** (it respects your \`.gitignore\`), skipping binaries.
+Very large working trees are capped at 2,000 matches.
+
+## Finding a TODO
+
+Results are **grouped by file** in collapsible sections. **Filter** them by typing text or
+a path fragment, or narrow to one or more **markers** (show only \`FIXME\`s, say). The list
+is fully keyboard-navigable.
+
+## The detail pane
+
+Select a TODO to see a **syntax-highlighted excerpt** of the code around that line, along
+with **blame attribution** — who wrote that line, and how long ago.
+
+From there you can:
+
+- **Open in editor** — jump to the file in your configured editor.
+- **Promote to issue** — create a private **local issue** pre-filled with the comment text
+  and a \`path:line\` reference back to it; from there it's publishable to GitHub or Jira
+  like any other local issue (see *Issues → Local issues*).
+- **Copy \`path:line\`** — copy the file and line reference to your clipboard.
+
+Code TODOs are ephemeral and anchored to a file and line — you resolve one by editing the
+code, not by closing a record. (They're distinct from **local issues**, which are
+hand-authored to-dos you track in the app; see the *Issues* section.)`,
+  },
+  {
     id: "agent",
     label: "Agent sessions",
     ai: true,

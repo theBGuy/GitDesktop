@@ -13,5 +13,6 @@ pub mod stage;
 pub mod stats;
 pub mod status;
 pub mod submodule;
+pub mod todos;
 pub mod types;
 pub mod worktree;

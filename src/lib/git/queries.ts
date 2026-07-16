@@ -507,12 +507,56 @@ export function useBlame(
   });
 }
 
+/** Raw working-tree text of a repo-relative file — the fallback source for the
+ *  Code TODOs excerpt when `git blame` refuses the file (e.g. an untracked, but
+ *  scanned-with-`--untracked`, new file). `enabled` lets the caller defer the
+ *  read until blame has actually errored, so tracked files never pay for it. */
+export function useFileText(repo: string, path: string, enabled: boolean) {
+  return useQuery({
+    queryKey: ["repo", repo, "file-text", path] as const,
+    // readTextFile takes an ABSOLUTE path; join like readReadme does.
+    queryFn: () => api.readTextFile(`${repo}/${path}`),
+    enabled: Boolean(repo) && path !== "" && enabled,
+    staleTime: 30_000,
+  });
+}
+
 export function useCommitAuthors(repo: string) {
   return useQuery({
     queryKey: ["repo", repo, "commit-authors"] as const,
     queryFn: () => api.gitCommitAuthors(repo),
     staleTime: 60_000,
   });
+}
+
+/** Working-tree TODO/FIXME/HACK/… scan for the Code TODOs tab. A heavy `git
+ *  grep`, so — like `useRepoStats` — it's gated on the tab being active
+ *  (<Activity> keeps the panel mounted but doesn't defer fetches). A modest
+ *  staleTime keeps a same-session tab re-entry from rescanning; the panel offers
+ *  a manual Refresh. Keyed on the marker set so toggling the marker chips (which
+ *  drive the scan, not a client filter) caches per-set and refetches cleanly.
+ *  `maxHits` is passed explicitly so the panel's truncated-count and the backend
+ *  cap can't drift; it's in the key so a different cap would refetch. */
+export function useTodoScan(
+  repo: string,
+  markers: string[],
+  maxHits: number,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: ["todo-scan", repo, markers, maxHits] as const,
+    queryFn: () => api.gitTodoScan(repo, markers, maxHits),
+    enabled: Boolean(repo) && enabled,
+    staleTime: 30_000,
+  });
+}
+
+/** Returns a thunk that invalidates the repo's TODO-scan queries — used by the
+ *  detail pane's Rescan when the file has drifted from the scan. Keeps the query
+ *  key owned here rather than leaking the literal into the feature. */
+export function useTodoScanInvalidate(repo: string) {
+  const queryClient = useQueryClient();
+  return () => queryClient.invalidateQueries({ queryKey: ["todo-scan", repo] });
 }
 
 export function useGlobalIdentity() {

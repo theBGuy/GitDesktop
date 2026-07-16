@@ -255,6 +255,7 @@ pub fn run() {
             git::compare::git_branch_diff,
             git::compare::git_diff_between_refs,
             git::compare::git_grep_at_ref,
+            git::todos::git_todo_scan,
             git::compare::git_fetch_objects,
             git::compare::git_branch_tips,
             git::compare::git_review_worktree,
