@@ -9,7 +9,7 @@ import { FileRowActions } from "@/features/history/FileRowActions";
 import { copyText } from "@/lib/clipboard";
 import { splitUnifiedDiff } from "@/lib/git/diff-split";
 import { useCommitComments, usePrCommitDiff } from "@/lib/git/queries";
-import type { PrCommitOut } from "@/lib/git/types";
+import type { PrCommitOut, RemoteLens } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { formatRelativeTime } from "@/lib/time";
 import { cn } from "@/lib/utils";
@@ -31,6 +31,8 @@ interface PrCommitDetailProps {
   /** The forge provider, for the line-comment composer's anchoring (GitHub needs
    *  a diff `position`; GitLab/Bitbucket anchor by line). Defaults to "github". */
   provider?: "github" | "gitlab" | "bitbucket";
+  /** The origin|upstream lens the parent PR view resolved. */
+  lens: RemoteLens;
 }
 
 /** Adds/deletions in one file's unified-diff section (its `+`/`-` body lines,
@@ -63,9 +65,10 @@ export function PrCommitDetail({
   canCommentCommits,
   remoteLabel,
   provider = "github",
+  lens,
 }: PrCommitDetailProps) {
-  const diff = usePrCommitDiff(repoPath, number, commit.oid);
-  const comments = useCommitComments(repoPath, commit.oid);
+  const diff = usePrCommitDiff(repoPath, number, commit.oid, lens);
+  const comments = useCommitComments(repoPath, commit.oid, lens);
 
   const sections = useMemo(
     () => splitUnifiedDiff(diff.data ?? ""),
@@ -136,6 +139,7 @@ export function PrCommitDetail({
           provider={provider}
           fileSection={sections.get(effectivePath)}
           onClose={onClose}
+          lens={lens}
         />
       ),
     };
@@ -146,6 +150,7 @@ export function PrCommitDetail({
     commit.oid,
     provider,
     sections,
+    lens,
   ]);
 
   return (
@@ -265,6 +270,7 @@ export function PrCommitDetail({
                 diffSections={sections}
                 selectedPath={effectivePath}
                 onSelectFile={setSelectedPath}
+                lens={lens}
               />
             </div>
           </main>

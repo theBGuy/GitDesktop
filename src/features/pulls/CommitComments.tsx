@@ -13,7 +13,11 @@ import {
   useDeleteCommitComment,
   useEditCommitComment,
 } from "@/lib/git/queries";
-import type { CommitCommentOut, PrThreadOut } from "@/lib/git/types";
+import type {
+  CommitCommentOut,
+  PrThreadOut,
+  RemoteLens,
+} from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
 import { SUBMIT_HINT } from "./ReviewThreads";
 
@@ -230,6 +234,7 @@ export function CommitComments({
   diffSections,
   selectedPath,
   onSelectFile,
+  lens,
 }: {
   repoPath: string;
   sha: string;
@@ -243,11 +248,14 @@ export function CommitComments({
   /** Selects a file in the sidebar; makes each group's path label a button that
    *  jumps to that file's diff. Absent = the label is plain text. */
   onSelectFile?: (path: string) => void;
+  /** Which repo the commit's comments live on: "origin" (the History surface, or
+   *  a non-fork) or the parent under the upstream lens (PR-commit context). */
+  lens: RemoteLens;
 }) {
-  const comments = useCommitComments(repoPath, sha);
-  const createComment = useCreateCommitComment(repoPath);
-  const editComment = useEditCommitComment(repoPath);
-  const deleteComment = useDeleteCommitComment(repoPath);
+  const comments = useCommitComments(repoPath, sha, lens);
+  const createComment = useCreateCommitComment(repoPath, lens);
+  const editComment = useEditCommitComment(repoPath, lens);
+  const deleteComment = useDeleteCommitComment(repoPath, lens);
 
   const [body, setBody] = useState("");
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -462,6 +470,7 @@ export function CommitLineComposer({
   provider,
   fileSection,
   onClose,
+  lens,
 }: {
   repoPath: string;
   sha: string;
@@ -475,8 +484,10 @@ export function CommitLineComposer({
   /** This file's unified-diff section, for recovering the GitHub `position`. */
   fileSection: string | undefined;
   onClose: () => void;
+  /** Which repo the commit lives on (origin vs upstream lens). */
+  lens: RemoteLens;
 }) {
-  const createComment = useCreateCommitComment(repoPath);
+  const createComment = useCreateCommitComment(repoPath, lens);
   const [body, setBody] = useState("");
 
   // The multi-line range, normalized: [from, line] with from <= line.

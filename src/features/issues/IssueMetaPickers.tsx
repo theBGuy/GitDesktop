@@ -21,7 +21,7 @@ import {
   useIssueTypes,
   useMilestones,
 } from "@/lib/git/queries";
-import type { ForgeUserRef, IssueType } from "@/lib/git/types";
+import type { ForgeUserRef, IssueType, RemoteLens } from "@/lib/git/types";
 import { cn } from "@/lib/utils";
 
 /** GitHub issue-type color NAMES → a swatch hex (matches GitHub's palette). */
@@ -68,14 +68,17 @@ export function AssigneesPopover({
   value,
   onChange,
   commitOnClose = false,
+  lens,
 }: {
   repoPath: string;
   enabled: boolean;
   value: ForgeUserRef[];
   onChange: (next: ForgeUserRef[]) => void;
   commitOnClose?: boolean;
+  /** The origin|upstream lens the parent surface resolved. */
+  lens: RemoteLens;
 }) {
-  const users = useAssignableUsers(repoPath, enabled);
+  const users = useAssignableUsers(repoPath, enabled, lens);
   const ghHost = useForgeGhHost(repoPath);
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<Map<string, ForgeUserRef>>(new Map());
@@ -187,14 +190,17 @@ export function MilestoneMenu({
   value,
   valueLabel,
   onChange,
+  lens,
 }: {
   repoPath: string;
   enabled: boolean;
   value: number | null;
   valueLabel?: string;
   onChange: (milestone: number | null, title: string | null) => void;
+  /** The origin|upstream lens the parent surface resolved. */
+  lens: RemoteLens;
 }) {
-  const milestones = useMilestones(repoPath, enabled);
+  const milestones = useMilestones(repoPath, enabled, lens);
   const list = milestones.data ?? [];
   const current = list.find((m) => m.number === value);
   const display =
@@ -253,13 +259,16 @@ export function IssueTypeMenu({
   enabled,
   value,
   onChange,
+  lens,
 }: {
   repoPath: string;
   enabled: boolean;
   value: IssueType | null;
   onChange: (type: IssueType | null) => void;
+  /** The origin|upstream lens the parent surface resolved. */
+  lens: RemoteLens;
 }) {
-  const types = useIssueTypes(repoPath, enabled);
+  const types = useIssueTypes(repoPath, enabled, lens);
   const list = types.data ?? [];
   // No types defined for this owner → hide the control entirely.
   if (list.length === 0) return null;

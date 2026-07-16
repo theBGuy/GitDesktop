@@ -407,6 +407,12 @@ workflow against any two branches with no remote at all).
 - **Record management** — right-click a local PR in the list to **Archive / Unarchive**
   or **Delete** it (Delete confirms; the branches are untouched), also from the command
   palette.
+- **Fork · Upstream lens** — on a GitHub fork (a repo with an `upstream` remote), a
+  **Fork | Upstream** switch in the list toolbar (remembered per repo, defaulting to your
+  fork; also the **Switch to fork / upstream view** palette commands) points the remote
+  PR list — and every PR you open under it: description, comments, reviews, and metadata —
+  at your fork or the **parent** repository. Opening a PR targets a repository explicitly,
+  offering your fork or the upstream repo on a fork.
 
 A Write/Preview markdown editor (formatting toolbar + live preview) is everywhere you author.
 
@@ -418,7 +424,10 @@ and edit (drafting with AI from your repo's issue templates), react with emoji,
 and manage the full metadata: labels, assignees, milestones, issue type,
 sub-issues, dependencies (blocked-by / blocking), and development links (linked
 and closing PRs and branches, plus create-a-branch). Duplicate, transfer,
-pin/unpin, lock/unlock, or delete.
+pin/unpin, lock/unlock, or delete. On a **fork**, the same **Fork | Upstream**
+lens as the PR tab browses the parent repository's issues (and creating one under
+the Upstream lens opens it **on the parent**); a fork with issues turned off
+offers a one-click switch to Upstream instead of a dead end.
 
 ![An issue open in GitDesktop with its description, labels, assignees, milestone, sub-issues, and a linked development branch and pull request; local and GitHub issues appear together in the sidebar.](site/src/assets/app-issues.png)
 

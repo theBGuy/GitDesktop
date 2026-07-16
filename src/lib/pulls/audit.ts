@@ -62,8 +62,10 @@ export function usePrAuditByBranch(
   const localPrs = useLocalPrs(repo);
   const forge = useForgeStatus(repo);
   const remote = enabled && forgeFeatureReady(forge.data, "pullRequests");
-  const openPrs = usePrList(repo, remote, "open");
-  const closedPrs = usePrList(repo, remote, "closed");
+  // Origin lens: the branch audit maps the FORK's own branches to their PRs; the
+  // fork/upstream lens is a PR/Issues-tab affordance.
+  const openPrs = usePrList(repo, remote, "open", undefined, "origin");
+  const closedPrs = usePrList(repo, remote, "closed", undefined, "origin");
 
   return useMemo(() => {
     const map = new Map<string, PrAudit>();

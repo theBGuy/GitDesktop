@@ -13,7 +13,7 @@ import {
 import { Radio, RadioGroup } from "@/components/ui/radio-group";
 import type { ReviewVerdict } from "@/lib/git/api";
 import { useSubmitReview } from "@/lib/git/queries";
-import type { DraftCommentIn } from "@/lib/git/types";
+import type { DraftCommentIn, RemoteLens } from "@/lib/git/types";
 import {
   useClearReviewDrafts,
   useReviewDrafts,
@@ -35,6 +35,7 @@ export function SubmitReviewDialog({
   onOpenChange,
   caps,
   remoteLabel,
+  lens,
 }: {
   repoPath: string;
   number: number;
@@ -42,9 +43,11 @@ export function SubmitReviewDialog({
   onOpenChange: (o: boolean) => void;
   caps: { canApprove: boolean; canRequestChanges: boolean };
   remoteLabel: string;
+  /** The origin|upstream lens the parent PR view resolved. */
+  lens: RemoteLens;
 }) {
   const drafts = useReviewDrafts(repoPath, number);
-  const submitReview = useSubmitReview(repoPath);
+  const submitReview = useSubmitReview(repoPath, lens);
   const clearDrafts = useClearReviewDrafts(repoPath, number);
   const [verdict, setVerdict] = useState<ReviewVerdict>("comment");
   const [summary, setSummary] = useState("");

@@ -369,7 +369,13 @@ async function generateReviewText(
     // pushed elsewhere). Use the provider's authoritative PR diff; it has no
     // numstat, so derive the file summary from the diff text. (pr-open and local
     // pr-sync keep the local branch diff below, which already includes file counts.)
-    const text = await forgePrDiff(event.repoPath, event.target.number);
+    // Origin-pinned (package B2 recorded gap): pr-sync automation tracks the
+    // fork's own PRs (the poller is origin-scoped); upstream-lens is a follow-up.
+    const text = await forgePrDiff(
+      event.repoPath,
+      event.target.number,
+      "origin",
+    );
     diff = { text, truncated: false, files: filesFromDiff(text) };
   } else {
     diff = await gitBranchDiff(
@@ -531,13 +537,22 @@ async function deliver(
   }
 
   if (event.target.type === "remote") {
-    await forgePrComment(event.repoPath, event.target.number, body, true);
+    // Origin-pinned (package B2 recorded gap): automation posts to the fork's own
+    // PRs (the poller is origin-scoped); upstream-lens is a follow-up.
+    await forgePrComment(
+      event.repoPath,
+      event.target.number,
+      body,
+      true,
+      "origin",
+    );
     // Narrow to the PR's own key family (prefix-matches its detail/reactions/
     // timeline/review-threads) rather than the whole-repo subtree — a posted
     // conversation comment only touches this PR. Mirrors the local-target path
-    // below, which invalidates just its own store.
+    // below, which invalidates just its own store. Scoped to the origin lens (the
+    // PR the comment landed on).
     await queryClient.invalidateQueries({
-      queryKey: ["repo", event.repoPath, "pr", event.target.number],
+      queryKey: ["repo", event.repoPath, "pr", "origin", event.target.number],
     });
     toast.success(`AI ${label} posted on #${event.target.number}`);
     if (notify) {

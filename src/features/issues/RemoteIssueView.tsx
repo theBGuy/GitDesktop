@@ -67,6 +67,7 @@ import {
 } from "@/lib/git/queries";
 import { providerLabel } from "@/lib/git/types";
 import { formatBinding } from "@/lib/hotkeys/binding";
+import { useRepoLens } from "@/lib/repo-lens/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
@@ -116,6 +117,9 @@ export function RemoteIssueView({
   const provider = forge.data?.provider;
   const canWrite = provider !== "gitlab" && provider !== "bitbucket";
   const remoteLabel = providerLabel(provider);
+  // The single lens-resolution point for this surface (package B2): every issue
+  // read/write below targets the fork (origin) or its parent (upstream).
+  const lens = useRepoLens(repoPath);
   // GitLab WRITES land per-action. Each shared control is
   // `canWrite || forgeFeatureReady(...)` so GitHub keeps its controls while a
   // forge-status query is pending/failed (canWrite default-true) AND a ready GitLab
@@ -150,20 +154,20 @@ export function RemoteIssueView({
   // Time tracking + related issues are GitLab-unique too — flag alone gates.
   const canTrackTime = forgeFeatureReady(forge.data, "timeTracking");
   const canLinkIssues = forgeFeatureReady(forge.data, "issueLinks");
-  const details = useIssueDetails(repoPath, number);
-  const comment = useCommentIssue(repoPath);
-  const closeIssue = useCloseIssue(repoPath);
-  const reopenIssue = useReopenIssue(repoPath);
-  const editIssue = useEditIssue(repoPath);
-  const editComment = useEditIssueComment(repoPath);
-  const deleteComment = useDeleteIssueComment(repoPath);
+  const details = useIssueDetails(repoPath, number, lens);
+  const comment = useCommentIssue(repoPath, lens);
+  const closeIssue = useCloseIssue(repoPath, lens);
+  const reopenIssue = useReopenIssue(repoPath, lens);
+  const editIssue = useEditIssue(repoPath, lens);
+  const editComment = useEditIssueComment(repoPath, lens);
+  const deleteComment = useDeleteIssueComment(repoPath, lens);
   const minimizeComment = useMinimizeComment(repoPath);
   const unminimizeComment = useUnminimizeComment(repoPath);
-  const pinIssue = usePinIssue(repoPath);
-  const lockIssue = useLockIssue(repoPath);
-  const unlockIssue = useUnlockIssue(repoPath);
-  const transferIssue = useTransferIssue(repoPath);
-  const deleteIssue = useDeleteIssue(repoPath);
+  const pinIssue = usePinIssue(repoPath, lens);
+  const lockIssue = useLockIssue(repoPath, lens);
+  const unlockIssue = useUnlockIssue(repoPath, lens);
+  const transferIssue = useTransferIssue(repoPath, lens);
+  const deleteIssue = useDeleteIssue(repoPath, lens);
   const selectIssue = useUiStore((s) => s.selectIssue);
   const setPendingIssueDraft = useUiStore((s) => s.setPendingIssueDraft);
   // Reactions are a shared control (GitLab awards emoji); the fetch is gated so
@@ -175,10 +179,10 @@ export function RemoteIssueView({
   // wired, so `issueCommentEdit` is false there.
   const canEditOwnComments =
     canWrite || forgeFeatureReady(forge.data, "issueCommentEdit");
-  const reactions = useIssueReactions(repoPath, canReact ? number : null);
+  const reactions = useIssueReactions(repoPath, canReact ? number : null, lens);
   const toggleReactionMutation = useToggleReaction(
     repoPath,
-    ["repo", repoPath, "issue", number, "reactions"] as const,
+    ["repo", repoPath, "issue", lens, number, "reactions"] as const,
     details.data?.id ?? "",
     { target: "issue", number },
   );
@@ -632,6 +636,7 @@ export function RemoteIssueView({
                   repoPath={repoPath}
                   issueId={issue.id}
                   number={number}
+                  lens={lens}
                 />
               )}
               {comments.map((c) => (
@@ -805,6 +810,7 @@ export function RemoteIssueView({
           canTrackTime={canTrackTime}
           canLinkIssues={canLinkIssues}
           remoteLabel={remoteLabel}
+          lens={lens}
         />
       </div>
 

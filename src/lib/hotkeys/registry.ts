@@ -187,6 +187,18 @@ export const ACTIONS = [
     defaultBinding: null,
   },
   {
+    id: "repo-lens-origin",
+    label: "Switch to fork view (pull requests & issues)",
+    category: "Repository",
+    defaultBinding: null,
+  },
+  {
+    id: "repo-lens-upstream",
+    label: "Switch to upstream view (pull requests & issues)",
+    category: "Repository",
+    defaultBinding: null,
+  },
+  {
     id: "open-in-terminal",
     label: "Open in terminal",
     category: "Repository",

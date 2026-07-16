@@ -16,6 +16,7 @@ import { forgePrComment } from "@/lib/git/api";
 import { useCreatePr, useForgeStatus } from "@/lib/git/queries";
 import type { LocalPr } from "@/lib/pulls/local";
 import { useUpdateLocalPr } from "@/lib/pulls/queries";
+import { useSetRepoLens } from "@/lib/repo-lens/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
@@ -41,6 +42,7 @@ export function PromoteLocalPrDialog({
   const createPr = useCreatePr(repoPath);
   const update = useUpdateLocalPr(repoPath);
   const selectPr = useUiStore((s) => s.selectPr);
+  const setLens = useSetRepoLens(repoPath);
   const forge = useForgeStatus(repoPath);
   const isGitLab = forge.data?.provider === "gitlab";
   const remoteLabel = isGitLab ? "GitLab" : "GitHub";
@@ -72,7 +74,7 @@ export function PromoteLocalPrDialog({
       setPosting(true);
       try {
         for (const c of carried) {
-          await forgePrComment(repoPath, number, c.body);
+          await forgePrComment(repoPath, number, c.body, undefined, "origin");
         }
       } finally {
         setPosting(false);
@@ -98,6 +100,9 @@ export function PromoteLocalPrDialog({
         action: { label: "View", onClick: () => openUrl(url) },
       });
       onOpenChange(false);
+      // The promoted PR lives on the fork (origin) — force the origin lens so the
+      // Pulls tab shows it (clearing any stale remote selection) before selecting.
+      setLens("origin");
       selectPr({ kind: "remote", id: String(number) });
     } catch (e) {
       if (created === null) {

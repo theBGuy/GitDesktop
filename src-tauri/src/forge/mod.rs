@@ -646,16 +646,25 @@ pub async fn forge_clone(
 /// delegates to the existing `gh pr list`; GitLab maps `glab` merge requests onto
 /// the same neutral [`PrInfo`] shape. `state` is `"open"` or `"closed"` (closed
 /// includes merged, matching the GitHub panel's Closed tab).
+///
+/// `lens` (the fork-identity Part B primitive — `None`/`Some("origin")`/
+/// `Some("upstream")`) is threaded to the GitHub arm ONLY: it selects whether a
+/// fork addresses its own PRs (origin) or the parent's (upstream). The GitLab and
+/// Bitbucket arms deliberately do NOT receive the lens — their behavior is
+/// byte-identical to today, and the frontend gates the lens UI to GitHub, so a
+/// stray upstream lens on GitLab/Bitbucket simply reads as origin (acceptable v1).
+/// This note stands for every `forge_*` PR/issue dispatcher below.
 #[tauri::command]
 pub async fn forge_pr_list(
     repo_path: String,
     state: String,
     limit: Option<u32>,
+    lens: Option<String>,
 ) -> AppResult<Vec<crate::github::pr::PrInfo>> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::list_prs(&repo_path, &state, limit).await,
         Some((Provider::Bitbucket, _)) => bitbucket::list_prs(&repo_path, &state, limit).await,
-        _ => github::list_prs(&repo_path, &state, limit).await,
+        _ => github::list_prs(&repo_path, &state, limit, lens).await,
     }
 }
 
@@ -703,17 +712,37 @@ pub async fn forge_pr_poll(repo_path: String) -> AppResult<Vec<crate::github::pr
     }
 }
 
+/// The upstream lens is a GitHub-only fork affordance (Part B). Reject it before a
+/// GitLab/Bitbucket dispatch so a stray upstream value can't be silently treated as
+/// origin on those providers (the frontend gates the lens UI to GitHub anyway).
+fn reject_upstream_on_non_github(lens: Option<&str>) -> AppResult<()> {
+    if lens == Some("upstream") {
+        return Err(AppError::InvalidArgument(
+            "Creating a pull request on the upstream repository is currently supported for GitHub only.".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Open merge/pull requests whose head is `head`, behind the abstraction — the
 /// ComparePanel duplicate probe ("View" instead of "Create" once one exists).
+/// `lens` is GitHub-only (see `forge_pr_list`).
 #[tauri::command]
 pub async fn forge_prs_for_branch(
     repo_path: String,
     head: String,
+    lens: Option<String>,
 ) -> AppResult<Vec<crate::github::pr::PrInfo>> {
     match detect_non_github(&repo_path).await {
-        Some((Provider::GitLab, _)) => gitlab::prs_for_branch(&repo_path, &head).await,
-        Some((Provider::Bitbucket, _)) => bitbucket::prs_for_branch(&repo_path, &head).await,
-        _ => github::prs_for_branch(&repo_path, &head).await,
+        Some((Provider::GitLab, _)) => {
+            reject_upstream_on_non_github(lens.as_deref())?;
+            gitlab::prs_for_branch(&repo_path, &head).await
+        }
+        Some((Provider::Bitbucket, _)) => {
+            reject_upstream_on_non_github(lens.as_deref())?;
+            bitbucket::prs_for_branch(&repo_path, &head).await
+        }
+        _ => github::prs_for_branch(&repo_path, &head, lens).await,
     }
 }
 
@@ -722,11 +751,12 @@ pub async fn forge_prs_for_branch(
 pub async fn forge_pr_view(
     repo_path: String,
     number: u64,
+    lens: Option<String>,
 ) -> AppResult<crate::github::pr::PrDetails> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::view_pr(&repo_path, number).await,
         Some((Provider::Bitbucket, _)) => bitbucket::view_pr(&repo_path, number).await,
-        _ => github::view_pr(&repo_path, number).await,
+        _ => github::view_pr(&repo_path, number, lens).await,
     }
 }
 
@@ -739,21 +769,26 @@ pub async fn forge_pr_view(
 pub async fn forge_pr_timeline(
     repo_path: String,
     number: u64,
+    lens: Option<String>,
 ) -> AppResult<Vec<crate::github::pr::PrTimelineEventOut>> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::mr_timeline(&repo_path, number).await,
         Some((Provider::Bitbucket, _)) => bitbucket::pr_activity(&repo_path, number).await,
-        _ => github::pr_timeline(&repo_path, number).await,
+        _ => github::pr_timeline(&repo_path, number, lens.as_deref()).await,
     }
 }
 
 /// The unified diff for one merge/pull request, behind the abstraction.
 #[tauri::command]
-pub async fn forge_pr_diff(repo_path: String, number: u64) -> AppResult<String> {
+pub async fn forge_pr_diff(
+    repo_path: String,
+    number: u64,
+    lens: Option<String>,
+) -> AppResult<String> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::diff_pr(&repo_path, number).await,
         Some((Provider::Bitbucket, _)) => bitbucket::diff_pr(&repo_path, number).await,
-        _ => github::diff_pr(&repo_path, number).await,
+        _ => github::diff_pr(&repo_path, number, lens).await,
     }
 }
 
@@ -769,6 +804,9 @@ pub async fn forge_pr_commit_diff(
     // `number` is part of the neutral contract (the diff is scoped to a PR in the
     // UI), but every provider addresses the commit by sha alone.
     let _ = number;
+    // No lens param here (Part B): the commit is sha-addressed, and GitHub's
+    // fork-network storage serves any network SHA via the fork's own endpoint, so an
+    // origin/upstream distinction would make no difference to what's returned.
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::commit_diff(&repo_path, &oid).await,
         Some((Provider::Bitbucket, _)) => bitbucket::commit_diff(&repo_path, &oid).await,
@@ -783,11 +821,12 @@ pub async fn forge_pr_commit_diff(
 pub async fn forge_commit_comments(
     repo_path: String,
     sha: String,
+    lens: Option<String>,
 ) -> AppResult<Vec<crate::github::pr::CommitCommentOut>> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::commit_comments(&repo_path, &sha).await,
         Some((Provider::Bitbucket, _)) => bitbucket::commit_comments(&repo_path, &sha).await,
-        _ => github::commit_comments(&repo_path, &sha).await,
+        _ => github::commit_comments(&repo_path, &sha, lens.as_deref()).await,
     }
 }
 
@@ -807,6 +846,7 @@ pub async fn forge_commit_comment_create(
     line: Option<u64>,
     start_line: Option<u64>,
     position: Option<u64>,
+    lens: Option<String>,
 ) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => {
@@ -824,7 +864,15 @@ pub async fn forge_commit_comment_create(
             bitbucket::commit_comment_create(&repo_path, &sha, &body, path.as_deref(), line).await
         }
         _ => {
-            github::commit_comment_create(&repo_path, &sha, &body, path.as_deref(), position).await
+            github::commit_comment_create(
+                &repo_path,
+                &sha,
+                &body,
+                path.as_deref(),
+                position,
+                lens.as_deref(),
+            )
+            .await
         }
     }
 }
@@ -880,13 +928,14 @@ pub async fn forge_commit_comment_delete(
 pub async fn forge_pr_external_reviews(
     repo_path: String,
     number: u64,
+    lens: Option<String>,
 ) -> AppResult<Vec<crate::github::pr::ExternalReviewItem>> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::external_reviews(&repo_path, number).await,
         // By design: no bot-review ecosystem posts on Bitbucket PRs. Cheap,
         // permanent no-network empty — nothing to map.
         Some((Provider::Bitbucket, _)) => Ok(Vec::new()),
-        _ => github::external_reviews(&repo_path, number).await,
+        _ => github::external_reviews(&repo_path, number, lens).await,
     }
 }
 
@@ -898,11 +947,12 @@ pub async fn forge_pr_external_reviews(
 pub async fn forge_pr_review_threads(
     repo_path: String,
     number: u64,
+    lens: Option<String>,
 ) -> AppResult<Vec<crate::github::pr::ReviewThreadOut>> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::review_threads(&repo_path, number).await,
         Some((Provider::Bitbucket, _)) => bitbucket::review_threads(&repo_path, number).await,
-        _ => github::review_threads(&repo_path, number).await,
+        _ => github::review_threads(&repo_path, number, lens).await,
     }
 }
 
@@ -941,6 +991,7 @@ pub async fn forge_pr_thread_create(
     side: String,
     start_line: Option<u64>,
     body: String,
+    lens: Option<String>,
 ) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => {
@@ -949,7 +1000,19 @@ pub async fn forge_pr_thread_create(
         Some((Provider::Bitbucket, _)) => {
             bitbucket::thread_create(&repo_path, number, &path, line, &side, start_line, &body).await
         }
-        _ => github::thread_create(&repo_path, number, &path, line, &side, start_line, &body).await,
+        _ => {
+            github::thread_create(
+                &repo_path,
+                number,
+                &path,
+                line,
+                &side,
+                start_line,
+                &body,
+                lens.as_deref(),
+            )
+            .await
+        }
     }
 }
 
@@ -965,6 +1028,7 @@ pub async fn forge_pr_review_submit(
     verdict: String,
     summary: Option<String>,
     comments: Vec<crate::github::pr::DraftCommentIn>,
+    lens: Option<String>,
 ) -> AppResult<crate::github::pr::ReviewSubmitOut> {
     // Pre-mutation guards: verdict validity, and request_changes needs a summary.
     if !matches!(verdict.as_str(), "comment" | "approve" | "request_changes") {
@@ -985,7 +1049,10 @@ pub async fn forge_pr_review_submit(
         Some((Provider::Bitbucket, _)) => {
             bitbucket::review_submit(&repo_path, number, &verdict, summary, &comments).await
         }
-        _ => github::review_submit(&repo_path, number, &verdict, summary, &comments).await,
+        _ => {
+            github::review_submit(&repo_path, number, &verdict, summary, &comments, lens.as_deref())
+                .await
+        }
     }
 }
 
@@ -1022,13 +1089,14 @@ pub async fn forge_pr_comment(
     number: u64,
     body: String,
     as_bot: Option<bool>,
+    lens: Option<String>,
 ) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => {
             gitlab::comment_mr(&repo_path, number, &body, as_bot.unwrap_or(false)).await
         }
         Some((Provider::Bitbucket, _)) => bitbucket::comment_pr(&repo_path, number, &body).await,
-        _ => github::comment_pr(&repo_path, number, &body).await,
+        _ => github::comment_pr(&repo_path, number, &body, lens).await,
     }
 }
 
@@ -1143,17 +1211,17 @@ pub async fn forge_pr_delete_review_comment(
 
 /// Close a merge/pull request (not merge), behind the abstraction.
 #[tauri::command]
-pub async fn forge_pr_close(repo_path: String, number: u64) -> AppResult<()> {
+pub async fn forge_pr_close(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::close_mr(&repo_path, number).await,
         Some((Provider::Bitbucket, _)) => bitbucket::decline_pr(&repo_path, number).await,
-        _ => github::close_pr(&repo_path, number).await,
+        _ => github::close_pr(&repo_path, number, lens).await,
     }
 }
 
 /// Reopen a closed (not merged) merge/pull request, behind the abstraction.
 #[tauri::command]
-pub async fn forge_pr_reopen(repo_path: String, number: u64) -> AppResult<()> {
+pub async fn forge_pr_reopen(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::reopen_mr(&repo_path, number).await,
         // A declined Bitbucket PR can't be reopened via API or web (BCLOUD-4954). The
@@ -1161,7 +1229,7 @@ pub async fn forge_pr_reopen(repo_path: String, number: u64) -> AppResult<()> {
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
             "Bitbucket declined pull requests can't be reopened.".into(),
         )),
-        _ => github::reopen_pr(&repo_path, number).await,
+        _ => github::reopen_pr(&repo_path, number, lens).await,
     }
 }
 
@@ -1176,6 +1244,7 @@ pub async fn forge_pr_request_changes(
     repo_path: String,
     number: u64,
     body: String,
+    lens: Option<String>,
 ) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => {
@@ -1184,8 +1253,14 @@ pub async fn forge_pr_request_changes(
         Some((Provider::Bitbucket, _)) => {
             bitbucket::request_changes_pr(&repo_path, number, &body).await
         }
-        _ => crate::github::pr::gh_pr_review(repo_path, number, "request_changes".to_string(), body)
-            .await,
+        _ => crate::github::pr::gh_pr_review(
+            repo_path,
+            number,
+            "request_changes".to_string(),
+            body,
+            lens,
+        )
+        .await,
     }
 }
 
@@ -1233,6 +1308,7 @@ pub async fn forge_pr_set_reviewers(
     repo_path: String,
     number: u64,
     reviewers: Vec<String>,
+    lens: Option<String>,
 ) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
         Some((Provider::Bitbucket, _)) => {
@@ -1241,7 +1317,7 @@ pub async fn forge_pr_set_reviewers(
         Some((Provider::GitLab, _)) => {
             gitlab::set_pr_reviewers(&repo_path, number, &reviewers).await
         }
-        _ => github::set_pr_reviewers(&repo_path, number, &reviewers).await,
+        _ => github::set_pr_reviewers(&repo_path, number, &reviewers, lens.as_deref()).await,
     }
 }
 
@@ -1254,13 +1330,14 @@ pub async fn forge_pr_set_reviewers(
 pub async fn forge_pr_reviewer_candidates(
     repo_path: String,
     number: Option<u64>,
+    lens: Option<String>,
 ) -> AppResult<Vec<model::ForgeUserRef>> {
     match detect_non_github(&repo_path).await {
         Some((Provider::Bitbucket, _)) => {
             bitbucket::reviewer_candidates(&repo_path, number).await
         }
         Some((Provider::GitLab, _)) => gitlab::reviewer_candidates(&repo_path, number).await,
-        _ => github::reviewer_candidates(&repo_path, number).await,
+        _ => github::reviewer_candidates(&repo_path, number, lens.as_deref()).await,
     }
 }
 
@@ -1272,13 +1349,14 @@ pub async fn forge_pr_edit(
     number: u64,
     title: String,
     body: String,
+    lens: Option<String>,
 ) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::edit_mr(&repo_path, number, &title, &body).await,
         Some((Provider::Bitbucket, _)) => {
             bitbucket::edit_pr(&repo_path, number, &title, &body).await
         }
-        _ => github::edit_pr(&repo_path, number, &title, &body).await,
+        _ => github::edit_pr(&repo_path, number, &title, &body, lens).await,
     }
 }
 
@@ -1307,12 +1385,18 @@ pub async fn forge_pr_approvals(
 /// (false for GitHub, which uses its native review flow there); this arm serves
 /// the MCP `approve_pull_request` tool.
 #[tauri::command]
-pub async fn forge_pr_approve(repo_path: String, number: u64) -> AppResult<()> {
+pub async fn forge_pr_approve(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::approve_pr(&repo_path, number).await,
         Some((Provider::Bitbucket, _)) => bitbucket::approve_pr(&repo_path, number).await,
-        _ => crate::github::pr::gh_pr_review(repo_path, number, "approve".to_string(), String::new())
-            .await,
+        _ => crate::github::pr::gh_pr_review(
+            repo_path,
+            number,
+            "approve".to_string(),
+            String::new(),
+            lens,
+        )
+        .await,
     }
 }
 
@@ -1348,6 +1432,7 @@ pub async fn forge_pr_merge(
     strategy: String,
     delete_branch: bool,
     sha: Option<String>,
+    lens: Option<String>,
 ) -> AppResult<crate::github::pr::PrMergeOutcome> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::merge_mr(
@@ -1363,7 +1448,7 @@ pub async fn forge_pr_merge(
         Some((Provider::Bitbucket, _)) => bitbucket::merge_pr(&repo_path, number, &strategy, delete_branch)
             .await
             .map(|()| crate::github::pr::PrMergeOutcome::default()),
-        _ => crate::github::pr::gh_pr_merge(repo_path, number, strategy, delete_branch).await,
+        _ => crate::github::pr::gh_pr_merge(repo_path, number, strategy, delete_branch, lens).await,
     }
 }
 
@@ -1376,13 +1461,14 @@ pub async fn forge_issue_list(
     repo_path: String,
     state: String,
     limit: Option<u32>,
+    lens: Option<String>,
 ) -> AppResult<Vec<crate::github::issue::IssueInfo>> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::list_issues(&repo_path, &state, limit).await,
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
             "Bitbucket issues aren't supported yet.".into(),
         )),
-        _ => github::list_issues(&repo_path, &state, limit).await,
+        _ => github::list_issues(&repo_path, &state, limit, lens).await,
     }
 }
 
@@ -1391,13 +1477,14 @@ pub async fn forge_issue_list(
 pub async fn forge_issue_view(
     repo_path: String,
     number: u64,
+    lens: Option<String>,
 ) -> AppResult<crate::github::issue::IssueDetails> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::view_issue(&repo_path, number).await,
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
             "Bitbucket issues aren't supported yet.".into(),
         )),
-        _ => github::view_issue(&repo_path, number).await,
+        _ => github::view_issue(&repo_path, number, lens).await,
     }
 }
 
@@ -1644,13 +1731,18 @@ pub async fn forge_release_delete_asset(
 /// Post a comment on an issue, behind the provider abstraction — the first GitLab
 /// WRITE. GitHub delegates to `gh issue comment`; GitLab posts a note via `glab`.
 #[tauri::command]
-pub async fn forge_issue_comment(repo_path: String, number: u64, body: String) -> AppResult<()> {
+pub async fn forge_issue_comment(
+    repo_path: String,
+    number: u64,
+    body: String,
+    lens: Option<String>,
+) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::comment_issue(&repo_path, number, &body).await,
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
             "Bitbucket issues aren't supported yet.".into(),
         )),
-        _ => github::comment_issue(&repo_path, number, &body).await,
+        _ => github::comment_issue(&repo_path, number, &body, lens).await,
     }
 }
 
@@ -1698,25 +1790,30 @@ pub async fn forge_issue_delete_comment(
 /// Close an issue, behind the abstraction. `reason` is GitHub's close reason
 /// (`completed`/`not_planned`); GitLab has no close reason and ignores it.
 #[tauri::command]
-pub async fn forge_issue_close(repo_path: String, number: u64, reason: String) -> AppResult<()> {
+pub async fn forge_issue_close(
+    repo_path: String,
+    number: u64,
+    reason: String,
+    lens: Option<String>,
+) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::close_issue(&repo_path, number).await,
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
             "Bitbucket issues aren't supported yet.".into(),
         )),
-        _ => github::close_issue(&repo_path, number, &reason).await,
+        _ => github::close_issue(&repo_path, number, &reason, lens).await,
     }
 }
 
 /// Reopen a closed issue, behind the abstraction.
 #[tauri::command]
-pub async fn forge_issue_reopen(repo_path: String, number: u64) -> AppResult<()> {
+pub async fn forge_issue_reopen(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::reopen_issue(&repo_path, number).await,
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
             "Bitbucket issues aren't supported yet.".into(),
         )),
-        _ => github::reopen_issue(&repo_path, number).await,
+        _ => github::reopen_issue(&repo_path, number, lens).await,
     }
 }
 
@@ -1728,13 +1825,14 @@ pub async fn forge_issue_edit(
     number: u64,
     title: String,
     body: String,
+    lens: Option<String>,
 ) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::edit_issue(&repo_path, number, &title, &body).await,
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
             "Bitbucket issues aren't supported yet.".into(),
         )),
-        _ => github::edit_issue(&repo_path, number, &title, &body).await,
+        _ => github::edit_issue(&repo_path, number, &title, &body, lens).await,
     }
 }
 
@@ -1747,25 +1845,26 @@ pub async fn forge_issue_lock(
     repo_path: String,
     number: u64,
     reason: Option<String>,
+    lens: Option<String>,
 ) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::lock_issue(&repo_path, number, true).await,
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
             "Bitbucket issues aren't supported yet.".into(),
         )),
-        _ => github::lock_issue(&repo_path, number, reason).await,
+        _ => github::lock_issue(&repo_path, number, reason, lens).await,
     }
 }
 
 /// Unlock an issue's conversation, behind the abstraction.
 #[tauri::command]
-pub async fn forge_issue_unlock(repo_path: String, number: u64) -> AppResult<()> {
+pub async fn forge_issue_unlock(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::lock_issue(&repo_path, number, false).await,
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
             "Bitbucket issues aren't supported yet.".into(),
         )),
-        _ => github::unlock_issue(&repo_path, number).await,
+        _ => github::unlock_issue(&repo_path, number, lens).await,
     }
 }
 
@@ -1777,13 +1876,14 @@ pub async fn forge_issue_transfer(
     repo_path: String,
     number: u64,
     destination: String,
+    lens: Option<String>,
 ) -> AppResult<String> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::move_issue(&repo_path, number, &destination).await,
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
             "Bitbucket issues aren't supported yet.".into(),
         )),
-        _ => github::transfer_issue(&repo_path, number, &destination).await,
+        _ => github::transfer_issue(&repo_path, number, &destination, lens).await,
     }
 }
 
@@ -1791,13 +1891,13 @@ pub async fn forge_issue_transfer(
 /// this server-side (GitHub: admin/triage; GitLab: owner) — their errors
 /// surface as-is.
 #[tauri::command]
-pub async fn forge_issue_delete(repo_path: String, number: u64) -> AppResult<()> {
+pub async fn forge_issue_delete(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::delete_issue(&repo_path, number).await,
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
             "Bitbucket issues aren't supported yet.".into(),
         )),
-        _ => github::delete_issue(&repo_path, number).await,
+        _ => github::delete_issue(&repo_path, number, lens).await,
     }
 }
 
@@ -1807,13 +1907,14 @@ pub async fn forge_issue_delete(repo_path: String, number: u64) -> AppResult<()>
 #[tauri::command]
 pub async fn forge_milestones(
     repo_path: String,
+    lens: Option<String>,
 ) -> AppResult<Vec<crate::github::issue::Milestone>> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::list_milestones(&repo_path).await,
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
             "Bitbucket milestones aren't supported yet.".into(),
         )),
-        _ => github::milestones(&repo_path).await,
+        _ => github::milestones(&repo_path, lens).await,
     }
 }
 
@@ -1824,13 +1925,14 @@ pub async fn forge_milestones(
 pub async fn forge_issue_reactions(
     repo_path: String,
     number: u64,
+    lens: Option<String>,
 ) -> AppResult<crate::github::issue::IssueReactions> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::issue_reactions(&repo_path, number).await,
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
             "Bitbucket issues aren't supported yet.".into(),
         )),
-        _ => github::issue_reactions(&repo_path, number).await,
+        _ => github::issue_reactions(&repo_path, number, lens).await,
     }
 }
 
@@ -1839,13 +1941,14 @@ pub async fn forge_issue_reactions(
 pub async fn forge_pr_reactions(
     repo_path: String,
     number: u64,
+    lens: Option<String>,
 ) -> AppResult<crate::github::issue::IssueReactions> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::mr_reactions(&repo_path, number).await,
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
             "Bitbucket merge requests aren't supported yet.".into(),
         )),
-        _ => github::pr_reactions(&repo_path, number).await,
+        _ => github::pr_reactions(&repo_path, number, lens).await,
     }
 }
 
@@ -1905,6 +2008,7 @@ pub async fn forge_issue_set_milestone(
     repo_path: String,
     number: u64,
     milestone: Option<u64>,
+    lens: Option<String>,
 ) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => {
@@ -1913,7 +2017,7 @@ pub async fn forge_issue_set_milestone(
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
             "Bitbucket issues aren't supported yet.".into(),
         )),
-        _ => github::set_issue_milestone(&repo_path, number, milestone).await,
+        _ => github::set_issue_milestone(&repo_path, number, milestone, lens).await,
     }
 }
 
@@ -1923,13 +2027,14 @@ pub async fn forge_issue_set_milestone(
 #[tauri::command]
 pub async fn forge_repo_labels(
     repo_path: String,
+    lens: Option<String>,
 ) -> AppResult<Vec<crate::github::pr::RepoLabel>> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::repo_labels(&repo_path).await,
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
             "Bitbucket labels aren't supported yet.".into(),
         )),
-        _ => github::repo_labels(&repo_path).await,
+        _ => github::repo_labels(&repo_path, lens).await,
     }
 }
 
@@ -1939,13 +2044,14 @@ pub async fn forge_repo_labels(
 #[tauri::command]
 pub async fn forge_assignable_users(
     repo_path: String,
+    lens: Option<String>,
 ) -> AppResult<Vec<model::ForgeUserRef>> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::assignable_users(&repo_path).await,
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
             "Bitbucket assignees aren't supported yet.".into(),
         )),
-        _ => github::assignable_users(&repo_path).await,
+        _ => github::assignable_users(&repo_path, lens).await,
     }
 }
 
@@ -1985,6 +2091,7 @@ pub async fn forge_issue_set_assignees(
     repo_path: String,
     number: u64,
     assignees: Vec<String>,
+    lens: Option<String>,
 ) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => {
@@ -1993,7 +2100,7 @@ pub async fn forge_issue_set_assignees(
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
             "Bitbucket assignees aren't supported yet.".into(),
         )),
-        _ => github::set_issue_assignees(&repo_path, number, assignees).await,
+        _ => github::set_issue_assignees(&repo_path, number, assignees, lens).await,
     }
 }
 
@@ -2007,6 +2114,7 @@ pub async fn forge_mr_set_assignees(
     repo_path: String,
     number: u64,
     assignees: Vec<String>,
+    lens: Option<String>,
 ) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => {
@@ -2016,7 +2124,7 @@ pub async fn forge_mr_set_assignees(
             "Bitbucket assignees aren't supported yet.".into(),
         )),
         // A PR number addresses the same issues endpoint (PRs are issues on GitHub).
-        _ => github::set_issue_assignees(&repo_path, number, assignees).await,
+        _ => github::set_issue_assignees(&repo_path, number, assignees, lens).await,
     }
 }
 
@@ -2026,6 +2134,7 @@ pub async fn forge_mr_set_assignees(
 /// drops it like `forge_issue_close` drops the GitHub-only close reason).
 /// `milestone` is whatever `forge_milestones` returned as `number`.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn forge_issue_create(
     repo_path: String,
     title: String,
@@ -2034,6 +2143,7 @@ pub async fn forge_issue_create(
     assignees: Vec<String>,
     milestone: Option<u64>,
     issue_type: Option<String>,
+    lens: Option<String>,
 ) -> AppResult<crate::github::pr::PrRef> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => {
@@ -2044,7 +2154,7 @@ pub async fn forge_issue_create(
         )),
         _ => {
             github::create_issue(
-                &repo_path, &title, &body, labels, assignees, milestone, issue_type,
+                &repo_path, &title, &body, labels, assignees, milestone, issue_type, lens,
             )
             .await
         }
@@ -3113,12 +3223,13 @@ pub async fn forge_pr_create(
     reviewers: Option<Vec<String>>,
     labels: Option<Vec<String>>,
     assignees: Option<Vec<String>>,
+    lens: Option<String>,
 ) -> AppResult<crate::github::pr::PrRef> {
     // The `#[tauri::command]` shell just derefs the managed `State` to a plain
     // `&AppState` and delegates to the core, so non-Tauri callers (the MCP server)
     // can create a PR with an `AppState` they own — GUI behavior is unchanged.
     forge_pr_create_core(
-        &state, repo_path, base, head, title, body, draft, reviewers, labels, assignees,
+        &state, repo_path, base, head, title, body, draft, reviewers, labels, assignees, lens,
     )
     .await
 }
@@ -3139,8 +3250,17 @@ pub(crate) async fn forge_pr_create_core(
     reviewers: Option<Vec<String>>,
     labels: Option<Vec<String>>,
     assignees: Option<Vec<String>>,
+    lens: Option<String>,
 ) -> AppResult<crate::github::pr::PrRef> {
     let detected = detect_non_github(&repo_path).await;
+    // The upstream lens (a fork contribution to the PARENT) is GitHub-only. Reject it
+    // for GitLab/Bitbucket BEFORE any dispatch or remote work (`None`/`Some("origin")`
+    // proceed as today; an unknown lens is caught in `gh_pr_create_core`).
+    if lens.as_deref() == Some("upstream") && detected.is_some() {
+        return Err(AppError::InvalidArgument(
+            "Creating a pull request on the upstream repository is currently supported for GitHub only.".into(),
+        ));
+    }
     // Create-time reviewers are Bitbucket-only. GitHub/GitLab reject a non-empty list
     // BEFORE dispatching (existing callers omit the key → `None` → untouched behavior).
     if reviewers.as_deref().is_some_and(|r| !r.is_empty())
@@ -3184,7 +3304,7 @@ pub(crate) async fn forge_pr_create_core(
         }
         _ => {
             crate::github::pr::gh_pr_create_core(
-                state, repo_path, base, head, title, body, draft, labels, assignees,
+                state, repo_path, base, head, title, body, draft, labels, assignees, lens,
             )
             .await
         }

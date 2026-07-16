@@ -37,6 +37,7 @@ import type {
   GitLabLinkedIssue,
   GitLabTimeStats,
   IssueDetails,
+  RemoteLens,
 } from "@/lib/git/types";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
@@ -69,6 +70,7 @@ export function IssueSidebar({
   canTrackTime,
   canLinkIssues,
   remoteLabel,
+  lens,
 }: {
   repoPath: string;
   number: number;
@@ -84,10 +86,12 @@ export function IssueSidebar({
   canTrackTime: boolean;
   canLinkIssues: boolean;
   remoteLabel: string;
+  /** The origin|upstream lens the parent issue view resolved. */
+  lens: RemoteLens;
 }) {
-  const setAssignees = useSetIssueAssignees(repoPath);
-  const setMilestone = useSetIssueMilestone(repoPath);
-  const setType = useSetIssueType(repoPath);
+  const setAssignees = useSetIssueAssignees(repoPath, lens);
+  const setMilestone = useSetIssueMilestone(repoPath, lens);
+  const setType = useSetIssueType(repoPath, lens);
   const setConfidential = useSetIssueConfidential(repoPath);
   const setDueDate = useSetIssueDueDate(repoPath);
   const onError = (e: unknown) => toastError(e);
@@ -122,6 +126,7 @@ export function IssueSidebar({
             target="issue"
             labelableId={issue.id}
             labels={issue.labels}
+            lens={lens}
           />
         )}
         {canEditAssignees && (
@@ -130,6 +135,7 @@ export function IssueSidebar({
             enabled
             value={issue.assignees}
             commitOnClose
+            lens={lens}
             onChange={(next) =>
               setAssignees.mutate({ number, assignees: next }, { onError })
             }
@@ -141,6 +147,7 @@ export function IssueSidebar({
             enabled
             value={issue.milestone?.number ?? null}
             valueLabel={issue.milestone?.title}
+            lens={lens}
             onChange={(m, title) =>
               setMilestone.mutate({ number, milestone: m, title }, { onError })
             }
@@ -186,6 +193,7 @@ export function IssueSidebar({
             repoPath={repoPath}
             number={number}
             editable={issue.state === "OPEN"}
+            lens={lens}
           />
         )}
         <div className="space-y-1.5">
@@ -209,6 +217,7 @@ export function IssueSidebar({
         repoPath={repoPath}
         enabled
         value={issue.issueType}
+        lens={lens}
         onChange={(type) =>
           setType.mutate(
             { number, typeName: type?.name ?? null, type },
@@ -221,6 +230,7 @@ export function IssueSidebar({
         enabled
         value={issue.assignees}
         commitOnClose
+        lens={lens}
         onChange={(next) =>
           setAssignees.mutate({ number, assignees: next }, { onError })
         }
@@ -232,12 +242,14 @@ export function IssueSidebar({
         target="issue"
         labelableId={issue.id}
         labels={issue.labels}
+        lens={lens}
       />
       <MilestoneMenu
         repoPath={repoPath}
         enabled
         value={issue.milestone?.number ?? null}
         valueLabel={issue.milestone?.title}
+        lens={lens}
         onChange={(m, title) =>
           setMilestone.mutate({ number, milestone: m, title }, { onError })
         }
@@ -253,13 +265,14 @@ export function IssueSidebar({
           Manage on GitHub
         </button>
       </div>
-      <IssueRelationships repoPath={repoPath} number={number} />
+      <IssueRelationships repoPath={repoPath} number={number} lens={lens} />
       <IssueDevelopment
         repoPath={repoPath}
         number={number}
         issueId={issue.id}
         issueTitle={issue.title}
         issueUrl={issue.url}
+        lens={lens}
       />
       <div className="space-y-1.5">
         <p className="text-xs font-medium text-muted-foreground">
@@ -587,10 +600,13 @@ function IssueLinksSection({
   repoPath,
   number,
   editable,
+  lens,
 }: {
   repoPath: string;
   number: number;
   editable: boolean;
+  /** The parent issue's lens (GitLab-only section, so always "origin"). */
+  lens: RemoteLens;
 }) {
   const links = useGlIssueLinks(repoPath, number);
   const linkIssue = useLinkIssue(repoPath);
@@ -656,6 +672,7 @@ function IssueLinksSection({
               repoPath={repoPath}
               exclude={exclude}
               pending={linkIssue.isPending}
+              lens={lens}
               onPick={(target) =>
                 linkIssue.mutate(
                   { number, targetNumber: target },

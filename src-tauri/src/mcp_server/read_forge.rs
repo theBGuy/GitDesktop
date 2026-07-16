@@ -146,6 +146,10 @@ impl GitDesktopMcp {
             self.repo.clone(),
             args.state.unwrap_or_else(|| "open".to_string()),
             args.limit,
+            // MCP stays origin-pinned in v1 (no lens surface): a fork's MCP server
+            // always answers for the fork itself. Documented gap, tracked for a later
+            // pass. Same for every `None` lens below.
+            None,
         )
         .await
         .map_err(app_err)?;
@@ -162,7 +166,7 @@ impl GitDesktopMcp {
         &self,
         Parameters(args): Parameters<NumberArg>,
     ) -> Result<CallToolResult, McpError> {
-        let pr = crate::forge::forge_pr_view(self.repo.clone(), args.number)
+        let pr = crate::forge::forge_pr_view(self.repo.clone(), args.number, None)
             .await
             .map_err(app_err)?;
         json_result_untrusted(&pr)
@@ -176,7 +180,7 @@ impl GitDesktopMcp {
         &self,
         Parameters(args): Parameters<NumberArg>,
     ) -> Result<CallToolResult, McpError> {
-        let diff = crate::forge::forge_pr_diff(self.repo.clone(), args.number)
+        let diff = crate::forge::forge_pr_diff(self.repo.clone(), args.number, None)
             .await
             .map_err(app_err)?;
         text_result_untrusted(cap_head(diff, GH_TEXT_MAX_BYTES))
@@ -197,11 +201,11 @@ impl GitDesktopMcp {
         &self,
         Parameters(args): Parameters<PrCommentsArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let pr = crate::forge::forge_pr_view(self.repo.clone(), args.number)
+        let pr = crate::forge::forge_pr_view(self.repo.clone(), args.number, None)
             .await
             .map_err(app_err)?;
         let mut review_threads =
-            crate::forge::forge_pr_review_threads(self.repo.clone(), args.number)
+            crate::forge::forge_pr_review_threads(self.repo.clone(), args.number, None)
                 .await
                 .map_err(app_err)?;
         // Bound each thread's diffHunk so a comment on a new file can't drag the
@@ -272,6 +276,7 @@ impl GitDesktopMcp {
             self.repo.clone(),
             args.state.unwrap_or_else(|| "open".to_string()),
             args.limit,
+            None,
         )
         .await
         .map_err(app_err)?;
@@ -289,7 +294,7 @@ impl GitDesktopMcp {
         &self,
         Parameters(args): Parameters<NumberArg>,
     ) -> Result<CallToolResult, McpError> {
-        let issue = crate::forge::forge_issue_view(self.repo.clone(), args.number)
+        let issue = crate::forge::forge_issue_view(self.repo.clone(), args.number, None)
             .await
             .map_err(app_err)?;
         json_result_untrusted(&issue)
@@ -368,7 +373,7 @@ impl GitDesktopMcp {
                        these names when applying labels via edit_labels. Returns JSON."
     )]
     async fn list_labels(&self) -> Result<CallToolResult, McpError> {
-        let labels = crate::forge::forge_repo_labels(self.repo.clone())
+        let labels = crate::forge::forge_repo_labels(self.repo.clone(), None)
             .await
             .map_err(app_err)?;
         json_result(&labels)
@@ -379,7 +384,7 @@ impl GitDesktopMcp {
                        remote; Bitbucket milestones aren't supported). Returns JSON."
     )]
     async fn list_milestones(&self) -> Result<CallToolResult, McpError> {
-        let milestones = crate::forge::forge_milestones(self.repo.clone())
+        let milestones = crate::forge::forge_milestones(self.repo.clone(), None)
             .await
             .map_err(app_err)?;
         json_result_untrusted(&milestones)
@@ -419,7 +424,7 @@ impl GitDesktopMcp {
                        set_pull_request_assignees. Returns JSON."
     )]
     async fn list_assignable_users(&self) -> Result<CallToolResult, McpError> {
-        let users = crate::forge::forge_assignable_users(self.repo.clone())
+        let users = crate::forge::forge_assignable_users(self.repo.clone(), None)
             .await
             .map_err(app_err)?;
         json_result(&users)
@@ -434,7 +439,7 @@ impl GitDesktopMcp {
         &self,
         Parameters(args): Parameters<NumberArg>,
     ) -> Result<CallToolResult, McpError> {
-        let timeline = crate::forge::forge_pr_timeline(self.repo.clone(), args.number)
+        let timeline = crate::forge::forge_pr_timeline(self.repo.clone(), args.number, None)
             .await
             .map_err(app_err)?;
         json_result_untrusted(&timeline)

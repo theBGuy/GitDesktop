@@ -117,7 +117,9 @@ export async function resolveOwnCommentsContext(
 
   let items: ExternalReviewItem[];
   try {
-    items = await forgePrExternalReviews(repoPath, prNumber);
+    // Origin-pinned (package B2 recorded gap): AI review context reads the fork's
+    // own PR; upstream-lens AI review is a follow-up.
+    items = await forgePrExternalReviews(repoPath, prNumber, "origin");
   } catch {
     return {};
   }

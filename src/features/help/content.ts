@@ -526,6 +526,20 @@ The **Pull Requests** tab ({{kbd:tab-pulls}}) manages GitHub PRs, GitLab merge r
 and local PRs. (Hosted PRs/MRs need the matching CLI — \`gh\` or \`glab\` — installed and
 authenticated.)
 
+## Fork · Upstream lens
+
+When the repo is a **GitHub fork** — an \`origin\` you pushed to plus an \`upstream\`
+remote pointing at the parent — a **Fork | Upstream** switch appears in the list toolbar.
+It's **remembered per repository** and defaults to **Fork** (your \`origin\`). Flip it to
+**Upstream** and the remote pull-request list, and every PR you open from it — description,
+commits, comments, reviews, reactions, labels, assignees, and reviewers — read and write
+the **parent** repository instead of your fork; the section header names the repository
+you're looking at. Switch back to **Fork** for your own. The switch shows only on a GitHub
+fork (never on GitLab or Bitbucket, or a repo with no upstream remote). Two palette
+commands do the same thing without the mouse: **Switch to fork view** ({{kbd:repo-lens-origin}})
+and **Switch to upstream view** ({{kbd:repo-lens-upstream}}). The same lens scopes the
+**Issues** tab (see *Issues*).
+
 ## GitHub PRs
 
 Browse open/closed PRs and open one in a full in-app view: description, commits, changed
@@ -777,6 +791,22 @@ add labels, **close / reopen**, **lock**, and **transfer** an issue to another r
 - **Dependencies** — link issues as blocked-by / blocking.
 - **Development** — see linked PRs and branches, and **create a branch** wired to the
   issue.
+
+## Fork · Upstream lens
+
+When the repo is a **GitHub fork** (an \`upstream\` remote alongside your \`origin\`), the
+same **Fork | Upstream** switch as the Pull Requests tab appears in the toolbar —
+**remembered per repository**, defaulting to **Fork**, and also reachable as the
+**Switch to fork view** ({{kbd:repo-lens-origin}}) and **Switch to upstream view**
+({{kbd:repo-lens-upstream}}) palette commands. It scopes **only the GitHub (remote)
+section** — your local to-dos and any linked Jira issues are unaffected. Under **Upstream**
+the list, and every issue you open, read and write the **parent** repository. Because a
+fresh GitHub fork starts with **issues turned off**, browsing your fork may show an
+*issues are disabled* notice — from there a one-click **Switch to upstream** jumps you to
+the parent's issues rather than a dead end. **Creating** an issue while the **Upstream**
+lens is active opens it **on the parent repository, not your fork** — the create dialog
+retitles to *New issue in \<parent\>*, says so in its description, and its submit button
+reads **Create in \<parent\>**.
 
 ## GitLab issues
 

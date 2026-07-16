@@ -58,6 +58,7 @@ import { listUserWorktrees, type UserWorktree } from "@/lib/git/worktree";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useLocalPrs } from "@/lib/pulls/queries";
+import { useSetRepoLens } from "@/lib/repo-lens/queries";
 import { useAiConfigured, useAiEnabled } from "@/lib/settings/queries";
 import { type SelectedPr, useUiStore } from "@/lib/stores/ui";
 import { formatRelativeTime } from "@/lib/time";
@@ -256,10 +257,25 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // Per-branch PR/MR popovers — the list reads work for GitHub and GitLab alike.
   const gh = useForgeStatus(repoPath);
   const canGh = forgeFeatureReady(gh.data, "pullRequests");
-  const openPrs = usePrList(repoPath, canGh && open, "open");
-  const closedPrs = usePrList(repoPath, canGh && open, "closed");
+  // Origin lens: the branch popover lists the FORK's own branch PRs; the
+  // fork/upstream lens is a Pulls/Issues-tab affordance.
+  const openPrs = usePrList(
+    repoPath,
+    canGh && open,
+    "open",
+    undefined,
+    "origin",
+  );
+  const closedPrs = usePrList(
+    repoPath,
+    canGh && open,
+    "closed",
+    undefined,
+    "origin",
+  );
   const localPrs = useLocalPrs(repoPath);
   const selectPr = useUiStore((s) => s.selectPr);
+  const setLens = useSetRepoLens(repoPath);
   const setRepoTab = useUiStore((s) => s.setRepoTab);
 
   const prByBranch = useMemo(() => {
@@ -303,6 +319,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   }, [openPrs.data, closedPrs.data, localPrs.data]);
 
   const openPr = (select: SelectedPr) => {
+    // A remote PR here is a fork (origin) PR — force the origin lens (which also
+    // clears any stale upstream remote selection) before navigating to it.
+    if (select.kind === "remote") setLens("origin");
     selectPr(select);
     setRepoTab("pulls");
     setOpen(false);

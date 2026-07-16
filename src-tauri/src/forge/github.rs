@@ -85,8 +85,9 @@ pub async fn list_prs(
     repo_path: &str,
     state: &str,
     limit: Option<u32>,
+    lens: Option<String>,
 ) -> AppResult<Vec<crate::github::pr::PrInfo>> {
-    crate::github::pr::gh_pr_list(repo_path.to_string(), state.to_string(), limit).await
+    crate::github::pr::gh_pr_list(repo_path.to_string(), state.to_string(), limit, lens).await
 }
 
 pub async fn list_ci(
@@ -99,19 +100,24 @@ pub async fn list_ci(
     crate::github::pr::gh_pr_list_ci(repo_path, numbers, sample_url).await
 }
 
-pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<crate::github::pr::PrDetails> {
-    crate::github::pr::gh_pr_view(repo_path.to_string(), number).await
+pub async fn view_pr(
+    repo_path: &str,
+    number: u64,
+    lens: Option<String>,
+) -> AppResult<crate::github::pr::PrDetails> {
+    crate::github::pr::gh_pr_view(repo_path.to_string(), number, lens).await
 }
 
 pub async fn pr_timeline(
     repo_path: &str,
     number: u64,
+    lens: Option<&str>,
 ) -> AppResult<Vec<crate::github::pr::PrTimelineEventOut>> {
-    crate::github::pr::pr_timeline(repo_path, number).await
+    crate::github::pr::pr_timeline(repo_path, number, lens).await
 }
 
-pub async fn diff_pr(repo_path: &str, number: u64) -> AppResult<String> {
-    crate::github::pr::gh_pr_diff(repo_path.to_string(), number).await
+pub async fn diff_pr(repo_path: &str, number: u64, lens: Option<String>) -> AppResult<String> {
+    crate::github::pr::gh_pr_diff(repo_path.to_string(), number, lens).await
 }
 
 pub async fn commit_diff(repo_path: &str, oid: &str) -> AppResult<String> {
@@ -121,8 +127,9 @@ pub async fn commit_diff(repo_path: &str, oid: &str) -> AppResult<String> {
 pub async fn commit_comments(
     repo_path: &str,
     sha: &str,
+    lens: Option<&str>,
 ) -> AppResult<Vec<crate::github::pr::CommitCommentOut>> {
-    crate::github::pr::commit_comments(repo_path, sha).await
+    crate::github::pr::commit_comments(repo_path, sha, lens).await
 }
 
 /// Create a commit comment. GitHub anchored comments use `path` + `position`; `line`
@@ -133,8 +140,9 @@ pub async fn commit_comment_create(
     body: &str,
     path: Option<&str>,
     position: Option<u64>,
+    lens: Option<&str>,
 ) -> AppResult<()> {
-    crate::github::pr::commit_comment_create(repo_path, sha, body, path, position).await
+    crate::github::pr::commit_comment_create(repo_path, sha, body, path, position, lens).await
 }
 
 pub async fn commit_comment_edit(repo_path: &str, comment_id: &str, body: &str) -> AppResult<()> {
@@ -154,8 +162,10 @@ pub async fn thread_create(
     side: &str,
     start_line: Option<u64>,
     body: &str,
+    lens: Option<&str>,
 ) -> AppResult<()> {
-    crate::github::pr::thread_create(repo_path, number, path, line, side, start_line, body).await
+    crate::github::pr::thread_create(repo_path, number, path, line, side, start_line, body, lens)
+        .await
 }
 
 pub async fn review_submit(
@@ -164,22 +174,25 @@ pub async fn review_submit(
     verdict: &str,
     summary: Option<&str>,
     comments: &[crate::github::pr::DraftCommentIn],
+    lens: Option<&str>,
 ) -> AppResult<crate::github::pr::ReviewSubmitOut> {
-    crate::github::pr::review_submit(repo_path, number, verdict, summary, comments).await
+    crate::github::pr::review_submit(repo_path, number, verdict, summary, comments, lens).await
 }
 
 pub async fn external_reviews(
     repo_path: &str,
     number: u64,
+    lens: Option<String>,
 ) -> AppResult<Vec<crate::github::pr::ExternalReviewItem>> {
-    crate::github::pr::gh_pr_external_reviews(repo_path.to_string(), number).await
+    crate::github::pr::gh_pr_external_reviews(repo_path.to_string(), number, lens).await
 }
 
 pub async fn review_threads(
     repo_path: &str,
     number: u64,
+    lens: Option<String>,
 ) -> AppResult<Vec<crate::github::pr::ReviewThreadOut>> {
-    crate::github::pr::gh_pr_review_threads(repo_path.to_string(), number).await
+    crate::github::pr::gh_pr_review_threads(repo_path.to_string(), number, lens).await
 }
 
 pub async fn reply_thread(repo_path: &str, thread_id: &str, body: &str) -> AppResult<()> {
@@ -211,12 +224,19 @@ pub async fn poll_prs(repo_path: &str) -> AppResult<Vec<crate::github::pr::PrPol
 // `gh_pr_merge` inside `forge_pr_merge` (no delegate here); full reviews stay
 // GitHub-only and aren't fronted.
 
-pub async fn edit_pr(repo_path: &str, number: u64, title: &str, body: &str) -> AppResult<()> {
+pub async fn edit_pr(
+    repo_path: &str,
+    number: u64,
+    title: &str,
+    body: &str,
+    lens: Option<String>,
+) -> AppResult<()> {
     crate::github::pr::gh_pr_edit(
         repo_path.to_string(),
         number,
         title.to_string(),
         body.to_string(),
+        lens,
     )
     .await
 }
@@ -224,12 +244,18 @@ pub async fn edit_pr(repo_path: &str, number: u64, title: &str, body: &str) -> A
 pub async fn prs_for_branch(
     repo_path: &str,
     head: &str,
+    lens: Option<String>,
 ) -> AppResult<Vec<crate::github::pr::PrInfo>> {
-    crate::github::pr::gh_prs_for_branch(repo_path.to_string(), head.to_string()).await
+    crate::github::pr::gh_prs_for_branch(repo_path.to_string(), head.to_string(), lens).await
 }
 
-pub async fn comment_pr(repo_path: &str, number: u64, body: &str) -> AppResult<()> {
-    crate::github::pr::gh_pr_comment(repo_path.to_string(), number, body.to_string()).await
+pub async fn comment_pr(
+    repo_path: &str,
+    number: u64,
+    body: &str,
+    lens: Option<String>,
+) -> AppResult<()> {
+    crate::github::pr::gh_pr_comment(repo_path.to_string(), number, body.to_string(), lens).await
 }
 
 /// Edit a conversation comment's body. GitHub's `updateIssueComment` mutation
@@ -256,12 +282,12 @@ pub async fn delete_review_comment(repo_path: &str, comment_id: &str) -> AppResu
     crate::github::pr::delete_review_comment(repo_path, comment_id).await
 }
 
-pub async fn close_pr(repo_path: &str, number: u64) -> AppResult<()> {
-    crate::github::pr::gh_pr_close(repo_path.to_string(), number).await
+pub async fn close_pr(repo_path: &str, number: u64, lens: Option<String>) -> AppResult<()> {
+    crate::github::pr::gh_pr_close(repo_path.to_string(), number, lens).await
 }
 
-pub async fn reopen_pr(repo_path: &str, number: u64) -> AppResult<()> {
-    crate::github::pr::gh_pr_reopen(repo_path.to_string(), number).await
+pub async fn reopen_pr(repo_path: &str, number: u64, lens: Option<String>) -> AppResult<()> {
+    crate::github::pr::gh_pr_reopen(repo_path.to_string(), number, lens).await
 }
 
 // ── Issues (read) ────────────────────────────────────────────────────────────
@@ -272,15 +298,17 @@ pub async fn list_issues(
     repo_path: &str,
     state: &str,
     limit: Option<u32>,
+    lens: Option<String>,
 ) -> AppResult<Vec<crate::github::issue::IssueInfo>> {
-    crate::github::issue::gh_issue_list(repo_path.to_string(), state.to_string(), limit).await
+    crate::github::issue::gh_issue_list(repo_path.to_string(), state.to_string(), limit, lens).await
 }
 
 pub async fn view_issue(
     repo_path: &str,
     number: u64,
+    lens: Option<String>,
 ) -> AppResult<crate::github::issue::IssueDetails> {
-    crate::github::issue::gh_issue_view(repo_path.to_string(), number).await
+    crate::github::issue::gh_issue_view(repo_path.to_string(), number, lens).await
 }
 
 // ── CI / Actions ─────────────────────────────────────────────────────────────
@@ -425,43 +453,77 @@ pub async fn delete_release_asset(repo_path: &str, tag: &str, asset_name: &str) 
 // remainder of the issue write surface (pin, sub-issues, close reason, …) stays
 // GitHub-only.
 
-pub async fn comment_issue(repo_path: &str, number: u64, body: &str) -> AppResult<()> {
-    crate::github::issue::gh_issue_comment(repo_path.to_string(), number, body.to_string()).await
+pub async fn comment_issue(
+    repo_path: &str,
+    number: u64,
+    body: &str,
+    lens: Option<String>,
+) -> AppResult<()> {
+    crate::github::issue::gh_issue_comment(repo_path.to_string(), number, body.to_string(), lens)
+        .await
 }
 
-pub async fn close_issue(repo_path: &str, number: u64, reason: &str) -> AppResult<()> {
-    crate::github::issue::gh_issue_close(repo_path.to_string(), number, reason.to_string()).await
+pub async fn close_issue(
+    repo_path: &str,
+    number: u64,
+    reason: &str,
+    lens: Option<String>,
+) -> AppResult<()> {
+    crate::github::issue::gh_issue_close(repo_path.to_string(), number, reason.to_string(), lens)
+        .await
 }
 
-pub async fn reopen_issue(repo_path: &str, number: u64) -> AppResult<()> {
-    crate::github::issue::gh_issue_reopen(repo_path.to_string(), number).await
+pub async fn reopen_issue(repo_path: &str, number: u64, lens: Option<String>) -> AppResult<()> {
+    crate::github::issue::gh_issue_reopen(repo_path.to_string(), number, lens).await
 }
 
-pub async fn edit_issue(repo_path: &str, number: u64, title: &str, body: &str) -> AppResult<()> {
+pub async fn edit_issue(
+    repo_path: &str,
+    number: u64,
+    title: &str,
+    body: &str,
+    lens: Option<String>,
+) -> AppResult<()> {
     crate::github::issue::gh_issue_edit(
         repo_path.to_string(),
         number,
         title.to_string(),
         body.to_string(),
+        lens,
     )
     .await
 }
 
-pub async fn lock_issue(repo_path: &str, number: u64, reason: Option<String>) -> AppResult<()> {
-    crate::github::issue::gh_issue_lock(repo_path.to_string(), number, reason).await
+pub async fn lock_issue(
+    repo_path: &str,
+    number: u64,
+    reason: Option<String>,
+    lens: Option<String>,
+) -> AppResult<()> {
+    crate::github::issue::gh_issue_lock(repo_path.to_string(), number, reason, lens).await
 }
 
-pub async fn unlock_issue(repo_path: &str, number: u64) -> AppResult<()> {
-    crate::github::issue::gh_issue_unlock(repo_path.to_string(), number).await
+pub async fn unlock_issue(repo_path: &str, number: u64, lens: Option<String>) -> AppResult<()> {
+    crate::github::issue::gh_issue_unlock(repo_path.to_string(), number, lens).await
 }
 
-pub async fn transfer_issue(repo_path: &str, number: u64, destination: &str) -> AppResult<String> {
-    crate::github::issue::gh_issue_transfer(repo_path.to_string(), number, destination.to_string())
-        .await
+pub async fn transfer_issue(
+    repo_path: &str,
+    number: u64,
+    destination: &str,
+    lens: Option<String>,
+) -> AppResult<String> {
+    crate::github::issue::gh_issue_transfer(
+        repo_path.to_string(),
+        number,
+        destination.to_string(),
+        lens,
+    )
+    .await
 }
 
-pub async fn delete_issue(repo_path: &str, number: u64) -> AppResult<()> {
-    crate::github::issue::gh_issue_delete(repo_path.to_string(), number).await
+pub async fn delete_issue(repo_path: &str, number: u64, lens: Option<String>) -> AppResult<()> {
+    crate::github::issue::gh_issue_delete(repo_path.to_string(), number, lens).await
 }
 
 // ── Milestones (read + write) ──────────────────────────────────────────────────
@@ -470,8 +532,11 @@ pub async fn delete_issue(repo_path: &str, number: u64) -> AppResult<()> {
 // write. GitHub keys on the milestone number; the GitLab impl keys on its global
 // milestone id — both travel as the neutral `Milestone.number`.
 
-pub async fn milestones(repo_path: &str) -> AppResult<Vec<crate::github::issue::Milestone>> {
-    crate::github::issue::gh_milestones(repo_path.to_string()).await
+pub async fn milestones(
+    repo_path: &str,
+    lens: Option<String>,
+) -> AppResult<Vec<crate::github::issue::Milestone>> {
+    crate::github::issue::gh_milestones(repo_path.to_string(), lens).await
 }
 
 // ── Repository actions & publish ───────────────────────────────────────────────
@@ -525,15 +590,17 @@ pub async fn publish_repo(
 pub async fn issue_reactions(
     repo_path: &str,
     number: u64,
+    lens: Option<String>,
 ) -> AppResult<crate::github::issue::IssueReactions> {
-    crate::github::issue::gh_issue_reactions(repo_path.to_string(), number).await
+    crate::github::issue::gh_issue_reactions(repo_path.to_string(), number, lens).await
 }
 
 pub async fn pr_reactions(
     repo_path: &str,
     number: u64,
+    lens: Option<String>,
 ) -> AppResult<crate::github::issue::IssueReactions> {
-    crate::github::pr::gh_pr_reactions(repo_path.to_string(), number).await
+    crate::github::pr::gh_pr_reactions(repo_path.to_string(), number, lens).await
 }
 
 pub async fn add_reaction(repo_path: &str, subject_id: &str, content: &str) -> AppResult<()> {
@@ -558,8 +625,10 @@ pub async fn set_issue_milestone(
     repo_path: &str,
     number: u64,
     milestone: Option<u64>,
+    lens: Option<String>,
 ) -> AppResult<()> {
-    crate::github::issue::gh_issue_set_milestone(repo_path.to_string(), number, milestone).await
+    crate::github::issue::gh_issue_set_milestone(repo_path.to_string(), number, milestone, lens)
+        .await
 }
 
 // ── Labels & assignees (read + write) ─────────────────────────────────────────
@@ -569,17 +638,21 @@ pub async fn set_issue_milestone(
 // assignees are a shared issue control. GitHub is byte-identical to calling the
 // `gh_*` commands directly — the abstraction only adds the dispatch seam.
 
-pub async fn repo_labels(repo_path: &str) -> AppResult<Vec<crate::github::pr::RepoLabel>> {
-    crate::github::pr::gh_repo_labels(repo_path.to_string()).await
+pub async fn repo_labels(
+    repo_path: &str,
+    lens: Option<String>,
+) -> AppResult<Vec<crate::github::pr::RepoLabel>> {
+    crate::github::pr::gh_repo_labels(repo_path.to_string(), lens).await
 }
 
 pub async fn assignable_users(
     repo_path: &str,
+    lens: Option<String>,
 ) -> AppResult<Vec<crate::forge::model::ForgeUserRef>> {
     // GitHub carries no avatar in the assignees endpoint; the picker derives it
     // from the login (id), so leave `avatar_url` empty and let the frontend fill it.
     Ok(
-        crate::github::issue::gh_assignable_users(repo_path.to_string())
+        crate::github::issue::gh_assignable_users(repo_path.to_string(), lens)
             .await?
             .into_iter()
             .map(|l| crate::forge::model::ForgeUserRef {
@@ -592,15 +665,21 @@ pub async fn assignable_users(
     )
 }
 
-pub async fn set_pr_reviewers(repo_path: &str, number: u64, reviewers: &[String]) -> AppResult<()> {
-    crate::github::pr::set_pr_reviewers(repo_path, number, reviewers).await
+pub async fn set_pr_reviewers(
+    repo_path: &str,
+    number: u64,
+    reviewers: &[String],
+    lens: Option<&str>,
+) -> AppResult<()> {
+    crate::github::pr::set_pr_reviewers(repo_path, number, reviewers, lens).await
 }
 
 pub async fn reviewer_candidates(
     repo_path: &str,
     number: Option<u64>,
+    lens: Option<&str>,
 ) -> AppResult<Vec<crate::forge::model::ForgeUserRef>> {
-    crate::github::pr::reviewer_candidates(repo_path, number).await
+    crate::github::pr::reviewer_candidates(repo_path, number, lens).await
 }
 
 pub async fn edit_labels(
@@ -622,14 +701,17 @@ pub async fn set_issue_assignees(
     repo_path: &str,
     number: u64,
     assignees: Vec<String>,
+    lens: Option<String>,
 ) -> AppResult<()> {
-    crate::github::issue::gh_issue_set_assignees(repo_path.to_string(), number, assignees).await
+    crate::github::issue::gh_issue_set_assignees(repo_path.to_string(), number, assignees, lens)
+        .await
 }
 
 /// Create an issue — delegates to the gh-backed REST create with the full GitHub
 /// field set (labels/assignees/milestone/org issue type). (PR create has no delegate
 /// here: `forge_pr_create`'s GitHub arm calls `gh_pr_create_core` directly, since the
 /// push needs an `AppState`, like `forge_pr_merge`.)
+#[allow(clippy::too_many_arguments)]
 pub async fn create_issue(
     repo_path: &str,
     title: &str,
@@ -638,6 +720,7 @@ pub async fn create_issue(
     assignees: Vec<String>,
     milestone: Option<u64>,
     issue_type: Option<String>,
+    lens: Option<String>,
 ) -> AppResult<crate::github::pr::PrRef> {
     crate::github::issue::gh_issue_create(
         repo_path.to_string(),
@@ -647,6 +730,7 @@ pub async fn create_issue(
         assignees,
         milestone,
         issue_type,
+        lens,
     )
     .await
 }

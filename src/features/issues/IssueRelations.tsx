@@ -31,7 +31,12 @@ import {
   useRemoveSubIssue,
   useSetIssueDependency,
 } from "@/lib/git/queries";
-import type { IssueInfo, IssueRelation, RelatedIssue } from "@/lib/git/types";
+import type {
+  IssueInfo,
+  IssueRelation,
+  RelatedIssue,
+  RemoteLens,
+} from "@/lib/git/types";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { CreateIssueDialog } from "./CreateIssueDialog";
@@ -125,14 +130,17 @@ export function IssuePicker({
   exclude,
   pending,
   onPick,
+  lens,
 }: {
   repoPath: string;
   exclude: Set<number>;
   pending: boolean;
   onPick: (n: number) => void;
+  /** The origin|upstream lens the parent issue surface resolved. */
+  lens: RemoteLens;
 }) {
-  const open = useIssueList(repoPath, true, "open");
-  const closed = useIssueList(repoPath, true, "closed");
+  const open = useIssueList(repoPath, true, "open", undefined, lens);
+  const closed = useIssueList(repoPath, true, "closed", undefined, lens);
   const candidates = [...(open.data ?? []), ...(closed.data ?? [])].filter(
     (i) => !exclude.has(i.number),
   );
@@ -175,13 +183,16 @@ export function IssueSubIssues({
   repoPath,
   issueId,
   number,
+  lens,
 }: {
   repoPath: string;
   issueId: string;
   number: number;
+  /** The origin|upstream lens the parent issue view resolved. */
+  lens: RemoteLens;
 }) {
-  const relations = useIssueRelations(repoPath, number);
-  const addSub = useAddSubIssue(repoPath);
+  const relations = useIssueRelations(repoPath, number, lens);
+  const addSub = useAddSubIssue(repoPath, lens);
   const removeSub = useRemoveSubIssue(repoPath);
   const selectIssue = useUiStore((s) => s.selectIssue);
   const [mode, setMode] = useState<null | "existing">(null);
@@ -301,6 +312,7 @@ export function IssueSubIssues({
                 exclude={exclude}
                 pending={addSub.isPending}
                 onPick={pickExisting}
+                lens={lens}
               />
             </div>
             <Button variant="ghost" size="xs" onClick={() => setMode(null)}>
@@ -312,6 +324,7 @@ export function IssueSubIssues({
 
       <CreateIssueDialog
         repoPath={repoPath}
+        lens={lens}
         open={createOpen}
         onOpenChange={setCreateOpen}
         subIssueParentId={issueId}
@@ -327,12 +340,15 @@ export function IssueSubIssues({
 export function IssueRelationships({
   repoPath,
   number,
+  lens,
 }: {
   repoPath: string;
   number: number;
+  /** The origin|upstream lens the parent issue view resolved. */
+  lens: RemoteLens;
 }) {
-  const dependencies = useIssueDependencies(repoPath, number);
-  const setDep = useSetIssueDependency(repoPath);
+  const dependencies = useIssueDependencies(repoPath, number, lens);
+  const setDep = useSetIssueDependency(repoPath, lens);
   const selectIssue = useUiStore((s) => s.selectIssue);
   const [addRelation, setAddRelation] = useState<IssueRelation | null>(null);
 
@@ -455,6 +471,7 @@ export function IssueRelationships({
                     { onSuccess: () => setAddRelation(null), onError },
                   )
                 }
+                lens={lens}
               />
             </div>
             <Button

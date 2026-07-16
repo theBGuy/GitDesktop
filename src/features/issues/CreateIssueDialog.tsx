@@ -22,7 +22,8 @@ import {
   useForgeStatus,
   useRepoLabels,
 } from "@/lib/git/queries";
-import type { ForgeUserRef, IssueType } from "@/lib/git/types";
+import type { ForgeUserRef, IssueType, RemoteLens } from "@/lib/git/types";
+import { useRemoteSlug } from "@/lib/repo-lens/queries";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { errorMessage } from "@/lib/tauri/invoke";
@@ -36,12 +37,16 @@ import { useGenerateIssueDraft } from "./useGenerateIssueDraft";
 
 export function CreateIssueDialog({
   repoPath,
+  lens,
   open,
   onOpenChange,
   initialDraft,
   subIssueParentId,
 }: {
   repoPath: string;
+  /** The issues surface's origin|upstream lens. Under "upstream" the issue is
+   *  created ON THE PARENT — the dialog reframes to say so. */
+  lens: RemoteLens;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** Seeds title/body (and labels, when duplicating) when opened — e.g.
@@ -51,14 +56,23 @@ export function CreateIssueDialog({
    *  (parent), and the view stays on the parent instead of navigating away. */
   subIssueParentId?: string;
 }) {
-  const createIssue = useCreateIssue(repoPath);
-  const addSubIssue = useAddSubIssue(repoPath);
-  const repoLabels = useRepoLabels(repoPath, open);
+  const createIssue = useCreateIssue(repoPath, lens);
+  const addSubIssue = useAddSubIssue(repoPath, lens);
+  const repoLabels = useRepoLabels(repoPath, open, lens);
+  // Under the upstream lens the issue is created ON THE PARENT; name that repo
+  // (the parent slug) so the create framing is unambiguous.
+  const isUpstream = lens === "upstream";
+  const parentSlug = useRemoteSlug(repoPath, "upstream", open && isUpstream);
   // The org issue type is a GitHub-only picker; the shared fields
   // (title/body/labels/assignees/milestone) work on both providers.
   const forge = useForgeStatus(repoPath);
   const isGitLab = forge.data?.provider === "gitlab";
   const remoteLabel = isGitLab ? "GitLab" : "GitHub";
+  // The create target's display name: the parent slug under the upstream lens
+  // (falling back to "the upstream repository" while it loads), else the forge.
+  const targetLabel = isUpstream
+    ? (parentSlug ?? "the upstream repository")
+    : remoteLabel;
   const selectIssue = useUiStore((s) => s.selectIssue);
   const repoName = useUiStore((s) => s.repoName) ?? "";
   const aiEnabled = useAiEnabled();
@@ -170,18 +184,29 @@ export function CreateIssueDialog({
         >
           <DialogHeader>
             <DialogTitle>
-              {subIssueParentId ? "Create sub-issue" : "Create issue"}
+              {subIssueParentId
+                ? "Create sub-issue"
+                : isUpstream
+                  ? `New issue in ${targetLabel}`
+                  : "Create issue"}
             </DialogTitle>
             <DialogDescription>
               {subIssueParentId
                 ? "Opens a new issue on GitHub and links it as a sub-issue."
-                : `Opens a new issue on ${remoteLabel} for this repository.`}
+                : isUpstream
+                  ? `Opens a new issue on ${targetLabel} (the upstream repository), not your fork.`
+                  : `Opens a new issue on ${remoteLabel} for this repository.`}
             </DialogDescription>
           </DialogHeader>
 
           {/* Fields scroll; the header and submit footer stay pinned so a long
               body or many metadata pickers can't push the dialog off-screen. */}
           <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+            {isUpstream && !subIssueParentId && (
+              <p className="text-xs text-muted-foreground">
+                This opens an issue on the upstream repository, not your fork.
+              </p>
+            )}
             <form.AppField
               name="title"
               validators={{ onChange: ({ value }) => required(value) }}
@@ -298,12 +323,14 @@ export function CreateIssueDialog({
               repoPath={repoPath}
               enabled={open}
               value={assignees}
+              lens={lens}
               onChange={setAssignees}
             />
             <MilestoneMenu
               repoPath={repoPath}
               enabled={open}
               value={milestone}
+              lens={lens}
               onChange={setMilestone}
             />
             {!isGitLab && (
@@ -311,6 +338,7 @@ export function CreateIssueDialog({
                 repoPath={repoPath}
                 enabled={open}
                 value={issueType}
+                lens={lens}
                 onChange={setIssueType}
               />
             )}
@@ -326,7 +354,11 @@ export function CreateIssueDialog({
             </Button>
             <form.AppForm>
               <form.SubmitButton disabled={generating}>
-                {subIssueParentId ? "Create sub-issue" : "Create issue"}
+                {subIssueParentId
+                  ? "Create sub-issue"
+                  : isUpstream
+                    ? `Create in ${targetLabel}`
+                    : "Create issue"}
               </form.SubmitButton>
             </form.AppForm>
           </DialogFooter>

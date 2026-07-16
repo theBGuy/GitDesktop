@@ -87,15 +87,18 @@ pub fn map_reaction_groups(groups: Option<&serde_json::Value>) -> Vec<Reaction> 
 /// Resolves the repo's GraphQL `owner` and `name`. GraphQL (unlike REST) has no
 /// `{owner}/{repo}` substitution, so callers must pass them explicitly.
 ///
-/// Pinned to the ORIGIN slug (via `gh_origin_slug`), NOT a bare `gh repo view`:
+/// Resolved through the lens (via `gh_lens_slug`), NOT a bare `gh repo view`:
 /// on a fork with an `upstream` remote a bare `gh repo view` auto-resolves to the
 /// PARENT, so every GraphQL read built on this pair (issue types/reactions/
 /// relations/dependencies/development, PR reactions/timeline/review-threads/
-/// external-reviews) would answer for the upstream instead of the fork. This one
-/// resolver pins them all. For a single-remote repo the slug equals what gh
-/// resolved before, so behavior is unchanged there.
-pub(crate) async fn repo_owner_name(repo_path: &str) -> AppResult<(String, String)> {
-    let slug = crate::github::gh_origin_slug(repo_path).await?;
+/// external-reviews) would answer for the upstream instead of the fork. `lens`
+/// (`None`/`Some("origin")`/`Some("upstream")`) selects which remote to resolve;
+/// `None` = origin, so a single-remote repo's behavior is unchanged.
+pub(crate) async fn repo_owner_name(
+    repo_path: &str,
+    lens: Option<&str>,
+) -> AppResult<(String, String)> {
+    let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
     slug.split_once('/')
         .map(|(o, n)| (o.to_string(), n.to_string()))
         .ok_or_else(|| AppError::Gh("could not determine the repository owner".into()))
@@ -132,10 +135,11 @@ pub async fn gh_issue_list(
     repo_path: String,
     state: String,
     limit: Option<u32>,
+    lens: Option<String>,
 ) -> AppResult<Vec<IssueInfo>> {
-    // Pin the origin slug so a fork lists its OWN issues, not the parent's (a bare
+    // Resolve the lens slug so a fork lists the chosen repo's issues (a bare
     // `gh issue list` on a fork auto-resolves to the upstream repo).
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let mut args: Vec<&str> = match state.as_str() {
         "open" => vec![
             "issue", "list", "--repo", &slug, "--state", "open", "--json", ISSUE_LIST_FIELDS,
@@ -269,11 +273,15 @@ const ISSUE_VIEW_FIELDS: &str =
 /// Full details for one issue's read view: body, assignees, labels and the
 /// conversation comments (with node ids for editing/hiding).
 #[tauri::command]
-pub async fn gh_issue_view(repo_path: String, number: u64) -> AppResult<IssueDetails> {
-    // Pin the origin slug so a fork's issue number resolves against the fork, not
+pub async fn gh_issue_view(
+    repo_path: String,
+    number: u64,
+    lens: Option<String>,
+) -> AppResult<IssueDetails> {
+    // Resolve the lens slug so the issue number resolves against the chosen repo, not
     // the parent gh would auto-detect from an `upstream` remote (used by both the
     // `issue view --repo` read and the literal `repos/<slug>` lock-state path).
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     // The conversation view and the (REST-only) lock state are fetched
     // concurrently so the lock state adds no extra round-trip latency.
     let n = number.to_string();
@@ -360,6 +368,7 @@ struct CreatedIssue {
 /// (by number) go in one call and the response carries the new number + URL
 /// directly. `labels` and `assignees` are applied by name/login (must exist).
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn gh_issue_create(
     repo_path: String,
     title: String,
@@ -368,6 +377,7 @@ pub async fn gh_issue_create(
     assignees: Vec<String>,
     milestone: Option<u64>,
     issue_type: Option<String>,
+    lens: Option<String>,
 ) -> AppResult<PrRef> {
     let title = title.trim();
     if title.is_empty() {
@@ -390,9 +400,10 @@ pub async fn gh_issue_create(
     }
     let input = serde_json::to_string(&payload)
         .map_err(|e| AppError::Gh(format!("could not encode issue: {e}")))?;
-    // Pin the origin slug so a new issue is filed on the fork, not the parent gh
-    // would auto-detect from an `upstream` remote (on a non-fork this is a no-op).
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    // Resolve the lens slug so a new issue is filed on the chosen repo, not the
+    // parent gh would auto-detect from an `upstream` remote (on a non-fork this is a
+    // no-op).
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let endpoint = format!("repos/{slug}/issues");
     // Creating an issue on a fork with issues disabled fails with the same gh
     // signature — remap it so the toast carries the readable variant message.
@@ -414,9 +425,12 @@ pub async fn gh_issue_create(
 
 /// Logins that can be assigned to issues/PRs in this repo (collaborators).
 #[tauri::command]
-pub async fn gh_assignable_users(repo_path: String) -> AppResult<Vec<String>> {
-    // Pin the origin slug so a fork lists its own assignees, not the parent's.
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+pub async fn gh_assignable_users(
+    repo_path: String,
+    lens: Option<String>,
+) -> AppResult<Vec<String>> {
+    // Resolve the lens slug so a fork lists the chosen repo's assignees.
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let endpoint = format!("repos/{slug}/assignees");
     let out = run_gh(
         Some(&repo_path),
@@ -430,9 +444,9 @@ pub async fn gh_assignable_users(repo_path: String) -> AppResult<Vec<String>> {
 
 /// Open milestones for the milestone picker.
 #[tauri::command]
-pub async fn gh_milestones(repo_path: String) -> AppResult<Vec<Milestone>> {
-    // Pin the origin slug so a fork lists its own milestones, not the parent's.
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+pub async fn gh_milestones(repo_path: String, lens: Option<String>) -> AppResult<Vec<Milestone>> {
+    // Resolve the lens slug so a fork lists the chosen repo's milestones.
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let endpoint = format!("repos/{slug}/milestones?state=open&per_page=100");
     let out = run_gh(
         Some(&repo_path),
@@ -450,11 +464,12 @@ pub async fn gh_issue_set_assignees(
     repo_path: String,
     number: u64,
     assignees: Vec<String>,
+    lens: Option<String>,
 ) -> AppResult<()> {
     let input = serde_json::to_string(&serde_json::json!({ "assignees": assignees }))
         .map_err(|e| AppError::Gh(format!("could not encode assignees: {e}")))?;
-    // Pin the origin slug so a fork's issue is edited on the fork, not the parent.
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    // Resolve the lens slug so the issue is edited on the chosen repo.
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let endpoint = format!("repos/{slug}/issues/{number}");
     run_gh_input(
         Some(&repo_path),
@@ -472,6 +487,7 @@ pub async fn gh_issue_set_milestone(
     repo_path: String,
     number: u64,
     milestone: Option<u64>,
+    lens: Option<String>,
 ) -> AppResult<()> {
     let milestone_value = match milestone {
         Some(m) => serde_json::json!(m),
@@ -480,8 +496,8 @@ pub async fn gh_issue_set_milestone(
     let input =
         serde_json::to_string(&serde_json::json!({ "milestone": milestone_value }))
             .map_err(|e| AppError::Gh(format!("could not encode milestone: {e}")))?;
-    // Pin the origin slug so a fork's issue is edited on the fork, not the parent.
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    // Resolve the lens slug so the issue is edited on the chosen repo.
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let endpoint = format!("repos/{slug}/issues/{number}");
     run_gh_input(
         Some(&repo_path),
@@ -496,8 +512,8 @@ pub async fn gh_issue_set_milestone(
 /// The repo's enabled issue types (org-defined). Empty when the owner defines
 /// none (e.g. a personal repo), which hides the picker on the frontend.
 #[tauri::command]
-pub async fn gh_issue_types(repo_path: String) -> AppResult<Vec<IssueType>> {
-    let (owner, name) = repo_owner_name(&repo_path).await?;
+pub async fn gh_issue_types(repo_path: String, lens: Option<String>) -> AppResult<Vec<IssueType>> {
+    let (owner, name) = repo_owner_name(&repo_path, lens.as_deref()).await?;
     let query = "query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ issueTypes(first:25){ nodes{ id name color isEnabled } } } }";
     let out = run_gh(
         Some(&repo_path),
@@ -550,10 +566,11 @@ pub async fn gh_issue_set_type(
     repo_path: String,
     number: u64,
     type_name: Option<String>,
+    lens: Option<String>,
 ) -> AppResult<()> {
     let n = number.to_string();
-    // Pin the origin slug so a fork's issue is edited on the fork, not the parent.
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    // Resolve the lens slug so the issue is edited on the chosen repo.
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let args: Vec<&str> = match type_name.as_deref() {
         Some(t) if !t.trim().is_empty() => {
             vec!["issue", "edit", &n, "--repo", &slug, "--type", t]
@@ -570,13 +587,14 @@ pub async fn gh_issue_comment(
     repo_path: String,
     number: u64,
     body: String,
+    lens: Option<String>,
 ) -> AppResult<()> {
     if body.trim().is_empty() {
         return Err(AppError::InvalidArgument("a comment is required".into()));
     }
     let n = number.to_string();
-    // Pin the origin slug so the comment lands on the fork's issue, not the parent's.
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    // Resolve the lens slug so the comment lands on the chosen repo's issue.
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     run_gh(
         Some(&repo_path),
         &["issue", "comment", &n, "--repo", &slug, "--body", &body],
@@ -593,6 +611,7 @@ pub async fn gh_issue_close(
     repo_path: String,
     number: u64,
     reason: String,
+    lens: Option<String>,
 ) -> AppResult<()> {
     let n = number.to_string();
     let reason = match reason.as_str() {
@@ -604,8 +623,8 @@ pub async fn gh_issue_close(
             )));
         }
     };
-    // Pin the origin slug so a fork's issue closes on the fork, not the parent.
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    // Resolve the lens slug so the issue closes on the chosen repo.
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     run_gh(
         Some(&repo_path),
         &["issue", "close", &n, "--repo", &slug, "--reason", reason],
@@ -617,10 +636,10 @@ pub async fn gh_issue_close(
 
 /// Reopens a closed issue.
 #[tauri::command]
-pub async fn gh_issue_reopen(repo_path: String, number: u64) -> AppResult<()> {
+pub async fn gh_issue_reopen(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     let n = number.to_string();
-    // Pin the origin slug so a fork's issue reopens on the fork, not the parent.
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    // Resolve the lens slug so the issue reopens on the chosen repo.
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     run_gh(
         Some(&repo_path),
         &["issue", "reopen", &n, "--repo", &slug],
@@ -640,6 +659,7 @@ pub async fn gh_issue_edit(
     number: u64,
     title: String,
     body: String,
+    lens: Option<String>,
 ) -> AppResult<()> {
     let title = title.trim();
     if title.is_empty() {
@@ -647,8 +667,8 @@ pub async fn gh_issue_edit(
             "an issue title is required".into(),
         ));
     }
-    // Pin the origin slug so a fork's issue is edited on the fork, not the parent.
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    // Resolve the lens slug so the issue is edited on the chosen repo.
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let endpoint = format!("repos/{slug}/issues/{number}");
     run_gh(
         Some(&repo_path),
@@ -670,10 +690,10 @@ pub async fn gh_issue_edit(
 
 /// Pins an issue (GitHub allows at most 3 pinned issues; gh surfaces the error).
 #[tauri::command]
-pub async fn gh_issue_pin(repo_path: String, number: u64) -> AppResult<()> {
+pub async fn gh_issue_pin(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     let n = number.to_string();
-    // Pin the origin slug so a fork's issue is pinned on the fork, not the parent.
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    // Resolve the lens slug so the issue is pinned on the chosen repo.
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     run_gh(
         Some(&repo_path),
         &["issue", "pin", &n, "--repo", &slug],
@@ -684,10 +704,10 @@ pub async fn gh_issue_pin(repo_path: String, number: u64) -> AppResult<()> {
 }
 
 #[tauri::command]
-pub async fn gh_issue_unpin(repo_path: String, number: u64) -> AppResult<()> {
+pub async fn gh_issue_unpin(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     let n = number.to_string();
-    // Pin the origin slug so a fork's issue is unpinned on the fork, not the parent.
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    // Resolve the lens slug so the issue is unpinned on the chosen repo.
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     run_gh(
         Some(&repo_path),
         &["issue", "unpin", &n, "--repo", &slug],
@@ -704,10 +724,11 @@ pub async fn gh_issue_lock(
     repo_path: String,
     number: u64,
     reason: Option<String>,
+    lens: Option<String>,
 ) -> AppResult<()> {
     let n = number.to_string();
-    // Pin the origin slug so a fork's issue is locked on the fork, not the parent.
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    // Resolve the lens slug so the issue is locked on the chosen repo.
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let mut args = vec!["issue", "lock", &n, "--repo", &slug];
     if let Some(r) = reason.as_deref() {
         if !matches!(r, "off_topic" | "resolved" | "spam" | "too_heated") {
@@ -723,10 +744,10 @@ pub async fn gh_issue_lock(
 }
 
 #[tauri::command]
-pub async fn gh_issue_unlock(repo_path: String, number: u64) -> AppResult<()> {
+pub async fn gh_issue_unlock(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     let n = number.to_string();
-    // Pin the origin slug so a fork's issue is unlocked on the fork, not the parent.
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    // Resolve the lens slug so the issue is unlocked on the chosen repo.
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     run_gh(
         Some(&repo_path),
         &["issue", "unlock", &n, "--repo", &slug],
@@ -754,8 +775,9 @@ const REACTIONS_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!){
 pub async fn gh_issue_reactions(
     repo_path: String,
     number: u64,
+    lens: Option<String>,
 ) -> AppResult<IssueReactions> {
-    let (owner, name) = repo_owner_name(&repo_path).await?;
+    let (owner, name) = repo_owner_name(&repo_path, lens.as_deref()).await?;
 
     // owner/name/number go in as typed variables (no string interpolation).
     let out = run_gh(
@@ -877,6 +899,7 @@ pub async fn gh_issue_transfer(
     repo_path: String,
     number: u64,
     destination: String,
+    lens: Option<String>,
 ) -> AppResult<String> {
     let destination = destination.trim();
     if destination.is_empty() || destination.starts_with('-') {
@@ -885,9 +908,9 @@ pub async fn gh_issue_transfer(
         ));
     }
     let n = number.to_string();
-    // Pin the origin slug so the SOURCE issue resolves against the fork, not the
-    // parent (the `destination` arg is explicit and unaffected).
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    // Resolve the lens slug so the SOURCE issue resolves against the chosen repo (the
+    // `destination` arg is explicit and unaffected).
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let out = run_gh(
         Some(&repo_path),
         &["issue", "transfer", &n, destination, "--repo", &slug],
@@ -901,10 +924,10 @@ pub async fn gh_issue_transfer(
 /// Permanently deletes an issue (requires admin/triage; gh confirms the error
 /// when the user lacks permission). `--yes` skips gh's interactive prompt.
 #[tauri::command]
-pub async fn gh_issue_delete(repo_path: String, number: u64) -> AppResult<()> {
+pub async fn gh_issue_delete(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     let n = number.to_string();
-    // Pin the origin slug so a fork's issue is deleted on the fork, not the parent.
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    // Resolve the lens slug so the issue is deleted on the chosen repo.
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     run_gh(
         Some(&repo_path),
         &["issue", "delete", &n, "--repo", &slug, "--yes"],
@@ -946,8 +969,9 @@ const RELATIONS_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!){
 pub async fn gh_issue_relations(
     repo_path: String,
     number: u64,
+    lens: Option<String>,
 ) -> AppResult<IssueRelations> {
-    let (owner, name) = repo_owner_name(&repo_path).await?;
+    let (owner, name) = repo_owner_name(&repo_path, lens.as_deref()).await?;
     let out = run_gh(
         Some(&repo_path),
         &[
@@ -1010,10 +1034,11 @@ pub async fn gh_issue_add_sub_issue(
     repo_path: String,
     parent_id: String,
     sub_number: u64,
+    lens: Option<String>,
 ) -> AppResult<()> {
     // Resolve the child's node id (this also rejects PRs / missing numbers).
-    // Pin the origin slug so the child number resolves against the fork, not the parent.
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    // Resolve the lens slug so the child number resolves against the chosen repo.
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let n = sub_number.to_string();
     let id_out = run_gh(
         Some(&repo_path),
@@ -1085,8 +1110,9 @@ const DEPENDENCIES_QUERY: &str = "query($owner:String!,$name:String!,$number:Int
 pub async fn gh_issue_dependencies(
     repo_path: String,
     number: u64,
+    lens: Option<String>,
 ) -> AppResult<IssueDependencies> {
-    let (owner, name) = repo_owner_name(&repo_path).await?;
+    let (owner, name) = repo_owner_name(&repo_path, lens.as_deref()).await?;
     let out = run_gh(
         Some(&repo_path),
         &[
@@ -1131,6 +1157,7 @@ pub async fn gh_issue_set_dependency(
     relation: String,
     target: u64,
     add: bool,
+    lens: Option<String>,
 ) -> AppResult<()> {
     let flag = match (relation.as_str(), add) {
         ("blocked_by", true) => "--add-blocked-by",
@@ -1145,8 +1172,8 @@ pub async fn gh_issue_set_dependency(
     };
     let n = number.to_string();
     let t = target.to_string();
-    // Pin the origin slug so the dependency is edited on the fork's issue, not the parent.
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    // Resolve the lens slug so the dependency is edited on the chosen repo's issue.
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     run_gh(
         Some(&repo_path),
         &["issue", "edit", &n, "--repo", &slug, flag, &t],
@@ -1183,8 +1210,9 @@ const DEVELOPMENT_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!
 pub async fn gh_issue_development(
     repo_path: String,
     number: u64,
+    lens: Option<String>,
 ) -> AppResult<IssueDevelopment> {
-    let (owner, name) = repo_owner_name(&repo_path).await?;
+    let (owner, name) = repo_owner_name(&repo_path, lens.as_deref()).await?;
     let out = run_gh(
         Some(&repo_path),
         &[
@@ -1236,6 +1264,7 @@ pub async fn gh_issue_create_linked_branch(
     repo_path: String,
     issue_id: String,
     name: String,
+    lens: Option<String>,
 ) -> AppResult<()> {
     let name = name.trim();
     if name.is_empty() {
@@ -1243,7 +1272,7 @@ pub async fn gh_issue_create_linked_branch(
             "a branch name is required".into(),
         ));
     }
-    let (owner, repo_name) = repo_owner_name(&repo_path).await?;
+    let (owner, repo_name) = repo_owner_name(&repo_path, lens.as_deref()).await?;
 
     // The new branch points at the default branch's current HEAD.
     let oid_query = "query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ defaultBranchRef{ target{ oid } } } }";

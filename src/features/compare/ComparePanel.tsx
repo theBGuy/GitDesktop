@@ -69,7 +69,10 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
   const prProbe = forgeFeatureReady(gh.data, "pullRequests");
   const isGitLab = gh.data?.provider === "gitlab";
   const prNoun = isGitLab ? "merge request" : "pull request";
-  const branchPrs = usePrsForBranch(repoPath, currentName, prProbe);
+  // Origin lens: this duplicate probe is about the FORK's own branch (the repo's
+  // origin), not any upstream contribution. The lens switcher is a PR/Issues-tab
+  // affordance; the Compare tab always reads origin.
+  const branchPrs = usePrsForBranch(repoPath, currentName, prProbe, "origin");
   // Agent-session branches (`gd/session/*`) are app-internal — never offer them
   // as a compare target (the PR button would even push one), like BranchSwitcher.
   const otherBranches = (branches.data ?? []).filter(

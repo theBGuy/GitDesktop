@@ -96,7 +96,13 @@ export function CommitDetailView({
   const gate = ready && canCommentCommits;
   const onRemote = useCommitOnRemote(repoPath, gate ? hash : null);
   const commentsEnabled = gate && onRemote.data === true;
-  const comments = useCommitComments(repoPath, commentsEnabled ? hash : null);
+  // Origin lens: the History surface reads a repo's OWN commits (the fork's
+  // origin); the fork/upstream lens is a PR/Issues-tab affordance.
+  const comments = useCommitComments(
+    repoPath,
+    commentsEnabled ? hash : null,
+    "origin",
+  );
   // GitHub commit-comment `position` mapping must walk GitHub's OWN patch (local
   // git's diff can differ — rename detection, context), so we fetch the forge's
   // diff only for GitHub. GitLab/Bitbucket anchor by plain line and need none.
@@ -145,6 +151,7 @@ export function CommitDetailView({
               : undefined
           }
           onClose={onClose}
+          lens="origin"
         />
       ),
     };
@@ -383,6 +390,7 @@ export function CommitDetailView({
             diffSections={providerKey === "github" ? remoteSections : undefined}
             selectedPath={deferredPath}
             onSelectFile={selectFileFromComments}
+            lens="origin"
           />
         </div>
       ) : gate && onRemote.data === false ? (

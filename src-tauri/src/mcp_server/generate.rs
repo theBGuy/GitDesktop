@@ -862,7 +862,7 @@ impl GitDesktopMcp {
 
         // Labels are best-effort: a forge error omits the section entirely rather
         // than failing the tool (mirrors the spec's best-effort contract).
-        let available_labels = crate::forge::forge_repo_labels(self.repo.clone())
+        let available_labels = crate::forge::forge_repo_labels(self.repo.clone(), None)
             .await
             .map(|labels| labels.into_iter().map(|l| l.name).collect::<Vec<_>>())
             .unwrap_or_default();

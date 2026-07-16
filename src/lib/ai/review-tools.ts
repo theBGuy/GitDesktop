@@ -295,7 +295,7 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
       execute: async (_input, { abortSignal }) => {
         try {
           if (abortSignal?.aborted) return "Error: cancelled";
-          const diff = await forgePrDiff(ctx.repoPath, prNumber);
+          const diff = await forgePrDiff(ctx.repoPath, prNumber, "origin");
           return UNTRUSTED_PREFIX + capHead(diff, FORGE_DIFF_CAP);
         } catch (e) {
           return `Error: ${errorMessage(e)}`;
@@ -311,7 +311,7 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
       execute: async (_input, { abortSignal }) => {
         try {
           if (abortSignal?.aborted) return "Error: cancelled";
-          const pr = await forgePrView(ctx.repoPath, prNumber);
+          const pr = await forgePrView(ctx.repoPath, prNumber, "origin");
           // Trimmed shape — the metadata a reviewer needs, NOT the full
           // comments/checks payload (that's list_pull_request_comments).
           const trimmed = {
@@ -363,9 +363,11 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
       execute: async ({ include_diff_hunk }, { abortSignal }) => {
         try {
           if (abortSignal?.aborted) return "Error: cancelled";
+          // Origin-pinned (package B2 recorded gap): the AI PR-review tools read
+          // the fork's own PR; upstream-lens AI review is a follow-up.
           const [pr, reviewThreads] = await Promise.all([
-            forgePrView(ctx.repoPath, prNumber),
-            forgePrReviewThreads(ctx.repoPath, prNumber),
+            forgePrView(ctx.repoPath, prNumber, "origin"),
+            forgePrReviewThreads(ctx.repoPath, prNumber, "origin"),
           ]);
           // Bound (or drop) each thread's diffHunk so a comment on a new file
           // can't drag the whole file into the payload (GitHub-only; other

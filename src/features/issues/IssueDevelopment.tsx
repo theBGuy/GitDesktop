@@ -26,6 +26,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { useCreateLinkedBranch, useIssueDevelopment } from "@/lib/git/queries";
+import type { RemoteLens } from "@/lib/git/types";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
@@ -76,15 +77,18 @@ export function IssueDevelopment({
   issueId,
   issueTitle,
   issueUrl,
+  lens,
 }: {
   repoPath: string;
   number: number;
   issueId: string;
   issueTitle: string;
   issueUrl: string;
+  /** The origin|upstream lens the parent issue view resolved. */
+  lens: RemoteLens;
 }) {
-  const dev = useIssueDevelopment(repoPath, number);
-  const createBranch = useCreateLinkedBranch(repoPath);
+  const dev = useIssueDevelopment(repoPath, number, lens);
+  const createBranch = useCreateLinkedBranch(repoPath, lens);
   const selectPr = useUiStore((s) => s.selectPr);
   const setRepoTab = useUiStore((s) => s.setRepoTab);
   const [branchOpen, setBranchOpen] = useState(false);

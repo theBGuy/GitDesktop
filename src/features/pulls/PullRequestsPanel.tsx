@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { ConversationFilterPopover } from "@/features/conversations/ConversationFilterPopover";
 import { ConversationListPanel } from "@/features/conversations/ConversationListPanel";
 import { PAGE_SIZE } from "@/features/conversations/LoadMoreRow";
+import { RepoLensSwitcher } from "@/features/conversations/RepoLensSwitcher";
 import { useCollapsedSections } from "@/features/conversations/useCollapsedSections";
 import { useLocalRemoteFilter } from "@/features/conversations/useLocalRemoteFilter";
 import type { PrStateFilter } from "@/lib/git/api";
@@ -31,6 +32,7 @@ import {
   useLocalPrs,
   useUpdateLocalPr,
 } from "@/lib/pulls/queries";
+import { useRemoteSlug, useRepoLens } from "@/lib/repo-lens/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
@@ -44,7 +46,15 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // Merge request reads work for GitHub and GitLab; the noun + section header
   // follow the provider so a GitLab repo reads "merge requests" / "GitLab".
   const isGitLab = provider === "gitlab";
-  const remoteLabel = providerLabel(provider);
+  // The origin|upstream lens (GitHub forks only; "origin" everywhere else). It
+  // decides which repo the remote PR list + every PR read/write below target.
+  const lens = useRepoLens(repoPath);
+  // When browsing the parent, the section header names the parent slug (whose
+  // data this is) — falling back to "Upstream" while the slug loads.
+  const upstreamSlug = useRemoteSlug(repoPath, "upstream", lens === "upstream");
+  const providerName = providerLabel(provider);
+  const remoteLabel =
+    lens === "upstream" ? (upstreamSlug ?? "Upstream") : providerName;
   const remoteNoun = isGitLab ? "merge requests" : "pull requests";
   const ghReady = forgeFeatureReady(gh.data, "pullRequests");
   // "closed" matches the Closed tab: closed and merged alike.
@@ -52,7 +62,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // How many remote PRs to load; "Load more" bumps it. A tab switch (open/closed)
   // resets to the first page.
   const [limit, setLimit] = useState(PAGE_SIZE);
-  const prList = usePrList(repoPath, ghReady, stateFilter, limit);
+  const prList = usePrList(repoPath, ghReady, stateFilter, limit, lens);
   // Row CI icons hydrate separately from the list (so the list paints immediately)
   // and are provider-neutral now — the backend routes GitHub/GitLab/Bitbucket — so
   // `ghReady` alone is the correct gate. Fires whenever the remote list is ready and
@@ -63,6 +73,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     stateFilter,
     limit,
     prList.data,
+    lens,
   );
   const ciMap = prListCi.data;
   const onStateFilter = (s: PrStateFilter) => {
@@ -74,7 +85,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   useReconcileLocalPrs(repoPath);
   const selectedPr = useUiStore((s) => s.selectedPr);
   const selectPr = useUiStore((s) => s.selectPr);
-  const prefetchPr = usePrefetchPr(repoPath);
+  const prefetchPr = usePrefetchPr(repoPath, lens);
   const hoverPrefetch = useHoverPrefetch();
   const [ghCreateOpen, setGhCreateOpen] = useState(false);
   const filterRef = useRef<HTMLInputElement>(null);
@@ -207,10 +218,11 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
       remoteLabel={remoteLabel}
       stateFilter={stateFilter}
       onStateFilter={onStateFilter}
+      lensControl={<RepoLensSwitcher repoPath={repoPath} />}
       newMenu={{
         ghLabel: isGitLab
           ? "Merge request on GitLab…"
-          : `Pull request on ${remoteLabel}…`,
+          : `Pull request on ${providerName}…`,
         ghDisabled: !canCreateGhPr,
         ghReason: ghCreateReason ?? undefined,
         onGh: () => setGhCreateOpen(true),

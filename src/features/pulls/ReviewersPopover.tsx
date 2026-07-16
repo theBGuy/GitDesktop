@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useForgeGhHost } from "@/lib/git/host";
 import { useReviewerCandidates } from "@/lib/git/queries";
-import type { ForgeUserRef } from "@/lib/git/types";
+import type { ForgeUserRef, RemoteLens } from "@/lib/git/types";
 
 /**
  * A short, stable disambiguator for a reviewer whose label collides with a
@@ -45,14 +45,17 @@ export function ReviewersPopover({
   enabled,
   value,
   onChange,
+  lens,
 }: {
   repoPath: string;
   number: number | null;
   enabled: boolean;
   value: ForgeUserRef[];
   onChange: (next: ForgeUserRef[]) => void;
+  /** The origin|upstream lens the parent surface resolved (create dialog: "origin"). */
+  lens: RemoteLens;
 }) {
-  const candidates = useReviewerCandidates(repoPath, number, enabled);
+  const candidates = useReviewerCandidates(repoPath, number, enabled, lens);
   // GitHub reviewer ids are logins (avatars served at `<host>/<login>.png`), so the
   // avatar is login-derived there; off GitHub it's the initial fallback unless the
   // ref carries a real avatarUrl (GitLab/Bitbucket do).

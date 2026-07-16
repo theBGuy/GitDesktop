@@ -27,6 +27,7 @@ import {
   useJiraLink,
   useJiraPermissions,
 } from "@/lib/jira/queries";
+import { useSetRepoLens } from "@/lib/repo-lens/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
@@ -54,9 +55,11 @@ export function PromoteLocalIssueDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
-  const createIssue = useCreateIssue(repoPath);
+  // Promotion always targets the fork's own remote (origin) — never the parent.
+  const createIssue = useCreateIssue(repoPath, "origin");
   const update = useUpdateLocalIssue(repoPath);
   const selectIssue = useUiStore((s) => s.selectIssue);
+  const setLens = useSetRepoLens(repoPath);
 
   const forge = useForgeStatus(repoPath);
   const remoteLabel = forge.data?.provider === "gitlab" ? "GitLab" : "GitHub";
@@ -145,7 +148,7 @@ export function PromoteLocalIssueDialog({
       created = { number, url };
       failedStep = "carrying over comments";
       for (const c of carried) {
-        await forgeIssueComment(repoPath, number, c.body);
+        await forgeIssueComment(repoPath, number, c.body, "origin");
       }
       failedStep = "closing the local issue";
       await closeLocalWithBackLink(
@@ -156,6 +159,10 @@ export function PromoteLocalIssueDialog({
         action: { label: "View", onClick: () => openUrl(url) },
       });
       onOpenChange(false);
+      // The promoted issue lives on the fork (origin) — force the origin lens so
+      // the Issues tab shows it (and any stale remote selection is cleared) before
+      // navigating to it.
+      setLens("origin");
       selectIssue({ kind: "remote", id: String(number) });
     } catch (e) {
       if (created === null) {

@@ -516,6 +516,7 @@ pub async fn gh_pr_review(
     number: u64,
     action: String,
     body: String,
+    lens: Option<String>,
 ) -> AppResult<()> {
     let n = number.to_string();
     let flag = match action.as_str() {
@@ -528,9 +529,9 @@ pub async fn gh_pr_review(
             )));
         }
     };
-    // Pin the origin slug (`gh pr … --repo OWNER/REPO`) so a fork's PR resolves
-    // against the fork, not the parent gh auto-detects from an `upstream` remote.
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    // Resolve the lens slug (`gh pr … --repo OWNER/REPO`) so a fork's PR resolves
+    // against the chosen remote, not the parent gh auto-detects from `upstream`.
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let body = body.trim();
     let mut args = vec!["pr", "review", &n, flag, "--repo", &slug];
     if !body.is_empty() {
@@ -543,13 +544,18 @@ pub async fn gh_pr_review(
 
 /// Adds a standalone comment to the PR conversation.
 #[tauri::command]
-pub async fn gh_pr_comment(repo_path: String, number: u64, body: String) -> AppResult<()> {
+pub async fn gh_pr_comment(
+    repo_path: String,
+    number: u64,
+    body: String,
+    lens: Option<String>,
+) -> AppResult<()> {
     if body.trim().is_empty() {
         return Err(AppError::InvalidArgument("a comment is required".into()));
     }
     let n = number.to_string();
-    // Pin the origin slug so the comment lands on the fork's PR, not the parent's.
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    // Resolve the lens slug so the comment lands on the chosen repo's PR.
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     run_gh(
         Some(&repo_path),
         &["pr", "comment", &n, "--body", &body, "--repo", &slug],
@@ -593,6 +599,7 @@ pub async fn gh_pr_merge(
     number: u64,
     strategy: String,
     delete_branch: bool,
+    lens: Option<String>,
 ) -> AppResult<PrMergeOutcome> {
     let n = number.to_string();
     let method = match strategy.as_str() {
@@ -605,8 +612,8 @@ pub async fn gh_pr_merge(
             )));
         }
     };
-    // Pin the origin slug so the merge targets the fork's PR, not the parent's.
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    // Resolve the lens slug so the merge targets the chosen repo's PR.
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     run_gh(
         Some(&repo_path),
         &["pr", "merge", &n, method, "--repo", &slug],
@@ -617,7 +624,7 @@ pub async fn gh_pr_merge(
     // warning on a successful outcome — never an error — so the UI can't show a
     // red "merge failed" toast for a PR that already merged.
     let cleanup_warning = if delete_branch {
-        gh_delete_remote_head_branch(&repo_path, number)
+        gh_delete_remote_head_branch(&repo_path, number, lens.as_deref())
             .await
             .err()
             .map(|e| e.to_string())
@@ -656,10 +663,14 @@ struct RawRepoName {
 /// message that `gh_pr_merge` folds into a successful outcome's `cleanup_warning`
 /// rather than a merge failure. A branch that is already gone (e.g. a repo that
 /// auto-deletes head branches on merge) counts as success.
-async fn gh_delete_remote_head_branch(repo_path: &str, number: u64) -> AppResult<()> {
-    // Pin the origin slug for the READ so a fork's PR resolves against the fork
+async fn gh_delete_remote_head_branch(
+    repo_path: &str,
+    number: u64,
+    lens: Option<&str>,
+) -> AppResult<()> {
+    // Resolve the lens slug for the READ so the PR resolves against the chosen repo
     // (the DELETE below then targets the PR's OWN head repository — see its note).
-    let slug = crate::github::gh_origin_slug(repo_path).await.map_err(|e| {
+    let slug = crate::github::gh_lens_slug(repo_path, lens).await.map_err(|e| {
         AppError::Gh(format!(
             "Merged #{number}, but couldn't clean up the remote head branch: {e}"
         ))
@@ -766,10 +777,10 @@ async fn gh_delete_remote_head_branch(repo_path: &str, number: u64) -> AppResult
 }
 
 #[tauri::command]
-pub async fn gh_pr_close(repo_path: String, number: u64) -> AppResult<()> {
+pub async fn gh_pr_close(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     let n = number.to_string();
-    // Pin the origin slug so a fork's PR closes on the fork, not the parent.
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    // Resolve the lens slug so the PR closes on the chosen repo.
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     run_gh(
         Some(&repo_path),
         &["pr", "close", &n, "--repo", &slug],
@@ -781,10 +792,10 @@ pub async fn gh_pr_close(repo_path: String, number: u64) -> AppResult<()> {
 
 /// Reopens a closed (not merged) pull request.
 #[tauri::command]
-pub async fn gh_pr_reopen(repo_path: String, number: u64) -> AppResult<()> {
+pub async fn gh_pr_reopen(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     let n = number.to_string();
-    // Pin the origin slug so a fork's PR reopens on the fork, not the parent.
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    // Resolve the lens slug so the PR reopens on the chosen repo.
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     run_gh(
         Some(&repo_path),
         &["pr", "reopen", &n, "--repo", &slug],
@@ -952,11 +963,11 @@ pub async fn gh_pr_unminimize_comment(repo_path: String, comment_id: String) -> 
 
 /// Checks out a PR's branch locally (handles fork-sourced PRs too).
 #[tauri::command]
-pub async fn gh_pr_checkout(repo_path: String, number: u64) -> AppResult<()> {
+pub async fn gh_pr_checkout(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     let n = number.to_string();
-    // Pin the origin slug so a fork's PR number checks out from the fork, not the
+    // Resolve the lens slug so the PR number checks out from the chosen repo, not the
     // parent gh would auto-resolve from an `upstream` remote.
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     run_gh(
         Some(&repo_path),
         &["pr", "checkout", &n, "--repo", &slug],
@@ -1034,10 +1045,10 @@ pub async fn gh_repo_fork(repo_path: String, contribute_to_parent: bool) -> AppR
 
 /// Marks a draft PR as ready for review.
 #[tauri::command]
-pub async fn gh_pr_ready(repo_path: String, number: u64) -> AppResult<()> {
+pub async fn gh_pr_ready(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     let n = number.to_string();
-    // Pin the origin slug so a fork's PR is marked ready on the fork, not the parent.
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    // Resolve the lens slug so the PR is marked ready on the chosen repo.
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     run_gh(
         Some(&repo_path),
         &["pr", "ready", &n, "--repo", &slug],
@@ -1058,10 +1069,11 @@ pub async fn gh_pr_list(
     repo_path: String,
     state: String,
     limit: Option<u32>,
+    lens: Option<String>,
 ) -> AppResult<Vec<PrInfo>> {
-    // Pin the origin slug so a fork lists its OWN PRs, not the parent's (a bare
+    // Resolve the lens slug so a fork lists the chosen repo's PRs (a bare
     // `gh pr list` on a fork auto-resolves to the upstream repo).
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let mut args: Vec<&str> = match state.as_str() {
         "open" => vec![
             "pr", "list", "--repo", &slug, "--state", "open", "--json", PR_LIST_FIELDS,
@@ -1275,14 +1287,15 @@ pub async fn gh_pr_edit(
     number: u64,
     title: String,
     body: String,
+    lens: Option<String>,
 ) -> AppResult<()> {
     let title = title.trim();
     if title.is_empty() {
         return Err(AppError::InvalidArgument("a PR title is required".into()));
     }
-    // Pin the origin slug so a fork's PR is edited on the fork, not the parent
+    // Resolve the lens slug so the PR is edited on the chosen repo
     // (`gh api` has no `-R` flag, so build a literal `repos/<slug>/…` path).
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let endpoint = format!("repos/{slug}/pulls/{number}");
     run_gh(
         Some(&repo_path),
@@ -1333,11 +1346,11 @@ fn validate_graphql_embed(value: &str, what: &str) -> AppResult<()> {
 /// The repository's labels with their GraphQL node ids, for the PR label
 /// picker. (`gh label list --json id` returns empty ids on older gh.)
 #[tauri::command]
-pub async fn gh_repo_labels(repo_path: String) -> AppResult<Vec<RepoLabel>> {
-    // Pin the origin slug: an unpinned `gh repo view` on a fork with an `upstream`
-    // remote auto-resolves to the PARENT, so the picker would show the upstream's
-    // labels. `gh_origin_slug` returns "owner/repo".
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+pub async fn gh_repo_labels(repo_path: String, lens: Option<String>) -> AppResult<Vec<RepoLabel>> {
+    // Resolve the lens slug: an unpinned `gh repo view` on a fork with an `upstream`
+    // remote auto-resolves to the PARENT, so the origin picker would show the
+    // upstream's labels. `gh_lens_slug` returns "owner/repo".
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let Some((owner, name)) = slug.split_once('/') else {
         return Err(AppError::Gh("could not determine the repository owner".into()));
     };
@@ -2064,12 +2077,16 @@ async fn gh_repo_merge_settings(repo_path: &str, pr_url: &str) -> AppResult<Repo
 
 /// Full details for one PR's read view.
 #[tauri::command]
-pub async fn gh_pr_view(repo_path: String, number: u64) -> AppResult<PrDetails> {
-    // Pin the origin slug so a fork's PR number resolves against the fork, not the
-    // parent gh would auto-detect from an `upstream` remote. The REST top-ups this
-    // fn calls (files/commits/reviews/comments) are likewise pinned to origin so
-    // they resolve to the SAME repo these PR numbers came from.
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+pub async fn gh_pr_view(
+    repo_path: String,
+    number: u64,
+    lens: Option<String>,
+) -> AppResult<PrDetails> {
+    // Resolve the lens slug so the PR number resolves against the chosen repo, not
+    // the parent gh would auto-detect from an `upstream` remote. The REST top-ups
+    // this fn calls (files/commits/reviews/comments) inherit the SAME lens so they
+    // resolve to the SAME repo these PR numbers came from.
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let out = run_gh(
         Some(&repo_path),
         &[
@@ -2095,7 +2112,7 @@ pub async fn gh_pr_view(repo_path: String, number: u64) -> AppResult<PrDetails> 
     // exactly 100 files just makes one redundant call). Best-effort: if the REST
     // completion fails, keep the 100 GraphQL entries rather than failing the view.
     let files: Vec<PrFileOut> = if raw.files.len() >= 100 {
-        match gh_pr_files_paginated(&repo_path, number).await {
+        match gh_pr_files_paginated(&repo_path, number, lens.as_deref()).await {
             Ok(complete) => complete
                 .into_iter()
                 .map(|f| PrFileOut {
@@ -2129,7 +2146,7 @@ pub async fn gh_pr_view(repo_path: String, number: u64) -> AppResult<PrDetails> 
     // from its paginated REST endpoint when we hit 100, best-effort (a REST
     // failure keeps the 100 GraphQL entries rather than failing the view).
     let commits: Vec<PrCommitOut> = if raw.commits.len() >= 100 {
-        match gh_pr_commits_paginated(&repo_path, number).await {
+        match gh_pr_commits_paginated(&repo_path, number, lens.as_deref()).await {
             Ok(complete) => complete,
             Err(_) => raw
                 .commits
@@ -2173,7 +2190,7 @@ pub async fn gh_pr_view(repo_path: String, number: u64) -> AppResult<PrDetails> 
     };
 
     let reviews: Vec<PrThreadOut> = if raw.reviews.len() >= 100 {
-        match gh_pr_reviews_paginated(&repo_path, number).await {
+        match gh_pr_reviews_paginated(&repo_path, number, lens.as_deref()).await {
             Ok(complete) => complete,
             Err(_) => raw
                 .reviews
@@ -2217,7 +2234,7 @@ pub async fn gh_pr_view(repo_path: String, number: u64) -> AppResult<PrDetails> 
     };
 
     let comments: Vec<PrThreadOut> = if raw.comments.len() >= 100 {
-        match gh_pr_comments_paginated(&repo_path, number).await {
+        match gh_pr_comments_paginated(&repo_path, number, lens.as_deref()).await {
             Ok(complete) => complete,
             Err(_) => raw
                 .comments
@@ -2368,15 +2385,19 @@ pub async fn gh_pr_view(repo_path: String, number: u64) -> AppResult<PrDetails> 
 /// and bots (e.g. Copilot) are intentionally excluded — exactly like teams — so
 /// [`set_pr_reviewers`] can preserve them untouched and never `--remove-reviewer`
 /// a bot.
-async fn current_requested_reviewer_logins(repo_path: &str, number: u64) -> AppResult<Vec<String>> {
+async fn current_requested_reviewer_logins(
+    repo_path: &str,
+    number: u64,
+    lens: Option<&str>,
+) -> AppResult<Vec<String>> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Wrap {
         #[serde(default)]
         review_requests: Vec<RawReviewRequest>,
     }
-    // Pin the origin slug so a fork's PR resolves against the fork, not the parent.
-    let slug = crate::github::gh_origin_slug(repo_path).await?;
+    // Inherit the lens so the PR resolves against the same repo as the write below.
+    let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
     let out = run_gh(
         Some(repo_path),
         &[
@@ -2403,9 +2424,9 @@ async fn current_requested_reviewer_logins(repo_path: &str, number: u64) -> AppR
 
 /// The PR author's login (`gh pr view --json author`) — excluded from the reviewer
 /// candidates, because GitHub rejects requesting a review from the author.
-async fn pr_author_login(repo_path: &str, number: u64) -> AppResult<String> {
-    // Pin the origin slug so a fork's PR resolves against the fork, not the parent.
-    let slug = crate::github::gh_origin_slug(repo_path).await?;
+async fn pr_author_login(repo_path: &str, number: u64, lens: Option<&str>) -> AppResult<String> {
+    // Inherit the lens so the PR resolves against the same repo as its candidates.
+    let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
     let out = run_gh(
         Some(repo_path),
         // `// empty` so a GraphQL-null author (deleted account / some bots) yields an
@@ -2436,9 +2457,14 @@ async fn pr_author_login(repo_path: &str, number: u64) -> AppResult<String> {
 /// rejects requesting a review from the PR author, and a reviewer who already
 /// submitted needs a *re-request* — those failures surface as the gh error rather
 /// than being swallowed (`run_gh` carries the stderr).
-pub async fn set_pr_reviewers(repo_path: &str, number: u64, desired: &[String]) -> AppResult<()> {
+pub async fn set_pr_reviewers(
+    repo_path: &str,
+    number: u64,
+    desired: &[String],
+    lens: Option<&str>,
+) -> AppResult<()> {
     use std::collections::HashSet;
-    let current = current_requested_reviewer_logins(repo_path, number).await?;
+    let current = current_requested_reviewer_logins(repo_path, number, lens).await?;
     let desired_set: HashSet<&str> = desired.iter().map(String::as_str).collect();
     let current_set: HashSet<&str> = current.iter().map(String::as_str).collect();
     let add: Vec<&str> = desired
@@ -2457,10 +2483,10 @@ pub async fn set_pr_reviewers(repo_path: &str, number: u64, desired: &[String]) 
     let num = number.to_string();
     let add_csv = add.join(",");
     let remove_csv = remove.join(",");
-    // Pin the origin slug so a fork's PR reviewers are edited on the fork, not the
-    // parent (`current_requested_reviewer_logins` above is already pinned, so the
+    // Resolve the lens slug so the PR reviewers are edited on the chosen repo
+    // (`current_requested_reviewer_logins` above inherits the same lens, so the
     // diff and the write agree on which repo's PR they target).
-    let slug = crate::github::gh_origin_slug(repo_path).await?;
+    let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
     let mut args: Vec<&str> = vec!["pr", "edit", &num, "--repo", &slug];
     if !add.is_empty() {
         args.push("--add-reviewer");
@@ -2482,10 +2508,13 @@ pub async fn set_pr_reviewers(repo_path: &str, number: u64, desired: &[String]) 
 pub async fn reviewer_candidates(
     repo_path: &str,
     number: Option<u64>,
+    lens: Option<&str>,
 ) -> AppResult<Vec<crate::forge::model::ForgeUserRef>> {
-    let logins = crate::github::issue::gh_assignable_users(repo_path.to_string()).await?;
+    let logins =
+        crate::github::issue::gh_assignable_users(repo_path.to_string(), lens.map(str::to_string))
+            .await?;
     let exclude = match number {
-        Some(n) => pr_author_login(repo_path, n).await.unwrap_or_default(),
+        Some(n) => pr_author_login(repo_path, n, lens).await.unwrap_or_default(),
         None => current_login(repo_path).await.unwrap_or_default(),
     };
     let mut out: Vec<crate::forge::model::ForgeUserRef> = logins
@@ -2510,8 +2539,12 @@ const PR_REACTIONS_QUERY: &str = "query($owner:String!,$name:String!,$number:Int
 /// GraphQL-only, so this loads in parallel with the PR view and leaves
 /// `gh_pr_view` untouched. Reuses the issue reaction types + mapper.
 #[tauri::command]
-pub async fn gh_pr_reactions(repo_path: String, number: u64) -> AppResult<IssueReactions> {
-    let (owner, name) = repo_owner_name(&repo_path).await?;
+pub async fn gh_pr_reactions(
+    repo_path: String,
+    number: u64,
+    lens: Option<String>,
+) -> AppResult<IssueReactions> {
+    let (owner, name) = repo_owner_name(&repo_path, lens.as_deref()).await?;
     let out = run_gh(
         Some(&repo_path),
         &[
@@ -2704,8 +2737,9 @@ fn map_timeline_node(node: &serde_json::Value) -> Option<PrTimelineEventOut> {
 pub async fn pr_timeline(
     repo_path: &str,
     number: u64,
+    lens: Option<&str>,
 ) -> AppResult<Vec<PrTimelineEventOut>> {
-    let (owner, name) = repo_owner_name(repo_path).await?;
+    let (owner, name) = repo_owner_name(repo_path, lens).await?;
     let out = run_gh(
         Some(repo_path),
         &[
@@ -2742,10 +2776,10 @@ pub async fn pr_timeline(
 /// files API (`gh_pr_diff_from_files`) instead of failing the whole view. Any
 /// other error propagates raw.
 #[tauri::command]
-pub async fn gh_pr_diff(repo_path: String, number: u64) -> AppResult<String> {
-    // Pin the origin slug so a fork's PR diff resolves against the fork, not the
-    // parent (the files-API fallback below goes through the pinned `gh_pr_files_paginated`).
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+pub async fn gh_pr_diff(repo_path: String, number: u64, lens: Option<String>) -> AppResult<String> {
+    // Resolve the lens slug so the PR diff resolves against the chosen repo (the
+    // files-API fallback below inherits the lens via `gh_pr_diff_from_files`).
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let out = match run_gh(
         Some(&repo_path),
         &["pr", "diff", &number.to_string(), "--repo", &slug],
@@ -2756,7 +2790,7 @@ pub async fn gh_pr_diff(repo_path: String, number: u64) -> AppResult<String> {
         Ok(out) => out,
         Err(e) if is_diff_too_large(&e.to_string()) => {
             // Reconstruct from the files API; if THAT fails, surface its error raw.
-            return gh_pr_diff_from_files(&repo_path, number).await;
+            return gh_pr_diff_from_files(&repo_path, number, lens.as_deref()).await;
         }
         Err(e) => return Err(e),
     };
@@ -2840,10 +2874,15 @@ struct GhCommitComment {
 /// List a commit's comments (`GET repos/{o}/{r}/commits/{sha}/comments`, paginated
 /// via the `--slurp` idiom). `viewer_did_author` compares each author against the
 /// tolerantly-resolved current login.
-pub async fn commit_comments(repo_path: &str, sha: &str) -> AppResult<Vec<CommitCommentOut>> {
+pub async fn commit_comments(
+    repo_path: &str,
+    sha: &str,
+    lens: Option<&str>,
+) -> AppResult<Vec<CommitCommentOut>> {
     validate_commit_oid(sha)?;
-    // Pin the origin slug so a fork reads its own commit's comments, not the parent's.
-    let slug = crate::github::gh_origin_slug(repo_path).await?;
+    // Resolve the lens slug so the commit's comments read from the chosen repo's
+    // namespace (default origin — a fork reads its own, not the parent's).
+    let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
     let viewer = current_login(repo_path).await;
     let endpoint = format!("repos/{slug}/commits/{sha}/comments");
     let out = run_gh(
@@ -2902,13 +2941,15 @@ pub async fn commit_comment_create(
     body: &str,
     path: Option<&str>,
     position: Option<u64>,
+    lens: Option<&str>,
 ) -> AppResult<()> {
     if body.trim().is_empty() {
         return Err(AppError::InvalidArgument("a comment is required".into()));
     }
     validate_commit_oid(sha)?;
-    // Pin the origin slug so a fork's commit comment lands on the fork, not the parent.
-    let slug = crate::github::gh_origin_slug(repo_path).await?;
+    // Resolve the lens slug so the commit comment lands in the chosen repo's
+    // namespace (default origin — a fork's comment lands on the fork, not the parent).
+    let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
     let endpoint = format!("repos/{slug}/commits/{sha}/comments");
     let mut payload = serde_json::json!({ "body": body });
     if let (Some(p), Some(pos)) = (path, position) {
@@ -2975,9 +3016,9 @@ pub async fn commit_comment_delete(repo_path: &str, comment_id: &str) -> AppResu
 /// Resolve a PR's head commit oid (`gh pr view {n} --json headRefOid`). Used to
 /// anchor a new inline review comment/thread to the current head — the commits list
 /// caps at 100, so this dedicated read is the reliable source.
-async fn head_ref_oid(repo_path: &str, number: u64) -> AppResult<String> {
-    // Pin the origin slug so a fork's PR resolves against the fork, not the parent.
-    let slug = crate::github::gh_origin_slug(repo_path).await?;
+async fn head_ref_oid(repo_path: &str, number: u64, lens: Option<&str>) -> AppResult<String> {
+    // Inherit the lens so the PR resolves against the same repo as the write below.
+    let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
     let out = run_gh(
         Some(repo_path),
         &[
@@ -3014,6 +3055,7 @@ fn gh_side(side: &str) -> AppResult<&'static str> {
 /// repos/{o}/{r}/pulls/{n}/comments` via `--input -`). `side` is `"new"`/`"old"`;
 /// `start_line` (GitHub-only multi-line range) adds `start_line` + `start_side`.
 /// The head oid is resolved internally. Plain fn (called by the forge dispatch).
+#[allow(clippy::too_many_arguments)]
 pub async fn thread_create(
     repo_path: &str,
     number: u64,
@@ -3022,6 +3064,7 @@ pub async fn thread_create(
     side: &str,
     start_line: Option<u64>,
     body: &str,
+    lens: Option<&str>,
 ) -> AppResult<()> {
     if body.trim().is_empty() {
         return Err(AppError::InvalidArgument("a comment is required".into()));
@@ -3030,7 +3073,7 @@ pub async fn thread_create(
         return Err(AppError::InvalidArgument("a file path is required".into()));
     }
     let gh_side = gh_side(side)?;
-    let commit_id = head_ref_oid(repo_path, number).await?;
+    let commit_id = head_ref_oid(repo_path, number, lens).await?;
     let mut payload = serde_json::json!({
         "body": body,
         "commit_id": commit_id,
@@ -3042,8 +3085,8 @@ pub async fn thread_create(
         payload["start_line"] = serde_json::Value::from(start);
         payload["start_side"] = serde_json::Value::String(gh_side.to_string());
     }
-    // Pin the origin slug so a fork's review thread lands on the fork's PR, not the parent.
-    let slug = crate::github::gh_origin_slug(repo_path).await?;
+    // Resolve the lens slug so the review thread lands on the chosen repo's PR.
+    let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
     let endpoint = format!("repos/{slug}/pulls/{number}/comments");
     run_gh_input(
         Some(repo_path),
@@ -3069,6 +3112,7 @@ pub async fn review_submit(
     verdict: &str,
     summary: Option<&str>,
     comments: &[DraftCommentIn],
+    lens: Option<&str>,
 ) -> AppResult<ReviewSubmitOut> {
     let event = match verdict {
         "comment" => "COMMENT",
@@ -3078,7 +3122,7 @@ pub async fn review_submit(
     };
     // Anchor the review's inline comments against the head the reviewer's lines were
     // computed on (not whatever head exists at submit time), like `thread_create`.
-    let commit_id = head_ref_oid(repo_path, number).await?;
+    let commit_id = head_ref_oid(repo_path, number, lens).await?;
     let mut payload = serde_json::json!({ "event": event, "commit_id": commit_id });
     if let Some(s) = summary.filter(|s| !s.trim().is_empty()) {
         payload["body"] = serde_json::Value::String(s.to_string());
@@ -3101,8 +3145,8 @@ pub async fn review_submit(
     if !arr.is_empty() {
         payload["comments"] = serde_json::Value::Array(arr);
     }
-    // Pin the origin slug so a fork's review is submitted on the fork's PR, not the parent.
-    let slug = crate::github::gh_origin_slug(repo_path).await?;
+    // Resolve the lens slug so the review is submitted on the chosen repo's PR.
+    let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
     let endpoint = format!("repos/{slug}/pulls/{number}/reviews");
     run_gh_input(
         Some(repo_path),
@@ -3157,14 +3201,18 @@ struct GhPrFile {
 /// `gh pr view --json files` and `gh pr diff` both cap at GitHub's GraphQL 100-file
 /// connection limit; this endpoint paginates past it. Used both to reconstruct the
 /// >300-file diff and to complete the PR-view file rail.
-async fn gh_pr_files_paginated(repo_path: &str, number: u64) -> AppResult<Vec<GhPrFile>> {
-    // Pin the origin slug: the caller (`gh_pr_view`) resolves PR numbers against the
-    // fork's own PRs, so this top-up must resolve to the SAME repo (the fork), not
-    // the parent gh would auto-detect from an `upstream` remote. `--paginate` on an
-    // array endpoint emits one JSON array PER PAGE concatenated, which a single
-    // `from_str::<Vec<_>>` can't parse — `--slurp` wraps the pages into one outer
-    // array of arrays, which we then flatten. (gh 2.44+ supports `--slurp`.)
-    let slug = crate::github::gh_origin_slug(repo_path).await?;
+async fn gh_pr_files_paginated(
+    repo_path: &str,
+    number: u64,
+    lens: Option<&str>,
+) -> AppResult<Vec<GhPrFile>> {
+    // Inherit the caller's lens: `gh_pr_view` resolves PR numbers against one repo,
+    // so this top-up must resolve to the SAME repo, not the parent gh would
+    // auto-detect from an `upstream` remote. `--paginate` on an array endpoint emits
+    // one JSON array PER PAGE concatenated, which a single `from_str::<Vec<_>>` can't
+    // parse — `--slurp` wraps the pages into one outer array of arrays, which we then
+    // flatten. (gh 2.44+ supports `--slurp`.)
+    let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
     let endpoint = format!("repos/{slug}/pulls/{number}/files");
     let out = run_gh(
         Some(repo_path),
@@ -3357,10 +3405,14 @@ fn rest_comment_to_out(c: GhPrRestComment, viewer_login: Option<&str>) -> PrThre
 /// Completes the PR's commit list via the paginated commits REST API, past the
 /// 100-item GraphQL cap `gh pr view --json commits` hits. Returns rows in the
 /// PR-view shape.
-async fn gh_pr_commits_paginated(repo_path: &str, number: u64) -> AppResult<Vec<PrCommitOut>> {
-    // Pin the origin slug: `gh_pr_view` resolves PR numbers against the fork's own
-    // PRs, so this top-up must resolve to the SAME repo (the fork), not the parent.
-    let slug = crate::github::gh_origin_slug(repo_path).await?;
+async fn gh_pr_commits_paginated(
+    repo_path: &str,
+    number: u64,
+    lens: Option<&str>,
+) -> AppResult<Vec<PrCommitOut>> {
+    // Inherit the caller's lens: `gh_pr_view` resolves PR numbers against one repo,
+    // so this top-up must resolve to the SAME repo, not the parent.
+    let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
     let endpoint = format!("repos/{slug}/pulls/{number}/commits");
     let out = run_gh(
         Some(repo_path),
@@ -3388,10 +3440,14 @@ async fn gh_pr_commits_paginated(repo_path: &str, number: u64) -> AppResult<Vec<
 
 /// Completes the PR's review list via the paginated reviews REST API, past the
 /// 100-item GraphQL cap. Returns rows in the PR-view thread shape.
-async fn gh_pr_reviews_paginated(repo_path: &str, number: u64) -> AppResult<Vec<PrThreadOut>> {
-    // Pin the origin slug: must resolve to the same repo (the fork) `gh_pr_view`
-    // resolved the PR number against, or a fork would 404.
-    let slug = crate::github::gh_origin_slug(repo_path).await?;
+async fn gh_pr_reviews_paginated(
+    repo_path: &str,
+    number: u64,
+    lens: Option<&str>,
+) -> AppResult<Vec<PrThreadOut>> {
+    // Inherit the caller's lens: must resolve to the same repo `gh_pr_view`
+    // resolved the PR number against, or it would 404.
+    let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
     let endpoint = format!("repos/{slug}/pulls/{number}/reviews");
     let out = run_gh(
         Some(repo_path),
@@ -3421,10 +3477,14 @@ async fn gh_pr_reviews_paginated(repo_path: &str, number: u64) -> AppResult<Vec<
 /// REST API (a PR's conversation comments are issue comments), past the 100-item
 /// GraphQL cap. Resolves the authenticated login once (best-effort) to set
 /// `viewer_did_author`. Returns rows in the PR-view thread shape.
-async fn gh_pr_comments_paginated(repo_path: &str, number: u64) -> AppResult<Vec<PrThreadOut>> {
-    // Pin the origin slug: must resolve to the same repo (the fork) `gh_pr_view`
-    // resolved the PR number against, or a fork would 404.
-    let slug = crate::github::gh_origin_slug(repo_path).await?;
+async fn gh_pr_comments_paginated(
+    repo_path: &str,
+    number: u64,
+    lens: Option<&str>,
+) -> AppResult<Vec<PrThreadOut>> {
+    // Inherit the caller's lens: must resolve to the same repo `gh_pr_view`
+    // resolved the PR number against, or it would 404.
+    let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
     let endpoint = format!("repos/{slug}/issues/{number}/comments");
     let out = run_gh(
         Some(repo_path),
@@ -3466,8 +3526,12 @@ async fn gh_pr_comments_paginated(repo_path: &str, number: u64) -> AppResult<Vec
 /// unified diff from them, in the same `git`-style format `gh pr diff` produces
 /// so the frontend diff viewer parses it identically. This is the >300-file
 /// fallback for `gh_pr_diff`.
-async fn gh_pr_diff_from_files(repo_path: &str, number: u64) -> AppResult<String> {
-    let files = gh_pr_files_paginated(repo_path, number).await?;
+async fn gh_pr_diff_from_files(
+    repo_path: &str,
+    number: u64,
+    lens: Option<&str>,
+) -> AppResult<String> {
+    let files = gh_pr_files_paginated(repo_path, number, lens).await?;
     let diff = reconstruct_pr_diff(&files);
     let (text, _) = crate::git::diff::truncate_at_char_boundary(diff, 2_000_000);
     Ok(text)
@@ -3585,8 +3649,9 @@ pub struct ExternalReviewItem {
 pub async fn gh_pr_external_reviews(
     repo_path: String,
     number: u64,
+    lens: Option<String>,
 ) -> AppResult<Vec<ExternalReviewItem>> {
-    let (owner, name) = repo_owner_name(&repo_path).await?;
+    let (owner, name) = repo_owner_name(&repo_path, lens.as_deref()).await?;
     validate_graphql_embed(&owner, "repository owner")?;
     validate_graphql_embed(&name, "repository name")?;
 
@@ -3798,8 +3863,9 @@ async fn gh_thread_comment_replies_topup(
 pub async fn gh_pr_review_threads(
     repo_path: String,
     number: u64,
+    lens: Option<String>,
 ) -> AppResult<Vec<ReviewThreadOut>> {
-    let (owner, name) = repo_owner_name(&repo_path).await?;
+    let (owner, name) = repo_owner_name(&repo_path, lens.as_deref()).await?;
     validate_graphql_embed(&owner, "repository owner")?;
     validate_graphql_embed(&name, "repository name")?;
 
@@ -4006,16 +4072,90 @@ pub async fn gh_pr_resolve_review_thread(
     Ok(())
 }
 
+/// A subset of the GitHub REST `GET /repos/{slug}/pulls` item, enough to build a
+/// [`PrInfo`] for the upstream-lens duplicate probe (see [`gh_prs_for_branch`]).
+/// Tolerant serde over the untrusted REST payload.
+#[derive(Deserialize)]
+struct GhPrRestPull {
+    number: u64,
+    html_url: String,
+    #[serde(default)]
+    title: String,
+    base: GhPrRestPullRef,
+    head: GhPrRestPullRef,
+    #[serde(default)]
+    draft: bool,
+}
+
+#[derive(Deserialize)]
+struct GhPrRestPullRef {
+    #[serde(rename = "ref", default)]
+    ref_name: String,
+}
+
+/// Map a REST `pulls` item onto the [`PrInfo`] the frontend already consumes. The
+/// caller queries `state=open`, so every item here is open by construction — hence
+/// the `"OPEN"` casing (matching what `gh pr list --json state` emits for the
+/// origin path). Only the fields the compare-panel probe needs are populated.
+fn rest_pull_to_pr_info(p: GhPrRestPull) -> PrInfo {
+    PrInfo {
+        number: p.number,
+        url: p.html_url,
+        title: p.title,
+        base_ref_name: p.base.ref_name,
+        head_ref_name: p.head.ref_name,
+        is_draft: p.draft,
+        state: "OPEN".to_string(),
+        author: None,
+        labels: Vec::new(),
+        created_at: String::new(),
+        head_sha: String::new(),
+    }
+}
+
 /// Open PRs whose head is `head` (there's at most one per base). Lets the UI
 /// offer "View pull request" instead of "Create" once one already exists.
+///
+/// `lens`: `None`/`Some("origin")` probes the fork's own PRs (consistent with
+/// `gh_pr_list`); `Some("upstream")` probes the PARENT repo — the fork
+/// contribution flow's "did I already open this upstream?" check.
+///
+/// The upstream arm does NOT use `gh pr list --head`: verified live 2026-07-16,
+/// `gh pr list --head "owner:branch"` silently returns `[]` even when the PR
+/// exists (it doesn't support the owner-prefixed head form). We hit REST instead
+/// — `GET repos/<parent>/pulls?head=<fork_owner>:<head>&state=open` — which
+/// matches cross-fork heads correctly. The caller passes a BARE branch name; we
+/// compose the `owner:` prefix here from the fork's origin owner.
 #[tauri::command]
-pub async fn gh_prs_for_branch(repo_path: String, head: String) -> AppResult<Vec<PrInfo>> {
+pub async fn gh_prs_for_branch(
+    repo_path: String,
+    head: String,
+    lens: Option<String>,
+) -> AppResult<Vec<PrInfo>> {
     if head.is_empty() || head.starts_with('-') {
         return Err(AppError::InvalidArgument(format!("invalid branch: {head}")));
     }
-    // Pin the origin slug so this "does a PR exist for this branch?" check reads the
+    if lens.as_deref() == Some("upstream") {
+        let parent_slug = crate::github::gh_lens_slug(&repo_path, Some("upstream")).await?;
+        let origin_slug = crate::github::gh_lens_slug(&repo_path, None).await?;
+        let fork_owner = crate::github::fork_owner_of(&origin_slug);
+        // `head`/`owner`/`ref` are all `[A-Za-z0-9_./-]` (branch validated above),
+        // so they're query-safe interpolated literally into the endpoint.
+        let endpoint =
+            format!("repos/{parent_slug}/pulls?head={fork_owner}:{head}&state=open");
+        let out = run_gh(
+            Some(&repo_path),
+            &["api", "--method", "GET", &endpoint],
+            GH_TIMEOUT,
+        )
+        .await?;
+        let pulls: Vec<GhPrRestPull> = serde_json::from_str(&out.stdout_lossy())
+            .map_err(|e| AppError::Gh(format!("could not parse gh api pulls: {e}")))?;
+        return Ok(pulls.into_iter().map(rest_pull_to_pr_info).collect());
+    }
+    // Pin the resolved slug so this "does a PR exist for this branch?" check reads the
     // fork's own PRs (consistent with `gh_pr_list`), not the parent's.
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let out = run_gh(
         Some(&repo_path),
         &[
@@ -4051,15 +4191,34 @@ pub async fn gh_pr_create(
     draft: bool,
     labels: Vec<String>,
     assignees: Vec<String>,
+    lens: Option<String>,
 ) -> AppResult<PrRef> {
     // The command shell derefs the managed `State` to a plain `&AppState` and
     // delegates to the core, so off-Tauri callers (the MCP server, via
     // `forge_pr_create_core`) can create a PR with an `AppState` they own.
-    gh_pr_create_core(&state, repo_path, base, head, title, body, draft, labels, assignees).await
+    gh_pr_create_core(
+        &state, repo_path, base, head, title, body, draft, labels, assignees, lens,
+    )
+    .await
 }
 
 /// The body of [`gh_pr_create`], taking a plain `&AppState` so it is callable off
 /// the Tauri runtime (the MCP server routes here through `forge_pr_create_core`).
+///
+/// `lens` selects the target repo:
+/// - `None`/`Some("origin")`: a same-repo PR **on the fork itself**, created with
+///   an explicit `-R <origin-slug>`. This is a deliberate behavior change from
+///   Part A (#56): the create call used to be UNPINNED, so on a fork `gh` would
+///   auto-resolve to the PARENT — meaning `gh_prs_for_branch`/`gh_pr_list` checked
+///   the fork while create silently targeted upstream. Pinning origin here closes
+///   that disclosed asymmetry: origin lens = honest, explicit same-repo PR.
+/// - `Some("upstream")`: the real fork contribution flow — push `head` to origin
+///   (origin IS the fork), then `gh pr create -R <parent> --head <fork_owner>:<head>`.
+///   Labels/assignees/reviewers are rejected up front (v1 keeps the cross-repo
+///   create minimal; the post-create edit is skipped on this path). Per gh's own
+///   docs (`gh pr create --help`, verified 2026-07-16) the `<user>:<branch>` head
+///   form does NOT support an organization as `<user>` (cli/cli#10093); gh's error
+///   is the disclosure surface if the fork owner is an org.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn gh_pr_create_core(
     state: &AppState,
@@ -4071,12 +4230,68 @@ pub(crate) async fn gh_pr_create_core(
     draft: bool,
     labels: Vec<String>,
     assignees: Vec<String>,
+    lens: Option<String>,
 ) -> AppResult<PrRef> {
+    // Pre-mutation guards: every local precondition is checked BEFORE the push, so
+    // no remote mutation happens on an input we'd have rejected.
     validate_branch(&base)?;
     validate_branch(&head)?;
     if title.trim().is_empty() {
         return Err(AppError::InvalidArgument("a PR title is required".into()));
     }
+
+    let upstream = lens.as_deref() == Some("upstream");
+    if lens.is_some() && !matches!(lens.as_deref(), Some("origin") | Some("upstream")) {
+        // Validate the lens before any remote work, mirroring `gh_lens_slug`.
+        return Err(AppError::InvalidArgument(format!(
+            "unknown remote lens: {}",
+            lens.as_deref().unwrap_or_default()
+        )));
+    }
+
+    if upstream {
+        // v1: the cross-repo create is minimal — no post-create edit — so reject
+        // metadata up front rather than silently dropping it (pre-mutation guard).
+        reject_upstream_create_metadata(&labels, &assignees)?;
+        let parent_slug = crate::github::gh_lens_slug(&repo_path, Some("upstream")).await?;
+        let origin_slug = crate::github::gh_lens_slug(&repo_path, None).await?;
+        let fork_owner = crate::github::fork_owner_of(&origin_slug).to_string();
+
+        // Push `head` to origin — origin IS the fork; the PR's head lives there.
+        run_git_mutating(
+            state,
+            &repo_path,
+            &["push", "-u", "origin", &head],
+            NETWORK_TIMEOUT,
+        )
+        .await?;
+
+        let cross_head = format!("{fork_owner}:{head}");
+        let mut args = vec![
+            "pr",
+            "create",
+            "--repo",
+            &parent_slug,
+            "--base",
+            &base,
+            "--head",
+            &cross_head,
+            "--title",
+            &title,
+            "--body",
+            &body,
+        ];
+        if draft {
+            args.push("--draft");
+        }
+        let out = run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await?;
+        let (number, url) = scrape_pr_ref(&out.stdout_lossy());
+        return Ok(PrRef { number, url });
+    }
+
+    // Origin lens (default). Pin the origin slug so this is a same-repo PR on the
+    // fork, explicit and honest (see the doc comment above).
+    let origin_slug = crate::github::gh_lens_slug(&repo_path, None).await?;
 
     // gh can only open a PR for a branch that exists on the remote.
     run_git_mutating(
@@ -4088,7 +4303,18 @@ pub(crate) async fn gh_pr_create_core(
     .await?;
 
     let mut args = vec![
-        "pr", "create", "--base", &base, "--head", &head, "--title", &title, "--body", &body,
+        "pr",
+        "create",
+        "--repo",
+        &origin_slug,
+        "--base",
+        &base,
+        "--head",
+        &head,
+        "--title",
+        &title,
+        "--body",
+        &body,
     ];
     if draft {
         args.push("--draft");
@@ -4101,20 +4327,7 @@ pub(crate) async fn gh_pr_create_core(
     // each exactly once. (Reproduced empirically 2026-07-10.)
     let out = run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await?;
 
-    // gh prints the new PR's URL as its last stdout line.
-    let url = out
-        .stdout_lossy()
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|l| l.starts_with("http"))
-        .unwrap_or_default()
-        .to_string();
-    let number = url
-        .rsplit('/')
-        .next()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0);
+    let (number, url) = scrape_pr_ref(&out.stdout_lossy());
 
     // Apply labels + assignees once, post-create. Address the PR by NUMBER when the
     // URL scrape yielded one (unambiguous, and the only form `gh pr edit` accepts for
@@ -4122,14 +4335,15 @@ pub(crate) async fn gh_pr_create_core(
     // still never depends on the scrape succeeding (the old `gh pr create --label`
     // argv applied labels unconditionally; keep that guarantee). Values come from the
     // repo's own pickers, so they resolve; an unknown one would fail this edit AFTER
-    // the PR exists (surfaced, not silent).
+    // the PR exists (surfaced, not silent). Pinned to the origin slug to match the
+    // create call above.
     if !labels.is_empty() || !assignees.is_empty() {
         let pr_id = if number != 0 {
             number.to_string()
         } else {
             head.clone()
         };
-        let mut edit_args = vec!["pr", "edit", pr_id.as_str()];
+        let mut edit_args = vec!["pr", "edit", pr_id.as_str(), "--repo", &origin_slug];
         for label in &labels {
             edit_args.push("--add-label");
             edit_args.push(label);
@@ -4158,15 +4372,50 @@ pub(crate) async fn gh_pr_create_core(
     Ok(PrRef { number, url })
 }
 
+/// Pre-mutation guard for the upstream-lens PR create: the v1 cross-repo flow is
+/// minimal (no post-create `gh pr edit`), so any labels or assignees are rejected
+/// up front rather than silently dropped. Pure, so it's unit-testable and runs
+/// before the branch push. (Reviewers aren't a param here — the `forge_pr_create`
+/// dispatch rejects create-time reviewers for GitHub before reaching this core —
+/// but the message names them so the surface reads consistently.)
+fn reject_upstream_create_metadata(labels: &[String], assignees: &[String]) -> AppResult<()> {
+    if !labels.is_empty() || !assignees.is_empty() {
+        return Err(AppError::InvalidArgument(
+            "Labels, assignees, and reviewers aren't supported when creating a pull request on the upstream repository.".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Scrape the new PR's number + URL from `gh pr create` stdout (gh prints the URL
+/// as its last line). Shared by the origin and upstream create paths.
+fn scrape_pr_ref(stdout: &str) -> (u64, String) {
+    let url = stdout
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| l.starts_with("http"))
+        .unwrap_or_default()
+        .to_string();
+    let number = url
+        .rsplit('/')
+        .next()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    (number, url)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         host_from_url, is_diff_too_large, map_timeline_node, parse_actions_run_job,
-        parse_auth_accounts, parse_pr_url_repo, reconstruct_pr_diff, rest_comment_to_out,
-        rest_commit_to_out, rest_review_to_out, rollup_state_to_ci, split_commit_message, GhPrFile,
-        GhPrRestComment, GhPrRestCommit, GhPrRestCommitGitAuthor, GhPrRestCommitInner,
-        GhPrRestReview, PrTimelineEventOut, RawLogin,
+        parse_auth_accounts, parse_pr_url_repo, reconstruct_pr_diff,
+        reject_upstream_create_metadata, rest_comment_to_out, rest_commit_to_out,
+        rest_pull_to_pr_info, rest_review_to_out, rollup_state_to_ci, scrape_pr_ref,
+        split_commit_message, GhPrFile, GhPrRestComment, GhPrRestCommit, GhPrRestCommitGitAuthor,
+        GhPrRestCommitInner, GhPrRestPull, GhPrRestReview, PrTimelineEventOut, RawLogin,
     };
+    use crate::error::AppError;
 
     fn file(status: &str, filename: &str, patch: Option<&str>) -> GhPrFile {
         GhPrFile {
@@ -4640,5 +4889,79 @@ github.acme.com
         // An unrecognized/missing __typename is skipped (None), not a panic.
         assert!(node(serde_json::json!({ "__typename": "SomeOtherEvent" })).is_none());
         assert!(node(serde_json::json!({ "actor": {"login": "a"} })).is_none());
+    }
+
+    #[test]
+    fn rest_pull_maps_onto_pr_info_as_open() {
+        // A REST `GET /repos/{parent}/pulls?head=…&state=open` item, matching the
+        // shape verified live against biomejs/biome#10965. Only the compare-panel
+        // probe's fields need to survive the mapping; state is "OPEN" by construction.
+        let raw: GhPrRestPull = serde_json::from_value(serde_json::json!({
+            "number": 10965,
+            "html_url": "https://github.com/biomejs/biome/pull/10965",
+            "title": "feat: resolve globals from d.ts",
+            "base": { "ref": "main" },
+            "head": { "ref": "feat/resolve-globals-from-dts" },
+            "draft": false,
+        }))
+        .expect("REST pull fixture deserializes");
+        let info = rest_pull_to_pr_info(raw);
+        assert_eq!(info.number, 10965);
+        assert_eq!(info.url, "https://github.com/biomejs/biome/pull/10965");
+        assert_eq!(info.title, "feat: resolve globals from d.ts");
+        assert_eq!(info.base_ref_name, "main");
+        assert_eq!(info.head_ref_name, "feat/resolve-globals-from-dts");
+        assert!(!info.is_draft);
+        // Open by construction → the same casing gh's `--json state` emits, so the
+        // frontend's `pr.state === "OPEN"` checks fire identically on this path.
+        assert_eq!(info.state, "OPEN");
+    }
+
+    #[test]
+    fn rest_pull_tolerates_missing_optional_fields_and_draft() {
+        // A draft PR with an absent title (tolerant serde: defaults to "").
+        let raw: GhPrRestPull = serde_json::from_value(serde_json::json!({
+            "number": 7,
+            "html_url": "https://github.com/o/r/pull/7",
+            "base": { "ref": "trunk" },
+            "head": { "ref": "wip" },
+            "draft": true,
+        }))
+        .expect("draft REST pull fixture deserializes");
+        let info = rest_pull_to_pr_info(raw);
+        assert_eq!(info.title, "");
+        assert!(info.is_draft);
+        assert_eq!(info.state, "OPEN");
+    }
+
+    #[test]
+    fn upstream_create_rejects_labels_or_assignees() {
+        let label = vec!["bug".to_string()];
+        let assignee = vec!["octocat".to_string()];
+        // Empty metadata is allowed on the upstream path.
+        assert!(reject_upstream_create_metadata(&[], &[]).is_ok());
+        // A non-empty label OR assignee list is rejected (pre-mutation, no push).
+        for (labels, assignees) in [
+            (label.as_slice(), [].as_slice()),
+            ([].as_slice(), assignee.as_slice()),
+            (label.as_slice(), assignee.as_slice()),
+        ] {
+            let err = reject_upstream_create_metadata(labels, assignees).unwrap_err();
+            assert!(
+                matches!(err, AppError::InvalidArgument(_)),
+                "expected InvalidArgument, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn scrape_pr_ref_reads_the_last_url_line() {
+        // gh prints the new PR's URL as the last stdout line.
+        let (number, url) =
+            scrape_pr_ref("Warning: something\nhttps://github.com/o/r/pull/42\n");
+        assert_eq!(number, 42);
+        assert_eq!(url, "https://github.com/o/r/pull/42");
+        // No URL line → number 0, empty url (create still returns Ok elsewhere).
+        assert_eq!(scrape_pr_ref("no url here"), (0, String::new()));
     }
 }

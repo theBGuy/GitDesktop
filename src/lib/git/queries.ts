@@ -43,6 +43,7 @@ import type {
   PrInfo,
   PrThreadOut,
   Reaction,
+  RemoteLens,
   RepoOp,
   RepoRole,
   RepoSettingsInput,
@@ -852,10 +853,11 @@ export function usePrsForBranch(
   repo: string,
   head: string | null,
   enabled: boolean,
+  lens: RemoteLens,
 ) {
   return useQuery({
-    queryKey: ["repo", repo, "prs", head ?? ""] as const,
-    queryFn: () => api.forgePrsForBranch(repo, head ?? ""),
+    queryKey: ["repo", repo, "prs", lens, head ?? ""] as const,
+    queryFn: () => api.forgePrsForBranch(repo, head ?? "", lens),
     enabled: enabled && head !== null,
     staleTime: 30_000,
   });
@@ -865,11 +867,12 @@ export function usePrList(
   repo: string,
   enabled: boolean,
   state: api.PrStateFilter,
-  limit?: number,
+  limit: number | undefined,
+  lens: RemoteLens,
 ) {
   return useQuery({
-    queryKey: ["repo", repo, "pr-list", state, limit ?? null] as const,
-    queryFn: () => api.forgePrList(repo, state, limit),
+    queryKey: ["repo", repo, "pr-list", lens, state, limit ?? null] as const,
+    queryFn: () => api.forgePrList(repo, state, limit, lens),
     enabled,
     staleTime: 30_000,
     // Growing the limit ("Load more") keeps the current rows visible instead of
@@ -893,12 +896,14 @@ export function usePrListCi(
   state: api.PrStateFilter,
   limit: number | undefined,
   prs: PrInfo[] | undefined,
+  lens: RemoteLens,
 ) {
   return useQuery({
     queryKey: [
       "repo",
       repo,
       "pr-ci",
+      lens,
       state,
       limit ?? null,
       prs?.map((p) => p.number).join(",") ?? "",
@@ -906,6 +911,10 @@ export function usePrListCi(
     queryFn: async () => {
       // `enabled` guarantees a non-empty list here; `prs![0]` is safe.
       const list = prs as PrInfo[];
+      // No lens arg on the api call: `sampleUrl` (list[0].url) already pins which
+      // repo these numbers belong to, so the CI rollup is fork/parent-correct by
+      // construction. The lens rides the key only, so the fork's and parent's
+      // rollups never collide in the cache.
       const rows = await api.forgePrListCi(
         repo,
         list.map((p) => ({ number: p.number, headSha: p.headSha })),
@@ -920,10 +929,14 @@ export function usePrListCi(
   });
 }
 
-export function useRepoLabels(repo: string, enabled: boolean) {
+export function useRepoLabels(
+  repo: string,
+  enabled: boolean,
+  lens: RemoteLens,
+) {
   return useQuery({
-    queryKey: ["repo", repo, "labels"] as const,
-    queryFn: () => api.forgeRepoLabels(repo),
+    queryKey: ["repo", repo, "labels", lens] as const,
+    queryFn: () => api.forgeRepoLabels(repo, lens),
     enabled,
     staleTime: 5 * 60_000,
   });
@@ -932,31 +945,39 @@ export function useRepoLabels(repo: string, enabled: boolean) {
 // Shared definitions so the hook and the prefetch path stay in sync. A short
 // stale window makes a hover-prefetched PR open with no extra round-trip; the
 // window-focus refetch still keeps an open PR current.
-const prDetailsOptions = (repo: string, number: number) =>
+const prDetailsOptions = (repo: string, number: number, lens: RemoteLens) =>
   queryOptions({
-    queryKey: ["repo", repo, "pr", number] as const,
-    queryFn: () => api.forgePrView(repo, number),
+    queryKey: ["repo", repo, "pr", lens, number] as const,
+    queryFn: () => api.forgePrView(repo, number, lens),
     staleTime: 30_000,
   });
 
-export const prDiffOptions = (repo: string, number: number) =>
+export const prDiffOptions = (repo: string, number: number, lens: RemoteLens) =>
   queryOptions({
-    queryKey: ["repo", repo, "pr", number, "diff"] as const,
-    queryFn: () => api.forgePrDiff(repo, number),
+    queryKey: ["repo", repo, "pr", lens, number, "diff"] as const,
+    queryFn: () => api.forgePrDiff(repo, number, lens),
     staleTime: 30_000,
   });
 
-export function usePrDetails(repo: string, number: number | null) {
+export function usePrDetails(
+  repo: string,
+  number: number | null,
+  lens: RemoteLens,
+) {
   return useQuery({
-    ...prDetailsOptions(repo, number ?? 0),
+    ...prDetailsOptions(repo, number ?? 0, lens),
     enabled: number !== null,
     placeholderData: keepPreviousDataForRepo(repo),
   });
 }
 
-export function usePrDiff(repo: string, number: number | null) {
+export function usePrDiff(
+  repo: string,
+  number: number | null,
+  lens: RemoteLens,
+) {
   return useQuery({
-    ...prDiffOptions(repo, number ?? 0),
+    ...prDiffOptions(repo, number ?? 0, lens),
     enabled: number !== null,
     placeholderData: keepPreviousDataForRepo(repo),
   });
@@ -965,13 +986,20 @@ export function usePrDiff(repo: string, number: number | null) {
 // File:line-anchored review threads (Copilot/CodeRabbit/human line comments); the
 // data serves both the Conversation grouping and the Files diff anchors, so it
 // lives at the PR top level.
-export const prReviewThreadsKey = (repo: string, number: number) =>
-  ["repo", repo, "pr", number, "review-threads"] as const;
+export const prReviewThreadsKey = (
+  repo: string,
+  number: number,
+  lens: RemoteLens,
+) => ["repo", repo, "pr", lens, number, "review-threads"] as const;
 
-export function usePrReviewThreads(repo: string, number: number | null) {
+export function usePrReviewThreads(
+  repo: string,
+  number: number | null,
+  lens: RemoteLens,
+) {
   return useQuery({
-    queryKey: prReviewThreadsKey(repo, number ?? 0),
-    queryFn: () => api.forgePrReviewThreads(repo, number ?? 0),
+    queryKey: prReviewThreadsKey(repo, number ?? 0, lens),
+    queryFn: () => api.forgePrReviewThreads(repo, number ?? 0, lens),
     staleTime: 30_000,
     // Gate on `number !== null` alone, exactly like usePrDetails/usePrReactions.
     // A transient gh status-probe failure (useForgeStatus has retry:false) leaves
@@ -1022,9 +1050,12 @@ export function usePrCommitDiff(
   repo: string,
   number: number,
   oid: string | null,
+  lens: RemoteLens,
 ) {
   return useQuery({
-    queryKey: ["repo", repo, "pr", number, "commit-diff", oid] as const,
+    // The diff itself is sha-addressed (forgePrCommitDiff takes no lens), but the
+    // PARENT PR this attaches to is lens-scoped, so the lens rides the key.
+    queryKey: ["repo", repo, "pr", lens, number, "commit-diff", oid] as const,
     queryFn: () => api.forgePrCommitDiff(repo, number, oid ?? ""),
     enabled: oid !== null,
     staleTime: 30_000,
@@ -1032,11 +1063,17 @@ export function usePrCommitDiff(
 }
 
 /** Comments on a commit (GitHub commit comments / GitLab commit notes). Pass
- *  `sha: null` when no commit is selected so the read doesn't fire. */
-export function useCommitComments(repo: string, sha: string | null) {
+ *  `sha: null` when no commit is selected so the read doesn't fire. The `lens`
+ *  scopes which repo the commit's comments come from — "origin" from the History
+ *  surface, the live lens inside the PR-commit review context. */
+export function useCommitComments(
+  repo: string,
+  sha: string | null,
+  lens: RemoteLens,
+) {
   return useQuery({
-    queryKey: ["repo", repo, "commit", sha, "comments"] as const,
-    queryFn: () => api.forgeCommitComments(repo, sha ?? ""),
+    queryKey: commitCommentsKey(repo, sha ?? "", lens),
+    queryFn: () => api.forgeCommitComments(repo, sha ?? "", lens),
     enabled: sha !== null,
     staleTime: 30_000,
   });
@@ -1068,8 +1105,8 @@ export function useRemoteCommitDiff(repo: string, sha: string | null) {
   });
 }
 
-const commitCommentsKey = (repo: string, sha: string) =>
-  ["repo", repo, "commit", sha, "comments"] as const;
+const commitCommentsKey = (repo: string, sha: string, lens: RemoteLens) =>
+  ["repo", repo, "commit", sha, "comments", lens] as const;
 
 /**
  * The shared skeleton behind every optimistic-cache mutation in this file:
@@ -1142,7 +1179,7 @@ function useOptimisticCacheMutation<TArgs, TData, TCache>(
  * key's cache; onSettled keeps the repo-wide invalidation as server-truth
  * reconciliation.
  */
-export function useCreateCommitComment(repo: string) {
+export function useCreateCommitComment(repo: string, lens: RemoteLens) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (args: {
@@ -1152,7 +1189,7 @@ export function useCreateCommitComment(repo: string) {
       line?: number;
       startLine?: number;
       position?: number;
-    }) => api.forgeCommitCommentCreate(repo, args),
+    }) => api.forgeCommitCommentCreate(repo, args, lens),
     onMutate: async (args: {
       sha: string;
       body: string;
@@ -1161,7 +1198,7 @@ export function useCreateCommitComment(repo: string) {
       startLine?: number;
       position?: number;
     }) => {
-      const key = commitCommentsKey(repo, args.sha);
+      const key = commitCommentsKey(repo, args.sha, lens);
       await queryClient.cancelQueries({ queryKey: key });
       const prev = queryClient.getQueryData<CommitCommentOut[]>(key);
       // The viewer's login is read from the already-cached forge status (no fetch);
@@ -1204,6 +1241,7 @@ export function useCreateCommitComment(repo: string) {
  */
 function useOptimisticCommitCommentMutation<TData>(
   repo: string,
+  lens: RemoteLens,
   mutationFn: (args: {
     sha: string;
     commentId: string;
@@ -1220,7 +1258,7 @@ function useOptimisticCommitCommentMutation<TData>(
     CommitCommentOut[]
   >(
     mutationFn,
-    (args) => commitCommentsKey(repo, args.sha),
+    (args) => commitCommentsKey(repo, args.sha, lens),
     (list, args) =>
       list?.flatMap((c) => {
         if (c.id !== args.commentId) return [c];
@@ -1232,9 +1270,10 @@ function useOptimisticCommitCommentMutation<TData>(
   );
 }
 
-export function useEditCommitComment(repo: string) {
+export function useEditCommitComment(repo: string, lens: RemoteLens) {
   return useOptimisticCommitCommentMutation(
     repo,
+    lens,
     (args: { sha: string; commentId: string; body?: string }) =>
       api.forgeCommitCommentEdit(repo, {
         sha: args.sha,
@@ -1245,9 +1284,10 @@ export function useEditCommitComment(repo: string) {
   );
 }
 
-export function useDeleteCommitComment(repo: string) {
+export function useDeleteCommitComment(repo: string, lens: RemoteLens) {
   return useOptimisticCommitCommentMutation(
     repo,
+    lens,
     (args: { sha: string; commentId: string }) =>
       api.forgeCommitCommentDelete(repo, {
         sha: args.sha,
@@ -1266,7 +1306,7 @@ export function useDeleteCommitComment(repo: string) {
  * the reconciliation refetch replaces it); onSettled keeps the repo-wide
  * invalidation as server-truth reconciliation.
  */
-export function useCreateReviewThread(repo: string) {
+export function useCreateReviewThread(repo: string, lens: RemoteLens) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (args: {
@@ -1276,7 +1316,7 @@ export function useCreateReviewThread(repo: string) {
       side: "new" | "old";
       startLine?: number;
       body: string;
-    }) => api.forgePrThreadCreate(repo, args),
+    }) => api.forgePrThreadCreate(repo, args, lens),
     onMutate: async (args: {
       number: number;
       path: string;
@@ -1285,7 +1325,7 @@ export function useCreateReviewThread(repo: string) {
       startLine?: number;
       body: string;
     }) => {
-      const key = prReviewThreadsKey(repo, args.number);
+      const key = prReviewThreadsKey(repo, args.number, lens);
       await queryClient.cancelQueries({ queryKey: key });
       const prev = queryClient.getQueryData<ReviewThreadOut[]>(key);
       const login = queryClient.getQueryData<ForgeStatus>([
@@ -1339,7 +1379,7 @@ export function useCreateReviewThread(repo: string) {
  *  optimistic — on some providers it fans out to several calls, so it just
  *  invalidates the repo subtree on success and returns the {@link ReviewSubmitOut}
  *  so the caller can toast the posted/total counts. */
-export function useSubmitReview(repo: string) {
+export function useSubmitReview(repo: string, lens: RemoteLens) {
   return useRepoMutation(
     repo,
     (args: {
@@ -1347,25 +1387,29 @@ export function useSubmitReview(repo: string) {
       verdict: api.ReviewVerdict;
       summary?: string;
       comments: DraftCommentIn[];
-    }) => api.forgePrReviewSubmit(repo, args),
+    }) => api.forgePrReviewSubmit(repo, args, lens),
   );
 }
 
-export function useThreadReply(repo: string, number: number) {
+export function useThreadReply(repo: string, number: number, lens: RemoteLens) {
   return useRepoMutation(
     repo,
     (args: { threadId: string; body: string }) =>
       api.forgePrThreadReply(repo, number, args.threadId, args.body),
-    { invalidate: [prReviewThreadsKey(repo, number)] },
+    { invalidate: [prReviewThreadsKey(repo, number, lens)] },
   );
 }
 
-export function useThreadResolve(repo: string, number: number) {
+export function useThreadResolve(
+  repo: string,
+  number: number,
+  lens: RemoteLens,
+) {
   return useRepoMutation(
     repo,
     (args: { threadId: string; resolved: boolean }) =>
       api.forgePrThreadResolve(repo, number, args.threadId, args.resolved),
-    { invalidate: [prReviewThreadsKey(repo, number)] },
+    { invalidate: [prReviewThreadsKey(repo, number, lens)] },
   );
 }
 
@@ -1374,23 +1418,27 @@ export function useThreadResolve(repo: string, number: number) {
  * comes over the network (the slowest loads in the app), so prefetching on row
  * hover and for the adjacent rows pays off most here.
  */
-export function usePrefetchPr(repo: string) {
+export function usePrefetchPr(repo: string, lens: RemoteLens) {
   const queryClient = useQueryClient();
   return useCallback(
     (number: number) => {
-      queryClient.prefetchQuery(prDetailsOptions(repo, number));
-      queryClient.prefetchQuery(prDiffOptions(repo, number));
+      queryClient.prefetchQuery(prDetailsOptions(repo, number, lens));
+      queryClient.prefetchQuery(prDiffOptions(repo, number, lens));
     },
-    [queryClient, repo],
+    [queryClient, repo, lens],
   );
 }
 
 /** Reactions for a PR's body + comments — decoupled from the PR view so it
  *  loads in parallel and leaves the (untouched) PR query alone. */
-export function usePrReactions(repo: string, number: number | null) {
+export function usePrReactions(
+  repo: string,
+  number: number | null,
+  lens: RemoteLens,
+) {
   return useQuery({
-    queryKey: ["repo", repo, "pr", number ?? 0, "reactions"] as const,
-    queryFn: () => api.forgePrReactions(repo, number ?? 0),
+    queryKey: ["repo", repo, "pr", lens, number ?? 0, "reactions"] as const,
+    queryFn: () => api.forgePrReactions(repo, number ?? 0, lens),
     enabled: number !== null,
     staleTime: 30_000,
   });
@@ -1405,10 +1453,11 @@ export function usePrTimeline(
   repoPath: string,
   number: number,
   enabled: boolean,
+  lens: RemoteLens,
 ) {
   return useQuery({
-    queryKey: ["repo", repoPath, "pr", number, "timeline"] as const,
-    queryFn: () => api.forgePrTimeline(repoPath, number),
+    queryKey: ["repo", repoPath, "pr", lens, number, "timeline"] as const,
+    queryFn: () => api.forgePrTimeline(repoPath, number, lens),
     enabled,
     staleTime: 30_000,
   });
@@ -1418,11 +1467,12 @@ export function useIssueList(
   repo: string,
   enabled: boolean,
   state: api.IssueStateFilter,
-  limit?: number,
+  limit: number | undefined,
+  lens: RemoteLens,
 ) {
   return useQuery({
-    queryKey: ["repo", repo, "issue-list", state, limit ?? null] as const,
-    queryFn: () => api.forgeIssueList(repo, state, limit),
+    queryKey: ["repo", repo, "issue-list", lens, state, limit ?? null] as const,
+    queryFn: () => api.forgeIssueList(repo, state, limit, lens),
     enabled,
     staleTime: 30_000,
     // issuesDisabled is a permanent repo condition — retrying only delays the notice.
@@ -1433,16 +1483,20 @@ export function useIssueList(
   });
 }
 
-const issueDetailsOptions = (repo: string, number: number) =>
+const issueDetailsOptions = (repo: string, number: number, lens: RemoteLens) =>
   queryOptions({
-    queryKey: ["repo", repo, "issue", number] as const,
-    queryFn: () => api.forgeIssueView(repo, number),
+    queryKey: ["repo", repo, "issue", lens, number] as const,
+    queryFn: () => api.forgeIssueView(repo, number, lens),
     staleTime: 30_000,
   });
 
-export function useIssueDetails(repo: string, number: number | null) {
+export function useIssueDetails(
+  repo: string,
+  number: number | null,
+  lens: RemoteLens,
+) {
   return useQuery({
-    ...issueDetailsOptions(repo, number ?? 0),
+    ...issueDetailsOptions(repo, number ?? 0, lens),
     enabled: number !== null,
     placeholderData: keepPreviousDataForRepo(repo),
   });
@@ -1450,17 +1504,17 @@ export function useIssueDetails(repo: string, number: number | null) {
 
 /** Warms an issue's view so opening it from the list is instant (hover/adjacent
  *  rows), mirroring {@link usePrefetchPr}. */
-export function usePrefetchIssue(repo: string) {
+export function usePrefetchIssue(repo: string, lens: RemoteLens) {
   const queryClient = useQueryClient();
   return useCallback(
     (number: number) => {
-      queryClient.prefetchQuery(issueDetailsOptions(repo, number));
+      queryClient.prefetchQuery(issueDetailsOptions(repo, number, lens));
     },
-    [queryClient, repo],
+    [queryClient, repo, lens],
   );
 }
 
-export function useCreateIssue(repo: string) {
+export function useCreateIssue(repo: string, lens: RemoteLens) {
   return useRepoMutation(
     repo,
     (args: {
@@ -1479,23 +1533,32 @@ export function useCreateIssue(repo: string) {
         args.assignees,
         args.milestone,
         args.type,
+        lens,
       ),
   );
 }
 
-export function useAssignableUsers(repo: string, enabled: boolean) {
+export function useAssignableUsers(
+  repo: string,
+  enabled: boolean,
+  lens: RemoteLens,
+) {
   return useQuery({
-    queryKey: ["repo", repo, "assignable-users"] as const,
-    queryFn: () => api.forgeAssignableUsers(repo),
+    queryKey: ["repo", repo, "assignable-users", lens] as const,
+    queryFn: () => api.forgeAssignableUsers(repo, lens),
     enabled,
     staleTime: 5 * 60_000,
   });
 }
 
-export function useMilestones(repo: string, enabled: boolean) {
+export function useMilestones(
+  repo: string,
+  enabled: boolean,
+  lens: RemoteLens,
+) {
   return useQuery({
-    queryKey: ["repo", repo, "milestones"] as const,
-    queryFn: () => api.forgeMilestones(repo),
+    queryKey: ["repo", repo, "milestones", lens] as const,
+    queryFn: () => api.forgeMilestones(repo, lens),
     enabled,
     staleTime: 5 * 60_000,
   });
@@ -1522,6 +1585,7 @@ function changedKeys<T extends object>(prev: T, next: T): (keyof T)[] {
 
 function useOptimisticIssueMutation<TArgs extends { number: number }, TData>(
   repo: string,
+  lens: RemoteLens,
   mutationFn: (args: TArgs) => Promise<TData>,
   patch: (issue: IssueDetails, args: TArgs) => IssueDetails,
 ) {
@@ -1529,7 +1593,7 @@ function useOptimisticIssueMutation<TArgs extends { number: number }, TData>(
   return useMutation({
     mutationFn,
     onMutate: async (args: TArgs) => {
-      const key = ["repo", repo, "issue", args.number] as const;
+      const key = ["repo", repo, "issue", lens, args.number] as const;
       await queryClient.cancelQueries({ queryKey: key });
       const prev = queryClient.getQueryData<IssueDetails>(key);
       if (!prev) return { key, restore: undefined };
@@ -1551,36 +1615,40 @@ function useOptimisticIssueMutation<TArgs extends { number: number }, TData>(
         cur ? { ...cur, ...ctx.restore } : cur,
       );
     },
-    // Narrow reconciliation: only the one issue's detail subtree (not repo-wide).
+    // Narrow reconciliation: only the one issue's detail subtree (not repo-wide),
+    // scoped to the lens the mutation ran under.
     onSettled: (_d, _e, args) =>
       void queryClient.invalidateQueries({
-        queryKey: ["repo", repo, "issue", args.number],
+        queryKey: ["repo", repo, "issue", lens, args.number],
       }),
   });
 }
 
-export function useSetIssueAssignees(repo: string) {
+export function useSetIssueAssignees(repo: string, lens: RemoteLens) {
   return useOptimisticIssueMutation(
     repo,
+    lens,
     (args: { number: number; assignees: ForgeUserRef[] }) =>
       api.forgeIssueSetAssignees(
         repo,
         args.number,
         args.assignees.map((a) => a.id),
+        lens,
       ),
     (issue, args) => ({ ...issue, assignees: args.assignees }),
   );
 }
 
-export function useSetIssueMilestone(repo: string) {
+export function useSetIssueMilestone(repo: string, lens: RemoteLens) {
   return useOptimisticIssueMutation(
     repo,
+    lens,
     (args: {
       number: number;
       milestone: number | null;
       /** Title for the optimistic chip (backend takes only the number). */
       title?: string | null;
-    }) => api.forgeIssueSetMilestone(repo, args.number, args.milestone),
+    }) => api.forgeIssueSetMilestone(repo, args.number, args.milestone, lens),
     (issue, args) => ({
       ...issue,
       milestone:
@@ -1592,20 +1660,24 @@ export function useSetIssueMilestone(repo: string) {
 }
 
 /** Toggle an issue's GitLab-only confidential flag, with the optimistic
- *  cache patch every other issue-field mutation uses. */
+ *  cache patch every other issue-field mutation uses. GitLab-only, so it only
+ *  ever runs under the origin lens (the switcher is GitHub-only). */
 export function useSetIssueConfidential(repo: string) {
   return useOptimisticIssueMutation(
     repo,
+    "origin",
     (args: { number: number; confidential: boolean }) =>
       api.forgeGlIssueSetConfidential(repo, args.number, args.confidential),
     (issue, args) => ({ ...issue, confidential: args.confidential }),
   );
 }
 
-/** Set ("YYYY-MM-DD") or clear (null) an issue's GitLab-only due date. */
+/** Set ("YYYY-MM-DD") or clear (null) an issue's GitLab-only due date. GitLab-only,
+ *  so it only ever runs under the origin lens. */
 export function useSetIssueDueDate(repo: string) {
   return useOptimisticIssueMutation(
     repo,
+    "origin",
     (args: { number: number; dueDate: string | null }) =>
       api.forgeGlIssueSetDueDate(repo, args.number, args.dueDate),
     (issue, args) => ({ ...issue, dueDate: args.dueDate }),
@@ -1614,10 +1686,14 @@ export function useSetIssueDueDate(repo: string) {
 
 // ── GitLab time tracking + related issues ────────────────────────────────────
 
+// GitLab-only time-tracking / links keys. These surfaces are GitLab-only and the
+// lens switcher is GitHub-only, so they always live under the "origin" lens
+// segment — baked in so they stay nested under the (lens-scoped) issue/MR detail
+// subtree that repoKeys.all + the details refetch reconcile.
 const issueTimeStatsKey = (repo: string, number: number) =>
-  ["repo", repo, "issue", number, "time-stats"] as const;
+  ["repo", repo, "issue", "origin", number, "time-stats"] as const;
 const mrTimeStatsKey = (repo: string, number: number) =>
-  ["repo", repo, "pr", number, "time-stats"] as const;
+  ["repo", repo, "pr", "origin", number, "time-stats"] as const;
 
 /** An issue's GitLab time-tracking stats (estimate + spent). Pass `null` when
  *  the section isn't shown so the read doesn't fire. */
@@ -1676,10 +1752,11 @@ function useTimeTrackingMutation(
   });
 }
 
+// GitLab-only time-tracking view keys — see issueTimeStatsKey: pinned to "origin".
 const issueViewKey = (repo: string, number: number) =>
-  ["repo", repo, "issue", number] as const;
+  ["repo", repo, "issue", "origin", number] as const;
 const mrViewKey = (repo: string, number: number) =>
-  ["repo", repo, "pr", number] as const;
+  ["repo", repo, "pr", "origin", number] as const;
 
 export function useSetIssueTimeEstimate(repo: string) {
   return useTimeTrackingMutation(
@@ -1711,8 +1788,9 @@ export function useAddMrSpentTime(repo: string) {
   );
 }
 
+// GitLab-only related-issue links key — pinned to "origin" (see issueTimeStatsKey).
 const issueLinksKey = (repo: string, number: number) =>
-  ["repo", repo, "issue", number, "links"] as const;
+  ["repo", repo, "issue", "origin", number, "links"] as const;
 
 /** An issue's GitLab related-issue links. Pass `null` when the section isn't
  *  shown so the read doesn't fire. */
@@ -1758,25 +1836,30 @@ export function useUnlinkIssue(repo: string) {
   });
 }
 
-export function useIssueTypes(repo: string, enabled: boolean) {
+export function useIssueTypes(
+  repo: string,
+  enabled: boolean,
+  lens: RemoteLens,
+) {
   return useQuery({
-    queryKey: ["repo", repo, "issue-types"] as const,
-    queryFn: () => api.ghIssueTypes(repo),
+    queryKey: ["repo", repo, "issue-types", lens] as const,
+    queryFn: () => api.ghIssueTypes(repo, lens),
     enabled,
     staleTime: 5 * 60_000,
     retry: false,
   });
 }
 
-export function useSetIssueType(repo: string) {
+export function useSetIssueType(repo: string, lens: RemoteLens) {
   return useOptimisticIssueMutation(
     repo,
+    lens,
     (args: {
       number: number;
       typeName: string | null;
       /** The full type for the optimistic patch (backend takes only the name). */
       type?: IssueType | null;
-    }) => api.ghIssueSetType(repo, args.number, args.typeName),
+    }) => api.ghIssueSetType(repo, args.number, args.typeName, lens),
     (issue, args) => ({ ...issue, issueType: args.type ?? null }),
   );
 }
@@ -1795,6 +1878,7 @@ export function useSetIssueType(repo: string) {
  */
 function useIssueLifecycleMutation<TArgs, TData>(
   repo: string,
+  lens: RemoteLens,
   mutationFn: (args: TArgs) => Promise<TData>,
   numberOf: (args: TArgs) => number,
 ) {
@@ -1804,47 +1888,54 @@ function useIssueLifecycleMutation<TArgs, TData>(
     onSettled: (_d, _e, args) =>
       void Promise.all([
         queryClient.invalidateQueries({
-          queryKey: ["repo", repo, "issue-list"],
+          queryKey: ["repo", repo, "issue-list", lens],
         }),
         queryClient.invalidateQueries({
-          queryKey: ["repo", repo, "issue", numberOf(args)],
+          queryKey: ["repo", repo, "issue", lens, numberOf(args)],
         }),
       ]),
   });
 }
 
-export function usePinIssue(repo: string) {
+export function usePinIssue(repo: string, lens: RemoteLens) {
   return useIssueLifecycleMutation(
     repo,
+    lens,
     (args: { number: number; pinned: boolean }) =>
       args.pinned
-        ? api.ghIssuePin(repo, args.number)
-        : api.ghIssueUnpin(repo, args.number),
+        ? api.ghIssuePin(repo, args.number, lens)
+        : api.ghIssueUnpin(repo, args.number, lens),
     (args) => args.number,
   );
 }
 
-export function useLockIssue(repo: string) {
+export function useLockIssue(repo: string, lens: RemoteLens) {
   return useIssueLifecycleMutation(
     repo,
+    lens,
     (args: { number: number; reason: api.LockReason | null }) =>
-      api.forgeIssueLock(repo, args.number, args.reason),
+      api.forgeIssueLock(repo, args.number, args.reason, lens),
     (args) => args.number,
   );
 }
 
-export function useUnlockIssue(repo: string) {
+export function useUnlockIssue(repo: string, lens: RemoteLens) {
   return useIssueLifecycleMutation(
     repo,
-    (number: number) => api.forgeIssueUnlock(repo, number),
+    lens,
+    (number: number) => api.forgeIssueUnlock(repo, number, lens),
     (number) => number,
   );
 }
 
-export function useIssueReactions(repo: string, number: number | null) {
+export function useIssueReactions(
+  repo: string,
+  number: number | null,
+  lens: RemoteLens,
+) {
   return useQuery({
-    queryKey: ["repo", repo, "issue", number ?? 0, "reactions"] as const,
-    queryFn: () => api.forgeIssueReactions(repo, number ?? 0),
+    queryKey: ["repo", repo, "issue", lens, number ?? 0, "reactions"] as const,
+    queryFn: () => api.forgeIssueReactions(repo, number ?? 0, lens),
     enabled: number !== null,
     staleTime: 30_000,
   });
@@ -2152,100 +2243,131 @@ export function useDiscussionReactions(repo: string, number: number | null) {
   });
 }
 
-export function useCommentIssue(repo: string) {
-  return useOptimisticCreateCommentMutation(repo, "issue", (args) =>
-    api.forgeIssueComment(repo, args.number, args.body),
+export function useCommentIssue(repo: string, lens: RemoteLens) {
+  return useOptimisticCreateCommentMutation(repo, "issue", lens, (args) =>
+    api.forgeIssueComment(repo, args.number, args.body, lens),
   );
 }
 
-export function useCloseIssue(repo: string) {
+export function useCloseIssue(repo: string, lens: RemoteLens) {
   return useIssueLifecycleMutation(
     repo,
+    lens,
     (args: { number: number; reason: string }) =>
-      api.forgeIssueClose(repo, args.number, args.reason),
+      api.forgeIssueClose(repo, args.number, args.reason, lens),
     (args) => args.number,
   );
 }
 
-export function useReopenIssue(repo: string) {
+export function useReopenIssue(repo: string, lens: RemoteLens) {
   return useIssueLifecycleMutation(
     repo,
-    (number: number) => api.forgeIssueReopen(repo, number),
+    lens,
+    (number: number) => api.forgeIssueReopen(repo, number, lens),
     (number) => number,
   );
 }
 
-export function useEditIssue(repo: string) {
+export function useEditIssue(repo: string, lens: RemoteLens) {
   return useIssueLifecycleMutation(
     repo,
+    lens,
     (args: { number: number; title: string; body: string }) =>
-      api.forgeIssueEdit(repo, args.number, args.title, args.body),
+      api.forgeIssueEdit(repo, args.number, args.title, args.body, lens),
     (args) => args.number,
   );
 }
 
-export function useTransferIssue(repo: string) {
+export function useTransferIssue(repo: string, lens: RemoteLens) {
   return useIssueLifecycleMutation(
     repo,
+    lens,
     (args: { number: number; destination: string }) =>
-      api.forgeIssueTransfer(repo, args.number, args.destination),
+      api.forgeIssueTransfer(repo, args.number, args.destination, lens),
     (args) => args.number,
   );
 }
 
-export function useDeleteIssue(repo: string) {
+export function useDeleteIssue(repo: string, lens: RemoteLens) {
   return useIssueLifecycleMutation(
     repo,
-    (number: number) => api.forgeIssueDelete(repo, number),
+    lens,
+    (number: number) => api.forgeIssueDelete(repo, number, lens),
     (number) => number,
   );
 }
 
 /** An issue's parent + sub-issues, loaded alongside the conversation. */
-export function useIssueRelations(repo: string, number: number | null) {
+export function useIssueRelations(
+  repo: string,
+  number: number | null,
+  lens: RemoteLens,
+) {
   return useQuery({
-    queryKey: ["repo", repo, "issue", number ?? 0, "relations"] as const,
-    queryFn: () => api.ghIssueRelations(repo, number ?? 0),
+    queryKey: ["repo", repo, "issue", lens, number ?? 0, "relations"] as const,
+    queryFn: () => api.ghIssueRelations(repo, number ?? 0, lens),
     enabled: number !== null,
     staleTime: 30_000,
   });
 }
 
-export function useAddSubIssue(repo: string) {
+export function useAddSubIssue(repo: string, lens: RemoteLens) {
   return useRepoMutation(
     repo,
     (args: { parentId: string; subNumber: number }) =>
-      api.ghIssueAddSubIssue(repo, args.parentId, args.subNumber),
+      api.ghIssueAddSubIssue(repo, args.parentId, args.subNumber, lens),
   );
 }
 
 /** An issue's blocked-by / blocking dependencies. */
-export function useIssueDependencies(repo: string, number: number | null) {
+export function useIssueDependencies(
+  repo: string,
+  number: number | null,
+  lens: RemoteLens,
+) {
   return useQuery({
-    queryKey: ["repo", repo, "issue", number ?? 0, "dependencies"] as const,
-    queryFn: () => api.ghIssueDependencies(repo, number ?? 0),
+    queryKey: [
+      "repo",
+      repo,
+      "issue",
+      lens,
+      number ?? 0,
+      "dependencies",
+    ] as const,
+    queryFn: () => api.ghIssueDependencies(repo, number ?? 0, lens),
     enabled: number !== null,
     staleTime: 30_000,
   });
 }
 
 /** An issue's "Development" links: closing PRs + linked branches. */
-export function useIssueDevelopment(repo: string, number: number | null) {
+export function useIssueDevelopment(
+  repo: string,
+  number: number | null,
+  lens: RemoteLens,
+) {
   return useQuery({
-    queryKey: ["repo", repo, "issue", number ?? 0, "development"] as const,
-    queryFn: () => api.ghIssueDevelopment(repo, number ?? 0),
+    queryKey: [
+      "repo",
+      repo,
+      "issue",
+      lens,
+      number ?? 0,
+      "development",
+    ] as const,
+    queryFn: () => api.ghIssueDevelopment(repo, number ?? 0, lens),
     enabled: number !== null,
     staleTime: 30_000,
   });
 }
 
-export function useCreateLinkedBranch(repo: string) {
+export function useCreateLinkedBranch(repo: string, lens: RemoteLens) {
   return useRepoMutation(repo, (args: { issueId: string; name: string }) =>
-    api.ghIssueCreateLinkedBranch(repo, args.issueId, args.name),
+    api.ghIssueCreateLinkedBranch(repo, args.issueId, args.name, lens),
   );
 }
 
-export function useSetIssueDependency(repo: string) {
+export function useSetIssueDependency(repo: string, lens: RemoteLens) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (args: {
@@ -2260,6 +2382,7 @@ export function useSetIssueDependency(repo: string) {
         args.relation,
         args.target,
         args.add,
+        lens,
       ),
     // Cross-issue: a dependency touches BOTH the source's and the target's detail
     // subtrees (their `dependencies` sub-query is keyed by number) — no list-
@@ -2268,7 +2391,7 @@ export function useSetIssueDependency(repo: string) {
       void Promise.all(
         [args.number, args.target].map((n) =>
           queryClient.invalidateQueries({
-            queryKey: ["repo", repo, "issue", n],
+            queryKey: ["repo", repo, "issue", lens, n],
           }),
         ),
       ),
@@ -3456,18 +3579,18 @@ export function useReviewPr(repo: string) {
   );
 }
 
-export function useCommentPr(repo: string) {
-  return useOptimisticCreateCommentMutation(repo, "pr", (args) =>
-    api.forgePrComment(repo, args.number, args.body, args.asBot),
+export function useCommentPr(repo: string, lens: RemoteLens) {
+  return useOptimisticCreateCommentMutation(repo, "pr", lens, (args) =>
+    api.forgePrComment(repo, args.number, args.body, args.asBot, lens),
   );
 }
 
 /** A merge request's approval state — the GitLab-only approve/unapprove toggle's
  *  driver. Pass `null` when the toggle isn't shown (GitHub, or a closed MR) so the
- *  read doesn't fire. */
+ *  read doesn't fire. GitLab-only, so it lives under the "origin" lens segment. */
 export function usePrApprovals(repo: string, number: number | null) {
   return useQuery({
-    queryKey: ["repo", repo, "pr", number ?? 0, "approvals"] as const,
+    queryKey: ["repo", repo, "pr", "origin", number ?? 0, "approvals"] as const,
     queryFn: () => api.forgePrApprovals(repo, number ?? 0),
     enabled: number !== null,
     staleTime: 30_000,
@@ -3475,9 +3598,9 @@ export function usePrApprovals(repo: string, number: number | null) {
   });
 }
 
-export function useApprovePr(repo: string) {
+export function useApprovePr(repo: string, lens: RemoteLens) {
   return useRepoMutation(repo, (number: number) =>
-    api.forgePrApprove(repo, number),
+    api.forgePrApprove(repo, number, lens),
   );
 }
 
@@ -3486,7 +3609,7 @@ export function useApprovePr(repo: string) {
  *  `usePrApprovals`). */
 export function usePrTasks(repo: string, number: number | null) {
   return useQuery({
-    queryKey: ["repo", repo, "pr", number, "tasks"] as const,
+    queryKey: prTasksKey(repo, number ?? 0),
     queryFn: () => api.forgeBbPrTasks(repo, number ?? 0),
     enabled: number !== null,
     staleTime: 30_000,
@@ -3497,8 +3620,10 @@ export function usePrTasks(repo: string, number: number | null) {
 // PR-task mutations invalidate the exact tasks key onSettled (keyed on the PR number
 // carried in the mutation args); the component patches its own local state
 // optimistically (like toggleApproval), so no optimistic logic lives in the hook.
+// Bitbucket-only surface, so it lives under the "origin" lens segment (the lens
+// switcher is GitHub-only).
 export const prTasksKey = (repo: string, number: number) =>
-  ["repo", repo, "pr", number, "tasks"] as const;
+  ["repo", repo, "pr", "origin", number, "tasks"] as const;
 
 export function useCreatePrTask(repo: string) {
   const queryClient = useQueryClient();
@@ -3557,9 +3682,9 @@ export function useUnapprovePr(repo: string) {
 /** Request changes on an MR with an optional comment (GitLab + Bitbucket, gated
  *  on `implemented.mrRequestChanges`). The caller patches the approvals cache
  *  optimistically, like the approve toggle. */
-export function useRequestChangesPr(repo: string) {
+export function useRequestChangesPr(repo: string, lens: RemoteLens) {
   return useRepoMutation(repo, (args: { number: number; body: string }) =>
-    api.forgePrRequestChanges(repo, args.number, args.body),
+    api.forgePrRequestChanges(repo, args.number, args.body, lens),
   );
 }
 
@@ -3589,16 +3714,18 @@ export function useReviewerCandidates(
   repo: string,
   number: number | null,
   enabled: boolean,
+  lens: RemoteLens,
 ) {
   return useQuery({
     queryKey: [
       "repo",
       repo,
       "pr",
+      lens,
       number ?? "create",
       "reviewer-candidates",
     ] as const,
-    queryFn: () => api.forgePrReviewerCandidates(repo, number),
+    queryFn: () => api.forgePrReviewerCandidates(repo, number, lens),
     enabled,
     staleTime: 5 * 60_000,
     retry: false,
@@ -3612,7 +3739,7 @@ export function useReviewerCandidates(
  * instead of waiting on the PUT + refetch. The list is the picker's HUMAN set;
  * bot/team requests never travel through it (preserved provider-side).
  */
-export function useSetPrReviewers(repo: string) {
+export function useSetPrReviewers(repo: string, lens: RemoteLens) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (args: { number: number; reviewers: ForgeUserRef[] }) =>
@@ -3620,9 +3747,10 @@ export function useSetPrReviewers(repo: string) {
         repo,
         args.number,
         args.reviewers.map((r) => r.id),
+        lens,
       ),
     onMutate: async (args) => {
-      const key = ["repo", repo, "pr", args.number] as const;
+      const key = ["repo", repo, "pr", lens, args.number] as const;
       await queryClient.cancelQueries({ queryKey: key });
       const prev = queryClient.getQueryData<PrDetails>(key);
       queryClient.setQueryData<PrDetails>(key, (d) =>
@@ -3643,7 +3771,7 @@ export function useSetPrReviewers(repo: string) {
     },
     onSettled: (_d, _e, args) =>
       queryClient.invalidateQueries({
-        queryKey: ["repo", repo, "pr", args.number],
+        queryKey: ["repo", repo, "pr", lens, args.number],
       }),
   });
 }
@@ -3654,7 +3782,7 @@ export function useSetPrReviewers(repo: string) {
  * `useSetIssueAssignees` — the picker's chips update instantly instead of
  * waiting on the PATCH/PUT + refetch (the CLI spawns a process per call).
  */
-export function useSetPrAssignees(repo: string) {
+export function useSetPrAssignees(repo: string, lens: RemoteLens) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (args: { number: number; assignees: ForgeUserRef[] }) =>
@@ -3662,9 +3790,10 @@ export function useSetPrAssignees(repo: string) {
         repo,
         args.number,
         args.assignees.map((a) => a.id),
+        lens,
       ),
     onMutate: async (args) => {
-      const key = ["repo", repo, "pr", args.number] as const;
+      const key = ["repo", repo, "pr", lens, args.number] as const;
       await queryClient.cancelQueries({ queryKey: key });
       const prev = queryClient.getQueryData<PrDetails>(key);
       queryClient.setQueryData<PrDetails>(key, (d) =>
@@ -3685,12 +3814,12 @@ export function useSetPrAssignees(repo: string) {
     },
     onSettled: (_d, _e, args) =>
       queryClient.invalidateQueries({
-        queryKey: ["repo", repo, "pr", args.number],
+        queryKey: ["repo", repo, "pr", lens, args.number],
       }),
   });
 }
 
-export function useMergePr(repo: string) {
+export function useMergePr(repo: string, lens: RemoteLens) {
   const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
@@ -3707,6 +3836,7 @@ export function useMergePr(repo: string) {
         args.strategy,
         args.deleteBranch,
         args.sha,
+        lens,
       );
       // The remote just advanced (and, on a deleteBranch merge, dropped the
       // head branch), but the local repo is now stale — ahead/behind, history,
@@ -3800,15 +3930,15 @@ export function useGlCancelAutoMerge(repo: string) {
   );
 }
 
-export function useClosePr(repo: string) {
+export function useClosePr(repo: string, lens: RemoteLens) {
   return useRepoMutation(repo, (number: number) =>
-    api.forgePrClose(repo, number),
+    api.forgePrClose(repo, number, lens),
   );
 }
 
-export function useReopenPr(repo: string) {
+export function useReopenPr(repo: string, lens: RemoteLens) {
   return useRepoMutation(repo, (number: number) =>
-    api.forgePrReopen(repo, number),
+    api.forgePrReopen(repo, number, lens),
   );
 }
 
@@ -3833,6 +3963,7 @@ let optimisticCommentSeq = 0;
 function useOptimisticCreateCommentMutation<TData>(
   repo: string,
   kind: "pr" | "issue",
+  lens: RemoteLens,
   // `asBot` is threaded through for the PR path (posts as the review-bot identity
   // on GitLab; ignored elsewhere). Optional + additive — the issue path and the
   // existing PR callers never pass it, so their behavior is unchanged.
@@ -3848,7 +3979,7 @@ function useOptimisticCreateCommentMutation<TData>(
     PrDetails | IssueDetails
   >(
     (args) => mutationFn(args),
-    (args) => ["repo", repo, kind, args.number] as const,
+    (args) => ["repo", repo, kind, lens, args.number] as const,
     (d, args) => {
       const synthetic: PrThreadOut = {
         author: args.author,
@@ -3889,12 +4020,13 @@ function useOptimisticCommentMutation<
 >(
   repo: string,
   kind: "pr" | "issue",
+  lens: RemoteLens,
   mutationFn: (args: TArgs) => Promise<TData>,
   patchComment: (comment: PrThreadOut, args: TArgs) => PrThreadOut | null,
 ) {
   return useOptimisticCacheMutation<TArgs, TData, PrDetails | IssueDetails>(
     mutationFn,
-    (args) => ["repo", repo, kind, args.number] as const,
+    (args) => ["repo", repo, kind, lens, args.number] as const,
     (d, args) =>
       d
         ? {
@@ -3911,40 +4043,44 @@ function useOptimisticCommentMutation<
   );
 }
 
-export function useEditPrComment(repo: string) {
+export function useEditPrComment(repo: string, lens: RemoteLens) {
   return useOptimisticCommentMutation(
     repo,
     "pr",
+    lens,
     (args: { number: number; commentId: string; body: string }) =>
       api.forgePrEditComment(repo, args.number, args.commentId, args.body),
     (comment, args) => ({ ...comment, body: args.body }),
   );
 }
 
-export function useDeletePrComment(repo: string) {
+export function useDeletePrComment(repo: string, lens: RemoteLens) {
   return useOptimisticCommentMutation(
     repo,
     "pr",
+    lens,
     (args: { number: number; commentId: string }) =>
       api.forgePrDeleteComment(repo, args.number, args.commentId),
     () => null,
   );
 }
 
-export function useEditIssueComment(repo: string) {
+export function useEditIssueComment(repo: string, lens: RemoteLens) {
   return useOptimisticCommentMutation(
     repo,
     "issue",
+    lens,
     (args: { number: number; commentId: string; body: string }) =>
       api.forgeIssueEditComment(repo, args.number, args.commentId, args.body),
     (comment, args) => ({ ...comment, body: args.body }),
   );
 }
 
-export function useDeleteIssueComment(repo: string) {
+export function useDeleteIssueComment(repo: string, lens: RemoteLens) {
   return useOptimisticCommentMutation(
     repo,
     "issue",
+    lens,
     (args: { number: number; commentId: string }) =>
       api.forgeIssueDeleteComment(repo, args.number, args.commentId),
     () => null,
@@ -3966,12 +4102,13 @@ function useOptimisticReviewCommentMutation<
   TData,
 >(
   repo: string,
+  lens: RemoteLens,
   mutationFn: (args: TArgs) => Promise<TData>,
   patchComment: (comment: PrThreadOut, args: TArgs) => PrThreadOut | null,
 ) {
   return useOptimisticCacheMutation<TArgs, TData, ReviewThreadOut[]>(
     mutationFn,
-    (args) => prReviewThreadsKey(repo, args.number),
+    (args) => prReviewThreadsKey(repo, args.number, lens),
     (threads, args) =>
       threads?.flatMap((t) => {
         if (!t.comments.some((c) => c.id === args.commentId)) return [t];
@@ -3988,9 +4125,10 @@ function useOptimisticReviewCommentMutation<
   );
 }
 
-export function useEditReviewComment(repo: string) {
+export function useEditReviewComment(repo: string, lens: RemoteLens) {
   return useOptimisticReviewCommentMutation(
     repo,
+    lens,
     (args: { number: number; commentId: string; body: string }) =>
       api.forgePrEditReviewComment(
         repo,
@@ -4002,9 +4140,10 @@ export function useEditReviewComment(repo: string) {
   );
 }
 
-export function useDeleteReviewComment(repo: string) {
+export function useDeleteReviewComment(repo: string, lens: RemoteLens) {
   return useOptimisticReviewCommentMutation(
     repo,
+    lens,
     (args: { number: number; commentId: string }) =>
       api.forgePrDeleteReviewComment(repo, args.number, args.commentId),
     () => null,
@@ -4025,9 +4164,9 @@ export function useUnminimizeComment(repo: string) {
   );
 }
 
-export function useCheckoutPr(repo: string) {
+export function useCheckoutPr(repo: string, lens: RemoteLens) {
   return useRepoMutation(repo, (number: number) =>
-    api.ghPrCheckout(repo, number),
+    api.ghPrCheckout(repo, number, lens),
   );
 }
 
@@ -5198,15 +5337,17 @@ export function useSetRulesetEnforcement(repo: string) {
   });
 }
 
-export function useReadyPr(repo: string) {
-  return useRepoMutation(repo, (number: number) => api.ghPrReady(repo, number));
+export function useReadyPr(repo: string, lens: RemoteLens) {
+  return useRepoMutation(repo, (number: number) =>
+    api.ghPrReady(repo, number, lens),
+  );
 }
 
-export function useEditPr(repo: string) {
+export function useEditPr(repo: string, lens: RemoteLens) {
   return useRepoMutation(
     repo,
     (args: { number: number; title: string; body: string }) =>
-      api.forgePrEdit(repo, args.number, args.title, args.body),
+      api.forgePrEdit(repo, args.number, args.title, args.body, lens),
   );
 }
 
@@ -5219,7 +5360,7 @@ export function useEditPr(repo: string) {
  *  wire `target` derives from `kind`: issue→"issue", mr→"mr", discussion→"issue"
  *  (the old default). Reconciles per-kind on settle instead of the whole-repo
  *  default, since the args now carry a reliable discriminator. */
-export function useEditPrLabels(repo: string) {
+export function useEditPrLabels(repo: string, lens: RemoteLens) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (args: {
@@ -5244,16 +5385,18 @@ export function useEditPrLabels(repo: string) {
         args.removeNames ?? [],
       ),
     onSettled: (_d, _e, args) => {
+      // Issue/MR narrow keys carry the lens they were read under; discussions are
+      // not lens-scoped (GitHub Discussions have no fork lens) — keyed as before.
       const keys =
         args.kind === "issue"
           ? [
-              ["repo", repo, "issue-list"],
-              ["repo", repo, "issue", args.number],
+              ["repo", repo, "issue-list", lens],
+              ["repo", repo, "issue", lens, args.number],
             ]
           : args.kind === "mr"
             ? [
-                ["repo", repo, "pr", args.number],
-                ["repo", repo, "pr-list"],
+                ["repo", repo, "pr", lens, args.number],
+                ["repo", repo, "pr-list", lens],
               ]
             : args.kind === "discussion"
               ? [
@@ -5283,6 +5426,10 @@ export function useCreatePr(repo: string) {
       labels?: string[];
       /** Create-time assignee login/username strings (GitHub/GitLab; omit for Bitbucket). */
       assignees?: string[];
+      /** Which repo the PR opens against: the fork itself ("origin", default) or
+       *  its parent ("upstream" — GitHub fork only; the backend composes
+       *  `owner:head` and rejects reviewers/labels/assignees on that path). */
+      lens?: RemoteLens;
     }) =>
       api.forgePrCreate(
         repo,
@@ -5294,6 +5441,7 @@ export function useCreatePr(repo: string) {
         args.reviewers,
         args.labels,
         args.assignees,
+        args.lens ?? "origin",
       ),
   );
 }

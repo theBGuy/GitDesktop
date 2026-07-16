@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Spinner } from "@/components/ui/spinner";
 import { useEditPrLabels, useRepoLabels } from "@/lib/git/queries";
-import type { RepoLabel } from "@/lib/git/types";
+import type { RemoteLens, RepoLabel } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
 import { LabelChip } from "./Thread";
 
@@ -22,6 +22,7 @@ export function LabelsPopover({
   target,
   labelableId,
   labels,
+  lens,
 }: {
   repoPath: string;
   enabled: boolean;
@@ -31,9 +32,11 @@ export function LabelsPopover({
   target: "issue" | "mr";
   labelableId: string;
   labels: RepoLabel[];
+  /** The origin|upstream lens the parent PR/issue surface resolved. */
+  lens: RemoteLens;
 }) {
-  const repoLabels = useRepoLabels(repoPath, enabled);
-  const editLabels = useEditPrLabels(repoPath);
+  const repoLabels = useRepoLabels(repoPath, enabled, lens);
+  const editLabels = useEditPrLabels(repoPath, lens);
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<Set<string>>(new Set());
 

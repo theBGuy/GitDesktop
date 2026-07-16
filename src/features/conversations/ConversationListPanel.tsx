@@ -93,6 +93,10 @@ export function ConversationListPanel<L, R, J = never>(props: {
   onStateFilter: (s: "open" | "closed") => void;
   newMenu: NewMenuConfig;
   filterSlot: ReactNode;
+  /** Optional Fork | Upstream lens switch, rendered in the toolbar after the
+   *  state filter (before the New menu). Omit (the default) and nothing renders,
+   *  so panels without a lens are unaffected. */
+  lensControl?: ReactNode;
   // search
   filterRef: Ref<HTMLInputElement>;
   filterText: string;
@@ -190,6 +194,7 @@ export function ConversationListPanel<L, R, J = never>(props: {
     onStateFilter,
     newMenu,
     filterSlot,
+    lensControl,
     filterRef,
     filterText,
     onFilterText,
@@ -249,6 +254,7 @@ export function ConversationListPanel<L, R, J = never>(props: {
             {s === "open" ? "Open" : "Closed"}
           </Button>
         ))}
+        {lensControl}
         <DropdownMenu>
           <DropdownMenuTrigger
             render={

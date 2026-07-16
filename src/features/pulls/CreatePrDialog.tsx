@@ -1,5 +1,11 @@
 import { Popover } from "@base-ui/react/popover";
-import { SparkleIcon, TagIcon, XIcon } from "@phosphor-icons/react";
+import {
+  ArrowSquareOutIcon,
+  SparkleIcon,
+  TagIcon,
+  XIcon,
+} from "@phosphor-icons/react";
+import { useQuery } from "@tanstack/react-query";
 import { useSelector } from "@tanstack/react-store";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
@@ -20,16 +26,27 @@ import { AssigneesPopover } from "@/features/issues/IssueMetaPickers";
 import { track } from "@/lib/analytics";
 import { triggerAutomations } from "@/lib/automations/runner";
 import { required, useAppForm } from "@/lib/form";
+import * as api from "@/lib/git/api";
 import {
   forgeFeatureReady,
   useCompareBranches,
   useCreatePr,
   useDefaultBranch,
   useForgeStatus,
+  usePrsForBranch,
   useRepoLabels,
   useRepoStatus,
 } from "@/lib/git/queries";
-import { type ForgeUserRef, providerLabel } from "@/lib/git/types";
+import {
+  type ForgeUserRef,
+  providerLabel,
+  type RemoteLens,
+} from "@/lib/git/types";
+import {
+  useLensGate,
+  useRemoteSlug,
+  useSetRepoLens,
+} from "@/lib/repo-lens/queries";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { toastError } from "@/lib/toast";
 import { ReviewersPopover } from "./ReviewersPopover";
@@ -54,22 +71,49 @@ export function CreatePrDialog({
   const status = useRepoStatus(repoPath);
   const defaultBranch = useDefaultBranch(repoPath);
   const createPr = useCreatePr(repoPath);
+  const setRepoLens = useSetRepoLens(repoPath);
   const forge = useForgeStatus(repoPath);
+
+  // Fork PR-create: on a GitHub fork (upstream remote present) the dialog offers
+  // an explicit "Create in" target — the parent (lens "upstream") or the fork
+  // (lens "origin"). The gate is hidden entirely otherwise, so behavior collapses
+  // to today's origin-only path. Default = parent: that reproduces what gh's
+  // implicit auto-resolution did before this feature, keeping the common
+  // contribution flow's outcome (now explicit).
+  const lensGate = useLensGate(repoPath);
+  const [target, setTarget] = useState<RemoteLens>("upstream");
+  // Resolved slugs label the two target buttons and the success toast; only
+  // fetched while the picker is shown.
+  const forkSlug = useRemoteSlug(repoPath, "origin", lensGate && open);
+  const upstreamSlug = useRemoteSlug(repoPath, "upstream", lensGate && open);
+  const targetIsParent = lensGate && target === "upstream";
+  // The effective lens for this create — always "origin" when the gate is off.
+  const createLens: RemoteLens = targetIsParent ? "upstream" : "origin";
+  const targetSlug = targetIsParent ? upstreamSlug : forkSlug;
+
   // Create-TIME reviewers stay Bitbucket-only: `forge_pr_create` rejects a reviewer
   // list for GitHub/GitLab (their create arms don't accept one yet). The
   // `mrReviewers` capability now covers all three, but only for editing reviewers on
   // an existing PR (the RemotePrView picker), so scope the create dialog explicitly.
+  // Targeting the parent rejects reviewers/labels/assignees backend-side, so the
+  // pickers are hidden on that path entirely (never offered as dead controls).
   const canPickReviewers =
+    !targetIsParent &&
     forge.data?.provider === "bitbucket" &&
     forgeFeatureReady(forge.data, "mrReviewers");
   // Labels + assignees are GitHub/GitLab; a repo is exactly one provider, so
   // these and the Bitbucket create-time reviewers picker are mutually exclusive.
-  const canPickLabels = forgeFeatureReady(forge.data, "mrLabels");
-  const canPickAssignees = forgeFeatureReady(forge.data, "mrAssignees");
+  const canPickLabels =
+    !targetIsParent && forgeFeatureReady(forge.data, "mrLabels");
+  const canPickAssignees =
+    !targetIsParent && forgeFeatureReady(forge.data, "mrAssignees");
   const [reviewers, setReviewers] = useState<ForgeUserRef[]>([]);
   const [labels, setLabels] = useState<Set<string>>(new Set());
   const [assignees, setAssignees] = useState<ForgeUserRef[]>([]);
-  const repoLabels = useRepoLabels(repoPath, open);
+  // Labels come from whichever repo the PR targets (parent's own labels when
+  // creating upstream). The picker is hidden on the parent path anyway, but the
+  // AI-description prompt still reads this list, so keep it lens-correct.
+  const repoLabels = useRepoLabels(repoPath, open, createLens);
   const isGitLab = forge.data?.provider === "gitlab";
   const remoteLabel = providerLabel(forge.data?.provider);
   const prNoun = isGitLab ? "merge request" : "pull request";
@@ -89,21 +133,76 @@ export function CreatePrDialog({
     defaultBranch.data,
   ]);
 
+  // Base options for the parent target: fetch `upstream` (like
+  // useUpdateFromUpstream), then read the local upstream refs and the parent's
+  // default branch. A failed fetch still yields whatever upstream refs are
+  // already local, so the picker stays usable — the error surfaces inline.
+  const parentBranches = useQuery({
+    queryKey: ["repo", repoPath, "create-pr-parent-branches"] as const,
+    queryFn: async () => {
+      let fetchError: string | null = null;
+      try {
+        await api.gitFetchRemote(repoPath, "upstream");
+      } catch (e) {
+        // Keep going with the refs already on disk; report the fetch failure.
+        fetchError = e instanceof Error ? e.message : String(e);
+      }
+      const remoteBranches = await api.gitRemoteBranches(repoPath);
+      const upstreamNames = remoteBranches
+        .filter((b) => b.remote === "upstream")
+        .map((b) => b.name);
+      let defaultBase = "";
+      try {
+        defaultBase = await api.gitRemoteDefaultBranch(repoPath, "upstream");
+      } catch {
+        // Fall back to the first upstream ref below; the picker stays usable.
+      }
+      return { names: upstreamNames, defaultBase, fetchError };
+    },
+    enabled: open && targetIsParent,
+    staleTime: 30_000,
+  });
+  const parentNames = parentBranches.data?.names ?? [];
+  const parentItems = Object.fromEntries(parentNames.map((n) => [n, n]));
+  const parentFetchError = parentBranches.data?.fetchError ?? null;
+  const parentBase = parentBranches.data?.defaultBase || parentNames[0] || "";
+
+  // Which base picker the current target drives. Parent → the upstream refs;
+  // fork → the local branches (unchanged behavior).
+  const baseItems = targetIsParent ? parentItems : items;
+  const baseAnnotations = targetIsParent ? undefined : annotations;
+  const baseLoading = targetIsParent && parentBranches.isPending;
+
   const form = useAppForm({
     defaultValues: { head: "", base: "", title: "", body: "", draft: false },
     validators: {
-      // Same branch on both sides proposes nothing — gate the submit.
+      // Same branch on both sides proposes nothing — gate the submit. On the
+      // parent target the base is an `upstream/<name>` ref, so a local head that
+      // merely shares the parent branch's *name* is still a distinct ref and is
+      // allowed; the real ref-identity check lives in `sameBranch` below.
       onChange: ({ value }) =>
-        value.head === value.base ? "Pick two different branches." : undefined,
+        !targetIsParent && value.head === value.base
+          ? "Pick two different branches."
+          : undefined,
     },
     onSubmit: async ({ value }) => {
       try {
         const { number, url } = await createPr.mutateAsync({
           base: value.base,
+          // Head stays a bare LOCAL branch name either way: the backend pushes it
+          // to origin and composes the `owner:branch` head ref itself on the
+          // upstream path. Org-owned forks aren't supported by `gh pr create`
+          // ("Using an organization as the <user> is currently not supported",
+          // cli/cli#10093) — we don't pre-gate; gh's own error surfaces via
+          // toastError below.
           head: value.head,
           title: value.title.trim(),
           body: value.body,
           draft: value.draft,
+          // Targets the fork ("origin") or its parent ("upstream"); the parent
+          // path rejects reviewers/labels/assignees backend-side (their pickers
+          // are hidden above), so those keys are already omitted there.
+          lens: createLens,
           // Bitbucket-only; omit the key otherwise (GitHub/GitLab byte-identical).
           // An empty selection also omits it, preserving server-side default reviewers.
           ...(canPickReviewers && reviewers.length > 0
@@ -123,7 +222,14 @@ export function CreatePrDialog({
             has_ai_description: aiDescriptionRef.current,
           },
         });
-        toast.success(`Opened ${prNoun} #${number}`, {
+        // Creating on the parent means the new PR lives under the upstream lens —
+        // flip the persisted lens so the PRs tab shows it (setter is a no-op when
+        // already "upstream").
+        if (createLens === "upstream") setRepoLens("upstream");
+        // Name the target repo in the toast so "Opened PR #N in owner/repo" is
+        // unambiguous for a fork contribution.
+        const where = targetSlug ? ` in ${targetSlug}` : "";
+        toast.success(`Opened ${prNoun} #${number}${where}`, {
           description: url,
           action: { label: "View", onClick: () => openUrl(url) },
         });
@@ -159,6 +265,9 @@ export function CreatePrDialog({
     setReviewers([]);
     setLabels(new Set());
     setAssignees([]);
+    // Reset the target to the default (parent) every open, so a prior fork/parent
+    // choice doesn't leak into the next PR.
+    setTarget("upstream");
     const h = defaultHead ?? currentName ?? names[0] ?? "";
     const fallbackBase =
       defaultBranch.data && defaultBranch.data !== h
@@ -167,6 +276,10 @@ export function CreatePrDialog({
     form.reset(
       {
         head: h,
+        // Seed the LOCAL (fork) base first; the base-reconcile effect below
+        // swaps in the parent's default branch when the parent target is active
+        // (and its branches have loaded). A ComparePanel-seeded `defaultBase` is
+        // a local branch, so it only applies to the fork target.
         base: defaultBase ?? fallbackBase,
         title: "",
         body: "",
@@ -182,10 +295,67 @@ export function CreatePrDialog({
   // Live head/base drive the "N commits" hint, AI generation, and submit gate.
   const head = useSelector(form.store, (s) => s.values.head);
   const base = useSelector(form.store, (s) => s.values.base);
-  const comparison = useCompareBranches(repoPath, base || null, head || null);
+
+  // Compute the fork-side fallback base (used both here and when reconciling back
+  // from the parent target). Mirrors the seed logic: default branch, else the
+  // first non-head branch.
+  const forkFallbackBase = useEffectEvent(() => {
+    const h = form.state.values.head;
+    return defaultBranch.data && defaultBranch.data !== h
+      ? defaultBranch.data
+      : (names.find((n) => n !== h) ?? "");
+  });
+  // Reconcile the base when the target changes (or the parent's branches arrive):
+  // re-seed ONLY when the current base isn't a valid option for the active
+  // target, so a user-picked base survives a target toggle where it still fits.
+  // The guard makes `base` safe to read directly — a valid pick is left alone, so
+  // this never fights the user's own edit.
+  useEffect(() => {
+    if (!open) return;
+    if (targetIsParent) {
+      // Wait for the parent refs before touching the base — otherwise we'd clear
+      // it to "" mid-fetch and lose the seed.
+      if (parentBranches.isPending) return;
+      if (!base || !parentNames.includes(base)) {
+        form.setFieldValue("base", parentBase);
+      }
+    } else if (base && !names.includes(base)) {
+      // Back on the fork target: re-seed only when the current value (e.g. a
+      // parent branch that isn't a local one) no longer fits.
+      form.setFieldValue("base", defaultBase ?? forkFallbackBase());
+    }
+  }, [
+    open,
+    targetIsParent,
+    parentBranches.isPending,
+    parentBase,
+    base,
+    parentNames,
+    names,
+    defaultBase,
+    form,
+  ]);
+  // The base ref to compare against: for the parent target the picked base is a
+  // bare upstream branch name, so qualify it as `upstream/<base>` (the ref that
+  // exists locally after the fetch) — otherwise `git log main..head` would
+  // resolve against a *local* `main`, a stale proxy for the parent's branch.
+  const compareBaseRef = base
+    ? targetIsParent
+      ? `upstream/${base}`
+      : base
+    : null;
+  const comparison = useCompareBranches(repoPath, compareBaseRef, head || null);
   const ahead = comparison.data?.ahead ?? [];
-  const sameBranch = base === head;
+  // A head equal to the parent's base name is still a distinct ref (local branch
+  // vs. `upstream/<name>`), so only treat identical refs as "same branch".
+  const sameBranch = compareBaseRef !== null && compareBaseRef === head;
   const nothingToMerge = sameBranch || ahead.length === 0;
+
+  // Duplicate probe: an open PR from this head against the chosen target already
+  // exists. Probe with the target's lens ("upstream" composes owner:branch
+  // Rust-side; pass the BARE head), matching ComparePanel's baseRefName match.
+  const branchPrs = usePrsForBranch(repoPath, head || null, open, createLens);
+  const existingPr = (branchPrs.data ?? []).find((p) => p.baseRefName === base);
 
   function toggleLabel(name: string, on: boolean) {
     setLabels((prev) => {
@@ -215,13 +385,50 @@ export function CreatePrDialog({
             <DialogDescription>
               Pushes <span className="font-mono">{head || "…"}</span> and opens
               a {prNoun} into <span className="font-mono">{base || "…"}</span>{" "}
-              on {remoteLabel}.
+              on {targetSlug ?? remoteLabel}.
             </DialogDescription>
           </DialogHeader>
 
           {/* Fields scroll; the header and submit footer stay pinned so a long
               body can't push the dialog off-screen. */}
           <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+            {/* Fork PR-create: choose the repo the PR opens against. Hidden unless
+                this is a GitHub fork with an upstream remote. Default = parent. */}
+            {lensGate && (
+              <div className="space-y-1.5">
+                <Label>Create in</Label>
+                <div className="flex items-center gap-1">
+                  {(
+                    [
+                      {
+                        value: "upstream",
+                        label: "Parent",
+                        slug: upstreamSlug,
+                      },
+                      { value: "origin", label: "Fork", slug: forkSlug },
+                    ] as const
+                  ).map((b) => (
+                    <Button
+                      key={b.value}
+                      type="button"
+                      variant={target === b.value ? "secondary" : "ghost"}
+                      size="xs"
+                      aria-pressed={target === b.value}
+                      title={b.slug ?? undefined}
+                      onClick={() => setTarget(b.value)}
+                    >
+                      {b.label}
+                      {b.slug ? (
+                        <span className="ml-1.5 font-mono text-[11px] text-muted-foreground">
+                          {b.slug}
+                        </span>
+                      ) : null}
+                    </Button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div className="flex items-end gap-2">
               <div className="min-w-0 flex-initial">
                 <form.AppField name="head">
@@ -243,8 +450,9 @@ export function CreatePrDialog({
                   {(field) => (
                     <field.SelectField
                       label="Base"
-                      items={items}
-                      annotations={annotations}
+                      items={baseLoading ? {} : baseItems}
+                      annotations={baseAnnotations}
+                      disabled={baseLoading}
                       sizeToContent
                     />
                   )}
@@ -254,9 +462,19 @@ export function CreatePrDialog({
             <div className="space-y-0.5">
               <p className="font-mono text-xs wrap-break-word text-foreground/80">
                 {head || "…"} <span className="text-muted-foreground">→</span>{" "}
-                {base || "…"}
+                {targetIsParent && base ? `upstream/${base}` : base || "…"}
               </p>
-              {sameBranch ? (
+              {baseLoading ? (
+                <p className="text-xs text-muted-foreground">
+                  Fetching upstream branches…
+                </p>
+              ) : parentFetchError ? (
+                // Fetch failed but local upstream refs (if any) still populate the
+                // picker — surface the error inline, keep the control usable.
+                <p className="text-xs text-warning">
+                  Couldn't fetch upstream: {parentFetchError}
+                </p>
+              ) : sameBranch ? (
                 <p className="text-xs text-warning">
                   Pick two different branches.
                 </p>
@@ -265,7 +483,30 @@ export function CreatePrDialog({
                   {ahead.length} commit{ahead.length === 1 ? "" : "s"} to merge.
                 </p>
               )}
+              {targetIsParent && (
+                <p className="text-xs text-muted-foreground">
+                  Labels and assignees can be added on {remoteLabel} after
+                  opening.
+                </p>
+              )}
             </div>
+
+            {existingPr && (
+              // An open PR from this head against the chosen target already
+              // exists — offer to view it instead of allowing a duplicate.
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="w-full cursor-pointer"
+                onClick={() => openUrl(existingPr.url)}
+                title={existingPr.title}
+              >
+                <ArrowSquareOutIcon data-icon="inline-start" />
+                View {prNoun} #{existingPr.number}
+                {existingPr.isDraft ? " (draft)" : ""}
+              </Button>
+            )}
 
             {canPickReviewers && (
               <div className="space-y-1.5">
@@ -275,6 +516,7 @@ export function CreatePrDialog({
                   number={null}
                   enabled={open && canPickReviewers}
                   value={reviewers}
+                  lens="origin"
                   onChange={setReviewers}
                 />
               </div>
@@ -350,6 +592,7 @@ export function CreatePrDialog({
                   repoPath={repoPath}
                   enabled={open}
                   value={assignees}
+                  lens="origin"
                   onChange={setAssignees}
                 />
               </div>
@@ -444,7 +687,14 @@ export function CreatePrDialog({
             <form.AppForm>
               <form.Subscribe selector={(s) => s.values.draft}>
                 {(draft) => (
-                  <form.SubmitButton disabled={generating || nothingToMerge}>
+                  <form.SubmitButton
+                    disabled={
+                      generating ||
+                      nothingToMerge ||
+                      baseLoading ||
+                      Boolean(existingPr)
+                    }
+                  >
                     {draft ? "Create draft" : `Create ${prNoun}`}
                   </form.SubmitButton>
                 )}

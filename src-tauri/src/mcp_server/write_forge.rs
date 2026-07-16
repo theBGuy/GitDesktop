@@ -415,6 +415,8 @@ impl GitDesktopMcp {
             args.assignees,
             None,
             None,
+            // Lens: MCP stays origin-pinned in v1 (documented gap). Same below.
+            None,
         )
         .await
         .map_err(app_err)?;
@@ -436,7 +438,7 @@ impl GitDesktopMcp {
         self.ensure_remote_write()?;
         // Append the attribution footer so the comment is identifiable as ours.
         let body = format!("{}{GD_COMMENT_FOOTER}", args.body);
-        crate::forge::forge_issue_comment(self.repo.clone(), args.number, body)
+        crate::forge::forge_issue_comment(self.repo.clone(), args.number, body, None)
             .await
             .map_err(app_err)?;
         json_result(&serde_json::json!({ "issue": args.number, "action": "commented" }))
@@ -462,7 +464,7 @@ impl GitDesktopMcp {
         } else {
             args.reason.as_str()
         };
-        crate::forge::forge_issue_close(self.repo.clone(), args.number, args.reason.clone())
+        crate::forge::forge_issue_close(self.repo.clone(), args.number, args.reason.clone(), None)
             .await
             .map_err(app_err)?;
         json_result(
@@ -482,7 +484,7 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<ReopenIssueArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
-        crate::forge::forge_issue_reopen(self.repo.clone(), args.number)
+        crate::forge::forge_issue_reopen(self.repo.clone(), args.number, None)
             .await
             .map_err(app_err)?;
         json_result(&serde_json::json!({ "issue": args.number, "status": "open" }))
@@ -503,7 +505,7 @@ impl GitDesktopMcp {
         self.ensure_remote_write()?;
         // Append the attribution footer so the comment is identifiable as ours.
         let body = format!("{}{GD_COMMENT_FOOTER}", args.body);
-        crate::forge::forge_pr_comment(self.repo.clone(), args.number, body, None)
+        crate::forge::forge_pr_comment(self.repo.clone(), args.number, body, None, None)
             .await
             .map_err(app_err)?;
         json_result(&serde_json::json!({ "pull_request": args.number, "action": "commented" }))
@@ -542,6 +544,8 @@ impl GitDesktopMcp {
             args.reviewers,
             args.labels,
             args.assignees,
+            // Lens: MCP always creates on origin in v1 (no upstream-PR affordance yet).
+            None,
         )
         .await
         .map_err(app_err)?;
@@ -567,6 +571,7 @@ impl GitDesktopMcp {
             args.number,
             strategy.clone(),
             args.delete_branch,
+            None,
             None,
         )
         .await
@@ -601,14 +606,14 @@ impl GitDesktopMcp {
         // forge_pr_edit replaces BOTH title and body, so fetch the current PR to fill
         // whichever the caller omitted — otherwise an omitted field would be wiped.
         let (title, body) = if args.title.is_none() || args.body.is_none() {
-            let pr = crate::forge::forge_pr_view(self.repo.clone(), args.number)
+            let pr = crate::forge::forge_pr_view(self.repo.clone(), args.number, None)
                 .await
                 .map_err(app_err)?;
             (args.title.unwrap_or(pr.title), args.body.unwrap_or(pr.body))
         } else {
             (args.title.unwrap(), args.body.unwrap())
         };
-        crate::forge::forge_pr_edit(self.repo.clone(), args.number, title, body)
+        crate::forge::forge_pr_edit(self.repo.clone(), args.number, title, body, None)
             .await
             .map_err(app_err)?;
         json_result(&serde_json::json!({ "pull_request": args.number, "action": "updated" }))
@@ -644,7 +649,7 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<NumberArg>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
-        crate::forge::forge_pr_close(self.repo.clone(), args.number)
+        crate::forge::forge_pr_close(self.repo.clone(), args.number, None)
             .await
             .map_err(app_err)?;
         json_result(&serde_json::json!({ "pull_request": args.number, "status": "closed" }))
@@ -662,7 +667,7 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<NumberArg>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
-        crate::forge::forge_pr_reopen(self.repo.clone(), args.number)
+        crate::forge::forge_pr_reopen(self.repo.clone(), args.number, None)
             .await
             .map_err(app_err)?;
         json_result(&serde_json::json!({ "pull_request": args.number, "status": "open" }))
@@ -685,6 +690,7 @@ impl GitDesktopMcp {
             self.repo.clone(),
             args.number,
             args.reviewers.clone(),
+            None,
         )
         .await
         .map_err(app_err)?;
@@ -724,19 +730,19 @@ impl GitDesktopMcp {
         // maps come back empty there — harmless, since GitLab uses the name side.)
         let labelable_id = match target {
             "mr" => {
-                crate::forge::forge_pr_view(self.repo.clone(), args.number)
+                crate::forge::forge_pr_view(self.repo.clone(), args.number, None)
                     .await
                     .map_err(app_err)?
                     .id
             }
             _ => {
-                crate::forge::forge_issue_view(self.repo.clone(), args.number)
+                crate::forge::forge_issue_view(self.repo.clone(), args.number, None)
                     .await
                     .map_err(app_err)?
                     .id
             }
         };
-        let repo_labels = crate::forge::forge_repo_labels(self.repo.clone())
+        let repo_labels = crate::forge::forge_repo_labels(self.repo.clone(), None)
             .await
             .map_err(app_err)?;
         let id_for = |name: &str| -> Option<String> {
@@ -813,6 +819,7 @@ impl GitDesktopMcp {
             self.repo.clone(),
             args.number,
             args.assignees.clone(),
+            None,
         )
         .await
         .map_err(app_err)?;
@@ -836,6 +843,7 @@ impl GitDesktopMcp {
             self.repo.clone(),
             args.number,
             args.assignees.clone(),
+            None,
         )
         .await
         .map_err(app_err)?;
@@ -855,7 +863,7 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<NumberArg>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
-        crate::forge::forge_pr_approve(self.repo.clone(), args.number)
+        crate::forge::forge_pr_approve(self.repo.clone(), args.number, None)
             .await
             .map_err(app_err)?;
         json_result(&serde_json::json!({ "pull_request": args.number, "action": "approved" }))
@@ -1120,6 +1128,7 @@ impl GitDesktopMcp {
             side,
             args.start_line,
             body,
+            None,
         )
         .await
         .map_err(app_err)?;
@@ -1139,7 +1148,7 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<RequestChangesArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
-        crate::forge::forge_pr_request_changes(self.repo.clone(), args.number, args.body)
+        crate::forge::forge_pr_request_changes(self.repo.clone(), args.number, args.body, None)
             .await
             .map_err(app_err)?;
         json_result(
@@ -1184,7 +1193,7 @@ impl GitDesktopMcp {
         // fill whichever the caller omitted — otherwise an omitted field would be wiped
         // (same fetch-and-preserve as update_pull_request).
         let (title, body) = if args.title.is_none() || args.body.is_none() {
-            let issue = crate::forge::forge_issue_view(self.repo.clone(), args.number)
+            let issue = crate::forge::forge_issue_view(self.repo.clone(), args.number, None)
                 .await
                 .map_err(app_err)?;
             (
@@ -1194,7 +1203,7 @@ impl GitDesktopMcp {
         } else {
             (args.title.unwrap(), args.body.unwrap())
         };
-        crate::forge::forge_issue_edit(self.repo.clone(), args.number, title, body)
+        crate::forge::forge_issue_edit(self.repo.clone(), args.number, title, body, None)
             .await
             .map_err(app_err)?;
         json_result(&serde_json::json!({ "issue": args.number, "action": "updated" }))
@@ -1212,7 +1221,7 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<SetIssueMilestoneArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
-        crate::forge::forge_issue_set_milestone(self.repo.clone(), args.number, args.milestone)
+        crate::forge::forge_issue_set_milestone(self.repo.clone(), args.number, args.milestone, None)
             .await
             .map_err(app_err)?;
         json_result(&serde_json::json!({ "issue": args.number, "milestone": args.milestone }))

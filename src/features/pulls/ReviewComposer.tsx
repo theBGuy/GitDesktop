@@ -2,6 +2,7 @@ import { type KeyboardEvent, useState } from "react";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import { Button } from "@/components/ui/button";
 import { useCreateReviewThread } from "@/lib/git/queries";
+import type { RemoteLens } from "@/lib/git/types";
 import { formatBinding } from "@/lib/hotkeys/binding";
 import { useAddReviewDraft } from "@/lib/pulls/review-drafts";
 import { toastError } from "@/lib/toast";
@@ -26,6 +27,8 @@ export interface ReviewComposerProps {
   /** Current pending-review size — drives the Add-to-review button label. */
   draftCount: number;
   canCreateThread: boolean;
+  /** The origin|upstream lens the parent PR view resolved (scopes the thread). */
+  lens: RemoteLens;
   onClose: () => void;
 }
 
@@ -48,11 +51,12 @@ export function ReviewComposer({
   fileSection,
   draftCount,
   canCreateThread,
+  lens,
   onClose,
 }: ReviewComposerProps) {
   const [body, setBody] = useState("");
   const [pending, setPending] = useState(false);
-  const createThread = useCreateReviewThread(repoPath);
+  const createThread = useCreateReviewThread(repoPath, lens);
   const addDraft = useAddReviewDraft(repoPath, number);
 
   // The multi-line range, normalized: [from, line] with from <= line.

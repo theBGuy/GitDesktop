@@ -124,6 +124,7 @@ import {
   useClearReviewDrafts,
   useReviewDrafts,
 } from "@/lib/pulls/review-drafts";
+import { useRepoLens } from "@/lib/repo-lens/queries";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
@@ -204,6 +205,10 @@ export function RemotePrView({
   const provider = forge.data?.provider;
   const remoteLabel = providerLabel(provider);
   const prNoun = provider === "gitlab" ? "merge request" : "pull request";
+  // The single lens-resolution point for this surface (see package B2): every PR
+  // read/write below reads/writes against the fork (origin) or its parent
+  // (upstream). "origin" everywhere but a GitHub fork whose lens is set upstream.
+  const lens = useRepoLens(repoPath);
   // Per-action write-capability flags, derived purely from forge status + provider
   // (see usePrCapabilities for the full gating convention). Destructured so every
   // downstream reference keeps compiling unchanged.
@@ -232,20 +237,20 @@ export function RemotePrView({
     canCreateThread,
     canSubmitReview,
   } = usePrCapabilities(forge.data, provider);
-  const details = usePrDetails(repoPath, number);
-  const prDiff = usePrDiff(repoPath, number);
-  const setAssignees = useSetPrAssignees(repoPath);
-  const setReviewers = useSetPrReviewers(repoPath);
+  const details = usePrDetails(repoPath, number, lens);
+  const prDiff = usePrDiff(repoPath, number, lens);
+  const setAssignees = useSetPrAssignees(repoPath, lens);
+  const setReviewers = useSetPrReviewers(repoPath, lens);
   // For the read-only assignee/reviewer chips (closed/merged PRs): GitHub avatars
   // are login-derived, GitLab/Bitbucket carry a real avatarUrl on the ref.
   const ghHost = useForgeGhHost(repoPath);
-  const comment = useCommentPr(repoPath);
-  const checkout = useCheckoutPr(repoPath);
+  const comment = useCommentPr(repoPath, lens);
+  const checkout = useCheckoutPr(repoPath, lens);
   const repoStatus = useRepoStatus(repoPath);
   const applySuggestion = useApplySuggestion(repoPath);
-  const mergePr = useMergePr(repoPath);
-  const closePr = useClosePr(repoPath);
-  const reopenPr = useReopenPr(repoPath);
+  const mergePr = useMergePr(repoPath, lens);
+  const closePr = useClosePr(repoPath, lens);
+  const reopenPr = useReopenPr(repoPath, lens);
   // Approval + reviewer state drives the GitLab-only approve toggle and
   // Request-changes control; only fetched for a ready GitLab repo with an open MR
   // (null disables the read for GitHub / closed MRs).
@@ -255,9 +260,9 @@ export function RemotePrView({
       ? number
       : null,
   );
-  const approvePr = useApprovePr(repoPath);
+  const approvePr = useApprovePr(repoPath, lens);
   const unapprovePr = useUnapprovePr(repoPath);
-  const requestChangesPr = useRequestChangesPr(repoPath);
+  const requestChangesPr = useRequestChangesPr(repoPath, lens);
   const unrequestChangesPr = useUnrequestChangesPr(repoPath);
   // Auto-merge state (GitLab-only): read only for a ready GitLab repo with an open
   // MR (null disables the read for GitHub / closed MRs). It polls server-side so the
@@ -274,29 +279,29 @@ export function RemotePrView({
   );
   const armAutoMerge = useGlArmAutoMerge(repoPath);
   const cancelAutoMerge = useGlCancelAutoMerge(repoPath);
-  const editComment = useEditPrComment(repoPath);
-  const deleteComment = useDeletePrComment(repoPath);
-  const editReviewComment = useEditReviewComment(repoPath);
-  const deleteReviewComment = useDeleteReviewComment(repoPath);
+  const editComment = useEditPrComment(repoPath, lens);
+  const deleteComment = useDeletePrComment(repoPath, lens);
+  const editReviewComment = useEditReviewComment(repoPath, lens);
+  const deleteReviewComment = useDeleteReviewComment(repoPath, lens);
   const minimizeComment = useMinimizeComment(repoPath);
   const unminimizeComment = useUnminimizeComment(repoPath);
-  const readyPr = useReadyPr(repoPath);
+  const readyPr = useReadyPr(repoPath, lens);
   const setDraft = useSetPrDraft(repoPath);
-  const editPr = useEditPr(repoPath);
+  const editPr = useEditPr(repoPath, lens);
   // File:line-anchored review threads (Copilot/CodeRabbit/human line comments).
   // The read serves both the Conversation block below and (later) the Files
   // diff anchors, so it lives here at the top level. The read gates on the PR
   // number alone (a flaky status probe mustn't hide threads); the WRITE controls
   // below stay gated on the per-provider Implemented flags.
-  const reviewThreads = usePrReviewThreads(repoPath, number);
-  const threadReply = useThreadReply(repoPath, number);
-  const threadResolve = useThreadResolve(repoPath, number);
+  const reviewThreads = usePrReviewThreads(repoPath, number, lens);
+  const threadReply = useThreadReply(repoPath, number, lens);
+  const threadResolve = useThreadResolve(repoPath, number, lens);
   // The reactions fetch is gated on `canReact` (see usePrCapabilities) so it never
   // fires for a provider whose reactions aren't wired (Bitbucket).
-  const reactions = usePrReactions(repoPath, canReact ? number : null);
+  const reactions = usePrReactions(repoPath, canReact ? number : null, lens);
   const toggleReactionMutation = useToggleReaction(
     repoPath,
-    ["repo", repoPath, "pr", number, "reactions"] as const,
+    ["repo", repoPath, "pr", lens, number, "reactions"] as const,
     details.data?.id ?? "",
     { target: "mr", number },
   );
@@ -317,6 +322,7 @@ export function RemotePrView({
     repoPath,
     number,
     section === "conversation" && !!provider,
+    lens,
   );
   const pendingPrSection = useUiStore((s) => s.pendingPrSection);
   const setPendingPrSection = useUiStore((s) => s.setPendingPrSection);
@@ -407,7 +413,9 @@ export function RemotePrView({
   async function toggleApproval() {
     const approved = approvals.data?.viewerHasApproved ?? false;
     const action = approved ? unapprovePr : approvePr;
-    const key = ["repo", repoPath, "pr", number, "approvals"] as const;
+    // Must mirror usePrApprovals' key exactly — GitLab-only, so the lens segment
+    // is the literal "origin" there; a mismatch makes this optimistic flip a no-op.
+    const key = ["repo", repoPath, "pr", "origin", number, "approvals"] as const;
     // Cancel any in-flight approvals refetch first — otherwise it can resolve
     // AFTER this optimistic flip and silently revert the click (the approval
     // state lives in a separate query, so nothing else guards it).
@@ -451,7 +459,8 @@ export function RemotePrView({
     // (its title says how to clear); a re-click must not fire the Premium-only
     // undo path. Bitbucket falls through to the revoke below.
     if (requested && !canUnrequestChanges) return;
-    const key = ["repo", repoPath, "pr", number, "approvals"] as const;
+    // Same as toggleApproval: mirror usePrApprovals' literal "origin" lens segment.
+    const key = ["repo", repoPath, "pr", "origin", number, "approvals"] as const;
     // Same guard as toggleApproval: cancel an in-flight approvals refetch so it
     // can't land after the optimistic flip and revert it.
     await queryClient.cancelQueries({ queryKey: key });
@@ -762,6 +771,7 @@ export function RemotePrView({
               fileSection={fileSections.get(effectivePath) ?? ""}
               draftCount={draftCount}
               canCreateThread={canCreateThread}
+              lens={lens}
               onClose={onClose}
             />
           ),
@@ -954,6 +964,7 @@ export function RemotePrView({
             target="mr"
             labelableId={pr.id}
             labels={pr.labels}
+            lens={lens}
           />
         ) : (
           pr.labels.length > 0 && (
@@ -973,6 +984,7 @@ export function RemotePrView({
             enabled
             value={pr.assignees}
             commitOnClose
+            lens={lens}
             onChange={(next) =>
               setAssignees.mutate(
                 { number, assignees: next },
@@ -1008,6 +1020,7 @@ export function RemotePrView({
               number={number}
               enabled
               value={humanReviewers}
+              lens={lens}
               onChange={(next) =>
                 setReviewers.mutate(
                   { number, reviewers: next },
@@ -1131,7 +1144,7 @@ export function RemotePrView({
             // re-fetching it — PR diffs are among the slowest loads in the app.
             loadDiff: () =>
               queryClient
-                .ensureQueryData(prDiffOptions(repoPath, number))
+                .ensureQueryData(prDiffOptions(repoPath, number, lens))
                 .then((text) => ({
                   text,
                   truncated: false,
@@ -1745,6 +1758,7 @@ export function RemotePrView({
                 canCommentCommits={canCommentCommits}
                 remoteLabel={remoteLabel}
                 provider={providerKey}
+                lens={lens}
               />
             );
           }
@@ -2101,7 +2115,7 @@ export function RemotePrView({
                   // so this works for fork PRs / unfetched head branches.
                   () =>
                     queryClient
-                      .ensureQueryData(prDiffOptions(repoPath, number))
+                      .ensureQueryData(prDiffOptions(repoPath, number, lens))
                       .then((text) => ({
                         text,
                         truncated: false,
@@ -2189,6 +2203,7 @@ export function RemotePrView({
           canRequestChanges: canWrite || canRequestChanges,
         }}
         remoteLabel={remoteLabel}
+        lens={lens}
       />
 
       {/* Palette-triggered "Discard pending review" confirmation (the bar has its

@@ -1316,6 +1316,11 @@ export interface PrRef {
   url: string;
 }
 
+/** Which repository a fork's PR/issue surfaces read & write against: the fork
+ *  itself ("origin") or its parent ("upstream"). GitHub-only — GitLab/Bitbucket
+ *  arms ignore it, so the frontend gates the lens UI to GitHub forks. */
+export type RemoteLens = "origin" | "upstream";
+
 export interface PrInfo {
   number: number;
   url: string;

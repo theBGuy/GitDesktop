@@ -179,8 +179,10 @@ export function DiscussionView({
     ["repo", repoPath, "discussion", number, "reactions"] as const,
     details.data?.id ?? "",
   );
-  const editLabels = useEditPrLabels(repoPath);
-  const repoLabels = useRepoLabels(repoPath, true);
+  // Discussions are a GitHub-only surface with no fork/upstream lens (repo labels
+  // are identical either way); the "origin" lens just satisfies the shared hooks.
+  const editLabels = useEditPrLabels(repoPath, "origin");
+  const repoLabels = useRepoLabels(repoPath, true, "origin");
   const lockDiscussion = useLockDiscussion(repoPath);
   const unlockDiscussion = useUnlockDiscussion(repoPath);
   const closeDiscussion = useCloseDiscussion(repoPath);

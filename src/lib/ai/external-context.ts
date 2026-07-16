@@ -97,7 +97,9 @@ export async function fetchExternalFindings(
 ): Promise<ExternalReviewItem[]> {
   if (provider === "bitbucket") return [];
   try {
-    const items = await forgePrExternalReviews(repoPath, prNumber);
+    // Origin-pinned (package B2 recorded gap): AI review context reads the fork's
+    // own PR; upstream-lens AI review is a follow-up.
+    const items = await forgePrExternalReviews(repoPath, prNumber, "origin");
     return items.filter((item) => isReviewerFinding(item, provider));
   } catch {
     return [];

@@ -75,6 +75,7 @@ export const capabilities: Capability[] = [
   { group: "Pull requests & review", label: "Drill into a PR's commits — per-file diffs, whole-commit & line comments" },
   { group: "Pull requests & review", label: "PR activity feed — reviews, comments, grouped commits, stale-approval marks" },
   { group: "Pull requests & review", label: "Comment on commits from History — whole-commit or line-anchored" },
+  { group: "Pull requests & review", label: "Fork · Upstream lens — browse & work a fork's PRs and issues or the parent's" },
 
   // — Forges & trackers —
   { group: "Forges & trackers", label: "GitHub, GitLab & Bitbucket — first-class, each on its own identity", highlight: true },

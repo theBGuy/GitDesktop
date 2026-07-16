@@ -60,6 +60,7 @@ import {
 } from "@/lib/git/queries";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useJiraLink, useJiraPermissions } from "@/lib/jira/queries";
+import { useLensGate, useSetRepoLens } from "@/lib/repo-lens/queries";
 import { useAiEnabled, useRepoAlias } from "@/lib/settings/queries";
 import { type RepoTab, useUiStore } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
@@ -253,6 +254,18 @@ export function RepositoryView() {
   useHotkeyAction("create-tag", () => requestCreate("tag"));
   // Palette-only "Blame file…": open the fuzzy tracked-file picker from any tab.
   useHotkeyAction("blame-file", () => setBlamePickerOpen(true));
+
+  // Fork/upstream lens (PR + Issues surfaces). Wired ONCE here — not in the
+  // panels, which can be mounted together under <Activity> (double-register).
+  // Absolute set-actions (idempotent), gated on the lens applying (GitHub fork).
+  const lensGate = useLensGate(repoPath ?? "");
+  const setRepoLens = useSetRepoLens(repoPath ?? "");
+  useHotkeyAction("repo-lens-origin", () => setRepoLens("origin"), lensGate);
+  useHotkeyAction(
+    "repo-lens-upstream",
+    () => setRepoLens("upstream"),
+    lensGate,
+  );
 
   // "repo • branch" in the OS title bar (and Alt-Tab) while a repo is open. No
   // cleanup here: a branch switch updates the title in one pass instead of

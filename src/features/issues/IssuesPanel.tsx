@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { ConversationFilterPopover } from "@/features/conversations/ConversationFilterPopover";
 import { ConversationListPanel } from "@/features/conversations/ConversationListPanel";
 import { PAGE_SIZE } from "@/features/conversations/LoadMoreRow";
+import { RepoLensSwitcher } from "@/features/conversations/RepoLensSwitcher";
 import { useCollapsedSections } from "@/features/conversations/useCollapsedSections";
 import { useLocalRemoteFilter } from "@/features/conversations/useLocalRemoteFilter";
 import type { IssueStateFilter } from "@/lib/git/api";
@@ -31,6 +32,12 @@ import {
 } from "@/lib/jira/queries";
 import { formatStoryPoints, type JiraIssueInfo } from "@/lib/jira/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import {
+  useLensGate,
+  useRemoteSlug,
+  useRepoLens,
+  useSetRepoLens,
+} from "@/lib/repo-lens/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { isAppError } from "@/lib/tauri/invoke";
 import { formatRelativeTime } from "@/lib/time";
@@ -78,7 +85,17 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
   const provider = gh.data?.provider;
   const isGitLab = provider === "gitlab";
   const isBitbucket = provider === "bitbucket";
-  const remoteLabel = providerLabel(provider);
+  // The origin|upstream lens (GitHub forks only) scopes ONLY the remote section
+  // below — local + Jira issues are lens-independent. It decides which repo feeds
+  // `remotes`, not how rows are partitioned.
+  const lens = useRepoLens(repoPath);
+  const lensGate = useLensGate(repoPath);
+  const setLens = useSetRepoLens(repoPath);
+  const upstreamSlug = useRemoteSlug(repoPath, "upstream", lens === "upstream");
+  const providerName = providerLabel(provider);
+  // When browsing the parent, the remote section header names the parent slug.
+  const remoteLabel =
+    lens === "upstream" ? (upstreamSlug ?? "Upstream") : providerName;
   // Issue *reads* are provider-neutral (the panel-level `issues` flag); issue
   // *creation* follows its own per-action write flag — ready GitHub AND GitLab
   // repos both offer the create dialog (which hides GitHub-only fields per
@@ -88,7 +105,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
   const [stateFilter, setStateFilter] = useState<IssueStateFilter>("open");
   // How many remote issues to load; "Load more" bumps it. A tab switch resets it.
   const [limit, setLimit] = useState(PAGE_SIZE);
-  const issueList = useIssueList(repoPath, ghReady, stateFilter, limit);
+  const issueList = useIssueList(repoPath, ghReady, stateFilter, limit, lens);
   // A fork (issues off by default on GitHub) surfaces a typed error here. It's a
   // permanent repo condition, not a transient fetch failure, so the section shows
   // an informative notice with no Retry — and issue creation is offered as
@@ -106,7 +123,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
   };
   const selectedIssue = useUiStore((s) => s.selectedIssue);
   const selectIssue = useUiStore((s) => s.selectIssue);
-  const prefetchIssue = usePrefetchIssue(repoPath);
+  const prefetchIssue = usePrefetchIssue(repoPath, lens);
   const hoverPrefetch = useHoverPrefetch();
   const filterRef = useRef<HTMLInputElement>(null);
   const [createOpen, setCreateOpen] = useState(false);
@@ -264,6 +281,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
       remoteLabel={remoteLabel}
       stateFilter={stateFilter}
       onStateFilter={onStateFilter}
+      lensControl={<RepoLensSwitcher repoPath={repoPath} />}
       newMenu={{
         ghLabel: isBitbucket
           ? "Issue on Bitbucket…"
@@ -351,6 +369,25 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
               Forks start with issues turned off — enable them in the repository
               settings on GitHub.
             </p>
+            {/* This disabled state only ever renders for the origin (fork) lens by
+                construction; when the repo is a GitHub fork, offer browsing the
+                parent's issues instead of a dead end. */}
+            {lensGate && lens === "origin" && (
+              <div className="space-y-1.5 pt-1.5">
+                <p className="text-[11px]">
+                  Your fork has issues disabled — switch to Upstream to browse
+                  the parent repository's issues.
+                </p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="cursor-pointer"
+                  onClick={() => setLens("upstream")}
+                >
+                  Switch to upstream
+                </Button>
+              </div>
+            )}
           </div>
         ) : (
           <div className="space-y-2 px-3 py-4 text-xs text-muted-foreground">
@@ -491,6 +528,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
     >
       <CreateIssueDialog
         repoPath={repoPath}
+        lens={lens}
         open={createOpen}
         onOpenChange={(o) => {
           setCreateOpen(o);
