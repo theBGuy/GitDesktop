@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useEffectEvent, useState } from "react";
 import {
   djb2,
   type HighlightWorkRequest,
@@ -113,26 +113,25 @@ export function useWorkerHighlight(
     asts: WorkerAsts;
   } | null>(null);
 
-  // `signature` is the canonical digest of every request-shaping input (path /
-  // lang / isDark / text + content hashes); the other `args.*` reads are exactly
-  // the fields it summarizes, so depending on them too would only re-fire this
-  // effect spuriously. `result` is read to skip re-posting a result we already
-  // hold, not to drive the effect.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: signature digests every request input; raw fields would re-fire spuriously
-  useEffect(() => {
-    if (!engaged || signature === null) return;
+  // Post the request for `sig` off the render path. An effect event reads the
+  // LATEST `args`/`result` without making them reactive — the effect below
+  // re-fires only when the signature (which digests every request-shaping
+  // input: path / lang / isDark / text + content hashes) or engagement changes,
+  // never on unrelated arg identity churn. Returns the request id for the
+  // effect's cleanup to disarm, or null when nothing was posted (result
+  // already in hand, or the worker is unavailable → interim paint).
+  const postRequest = useEffectEvent((sig: string): number | null => {
     // Already have this exact result — don't re-post.
-    if (result?.signature === signature) return;
+    if (result?.signature === sig) return null;
 
     const w = getWorker();
-    if (!w) return; // unavailable → keeps interim paint
+    if (!w) return null; // unavailable → keeps interim paint
 
     const id = nextId++;
-    let cancelled = false;
     const req: HighlightWorkRequest = {
       id,
       filePath: args.filePath,
-      // `engaged` already gated on lang being non-null.
+      // `engaged` (checked by the caller) already gated on lang being non-null.
       lang: args.lang as string,
       isDark: args.isDark,
       hunkText: args.text,
@@ -140,16 +139,23 @@ export function useWorkerHighlight(
       tmGrammar: args.tmGrammar,
     };
     handlers.set(id, (res) => {
-      if (cancelled) return;
-      // Latest-wins: only accept the response for the request we last sent.
-      if (res.result) setResult({ signature, asts: res.result });
+      // Latest-wins: a superseded request's handler was already deleted by its
+      // cleanup (onmessage and the crash-drain both go through the map), so
+      // reaching here means this response is for the request we last sent. A
+      // null result (tokenize failure) leaves the interim paint.
+      if (res.result) setResult({ signature: sig, asts: res.result });
     });
     w.postMessage(req);
+    return id;
+  });
 
+  useEffect(() => {
+    if (!engaged || signature === null) return;
+    const id = postRequest(signature);
+    if (id === null) return;
     return () => {
-      cancelled = true;
-      // Drop the pending handler so a late reply for a superseded/unmounted
-      // request is ignored (and the map doesn't leak).
+      // Disarm the pending handler so a late reply for a superseded/unmounted
+      // request is dropped by the onmessage map lookup (and the map doesn't leak).
       handlers.delete(id);
     };
   }, [engaged, signature]);
