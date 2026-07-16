@@ -247,6 +247,16 @@ function buildHast(
  * style-based spans (the renderer applies `properties.style` directly). AST
  * post-processing is reused from the default highlighter's exported `processAST`.
  */
+/**
+ * Line cap on the RECONSTRUCTED file, deciding whether a small edit deep in a
+ * big file gets highlighted at all (not the diff's own size). Placeholder-
+ * reconstructed lines tokenize cheaply (measured 61ms at 12K lines). The ONE
+ * shared cap for every highlighter the diff uses — the Shiki object below, the
+ * highlight.js singleton pin, and the worker-AST precomputed highlighter (both
+ * in DiffSurface.tsx) — so they can't silently diverge.
+ */
+export const SYNTAX_LINE_CAP = 15_000;
+
 export function shikiDiffHighlighter(
   // When set, forces the token theme instead of sniffing the `.dark` class —
   // required off the main thread (the highlight worker has no `document`), and
@@ -256,11 +266,7 @@ export function shikiDiffHighlighter(
   return {
     name: "shiki",
     type: "style",
-    // Line cap on the RECONSTRUCTED file, so it decides whether a small edit
-    // deep in a big file gets highlighted at all (not the diff's own size).
-    // Placeholder-reconstructed lines tokenize cheaply (measured 61ms at 12K
-    // lines); keep in sync with the highlight.js cap set in DiffSurface.tsx.
-    maxLineToIgnoreSyntax: 15_000,
+    maxLineToIgnoreSyntax: SYNTAX_LINE_CAP,
     setMaxLineToIgnoreSyntax: () => undefined,
     ignoreSyntaxHighlightList: [],
     setIgnoreSyntaxHighlightList: () => undefined,

@@ -44,6 +44,7 @@ import {
   isBuiltinShikiLang,
   isShikiLang,
   shikiDiffHighlighter,
+  SYNTAX_LINE_CAP,
 } from "./shiki-highlighter";
 import { ensureCustomLanguages } from "./syntax";
 import { useWorkerHighlight, type WorkerAsts } from "./use-worker-highlight";
@@ -272,7 +273,7 @@ function precomputedHighlighter(asts: WorkerAsts) {
   return {
     name: "shiki",
     type: "style" as const,
-    maxLineToIgnoreSyntax: 15_000,
+    maxLineToIgnoreSyntax: SYNTAX_LINE_CAP,
     setMaxLineToIgnoreSyntax: () => undefined,
     ignoreSyntaxHighlightList: [],
     setIgnoreSyntaxHighlightList: () => undefined,
@@ -297,8 +298,8 @@ export const HIGHLIGHT_MAX_LINES = 2000;
 // reconstruction lines tokenize at ~5–20µs each (≤~200ms one-time at this cap),
 // while real-content cost is bounded separately by the char budgets above. The
 // default was 2000, which silently dropped highlighting for any edit past line
-// 2000. Keep in sync with the Shiki cap in shiki-highlighter.ts.
-highlighter.setMaxLineToIgnoreSyntax(15_000);
+// 2000. SYNTAX_LINE_CAP is shared with the Shiki + precomputed highlighters.
+highlighter.setMaxLineToIgnoreSyntax(SYNTAX_LINE_CAP);
 
 /**
  * Build a parsed `DiffFile` from unified-diff text, with syntax highlighting

@@ -122,9 +122,9 @@ async function handle(req: HighlightWorkRequest): Promise<WorkerAsts | null> {
 }
 
 // Only wire the message handler inside a real Worker context (no `document`).
-// The main thread imports pure helpers from this module (`djb2`, the shared
-// types); guarding the registration keeps that import side-effect-free instead
-// of installing an onmessage handler on the app window.
+// Nothing on the main thread imports this entry anymore (shared helpers live in
+// highlight-worker-shared.ts) — the guard is defence-in-depth so an accidental
+// future re-import can't install an onmessage handler on the app window.
 if (typeof document === "undefined") {
   self.onmessage = (e: MessageEvent<HighlightWorkRequest>) => {
     const req = e.data;
