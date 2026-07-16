@@ -985,11 +985,8 @@ fn name_with_owner_from_url(url: &str) -> Option<String> {
 /// PR lists/creation, issues, and "View on GitHub" follow afterwards.
 #[tauri::command]
 pub async fn gh_repo_fork(repo_path: String, contribute_to_parent: bool) -> AppResult<String> {
-    // INVARIANT — do NOT origin-pin this read. Before forking, `origin` still
-    // points at the PARENT, and this deliberately resolves the parent's slug so a
-    // later `gh repo set-default` can target it. Pinning to the origin slug would
-    // be a no-op here (origin IS the parent pre-fork) but is misleading — leave the
-    // bare cwd resolution to make the "reads the parent" intent explicit.
+    // Deliberately NOT origin-pinned: before forking, this read must resolve the
+    // PARENT repo — pinning it would break fork creation.
     let parent = run_gh(
         Some(&repo_path),
         &["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],

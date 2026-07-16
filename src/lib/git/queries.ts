@@ -7,6 +7,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef } from "react";
+import { isAppError } from "@/lib/tauri/invoke";
 import { COLD_START_NO_GH, COLD_START_NO_GIT } from "@/lib/test-mode";
 import * as api from "./api";
 import { primeCommitAuthorIndex } from "./commit-avatar";
@@ -1424,6 +1425,9 @@ export function useIssueList(
     queryFn: () => api.forgeIssueList(repo, state, limit),
     enabled,
     staleTime: 30_000,
+    // issuesDisabled is a permanent repo condition — retrying only delays the notice.
+    retry: (failureCount, err) =>
+      !(isAppError(err) && err.kind === "issuesDisabled") && failureCount < 1,
     // Keep current rows visible while a grown "Load more" page loads.
     placeholderData: keepPreviousDataForRepo(repo),
   });
