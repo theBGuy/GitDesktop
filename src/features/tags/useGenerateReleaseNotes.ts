@@ -72,7 +72,7 @@ async function gatherReleaseSource(
  * publishing. Mirrors useGenerateIssueDraft.
  */
 export function useGenerateReleaseNotes(repoPath: string) {
-  const { generating, cancel, run } = useAiStream();
+  const { generating, cancel, run } = useAiStream(repoPath);
 
   const generate = useCallback(
     async (opts: {

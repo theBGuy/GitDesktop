@@ -7,6 +7,7 @@ import {
 } from "@phosphor-icons/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSelector } from "@tanstack/react-store";
+import type { ReactNode } from "react";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -192,15 +193,22 @@ function ModelPicker({
 }
 
 /**
- * Detection + optional binary-path override for a CLI review provider. Shows
- * whether the CLI is installed and signed in, since there's no API key to save.
+ * Detection + optional binary-path override for a CLI provider (generation or
+ * review). Shows whether the CLI is installed and signed in, since there's no
+ * API key to save. `idPrefix` keeps the input id unique when both the generation
+ * and review pickers have a CLI selected; `description` carries the
+ * surface-specific footer copy.
  */
-function CliReviewConfig({
+function CliProviderConfig({
+  idPrefix,
   value,
   onChange,
+  description,
 }: {
+  idPrefix: string;
   value: AiSettings;
   onChange: (next: AiSettings) => void;
+  description: ReactNode;
 }) {
   const kind = providerKind(value.provider);
   const detect = useQuery({
@@ -214,12 +222,12 @@ function CliReviewConfig({
 
   return (
     <div className="space-y-2">
-      <Label htmlFor="cli-path">
+      <Label htmlFor={`${idPrefix}-cli-path`}>
         CLI path{" "}
         <span className="font-normal text-muted-foreground">(optional)</span>
       </Label>
       <Input
-        id="cli-path"
+        id={`${idPrefix}-cli-path`}
         autoComplete="off"
         placeholder="Auto-detect on PATH"
         value={value.cliPath ?? ""}
@@ -258,10 +266,7 @@ function CliReviewConfig({
           </span>
         )}
       </div>
-      <p className="text-xs text-muted-foreground">
-        Uses the CLI's own subscription login — no API key needed. Reviews run
-        read-only.
-      </p>
+      <p className="text-xs text-muted-foreground">{description}</p>
     </div>
   );
 }
@@ -700,6 +705,23 @@ export const AiProviderSection = withForm({
           onAllowHost={allowHost}
         />
 
+        {isCliProvider(ai.provider) && (
+          <CliProviderConfig
+            idPrefix="ai"
+            value={ai}
+            onChange={setAi}
+            description={
+              <>
+                Uses the CLI's own subscription login — no API key needed.
+                Generation runs the agent CLI per request, so it's noticeably
+                slower than an HTTP provider and draws on your plan's quota. The
+                agent only completes the prepared prompt; it doesn't explore the
+                repository.
+              </>
+            }
+          />
+        )}
+
         {needsKey && (
           <form
             onSubmit={(e) => {
@@ -808,9 +830,16 @@ export const AiProviderSection = withForm({
             allowedHosts={allowedHosts}
           />
           {isCliProvider(reviewAi.provider) && (
-            <CliReviewConfig
+            <CliProviderConfig
+              idPrefix="review"
               value={reviewAi}
               onChange={(next) => form.setFieldValue("reviewAi", next)}
+              description={
+                <>
+                  Uses the CLI's own subscription login — no API key needed.
+                  Reviews run read-only.
+                </>
+              }
             />
           )}
           <ProviderUrlConfig

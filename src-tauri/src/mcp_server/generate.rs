@@ -42,7 +42,7 @@ const RAW_DIFF_MAX_BYTES: usize = 200_000;
 
 /// Mirrors `BASE_SYSTEM` in src/lib/ai/prompt.ts. KEEP IN SYNC.
 const BASE_SYSTEM: &str = "You write git commit messages.\n\
-Output ONLY the commit message itself: the first line is the subject (imperative mood, at most 72 characters), then a blank line, then an optional body explaining what changed and why.\n\
+Output ONLY the commit message itself: the first line is the subject (imperative mood, at most 72 characters), then a blank line, then a body explaining what changed and why — a few sentences for a focused change; for a larger change spanning several areas, a short dash-bullet list with one line per area, most important first, naming the concrete surfaces touched. Omit the body only for a trivial, self-explanatory change.\n\
 Never reference issue or PR numbers, tickets, or links (e.g. \"Closes #123\") — you can't see the issue tracker, so any such reference is fabricated.\n\
 Do not wrap the message in markdown fences. Do not add commentary before or after the message.";
 
@@ -476,9 +476,10 @@ fn assemble_commit_recipe(p: CommitPieces) -> Recipe {
         prompt: prompt_parts.join("\n\n"),
         note: recipe_note(
             "commit message",
-            "The subject line must be imperative mood and at most 72 characters, an optional body \
-             follows after a blank line, and the output must contain no markdown fences or issue/PR \
-             references.",
+            "The subject line must be imperative mood and at most 72 characters, a body follows \
+             after a blank line (a few sentences, or one dash bullet per area for a larger change; \
+             omit it only for a trivial, self-explanatory change), and the output must contain no \
+             markdown fences or issue/PR references.",
         ),
     }
 }

@@ -10,7 +10,7 @@ import { readIssueTemplates, readRepoInstructions } from "@/lib/git/api";
  * useGenerateRepoDescription.
  */
 export function useGenerateIssueDraft(repoPath: string) {
-  const { generating, cancel, run } = useAiStream();
+  const { generating, cancel, run } = useAiStream(repoPath);
 
   const generate = useCallback(
     async (opts: {

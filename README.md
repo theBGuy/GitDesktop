@@ -228,8 +228,9 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
   titles/descriptions (and **suggested labels** from the repo's existing set when
   you generate a PR/MR), repository descriptions and topics, and a streaming code
   review or security audit. Bring your own provider: cloud APIs, local **Ollama**,
-  or a **keyless CLI agent** you already pay for — the full list is under
-  [AI configuration](#ai-configuration).
+  or a **keyless agent CLI** you already pay for (Claude Code, Codex, GitHub
+  Copilot, opencode) — usable for generation *and* review via its subscription
+  login — the full list is under [AI configuration](#ai-configuration).
 - **AI review that doesn't quit or repeat itself** — it keeps running while you move
   between PRs, and finishes in the tray even after you close the window.
   - **Iterative** — re-runs remember the last round, fold in other reviewers' findings,

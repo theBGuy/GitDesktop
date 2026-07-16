@@ -160,7 +160,7 @@ export const capabilities: Capability[] = [
   { group: "AI · MCP & providers", ai: true, label: "Trigger GitDesktop's AI generation from an external MCP client" },
   { group: "AI · MCP & providers", ai: true, label: "Bring your own MCP servers, opted in per session" },
   { group: "AI · MCP & providers", ai: true, label: "Browse the official MCP registry to add servers" },
-  { group: "AI · MCP & providers", ai: true, label: "Bring your own model — Anthropic, OpenAI, OpenRouter, Ollama, or a CLI" },
+  { group: "AI · MCP & providers", ai: true, label: "Bring your own model — Anthropic, OpenAI, OpenRouter, Ollama, or a keyless agent CLI (generation & review)" },
   { group: "AI · MCP & providers", ai: true, label: "Point AI at a custom or LAN Ollama / OpenAI-compatible server" },
   { group: "AI · MCP & providers", ai: true, label: "Keys live in your OS keychain; one switch hides every AI surface" },
 ];

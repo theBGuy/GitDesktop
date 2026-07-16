@@ -14,7 +14,7 @@ import { useUiStore } from "@/lib/stores/ui";
 const RAW_DIFF_MAX_BYTES = 200_000;
 
 export function useGenerateCommitMessage(repoPath: string) {
-  const { cancel, run } = useAiStream();
+  const { cancel, run } = useAiStream(repoPath);
   const setCommitDraft = useUiStore((s) => s.setCommitDraft);
   const setGenerating = useUiStore((s) => s.setGenerating);
   const setCommitAiGenerated = useUiStore((s) => s.setCommitAiGenerated);

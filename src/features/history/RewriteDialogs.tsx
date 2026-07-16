@@ -68,6 +68,7 @@ export function useGenerateSquashMessage(
         system,
         prompt,
         abortSignal: abort.signal,
+        repoPath,
       })) {
         buffer += chunk;
         onText(buffer);

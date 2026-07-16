@@ -37,6 +37,9 @@ export interface AiStreamRequest {
   system: string;
   prompt: string;
   abortSignal?: AbortSignal;
+  /** Repository the generation belongs to — required by the CLI agent providers
+   *  (the subprocess's working directory); ignored by HTTP providers. */
+  repoPath?: string;
 }
 
 export interface AiClient {

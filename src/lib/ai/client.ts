@@ -7,7 +7,7 @@ import {
 } from "ai";
 import { getSecret } from "@/lib/git/api";
 import { errorMessage } from "@/lib/tauri/invoke";
-import { PROVIDERS_REQUIRING_KEY } from "./providers";
+import { isCliProvider, PROVIDERS_REQUIRING_KEY } from "./providers";
 import { httpToolStatusLine } from "./review-tools";
 import type { AiClient, AiSettings, AiStreamRequest } from "./types";
 
@@ -52,12 +52,23 @@ export async function resolveModel(
  * is the analogous override for the AI host allowlist — Settings passes the
  * unsaved draft list so a just-added custom host can be tested before Save;
  * omitted elsewhere so the guarded fetch reads the saved list.
+ *
+ * CLI providers (claude/codex/copilot/opencode) route to the agent-CLI subprocess
+ * path instead — a Tier-1 (no-tools) adapter over `runAgentReview`. Both overrides
+ * are HTTP-only and ignored for those (CLIs authenticate via their own login and
+ * make no guarded HTTP fetch); each `stream` call must carry `repoPath`.
  */
 export async function createAiClient(
   settings: AiSettings,
   apiKeyOverride?: string,
   allowedHostsOverride?: readonly string[],
 ): Promise<AiClient> {
+  // A CLI id must never reach the SDK model factory — branch before resolveModel.
+  // Lazy import mirrors the model-factory pattern (heavy deps load only on use).
+  if (isCliProvider(settings.provider)) {
+    const { createCliClient } = await import("./cli-client");
+    return createCliClient(settings);
+  }
   const model = await resolveModel(
     settings,
     apiKeyOverride,

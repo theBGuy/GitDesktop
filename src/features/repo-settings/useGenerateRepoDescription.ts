@@ -35,7 +35,7 @@ async function readReadme(repoPath: string): Promise<string> {
  * README (falling back to the name alone). Mirrors useGenerateBranchName.
  */
 export function useGenerateRepoDescription(repoPath: string) {
-  const { generating, cancel, run } = useAiStream();
+  const { generating, cancel, run } = useAiStream(repoPath);
 
   const generate = useCallback(
     async (opts: {

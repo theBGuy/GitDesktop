@@ -20,7 +20,7 @@ const RAW_DIFF_MAX_BYTES = 200_000;
  * nothing to name a branch after when the tree is clean.
  */
 export function useGenerateBranchName(repoPath: string) {
-  const { generating, cancel, run } = useAiStream();
+  const { generating, cancel, run } = useAiStream(repoPath);
 
   const generate = useCallback(
     async (opts: {

@@ -484,6 +484,9 @@ async function generateReviewText(
     system,
     prompt,
     abortSignal: signal,
+    // CLI providers are routed at L461; carry repoPath here regardless so every
+    // stream call is uniform (ignored by HTTP providers).
+    repoPath: event.repoPath,
   })) {
     buffer += chunk;
   }

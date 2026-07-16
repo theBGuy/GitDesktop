@@ -238,6 +238,9 @@ export async function streamAi({
     system,
     prompt,
     abortSignal: abort.signal,
+    // CLI providers are routed at L200; passing repoPath here regardless keeps
+    // every stream call carrying it, so the invariant stays grep-clean.
+    repoPath,
   })) {
     buffer += chunk;
     setText(buffer);

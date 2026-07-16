@@ -88,8 +88,9 @@ export const PROVIDERS_REQUIRING_KEY: AiProviderId[] = [
 ];
 
 /** Providers backed by a locally-installed coding-agent CLI rather than an
- *  HTTP API — they authenticate via the CLI's own login, not an API key, and
- *  run only on the review path (not commit/PR generation). */
+ *  HTTP API — they authenticate via the CLI's own login, not an API key. They
+ *  drive both the review path and text generation (commit/PR/branch/…), always
+ *  Tier-1 (no tools, no MCP) on the generation path. */
 export const CLI_PROVIDERS: AiProviderId[] = [
   "claude-cli",
   "codex-cli",
@@ -108,10 +109,10 @@ export const isLocalProvider = (id: AiProviderId): boolean =>
 
 export const ALL_PROVIDER_IDS = Object.keys(PROVIDER_LABELS) as AiProviderId[];
 
-/** Providers offered for commit/PR message generation (CLI agents excluded). */
-export const GENERATION_PROVIDER_IDS = ALL_PROVIDER_IDS.filter(
-  (id) => !isCliProvider(id),
-);
+/** Providers offered for commit/PR message generation — every provider,
+ *  including the agent CLIs (they generate too now, always Tier-1/no-tools via
+ *  `createCliClient`). The Settings generation picker offers this list as-is. */
+export const GENERATION_PROVIDER_IDS = ALL_PROVIDER_IDS;
 
 export const MODEL_SUGGESTIONS: Record<AiProviderId, string[]> = {
   anthropic: ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-8"],

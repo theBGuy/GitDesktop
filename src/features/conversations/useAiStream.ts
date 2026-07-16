@@ -23,10 +23,14 @@ export interface AiStreamRequest {
  * buffer per delta for live previews. `run` resolves with the final buffer, or
  * null if it bailed / aborted / errored, so the caller can parse the result.
  *
- * This is the HTTP-only generator path (`createAiClient`); it is intentionally
- * separate from lib/ai/stream.ts's `useAiTextStream` (the CLI+HTTP review path).
+ * The one-shot generator path (`createAiClient`): HTTP providers stream over the
+ * AI SDK, CLI providers stream from an agent-CLI subprocess through
+ * `createAiClient`'s CLI branch — `repoPath` is forwarded to `client.stream` for
+ * those (ignored by HTTP). Still intentionally separate from lib/ai/stream.ts's
+ * `useAiTextStream` (the review path). CLI providers never throw
+ * MissingApiKeyError — they're not in PROVIDERS_REQUIRING_KEY.
  */
-export function useAiStream() {
+export function useAiStream(repoPath: string) {
   const [generating, setGenerating] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -50,6 +54,7 @@ export function useAiStream() {
           system: request.system,
           prompt: request.prompt,
           abortSignal: abort.signal,
+          repoPath,
         })) {
           buffer += chunk;
           opts?.onChunk?.(buffer);
@@ -75,7 +80,7 @@ export function useAiStream() {
         abortRef.current = null;
       }
     },
-    [],
+    [repoPath],
   );
 
   return { generating, cancel, run };

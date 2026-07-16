@@ -20,7 +20,7 @@ interface SuppliedDiff {
  * the PR would introduce. `onUpdate` fires with the parsed draft on each chunk.
  */
 export function useGeneratePrDescription(repoPath: string) {
-  const { generating, cancel, run } = useAiStream();
+  const { generating, cancel, run } = useAiStream(repoPath);
 
   /** Shared streaming core: gets the diff from `getDiff`, budgets it into a PR
    *  prompt, and streams the parsed title/body/labels draft to `onUpdate`.

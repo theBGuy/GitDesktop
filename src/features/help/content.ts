@@ -1310,7 +1310,11 @@ Bring your own model:
   running on another machine on your network — set its URL in Settings.
 - **Claude Code, Codex, GitHub Copilot, opencode CLIs** — *keyless*: they reuse your
   existing CLI login, with no API key. The CLI agents are **write-capable** — they power
-  agent sessions and plan mode — and can read repo files for deeper reviews.
+  agent sessions and plan mode — and can read repo files for deeper reviews. They also
+  drive **generation** (commit messages, PR descriptions, and the rest): pick one under
+  the AI provider or review model in Settings. Generation runs the CLI per request, so
+  it's noticeably slower than an HTTP provider and draws on your plan's quota; the agent
+  only completes the prepared prompt and never explores the repo on the generation path.
 
 You can set **separate models** for generation (commit/PR messages) versus review.
 

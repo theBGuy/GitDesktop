@@ -13,7 +13,7 @@ import type {
 
 // KEEP IN SYNC: src-tauri/src/mcp_server/generate.rs mirrors this for the MCP recipe tools.
 const BASE_SYSTEM = `You write git commit messages.
-Output ONLY the commit message itself: the first line is the subject (imperative mood, at most 72 characters), then a blank line, then an optional body explaining what changed and why.
+Output ONLY the commit message itself: the first line is the subject (imperative mood, at most 72 characters), then a blank line, then a body explaining what changed and why — a few sentences for a focused change; for a larger change spanning several areas, a short dash-bullet list with one line per area, most important first, naming the concrete surfaces touched. Omit the body only for a trivial, self-explanatory change.
 Never reference issue or PR numbers, tickets, or links (e.g. "Closes #123") — you can't see the issue tracker, so any such reference is fabricated.
 Do not wrap the message in markdown fences. Do not add commentary before or after the message.`;
 
@@ -737,16 +737,20 @@ export function extractPrDraft(
   return { title, body, labels };
 }
 
-/** First non-empty line of a branch-name response, with wrapping quotes/fences
- *  stripped. Still pass the result through sanitizeRefName for git validity. */
+/** The branch name from a branch-name response, tolerant of a leaked preamble
+ *  line. Fence-strip, then per candidate line trim and strip wrapping
+ *  quotes/backticks; prefer the first candidate with NO internal whitespace (a
+ *  plausible git ref has none — so a disobedient "Here's a branch name:" line is
+ *  passed over), falling back to the first non-empty candidate (preserving the
+ *  old first-line behavior for well-behaved single-line output). Still pass the
+ *  result through sanitizeRefName for git validity. */
 export function extractBranchName(raw: string): string {
-  const line =
-    raw
-      .replace(/```[a-z]*/gi, "")
-      .split("\n")
-      .map((l) => l.trim())
-      .find((l) => l.length > 0) ?? "";
-  return line.replace(/^[`'"]+|[`'"]+$/g, "").trim();
+  const candidates = raw
+    .replace(/```[a-z]*/gi, "")
+    .split("\n")
+    .map((l) => l.trim().replace(/^[`'"]+|[`'"]+$/g, "").trim())
+    .filter((l) => l.length > 0);
+  return candidates.find((l) => !/\s/.test(l)) ?? candidates[0] ?? "";
 }
 
 // The prompt's 325 ceiling sits INTENTIONALLY below capDescription's 350 guard
