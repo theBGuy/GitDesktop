@@ -4,9 +4,9 @@ import {
   type HighlightWorkRequest,
   type HighlightWorkResponse,
   type WorkerAsts,
-} from "./highlight-worker";
+} from "./highlight-worker-shared";
 
-export type { WorkerAsts } from "./highlight-worker";
+export type { WorkerAsts } from "./highlight-worker-shared";
 
 // One worker shared by every mounted diff on the main thread. Created lazily on
 // the first enabled request; if construction throws (a headless/webview quirk
@@ -36,6 +36,24 @@ function getWorker(): Worker | null {
         handler(e.data);
       }
     };
+    // A worker that dies at module-init (bad import, OOM) or on a malformed
+    // message would otherwise leave `worker` non-null and every future request
+    // posting into a corpse — interim paint forever, no signal. Mark it
+    // unavailable and drain the pending handlers fail-open (result: null keeps
+    // each requester on its interim paint, matching the behavior matrix).
+    const fail = (kind: string) => (err: unknown) => {
+      workerUnavailable = true;
+      worker = null;
+      console.warn(
+        `[diff] highlight worker ${kind}; large Shiki diffs keep their interim paint`,
+        err,
+      );
+      const pending = [...handlers.values()];
+      handlers.clear();
+      for (const handler of pending) handler({ id: -1, result: null });
+    };
+    worker.onerror = fail("crashed");
+    worker.onmessageerror = fail("message failed to deserialize");
     return worker;
   } catch (err) {
     workerUnavailable = true;

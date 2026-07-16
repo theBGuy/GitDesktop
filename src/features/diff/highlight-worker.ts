@@ -24,64 +24,25 @@
  * responds `result: null`, and the main thread keeps its interim paint. The
  * whole handler is wrapped so no error escapes unhandled.
  *
- * This module imports ONLY from `@git-diff-view/core` (`DiffFile`, `DiffAST`)
- * and the worker-safe shiki helpers — never `@git-diff-view/react` (React in the
- * worker chunk) and no longer `@git-diff-view/lowlight` (hljs isn't run here).
+ * This module imports ONLY from `@git-diff-view/core` (`DiffFile`), the
+ * worker-safe shiki helpers, and the shared djb2/types module — never
+ * `@git-diff-view/react` (React in the worker chunk) and no longer
+ * `@git-diff-view/lowlight` (hljs isn't run here).
  */
-import { type DiffAST, DiffFile } from "@git-diff-view/core";
+import { DiffFile } from "@git-diff-view/core";
 import type { CustomLanguage } from "@/lib/settings/api";
+import type {
+  HighlightAst,
+  HighlightWorkRequest,
+  HighlightWorkResponse,
+  WorkerAsts,
+} from "./highlight-worker-shared";
+import { djb2 } from "./highlight-worker-shared";
 import {
   ensureBuiltinShikiLang,
   ensureShikiGrammars,
   shikiDiffHighlighter,
 } from "./shiki-highlighter";
-
-/** djb2 over a full string — O(n) at ~1ms/MB, negligible next to tokenize. The
- *  hook keys request signatures with it; the worker tags each captured side's
- *  raw text with it so the main-thread highlighter can look its AST up by hash.
- *  Shared from here so the two never drift. */
-export function djb2(s: string): number {
-  let h = 5381;
-  for (let i = 0; i < s.length; i++) h = (h * 33) ^ s.charCodeAt(i);
-  return h >>> 0;
-}
-
-/** One tokenized side: the raw text's djb2 hash paired with its HAST. */
-export interface HighlightAst {
-  rawHash: number;
-  ast: DiffAST;
-}
-
-/** The worker's payload: the per-side tokenized ASTs (old + new). */
-export interface WorkerAsts {
-  sides: HighlightAst[];
-}
-
-/** Work posted from the main thread. The worker is Shiki-only, so there's no
- *  engine flag — the call site only requests when the file routes to Shiki. */
-export interface HighlightWorkRequest {
-  id: number;
-  filePath: string;
-  /** Already resolved on the main thread via `diffLang`. */
-  lang: string;
-  isDark: boolean;
-  hunkText: string;
-  content: { old: string | null; new: string | null } | null;
-  /** A custom language's raw tmLanguage JSON, when that's what routed to Shiki. */
-  tmGrammar: object | null;
-}
-
-/** The worker's reply. `result: null` means "couldn't highlight — keep the
- *  interim paint". */
-export interface HighlightWorkResponse {
-  id: number;
-  result: WorkerAsts | null;
-}
-
-// The renderer caps highlighting at 15_000 reconstructed lines; mirror that here
-// so a file past the cap tokenizes exactly the lines the view will show and no
-// more. Lifting this ceiling belongs to the diff-virtualization epic.
-const WORKER_MAX_LINE = 15_000;
 
 /**
  * Load the Shiki grammar this file needs into the worker's own engine. The
@@ -135,8 +96,10 @@ async function handle(req: HighlightWorkRequest): Promise<WorkerAsts | null> {
   // drives getAST (once per side — old then new), instead of shipping the whole
   // built DiffFile. initSyntax alone calls getAST for both sides via each
   // File.doSyntax (core composeSyntax) — no build*/getBundle needed.
+  // The worker inherits the highlighter's own 15_000 reconstructed-line cap
+  // (`shikiDiffHighlighter` sets it), mirroring the renderer; lifting that
+  // ceiling belongs to the diff-virtualization epic.
   const inner = shikiDiffHighlighter(req.isDark);
-  inner.maxLineToIgnoreSyntax = WORKER_MAX_LINE;
   const sides: HighlightAst[] = [];
   const seen = new Set<number>();
   const capturing = {

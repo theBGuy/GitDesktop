@@ -36,7 +36,7 @@ import { DiffErrorBoundary } from "./DiffErrorBoundary";
 import { DiffLanguagePicker } from "./DiffLanguagePicker";
 import { DiffPlaceholder } from "./DiffPlaceholder";
 import { diffLang } from "./diff-lang";
-import { djb2 } from "./highlight-worker";
+import { djb2 } from "./highlight-worker-shared";
 import { ImageDiff, ImagePanes, type ImageRevs, imageMime } from "./ImageDiff";
 import {
   ensureBuiltinShikiLang,
