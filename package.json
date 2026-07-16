@@ -25,6 +25,7 @@
     "@codemirror/language": "^6.12.3",
     "@codemirror/legacy-modes": "^6.5.3",
     "@fontsource-variable/jetbrains-mono": "^5.2.8",
+    "@git-diff-view/core": "^0.1.5",
     "@git-diff-view/react": "^0.1.5",
     "@openrouter/ai-sdk-provider": "^2.9.0",
     "@phosphor-icons/react": "^2.1.10",

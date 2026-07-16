@@ -1,0 +1,140 @@
+import { useEffect, useState } from "react";
+import {
+  djb2,
+  type HighlightWorkRequest,
+  type HighlightWorkResponse,
+  type WorkerAsts,
+} from "./highlight-worker";
+
+export type { WorkerAsts } from "./highlight-worker";
+
+// One worker shared by every mounted diff on the main thread. Created lazily on
+// the first enabled request; if construction throws (a headless/webview quirk
+// where module workers aren't available) it's marked permanently unavailable
+// and every future request fails open to the interim paint.
+let worker: Worker | null = null;
+let workerUnavailable = false;
+let nextId = 1;
+
+// Per-request handlers, keyed by request id, so multiple mounted hook instances
+// share the one worker without leaking listeners: the single onmessage below
+// dispatches each response to (and removes) its handler. A response with no
+// registered handler (the requester unmounted) is simply dropped.
+const handlers = new Map<number, (res: HighlightWorkResponse) => void>();
+
+function getWorker(): Worker | null {
+  if (worker) return worker;
+  if (workerUnavailable) return null;
+  try {
+    worker = new Worker(new URL("./highlight-worker.ts", import.meta.url), {
+      type: "module",
+    });
+    worker.onmessage = (e: MessageEvent<HighlightWorkResponse>) => {
+      const handler = handlers.get(e.data.id);
+      if (handler) {
+        handlers.delete(e.data.id);
+        handler(e.data);
+      }
+    };
+    return worker;
+  } catch (err) {
+    workerUnavailable = true;
+    console.warn(
+      "[diff] highlight worker unavailable; large diffs stay plain",
+      err,
+    );
+    return null;
+  }
+}
+
+interface WorkerHighlightArgs {
+  enabled: boolean;
+  filePath: string;
+  text: string;
+  lang: string | null;
+  isDark: boolean;
+  content: { old: string | null; new: string | null } | null;
+  tmGrammar: object | null;
+}
+
+// Files past this size never engage the worker. The AST payload amplifies the
+// text ~37× (measured), so 1.5MB of text ≈ 55MB of ASTs — the prudent ceiling
+// for structured-clone transfer + main-thread rebuild until diff virtualization
+// lands. The motivating ~1MB-tsx case stays covered; past it, the diff keeps its
+// interim paint.
+const WORKER_MAX_CHARS = 1_500_000;
+
+function signatureOf(args: WorkerHighlightArgs): string {
+  // Fold `content` into the signature too: the whole-file old/new text shapes
+  // the worker request (it's what gets tokenized), so a content change on the
+  // same path/length must re-request. Content is ≤100KB/side (the content-mode
+  // budget), so the extra hashing is negligible. Empty-string forms when null.
+  const old = args.content?.old ?? "";
+  const nw = args.content?.new ?? "";
+  return `${args.filePath}|${args.lang}|${args.isDark}|${args.text.length}|${djb2(args.text)}|${old.length}|${djb2(old)}|${nw.length}|${djb2(nw)}`;
+}
+
+/**
+ * Off-thread Shiki highlighting for over-budget Shiki-routed diffs. Returns the
+ * per-side tokenized ASTs to hand `createDiffFile(..., workerAsts)` once they
+ * land, or null until then (and forever if the worker is unavailable or the
+ * tokenize fails) — the caller keeps its interim paint. Latest-wins: a response
+ * for a superseded request (rapid file navigation) is discarded, so no
+ * stale/wrong-file highlighting flashes in.
+ */
+export function useWorkerHighlight(
+  args: WorkerHighlightArgs,
+): WorkerAsts | null {
+  // The size ceiling is enforced here, once, folded into engagement.
+  const engaged =
+    args.enabled && !!args.lang && args.text.length <= WORKER_MAX_CHARS;
+  const signature = engaged ? signatureOf(args) : null;
+
+  const [result, setResult] = useState<{
+    signature: string;
+    asts: WorkerAsts;
+  } | null>(null);
+
+  // `signature` is the canonical digest of every request-shaping input (path /
+  // lang / isDark / text + content hashes); the other `args.*` reads are exactly
+  // the fields it summarizes, so depending on them too would only re-fire this
+  // effect spuriously. `result` is read to skip re-posting a result we already
+  // hold, not to drive the effect.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: signature digests every request input; raw fields would re-fire spuriously
+  useEffect(() => {
+    if (!engaged || signature === null) return;
+    // Already have this exact result — don't re-post.
+    if (result?.signature === signature) return;
+
+    const w = getWorker();
+    if (!w) return; // unavailable → keeps interim paint
+
+    const id = nextId++;
+    let cancelled = false;
+    const req: HighlightWorkRequest = {
+      id,
+      filePath: args.filePath,
+      // `engaged` already gated on lang being non-null.
+      lang: args.lang as string,
+      isDark: args.isDark,
+      hunkText: args.text,
+      content: args.content,
+      tmGrammar: args.tmGrammar,
+    };
+    handlers.set(id, (res) => {
+      if (cancelled) return;
+      // Latest-wins: only accept the response for the request we last sent.
+      if (res.result) setResult({ signature, asts: res.result });
+    });
+    w.postMessage(req);
+
+    return () => {
+      cancelled = true;
+      // Drop the pending handler so a late reply for a superseded/unmounted
+      // request is ignored (and the map doesn't leak).
+      handlers.delete(id);
+    };
+  }, [engaged, signature]);
+
+  return result?.signature === signature ? result.asts : null;
+}

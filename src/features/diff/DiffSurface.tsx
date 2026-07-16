@@ -1,3 +1,4 @@
+import type { DiffAST } from "@git-diff-view/core";
 import {
   DiffFile,
   DiffModeEnum,
@@ -8,6 +9,7 @@ import {
   type LineRange,
   type MultiSelectResult,
   type MultiSelectState,
+  processAST,
   SplitSide,
 } from "@git-diff-view/react";
 import type { UseQueryResult } from "@tanstack/react-query";
@@ -34,6 +36,7 @@ import { DiffErrorBoundary } from "./DiffErrorBoundary";
 import { DiffLanguagePicker } from "./DiffLanguagePicker";
 import { DiffPlaceholder } from "./DiffPlaceholder";
 import { diffLang } from "./diff-lang";
+import { djb2 } from "./highlight-worker";
 import { ImageDiff, ImagePanes, type ImageRevs, imageMime } from "./ImageDiff";
 import {
   ensureBuiltinShikiLang,
@@ -43,6 +46,7 @@ import {
   shikiDiffHighlighter,
 } from "./shiki-highlighter";
 import { ensureCustomLanguages } from "./syntax";
+import { useWorkerHighlight, type WorkerAsts } from "./use-worker-highlight";
 
 /**
  * A line-anchored annotation rendered under a specific diff line (e.g. a PR
@@ -227,11 +231,57 @@ export function GitDiffView({
 // hunk path runs on first paint. Measured warm cost on unique real content:
 // highlight.js ≈0.37ms/KB (~150ms at 400KB), Shiki ≈1ms/KB for rust and
 // ≈3.2ms/KB for tsx (~150ms rust / ~480ms worst-case tsx at 150KB). Shiki is
-// ~8× the per-KB cost, so it gets the tighter budget. A worker-built DiffFile
-// (backlog) is the future unbounded fix; until then these keep the blocking
-// tokenize bounded.
+// ~8× the per-KB cost, so it gets the tighter budget. Over budget, a Shiki-routed
+// language tokenizes off-thread instead (see {@link useWorkerHighlight}); an
+// over-budget hljs language keeps the view's own hljs pass (≤15K lines) unchanged.
 const HIGHLIGHT_MAX_CHARS_HLJS = 400_000;
 const HIGHLIGHT_MAX_CHARS_SHIKI = 150_000;
+
+/**
+ * Whether a diff of `textLength` chars is over the synchronous-tokenize budget
+ * for the engine it routes to (Shiki gets the tighter budget — ~8× the per-KB
+ * cost). Over budget for a Shiki language, the sync path skips highlighting and
+ * the Web Worker tokenizes off-thread; under budget it highlights inline. Shared
+ * so the worker call site computes engagement the SAME way the skip logic inside
+ * {@link createDiffFile} does.
+ */
+export function overHighlightBudget(
+  textLength: number,
+  useShiki: boolean,
+): boolean {
+  const maxChars = useShiki
+    ? HIGHLIGHT_MAX_CHARS_SHIKI
+    : HIGHLIGHT_MAX_CHARS_HLJS;
+  return textLength > maxChars;
+}
+
+// An empty tree for a side whose AST the worker didn't supply; the renderer
+// treats it as "no highlighting" (that side plain — fail-open).
+const EMPTY_WORKER_AST: DiffAST = { type: "root", children: [] };
+
+/**
+ * A @git-diff-view highlighter backed by ASTs the worker already tokenized. Its
+ * `getAST` just looks the side up by the raw text's djb2 hash — no engine runs
+ * on the main thread. Fed to a REAL local `initSyntax` so the instance is
+ * indistinguishable from a locally-highlighted one (its `syntaxFile` populates,
+ * so the view's clone restores rather than wipes the highlighting on mount). A
+ * hash miss returns the empty AST (that side plain). Shiki emits style-based
+ * spans, so `type: "style"` — matching the worker's own highlighter.
+ */
+function precomputedHighlighter(asts: WorkerAsts) {
+  return {
+    name: "shiki",
+    type: "style" as const,
+    maxLineToIgnoreSyntax: 15_000,
+    setMaxLineToIgnoreSyntax: () => undefined,
+    ignoreSyntaxHighlightList: [],
+    setIgnoreSyntaxHighlightList: () => undefined,
+    getAST: (raw: string) =>
+      asts.sides.find((s) => s.rawHash === djb2(raw))?.ast ?? EMPTY_WORKER_AST,
+    processAST,
+    hasRegisteredCurrentLang: () => true,
+  };
+}
 // Content mode reads and highlights BOTH whole files over IPC (≈2× the hunk
 // path's cost), so it keeps the original, tighter 100KB budget.
 const CONTENT_HIGHLIGHT_MAX_CHARS = 100_000;
@@ -264,6 +314,11 @@ export function createDiffFile(
   // files (correct comment/string state) and maps tokens onto the diff lines —
   // and switches to collapsible full-file context instead of a bare hunk.
   content?: { old: string | null; new: string | null },
+  // Per-side ASTs the highlight worker already tokenized. Passed only for an
+  // over-budget Shiki-routed file (the sync path would have SKIPPED Shiki): run
+  // a REAL local initSyntax off the precomputed ASTs to paint the worker's
+  // highlighting in. Undefined = exactly today's path.
+  workerAsts?: WorkerAsts,
 ): DiffFile | null {
   if (!text.trim()) return null;
   try {
@@ -286,7 +341,7 @@ export function createDiffFile(
     // loaded. Until then a built-in Shiki language falls back to highlight.js /
     // plain; RenderedDiff rebuilds the diff when the grammar finishes loading.
     const useShiki = lang ? isShikiLang(lang) : false;
-    const file = DiffFile.createInstance({
+    const data = {
       oldFile: {
         fileName: filePath,
         fileLang: lang,
@@ -298,7 +353,21 @@ export function createDiffFile(
         content: content?.new ?? null,
       },
       hunks: [text],
-    });
+    };
+    // Worker ASTs arrive only for an over-budget Shiki-routed file the sync path
+    // skipped. Build the instance locally and run the REAL initSyntax off the
+    // precomputed ASTs — the resulting instance is a genuinely-highlighted one
+    // (syntaxFile populated), so the view's clone restores it on mount instead of
+    // wiping to plain (as a getBundle-merged Shiki instance would).
+    if (workerAsts) {
+      const file = DiffFile.createInstance(data);
+      file.initRaw();
+      file.initSyntax({
+        registerHighlighter: precomputedHighlighter(workerAsts),
+      });
+      return file;
+    }
+    const file = DiffFile.createInstance(data);
     file.initRaw();
     // The char budget bounds the one-time synchronous tokenization cost, which
     // differs ~8× by engine (see the constants) — so gate on the budget for the
@@ -307,10 +376,7 @@ export function createDiffFile(
     // 15_000 for both engines), which bounds the placeholder-reconstruction cost
     // of an edit deep in a huge file. Gating here on a line count would wrongly
     // skip large Shiki-rendered files (e.g. Rust) the renderer would happily do.
-    const maxChars = useShiki
-      ? HIGHLIGHT_MAX_CHARS_SHIKI
-      : HIGHLIGHT_MAX_CHARS_HLJS;
-    if (lang && text.length <= maxChars) {
+    if (lang && !overHighlightBudget(text.length, useShiki)) {
       if (useShiki) {
         file.initSyntax({ registerHighlighter: shikiDiffHighlighter() });
       } else {
@@ -503,7 +569,12 @@ function RenderedDiff({
       !lang ||
       !isBuiltinShikiLang(lang) ||
       isShikiLang(lang) ||
-      grammarState[lang] !== undefined
+      grammarState[lang] !== undefined ||
+      // Over the Shiki budget (a builtin-Shiki lang is Shiki-routed, so that's
+      // the budget that applies) the main thread never tokenizes this file —
+      // the worker loads its own grammar copy. Loading here too would waste the
+      // fetch AND flip grammarState, rebuilding the interim hljs paint to plain.
+      overHighlightBudget(shown.length, true)
     )
       return;
     let cancelled = false;
@@ -514,7 +585,7 @@ function RenderedDiff({
     return () => {
       cancelled = true;
     };
-  }, [lang, grammarState]);
+  }, [lang, grammarState, shown.length]);
 
   // A built-in Shiki grammar this diff needs is still loading (never seen a
   // "ready"/"failed" result for it): hold the paint. `isShikiLang(lang)` already
@@ -525,20 +596,67 @@ function RenderedDiff({
     !isShikiLang(lang) &&
     !grammarState[lang];
 
+  // Off-thread highlighting, Shiki-only. Over-budget Shiki-routed files (Rust,
+  // TSX, Astro, custom grammars &c.) otherwise get the WRONG engine — the view's
+  // own hljs pass, which those languages are routed off on purpose — so the
+  // worker delivers correct Shiki off-thread. An over-budget hljs-routed file
+  // sends NO request: the view clone already hljs-highlights it (≤15K lines),
+  // which is the intended engine there. `useShikiWorker` also routes a builtin
+  // Shiki lang whose grammar the main thread hasn't loaded yet — the worker loads
+  // it itself. `tmGrammar` is a custom Shiki language's raw grammar for the worker
+  // to register. A custom tmGrammar routes to Shiki here directly because its
+  // registration happens lazily inside createDiffFile with no rebuild trigger —
+  // `tmGrammar` is available on the first render, module state is not. The hook
+  // adds the size ceiling.
+  const tmGrammar = useMemo(
+    () =>
+      lang
+        ? (customLanguages?.find((c) => c.id === lang)?.tmGrammar ?? null)
+        : null,
+    [lang, customLanguages],
+  );
+  const useShikiWorker =
+    !!lang &&
+    (isShikiLang(lang) || isBuiltinShikiLang(lang) || tmGrammar != null);
+  const overBudget =
+    !!lang && overHighlightBudget(shown.length, useShikiWorker);
+  const workerAsts = useWorkerHighlight({
+    // Shiki-routed + over budget only. Don't request while whole-file reads are
+    // still settling — the worker input would be built on interim text and
+    // superseded. (Over budget we never hold the paint on grammarPending, so it
+    // isn't gated on here.)
+    enabled: overBudget && useShikiWorker && !contentPending,
+    filePath: deferredPath,
+    text: shown,
+    lang: lang ?? null,
+    isDark,
+    content: content ?? null,
+    tmGrammar,
+  });
+
+  // Over budget, the main thread will NEVER Shiki-tokenize this file, so holding
+  // the plain paint on a grammar only the worker needs would just delay the
+  // interim paint — the worker loads its own grammar. Under budget, keep the
+  // original hold so the lazy-grammar rebuild still lands in one paint.
+  const holdForGrammar = grammarPending && !overBudget;
+
   // grammarState is a deliberate rebuild trigger: createDiffFile reads the
   // now-loaded Shiki grammar via module state (isShikiLang), not a passed value,
   // so recording the load result is what forces the rebuild that picks the
   // grammar up (the gate below only lets the first build run once it's settled).
+  // `workerAsts` is the analogous trigger for the over-budget path: its identity
+  // change when the ASTs land is what rebuilds the diff highlighted.
   // biome-ignore lint/correctness/useExhaustiveDependencies: grammarState is an intentional rebuild trigger, read via module state not directly
   const diffFile = useMemo(
     () =>
-      contentPending || grammarPending
+      contentPending || holdForGrammar
         ? null
         : createDiffFile(
             deferredPath,
             shown,
             { syntaxMap, customLanguages },
             content ?? undefined,
+            workerAsts ?? undefined,
           ),
     [
       shown,
@@ -547,8 +665,9 @@ function RenderedDiff({
       customLanguages,
       content,
       contentPending,
-      grammarPending,
+      holdForGrammar,
       grammarState,
+      workerAsts,
     ],
   );
 
@@ -871,8 +990,12 @@ function RenderedDiff({
   // rather than a hunk-only diff we'd immediately rebuild — the single-paint gate
   // that removes the flash. Must precede the empty-state placeholder so loading
   // never masquerades as "No changes to show". Matches DiffContent's own
-  // render-nothing-while-loading design (see the comment there).
-  if (contentPending || grammarPending) return null;
+  // render-nothing-while-loading design (see the comment there). Over budget we
+  // use `holdForGrammar` (never true there) so the interim paint isn't delayed
+  // for a grammar only the worker needs — the interim is the view clone's own
+  // hljs pass (≤15K lines; plain past it), and correct Shiki swaps in when the
+  // worker ASTs land.
+  if (contentPending || holdForGrammar) return null;
   if (!diffFile) return <DiffPlaceholder message="No changes to show" />;
   return (
     <>

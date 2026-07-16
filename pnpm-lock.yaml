@@ -29,6 +29,9 @@ importers:
       '@fontsource-variable/jetbrains-mono':
         specifier: ^5.2.8
         version: 5.2.8
+      '@git-diff-view/core':
+        specifier: ^0.1.5
+        version: 0.1.5(patch_hash=75ef62db50aa8a15e3b2a9171bf9b4af13c9676f39197307ddee5e5fc5e00b3c)
       '@git-diff-view/react':
         specifier: ^0.1.5
         version: 0.1.5(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
