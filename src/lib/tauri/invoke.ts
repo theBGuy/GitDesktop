@@ -39,13 +39,17 @@ export function errorMessage(e: unknown): string {
   return String(e);
 }
 
-/** Typed wrapper around Tauri invoke that normalizes thrown errors to AppError. */
+/** Typed wrapper around the installed transport's invoke that normalizes
+ *  thrown errors to AppError. */
 export async function invoke<T>(
   cmd: string,
   args?: Record<string, unknown>,
 ): Promise<T> {
+  // Outside the try: a missing installer surfaces as its own raw Error
+  // instead of being reclassified as an `io` AppError below.
+  const transport = getTransport();
   try {
-    return await getTransport().invoke<T>(cmd, args);
+    return await transport.invoke<T>(cmd, args);
   } catch (e) {
     if (isAppError(e)) throw e;
     throw {
