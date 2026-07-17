@@ -376,19 +376,28 @@ function LeaveForkNetworkAction({
   if (record?.isFork !== true) return null;
 
   // Derive the host — on GitHub Enterprise the provider is still "github" but a
-  // hardcoded github.com would open the wrong host's settings page.
-  const ghHost = forge.data?.host || "github.com";
+  // hardcoded github.com would open the wrong host's settings page. While the
+  // forge status is still resolving (or errored — retry: false), fall back to
+  // the persisted RecentRepo host, which is available synchronously.
+  const ghHost = forge.data?.host || record?.host || "github.com";
 
   const recheck = async () => {
     setRechecking(true);
     try {
       const probe = await probeAndPersistVisibility(repoPath);
       queryClient.invalidateQueries({ queryKey: settingsKeys.settings });
-      toast.success(
-        probe?.isFork
-          ? "Still a fork on GitHub"
-          : "No longer a fork — badge cleared",
-      );
+      // A null probe means no provider was detected (e.g. the origin remote is
+      // gone) — the badge still clears, but don't present that as a verified
+      // detach.
+      if (probe === null) {
+        toast.success("Couldn't verify on GitHub — fork badge cleared");
+      } else {
+        toast.success(
+          probe.isFork
+            ? "Still a fork on GitHub"
+            : "No longer a fork — badge cleared",
+        );
+      }
     } catch (e) {
       toastError(e);
     } finally {
