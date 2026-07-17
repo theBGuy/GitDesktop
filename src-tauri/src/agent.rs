@@ -652,7 +652,8 @@ fn claude_session_args(
     }
     // Write sessions always bypass; a read-only Research run bypasses too so its web
     // tools are authorized (see the toolset comment above). Plan (read-only, no web)
-    // stays prompt-gated — its read tools need no grant.
+    // stays prompt-gated — its built-in read tools need no grant, and its opted-in
+    // MCP tools are covered by the `--allowedTools` grant above.
     if !read_only || web {
         args.push("--permission-mode".into());
         args.push("bypassPermissions".into());
@@ -2536,6 +2537,12 @@ mod tests {
         let plan = claude_session_args("", "sys", "sid", false, false, true, false, None, &patterns);
         assert!(!plan.iter().any(|a| a == "bypassPermissions"));
         assert_eq!(flag_value(&plan, "--allowedTools"), Some("mcp__gitdesktop"));
+
+        // Write session with self-MCP: the grant is emitted ALONGSIDE bypass — it is
+        // never gated on the bypass being absent.
+        let write = claude_session_args("", "sys", "sid", false, false, false, false, None, &patterns);
+        assert!(write.iter().any(|a| a == "bypassPermissions"));
+        assert_eq!(flag_value(&write, "--allowedTools"), Some("mcp__gitdesktop"));
 
         // An empty mcp_tools slice grants nothing — the flag is absent.
         let plan_none = claude_session_args("", "sys", "sid", false, false, true, false, None, &[]);
