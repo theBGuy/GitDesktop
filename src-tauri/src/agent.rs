@@ -147,9 +147,18 @@ struct FanoutSink {
 
 impl EventSink for FanoutSink {
     fn send(&self, ev: ReviewEvent) {
-        // LAN leg first (a clone) — no subscribers is fine. Then the desktop leg,
-        // fully qualified so it hits the inherent `Channel::send`, not this trait.
-        let _ = self.tx.send(ev.clone());
+        // LAN leg first (a clone). Skip the clone entirely when nobody's
+        // listening — the common default-off case where the LAN server is
+        // disabled and the broadcast has zero subscribers, so we don't pay a
+        // per-event clone (including chatty token `Delta`s) on the hot desktop
+        // path. Benign race: a subscriber attaching between this check and the
+        // send just misses that one event — the same as connecting a moment
+        // later, which the WS route already handles for mid-stream joins. Then
+        // the desktop leg, fully qualified so it hits the inherent
+        // `Channel::send`, not this trait.
+        if self.tx.receiver_count() > 0 {
+            let _ = self.tx.send(ev.clone());
+        }
         let _ = Channel::send(&self.channel, ev);
     }
 }

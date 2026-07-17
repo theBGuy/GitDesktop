@@ -106,7 +106,11 @@ impl LanState {
                 port: None,
                 urls: Vec::new(),
                 active_repo,
-                device_count: auth::device_count(),
+                // The device count is only meaningful/consumed while sharing is
+                // on, so report 0 here and skip `auth::device_count()`'s disk
+                // read of `lan-devices.json`. This keeps the app-wide 5s
+                // `lan_status` poll off-disk for the (default) disabled case.
+                device_count: 0,
                 pairing_active,
             },
         }
@@ -595,6 +599,32 @@ mod tests {
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         }
+
+        // `.git/config` is a Normal component INSIDE the repo root (containment
+        // passes), so without the `.git`-component guard this would 200 and leak
+        // `.git/` internals (`git init` creates `.git/config`). Must 400.
+        let resp = router
+            .clone()
+            .oneshot(authed_get(
+                "/api/repo/diff/file?path=.git/config&untracked=true",
+                &bearer,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // `.GIT/config` → 400 on every filesystem: case-insensitive ones
+        // canonicalize it to `.git` and the new guard rejects; case-sensitive
+        // ones have no such path, so canonicalize fails → 400 from containment.
+        let resp = router
+            .clone()
+            .oneshot(authed_get(
+                "/api/repo/diff/file?path=.GIT/config&untracked=true",
+                &bearer,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
         // A legitimate untracked file inside the repo is served, not rejected.
         let resp = router

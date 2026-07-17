@@ -108,14 +108,36 @@ pub async fn diff_file(
     // exist on disk, so canonicalize succeeds for legitimate requests. The
     // tracked branch is skipped: git confines its own pathspecs, and a
     // deleted-but-tracked file isn't on disk to canonicalize.)
+    //
+    // Both the containment AND the `.git`-guard below run on the CANONICALIZED
+    // path, not the raw input: `std::fs::canonicalize` returns the real
+    // long-name path, so Windows 8.3 short names (`GIT~1`) and case tricks on
+    // case-insensitive filesystems (`.GIT`) resolve to their true form before
+    // we inspect the components.
     if q.untracked {
         let repo_root = match std::fs::canonicalize(&repo) {
             Ok(p) => p,
             Err(_) => return bad_request("path is outside the shared repository"),
         };
-        match std::fs::canonicalize(std::path::Path::new(&repo).join(&q.path)) {
-            Ok(target) if target.starts_with(&repo_root) => {}
+        let target = match std::fs::canonicalize(std::path::Path::new(&repo).join(&q.path)) {
+            Ok(target) if target.starts_with(&repo_root) => target,
             _ => return bad_request("path is outside the shared repository"),
+        };
+        // Reject anything inside the repo's git directory: `.git` is a `Normal`
+        // component, so containment alone lets `?path=.git/config` reach
+        // `git diff --no-index` and leak `.git/` internals (a `[remote "origin"]`
+        // url can embed credentials). Match ANY component (not just the first),
+        // mirroring git's own refusal to track paths containing a `.git`
+        // component (submodule gitdirs etc.).
+        let rel = match target.strip_prefix(&repo_root) {
+            Ok(rel) => rel,
+            Err(_) => return bad_request("path is outside the shared repository"),
+        };
+        if rel
+            .components()
+            .any(|c| c.as_os_str().eq_ignore_ascii_case(".git"))
+        {
+            return bad_request("path is inside the repository's git directory");
         }
     }
     respond(crate::git::diff::git_diff_file(repo, q.path, q.staged, q.untracked).await)
