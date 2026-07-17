@@ -69,6 +69,14 @@ export interface SelectedFile {
   untracked: boolean;
 }
 
+/** Which forge sign-in the global ReconnectDialog is driving; null = closed.
+ *  `mode: "login"` signs in a new session, `"refresh"` renews an existing one. */
+export interface ReconnectTarget {
+  provider: "github" | "gitlab";
+  host: string;
+  mode: "login" | "refresh";
+}
+
 /** An in-progress commit message, persisted per repo + branch. */
 export interface CommitDraft {
   title: string;
@@ -142,6 +150,14 @@ interface UiState {
    *  the command palette / a hotkey can toggle it regardless of which mount
    *  (header dock or bottom strip) is currently on screen. */
   activityOpen: boolean;
+  /** The forge sign-in the global ReconnectDialog is driving; null = closed. Held
+   *  in the store so any surface (repo panels, Settings, the palette) can open the
+   *  one shared dialog. */
+  reconnectTarget: ReconnectTarget | null;
+  /** Session-scoped dismissals of the token-expiry notice, keyed
+   *  `${provider}|${host}|${expiresAt}`. In-memory only (never persisted), so a
+   *  dismissed notice returns next launch until the token is actually renewed. */
+  dismissedExpiryNotices: Set<string>;
   repoPath: string | null;
   repoName: string | null;
   repoTab: RepoTab;
@@ -243,6 +259,11 @@ interface UiState {
   setMcpBrowseOpen: (open: boolean) => void;
   setActivityOpen: (open: boolean) => void;
   toggleActivity: () => void;
+  /** Open the global ReconnectDialog for a forge sign-in. */
+  openReconnect: (target: ReconnectTarget) => void;
+  closeReconnect: () => void;
+  /** Dismiss the token-expiry notice for `key` (session-scoped, not persisted). */
+  dismissExpiryNotice: (key: string) => void;
   closeSettings: () => void;
   openHelp: () => void;
   closeHelp: () => void;
@@ -341,6 +362,8 @@ export const useUiStore = create<UiState>()((set, get) => {
     settingsTarget: null,
     mcpBrowseOpen: false,
     activityOpen: false,
+    reconnectTarget: null,
+    dismissedExpiryNotices: new Set<string>(),
     repoPath: null,
     repoName: null,
     repoTab: "changes",
@@ -487,6 +510,12 @@ export const useUiStore = create<UiState>()((set, get) => {
     setMcpBrowseOpen: (open) => set({ mcpBrowseOpen: open }),
     setActivityOpen: (open) => set({ activityOpen: open }),
     toggleActivity: () => set((s) => ({ activityOpen: !s.activityOpen })),
+    openReconnect: (target) => set({ reconnectTarget: target }),
+    closeReconnect: () => set({ reconnectTarget: null }),
+    dismissExpiryNotice: (key) =>
+      set((s) => ({
+        dismissedExpiryNotices: new Set(s.dismissedExpiryNotices).add(key),
+      })),
     closeSettings: () =>
       startViewTransition(() => set({ view: get().previousView })),
     openHelp: () =>

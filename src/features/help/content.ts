@@ -41,9 +41,11 @@ A few things worth knowing up front:
 - **Git is required.** GitDesktop drives your system \`git\`, so anything it does is
   standard Git you could do on the command line.
 - **GitHub features use the GitHub CLI (\`gh\`).** Pull requests, issues, discussions,
-  Actions, and repository settings appear once \`gh\` is installed and you've run
-  \`gh auth login\`. There's no separate sign-in, and the app never stores your tokens.
-  Plain Git (clone/fetch/pull/push) works against any remote without GitHub.
+  Actions, and repository settings appear once \`gh\` is installed and you've signed in —
+  from inside the app (**Settings → Accounts**, or the **Sign in** button right on the
+  Pull Requests / Issues tabs), or from a terminal with \`gh auth login\`. There's no
+  separate GitDesktop sign-in, and the app never stores your tokens. Plain Git
+  (clone/fetch/pull/push) works against any remote without GitHub.
 - **GitHub Enterprise works too.** GitDesktop follows \`gh\`, which detects each repo's
   host from its remote — so sign in to your Enterprise server with
   \`gh auth login --hostname your.github.example\` and its repos get the same PR, issue,
@@ -524,7 +526,11 @@ keyless Claude Code / Codex agents, and skips files matched by your AI ignore pa
 
 The **Pull Requests** tab ({{kbd:tab-pulls}}) manages GitHub PRs, GitLab merge requests,
 and local PRs. (Hosted PRs/MRs need the matching CLI — \`gh\` or \`glab\` — installed and
-authenticated.)
+authenticated; when you're not signed in the tab shows a **Sign in** button that runs the
+sign-in in-app, and if a session **expired or was revoked** it becomes **Reconnect**
+instead of a dead end.) When a token is within a week of expiring, a quiet **dismissible
+notice** at the top of this tab (and the Issues tab) reminds you to reconnect before it
+lapses.
 
 ## Fork · Upstream lens
 
@@ -696,9 +702,11 @@ works from the app too ({{kbd:create-pr}}, the New menu, or the Compare tab) —
 branch and opens the MR, with the same draft checkbox and AI description as GitHub, and the
 Compare tab points you at an **existing open MR** from your branch instead of creating a
 duplicate. GitLab uses the GitLab
-CLI (\`glab\`) — run \`glab auth login\` once, no tokens stored. **Self-managed GitLab works
-too**: sign \`glab\` in to your instance (\`glab auth login --hostname …\`) and the app
-recognizes repositories on that host automatically. Its issues, CI pipelines, and
+CLI (\`glab\`) — sign in once from **Settings → Accounts** (or the Pull Requests tab's
+sign-in button), or with \`glab auth login\` in a terminal; no tokens stored. **Self-managed
+GitLab works too**: sign \`glab\` in to your instance (from Accounts, or
+\`glab auth login --hostname …\`) and the app recognizes repositories on that host
+automatically. Its issues, CI pipelines, and
 releases work too (see their sections below).
 
 ## Bitbucket PRs
@@ -1531,14 +1539,27 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   ({{kbd:command-palette}} → *Activity & notifications*), click an entry to jump to it,
   arrow-key through the list, and clear items or mark all read.
 - **Keyboard** — rebind any shortcut, with live key-capture.
-- **Accounts** — your GitHub sign-in, and your **Bitbucket** connection (an Atlassian
-  API token: enter your Atlassian account email + a token with the five \`read:…:bitbucket\`
-  scopes, plus the \`write:…:bitbucket\` scopes to act on PRs and Pipelines and the
-  \`admin:…:bitbucket\` / \`delete:…:bitbucket\` / webhook scopes to manage repositories;
-  stored in the OS keychain, replaceable or removable here).{{ai}} A **GitLab** block here
-  takes an optional **project or group access token** so your AI reviews post as that
-  project's bot rather than your signed-in \`glab\` account (also OS-keychain-stored,
-  connect or disconnect here).{{/ai}}
+- **Accounts** — your **GitHub** and **GitLab** sign-ins and your **Bitbucket**
+  connection. **Sign in to GitHub…** and **Sign in to gitlab.com…** run the CLI's
+  sign-in in-app (GitHub's one-time device code, GitLab's browser flow) — no terminal
+  needed, though \`gh\`/\`glab auth login\` in a terminal still works. Each signed-in
+  account lists here, and a **session that expired or was revoked** shows a *session
+  expired* badge with a one-click **Reconnect** (GitHub reconnects the active account;
+  switch first if it's another one). GitDesktop also **warns before a token lapses**: a
+  GitLab personal-access-token session shows *token expires in N days* once it's within
+  two weeks (browser/OAuth sessions renew themselves, so they carry no warning — the
+  reason the sign-in flow recommends the browser option), and a GitHub PAT's expiry is
+  flagged the same way when its host reports one. **Bitbucket** connects with an
+  Atlassian API token (your Atlassian account email + a token with the five
+  \`read:…:bitbucket\` scopes, plus the \`write:…:bitbucket\` scopes to act on PRs and
+  Pipelines and the \`admin:…:bitbucket\` / \`delete:…:bitbucket\` / webhook scopes to
+  manage repositories); because Atlassian never reports a token's expiry, you can enter
+  an optional **Token expires on** date so GitDesktop can warn you before it lapses.
+  Everything here is stored in the OS keychain, replaceable or removable in place, and
+  the **Reconnect forge session** command in the palette opens the same sign-in dialog
+  from anywhere.{{ai}} A separate **GitLab review-bot** block takes an optional **project
+  or group access token** so your AI reviews post as that project's bot rather than your
+  signed-in \`glab\` account (also OS-keychain-stored, connect or disconnect here).{{/ai}}
 - **Git** — the default branch name for new repos, your global identity, a per-repository
   identity override, and line endings (\`core.autocrlf\`).
 - **Syntax** — map file extensions to languages or add custom grammars, personally or

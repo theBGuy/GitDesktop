@@ -513,6 +513,48 @@ export interface GhAccounts {
   accounts: GhAccount[];
 }
 
+/** The health of a forge sign-in session (gh/glab account, or a Bitbucket token).
+ *  `"offline"` means the probe was inconclusive (a network blip) — treated as
+ *  "unchanged": it must never flip any UI, so nothing regresses on a bad network. */
+export type SessionState =
+  | "healthy"
+  | "broken"
+  | "notConnected"
+  | "cliMissing"
+  | "offline";
+
+/** One forge session's health, provider-neutral. Populated by `forge_session_health`
+ *  (this repo's session) and `forge_accounts_health` (every known account). */
+export interface SessionHealth {
+  provider: ForgeProvider;
+  host: string;
+  state: SessionState;
+  login: string | null;
+  /** gh accounts only — whether this is the active account on its host. */
+  active: boolean | null;
+  /** A short human reason for a `broken`/`offline` state (a tooltip). */
+  detail: string | null;
+  method: "oauth" | "pat" | "token" | null;
+  /** ISO-8601 expiry when knowable (GitLab/GitHub PAT, user-entered Bitbucket
+   *  date); null otherwise (e.g. an OAuth session that renews itself). */
+  expiresAt: string | null;
+  /** Whole days until `expiresAt` (may be negative/0); null when not knowable. */
+  daysLeft: number | null;
+}
+
+/** A streaming event from a `forge_reconnect` flow, delivered over a Channel.
+ *  `code` is gh's device-flow one-time code + URL; `line` is a glab progress
+ *  line; `finished` is the terminal result. */
+export type ReconnectEvent =
+  | { type: "code"; code: string; url: string }
+  | { type: "line"; text: string }
+  | {
+      type: "finished";
+      ok: boolean;
+      login: string | null;
+      message: string | null;
+    };
+
 export interface GhStatus {
   installed: boolean;
   authenticated: boolean;

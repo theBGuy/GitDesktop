@@ -19,6 +19,7 @@ import { copyText } from "@/lib/clipboard";
 import { useAppForm } from "@/lib/form";
 import { forgeBbClearAccount, forgeBbSetAccount } from "@/lib/git/api";
 import {
+  useAccountsHealth,
   useBbAccount,
   useClearGitlabReviewToken,
   useGhAccounts,
@@ -26,9 +27,19 @@ import {
   useSetGitlabReviewToken,
   useSwitchAccount,
 } from "@/lib/git/queries";
-import type { GhAccount } from "@/lib/git/types";
+import type { GhAccount, SessionHealth } from "@/lib/git/types";
+import { setBitbucketTokenExpiresAt } from "@/lib/settings/api";
+import { useSettings } from "@/lib/settings/queries";
+import { useUiStore } from "@/lib/stores/ui";
 import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
+
+/** The GitLab CLI install docs — where the "install glab" affordance points. */
+const GLAB_INSTALL_URL = "https://gitlab.com/gitlab-org/cli#installation";
+
+/** The shared OAuth-vs-PAT nudge (matches ForgeNotReady's wording). */
+const GLAB_OAUTH_NUDGE =
+  "Tip: choose the browser (OAuth) option — OAuth sessions renew themselves, while personal access tokens expire.";
 
 /** Where a Bitbucket / Atlassian API token is created. */
 const ATLASSIAN_TOKEN_URL =
@@ -60,6 +71,28 @@ const BB_SCOPES = [
   "delete:webhook:bitbucket",
 ];
 
+/** Whole days from now until a `YYYY-MM-DD` date (the Bitbucket-token expiry the
+ *  user entered). Counts to the END of that day, so the expiry date itself reads
+ *  as ~1 day left rather than "today". Null when unparseable/empty. */
+function daysUntilDate(date: string | null): number | null {
+  if (!date) return null;
+  const then = Date.parse(`${date}T23:59:59`);
+  if (Number.isNaN(then)) return null;
+  return Math.ceil((then - Date.now()) / 86_400_000);
+}
+
+/** A `YYYY-MM-DD` string rendered in the user's locale ("Jul 30, 2026"); falls
+ *  back to the raw string if it can't be parsed. */
+function formatDate(date: string): string {
+  const t = Date.parse(`${date}T00:00:00`);
+  if (Number.isNaN(t)) return date;
+  return new Date(t).toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}
+
 /** Whether this gh supports multiple accounts (`gh auth switch`, 2.40+). */
 function supportsSwitching(version: string): boolean {
   const [major = 0, minor = 0] = version.split(".").map(Number);
@@ -90,10 +123,23 @@ export function AccountsSection() {
 function GitHubAccounts() {
   const accounts = useGhAccounts();
   const switchAccount = useSwitchAccount();
+  const health = useAccountsHealth();
+  const openReconnect = useUiStore((s) => s.openReconnect);
 
   const version = accounts.data?.version ?? "";
   const canSwitch = supportsSwitching(version);
   const list = accounts.data?.accounts ?? [];
+
+  // Merge the health probe onto each account by host+login. Only a `broken`
+  // state surfaces (silence is health — no "ok" chip); "offline" and everything
+  // else read as fine, so a network blip never badges a good account.
+  const healthByKey = useMemo(() => {
+    const map = new Map<string, SessionHealth>();
+    for (const h of health.data ?? []) {
+      if (h.provider === "github") map.set(`${h.host}/${h.login}`, h);
+    }
+    return map;
+  }, [health.data]);
 
   // Group accounts by host so a developer with both github.com and an
   // Enterprise account sees the active one per host. github.com first, then
@@ -149,49 +195,85 @@ function GitHubAccounts() {
                     </p>
                   )}
                   <div className="space-y-px border">
-                    {hostAccounts.map((account) => (
-                      <div
-                        key={`${account.host}/${account.login}`}
-                        className="flex items-center gap-2 border-b px-3 py-2 last:border-b-0"
-                      >
-                        <span className="text-xs font-medium">
-                          {account.login}
-                        </span>
-                        {account.active && (
-                          <Badge variant="secondary">active</Badge>
-                        )}
-                        <span className="flex-1" />
-                        {!account.active && (
-                          <Button
-                            variant="outline"
-                            size="xs"
-                            disabled={!canSwitch || switchAccount.isPending}
-                            title={
-                              canSwitch
-                                ? `Make ${account.login} the active account on ${account.host}`
-                                : "Switching needs GitHub CLI 2.40 or newer"
-                            }
-                            onClick={() =>
-                              switchAccount.mutate(
-                                { host: account.host, login: account.login },
-                                {
-                                  onSuccess: () =>
-                                    toast.success(
-                                      `Switched to ${account.login}`,
-                                    ),
-                                  onError: (e) => toastError(e),
-                                },
-                              )
-                            }
-                          >
-                            {switchAccount.isPending && (
-                              <Spinner data-icon="inline-start" />
-                            )}
-                            Switch
-                          </Button>
-                        )}
-                      </div>
-                    ))}
+                    {hostAccounts.map((account) => {
+                      const broken =
+                        healthByKey.get(`${account.host}/${account.login}`)
+                          ?.state === "broken";
+                      const brokenDetail = healthByKey.get(
+                        `${account.host}/${account.login}`,
+                      )?.detail;
+                      return (
+                        <div
+                          key={`${account.host}/${account.login}`}
+                          className="flex items-center gap-2 border-b px-3 py-2 last:border-b-0"
+                        >
+                          <span className="text-xs font-medium">
+                            {account.login}
+                          </span>
+                          {account.active && (
+                            <Badge variant="secondary">active</Badge>
+                          )}
+                          {broken && (
+                            <Badge
+                              variant="destructive"
+                              title={
+                                brokenDetail ??
+                                (account.active
+                                  ? undefined
+                                  : "Switch to this account, then reconnect.")
+                              }
+                            >
+                              session expired
+                            </Badge>
+                          )}
+                          <span className="flex-1" />
+                          {broken && account.active && (
+                            <Button
+                              variant="outline"
+                              size="xs"
+                              onClick={() =>
+                                openReconnect({
+                                  provider: "github",
+                                  host: account.host,
+                                  mode: "refresh",
+                                })
+                              }
+                            >
+                              Reconnect
+                            </Button>
+                          )}
+                          {!account.active && (
+                            <Button
+                              variant="outline"
+                              size="xs"
+                              disabled={!canSwitch || switchAccount.isPending}
+                              title={
+                                canSwitch
+                                  ? `Make ${account.login} the active account on ${account.host}`
+                                  : "Switching needs GitHub CLI 2.40 or newer"
+                              }
+                              onClick={() =>
+                                switchAccount.mutate(
+                                  { host: account.host, login: account.login },
+                                  {
+                                    onSuccess: () =>
+                                      toast.success(
+                                        `Switched to ${account.login}`,
+                                      ),
+                                    onError: (e) => toastError(e),
+                                  },
+                                )
+                              }
+                            >
+                              {switchAccount.isPending && (
+                                <Spinner data-icon="inline-start" />
+                              )}
+                              Switch
+                            </Button>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               ))}
@@ -216,17 +298,32 @@ function GitHubAccounts() {
             </p>
           )}
 
-          <div className="space-y-1">
+          <div className="space-y-2">
             <p className="text-xs font-medium">Add an account</p>
+            <Button
+              size="sm"
+              className="cursor-pointer"
+              onClick={() =>
+                openReconnect({
+                  provider: "github",
+                  host: "github.com",
+                  mode: "login",
+                })
+              }
+            >
+              Sign in to GitHub…
+            </Button>
             <p className="text-xs text-muted-foreground">
-              gh's sign-in flow is interactive — run{" "}
+              For a GitHub Enterprise host, run{" "}
               <button
                 type="button"
                 className="font-mono underline underline-offset-2"
-                onClick={() => copyText("gh auth login", "Command copied")}
+                onClick={() =>
+                  copyText("gh auth login -h <host>", "Command copied")
+                }
                 title="Copy command"
               >
-                gh auth login
+                gh auth login -h &lt;host&gt;
               </button>{" "}
               in a terminal, then come back here.
             </p>
@@ -234,6 +331,132 @@ function GitHubAccounts() {
         </>
       )}
     </section>
+  );
+}
+
+/**
+ * The GitLab day-to-day sign-in block (distinct from the review-bot token below):
+ * the `glab` accounts known to the CLI, with a "session expired" badge + Reconnect
+ * on a broken one, and a warning before a knowable PAT expiry. OAuth sessions
+ * renew themselves, so they carry no expiry chip. Sourced from the accounts-health
+ * probe. cliMissing → an install affordance; no signed-in host → a sign-in button.
+ */
+function GitLabSignInBlock() {
+  const health = useAccountsHealth();
+  const openReconnect = useUiStore((s) => s.openReconnect);
+
+  const gitlab = (health.data ?? []).filter((h) => h.provider === "gitlab");
+  const cliMissing = gitlab.some((h) => h.state === "cliMissing");
+  // Signed-in hosts = the entries that name a real host (a cliMissing/notConnected
+  // sentinel carries none we should list as an account).
+  const hosts = gitlab.filter(
+    (h) => h.state !== "cliMissing" && h.state !== "notConnected",
+  );
+
+  if (health.isPending) return <Skeleton className="h-16 w-full" />;
+
+  return (
+    <div className="max-w-xl space-y-3">
+      {cliMissing ? (
+        <div className="space-y-2">
+          <p className="text-xs text-muted-foreground">
+            The GitLab CLI (<span className="font-mono">glab</span>) isn't
+            installed.
+          </p>
+          <Button
+            variant="outline"
+            size="sm"
+            className="cursor-pointer"
+            onClick={() => openUrl(GLAB_INSTALL_URL)}
+          >
+            Install the GitLab CLI
+          </Button>
+        </div>
+      ) : hosts.length === 0 ? (
+        <div className="space-y-2">
+          <p className="text-xs text-muted-foreground">
+            No GitLab host is signed in yet.
+          </p>
+          <Button
+            size="sm"
+            className="cursor-pointer"
+            onClick={() =>
+              openReconnect({
+                provider: "gitlab",
+                host: "gitlab.com",
+                mode: "login",
+              })
+            }
+          >
+            Sign in to gitlab.com…
+          </Button>
+        </div>
+      ) : (
+        <div className="space-y-px border">
+          {hosts.map((h) => {
+            const broken = h.state === "broken";
+            const warnExpiry =
+              h.state === "healthy" &&
+              h.method === "pat" &&
+              h.daysLeft != null &&
+              h.daysLeft <= 14;
+            return (
+              <div
+                key={`${h.host}/${h.login ?? ""}`}
+                className="flex items-center gap-2 border-b px-3 py-2 last:border-b-0"
+              >
+                <div className="min-w-0">
+                  <p className="truncate text-xs font-medium">
+                    {h.login ?? h.host}
+                  </p>
+                  <p className="truncate font-mono text-[11px] text-muted-foreground">
+                    {h.host}
+                  </p>
+                </div>
+                {broken && (
+                  <Badge
+                    variant="destructive"
+                    className="ml-auto shrink-0"
+                    title={h.detail ?? undefined}
+                  >
+                    session expired
+                  </Badge>
+                )}
+                {warnExpiry && (
+                  <Badge
+                    variant="outline"
+                    className="ml-auto shrink-0 text-warning"
+                    title={h.detail ?? undefined}
+                  >
+                    {(h.daysLeft ?? 0) <= 0
+                      ? "token expired"
+                      : `token expires in ${h.daysLeft} day${h.daysLeft === 1 ? "" : "s"}`}
+                  </Badge>
+                )}
+                {broken && (
+                  <Button
+                    variant="outline"
+                    size="xs"
+                    className="shrink-0"
+                    onClick={() =>
+                      openReconnect({
+                        provider: "gitlab",
+                        host: h.host,
+                        mode: "refresh",
+                      })
+                    }
+                  >
+                    Reconnect
+                  </Button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <p className="text-xs text-muted-foreground">{GLAB_OAUTH_NUDGE}</p>
+    </div>
   );
 }
 
@@ -287,6 +510,17 @@ function GitLabAccount() {
     <section className="space-y-4 border-t pt-6">
       <div>
         <h2 className="text-sm font-medium">GitLab</h2>
+        <p className="text-xs text-muted-foreground">
+          GitDesktop acts as whichever account is signed in to the GitLab CLI
+          (glab) — merge requests, issues, and pushes all use it. Works with
+          gitlab.com and self-managed GitLab hosts alike.
+        </p>
+      </div>
+
+      <GitLabSignInBlock />
+
+      <div className="space-y-2">
+        <p className="text-xs font-medium">AI review bot</p>
         <p className="text-xs text-muted-foreground">
           Add a GitLab project or group access token to post AI reviews as that
           project's bot user instead of your signed-in account. Tokens are
@@ -421,17 +655,22 @@ function GitLabAccount() {
  */
 function BitbucketAccount() {
   const account = useBbAccount();
+  const settings = useSettings();
   const queryClient = useQueryClient();
   const [replacing, setReplacing] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const connected = account.data ?? null;
+  const storedExpiry = settings.data?.bitbucketTokenExpiresAt ?? null;
+  const expiryDaysLeft = daysUntilDate(storedExpiry);
 
   // The set/clear both invalidate the account query AND every repo's forge-status
-  // so a connected Bitbucket repo lights up (or goes dark) without a restart.
+  // so a connected Bitbucket repo lights up (or goes dark) without a restart. The
+  // settings key too, so the stored token-expiry date reflects immediately.
   function invalidateAll() {
     queryClient.invalidateQueries({ queryKey: ["bb-account"] });
+    queryClient.invalidateQueries({ queryKey: ["settings"] });
     queryClient.invalidateQueries({
       predicate: (q) =>
         q.queryKey[0] === "repo" && q.queryKey[2] === "forge-status",
@@ -439,7 +678,13 @@ function BitbucketAccount() {
   }
 
   const form = useAppForm({
-    defaultValues: { email: connected?.email ?? "", token: "" },
+    // `expiresAt` is optional — connect works without it. Seeded from the stored
+    // value so "Replace token…" pre-fills the current expiry.
+    defaultValues: {
+      email: connected?.email ?? "",
+      token: "",
+      expiresAt: storedExpiry ?? "",
+    },
     onSubmit: async ({ value }) => {
       setError(null);
       try {
@@ -447,7 +692,14 @@ function BitbucketAccount() {
           value.email.trim(),
           value.token.trim(),
         );
-        form.reset({ email: info.email, token: "" });
+        // Persist the optional expiry on the serialized settings chain (empty =
+        // clear). Ride it so a concurrent recent-repo write can't clobber it.
+        await setBitbucketTokenExpiresAt(value.expiresAt.trim() || null);
+        form.reset({
+          email: info.email,
+          token: "",
+          expiresAt: value.expiresAt,
+        });
         setReplacing(false);
         invalidateAll();
         toast.success(
@@ -472,9 +724,11 @@ function BitbucketAccount() {
   async function clearAccount() {
     try {
       await forgeBbClearAccount();
+      // The stored expiry can't outlive the token it described.
+      await setBitbucketTokenExpiresAt(null);
       setConfirmClear(false);
       setReplacing(false);
-      form.reset({ email: "", token: "" });
+      form.reset({ email: "", token: "", expiresAt: "" });
       invalidateAll();
       toast.success("Disconnected from Bitbucket");
     } catch (e) {
@@ -523,13 +777,32 @@ function BitbucketAccount() {
                   connected
                 </Badge>
               </div>
+              {storedExpiry && (
+                <p
+                  className={`px-3 text-[11px] ${
+                    expiryDaysLeft != null && expiryDaysLeft <= 14
+                      ? "text-warning"
+                      : "text-muted-foreground"
+                  }`}
+                >
+                  {expiryDaysLeft != null && expiryDaysLeft <= 14
+                    ? `expires in ${expiryDaysLeft <= 0 ? 0 : expiryDaysLeft} day${
+                        expiryDaysLeft === 1 ? "" : "s"
+                      } — replace the token soon`
+                    : `token expires ${formatDate(storedExpiry)}`}
+                </p>
+              )}
               <div className="flex items-center gap-2 px-3 pb-3">
                 <Button
                   variant="outline"
                   size="xs"
                   onClick={() => {
                     setError(null);
-                    form.reset({ email: connected.email, token: "" });
+                    form.reset({
+                      email: connected.email,
+                      token: "",
+                      expiresAt: storedExpiry ?? "",
+                    });
                     setReplacing(true);
                   }}
                 >
@@ -572,6 +845,19 @@ function BitbucketAccount() {
                   />
                 )}
               </form.AppField>
+              {/* Optional — connect works without it (Bitbucket never reports the
+                  expiry, so it's user-supplied to power the pre-expiry warning). */}
+              <div className="space-y-1.5">
+                <form.AppField name="expiresAt">
+                  {(field) => (
+                    <field.TextField type="date" label="Token expires on" />
+                  )}
+                </form.AppField>
+                <p className="text-[11px] text-muted-foreground">
+                  Shown when Atlassian created the token (max 1 year). Lets
+                  GitDesktop warn you before it expires.
+                </p>
+              </div>
 
               <div className="flex items-center gap-2">
                 {/* A natively-disabled button swallows its title tooltip, so wrap

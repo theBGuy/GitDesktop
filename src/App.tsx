@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Spinner } from "@/components/ui/spinner";
+import { ReconnectDialog } from "@/features/accounts/ReconnectDialog";
 import { ActivityStrip } from "@/features/activity/ActivityDock";
 import { AutomationResultDialog } from "@/features/automations/AutomationResultDialog";
 import { HelpScreen } from "@/features/help/HelpScreen";
@@ -178,6 +179,7 @@ function App() {
         <ActivityStrip />
       </div>
       <AutomationResultDialog />
+      <ReconnectDialog />
       <UpdateChecker />
       <WhatsNew />
       <ShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />

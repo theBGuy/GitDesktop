@@ -8,6 +8,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useRef, useState } from "react";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { Button } from "@/components/ui/button";
+import { SessionExpiryNotice } from "@/features/accounts/SessionExpiryNotice";
 import { ConversationFilterPopover } from "@/features/conversations/ConversationFilterPopover";
 import { ConversationListPanel } from "@/features/conversations/ConversationListPanel";
 import { PAGE_SIZE } from "@/features/conversations/LoadMoreRow";
@@ -275,286 +276,292 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
   ) : undefined;
 
   return (
-    <ConversationListPanel
-      repoPath={repoPath}
-      feature="issues"
-      remoteLabel={remoteLabel}
-      stateFilter={stateFilter}
-      onStateFilter={onStateFilter}
-      lensControl={<RepoLensSwitcher repoPath={repoPath} />}
-      newMenu={{
-        ghLabel: isBitbucket
-          ? "Issue on Bitbucket…"
-          : isGitLab
-            ? "Issue on GitLab…"
-            : "Issue on GitHub…",
-        // Issues disabled on the repo (a fork's default) also blocks creation, even
-        // when the forge is otherwise ready — gate it with the reason so "New" isn't
-        // a button that can only fail.
-        ghDisabled: !canCreateGh || issuesDisabled,
-        ghReason:
-          canCreateGh && !issuesDisabled
-            ? undefined
-            : isBitbucket
-              ? "Bitbucket has retired its native issue tracker — link a Jira project to track issues."
-              : isGitLab
-                ? gh.data?.installed
-                  ? "Sign in to GitLab (glab auth login) to open issues here."
-                  : "Install the GitLab CLI (glab) to open issues here."
-                : issuesDisabled
-                  ? "Issues are disabled on this repository — enable them in the repository settings on GitHub."
-                  : "Connect this repository to GitHub to open an issue.",
-        onGh: () => setCreateOpen(true),
-        localLabel: "Local issue…",
-        onLocal: () => setCreateLocalOpen(true),
-        jiraLabel: canCreateJira
-          ? `Jira issue in ${link?.projectKey}…`
-          : undefined,
-        onJira: canCreateJira ? () => setCreateJiraOpen(true) : undefined,
-      }}
-      filterSlot={
-        <ConversationFilterPopover
-          authors={authors}
-          labels={labels}
-          authorFilter={authorFilter}
-          labelFilter={labelFilter}
-          toggle={toggle}
-          activeFilterCount={activeFilterCount}
-          authorCount={authorCount}
-          labelCount={labelCount}
-        />
-      }
-      filterRef={filterRef}
-      filterText={filterText}
-      onFilterText={setFilterText}
-      onListKeyDown={onListKeyDown}
-      stateLocal={stateLocal}
-      visibleLocal={visibleLocal}
-      localKey={(issue) => issue.id}
-      isLocalActive={(issue) =>
-        selectedIssue?.kind === "local" && selectedIssue.id === issue.id
-      }
-      onSelectLocal={(issue) => selectIssue({ kind: "local", id: issue.id })}
-      renderLocalRow={(issue) => (
-        <>
-          <p className="flex items-center gap-1.5 text-xs font-medium">
-            <RowIcon className="size-3 shrink-0 text-muted-foreground" />
-            <span className="truncate" title={issue.title}>
-              {issue.title}
-            </span>
-          </p>
-          <p className="mt-0.5 truncate pl-4 text-[11px] text-muted-foreground">
-            local · {formatRelativeTime(issue.createdAt)}
-            {issue.archived ? " · archived" : ""}
-          </p>
-        </>
-      )}
-      archivedLocalCount={archivedLocalCount}
-      showArchived={showArchived}
-      onToggleArchived={() => setShowArchived((v) => !v)}
-      localCollapsed={localCollapsed}
-      remoteCollapsed={remoteCollapsed}
-      onToggleLocal={toggleLocal}
-      onToggleRemote={toggleRemote}
-      ghPending={gh.isPending}
-      ghReady={ghReady}
-      remoteNotReadySlot={bitbucketNotReadySlot}
-      listPending={issueList.isPending}
-      remoteError={issueList.isError}
-      remoteErrorSlot={
-        issuesDisabled ? (
-          <div className="space-y-1 px-3 py-4 text-xs text-muted-foreground">
-            <p>Issues are disabled on this repository.</p>
-            <p className="text-[11px]">
-              Forks start with issues turned off — enable them in the repository
-              settings on GitHub.
+    <div className="flex min-h-0 flex-1 flex-col">
+      <SessionExpiryNotice repoPath={repoPath} />
+      <ConversationListPanel
+        repoPath={repoPath}
+        feature="issues"
+        remoteLabel={remoteLabel}
+        stateFilter={stateFilter}
+        onStateFilter={onStateFilter}
+        lensControl={<RepoLensSwitcher repoPath={repoPath} />}
+        newMenu={{
+          ghLabel: isBitbucket
+            ? "Issue on Bitbucket…"
+            : isGitLab
+              ? "Issue on GitLab…"
+              : "Issue on GitHub…",
+          // Issues disabled on the repo (a fork's default) also blocks creation, even
+          // when the forge is otherwise ready — gate it with the reason so "New" isn't
+          // a button that can only fail.
+          ghDisabled: !canCreateGh || issuesDisabled,
+          ghReason:
+            canCreateGh && !issuesDisabled
+              ? undefined
+              : isBitbucket
+                ? "Bitbucket has retired its native issue tracker — link a Jira project to track issues."
+                : isGitLab
+                  ? gh.data?.installed
+                    ? "Sign in to GitLab (glab auth login) to open issues here."
+                    : "Install the GitLab CLI (glab) to open issues here."
+                  : issuesDisabled
+                    ? "Issues are disabled on this repository — enable them in the repository settings on GitHub."
+                    : "Connect this repository to GitHub to open an issue.",
+          onGh: () => setCreateOpen(true),
+          localLabel: "Local issue…",
+          onLocal: () => setCreateLocalOpen(true),
+          jiraLabel: canCreateJira
+            ? `Jira issue in ${link?.projectKey}…`
+            : undefined,
+          onJira: canCreateJira ? () => setCreateJiraOpen(true) : undefined,
+        }}
+        filterSlot={
+          <ConversationFilterPopover
+            authors={authors}
+            labels={labels}
+            authorFilter={authorFilter}
+            labelFilter={labelFilter}
+            toggle={toggle}
+            activeFilterCount={activeFilterCount}
+            authorCount={authorCount}
+            labelCount={labelCount}
+          />
+        }
+        filterRef={filterRef}
+        filterText={filterText}
+        onFilterText={setFilterText}
+        onListKeyDown={onListKeyDown}
+        stateLocal={stateLocal}
+        visibleLocal={visibleLocal}
+        localKey={(issue) => issue.id}
+        isLocalActive={(issue) =>
+          selectedIssue?.kind === "local" && selectedIssue.id === issue.id
+        }
+        onSelectLocal={(issue) => selectIssue({ kind: "local", id: issue.id })}
+        renderLocalRow={(issue) => (
+          <>
+            <p className="flex items-center gap-1.5 text-xs font-medium">
+              <RowIcon className="size-3 shrink-0 text-muted-foreground" />
+              <span className="truncate" title={issue.title}>
+                {issue.title}
+              </span>
             </p>
-            {/* This disabled state only ever renders for the origin (fork) lens by
+            <p className="mt-0.5 truncate pl-4 text-[11px] text-muted-foreground">
+              local · {formatRelativeTime(issue.createdAt)}
+              {issue.archived ? " · archived" : ""}
+            </p>
+          </>
+        )}
+        archivedLocalCount={archivedLocalCount}
+        showArchived={showArchived}
+        onToggleArchived={() => setShowArchived((v) => !v)}
+        localCollapsed={localCollapsed}
+        remoteCollapsed={remoteCollapsed}
+        onToggleLocal={toggleLocal}
+        onToggleRemote={toggleRemote}
+        ghPending={gh.isPending}
+        ghReady={ghReady}
+        remoteNotReadySlot={bitbucketNotReadySlot}
+        listPending={issueList.isPending}
+        remoteError={issueList.isError}
+        remoteErrorSlot={
+          issuesDisabled ? (
+            <div className="space-y-1 px-3 py-4 text-xs text-muted-foreground">
+              <p>Issues are disabled on this repository.</p>
+              <p className="text-[11px]">
+                Forks start with issues turned off — enable them in the
+                repository settings on GitHub.
+              </p>
+              {/* This disabled state only ever renders for the origin (fork) lens by
                 construction; when the repo is a GitHub fork, offer browsing the
                 parent's issues instead of a dead end. */}
-            {lensGate && lens === "origin" && (
-              <div className="space-y-1.5 pt-1.5">
-                <p className="text-[11px]">
-                  Your fork has issues disabled — switch to Upstream to browse
-                  the parent repository's issues.
-                </p>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="cursor-pointer"
-                  onClick={() => setLens("upstream")}
-                >
-                  Switch to upstream
-                </Button>
-              </div>
-            )}
-          </div>
-        ) : (
-          <div className="space-y-2 px-3 py-4 text-xs text-muted-foreground">
-            <p>Couldn't load issues.</p>
-            <Button
-              variant="outline"
-              size="sm"
-              className="cursor-pointer"
-              onClick={() => issueList.refetch()}
-            >
-              Retry
-            </Button>
-          </div>
-        )
-      }
-      // More may exist server-side exactly when this page filled the requested
-      // limit (compared against the raw loaded count, not the filtered view).
-      hasMore={(issueList.data?.length ?? 0) === limit}
-      remoteCount={issueList.data?.length ?? 0}
-      loadingMore={issueList.isFetching}
-      onLoadMore={() => setLimit((n) => n + PAGE_SIZE)}
-      stateRemote={issues}
-      visibleRemote={visible}
-      remoteKey={(issue) => String(issue.number)}
-      isRemoteActive={(issue) =>
-        selectedIssue?.kind === "remote" &&
-        selectedIssue.id === String(issue.number)
-      }
-      onSelectRemote={(issue) =>
-        selectIssue({ kind: "remote", id: String(issue.number) })
-      }
-      onRemoteHover={(issue) =>
-        hoverPrefetch(() => prefetchIssue(issue.number))
-      }
-      renderRemoteRow={(issue) => (
-        <>
-          <p className="flex items-center gap-1.5 text-xs font-medium">
-            <RowIcon className="size-3 shrink-0 text-muted-foreground" />
-            <span className="truncate" title={issue.title}>
-              {issue.title}
-            </span>
-          </p>
-          <p className="mt-0.5 truncate pl-4 text-[11px] text-muted-foreground">
-            #{issue.number} · {issue.author ? `${issue.author.login} · ` : ""}
-            {formatRelativeTime(issue.createdAt)}
-          </p>
-        </>
-      )}
-      remoteSkeletonRows={3}
-      localNoun="issues"
-      remoteNoun="issues"
-      jira={
-        link
-          ? {
-              header: `Jira · ${link.projectKey}`,
-              headerAction: (
-                <Button
-                  variant="ghost"
-                  size="xs"
-                  className="cursor-pointer text-muted-foreground"
-                  onClick={() =>
-                    openUrl(
-                      `https://${link.siteHost}/browse/${link.projectKey}`,
-                    ).catch(toastError)
-                  }
-                  title={`Open ${link.projectKey} in Jira`}
-                >
-                  <ArrowSquareOutIcon data-icon="inline-start" />
-                  View in Jira
-                </Button>
-              ),
-              pending: jiraIssues.isPending,
-              isError: jiraIssues.isError,
-              errorSlot: (
-                <div className="space-y-2 px-3 py-4 text-xs text-muted-foreground">
-                  <p>
-                    Couldn't load {link.projectKey} — your Jira credential may
-                    have expired.
+              {lensGate && lens === "origin" && (
+                <div className="space-y-1.5 pt-1.5">
+                  <p className="text-[11px]">
+                    Your fork has issues disabled — switch to Upstream to browse
+                    the parent repository's issues.
                   </p>
                   <Button
                     variant="outline"
                     size="sm"
                     className="cursor-pointer"
-                    onClick={() => setJiraOpen(true)}
+                    onClick={() => setLens("upstream")}
                   >
-                    Reconnect
+                    Switch to upstream
                   </Button>
                 </div>
-              ),
-              items: visibleJira,
-              itemKey: (issue: JiraIssueInfo) => issue.key,
-              isActive: (issue: JiraIssueInfo) =>
-                selectedIssue?.kind === "jira" &&
-                selectedIssue.id === issue.key,
-              onSelect: (issue: JiraIssueInfo) =>
-                selectIssue({ kind: "jira", id: issue.key }),
-              // Three-line layout so the textual Jira status name never wraps
-              // inside its chip and squeezes the title: (1) status chip left +
-              // assignee avatar right, (2) full-width truncating title, (3)
-              // key · updated. Row heights stay consistent with/without an
-              // assignee (line 1 always reserves the avatar's height via the
-              // chip).
-              renderRow: (issue: JiraIssueInfo) => (
-                <>
-                  <div className="flex min-h-6 items-center gap-1.5">
-                    <JiraStatusChip issue={issue} />
-                    {issue.storyPoints != null && (
-                      <span
-                        className="w-fit whitespace-nowrap border px-1 py-px text-[10px] text-muted-foreground"
-                        title="Story points"
-                        aria-label={`${formatStoryPoints(issue.storyPoints)} story points`}
-                      >
-                        {formatStoryPoints(issue.storyPoints)}
-                      </span>
-                    )}
-                    {issue.assignee && (
-                      <span className="ml-auto shrink-0">
-                        <ForgeUserAvatar user={issue.assignee} ghHost={null} />
-                      </span>
-                    )}
-                  </div>
-                  <p
-                    className="mt-0.5 truncate text-xs font-medium"
-                    title={issue.summary}
+              )}
+            </div>
+          ) : (
+            <div className="space-y-2 px-3 py-4 text-xs text-muted-foreground">
+              <p>Couldn't load issues.</p>
+              <Button
+                variant="outline"
+                size="sm"
+                className="cursor-pointer"
+                onClick={() => issueList.refetch()}
+              >
+                Retry
+              </Button>
+            </div>
+          )
+        }
+        // More may exist server-side exactly when this page filled the requested
+        // limit (compared against the raw loaded count, not the filtered view).
+        hasMore={(issueList.data?.length ?? 0) === limit}
+        remoteCount={issueList.data?.length ?? 0}
+        loadingMore={issueList.isFetching}
+        onLoadMore={() => setLimit((n) => n + PAGE_SIZE)}
+        stateRemote={issues}
+        visibleRemote={visible}
+        remoteKey={(issue) => String(issue.number)}
+        isRemoteActive={(issue) =>
+          selectedIssue?.kind === "remote" &&
+          selectedIssue.id === String(issue.number)
+        }
+        onSelectRemote={(issue) =>
+          selectIssue({ kind: "remote", id: String(issue.number) })
+        }
+        onRemoteHover={(issue) =>
+          hoverPrefetch(() => prefetchIssue(issue.number))
+        }
+        renderRemoteRow={(issue) => (
+          <>
+            <p className="flex items-center gap-1.5 text-xs font-medium">
+              <RowIcon className="size-3 shrink-0 text-muted-foreground" />
+              <span className="truncate" title={issue.title}>
+                {issue.title}
+              </span>
+            </p>
+            <p className="mt-0.5 truncate pl-4 text-[11px] text-muted-foreground">
+              #{issue.number} · {issue.author ? `${issue.author.login} · ` : ""}
+              {formatRelativeTime(issue.createdAt)}
+            </p>
+          </>
+        )}
+        remoteSkeletonRows={3}
+        localNoun="issues"
+        remoteNoun="issues"
+        jira={
+          link
+            ? {
+                header: `Jira · ${link.projectKey}`,
+                headerAction: (
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    className="cursor-pointer text-muted-foreground"
+                    onClick={() =>
+                      openUrl(
+                        `https://${link.siteHost}/browse/${link.projectKey}`,
+                      ).catch(toastError)
+                    }
+                    title={`Open ${link.projectKey} in Jira`}
                   >
-                    {issue.summary}
-                  </p>
-                  <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
-                    {issue.key} · {formatRelativeTime(issue.updatedAt)}
-                  </p>
-                </>
-              ),
-              skeletonRows: 3,
-              emptyLabel: `No ${stateFilter} issues in ${link.projectKey} — switch the filter or view the project in Jira.`,
-            }
-          : undefined
-      }
-    >
-      <CreateIssueDialog
-        repoPath={repoPath}
-        lens={lens}
-        open={createOpen}
-        onOpenChange={(o) => {
-          setCreateOpen(o);
-          if (!o) setIssueDraft(undefined);
-        }}
-        initialDraft={issueDraft}
-      />
-      <CreateLocalIssueDialog
-        repoPath={repoPath}
-        open={createLocalOpen}
-        onOpenChange={setCreateLocalOpen}
-      />
-      {link && (
-        <CreateJiraIssueDialog
+                    <ArrowSquareOutIcon data-icon="inline-start" />
+                    View in Jira
+                  </Button>
+                ),
+                pending: jiraIssues.isPending,
+                isError: jiraIssues.isError,
+                errorSlot: (
+                  <div className="space-y-2 px-3 py-4 text-xs text-muted-foreground">
+                    <p>
+                      Couldn't load {link.projectKey} — your Jira credential may
+                      have expired.
+                    </p>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="cursor-pointer"
+                      onClick={() => setJiraOpen(true)}
+                    >
+                      Reconnect
+                    </Button>
+                  </div>
+                ),
+                items: visibleJira,
+                itemKey: (issue: JiraIssueInfo) => issue.key,
+                isActive: (issue: JiraIssueInfo) =>
+                  selectedIssue?.kind === "jira" &&
+                  selectedIssue.id === issue.key,
+                onSelect: (issue: JiraIssueInfo) =>
+                  selectIssue({ kind: "jira", id: issue.key }),
+                // Three-line layout so the textual Jira status name never wraps
+                // inside its chip and squeezes the title: (1) status chip left +
+                // assignee avatar right, (2) full-width truncating title, (3)
+                // key · updated. Row heights stay consistent with/without an
+                // assignee (line 1 always reserves the avatar's height via the
+                // chip).
+                renderRow: (issue: JiraIssueInfo) => (
+                  <>
+                    <div className="flex min-h-6 items-center gap-1.5">
+                      <JiraStatusChip issue={issue} />
+                      {issue.storyPoints != null && (
+                        <span
+                          className="w-fit whitespace-nowrap border px-1 py-px text-[10px] text-muted-foreground"
+                          title="Story points"
+                          aria-label={`${formatStoryPoints(issue.storyPoints)} story points`}
+                        >
+                          {formatStoryPoints(issue.storyPoints)}
+                        </span>
+                      )}
+                      {issue.assignee && (
+                        <span className="ml-auto shrink-0">
+                          <ForgeUserAvatar
+                            user={issue.assignee}
+                            ghHost={null}
+                          />
+                        </span>
+                      )}
+                    </div>
+                    <p
+                      className="mt-0.5 truncate text-xs font-medium"
+                      title={issue.summary}
+                    >
+                      {issue.summary}
+                    </p>
+                    <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
+                      {issue.key} · {formatRelativeTime(issue.updatedAt)}
+                    </p>
+                  </>
+                ),
+                skeletonRows: 3,
+                emptyLabel: `No ${stateFilter} issues in ${link.projectKey} — switch the filter or view the project in Jira.`,
+              }
+            : undefined
+        }
+      >
+        <CreateIssueDialog
           repoPath={repoPath}
-          link={link}
-          open={createJiraOpen}
-          onOpenChange={setCreateJiraOpen}
+          lens={lens}
+          open={createOpen}
+          onOpenChange={(o) => {
+            setCreateOpen(o);
+            if (!o) setIssueDraft(undefined);
+          }}
+          initialDraft={issueDraft}
         />
-      )}
-      <RepoJiraDialog
-        repoPath={repoPath}
-        open={jiraOpen}
-        onOpenChange={setJiraOpen}
-        existingLink={link}
-      />
-    </ConversationListPanel>
+        <CreateLocalIssueDialog
+          repoPath={repoPath}
+          open={createLocalOpen}
+          onOpenChange={setCreateLocalOpen}
+        />
+        {link && (
+          <CreateJiraIssueDialog
+            repoPath={repoPath}
+            link={link}
+            open={createJiraOpen}
+            onOpenChange={setCreateJiraOpen}
+          />
+        )}
+        <RepoJiraDialog
+          repoPath={repoPath}
+          open={jiraOpen}
+          onOpenChange={setJiraOpen}
+          existingLink={link}
+        />
+      </ConversationListPanel>
+    </div>
   );
 }

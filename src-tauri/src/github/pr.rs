@@ -299,17 +299,17 @@ pub async fn gh_switch_account(host: String, login: String) -> AppResult<()> {
 }
 
 /// One account from a `gh auth status` report.
-struct ParsedAccount {
-    host: String,
-    login: String,
-    active: bool,
+pub(crate) struct ParsedAccount {
+    pub(crate) host: String,
+    pub(crate) login: String,
+    pub(crate) active: bool,
 }
 
 /// Accounts from a `gh auth status` report, with the active one per host
 /// flagged. Handles both formats: old gh prints "Logged in to <host> as
 /// <login>", gh 2.40+ prints "Logged in to <host> account <login>" with a
 /// separate "Active account: true" line per account.
-fn parse_auth_accounts(report: &str) -> Vec<ParsedAccount> {
+pub(crate) fn parse_auth_accounts(report: &str) -> Vec<ParsedAccount> {
     let mut accounts: Vec<ParsedAccount> = Vec::new();
     for line in report.lines() {
         if let Some(after) = line.split_once("Logged in to ").map(|(_, rest)| rest) {

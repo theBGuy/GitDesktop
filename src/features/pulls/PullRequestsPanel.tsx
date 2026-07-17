@@ -8,6 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { SessionExpiryNotice } from "@/features/accounts/SessionExpiryNotice";
 import { ConversationFilterPopover } from "@/features/conversations/ConversationFilterPopover";
 import { ConversationListPanel } from "@/features/conversations/ConversationListPanel";
 import { PAGE_SIZE } from "@/features/conversations/LoadMoreRow";
@@ -212,206 +213,209 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   });
 
   return (
-    <ConversationListPanel
-      repoPath={repoPath}
-      feature={remoteNoun}
-      remoteLabel={remoteLabel}
-      stateFilter={stateFilter}
-      onStateFilter={onStateFilter}
-      lensControl={<RepoLensSwitcher repoPath={repoPath} />}
-      newMenu={{
-        ghLabel: isGitLab
-          ? "Merge request on GitLab…"
-          : `Pull request on ${providerName}…`,
-        ghDisabled: !canCreateGhPr,
-        ghReason: ghCreateReason ?? undefined,
-        onGh: () => setGhCreateOpen(true),
-        localLabel: "Local pull request…",
-        onLocal: () => openLocalPrCreate(),
-      }}
-      filterSlot={
-        <ConversationFilterPopover
-          authors={authors}
-          labels={labels}
-          authorFilter={authorFilter}
-          labelFilter={labelFilter}
-          toggle={toggle}
-          activeFilterCount={activeFilterCount}
-          authorCount={authorCount}
-          labelCount={labelCount}
-        />
-      }
-      filterRef={filterRef}
-      filterText={filterText}
-      onFilterText={setFilterText}
-      onListKeyDown={onListKeyDown}
-      stateLocal={stateLocal}
-      visibleLocal={visibleLocal}
-      localKey={(pr) => pr.id}
-      isLocalActive={(pr) =>
-        selectedPr?.kind === "local" && selectedPr.id === pr.id
-      }
-      onSelectLocal={(pr) => selectPr({ kind: "local", id: pr.id })}
-      renderLocalRow={(pr) => (
-        <>
-          <p className="flex items-center gap-1.5 text-xs font-medium">
-            <GitPullRequestIcon className="size-3 shrink-0 text-muted-foreground" />
-            <span className="min-w-0 truncate" title={pr.title}>
-              {pr.title}
-            </span>
-            {pr.status !== "open" && (
-              <Badge variant="secondary" className="capitalize">
-                {pr.status}
-              </Badge>
-            )}
-          </p>
-          <p className="mt-0.5 truncate pl-4 text-[11px] text-muted-foreground">
-            {pr.createdAt ? `${formatRelativeTime(pr.createdAt)} · ` : ""}
-            {pr.head} → {pr.base}
-            {pr.archived ? " · archived" : ""}
-          </p>
-        </>
-      )}
-      localRowContextMenu={(pr, row) => (
-        <LocalPrContextMenu repoPath={repoPath} pr={pr}>
-          {row}
-        </LocalPrContextMenu>
-      )}
-      archivedLocalCount={archivedLocalCount}
-      showArchived={showArchived}
-      onToggleArchived={() => setShowArchived((v) => !v)}
-      localCollapsed={localCollapsed}
-      remoteCollapsed={remoteCollapsed}
-      onToggleLocal={toggleLocal}
-      onToggleRemote={toggleRemote}
-      ghPending={gh.isPending}
-      ghReady={ghReady}
-      listPending={prList.isPending}
-      remoteError={prList.isError}
-      remoteErrorSlot={
-        <div className="space-y-2 px-3 py-4 text-xs text-muted-foreground">
-          <p>Couldn't load {remoteNoun}.</p>
-          <Button
-            variant="outline"
-            size="sm"
-            className="cursor-pointer"
-            onClick={() => prList.refetch()}
-          >
-            Retry
-          </Button>
-        </div>
-      }
-      // More may exist server-side exactly when this page filled the requested
-      // limit (compared against the raw loaded count, not the filtered view).
-      hasMore={(prList.data?.length ?? 0) === limit}
-      remoteCount={prList.data?.length ?? 0}
-      loadingMore={prList.isFetching}
-      onLoadMore={() => setLimit((n) => n + PAGE_SIZE)}
-      stateRemote={stateRemote}
-      visibleRemote={visibleRemote}
-      remoteKey={(pr) => String(pr.number)}
-      isRemoteActive={(pr) =>
-        selectedPr?.kind === "remote" && selectedPr.id === String(pr.number)
-      }
-      onSelectRemote={(pr) =>
-        selectPr({ kind: "remote", id: String(pr.number) })
-      }
-      onRemoteHover={(pr) => hoverPrefetch(() => prefetchPr(pr.number))}
-      renderRemoteRow={(pr) => (
-        <>
-          <p className="flex items-center gap-1.5 text-xs font-medium">
-            <GitPullRequestIcon className="size-3 shrink-0 text-muted-foreground" />
-            <span className="min-w-0 truncate" title={pr.title}>
-              {pr.title}
-            </span>
-            {pr.isDraft && <Badge variant="secondary">Draft</Badge>}
-            {pr.state !== "OPEN" && (
-              <Badge variant="secondary" className="capitalize">
-                {pr.state.toLowerCase()}
-              </Badge>
-            )}
-            {ciMap?.get(pr.number) === "passing" && (
-              <span
-                className="ml-auto shrink-0 text-success"
-                role="img"
-                title="Checks passing"
-                aria-label="Checks passing"
-              >
-                <CheckCircleIcon className="size-3" />
-              </span>
-            )}
-            {ciMap?.get(pr.number) === "failing" && (
-              <span
-                className="ml-auto shrink-0 text-destructive"
-                role="img"
-                title="Checks failing"
-                aria-label="Checks failing"
-              >
-                <XCircleIcon className="size-3" />
-              </span>
-            )}
-            {ciMap?.get(pr.number) === "pending" && (
-              <span
-                className="ml-auto shrink-0 text-warning"
-                role="img"
-                title="Checks pending"
-                aria-label="Checks pending"
-              >
-                <ClockIcon className="size-3" />
-              </span>
-            )}
-          </p>
-          <p className="mt-0.5 truncate pl-4 text-[11px] text-muted-foreground">
-            #{pr.number} ·{" "}
-            {pr.author ? `${displayLogin(pr.author.login)} · ` : ""}
-            {pr.createdAt ? `${formatRelativeTime(pr.createdAt)} · ` : ""}
-            {pr.headRefName} → {pr.baseRefName}
-          </p>
-        </>
-      )}
-      remoteSkeletonRows={2}
-      localNoun="pull requests"
-      remoteNoun={remoteNoun}
-    >
-      <CreatePrDialog
+    <div className="flex min-h-0 flex-1 flex-col">
+      <SessionExpiryNotice repoPath={repoPath} />
+      <ConversationListPanel
         repoPath={repoPath}
-        open={ghCreateOpen}
-        onOpenChange={setGhCreateOpen}
-      />
-
-      {/* Confirm for the palette "Delete pull request" action (the row menu owns
-          its own confirm). Guarded on a selected local PR still existing. */}
-      <ConfirmDialog
-        open={confirmDeleteSelected && selectedLocalPr !== undefined}
-        onCancel={() => setConfirmDeleteSelected(false)}
-        title="Delete this local pull request?"
-        body={
-          selectedLocalPr ? (
-            <>
-              Permanently deletes "{selectedLocalPr.title}"
-              {selectedLocalPr.comments.length > 0
-                ? ` and its ${selectedLocalPr.comments.length} comment${
-                    selectedLocalPr.comments.length === 1 ? "" : "s"
-                  }`
-                : ""}
-              . The branches are not affected. This cannot be undone.
-            </>
-          ) : null
-        }
-        confirmLabel="Delete"
-        confirmVariant="destructive"
-        pending={deleteLocalPr.isPending}
-        onConfirm={() => {
-          if (!selectedLocalPr) return;
-          deleteLocalPr.mutate(selectedLocalPr.id, {
-            onSuccess: () => {
-              setConfirmDeleteSelected(false);
-              selectPr(null);
-            },
-            onError: toastError,
-          });
+        feature={remoteNoun}
+        remoteLabel={remoteLabel}
+        stateFilter={stateFilter}
+        onStateFilter={onStateFilter}
+        lensControl={<RepoLensSwitcher repoPath={repoPath} />}
+        newMenu={{
+          ghLabel: isGitLab
+            ? "Merge request on GitLab…"
+            : `Pull request on ${providerName}…`,
+          ghDisabled: !canCreateGhPr,
+          ghReason: ghCreateReason ?? undefined,
+          onGh: () => setGhCreateOpen(true),
+          localLabel: "Local pull request…",
+          onLocal: () => openLocalPrCreate(),
         }}
-      />
-    </ConversationListPanel>
+        filterSlot={
+          <ConversationFilterPopover
+            authors={authors}
+            labels={labels}
+            authorFilter={authorFilter}
+            labelFilter={labelFilter}
+            toggle={toggle}
+            activeFilterCount={activeFilterCount}
+            authorCount={authorCount}
+            labelCount={labelCount}
+          />
+        }
+        filterRef={filterRef}
+        filterText={filterText}
+        onFilterText={setFilterText}
+        onListKeyDown={onListKeyDown}
+        stateLocal={stateLocal}
+        visibleLocal={visibleLocal}
+        localKey={(pr) => pr.id}
+        isLocalActive={(pr) =>
+          selectedPr?.kind === "local" && selectedPr.id === pr.id
+        }
+        onSelectLocal={(pr) => selectPr({ kind: "local", id: pr.id })}
+        renderLocalRow={(pr) => (
+          <>
+            <p className="flex items-center gap-1.5 text-xs font-medium">
+              <GitPullRequestIcon className="size-3 shrink-0 text-muted-foreground" />
+              <span className="min-w-0 truncate" title={pr.title}>
+                {pr.title}
+              </span>
+              {pr.status !== "open" && (
+                <Badge variant="secondary" className="capitalize">
+                  {pr.status}
+                </Badge>
+              )}
+            </p>
+            <p className="mt-0.5 truncate pl-4 text-[11px] text-muted-foreground">
+              {pr.createdAt ? `${formatRelativeTime(pr.createdAt)} · ` : ""}
+              {pr.head} → {pr.base}
+              {pr.archived ? " · archived" : ""}
+            </p>
+          </>
+        )}
+        localRowContextMenu={(pr, row) => (
+          <LocalPrContextMenu repoPath={repoPath} pr={pr}>
+            {row}
+          </LocalPrContextMenu>
+        )}
+        archivedLocalCount={archivedLocalCount}
+        showArchived={showArchived}
+        onToggleArchived={() => setShowArchived((v) => !v)}
+        localCollapsed={localCollapsed}
+        remoteCollapsed={remoteCollapsed}
+        onToggleLocal={toggleLocal}
+        onToggleRemote={toggleRemote}
+        ghPending={gh.isPending}
+        ghReady={ghReady}
+        listPending={prList.isPending}
+        remoteError={prList.isError}
+        remoteErrorSlot={
+          <div className="space-y-2 px-3 py-4 text-xs text-muted-foreground">
+            <p>Couldn't load {remoteNoun}.</p>
+            <Button
+              variant="outline"
+              size="sm"
+              className="cursor-pointer"
+              onClick={() => prList.refetch()}
+            >
+              Retry
+            </Button>
+          </div>
+        }
+        // More may exist server-side exactly when this page filled the requested
+        // limit (compared against the raw loaded count, not the filtered view).
+        hasMore={(prList.data?.length ?? 0) === limit}
+        remoteCount={prList.data?.length ?? 0}
+        loadingMore={prList.isFetching}
+        onLoadMore={() => setLimit((n) => n + PAGE_SIZE)}
+        stateRemote={stateRemote}
+        visibleRemote={visibleRemote}
+        remoteKey={(pr) => String(pr.number)}
+        isRemoteActive={(pr) =>
+          selectedPr?.kind === "remote" && selectedPr.id === String(pr.number)
+        }
+        onSelectRemote={(pr) =>
+          selectPr({ kind: "remote", id: String(pr.number) })
+        }
+        onRemoteHover={(pr) => hoverPrefetch(() => prefetchPr(pr.number))}
+        renderRemoteRow={(pr) => (
+          <>
+            <p className="flex items-center gap-1.5 text-xs font-medium">
+              <GitPullRequestIcon className="size-3 shrink-0 text-muted-foreground" />
+              <span className="min-w-0 truncate" title={pr.title}>
+                {pr.title}
+              </span>
+              {pr.isDraft && <Badge variant="secondary">Draft</Badge>}
+              {pr.state !== "OPEN" && (
+                <Badge variant="secondary" className="capitalize">
+                  {pr.state.toLowerCase()}
+                </Badge>
+              )}
+              {ciMap?.get(pr.number) === "passing" && (
+                <span
+                  className="ml-auto shrink-0 text-success"
+                  role="img"
+                  title="Checks passing"
+                  aria-label="Checks passing"
+                >
+                  <CheckCircleIcon className="size-3" />
+                </span>
+              )}
+              {ciMap?.get(pr.number) === "failing" && (
+                <span
+                  className="ml-auto shrink-0 text-destructive"
+                  role="img"
+                  title="Checks failing"
+                  aria-label="Checks failing"
+                >
+                  <XCircleIcon className="size-3" />
+                </span>
+              )}
+              {ciMap?.get(pr.number) === "pending" && (
+                <span
+                  className="ml-auto shrink-0 text-warning"
+                  role="img"
+                  title="Checks pending"
+                  aria-label="Checks pending"
+                >
+                  <ClockIcon className="size-3" />
+                </span>
+              )}
+            </p>
+            <p className="mt-0.5 truncate pl-4 text-[11px] text-muted-foreground">
+              #{pr.number} ·{" "}
+              {pr.author ? `${displayLogin(pr.author.login)} · ` : ""}
+              {pr.createdAt ? `${formatRelativeTime(pr.createdAt)} · ` : ""}
+              {pr.headRefName} → {pr.baseRefName}
+            </p>
+          </>
+        )}
+        remoteSkeletonRows={2}
+        localNoun="pull requests"
+        remoteNoun={remoteNoun}
+      >
+        <CreatePrDialog
+          repoPath={repoPath}
+          open={ghCreateOpen}
+          onOpenChange={setGhCreateOpen}
+        />
+
+        {/* Confirm for the palette "Delete pull request" action (the row menu owns
+          its own confirm). Guarded on a selected local PR still existing. */}
+        <ConfirmDialog
+          open={confirmDeleteSelected && selectedLocalPr !== undefined}
+          onCancel={() => setConfirmDeleteSelected(false)}
+          title="Delete this local pull request?"
+          body={
+            selectedLocalPr ? (
+              <>
+                Permanently deletes "{selectedLocalPr.title}"
+                {selectedLocalPr.comments.length > 0
+                  ? ` and its ${selectedLocalPr.comments.length} comment${
+                      selectedLocalPr.comments.length === 1 ? "" : "s"
+                    }`
+                  : ""}
+                . The branches are not affected. This cannot be undone.
+              </>
+            ) : null
+          }
+          confirmLabel="Delete"
+          confirmVariant="destructive"
+          pending={deleteLocalPr.isPending}
+          onConfirm={() => {
+            if (!selectedLocalPr) return;
+            deleteLocalPr.mutate(selectedLocalPr.id, {
+              onSuccess: () => {
+                setConfirmDeleteSelected(false);
+                selectPr(null);
+              },
+              onError: toastError,
+            });
+          }}
+        />
+      </ConversationListPanel>
+    </div>
   );
 }

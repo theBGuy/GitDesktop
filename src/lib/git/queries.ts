@@ -2438,6 +2438,50 @@ export function useBbAccount() {
   });
 }
 
+/** The forge session health for THIS repo's provider — drives the "session
+ *  expired" reconnect affordances on the not-ready ladders and the expiry notice.
+ *  A `state` of "offline" (inconclusive probe) is treated as "no change" by every
+ *  consumer, so a network blip never flips the UI. Repo-keyed (repo at index 1). */
+export function useForgeSessionHealth(repoPath: string) {
+  return useQuery({
+    queryKey: ["repo", repoPath, "forge-session-health"] as const,
+    queryFn: () => api.forgeSessionHealth(repoPath),
+    staleTime: 5 * 60_000,
+    enabled: !!repoPath,
+    retry: false,
+  });
+}
+
+/** The health of every known forge account (gh accounts + glab hosts) — the
+ *  Accounts settings section merges this into its rows to badge expired sessions
+ *  and warn before a knowable token expiry. */
+export function useAccountsHealth() {
+  return useQuery({
+    queryKey: ["accounts-health"] as const,
+    queryFn: api.forgeAccountsHealth,
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+}
+
+/** Refresh everything a successful reconnect can change: the accounts-health list,
+ *  every repo's forge-status (a dead session flips a repo back to ready) and
+ *  forge-session-health, plus the gh-accounts list (which account is active). Call
+ *  from a reconnect's `finished: ok` handler. */
+export function useInvalidateAfterReconnect() {
+  const queryClient = useQueryClient();
+  return useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ["accounts-health"] });
+    queryClient.invalidateQueries({ queryKey: ["gh-accounts"] });
+    queryClient.invalidateQueries({
+      predicate: (q) =>
+        q.queryKey[0] === "repo" &&
+        (q.queryKey[2] === "forge-status" ||
+          q.queryKey[2] === "forge-session-health"),
+    });
+  }, [queryClient]);
+}
+
 const gitlabReviewBotKey = ["settings", "gitlab-review-bot"] as const;
 
 /** The configured GitLab review-bot login, or null when none. A fast keyring

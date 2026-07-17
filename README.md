@@ -133,6 +133,14 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
   to list and read, and (behind `--allow-remote-write`) comment, close/reopen, create,
   assign, log work (`jira_log_work`), and update an issue's due date, priority, labels,
   and original/remaining estimates.
+- **Sign in without leaving the app** — reconnect **GitHub** (`gh`'s device-code flow)
+  and **GitLab** (`glab --web`) right from the not-signed-in panels, Settings → Accounts,
+  or the palette — no dropping to a terminal (though it stays a fallback). GitDesktop
+  tells an **expired-or-revoked session** apart from never-signed-in and network blips,
+  badges the affected account with one-click **Reconnect**, and **warns before a token
+  lapses** — GitLab and GitHub PAT expiry, plus an optional Bitbucket **expiry date** you
+  supply. For GitLab it nudges the **browser (OAuth)** option, whose sessions renew
+  themselves instead of expiring.
 - **Delegate a task to an agent** — hand a coding task to a **Claude Code**, **Codex**,
   **GitHub Copilot**, or **opencode** agent (the CLI you already have — opencode's
   hosted models are free, no extra subscription). It works in an isolated worktree that

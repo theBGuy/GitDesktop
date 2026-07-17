@@ -345,6 +345,12 @@ export const ACTIONS = [
     defaultBinding: null,
   },
   {
+    id: "reconnect-forge-session",
+    label: "Reconnect forge session",
+    category: "Repository",
+    defaultBinding: null,
+  },
+  {
     id: "fork-repository",
     label: "Fork repository",
     category: "Repository",

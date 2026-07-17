@@ -16,6 +16,7 @@ pub mod glab;
 pub mod http;
 pub mod jira;
 pub mod model;
+pub mod session;
 
 use crate::error::{AppError, AppResult};
 use crate::forge::bitbucket::BitbucketForge;
@@ -115,7 +116,7 @@ fn provider_for_host(host: &str) -> Option<Provider> {
 /// path) when the `origin` URL can't be read (no remote, or any git error), is
 /// unparseable, or the host is unrecognized — so GitHub stays the resilient
 /// default and `gh`'s own detection decides readiness.
-async fn detect_non_github(repo_path: &str) -> Option<(Provider, String)> {
+pub(crate) async fn detect_non_github(repo_path: &str) -> Option<(Provider, String)> {
     let url = crate::git::remote::git_remote_url(repo_path.to_string(), "origin".to_string())
         .await
         .ok()?;

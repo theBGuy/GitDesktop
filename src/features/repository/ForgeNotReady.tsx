@@ -7,7 +7,11 @@ import {
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { openInTerminal } from "@/lib/git/api";
-import { useForgeStatus, useRemotes } from "@/lib/git/queries";
+import {
+  useForgeSessionHealth,
+  useForgeStatus,
+  useRemotes,
+} from "@/lib/git/queries";
 import { useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
@@ -45,6 +49,13 @@ export function ForgeNotReady({
   const forge = useForgeStatus(repoPath);
   const settings = useSettings();
   const openSettings = useUiStore((s) => s.openSettings);
+  const openReconnect = useUiStore((s) => s.openReconnect);
+  // A dead session shows as `broken`; "offline" (inconclusive probe) reads like
+  // any non-broken state and changes nothing here, so a network blip never flips
+  // the copy or the button mode (anti-flap).
+  const health = useForgeSessionHealth(repoPath);
+  const sessionBroken = health.data?.state === "broken";
+  const healthLogin = health.data?.login ?? null;
 
   const provider = forge.data?.provider;
   const installed = Boolean(forge.data?.installed);
@@ -92,27 +103,49 @@ export function ForgeNotReady({
       );
     }
     if (!forge.data?.authenticated) {
+      const host = forge.data?.host ?? health.data?.host ?? "gitlab.com";
       return (
         <div className="space-y-2.5 px-3 py-4 text-xs text-muted-foreground">
           <p>
-            Sign in to GitLab to work with {feature}. Run{" "}
-            <span className="font-mono text-foreground">glab auth login</span>{" "}
-            in a terminal.
+            {sessionBroken
+              ? `Your GitLab session${
+                  healthLogin ? ` for @${healthLogin}` : ""
+                } expired or was revoked. Reconnect to keep working with ${feature}.`
+              : `Sign in to GitLab to work with ${feature}.`}
           </p>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() =>
-              openInTerminal(
-                repoPath,
-                settings.data?.terminal,
-                settings.data?.terminalPath,
-              ).catch(toastError)
-            }
-          >
-            <TerminalIcon data-icon="inline-start" />
-            Open terminal to sign in
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              className="cursor-pointer"
+              onClick={() =>
+                openReconnect({
+                  provider: "gitlab",
+                  host,
+                  mode: sessionBroken ? "refresh" : "login",
+                })
+              }
+            >
+              {sessionBroken ? "Reconnect GitLab…" : "Sign in to GitLab…"}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() =>
+                openInTerminal(
+                  repoPath,
+                  settings.data?.terminal,
+                  settings.data?.terminalPath,
+                ).catch(toastError)
+              }
+            >
+              <TerminalIcon data-icon="inline-start" />
+              Open terminal to sign in
+            </Button>
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            Tip: choose the browser (OAuth) option — OAuth sessions renew
+            themselves, while personal access tokens expire.
+          </p>
         </div>
       );
     }
@@ -210,24 +243,41 @@ export function ForgeNotReady({
       ) : !authed ? (
         <>
           <p>
-            Sign in to GitHub to work with {feature}. Run{" "}
-            <span className="font-mono text-foreground">gh auth login</span> in
-            a terminal.
+            {sessionBroken
+              ? `Your GitHub session${
+                  healthLogin ? ` for @${healthLogin}` : ""
+                } expired or was revoked. Reconnect to keep working with ${feature}.`
+              : `Sign in to GitHub to work with ${feature}.`}
           </p>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() =>
-              openInTerminal(
-                repoPath,
-                settings.data?.terminal,
-                settings.data?.terminalPath,
-              ).catch(toastError)
-            }
-          >
-            <TerminalIcon data-icon="inline-start" />
-            Open terminal to sign in
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              className="cursor-pointer"
+              onClick={() =>
+                openReconnect({
+                  provider: "github",
+                  host: forge.data?.host ?? health.data?.host ?? "github.com",
+                  mode: sessionBroken ? "refresh" : "login",
+                })
+              }
+            >
+              {sessionBroken ? "Reconnect GitHub…" : "Sign in to GitHub…"}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() =>
+                openInTerminal(
+                  repoPath,
+                  settings.data?.terminal,
+                  settings.data?.terminalPath,
+                ).catch(toastError)
+              }
+            >
+              <TerminalIcon data-icon="inline-start" />
+              Open terminal to sign in
+            </Button>
+          </div>
         </>
       ) : (
         <p>

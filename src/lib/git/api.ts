@@ -1,3 +1,4 @@
+import { Channel } from "@tauri-apps/api/core";
 import { invoke } from "@/lib/tauri/invoke";
 import {
   COLD_START,
@@ -91,6 +92,7 @@ import type {
   PrTask,
   PrTimelineEvent,
   PunchCard,
+  ReconnectEvent,
   ReleaseDetails,
   ReleaseInfo,
   RemoteBranch,
@@ -116,6 +118,7 @@ import type {
   SecretApp,
   SecurityFeature,
   SecurityStatus,
+  SessionHealth,
   StagedDiff,
   StashEntry,
   StashFile,
@@ -1078,6 +1081,47 @@ export const forgeBbAccount = () =>
   COLD_START
     ? Promise.resolve<BbAccountInfo | null>(null)
     : invoke<BbAccountInfo | null>("forge_bb_account");
+
+// ── Forge session health & reconnect ─────────────────────────────────────────
+//
+// A session (a gh/glab account, or the Bitbucket token) can go dead mid-flow;
+// these probe its health and drive an in-app reconnect (gh's device flow /
+// glab's `--web` flow) instead of sending the user to a terminal.
+
+/** The health of the forge session backing THIS repo (its provider only). */
+export const forgeSessionHealth = (repoPath: string) =>
+  invoke<SessionHealth>("forge_session_health", { repoPath });
+
+/** The health of every known forge account (gh accounts + glab hosts). */
+export const forgeAccountsHealth = () =>
+  invoke<SessionHealth[]>("forge_accounts_health");
+
+/** Drive an in-app reconnect: `mode: "login"` signs in a new session, `"refresh"`
+ *  renews an existing one. Streams `ReconnectEvent`s (gh's device code, glab's
+ *  progress lines, then a terminal `finished`) over a Channel; resolves when the
+ *  flow ends. Cancel a live flow via {@link forgeReconnectCancel} with the same
+ *  `sessionId` (generated frontend-side with `crypto.randomUUID()`). */
+export const forgeReconnect = (args: {
+  sessionId: string;
+  provider: "github" | "gitlab";
+  host: string;
+  mode: "login" | "refresh";
+  onEvent: (event: ReconnectEvent) => void;
+}): Promise<void> => {
+  const channel = new Channel<ReconnectEvent>();
+  channel.onmessage = args.onEvent;
+  return invoke<void>("forge_reconnect", {
+    sessionId: args.sessionId,
+    provider: args.provider,
+    host: args.host,
+    mode: args.mode,
+    onEvent: channel,
+  });
+};
+
+/** Cancel an in-flight reconnect flow (kills the CLI subprocess). */
+export const forgeReconnectCancel = (sessionId: string) =>
+  invoke<void>("forge_reconnect_cancel", { sessionId });
 
 /** Clone a repo for a provider, supplying provider auth that plain `git clone`
  *  lacks (a private GitLab repo authenticates via glab's token). Returns the

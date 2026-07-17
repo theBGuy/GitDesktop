@@ -262,6 +262,11 @@ export interface AppSettings {
    *  Global (not per-repo) and feature-scoped, so the remote key collapses the
    *  provider section across every repo regardless of its host. */
   collapsedConversationSections: string[];
+  /** ISO-8601 expiry the user optionally entered when connecting a Bitbucket
+   *  (Atlassian) API token, so GitDesktop can warn before it lapses. Bitbucket
+   *  never reports it, so it's user-supplied; null = not provided. Cleared on
+   *  disconnect. */
+  bitbucketTokenExpiresAt: string | null;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -317,6 +322,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   recentRepos: [],
   diffViewMode: "unified",
   collapsedConversationSections: [],
+  bitbucketTokenExpiresAt: null,
 };
 
 const MAX_RECENT_REPOS = 200;
@@ -552,5 +558,22 @@ export function removeRecentRepo(path: string): Promise<void> {
       ...settings,
       recentRepos: settings.recentRepos.filter((r) => r.path !== path),
     });
+  });
+}
+
+/**
+ * Sets (or clears, with null) the optional Bitbucket token expiry date. Rides the
+ * same serialized load→modify→save chain as the recent-repo writes above: it's a
+ * top-level settings RMW that writes the whole `settings` object, so running it
+ * unserialized would interleave with a concurrent `addRecentRepo` / visibility
+ * backfill and lose one of the two writes (the documented lost-update race).
+ */
+export function setBitbucketTokenExpiresAt(
+  value: string | null,
+): Promise<void> {
+  return serializedRecentRepoWrite(async () => {
+    const settings = await loadSettings();
+    if (settings.bitbucketTokenExpiresAt === value) return;
+    await saveSettings({ ...settings, bitbucketTokenExpiresAt: value });
   });
 }

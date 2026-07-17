@@ -55,6 +55,7 @@ import { TagDetailView } from "@/features/tags/TagDetailView";
 import { TagsPanel } from "@/features/tags/TagsPanel";
 import {
   forgeFeatureReady,
+  useForgeSessionHealth,
   useForgeStatus,
   useRepoStatus,
 } from "@/lib/git/queries";
@@ -265,6 +266,35 @@ export function RepositoryView() {
     "repo-lens-upstream",
     () => setRepoLens("upstream"),
     lensGate,
+  );
+
+  // Palette "Reconnect forge session": github/gitlab open the reconnect dialog
+  // (mode from health — a signed-out host needs a fresh login, since `gh auth
+  // refresh` errors when no account exists; anything else refreshes); bitbucket
+  // has no in-app flow, so it deep-links to Settings → Accounts. Gated on a
+  // known provider (nothing to reconnect otherwise).
+  const openReconnect = useUiStore((s) => s.openReconnect);
+  const openSettings = useUiStore((s) => s.openSettings);
+  const sessionHealth = useForgeSessionHealth(repoPath ?? "");
+  const forgeProvider = gh.data?.provider ?? null;
+  useHotkeyAction(
+    "reconnect-forge-session",
+    () => {
+      if (forgeProvider === "github" || forgeProvider === "gitlab") {
+        openReconnect({
+          provider: forgeProvider,
+          host:
+            gh.data?.host ??
+            sessionHealth.data?.host ??
+            (forgeProvider === "gitlab" ? "gitlab.com" : "github.com"),
+          mode:
+            sessionHealth.data?.state === "notConnected" ? "login" : "refresh",
+        });
+      } else if (forgeProvider === "bitbucket") {
+        openSettings("accounts");
+      }
+    },
+    forgeProvider !== null,
   );
 
   // "repo • branch" in the OS title bar (and Alt-Tab) while a repo is open. No

@@ -81,6 +81,7 @@ export const capabilities: Capability[] = [
   { group: "Forges & trackers", label: "GitHub, GitLab & Bitbucket — first-class, each on its own identity", highlight: true },
   { group: "Forges & trackers", label: "GitHub Enterprise — same features, via gh" },
   { group: "Forges & trackers", label: "Multiple accounts, switch the active one per host" },
+  { group: "Forges & trackers", label: "Sign in & reconnect in-app — session-expired detection & token-expiry warnings" },
   { group: "Forges & trackers", label: "Repo switcher — forge logo & visibility badge per row, grouped by owner" },
   { group: "Forges & trackers", label: "Jira Cloud — link a project, browse & work issues in-app", highlight: true },
   { group: "Forges & trackers", label: "Jira keys in branches, commits & PRs link back to the Issues tab" },
