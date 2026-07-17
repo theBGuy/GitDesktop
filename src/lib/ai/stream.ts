@@ -146,14 +146,19 @@ export async function runCliStream({
             // narration is peeled off as separate "thoughts" for a disclosure.
             const final = event.text.trim() ? event.text : buffer;
             setText(final);
-            if (event.text.trim() && buffer !== event.text) {
-              // The buffer ends with the final answer (deltas may prepend a
-              // separator), so strip that suffix; if it doesn't match (older CLI
-              // behavior), keep the whole buffer as the thoughts.
-              const cut = buffer.endsWith(event.text)
-                ? buffer.slice(0, buffer.length - event.text.length)
-                : buffer;
-              const thoughts = cut.trim();
+            // Peel narration ONLY on a genuine suffix match (deltas may prepend a
+            // separator before the final answer, so the buffer ends with it). A
+            // mismatched buffer is NOT narration — it's a fallen-short delta stream
+            // (coalesced deltas on a non-agentic run) or a drifted wire format; a
+            // spurious "thoughts" copy of the review body is worse than no thoughts.
+            if (
+              event.text.trim() &&
+              buffer !== event.text &&
+              buffer.endsWith(event.text)
+            ) {
+              const thoughts = buffer
+                .slice(0, buffer.length - event.text.length)
+                .trim();
               if (thoughts) onThoughts?.(thoughts);
             }
             resolve();

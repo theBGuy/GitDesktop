@@ -1261,6 +1261,10 @@ fn parse_copilot_line(
                 .get("data")
                 .and_then(|d| d.get("deltaContent"))
                 .and_then(|t| t.as_str())?;
+            // Empty deltas are dropped here, while the Claude parser still emits
+            // `Delta { text: "" }` for them (its pre-separator behavior, kept
+            // byte-identical). Both deliberately leave `pending_sep` armed — the
+            // separator belongs on the first REAL text.
             if t.is_empty() {
                 return None;
             }

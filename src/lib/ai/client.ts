@@ -246,6 +246,13 @@ export async function runAgenticStream(opts: AgenticStreamOpts): Promise<void> {
   // off into "thoughts" for a disclosure. When the conclusion is empty (all prose
   // preceded the last tool step — a heuristic miss), leave the full buffer as the
   // body and emit no thoughts, never dropping content.
+  //
+  // Known limitation (accepted): a model that interleaves real findings with
+  // verification tool calls ("X is broken … [reads file] … and Y too") gets the
+  // pre-tool findings demoted into the disclosure — content preserved, placement
+  // imperfect. This mirrors the CLI providers' native semantics (Claude's `result`
+  // is likewise only the final post-tool message), and models overwhelmingly
+  // conclude after exploring, so the last-tool split is the right default.
   if (conclusionStart > 0) {
     const conclusion = buffer.slice(conclusionStart).trim();
     if (conclusion) {
