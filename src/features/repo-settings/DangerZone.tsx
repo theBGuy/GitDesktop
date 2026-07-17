@@ -389,7 +389,7 @@ function LeaveForkNetworkAction({
 
   const isGitLab = provider === "gitlab";
   const isBitbucket = provider === "bitbucket";
-  // The provider's own label, for the re-check toasts (gh is the default).
+  // The provider's own label, for the re-check toasts.
   const label = providerLabel(provider);
 
   // Derive the host — on GitHub Enterprise the provider is still "github" but a
@@ -400,6 +400,11 @@ function LeaveForkNetworkAction({
   const ghHost = forge.data?.host || record?.host || "github.com";
   const bbHost = record?.host || "bitbucket.org";
 
+  // Post-success confirmation probe (GitLab in-app detach). A failure is
+  // swallowed deliberately: the detach itself already succeeded (and toasted),
+  // the persisted badge self-heals on the next repo open, and the row's own
+  // "Re-check fork status" button — which does surface errors — remains
+  // available meanwhile.
   const reprobe = () =>
     probeAndPersistVisibility(repoPath)
       .then(() =>
@@ -421,7 +426,7 @@ function LeaveForkNetworkAction({
         toast.success(
           probe.isFork
             ? `Still a fork on ${label}`
-            : "No longer a fork — badge cleared",
+            : `No longer a fork on ${label} — badge cleared`,
         );
       }
     } catch (e) {
@@ -724,7 +729,7 @@ function DeleteAction({
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const noun = isGitLab ? "project" : "repository";
-  const providerLabel = isGitLab
+  const providerName = isGitLab
     ? "GitLab"
     : isBitbucket
       ? "Bitbucket"
@@ -733,7 +738,7 @@ function DeleteAction({
   return (
     <Row
       title={`Delete this ${noun}`}
-      desc={`Permanently remove the ${noun} on ${providerLabel}.`}
+      desc={`Permanently remove the ${noun} on ${providerName}.`}
     >
       <DangerButton
         variant="destructive"
@@ -761,7 +766,7 @@ function DeleteAction({
           del.mutate(undefined, {
             onSuccess: () => {
               toast.success(
-                `${isGitLab ? "Project" : "Repository"} deleted on ${providerLabel}`,
+                `${isGitLab ? "Project" : "Repository"} deleted on ${providerName}`,
               );
               setOpen(false);
               // The remote is gone — re-probe the repo's hosted panels so they
