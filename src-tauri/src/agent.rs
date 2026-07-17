@@ -121,6 +121,20 @@ pub enum ReviewEvent {
     NativeSession { id: String },
 }
 
+/// Sink for streaming agent events — one emitter, N consumers (the Tauri
+/// channel today; a LAN broadcast fan-out later).
+pub trait EventSink: Send + Sync {
+    fn send(&self, ev: ReviewEvent);
+}
+
+impl EventSink for Channel<ReviewEvent> {
+    fn send(&self, ev: ReviewEvent) {
+        // Fully qualified so this forwards to the inherent method instead of
+        // recursing into the trait impl.
+        let _ = Channel::send(self, ev);
+    }
+}
+
 // --- binary resolution -----------------------------------------------------
 //
 // A GUI app does not reliably inherit the user's shell PATH, and npm-installed
@@ -1505,7 +1519,7 @@ async fn stream_agent(
     // `-e COPILOT_GITHUB_TOKEN` with no value, so the token is inherited here and
     // never appears in argv / `docker inspect`).
     extra_env: &[(&str, String)],
-    on_event: &Channel<ReviewEvent>,
+    on_event: &dyn EventSink,
 ) -> AppResult<()> {
     let mut cmd = Command::new(binary);
     cmd.args(args)
@@ -1598,7 +1612,7 @@ async fn stream_agent(
                             }
                         };
                         if let Some(ev) = ev {
-                            let _ = on_event.send(ev);
+                            on_event.send(ev);
                         }
                     }
                     Ok(None) => break, // EOF: process closed stdout
@@ -1624,7 +1638,7 @@ async fn stream_agent(
         return Ok(());
     }
     if timed_out {
-        let _ = on_event.send(ReviewEvent::Error {
+        on_event.send(ReviewEvent::Error {
             message: format!("The {noun} timed out after {}s.", timeout.as_secs()),
         });
         return Ok(());
@@ -1633,7 +1647,7 @@ async fn stream_agent(
         // No terminal result event — surface stderr. Covers auth/quota
         // failures and the empty-stdout-without-a-TTY class of CLI bugs.
         let msg = stderr_text.trim();
-        let _ = on_event.send(ReviewEvent::Error {
+        on_event.send(ReviewEvent::Error {
             message: if msg.is_empty() {
                 format!("The {noun} process ended without producing any output.")
             } else {
@@ -2559,5 +2573,41 @@ mod tests {
         assert!(diff_only.iter().any(|a| a == "--allow-all-tools"));
         assert!(diff_only.iter().any(|a| a == "--deny-tool=write"));
         assert!(!diff_only.iter().any(|a| a == "--disable-builtin-mcps"));
+    }
+
+    // --- EventSink seam ------------------------------------------------------
+
+    /// A second `EventSink` implementation (the Tauri `Channel` is the first),
+    /// proving the seam takes a non-channel sink — the substrate the LAN
+    /// broadcast fan-out will reuse. Collects every event into a `Vec`.
+    struct CollectorSink {
+        events: std::sync::Mutex<Vec<ReviewEvent>>,
+    }
+
+    impl EventSink for CollectorSink {
+        fn send(&self, ev: ReviewEvent) {
+            self.events.lock().unwrap().push(ev);
+        }
+    }
+
+    #[test]
+    fn event_sink_collects_events_through_dyn_object() {
+        let sink = CollectorSink {
+            events: std::sync::Mutex::new(Vec::new()),
+        };
+        // Drive it through `&dyn EventSink` to exercise object safety — the same
+        // coercion `stream_agent`'s callers rely on.
+        let dyn_sink: &dyn EventSink = &sink;
+        dyn_sink.send(ReviewEvent::Delta {
+            text: "hello".to_string(),
+        });
+        dyn_sink.send(ReviewEvent::Error {
+            message: "boom".to_string(),
+        });
+
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], ReviewEvent::Delta { text } if text == "hello"));
+        assert!(matches!(&events[1], ReviewEvent::Error { message } if message == "boom"));
     }
 }

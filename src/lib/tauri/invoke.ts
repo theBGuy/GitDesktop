@@ -1,4 +1,4 @@
-import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { getTransport } from "@/lib/transport";
 
 export interface AppError {
   kind:
@@ -45,7 +45,7 @@ export async function invoke<T>(
   args?: Record<string, unknown>,
 ): Promise<T> {
   try {
-    return await tauriInvoke<T>(cmd, args);
+    return await getTransport().invoke<T>(cmd, args);
   } catch (e) {
     if (isAppError(e)) throw e;
     throw {
