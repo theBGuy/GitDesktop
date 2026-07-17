@@ -4001,6 +4001,16 @@ export function useGlCancelAutoMerge(repo: string) {
   );
 }
 
+/** Remove a GitLab project's fork relationship (detach from the fork network) —
+ *  GitLab-only. Deliberately does NO cache patching or invalidation: `isFork` is
+ *  forge truth that only flips via a re-probe, so the Danger-zone call site owns
+ *  the post-success `probeAndPersistVisibility` + settings invalidation. */
+export function useGlRemoveForkRelationship(repo: string) {
+  return useMutation({
+    mutationFn: () => api.forgeGlRemoveForkRelationship(repo),
+  });
+}
+
 export function useClosePr(repo: string, lens: RemoteLens) {
   return useRepoMutation(repo, (number: number) =>
     api.forgePrClose(repo, number, lens),

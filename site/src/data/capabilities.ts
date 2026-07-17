@@ -101,7 +101,7 @@ export const capabilities: Capability[] = [
   // — Repository & workspace —
   { group: "Repository & workspace", label: "Clone, add local, create (README/.gitignore/license) or fork" },
   { group: "Repository & workspace", label: "Update a fork from its upstream — fetch, then fast-forward or merge" },
-  { group: "Repository & workspace", label: "Detach from a fork — remove the upstream remote; leave the fork network on GitHub" },
+  { group: "Repository & workspace", label: "Detach from a fork — remove the upstream remote; leave the fork network on GitHub, GitLab, or Bitbucket (in-app on GitLab)" },
   { group: "Repository & workspace", label: "Publish a local repo to GitHub, GitLab or Bitbucket" },
   { group: "Repository & workspace", label: "Worktree manager — create, switch, promote & remove", highlight: true },
   { group: "Repository & workspace", label: "Submodule status & update" },
