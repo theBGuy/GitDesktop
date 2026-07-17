@@ -11,6 +11,14 @@
 //! stream the desktop renders. There is no approve/deny, no stdin, and no write
 //! path — inbound client frames are drained and ignored (except a Close).
 //!
+//! **Scoped to the shared repo.** Both routes authorize against the currently-
+//! shared repo: with no active repo they 409 like every other read route, and
+//! they only ever surface streams whose run operates on that repo. A stream on a
+//! repo the desktop has since closed or switched away from is invisible — the
+//! enumeration omits it and the watch route 404s it (indistinguishable from an
+//! unknown id, so there's no probe oracle). This upholds the clear-on-close
+//! containment: paired devices never watch a run on a repo that isn't shared.
+//!
 //! **No replay.** The underlying channel is a `tokio::sync::broadcast` with no
 //! history, so a subscriber that connects mid-stream sees only events emitted
 //! *after* it subscribed; earlier deltas are not resent. Acceptable for v1 (the
@@ -26,12 +34,18 @@ use tokio::sync::broadcast::error::RecvError;
 
 use crate::agent::ReviewEvent;
 use crate::lan::auth::RouterState;
-use crate::state::{snapshot_streams, subscribe_in};
+use crate::lan::routes::repo_or_409;
+use crate::state::{snapshot_streams_for, subscribe_in_for};
 
 /// GET /api/reviews — the active agent streams the phone can watch, as
 /// `[{ id, kind, startedAt }]` (camelCase). `kind` is `"review"` | `"session"`.
+/// Scoped to the currently-shared repo: a `None` active repo 409s (like every
+/// other read route), and only streams operating on that repo are listed — a
+/// device never sees streams from a repo the desktop has closed or switched away
+/// from. Repo paths are never exposed on the wire.
 pub async fn list(State(state): State<RouterState>) -> Response {
-    let items: Vec<_> = snapshot_streams(&state.streams)
+    let repo = repo_or_409!(state);
+    let items: Vec<_> = snapshot_streams_for(&state.streams, &repo)
         .into_iter()
         .map(|(id, kind, started_at)| {
             json!({
@@ -45,17 +59,23 @@ pub async fn list(State(state): State<RouterState>) -> Response {
 }
 
 /// GET /api/reviews/{id}/stream — upgrade to a WebSocket that forwards the live
-/// stream's [`ReviewEvent`]s as they happen. An unknown id 404s BEFORE the
-/// upgrade (no socket is opened for a stream that isn't running).
+/// stream's [`ReviewEvent`]s as they happen. Scoped to the currently-shared repo:
+/// a `None` active repo 409s, and a stream on any other repo is treated as
+/// unknown (404) — a device can't probe for or watch streams outside the shared
+/// repo. An unknown/out-of-scope id 404s BEFORE the upgrade (no socket is opened
+/// for a stream that isn't running or isn't ours to share).
 pub async fn stream(
     State(state): State<RouterState>,
     Path(id): Path<String>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    // Subscribe up front so we can reject an unknown id with a plain 404 instead
-    // of upgrading and immediately closing. Subscribing here also means we don't
-    // miss events between the upgrade handshake and the receive loop starting.
-    let rx = subscribe_in(&state.streams, &id);
+    let repo = repo_or_409!(state);
+    // Subscribe up front so we can reject an unknown (or out-of-scope) id with a
+    // plain 404 instead of upgrading and immediately closing. Scoping to `repo`
+    // here means a stream on a different repo is indistinguishable from an unknown
+    // id. Subscribing now also means we don't miss events between the upgrade
+    // handshake and the receive loop starting.
+    let rx = subscribe_in_for(&state.streams, &id, &repo);
     let Some(rx) = rx else {
         return (
             StatusCode::NOT_FOUND,

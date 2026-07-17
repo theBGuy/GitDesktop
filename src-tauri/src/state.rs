@@ -24,6 +24,11 @@ pub struct StreamInfo {
     pub kind: String,
     /// ISO-8601 (millis + `Z`), matching every other timestamp the app writes.
     pub started_at: String,
+    /// The repo the streaming run operates on; the LAN routes authorize against
+    /// it so a paired device only ever watches streams belonging to the
+    /// currently-shared repo (never one on a repo the desktop has since closed or
+    /// switched away from). Not exposed on the wire — used only for scoping.
+    pub repo_path: String,
 }
 
 /// The shared live-stream registry handle. `AppState` owns one and hands a clone
@@ -50,6 +55,52 @@ pub fn subscribe_in(registry: &StreamRegistry, id: &str) -> Option<broadcast::Re
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .get(id)
+        .map(|info| info.tx.subscribe())
+}
+
+/// Whether two repo paths refer to the same repo for LAN stream authorization.
+/// Equal if the raw strings match (the common case — both originate from the same
+/// frontend `repoPath`), OR if both canonicalize successfully to the same path
+/// (hardens against `/` vs `\` and drive-letter case on Windows). Canonicalization
+/// touches the filesystem, so it's the fallback, not the primary check.
+fn repo_paths_match(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => false,
+    }
+}
+
+/// Like [`snapshot_streams`], but returns only streams whose `repo_path` matches
+/// `repo` (per [`repo_paths_match`]) — the LAN enumeration route uses this so a
+/// paired device sees only streams on the currently-shared repo. The tuple shape
+/// is unchanged (`(id, kind, started_at)`); the repo path is never exposed.
+pub fn snapshot_streams_for(registry: &StreamRegistry, repo: &str) -> Vec<(String, String, String)> {
+    registry
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .filter(|(_, info)| repo_paths_match(&info.repo_path, repo))
+        .map(|(id, info)| (id.clone(), info.kind.clone(), info.started_at.clone()))
+        .collect()
+}
+
+/// Like [`subscribe_in`], but returns `None` unless the stream's `repo_path`
+/// matches `repo` (per [`repo_paths_match`]). A stream belonging to a different
+/// repo is indistinguishable from an unknown id — deliberately no oracle, so a
+/// paired device can't probe for streams on repos the desktop isn't sharing.
+pub fn subscribe_in_for(
+    registry: &StreamRegistry,
+    id: &str,
+    repo: &str,
+) -> Option<broadcast::Receiver<ReviewEvent>> {
+    registry
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(id)
+        .filter(|info| repo_paths_match(&info.repo_path, repo))
         .map(|info| info.tx.subscribe())
 }
 
@@ -115,17 +166,19 @@ impl AppState {
         }
     }
 
-    /// Register a live stream `id` (`kind` = `"review"` | `"session"`), returning
-    /// the broadcast sender the run fans its [`ReviewEvent`]s out through. The
-    /// caller must [`clear_stream`](Self::clear_stream) on every exit path so the
-    /// entry's lifetime matches the streaming run's (no leaked entries). A prior
-    /// entry under the same id is replaced.
-    pub fn register_stream(&self, id: &str, kind: &str) -> broadcast::Sender<ReviewEvent> {
+    /// Register a live stream `id` (`kind` = `"review"` | `"session"`) operating on
+    /// `repo_path` (recorded so the LAN routes can scope watching to the shared
+    /// repo), returning the broadcast sender the run fans its [`ReviewEvent`]s out
+    /// through. The caller must [`clear_stream`](Self::clear_stream) on every exit
+    /// path so the entry's lifetime matches the streaming run's (no leaked
+    /// entries). A prior entry under the same id is replaced.
+    pub fn register_stream(&self, id: &str, kind: &str, repo_path: &str) -> broadcast::Sender<ReviewEvent> {
         let (tx, _rx) = broadcast::channel(STREAM_BROADCAST_CAPACITY);
         let info = StreamInfo {
             tx: tx.clone(),
             kind: kind.to_string(),
             started_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            repo_path: repo_path.to_string(),
         };
         self.active_streams
             .lock()
@@ -194,7 +247,7 @@ mod tests {
         // A fresh state has no active streams.
         assert!(state.stream_snapshot().is_empty());
 
-        let tx = state.register_stream("rev-1", "review");
+        let tx = state.register_stream("rev-1", "review", "C:/repo");
         // The snapshot reflects the registration (id, kind, and a non-empty ISO ts).
         let snap = state.stream_snapshot();
         assert_eq!(snap.len(), 1);
@@ -217,7 +270,7 @@ mod tests {
     #[test]
     fn clear_removes_entry_and_closes_subscribers() {
         let state = AppState::default();
-        let _tx = state.register_stream("sess-1", "session");
+        let _tx = state.register_stream("sess-1", "session", "C:/repo");
         let mut rx = state.subscribe_stream("sess-1").expect("stream is active");
 
         // Clearing drops the stored sender...
@@ -237,7 +290,7 @@ mod tests {
     #[test]
     fn subscribe_after_clear_is_none() {
         let state = AppState::default();
-        state.register_stream("x", "review");
+        state.register_stream("x", "review", "C:/repo");
         state.clear_stream("x");
         assert!(state.subscribe_stream("x").is_none());
     }
@@ -248,12 +301,45 @@ mod tests {
         // a stream registered on the state is visible through the shared handle.
         let state = AppState::default();
         let shared = state.streams_arc();
-        state.register_stream("rev-1", "review");
+        state.register_stream("rev-1", "review", "C:/repo");
         assert!(shared
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .contains_key("rev-1"));
         state.clear_stream("rev-1");
         assert!(shared.lock().unwrap_or_else(|p| p.into_inner()).is_empty());
+    }
+
+    #[test]
+    fn scoped_snapshot_and_subscribe_filter_by_repo() {
+        // Two streams on different repos; scoping to one repo sees only its stream,
+        // and the other repo's id is indistinguishable from an unknown id (None).
+        let state = AppState::default();
+        let registry = state.streams_arc();
+        state.register_stream("rev-a", "review", "C:/repo");
+        state.register_stream("rev-b", "review", "C:/other");
+        // A write SESSION spawned from the shared repo registers under its ORIGIN
+        // repo (`C:/repo`), even though it runs in a `gd/session/*` worktree — so it
+        // must stay visible when scoping to `C:/repo`. (This is the product behavior
+        // the origin_repo_path plumbing exists for: sessions keep phone visibility.)
+        state.register_stream("sess-c", "session", "C:/repo");
+
+        // The unscoped snapshot sees all three (the desktop's own surface).
+        assert_eq!(snapshot_streams(&registry).len(), 3);
+
+        // Scoped to C:/repo: rev-a AND the origin-registered session, but not rev-b
+        // (raw string equality — no filesystem touch).
+        let mut scoped: Vec<String> = snapshot_streams_for(&registry, "C:/repo")
+            .into_iter()
+            .map(|(id, _, _)| id)
+            .collect();
+        scoped.sort();
+        assert_eq!(scoped, vec!["rev-a".to_string(), "sess-c".to_string()]);
+
+        // Subscribing under the matching repo works; under the wrong repo it's None
+        // even though the id exists (no oracle for out-of-scope streams).
+        assert!(subscribe_in_for(&registry, "rev-a", "C:/repo").is_some());
+        assert!(subscribe_in_for(&registry, "rev-b", "C:/repo").is_none());
+        assert!(subscribe_in_for(&registry, "does-not-exist", "C:/repo").is_none());
     }
 }

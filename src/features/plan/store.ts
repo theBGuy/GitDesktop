@@ -241,6 +241,8 @@ export const usePlanStore = create<PlanState>((set, get) => {
         userPrompt,
         // Read-only: runs in the live repo, never a worktree, and can't write.
         worktreePath: run0.repoPath,
+        // Same live repo it was spawned from (read-only sessions never worktree).
+        originRepoPath: run0.repoPath,
         sessionId: run0.sessionId,
         resume,
         readOnly: true,

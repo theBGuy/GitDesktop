@@ -1956,7 +1956,7 @@ pub async fn agent_review(
     // it, fanning events out to the LAN broadcast alongside the desktop channel.
     // The guard clears the entry on every exit path (registered lifetime ==
     // streaming lifetime); the desktop leg stays byte-for-byte unchanged.
-    let tx = state.register_stream(&review_id, "review");
+    let tx = state.register_stream(&review_id, "review", &repo_path);
     let _stream_guard = StreamGuard {
         state: &state,
         id: review_id.clone(),
@@ -2016,6 +2016,12 @@ pub async fn agent_session(
     system_prompt: String,
     user_prompt: String,
     worktree_path: String,
+    // The open repo this session was spawned from. `worktree_path` for a write
+    // session is a `gd/session/*` worktree of it, while read-only Plan/Research
+    // sessions pass the live repo for both. The LAN monitor authorizes streams
+    // against the SHARED repo, which is this value — so a session spawned from the
+    // shared repo stays visible to a paired phone even though it runs in a worktree.
+    origin_repo_path: String,
     session_id: String,
     resume: bool,
     // Claude-only: forks a resumed conversation to a throwaway session id
@@ -2248,7 +2254,7 @@ pub async fn agent_session(
     // channel. The guard clears the entry on EVERY exit path — the host tail, the
     // container branch's early `return`, and any `?` below (registered lifetime ==
     // streaming lifetime). The desktop leg stays byte-for-byte unchanged.
-    let tx = state.register_stream(&session_id, "session");
+    let tx = state.register_stream(&session_id, "session", &origin_repo_path);
     let _stream_guard = StreamGuard {
         state: &state,
         id: session_id.clone(),

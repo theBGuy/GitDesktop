@@ -645,4 +645,103 @@ mod tests {
         std::fs::remove_file(&tmp).ok();
         std::fs::remove_dir_all(&repo_dir).ok();
     }
+
+    /// Insert a live stream into a router state's registry, tagged with the repo it
+    /// operates on. Mirrors what `AppState::register_stream` stores, but built
+    /// directly so the test doesn't need a whole `AppState`. Returns the sender so
+    /// the caller can keep it alive (dropping it would close the stream).
+    fn insert_stream(
+        state: &auth::RouterState,
+        id: &str,
+        kind: &str,
+        repo_path: &str,
+    ) -> tokio::sync::broadcast::Sender<crate::agent::ReviewEvent> {
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        state.streams.lock().unwrap().insert(
+            id.to_string(),
+            crate::state::StreamInfo {
+                tx: tx.clone(),
+                kind: kind.to_string(),
+                started_at: "2026-07-17T00:00:00.000Z".to_string(),
+                repo_path: repo_path.to_string(),
+            },
+        );
+        tx
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn reviews_list_is_scoped_to_the_shared_repo() {
+        // A stream registered on the shared repo is listed; one on a different repo
+        // is omitted — a paired device only ever sees streams on the shared repo.
+        let _lock = auth::store_test_lock();
+        let tmp = temp_store();
+        let prev = auth::set_store_path_for_test(Some(tmp.clone()));
+        let (device, bearer, token_hash) = auth::mint_device("List Phone");
+        auth::persist_device(&device, &token_hash).unwrap();
+
+        // Sharing C:/repo, with one stream on it and one on C:/other.
+        let state = test_router(Some("C:/repo".to_string()));
+        let _tx_here = insert_stream(&state, "rev-here", "review", "C:/repo");
+        let _tx_other = insert_stream(&state, "rev-other", "session", "C:/other");
+        let router = server::build_router(state);
+
+        let resp = router
+            .oneshot(authed_get("/api/reviews", &bearer))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let items: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let arr = items.as_array().unwrap();
+        // Exactly the shared repo's stream; the other repo's is filtered out. Repo
+        // paths are never on the wire (only id/kind/startedAt).
+        assert_eq!(arr.len(), 1, "only the shared repo's stream: {items}");
+        assert_eq!(arr[0]["id"], "rev-here");
+        assert_eq!(arr[0]["kind"], "review");
+        assert!(arr[0].get("repoPath").is_none() && arr[0].get("repo_path").is_none());
+
+        auth::set_store_path_for_test(prev);
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn reviews_list_409s_when_no_repo_shared() {
+        // With no active repo, the enumeration route 409s (like every other read
+        // route) even when a stream is registered — nothing is shared to list.
+        let _lock = auth::store_test_lock();
+        let tmp = temp_store();
+        let prev = auth::set_store_path_for_test(Some(tmp.clone()));
+        let (device, bearer, token_hash) = auth::mint_device("NoRepo Phone");
+        auth::persist_device(&device, &token_hash).unwrap();
+
+        let state = test_router(None);
+        let _tx = insert_stream(&state, "rev-1", "review", "C:/repo");
+        let router = server::build_router(state);
+
+        let list = router
+            .oneshot(authed_get("/api/reviews", &bearer))
+            .await
+            .unwrap();
+        assert_eq!(list.status(), StatusCode::CONFLICT);
+
+        auth::set_store_path_for_test(prev);
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    // NOTE on the `stream` route's 409/404 branches: `WebSocketUpgrade` is an
+    // extractor, and axum runs it during extraction — a plain (non-upgrade) GET is
+    // rejected with `400 Bad Request` by the extractor BEFORE the handler body runs,
+    // so a `tower::oneshot` (which can't perform a real WS upgrade) can never reach
+    // the body's `repo_or_409!` (409) or its scoped-`subscribe_in_for` 404. The
+    // pre-existing `review_routes_are_bearer_gated` test likewise only reaches the
+    // 401 because that's middleware, ahead of extraction. The scoping logic these
+    // branches call is unit-tested directly in `state::tests`
+    // (`scoped_snapshot_and_subscribe_filter_by_repo`): matching repo → `Some`,
+    // out-of-scope id and unknown id → `None` (the 404 source), with no oracle
+    // distinguishing them. Asserting the route-level 404/409 would need a live
+    // socket, out of scope for these in-memory router tests.
 }
