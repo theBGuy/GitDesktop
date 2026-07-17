@@ -511,10 +511,12 @@ fn claude_review_args(
     repo_aware: bool,
     mcp_config: Option<&str>,
     // `mcp__<server>` allowlist entries for any server loaded via `mcp_config`.
-    // `--tools` is a STRICT allowlist, so a loaded server's tools stay uncallable
-    // unless its pattern is appended here (proven live in the session work). Empty
-    // when no self-MCP is attached, so the diff-only / plain repo-aware toolset is
-    // byte-identical to before.
+    // Two separate layers gate an MCP call: `--tools` is AVAILABILITY (a loaded
+    // server's tools stay invisible to the model unless its pattern is appended),
+    // and `--allowedTools` is PERMISSION (without it, headless `-p` mode auto-denies
+    // every MCP call — no one is there to answer the approval prompt). Both are
+    // appended below. Empty when no self-MCP is attached, so the diff-only / plain
+    // repo-aware toolset is byte-identical to before.
     mcp_tools: &[String],
 ) -> Vec<String> {
     // Base toolset: repo-aware exposes the read tools; diff-only exposes none. Any
@@ -550,6 +552,15 @@ fn claude_review_args(
     if let Some(path) = mcp_config {
         args.push("--mcp-config".into());
         args.push(path.into());
+    }
+    // `--tools` only makes an MCP tool AVAILABLE to the model; permission is a
+    // separate layer. In headless `-p` mode there is no one to answer an approval
+    // prompt, so every ungranted MCP call is auto-denied. `--allowedTools` grants
+    // exactly the self-server's tools (safe: the self server is spawned read-only,
+    // no write flags), so the loaded server is actually callable.
+    if !mcp_tools.is_empty() {
+        args.push("--allowedTools".into());
+        args.push(mcp_tools.join(","));
     }
     if !model.trim().is_empty() {
         args.push("--model".into());
@@ -628,6 +639,16 @@ fn claude_session_args(
     if let Some(path) = mcp_config {
         args.push("--mcp-config".into());
         args.push(path.into());
+    }
+    // Grant permission to the opted-in MCP tools (a separate layer from `--tools`
+    // availability). Write/Research sessions already run `bypassPermissions` below,
+    // which skips this layer entirely — the grant is redundant but harmless there.
+    // It matters for a read-only no-web session (Plan) with MCP attached: that
+    // profile has no bypass, so it would hit the same headless auto-denial as a
+    // review; `--allowedTools` closes the hole uniformly across profiles.
+    if !mcp_tools.is_empty() {
+        args.push("--allowedTools".into());
+        args.push(mcp_tools.join(","));
     }
     // Write sessions always bypass; a read-only Research run bypasses too so its web
     // tools are authorized (see the toolset comment above). Plan (read-only, no web)
@@ -2508,6 +2529,20 @@ mod tests {
     }
 
     #[test]
+    fn claude_session_grants_mcp_tools_when_attached() {
+        let patterns = vec!["mcp__gitdesktop".to_string()];
+        // Read-only (Plan) profile with self-MCP: no bypass, so the permission grant
+        // is what actually makes the loaded server callable in headless `-p` mode.
+        let plan = claude_session_args("", "sys", "sid", false, false, true, false, None, &patterns);
+        assert!(!plan.iter().any(|a| a == "bypassPermissions"));
+        assert_eq!(flag_value(&plan, "--allowedTools"), Some("mcp__gitdesktop"));
+
+        // An empty mcp_tools slice grants nothing — the flag is absent.
+        let plan_none = claude_session_args("", "sys", "sid", false, false, true, false, None, &[]);
+        assert!(!plan_none.iter().any(|a| a == "--allowedTools"));
+    }
+
+    #[test]
     fn claude_review_without_mcp_is_unchanged() {
         // No self-MCP: no `--mcp-config`, tools are the plain repo-aware/diff-only set,
         // and `--strict-mcp-config` is still present. This locks the mcp_self=false path
@@ -2516,10 +2551,12 @@ mod tests {
         assert_eq!(tools_of(&aware), "Read,Grep,Glob");
         assert!(!aware.iter().any(|a| a == "--mcp-config"));
         assert!(aware.iter().any(|a| a == "--strict-mcp-config"));
+        assert!(!aware.iter().any(|a| a == "--allowedTools"));
 
         let diff_only = claude_review_args("m", "sys", false, None, &[]);
         assert_eq!(tools_of(&diff_only), ""); // empty toolset for diff-only
         assert!(!diff_only.iter().any(|a| a == "--mcp-config"));
+        assert!(!diff_only.iter().any(|a| a == "--allowedTools"));
     }
 
     #[test]
@@ -2530,12 +2567,16 @@ mod tests {
         assert_eq!(tools_of(&aware), "Read,Grep,Glob,mcp__gitdesktop");
         assert_eq!(flag_value(&aware, "--mcp-config"), Some("C:/cfg/r.json"));
         assert!(aware.iter().any(|a| a == "--strict-mcp-config"));
+        // Permission is granted for exactly the self-server's tools, or a headless
+        // `-p` review auto-denies every MCP call.
+        assert_eq!(flag_value(&aware, "--allowedTools"), Some("mcp__gitdesktop"));
 
         // Diff-only: base toolset is empty, so the pattern stands alone (no leading
         // comma) — the server stays callable even without repo-aware read tools.
         let diff_only = claude_review_args("m", "sys", false, Some("C:/cfg/r.json"), &patterns);
         assert_eq!(tools_of(&diff_only), "mcp__gitdesktop");
         assert_eq!(flag_value(&diff_only, "--mcp-config"), Some("C:/cfg/r.json"));
+        assert_eq!(flag_value(&diff_only, "--allowedTools"), Some("mcp__gitdesktop"));
     }
 
     #[test]
