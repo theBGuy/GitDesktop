@@ -44,7 +44,12 @@ pub struct ServerHandle {
 impl ServerHandle {
     /// Signal graceful shutdown and await the serve task's exit.
     pub async fn shutdown(self) {
-        self.shutdown.notify_waiters();
+        // `notify_one` (NOT `notify_waiters`): the serve task registers its
+        // `notified()` waiter only on its first poll, and a rapid enable→disable
+        // can call shutdown before that. `notify_one` stores a permit so a
+        // pre-registration signal is still consumed; `notify_waiters` would be
+        // lost, leaving `task.await` pending forever with the lifecycle lock held.
+        self.shutdown.notify_one();
         // The serve future observes the notify and returns; join to be sure the
         // listener is released before we (possibly) rebind on a mode change.
         let _ = self.task.await;
