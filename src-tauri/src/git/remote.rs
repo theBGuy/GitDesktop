@@ -170,6 +170,46 @@ pub async fn git_remote_add(
     Ok(())
 }
 
+/// Remove a remote (`git remote remove <name>`) — the "Detach from fork"
+/// action, dropping the `upstream` remote a fork was given so the fork/upstream
+/// lens stops treating the repo as a fork. Generic over the remote name.
+///
+/// What git does on remove (git-remote(1) / `builtin/remote.c`): it deletes the
+/// entire `remote.<name>` config section, unsets `branch.<b>.remote` /
+/// `branch.<b>.merge` for every branch that was tracking this remote (leaving
+/// those branches with **no** upstream — they are not re-pointed at another
+/// remote), and deletes the remote-tracking refs under
+/// `refs/remotes/<name>/`. The remote must exist first — [`ensure_remote_exists`]
+/// turns an unknown name into an honest `InvalidArgument` (and rejects the
+/// `-flag` injection shape) rather than a confusing raw-git error.
+#[tauri::command]
+pub async fn git_remote_remove(
+    state: State<'_, AppState>,
+    repo_path: String,
+    name: String,
+) -> AppResult<()> {
+    git_remote_remove_core(&state, repo_path, name).await
+}
+
+pub(crate) async fn git_remote_remove_core(
+    state: &AppState,
+    repo_path: String,
+    name: String,
+) -> AppResult<()> {
+    ensure_remote_exists(&repo_path, &name).await?;
+    run_git_mutating(
+        state,
+        &repo_path,
+        &["remote", "remove", &name],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    // The remote (and its URL) no longer exists — drop any cached URL so a forge
+    // query firing within the TTL doesn't serve the removed remote's stale value.
+    cache_invalidate(&repo_path, &name);
+    Ok(())
+}
+
 /// Names of the configured remotes (e.g. `["origin"]`), empty for a local repo.
 #[tauri::command]
 pub async fn git_remotes(repo_path: String) -> AppResult<Vec<String>> {
@@ -366,7 +406,10 @@ pub(crate) async fn git_push_core(
 
 #[cfg(test)]
 mod tests {
-    use super::{cache_get, cache_invalidate, cache_put};
+    use super::{cache_get, cache_invalidate, cache_put, git_remote_remove_core};
+    use crate::error::AppError;
+    use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
+    use crate::state::AppState;
     use std::time::Duration;
 
     // Distinct keys per test — the cache is a process-wide static shared across all tests.
@@ -425,5 +468,145 @@ mod tests {
     #[test]
     fn miss_returns_none() {
         assert_eq!(cache_get("/repo/never-written", "origin", BIG), None);
+    }
+
+    // --- Real-repo tests for git_remote_remove (temp_dir, git on PATH). ---
+
+    async fn run(repo: &str, args: &[&str]) -> String {
+        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+            .await
+            .unwrap()
+            .stdout_lossy()
+    }
+
+    /// A unique temp base dir for a test, cleaned up by the caller.
+    fn temp_base(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "gd-remote-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    async fn init_repo(repo_s: &str, seed_file: &str) {
+        run(repo_s, &["init", "-q"]).await;
+        run(repo_s, &["config", "user.email", "t@t.local"]).await;
+        run(repo_s, &["config", "user.name", "T"]).await;
+        std::fs::write(std::path::Path::new(repo_s).join(seed_file), "hello\n").unwrap();
+        run(repo_s, &["add", "-A"]).await;
+        run(repo_s, &["commit", "-qm", "seed"]).await;
+    }
+
+    /// Add an `upstream` remote (a second local repo), fetch it, point a branch's
+    /// upstream at it, then remove it via `git_remote_remove_core` and assert git
+    /// tore down everything: the remote is gone from `git remote`, the branch's
+    /// `branch.<b>.remote` config is unset, and `refs/remotes/upstream/` is empty.
+    #[tokio::test]
+    async fn remove_drops_remote_tracking_and_branch_upstream() {
+        let base = temp_base("remove");
+        let repo = base.join("repo");
+        let up = base.join("upstream");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&up).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        let up_s = up.to_string_lossy().into_owned();
+
+        // The upstream repo, with a commit so it has a branch to fetch.
+        init_repo(&up_s, "u.txt").await;
+        let up_branch = run(&up_s, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+
+        // The consuming repo, with its own branch.
+        init_repo(&repo_s, "a.txt").await;
+        let branch = run(&repo_s, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+
+        // Add + fetch upstream by file path, then track upstream/<branch>.
+        run(&repo_s, &["remote", "add", "upstream", &up_s]).await;
+        run(&repo_s, &["fetch", "-q", "upstream"]).await;
+        run(
+            &repo_s,
+            &[
+                "branch",
+                &format!("--set-upstream-to=upstream/{up_branch}"),
+                &branch,
+            ],
+        )
+        .await;
+
+        // Preconditions: the remote is listed, the branch tracks it, refs exist.
+        assert!(run(&repo_s, &["remote"]).await.contains("upstream"));
+        assert_eq!(
+            run(&repo_s, &["config", &format!("branch.{branch}.remote")])
+                .await
+                .trim(),
+            "upstream"
+        );
+        assert!(!run(&repo_s, &["for-each-ref", "refs/remotes/upstream/"])
+            .await
+            .trim()
+            .is_empty());
+
+        // Remove via the command core.
+        let state = AppState::default();
+        git_remote_remove_core(&state, repo_s.clone(), "upstream".into())
+            .await
+            .expect("remove succeeds");
+
+        // The remote is gone.
+        assert!(!run(&repo_s, &["remote"]).await.contains("upstream"));
+        // The branch's upstream config is unset — `git config` exits non-zero.
+        assert!(
+            run_git(
+                Some(&repo_s),
+                &["config", &format!("branch.{branch}.remote")],
+                DEFAULT_TIMEOUT,
+            )
+            .await
+            .is_err(),
+            "branch.<b>.remote is unset after removal"
+        );
+        // The remote-tracking refs are gone.
+        assert!(
+            run(&repo_s, &["for-each-ref", "refs/remotes/upstream/"])
+                .await
+                .trim()
+                .is_empty(),
+            "refs/remotes/upstream/ is empty after removal"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Removing a remote that doesn't exist is an honest `InvalidArgument`, not a
+    /// raw git error — the `ensure_remote_exists` gate.
+    #[tokio::test]
+    async fn remove_nonexistent_remote_errors_invalid_argument() {
+        let base = temp_base("missing");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "a.txt").await;
+
+        let state = AppState::default();
+        let err = git_remote_remove_core(&state, repo_s.clone(), "upstream".into())
+            .await
+            .expect_err("removing a missing remote errors");
+        match err {
+            AppError::InvalidArgument(msg) => {
+                assert_eq!(msg, "remote does not exist: upstream");
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

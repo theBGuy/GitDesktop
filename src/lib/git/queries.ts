@@ -2780,6 +2780,17 @@ export function useAddRemote(repo: string) {
   );
 }
 
+/** Removes a remote (e.g. dropping `upstream` to detach a clone from the fork's
+ *  parent). The default broad invalidation (`["repo", repo]`) prefix-covers the
+ *  `remotes` and `remote-url` queries, so `useLensGate` re-reads and every
+ *  fork-identity surface — the origin/upstream switcher, "Update from upstream",
+ *  and "Create on parent" — collapses live once the remote is gone. */
+export function useRemoveRemote(repo: string) {
+  return useRepoMutation(repo, (args: { name: string }) =>
+    api.gitRemoteRemove(repo, args.name),
+  );
+}
+
 export function useOpState(repo: string) {
   return useQuery({
     queryKey: ["repo", repo, "op-state"] as const,

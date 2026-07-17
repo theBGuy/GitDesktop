@@ -719,6 +719,9 @@ export const gitRemoteSetUrl = (repoPath: string, name: string, url: string) =>
 export const gitRemoteAdd = (repoPath: string, name: string, url: string) =>
   invoke<void>("git_remote_add", { repoPath, name, url });
 
+export const gitRemoteRemove = (repoPath: string, name: string) =>
+  invoke<void>("git_remote_remove", { repoPath, name });
+
 export const gitSubmodules = (repoPath: string) =>
   invoke<Submodule[]>("git_submodules", { repoPath });
 

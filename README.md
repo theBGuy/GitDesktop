@@ -420,7 +420,10 @@ workflow against any two branches with no remote at all).
   fork; also the **Switch to fork / upstream view** palette commands) points the remote
   PR list — and every PR you open under it: description, comments, reviews, and metadata —
   at your fork or the **parent** repository. Opening a PR targets a repository explicitly,
-  offering your fork or the upstream repo on a fork.
+  offering your fork or the upstream repo on a fork. When you're done with a fork, the
+  settings **Danger zone** can **remove the upstream remote** (a local detach — reversible)
+  or, on GitHub, link out to **leave the fork network** entirely (permanent, done on
+  github.com), with a **Re-check fork status** button that refreshes the fork badge in place.
 
 A Write/Preview markdown editor (formatting toolbar + live preview) is everywhere you author.
 

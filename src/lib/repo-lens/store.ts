@@ -38,3 +38,12 @@ export async function saveRepoLens(
   const id = await repoIdentity(repo);
   await store.set(id, lens);
 }
+
+/** Drop the persisted lens for a repo (hygiene after detaching from a fork —
+ *  the upstream remote is gone, so a stale "upstream" entry no longer applies).
+ *  Any subsequent read safe-defaults to "origin". */
+export async function deleteRepoLens(repo: string): Promise<void> {
+  const store = await getStore();
+  const id = await repoIdentity(repo);
+  await store.delete(id);
+}

@@ -165,7 +165,12 @@ like this:
 - **Danger zone** — **rename**, **archive / unarchive**, **change visibility**,
   **transfer ownership**, and **delete** the repository. The three irreversible actions
   are each behind a type-the-\`owner/repo\`-name confirmation, and your local clone is
-  never touched.
+  never touched. When the repo has an **upstream remote**, **Remove upstream remote**
+  detaches this clone from the parent locally (the Fork/Upstream switcher and "Update
+  from upstream" disappear — reversible by re-adding the remote). On a **fork**, **Leave
+  fork network** links out to GitHub to permanently detach the repository from its fork
+  network (GitHub has no API for this; it's done on the web and can't be undone). After
+  you leave the network on GitHub, **Re-check fork status** refreshes the badge in place.
 
 > Some options GitHub exposes to no app appear as **"Manage on GitHub"** links rather
 > than dead toggles.

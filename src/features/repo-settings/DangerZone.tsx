@@ -26,10 +26,14 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
+import { probeAndPersistVisibility } from "@/features/repository/useRepoVisibilityProbe";
 import {
   useBbRepoSettings,
   useDeleteRepo,
+  useForgeStatus,
   useGlRepoSettings,
+  useRemotes,
+  useRemoveRemote,
   useRenameRepo,
   useRepoAdmin,
   useRepoSettings,
@@ -37,6 +41,8 @@ import {
   useSetVisibility,
   useTransferRepo,
 } from "@/lib/git/queries";
+import { deleteRepoLens } from "@/lib/repo-lens/store";
+import { settingsKeys, useSettings } from "@/lib/settings/queries";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { InlineConfirm } from "./parts";
@@ -286,6 +292,139 @@ function ArchiveAction({
         </DangerButton>
       )}
     </Row>
+  );
+}
+
+/** Local detach: drop the `upstream` remote, collapsing every fork-identity
+ *  surface (the origin/upstream switcher, "Update from upstream", "Create on
+ *  parent") via the broad `["repo", repo]` invalidation. Reversible — the user
+ *  can re-add the remote (CreatePrDialog's Add-upstream affordance returns for a
+ *  known fork). Shown for ANY provider whenever an `upstream` remote exists;
+ *  never fakes the persisted `isFork` provenance (that reflects GitHub-side
+ *  truth and only changes via re-probe). */
+function RemoveUpstreamAction({ repoPath }: { repoPath: string }) {
+  const remotes = useRemotes(repoPath);
+  const removeRemote = useRemoveRemote(repoPath);
+  const [confirming, setConfirming] = useState(false);
+
+  if (!remotes.data?.includes("upstream")) return null;
+
+  return (
+    <>
+      <div className="border-t" />
+      <Row
+        title="Remove upstream remote"
+        desc="Detaches this clone from the fork's parent locally: the Fork/Upstream switcher and “Update from upstream” disappear, and branches that tracked upstream lose their tracking. Reversible — re-add the remote to restore it."
+      >
+        {confirming ? (
+          <div className="flex shrink-0 items-center gap-2">
+            <InlineConfirm
+              actLabel="Remove"
+              pending={removeRemote.isPending}
+              onCancel={() => setConfirming(false)}
+              onAct={() =>
+                removeRemote.mutate(
+                  { name: "upstream" },
+                  {
+                    onSuccess: () => {
+                      // Hygiene: the persisted "upstream" lens no longer applies.
+                      // Fire-and-forget — the lens read safe-defaults to origin,
+                      // so a failure here is harmless.
+                      deleteRepoLens(repoPath).catch(() => undefined);
+                      toast.success("Upstream remote removed");
+                      setConfirming(false);
+                    },
+                    onError: toastError,
+                  },
+                )
+              }
+            />
+          </div>
+        ) : (
+          <DangerButton
+            variant="outline"
+            className="shrink-0"
+            onClick={() => setConfirming(true)}
+          >
+            Remove upstream
+          </DangerButton>
+        )}
+      </Row>
+    </>
+  );
+}
+
+/** GitHub-only link-out: GitHub has NO API to leave a fork network, so we send
+ *  the user to the repo's settings page. A "Re-check fork status" affordance
+ *  re-probes and re-persists after they detach on github.com, so the fork badge
+ *  + persisted `isFork` clear without an app restart — never cleared
+ *  optimistically (it reflects GitHub-side truth). Gated on the persisted fork
+ *  provenance, independent of the upstream-remote gate. */
+function LeaveForkNetworkAction({
+  repoPath,
+  fullName,
+}: {
+  repoPath: string;
+  fullName: string;
+}) {
+  const queryClient = useQueryClient();
+  const settings = useSettings();
+  const forge = useForgeStatus(repoPath);
+  const [rechecking, setRechecking] = useState(false);
+  const record = settings.data?.recentRepos.find((r) => r.path === repoPath);
+
+  if (record?.isFork !== true) return null;
+
+  // Derive the host — on GitHub Enterprise the provider is still "github" but a
+  // hardcoded github.com would open the wrong host's settings page.
+  const ghHost = forge.data?.host || "github.com";
+
+  const recheck = async () => {
+    setRechecking(true);
+    try {
+      const probe = await probeAndPersistVisibility(repoPath);
+      queryClient.invalidateQueries({ queryKey: settingsKeys.settings });
+      toast.success(
+        probe?.isFork
+          ? "Still a fork on GitHub"
+          : "No longer a fork — badge cleared",
+      );
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setRechecking(false);
+    }
+  };
+
+  return (
+    <>
+      <div className="border-t" />
+      <Row
+        title="Leave fork network"
+        desc="Permanently detaches this repository from its fork network on GitHub — this cannot be undone. GitHub requires the fork be public, under 1 GB, and have no child forks. Your code and history are kept; issues, PRs, stars, and watchers are lost."
+      >
+        {/* Stacked so the description keeps its width — two side-by-side
+            buttons squeezed the copy into a tall, narrow column. */}
+        <div className="flex shrink-0 flex-col gap-2">
+          <Button
+            variant="destructive"
+            size="sm"
+            onClick={() => openUrl(`https://${ghHost}/${fullName}/settings`)}
+          >
+            Leave on GitHub…
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={rechecking}
+            onClick={recheck}
+          >
+            {rechecking && <Spinner data-icon="inline-start" />}
+            Re-check fork status
+          </Button>
+        </div>
+      </Row>
+    </>
   );
 }
 
@@ -639,6 +778,14 @@ export function DangerZone({
         isGitLab={isGitLab}
         isBitbucket={isBitbucket}
       />
+      {/* Local detach — any provider, whenever an `upstream` remote exists. */}
+      <RemoveUpstreamAction repoPath={repoPath} />
+      {/* Leave-fork-network — GitHub only, gated on persisted fork provenance.
+          Gates are independent: a detached-on-GitHub repo may still have the
+          remote; a remote-less fork may still be in the network. */}
+      {isGitHub && (
+        <LeaveForkNetworkAction repoPath={repoPath} fullName={info.fullName} />
+      )}
       {/* Bitbucket can't archive over the API — hide the row (platform limit). */}
       {!isBitbucket && (
         <>
