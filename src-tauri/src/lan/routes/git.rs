@@ -7,7 +7,7 @@ use axum::response::Response;
 use serde::Deserialize;
 
 use crate::lan::auth::RouterState;
-use crate::lan::routes::{repo_or_409, respond};
+use crate::lan::routes::{bad_request, is_safe_relative_path, repo_or_409, respond};
 
 /// GET /api/repo/status
 pub async fn status(State(state): State<RouterState>) -> Response {
@@ -95,5 +95,28 @@ pub async fn diff_file(
     Query(q): Query<FileDiffQuery>,
 ) -> Response {
     let repo = repo_or_409!(state);
+    // Path containment: this is a paired LAN device supplying `path`, and the
+    // untracked branch of `git_diff_file` runs `git diff --no-index` (NOT
+    // repo-confined). Reject anything that isn't a safe repo-relative path so a
+    // device can't read arbitrary files (e.g. `?path=/etc/passwd&untracked=true`).
+    if !is_safe_relative_path(&q.path) {
+        return bad_request("path must be a repo-relative path");
+    }
+    // For the untracked (`--no-index`, on-disk) branch, also require that the
+    // resolved file actually lives inside the repo — closes the symlink-that-
+    // points-outside case that a purely lexical check can't. (Untracked files
+    // exist on disk, so canonicalize succeeds for legitimate requests. The
+    // tracked branch is skipped: git confines its own pathspecs, and a
+    // deleted-but-tracked file isn't on disk to canonicalize.)
+    if q.untracked {
+        let repo_root = match std::fs::canonicalize(&repo) {
+            Ok(p) => p,
+            Err(_) => return bad_request("path is outside the shared repository"),
+        };
+        match std::fs::canonicalize(std::path::Path::new(&repo).join(&q.path)) {
+            Ok(target) if target.starts_with(&repo_root) => {}
+            _ => return bad_request("path is outside the shared repository"),
+        }
+    }
     respond(crate::git::diff::git_diff_file(repo, q.path, q.staged, q.untracked).await)
 }

@@ -1541,8 +1541,8 @@ so pairing today is mainly for trying the connection out. It's **off by default*
 
 Flip **Share with your phone on this network**. GitDesktop starts a small server bound
 to your machine's LAN address and shows the address(es) and port it's reachable at.
-While sharing is on, a small **Sharing on** badge stays visible in the top corner of the
-window (click it to jump back here). If the port can't be opened, the reason appears
+While sharing is on, a **Sharing on** banner runs across the top of the window
+(click it to jump back here). If the port can't be opened, the reason appears
 right in the panel.
 
 ## Pairing a phone

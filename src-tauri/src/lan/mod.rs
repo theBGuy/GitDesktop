@@ -233,10 +233,15 @@ pub async fn lan_disable(app: AppHandle, state: State<'_, LanState>) -> AppResul
 }
 
 /// Point the read routes at `repo_path` (the desktop's currently-open repo).
+/// `None` clears the active repo (the desktop closed its repo), after which the
+/// read routes 409 via `repo_or_409!` — paired devices stop seeing the last repo.
 #[tauri::command]
-pub fn lan_set_active_repo(state: State<'_, LanState>, repo_path: String) -> AppResult<()> {
+pub fn lan_set_active_repo(
+    state: State<'_, LanState>,
+    repo_path: Option<String>,
+) -> AppResult<()> {
     let mut guard = state.active_repo.lock().unwrap_or_else(|p| p.into_inner());
-    *guard = Some(repo_path);
+    *guard = repo_path;
     Ok(())
 }
 
@@ -345,6 +350,23 @@ mod tests {
             .header("host", "testhost")
             .body(Body::empty())
             .unwrap()
+    }
+
+    #[test]
+    fn set_active_repo_none_clears() {
+        // Setting a repo then clearing with None must leave the status snapshot
+        // with no active repo (Close repo stops sharing the last repo).
+        let state = LanState::default();
+        {
+            let mut guard = state.active_repo.lock().unwrap();
+            *guard = Some("C:/repo".to_string());
+        }
+        assert_eq!(state.status().active_repo.as_deref(), Some("C:/repo"));
+        {
+            let mut guard = state.active_repo.lock().unwrap();
+            *guard = None;
+        }
+        assert_eq!(state.status().active_repo, None);
     }
 
     #[tokio::test]
@@ -493,5 +515,104 @@ mod tests {
 
         auth::set_store_path_for_test(prev);
         std::fs::remove_file(&tmp).ok();
+    }
+
+    /// Build an authed GET request by seeding a device in the store and using its
+    /// raw bearer. Caller must hold `store_test_lock` + a store-path override.
+    fn authed_get(path: &str, bearer: &str) -> Request<Body> {
+        Request::builder()
+            .uri(path)
+            .header("host", "testhost")
+            .header("authorization", format!("Bearer {bearer}"))
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn diff_file_rejects_paths_escaping_the_repo() {
+        let _lock = auth::store_test_lock();
+        let tmp = temp_store();
+        let prev = auth::set_store_path_for_test(Some(tmp.clone()));
+
+        // A real temp repo so a legitimate untracked path can be served (200) and
+        // the guard — not a downstream git error — is what rejects bad paths.
+        let repo_dir = std::env::temp_dir().join(format!(
+            "gd-lan-diff-guard-repo-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        assert!(std::process::Command::new("git")
+            .arg("init")
+            .current_dir(&repo_dir)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        std::fs::write(repo_dir.join("hello.txt"), "hello lan\n").unwrap();
+        let repo = repo_dir.to_string_lossy().to_string();
+
+        // Seed a paired device and grab its raw bearer.
+        let (device, bearer, token_hash) = auth::mint_device("Guard Phone");
+        auth::persist_device(&device, &token_hash).unwrap();
+
+        let router = server::build_router(test_router(Some(repo.clone())));
+
+        // ../x → 400 (ParentDir).
+        let resp = router
+            .clone()
+            .oneshot(authed_get(
+                "/api/repo/diff/file?path=../x&untracked=true",
+                &bearer,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // /etc/passwd → 400 (RootDir; a leading `/` parses as RootDir on Windows too).
+        let resp = router
+            .clone()
+            .oneshot(authed_get(
+                "/api/repo/diff/file?path=/etc/passwd&untracked=true",
+                &bearer,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // A Windows drive prefix → 400 (Prefix). On unix `C:/x` is a Normal
+        // component, so only assert this where it's actually an escape.
+        #[cfg(windows)]
+        {
+            let resp = router
+                .clone()
+                .oneshot(authed_get(
+                    "/api/repo/diff/file?path=C:/x&untracked=true",
+                    &bearer,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        }
+
+        // A legitimate untracked file inside the repo is served, not rejected.
+        let resp = router
+            .oneshot(authed_get(
+                "/api/repo/diff/file?path=hello.txt&untracked=true",
+                &bearer,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 256 * 1024)
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&bytes);
+        assert!(body.contains("hello lan"), "diff body should include the file content: {body}");
+
+        auth::set_store_path_for_test(prev);
+        std::fs::remove_file(&tmp).ok();
+        std::fs::remove_dir_all(&repo_dir).ok();
     }
 }

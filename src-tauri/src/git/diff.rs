@@ -288,6 +288,10 @@ pub async fn git_diff_file(
         // Full-file "added" diff for files git doesn't track yet.
         // git maps /dev/null to the platform null device; exit code 1 just
         // means "differences found" for --no-index.
+        // INVARIANT: `--no-index` is NOT repo-confined — it can read any file the
+        // process can open. Callers passing an untrusted `file_path` (the LAN
+        // companion route) MUST validate repo containment before calling this
+        // (see `crate::lan::routes::git::diff_file`).
         let out = run_git_raw(
             Some(&repo_path),
             &["diff", "--no-index", "--", "/dev/null", &file_path],

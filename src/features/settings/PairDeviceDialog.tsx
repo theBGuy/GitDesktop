@@ -50,8 +50,11 @@ export function PairDeviceDialog({
   // Wall-clock time (ms) the current pairing session started. A device counts as
   // freshly paired only if its `createdAt` is at/after this, so a PRE-EXISTING
   // device can't be misdetected as new when the parent's device query hadn't
-  // resolved at open time (an id snapshot would have been empty). Server and UI
-  // share this machine's clock; the 5s slack below absorbs any tiny skew/latency.
+  // resolved at open time (an id snapshot would have been empty). No slack is
+  // needed: `createdAt` is minted by our own Rust with millisecond precision on
+  // the SAME machine clock as `Date.now()`, and this ref is set BEFORE the
+  // pairing offer is requested — so any device minted in this session satisfies
+  // `createdAt >= startTimeRef` strictly.
   const startTimeRef = useRef(0);
 
   // Poll devices only while the dialog is open and we're still waiting for one.
@@ -113,13 +116,22 @@ export function PairDeviceDialog({
   }, [open, pairing, pairedName]);
 
   // Detect a newly-paired device: one created at/after this pairing session
-  // started (with 5s slack for clock skew), NOT a pre-existing device.
+  // started (no slack — same clock, ms precision, ref marked before the offer),
+  // NOT a pre-existing device. Pick the NEWEST match so back-to-back pairings
+  // report the device that just paired, not an earlier one.
   useEffect(() => {
     if (!open || pairedName !== null || !devices.data) return;
-    const threshold = startTimeRef.current - 5000;
-    const fresh = devices.data.find(
-      (d) => new Date(d.createdAt).getTime() >= threshold,
-    );
+    const threshold = startTimeRef.current;
+    const fresh = devices.data
+      .filter((d) => new Date(d.createdAt).getTime() >= threshold)
+      .reduce<(typeof devices.data)[number] | null>(
+        (newest, d) =>
+          newest === null ||
+          new Date(d.createdAt).getTime() > new Date(newest.createdAt).getTime()
+            ? d
+            : newest,
+        null,
+      );
     if (fresh) setPairedName(fresh.name);
   }, [open, devices.data, pairedName]);
 

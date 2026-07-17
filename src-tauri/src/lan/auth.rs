@@ -211,8 +211,9 @@ fn read_store(path: &Path) -> AppResult<Map<String, Value>> {
 }
 
 /// The list of stored devices under the `"devices"` array key. Unknown top-level
-/// keys and unknown per-record fields are preserved by round-tripping through
-/// `Value` at the call sites that write.
+/// keys ARE preserved: every writer passes the previously-read store map to
+/// [`write_devices`], which replaces only the `"devices"` key. Unknown PER-RECORD
+/// fields are NOT preserved — records round-trip through the typed [`StoredDevice`].
 fn devices_from(store: &Map<String, Value>) -> Vec<StoredDevice> {
     store
         .get("devices")
@@ -225,9 +226,15 @@ fn devices_from(store: &Map<String, Value>) -> Vec<StoredDevice> {
         .unwrap_or_default()
 }
 
-/// Persist the given device set as the `"devices"` array, atomically.
-fn write_devices(path: &Path, devices: &[StoredDevice]) -> AppResult<()> {
-    let mut store = Map::new();
+/// Persist the given device set as the `"devices"` array, atomically. `store` is
+/// the previously-read store map (from [`read_store`] under the store lock); we
+/// replace only its `"devices"` key so any unknown top-level keys a future
+/// version wrote survive the round-trip.
+fn write_devices(
+    path: &Path,
+    mut store: Map<String, Value>,
+    devices: &[StoredDevice],
+) -> AppResult<()> {
     let arr = devices
         .iter()
         .map(|d| serde_json::to_value(d).unwrap_or(Value::Null))
@@ -263,7 +270,7 @@ pub fn revoke_device(id: &str) -> AppResult<()> {
     if devices.len() == before {
         return Err(AppError::InvalidArgument(format!("no paired device with id {id}")));
     }
-    write_devices(&path, &devices)
+    write_devices(&path, store, &devices)
 }
 
 // --------------------------------------------------------------------------
@@ -423,7 +430,7 @@ pub fn persist_device(device: &LanDevice, token_hash: &str) -> AppResult<()> {
         created_at: device.created_at.clone(),
         last_seen_at: device.last_seen_at.clone(),
     });
-    write_devices(&path, &devices)
+    write_devices(&path, store, &devices)
 }
 
 /// Look up the device whose stored token hash matches `sha256(bearer)`; on a hit,
@@ -442,7 +449,7 @@ fn authenticate_bearer(bearer: &str) -> Option<String> {
     // chatty client doesn't hammer the store file.
     if last_seen_is_stale(&devices[idx].last_seen_at) {
         devices[idx].last_seen_at = now_iso();
-        let _ = write_devices(&path, &devices);
+        let _ = write_devices(&path, store, &devices);
     }
     Some(id)
 }
@@ -922,6 +929,37 @@ mod tests {
         assert!(authenticate_bearer(&bearer).is_none());
         // Revoking an unknown id errors.
         assert!(revoke_device("nope").is_err());
+
+        set_store_path_for_test(prev);
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn unknown_top_level_keys_survive_a_write() {
+        let _lock = store_test_lock();
+        let tmp = std::env::temp_dir().join(format!(
+            "gd-lan-devices-preserve-{}-{}.json",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let prev = set_store_path_for_test(Some(tmp.clone()));
+
+        // Seed a store file with a device AND an extra top-level key a future
+        // version might write.
+        let (device, _bearer, token_hash) = mint_device("Preserve Phone");
+        persist_device(&device, &token_hash).unwrap();
+        let mut raw: Value = serde_json::from_slice(&std::fs::read(&tmp).unwrap()).unwrap();
+        raw.as_object_mut()
+            .unwrap()
+            .insert("future".to_string(), json!({ "x": 1 }));
+        std::fs::write(&tmp, serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
+
+        // Perform a write (revoke) through the public API.
+        revoke_device(&device.id).unwrap();
+
+        // The extra top-level key must survive.
+        let after: Value = serde_json::from_slice(&std::fs::read(&tmp).unwrap()).unwrap();
+        assert_eq!(after["future"]["x"], json!(1));
 
         set_store_path_for_test(prev);
         std::fs::remove_file(&tmp).ok();

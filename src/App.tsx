@@ -113,10 +113,12 @@ function App() {
   }, [closeToTray]);
 
   // The LAN companion server serves whichever repo is open, so push the active
-  // repo to the backend whenever it changes (no-op when no repo is open).
+  // repo to the backend whenever it changes. Closing the repo pushes null, which
+  // clears it so paired devices stop seeing the last repo (routes 409).
   useEffect(() => {
-    if (!repoPath) return;
-    invoke("lan_set_active_repo", { repoPath }).catch(() => undefined);
+    invoke("lan_set_active_repo", { repoPath: repoPath ?? null }).catch(
+      () => undefined,
+    );
   }, [repoPath]);
 
   // Drop a repo folder anywhere on the window to open it.

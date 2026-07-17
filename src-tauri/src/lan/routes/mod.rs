@@ -44,6 +44,41 @@ pub(crate) fn no_active_repo() -> Response {
         .into_response()
 }
 
+/// A 400 response with the app's standard `{ kind, message }` shape (mirrors
+/// [`crate::lan::auth::bad_request`], reused by routes that validate client input
+/// before touching the git core).
+pub(crate) fn bad_request(message: &str) -> Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use axum::Json;
+    use serde_json::json;
+
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "kind": "invalidArgument",
+            "message": message
+        })),
+    )
+        .into_response()
+}
+
+/// Whether `path` is a safe repo-relative path: non-empty and built only from
+/// `Normal`/`CurDir` components. Any `RootDir` (a leading `/`), `Prefix` (a
+/// Windows drive like `C:`), or `ParentDir` (`..`) component rejects it — those
+/// are the ways a client could escape the repo. This is a purely lexical check;
+/// callers that also need on-disk containment (the untracked `--no-index` path)
+/// must additionally canonicalize + `starts_with` the repo root.
+pub(crate) fn is_safe_relative_path(path: &str) -> bool {
+    use std::path::{Component, Path};
+    if path.is_empty() {
+        return false;
+    }
+    Path::new(path)
+        .components()
+        .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+}
+
 /// Convenience: fetch the active repo or short-circuit-return its 409 response.
 macro_rules! repo_or_409 {
     ($state:expr) => {
@@ -69,3 +104,25 @@ pub(crate) fn json_or_error<T: serde::Serialize>(
 }
 
 pub(crate) use json_or_error as respond;
+
+#[cfg(test)]
+mod tests {
+    use super::is_safe_relative_path;
+
+    #[test]
+    fn safe_relative_paths_accepted() {
+        assert!(is_safe_relative_path("src/main.rs"));
+        assert!(is_safe_relative_path("./src/main.rs"));
+        assert!(is_safe_relative_path("file.txt"));
+    }
+
+    #[test]
+    fn escaping_paths_rejected() {
+        assert!(!is_safe_relative_path("")); // empty
+        assert!(!is_safe_relative_path("../x")); // ParentDir
+        assert!(!is_safe_relative_path("a/../b")); // ParentDir mid-path
+        assert!(!is_safe_relative_path("/etc/passwd")); // RootDir (leading /)
+        #[cfg(windows)]
+        assert!(!is_safe_relative_path("C:/x")); // Prefix (drive), Windows only
+    }
+}
