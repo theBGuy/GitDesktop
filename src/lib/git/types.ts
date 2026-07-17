@@ -1932,3 +1932,56 @@ export interface UnignoreRule {
   source: string;
   pattern: string;
 }
+
+// ---------------------------------------------------------------------------
+// LAN phone companion (experimental) — mirrors the Rust structs the backend
+// serializes (camelCase). Sharing exposes read-only API access to the open
+// repo over the local network to paired phones; see CompanionSection.
+// ---------------------------------------------------------------------------
+
+/** The companion server's runtime state (polled — there's no push channel). */
+export interface LanStatus {
+  /** Whether the companion server is currently sharing. */
+  enabled: boolean;
+  /** True when bound to the LAN (reachable from phones), false when loopback-only
+   *  (a dev/test mode with no UI toggle). */
+  bindLan: boolean;
+  /** The TCP port the server listens on, or null while sharing is off
+   *  (Rust `Option<u16>` serializes to null — never read this unguarded). */
+  port: number | null;
+  /** Reachable base URLs for this machine (one per bound address). */
+  urls: string[];
+  /** Absolute path of the repo currently shared, or null when none is set. */
+  activeRepo: string | null;
+  /** Count of paired devices with live tokens. */
+  deviceCount: number;
+  /** Whether a pairing window is currently open (a PIN is live). */
+  pairingActive: boolean;
+}
+
+/** A live pairing offer — the phone scans the QR (or opens the URL) and types
+ *  the PIN to complete pairing before it expires. */
+export interface LanPairing {
+  /** The pairing URL the QR encodes (also shown as selectable text). */
+  url: string;
+  /** Server-generated SVG markup for the QR code (safe to inline; not user input). */
+  qrSvg: string;
+  /** The short PIN the user types on the phone. */
+  pin: string;
+  /** ISO-8601 instant when this pairing offer expires. */
+  expiresAt: string;
+}
+
+/** A phone that has paired and holds a revocable access token. */
+export interface LanDevice {
+  /** Stable device id (used to revoke). */
+  id: string;
+  /** Human-facing device name (self-reported at pairing). */
+  name: string;
+  /** Access scope granted to the device (read-only for now). */
+  scope: string;
+  /** ISO-8601 instant the device paired. */
+  createdAt: string;
+  /** ISO-8601 instant the device last made a request. */
+  lastSeenAt: string;
+}
