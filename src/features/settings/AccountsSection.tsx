@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import { calendarDaysUntil } from "@/features/accounts/expiry";
 import { copyText } from "@/lib/clipboard";
 import { useAppForm } from "@/lib/form";
 import { forgeBbClearAccount, forgeBbSetAccount } from "@/lib/git/api";
@@ -70,16 +71,6 @@ const BB_SCOPES = [
   "write:webhook:bitbucket",
   "delete:webhook:bitbucket",
 ];
-
-/** Whole days from now until a `YYYY-MM-DD` date (the Bitbucket-token expiry the
- *  user entered). Counts to the END of that day, so the expiry date itself reads
- *  as ~1 day left rather than "today". Null when unparseable/empty. */
-function daysUntilDate(date: string | null): number | null {
-  if (!date) return null;
-  const then = Date.parse(`${date}T23:59:59`);
-  if (Number.isNaN(then)) return null;
-  return Math.ceil((then - Date.now()) / 86_400_000);
-}
 
 /** A `YYYY-MM-DD` string rendered in the user's locale ("Jul 30, 2026"); falls
  *  back to the raw string if it can't be parsed. */
@@ -428,9 +419,11 @@ function GitLabSignInBlock() {
                     className="ml-auto shrink-0 text-warning"
                     title={h.detail ?? undefined}
                   >
-                    {(h.daysLeft ?? 0) <= 0
+                    {(h.daysLeft ?? 0) < 0
                       ? "token expired"
-                      : `token expires in ${h.daysLeft} day${h.daysLeft === 1 ? "" : "s"}`}
+                      : h.daysLeft === 0
+                        ? "token expires today"
+                        : `token expires in ${h.daysLeft} day${h.daysLeft === 1 ? "" : "s"}`}
                   </Badge>
                 )}
                 {broken && (
@@ -663,7 +656,7 @@ function BitbucketAccount() {
 
   const connected = account.data ?? null;
   const storedExpiry = settings.data?.bitbucketTokenExpiresAt ?? null;
-  const expiryDaysLeft = daysUntilDate(storedExpiry);
+  const expiryDaysLeft = calendarDaysUntil(storedExpiry);
 
   // The set/clear both invalidate the account query AND every repo's forge-status
   // so a connected Bitbucket repo lights up (or goes dark) without a restart. The
@@ -786,8 +779,14 @@ function BitbucketAccount() {
                   }`}
                 >
                   {expiryDaysLeft != null && expiryDaysLeft <= 14
-                    ? `expires in ${expiryDaysLeft <= 0 ? 0 : expiryDaysLeft} day${
-                        expiryDaysLeft === 1 ? "" : "s"
+                    ? `${
+                        expiryDaysLeft < 0
+                          ? "token expired"
+                          : expiryDaysLeft === 0
+                            ? "token expires today"
+                            : `token expires in ${expiryDaysLeft} day${
+                                expiryDaysLeft === 1 ? "" : "s"
+                              }`
                       } — replace the token soon`
                     : `token expires ${formatDate(storedExpiry)}`}
                 </p>

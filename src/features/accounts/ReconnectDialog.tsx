@@ -94,7 +94,14 @@ function ReconnectFlow({
   const primaryRef = useRef<HTMLButtonElement>(null);
   const autoCloseRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const fallbackCommand = `${isGitHub ? "gh" : "glab"} auth login --hostname ${host} --web`;
+  // The copy-paste fallback must match the flow the dialog was driving: a GitHub
+  // "refresh" maps to `gh auth refresh` (preserves granted scopes), everything else to
+  // `auth login --web` (glab has no `refresh` subcommand — login re-runs OAuth for it in
+  // both modes).
+  const fallbackCommand =
+    isGitHub && mode === "refresh"
+      ? `gh auth refresh --hostname ${host}`
+      : `${isGitHub ? "gh" : "glab"} auth login --hostname ${host} --web`;
 
   // Handle streamed events without re-subscribing the channel on every render:
   // useEffectEvent reads the latest closures (invalidate/settings) but stays
@@ -109,6 +116,10 @@ function ReconnectFlow({
           : { kind: "lines", lines: [event.text] },
       );
     } else {
+      // Terminal Rust-side: the flow's guard already unregistered its session, so null
+      // the ref — otherwise the unmount cleanup and start()'s prior-cancel would cancel
+      // an already-finished flow (which would re-seed a registry tombstone).
+      sessionIdRef.current = null;
       setPhase({
         kind: "finished",
         ok: event.ok,

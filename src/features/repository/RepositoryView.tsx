@@ -294,7 +294,15 @@ export function RepositoryView() {
         openSettings("accounts");
       }
     },
-    forgeProvider !== null,
+    // Gate on health having RESOLVED for github/gitlab: the mode below is derived from
+    // `sessionHealth.data`, and while it's undefined the derivation would default to
+    // "refresh" — wrong for a never-signed-in host. Defaulting to "login" instead was
+    // rejected because `gh auth login` re-requests the DEFAULT scope set (silently
+    // narrowing extra granted scopes like `workflow`), while `refresh` preserves them —
+    // so the mode decision must never be made blind. Bitbucket needs no health probe (it
+    // deep-links to Settings), so it stays enabled on a known provider alone.
+    forgeProvider === "bitbucket" ||
+      (forgeProvider !== null && sessionHealth.data !== undefined),
   );
 
   // "repo • branch" in the OS title bar (and Alt-Tab) while a repo is open. No

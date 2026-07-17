@@ -177,23 +177,46 @@ struct GhJsonAccount {
     error: Option<String>,
 }
 
-/// Run `gh auth status --json hosts [--hostname <host>]` and parse the hosts map.
-/// `Ok(None)` when `gh` reported the `--json` flag is unknown (old gh) — the caller
-/// falls back to text parsing. `Err(GhNotFound)` when gh isn't installed.
-async fn gh_status_json(
-    hostname: Option<&str>,
-) -> AppResult<Option<HashMap<String, Vec<GhJsonAccount>>>> {
+/// The outcome of a `gh auth status --json hosts` probe. `gh auth status --json` exits
+/// 0 even on auth issues (per gh's own help), so a non-zero exit is NOT an auth signal:
+/// it's either an old gh that doesn't know `--json` (→ text fallback) or a fatal/
+/// environmental gh error (→ inconclusive, don't misclassify as an auth state).
+enum GhJsonProbe {
+    /// Exit 0: the parsed hosts map (`{"hosts":{}}` = logged out everywhere).
+    Parsed(HashMap<String, Vec<GhJsonAccount>>),
+    /// Non-zero because `--json` is an unknown flag (old gh) → use the text fallback.
+    UnknownFlag,
+    /// Any other non-zero exit (fatal/environmental) → Offline, with a sanitized detail.
+    Inconclusive(Option<String>),
+}
+
+/// Classify a non-zero `gh auth status --json` result on `(code, stderr)` alone — an
+/// unknown-flag signature (old gh) vs any other failure. Factored out so it's unit-
+/// testable without spawning gh. `code` is included for symmetry/clarity even though the
+/// discriminator is the stderr text.
+fn classify_gh_json_nonzero(_code: i32, stderr: &str) -> GhJsonProbe {
+    if stderr.to_lowercase().contains("unknown flag") {
+        GhJsonProbe::UnknownFlag
+    } else {
+        // A fatal/environmental gh error — surface it as Offline, not a fake auth state.
+        let detail = sanitize_detail(stderr.trim());
+        GhJsonProbe::Inconclusive((!detail.is_empty()).then_some(detail))
+    }
+}
+
+/// Run `gh auth status --json hosts [--hostname <host>]` and classify the outcome into a
+/// `GhJsonProbe`. `Err(GhNotFound)` when gh isn't installed (caller → CliMissing).
+async fn gh_status_json(hostname: Option<&str>) -> AppResult<GhJsonProbe> {
     let mut args: Vec<&str> = vec!["auth", "status", "--json", "hosts"];
     if let Some(h) = hostname {
         args.push("--hostname");
         args.push(h);
     }
-    // `gh auth status --json hosts` exits 0 ALWAYS (even on auth issues), so a
-    // non-zero exit here means the flag itself was rejected (old gh) — fall back.
     let out = run_gh_raw(None, &args, GH_TIMEOUT).await?;
     if out.code != 0 {
-        // Old gh: `--json` isn't a known flag on `auth status`. Signal the fallback.
-        return Ok(None);
+        // Non-zero ≠ auth state (gh exits 0 on auth issues). Discriminate old-gh
+        // unknown-flag (→ text fallback) from a fatal error (→ Offline).
+        return Ok(classify_gh_json_nonzero(out.code, &out.stderr));
     }
     #[derive(serde::Deserialize)]
     struct HostsWrapper {
@@ -205,7 +228,7 @@ async fn gh_status_json(
     let parsed: HostsWrapper = serde_json::from_str(&out.stdout_lossy()).unwrap_or(HostsWrapper {
         hosts: HashMap::new(),
     });
-    Ok(Some(parsed.hosts))
+    Ok(GhJsonProbe::Parsed(parsed.hosts))
 }
 
 /// Classify the account list for one host into a state (no re-probe here — the
@@ -246,10 +269,17 @@ fn classify_gh_host(accounts: &[GhJsonAccount]) -> SessionHealth {
 /// Per-repo GitHub health for `host`, with the anti-flap re-probe on `error`.
 async fn github_health(host: &str) -> SessionHealth {
     let json = match gh_status_json(Some(host)).await {
-        Ok(Some(map)) => map,
+        Ok(GhJsonProbe::Parsed(map)) => map,
         // Old gh: no `--json` on `auth status` → degraded text fallback (no Offline
         // detection — plain `gh auth status` can't distinguish transient from broken).
-        Ok(None) => return github_health_text_fallback(Some(host)).await,
+        Ok(GhJsonProbe::UnknownFlag) => return github_health_text_fallback(Some(host)).await,
+        // A fatal/environmental gh error (non-zero, not unknown-flag) → Offline with the
+        // sanitized detail — never a fabricated auth state.
+        Ok(GhJsonProbe::Inconclusive(detail)) => {
+            let mut h = SessionHealth::new("github", host, SessionState::Offline);
+            h.detail = detail;
+            return h;
+        }
         Err(AppError::GhNotFound) => {
             return SessionHealth::new("github", host, SessionState::CliMissing)
         }
@@ -264,7 +294,7 @@ async fn github_health(host: &str) -> SessionHealth {
     // second error stays Broken.
     if health.state == SessionState::Broken {
         tokio::time::sleep(REPROBE_DELAY).await;
-        if let Ok(Some(map2)) = gh_status_json(Some(host)).await {
+        if let Ok(GhJsonProbe::Parsed(map2)) = gh_status_json(Some(host)).await {
             let accounts2 = map2.get(host).map(Vec::as_slice).unwrap_or(&[]);
             let mut health2 = classify_gh_host(accounts2);
             health2.host = host.to_string();
@@ -324,11 +354,17 @@ async fn github_health_text_fallback(host: Option<&str>) -> SessionHealth {
 /// shared re-probe (not per account) when any account reports `error`.
 async fn github_accounts_health() -> Vec<SessionHealth> {
     let map = match gh_status_json(None).await {
-        Ok(Some(m)) => m,
-        Ok(None) => {
+        Ok(GhJsonProbe::Parsed(m)) => m,
+        Ok(GhJsonProbe::UnknownFlag) => {
             // Old gh: a single degraded entry (text fallback can't enumerate per-host
             // states with anti-flap; the default-host reading is the useful signal).
             return vec![github_health_text_fallback(None).await];
+        }
+        // A fatal/environmental gh error → one Offline entry with the sanitized detail.
+        Ok(GhJsonProbe::Inconclusive(detail)) => {
+            let mut h = SessionHealth::new("github", "github.com", SessionState::Offline);
+            h.detail = detail;
+            return vec![h];
         }
         Err(AppError::GhNotFound) => {
             return vec![SessionHealth::new(
@@ -351,7 +387,7 @@ async fn github_accounts_health() -> Vec<SessionHealth> {
     let map = if any_error {
         tokio::time::sleep(REPROBE_DELAY).await;
         match gh_status_json(None).await {
-            Ok(Some(m2)) => m2,
+            Ok(GhJsonProbe::Parsed(m2)) => m2,
             // A failed re-probe leaves the original reading (the error stands).
             _ => map,
         }
@@ -859,6 +895,11 @@ pub async fn forge_reconnect(
 /// consumes the permit on its first `.notified()` poll, killing the child immediately.
 #[tauri::command]
 pub async fn forge_reconnect_cancel(session_id: String) -> AppResult<()> {
+    // Validate before touching the registry — same grammar gate as `forge_reconnect`,
+    // so a malformed id can't seed a tombstone.
+    if !valid_session_id(&session_id) {
+        return Err(AppError::InvalidArgument("invalid session id".into()));
+    }
     cancel_reconnect(&session_id);
     Ok(())
 }
@@ -867,15 +908,54 @@ pub async fn forge_reconnect_cancel(session_id: String) -> AppResult<()> {
 /// else creating a tombstone entry the later-registering flow will adopt. `notify_one`
 /// stores a permit, so the cancel is never lost whether it arrives mid-loop or before
 /// registration. Sync so it's unit-testable without the async command wrapper.
+///
+/// When this CREATES the entry (the cancel raced ahead of any registration — or the
+/// session already finished and unregistered), nothing else may ever adopt it, so an
+/// orphan tombstone would grow the map unbounded. In that case only, schedule a delayed
+/// sweep that removes the entry IFF it stayed unadopted (see `sweep_unadopted_tombstone`).
 fn cancel_reconnect(session_id: &str) {
-    let notify = RECONNECT_REGISTRY
+    use std::collections::hash_map::Entry;
+    let mut map = RECONNECT_REGISTRY
         .lock()
-        .expect("reconnect registry poisoned")
-        // Absent → insert a tombstone the later-registering flow will adopt.
-        .entry(session_id.to_string())
-        .or_insert_with(|| Arc::new(Notify::new()))
-        .clone();
+        .expect("reconnect registry poisoned");
+    let (notify, created) = match map.entry(session_id.to_string()) {
+        // A live flow already registered here → adopt its Notify (do NOT sweep — the
+        // flow's RAII guard removes the entry on drop).
+        Entry::Occupied(e) => (e.get().clone(), false),
+        // Absent → insert a tombstone the later-registering flow will adopt (or that
+        // the sweep below reclaims if nothing ever does).
+        Entry::Vacant(e) => (e.insert(Arc::new(Notify::new())).clone(), true),
+    };
+    drop(map);
     notify.notify_one();
+    if created {
+        let id = session_id.to_string();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(TOMBSTONE_SWEEP_DELAY).await;
+            sweep_unadopted_tombstone(&id);
+        });
+    }
+}
+
+/// How long a cancel-created tombstone is kept before the sweep reclaims it if unadopted.
+/// Comfortably longer than the resolve+spawn window a racing flow needs to adopt it.
+const TOMBSTONE_SWEEP_DELAY: Duration = Duration::from_secs(60);
+
+/// Remove `session_id` from the registry ONLY IF it's still an unadopted tombstone —
+/// i.e. the map holds the sole reference to its `Notify` (`strong_count == 1` under the
+/// lock). A live flow that adopted the entry holds a clone of the `Arc` (via its RAII
+/// guard), so a count above 1 means the flow is running and its guard will remove the
+/// entry itself on drop — the sweep must not touch it. Sync + `strong_count` check under
+/// the lock so it's unit-testable without the delay.
+fn sweep_unadopted_tombstone(session_id: &str) {
+    let mut map = RECONNECT_REGISTRY
+        .lock()
+        .expect("reconnect registry poisoned");
+    if let Some(n) = map.get(session_id) {
+        if Arc::strong_count(n) == 1 {
+            map.remove(session_id);
+        }
+    }
 }
 
 /// Spawn + drive the reconnect child. Reads stdout AND stderr concurrently (the code
@@ -1106,10 +1186,12 @@ fn sanitize_line(raw: &str) -> String {
     redacted.chars().take(300).collect()
 }
 
-/// Sanitize a detail/reason string: redact tokens and collapse to a single line.
+/// Sanitize a detail/reason string: redact tokens, collapse to a single line, and cap
+/// at 300 chars (matching `sanitize_line` — the gh `error`-field call sites were
+/// otherwise unbounded).
 fn sanitize_detail(raw: &str) -> String {
     let one_line = raw.replace(['\n', '\r'], " ");
-    redact_tokens(one_line.trim())
+    redact_tokens(one_line.trim()).chars().take(300).collect()
 }
 
 /// Replace any token-ish substring with `[redacted]`. Covers gh (`gho_`, `ghp_`,
@@ -1597,6 +1679,80 @@ mod tests {
         let got = tokio::time::timeout(Duration::ZERO, notify.notified()).await;
         assert!(got.is_ok(), "a post-register cancel must still deliver");
         unregister_reconnect(id);
+    }
+
+    // ── gh --json non-zero classification ──
+    #[test]
+    fn gh_json_nonzero_unknown_flag_is_unknown_flag() {
+        // Old gh rejects `--json` on `auth status` → text fallback.
+        assert!(matches!(
+            classify_gh_json_nonzero(1, "unknown flag: --json"),
+            GhJsonProbe::UnknownFlag
+        ));
+        // Case-insensitive.
+        assert!(matches!(
+            classify_gh_json_nonzero(2, "Error: Unknown Flag --json"),
+            GhJsonProbe::UnknownFlag
+        ));
+    }
+
+    #[test]
+    fn gh_json_nonzero_other_is_inconclusive() {
+        // Any other non-zero → Inconclusive with the sanitized detail (→ Offline).
+        match classify_gh_json_nonzero(1, "could not connect to keyring service") {
+            GhJsonProbe::Inconclusive(Some(detail)) => {
+                assert_eq!(detail, "could not connect to keyring service");
+            }
+            _ => panic!("expected Inconclusive(Some), got a different variant"),
+        }
+        // Empty stderr → Inconclusive(None).
+        assert!(matches!(
+            classify_gh_json_nonzero(1, "   "),
+            GhJsonProbe::Inconclusive(None)
+        ));
+    }
+
+    // ── sanitize_detail bound ──
+    #[test]
+    fn sanitize_detail_caps_at_300() {
+        let long = "a".repeat(500);
+        assert_eq!(sanitize_detail(&long).chars().count(), 300);
+        // Still redacts + collapses newlines within the bound.
+        let with_token = format!("line1\nghp_SECRETTOKEN {}", "b".repeat(400));
+        let out = sanitize_detail(&with_token);
+        assert!(!out.contains("ghp_"));
+        assert!(out.contains("[redacted]"));
+        assert!(!out.contains('\n'));
+        assert_eq!(out.chars().count(), 300);
+    }
+
+    // ── tombstone sweep ──
+    #[test]
+    fn sweep_removes_unadopted_tombstone() {
+        // A cancel for an id nothing registered creates a tombstone (map-only Arc).
+        let id = "sweep-test-unadopted-tombstone-000001";
+        cancel_reconnect(id);
+        assert!(RECONNECT_REGISTRY.lock().unwrap().contains_key(id));
+        // Unadopted (strong_count == 1 under the lock) → the sweep reclaims it.
+        sweep_unadopted_tombstone(id);
+        assert!(!RECONNECT_REGISTRY.lock().unwrap().contains_key(id));
+    }
+
+    #[test]
+    fn sweep_spares_adopted_entry() {
+        // A flow registered (adopted) the entry — it holds a clone of the Arc, so the
+        // sweep must be a no-op while that clone lives.
+        let id = "sweep-test-adopted-entry-000002";
+        let held = register_reconnect(id); // the flow's guard would hold this clone
+        assert!(RECONNECT_REGISTRY.lock().unwrap().contains_key(id));
+        sweep_unadopted_tombstone(id);
+        // Still present — strong_count > 1 (map + `held`).
+        assert!(RECONNECT_REGISTRY.lock().unwrap().contains_key(id));
+        // Once the flow's clone drops, the entry is a bare tombstone again and can be
+        // swept (mirrors the guard's own Drop, which unregisters directly).
+        drop(held);
+        sweep_unadopted_tombstone(id);
+        assert!(!RECONNECT_REGISTRY.lock().unwrap().contains_key(id));
     }
 
     // ── session id validation ──

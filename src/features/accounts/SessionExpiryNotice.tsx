@@ -4,15 +4,7 @@ import { useForgeSessionHealth } from "@/lib/git/queries";
 import { providerLabel } from "@/lib/git/types";
 import { useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
-
-/** Whole days from now until an ISO-8601 instant (may be negative/0). Null when
- *  the input isn't a parseable date. */
-function daysUntil(iso: string | null | undefined): number | null {
-  if (!iso) return null;
-  const then = Date.parse(iso);
-  if (Number.isNaN(then)) return null;
-  return Math.floor((then - Date.now()) / 86_400_000);
-}
+import { calendarDaysUntil } from "./expiry";
 
 /**
  * A quiet one-line banner that warns before a repo's forge token lapses — shown
@@ -44,15 +36,22 @@ export function SessionExpiryNotice({ repoPath }: { repoPath: string }) {
       ? (settings.data?.bitbucketTokenExpiresAt ?? null)
       : data.expiresAt;
   const daysLeft =
-    provider === "bitbucket" ? daysUntil(expiresAt) : data.daysLeft;
+    provider === "bitbucket" ? calendarDaysUntil(expiresAt) : data.daysLeft;
 
   if (daysLeft == null || daysLeft > 7) return null;
 
   const key = `${provider}|${data.host}|${expiresAt ?? ""}`;
   if (dismissed.has(key)) return null;
 
-  const when =
-    daysLeft <= 0 ? "today" : `in ${daysLeft} day${daysLeft === 1 ? "" : "s"}`;
+  // Wording rule (shared with AccountsSection): past → "has expired"; today → "expires
+  // today"; else "expires in N day(s)". A negative value still shows (past the ≤7 gate).
+  const label = providerLabel(provider);
+  const message =
+    daysLeft < 0
+      ? `Your ${label} token has expired.`
+      : daysLeft === 0
+        ? `Your ${label} token expires today.`
+        : `Your ${label} token expires in ${daysLeft} day${daysLeft === 1 ? "" : "s"}.`;
 
   return (
     <div
@@ -60,9 +59,7 @@ export function SessionExpiryNotice({ repoPath }: { repoPath: string }) {
       className="flex items-center gap-2 border-b bg-warning/5 px-3 py-1.5 text-xs"
     >
       <WarningIcon className="size-3.5 shrink-0 text-warning" />
-      <span className="min-w-0">
-        Your {providerLabel(provider)} token expires {when}.
-      </span>
+      <span className="min-w-0">{message}</span>
       <button
         type="button"
         className="cursor-pointer underline underline-offset-2 hover:text-foreground"
