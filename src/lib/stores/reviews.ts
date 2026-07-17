@@ -98,6 +98,10 @@ export interface ReviewEntry {
    *  upgrade nudge. A tool-bearing run handles its own coverage, so this stays
    *  false there. */
   truncatedCoverage?: boolean;
+  /** The agentic run's streamed working narration, set once at settle (arrives via
+   *  a single patch, so it lives on the entry, not the per-token `texts` map). The
+   *  panel shows it behind a "Thought process" disclosure; the dock ignores it. */
+  thoughts?: string;
 }
 
 /** A store entry tagged with its key — what the activity dock renders. */
@@ -338,6 +342,7 @@ export async function startReview(
     error: "",
     deltaState: undefined,
     truncatedCoverage: undefined,
+    thoughts: undefined,
   });
 
   // Wall-clock start for the persisted history record (the store itself orders
@@ -459,6 +464,7 @@ export async function startReview(
       reviewTools,
       setText: pushText,
       setStatus: (s) => patch({ status: s }),
+      onThoughts: (t) => patch({ thoughts: t }),
       onCliId: (id) => {
         control.cliReviewId = id;
       },
@@ -480,6 +486,9 @@ export async function startReview(
     // paths); a cancelled run returns above, so no mid-stream fragment is ever
     // stored. Best-effort — a persistence failure must not surface to the user.
     const finalText = useReviewStore.getState().texts[key] ?? "";
+    // The agentic run's narration, peeled off at settle — persisted as display-only
+    // metadata (omitted when empty; the next run's soft context reads `text` alone).
+    const thoughts = useReviewStore.getState().entries[key]?.thoughts;
     if (finalText.trim()) {
       void saveReview(target.repoPath, {
         schemaVersion: 1,
@@ -490,6 +499,7 @@ export async function startReview(
         model: ai.model,
         title,
         text: finalText,
+        ...(thoughts?.trim() ? { thoughts } : {}),
         // Empty when the view supplied no head (degenerate no-commits state);
         // the next run then routes to the safe "indeterminate" delta path and
         // self-heals once a later review records a real SHA.
@@ -701,5 +711,8 @@ export function useReviewRun(target: ReviewTarget) {
     phase: entry.phase,
     /** Failure message when `phase === "error"`. */
     error: entry.error,
+    /** The finished agentic run's streamed narration — shown behind a collapsed
+     *  "Thought process" disclosure. Empty on non-agentic / codex runs. */
+    thoughts: entry.thoughts ?? "",
   };
 }

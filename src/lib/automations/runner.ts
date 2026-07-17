@@ -290,7 +290,7 @@ async function run(event: AutomationEvent): Promise<void> {
       ).catch(() => undefined);
     };
     try {
-      const text = await generateReviewText(
+      const result = await generateReviewText(
         settings.reviewAi,
         action,
         event,
@@ -303,11 +303,15 @@ async function run(event: AutomationEvent): Promise<void> {
         toast.info(`AI ${label} cancelled.`, { duration: 4000 });
         continue;
       }
-      if (text === null) {
+      if (result === null) {
         releaseClaim();
         toast.info(`AI ${label} skipped — no changes to review.`);
         continue;
       }
+      const { text, thoughts } = result;
+      // The delivered comment body carries the final review text ONLY — the
+      // agentic narration is persisted to history for later inspection, never
+      // posted (buildAiCommentBody + deliver both take `text`).
       const body = buildAiCommentBody({
         kind: label,
         model: settings.reviewAi.model,
@@ -325,6 +329,7 @@ async function run(event: AutomationEvent): Promise<void> {
           action,
           text,
           settings.reviewAi.model,
+          thoughts,
         ).catch(() => undefined);
       }
     } catch (e) {
@@ -348,10 +353,18 @@ async function run(event: AutomationEvent): Promise<void> {
   }
 }
 
+/** A completed automated review: the final answer `text` plus any agentic
+ *  narration `thoughts` (empty for non-agentic / codex / HTTP-text runs). */
+interface ReviewResult {
+  text: string;
+  thoughts: string;
+}
+
 /**
  * Resolves the diff, builds the prompt, and runs the model to completion.
  * `signal` aborts the HTTP stream; `onCliId` reports the CLI run's id so the
  * caller can kill the subprocess (CLI providers don't take an AbortSignal).
+ * Returns the final answer plus any agentic narration, or null for no changes.
  */
 async function generateReviewText(
   ai: AiSettings,
@@ -359,7 +372,7 @@ async function generateReviewText(
   event: AutomationEvent,
   signal: AbortSignal,
   onCliId: (id: string) => void,
-): Promise<string | null> {
+): Promise<ReviewResult | null> {
   let diff: { text: string; truncated: boolean; files: DiffStatEntry[] };
   if (event.kind === "commit") {
     diff = await gitCommitDiff(event.repoPath, event.hash, DIFF_MAX_BYTES);
@@ -466,6 +479,7 @@ async function generateReviewText(
   // route them the same way the interactive review does.
   if (isCliProvider(ai.provider)) {
     let result = "";
+    let thoughts = "";
     await runCliStream({
       ai,
       system,
@@ -474,14 +488,18 @@ async function generateReviewText(
       // Read the reviewed commit / PR-head's files in a worktree, not whatever
       // branch happens to be checked out.
       headSha: event.kind === "commit" ? event.hash : event.headSha,
-      // runCliStream accumulates; the last setText carries the full text.
+      // runCliStream replaces with the agent's final answer on done; the last
+      // setText carries that clean review body (narration is peeled into onThoughts).
       setText: (t) => {
         result = t;
       },
       setStatus: () => undefined,
       registerId: onCliId,
+      onThoughts: (t) => {
+        thoughts = t;
+      },
     });
-    return result;
+    return { text: result, thoughts };
   }
 
   const client = await createAiClient(ai);
@@ -496,7 +514,8 @@ async function generateReviewText(
   })) {
     buffer += chunk;
   }
-  return buffer;
+  // The plain HTTP text path has no tool narration.
+  return { text: buffer, thoughts: "" };
 }
 
 async function deliver(
@@ -597,14 +616,16 @@ async function deliver(
  * Persists an automated PR review into the keyed history store (same shape +
  * key the interactive path uses), so the next review of that PR + mode builds
  * on it. Keyed by `(kind, ref, mode)`; `text` is the raw findings, not the
- * comment-wrapped body. Invalidates the panel's history query so an open Review
- * tab reflects it immediately.
+ * comment-wrapped body. `thoughts` is the agentic narration (display-only, never
+ * fed forward). Invalidates the panel's history query so an open Review tab
+ * reflects it immediately.
  */
 async function persistReviewHistory(
   event: PrAutomationEvent,
   mode: ReviewMode,
   text: string,
   model: string,
+  thoughts: string,
 ): Promise<void> {
   if (!text.trim()) return;
   const kind = event.target.type;
@@ -619,6 +640,8 @@ async function persistReviewHistory(
     model,
     title: event.title,
     text,
+    // Display-only narration (omitted when empty; never fed to the next run).
+    ...(thoughts.trim() ? { thoughts } : {}),
     headSha: event.headSha ?? "",
     startedAt: now,
     finishedAt: now,

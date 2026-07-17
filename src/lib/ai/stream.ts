@@ -35,6 +35,11 @@ export interface CliStreamOpts {
    *  agentic reviewer can pull the full PR diff and read files at any ref. Default
    *  off keeps every other CLI flow (Debug with AI, generation) byte-identical. */
   mcpSelf?: boolean;
+  /** Called at most once, at successful settle, with the narration that streamed
+   *  before the final answer (a tool-using run's "Let me check…" prose). Never
+   *  called when there is none — a codex run (no deltas) or a run whose whole
+   *  buffer IS the final answer. */
+  onThoughts?: (text: string) => void;
 }
 
 /** A short, human status line for a tool step, from the normalized kind + target
@@ -75,6 +80,7 @@ export async function runCliStream({
   onCost,
   effort,
   mcpSelf,
+  onThoughts,
 }: CliStreamOpts): Promise<void> {
   const kind = providerKind(ai.provider);
   if (!kind) throw new Error(`Unsupported CLI provider: ${ai.provider}`);
@@ -125,12 +131,32 @@ export async function runCliStream({
           } else if (event.kind === "done") {
             settled = true;
             onCost?.(event.costUsd);
-            // The terminal event carries the authoritative full text; prefer it
-            // if the partial stream fell short (e.g. deltas were coalesced).
-            if (event.text.length > buffer.length) setText(event.text);
-            if (event.isError)
+            // An errored run keeps whatever streamed (partial text + the error is
+            // today's UX) — no replace/strip.
+            if (event.isError) {
               reject(new Error("The run ended with an error."));
-            else resolve();
+              return;
+            }
+            // The terminal event's text IS the agent's final answer — the
+            // authoritative review body. The accumulated delta buffer additionally
+            // holds any tool-using narration ("Let me check…") that streamed ahead
+            // of it; adopting the buffer here (the old length heuristic) leaked that
+            // narration into the review. So: the final answer wins (falling back to
+            // the buffer only for a degenerate empty terminal event), and the
+            // narration is peeled off as separate "thoughts" for a disclosure.
+            const final = event.text.trim() ? event.text : buffer;
+            setText(final);
+            if (event.text.trim() && buffer !== event.text) {
+              // The buffer ends with the final answer (deltas may prepend a
+              // separator), so strip that suffix; if it doesn't match (older CLI
+              // behavior), keep the whole buffer as the thoughts.
+              const cut = buffer.endsWith(event.text)
+                ? buffer.slice(0, buffer.length - event.text.length)
+                : buffer;
+              const thoughts = cut.trim();
+              if (thoughts) onThoughts?.(thoughts);
+            }
+            resolve();
           } else if (event.kind === "error") {
             settled = true;
             reject(new Error(event.message));
@@ -170,6 +196,10 @@ export interface StreamAiOpts {
   reviewTools?: ToolSet;
   setText: (text: string) => void;
   setStatus: (status: string) => void;
+  /** Called at most once, at successful settle, with the narration that streamed
+   *  before the final answer (agentic CLI + HTTP runs only). The plain HTTP text
+   *  path has no narration and never calls it. */
+  onThoughts?: (text: string) => void;
   /** CLI path: receives the agent review id (cancel via `cancelAgentReview`). */
   onCliId: (id: string) => void;
   /** HTTP path: receives the AbortController driving the stream (cancel via
@@ -194,6 +224,7 @@ export async function streamAi({
   reviewTools,
   setText,
   setStatus,
+  onThoughts,
   onCliId,
   onAbort,
 }: StreamAiOpts): Promise<void> {
@@ -208,6 +239,7 @@ export async function streamAi({
       setText,
       setStatus,
       registerId: onCliId,
+      onThoughts,
     });
     return;
   }
@@ -229,6 +261,7 @@ export async function streamAi({
       abortSignal: abort.signal,
       setText,
       setStatus,
+      onThoughts,
     });
     return;
   }

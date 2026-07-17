@@ -53,6 +53,7 @@ import {
 import { useUiStore } from "@/lib/stores/ui";
 import { formatRelativeTime } from "@/lib/time";
 import { ReviewHistory } from "./ReviewHistory";
+import { ThoughtsDisclosure } from "./ThoughtsDisclosure";
 
 /** Pre-run note shown when a re-run's "changes since" delta couldn't be used. */
 const DELTA_NOTE: Partial<Record<string, string>> = {
@@ -111,6 +112,7 @@ export function PrReviewPanel({
     truncatedCoverage,
     phase,
     error,
+    thoughts,
   } = useReviewRun(target);
 
   // Prior reviews for this PR, used for the per-mode context banner. Read-only —
@@ -501,7 +503,10 @@ export function PrReviewPanel({
               {text.trim() && <Markdown>{text}</Markdown>}
             </div>
           ) : text.trim() ? (
-            <Markdown>{text}</Markdown>
+            <>
+              <Markdown>{text}</Markdown>
+              {thoughts.trim() && <ThoughtsDisclosure thoughts={thoughts} />}
+            </>
           ) : generating ? (
             <p className="flex items-center gap-2 text-xs text-muted-foreground">
               <Spinner className="size-3" />

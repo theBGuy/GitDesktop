@@ -116,6 +116,10 @@ export interface AgenticStreamOpts {
   abortSignal: AbortSignal;
   setText: (t: string) => void;
   setStatus: (s: string) => void;
+  /** Called at most once, at successful settle, with the narration (prose before
+   *  the last tool step) that preceded the conclusion. Never called when the run
+   *  had no tool steps or no distinct narration to peel off. */
+  onThoughts?: (t: string) => void;
 }
 
 /** Max reasoning/tool steps a single agentic review may take before it must
@@ -156,6 +160,10 @@ export async function runAgenticStream(opts: AgenticStreamOpts): Promise<void> {
   // Terminal state, captured on `finish` so a zero-text run can explain itself.
   let finishReason = "unknown";
   let toolSteps = 0;
+  // Offset in `buffer` where the conclusion begins — advanced to the current
+  // buffer length after every tool step, so it ends up pointing just past the LAST
+  // tool activity. Prose after it is the review body; prose before it is narration.
+  let conclusionStart = 0;
   try {
     for await (const part of result.fullStream) {
       switch (part.type) {
@@ -189,11 +197,14 @@ export async function runAgenticStream(opts: AgenticStreamOpts): Promise<void> {
           toolSteps++;
           opts.setStatus(httpToolStatusLine(part.toolName, part.input));
           pendingBreak = true;
+          // Everything after this last tool activity is (so far) the conclusion.
+          conclusionStart = buffer.length;
           break;
         }
         case "tool-error": {
           opts.setStatus(`Tool ${part.toolName} failed — continuing…`);
           pendingBreak = true;
+          conclusionStart = buffer.length;
           break;
         }
         case "finish": {
@@ -227,6 +238,21 @@ export async function runAgenticStream(opts: AgenticStreamOpts): Promise<void> {
     throw new Error(
       `The review ended after ${toolSteps} tool step(s) without producing a conclusion (${finishReason}). Try again, or turn off Agentic review for a single-pass response.`,
     );
+  }
+
+  // A tool-using run streams its exploration narration ("Let me check the call
+  // sites…") ahead of the final review. The prose after the LAST tool step is the
+  // conclusion — the authoritative body; the prose before it is narration, peeled
+  // off into "thoughts" for a disclosure. When the conclusion is empty (all prose
+  // preceded the last tool step — a heuristic miss), leave the full buffer as the
+  // body and emit no thoughts, never dropping content.
+  if (conclusionStart > 0) {
+    const conclusion = buffer.slice(conclusionStart).trim();
+    if (conclusion) {
+      opts.setText(conclusion);
+      const thoughts = buffer.slice(0, conclusionStart).trim();
+      if (thoughts) opts.onThoughts?.(thoughts);
+    }
   }
 }
 

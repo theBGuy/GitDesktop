@@ -17,6 +17,7 @@ import {
   useUpdateReviewText,
 } from "@/lib/pulls/queries";
 import { formatRelativeTime } from "@/lib/time";
+import { ThoughtsDisclosure } from "./ThoughtsDisclosure";
 
 /**
  * The "Previous reviews" disclosure — past AI reviews for this PR (both modes),
@@ -203,6 +204,9 @@ export function ReviewHistory({
                     ) : (
                       <>
                         <Markdown>{r.text}</Markdown>
+                        {r.thoughts?.trim() && (
+                          <ThoughtsDisclosure thoughts={r.thoughts} />
+                        )}
                         <Button
                           variant="ghost"
                           size="xs"

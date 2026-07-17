@@ -1237,10 +1237,18 @@ fn parse_codex_line(
 /// `assistant.message.content` as the authoritative final text, and emits `Done` at
 /// the terminal `result` (whose `exitCode` decides success). Setup / MCP / skills /
 /// reasoning / turn-marker events are ignored.
+///
+/// Successive assistant messages would otherwise concatenate with no separator
+/// ("…real context.Let me check…"), so a paragraph break is lazily PREPENDED to the
+/// first non-empty delta after a completed message (`emitted_text`/`pending_sep`).
+/// The separator lands before the delta text, so the delta buffer still ends with
+/// `Done.text` (which stays verbatim, never separator-prefixed).
 fn parse_copilot_line(
     line: &str,
     saw_terminal: &mut bool,
     last_message: &mut String,
+    emitted_text: &mut bool,
+    pending_sep: &mut bool,
 ) -> Option<ReviewEvent> {
     let line = line.trim();
     if line.is_empty() {
@@ -1248,11 +1256,23 @@ fn parse_copilot_line(
     }
     let v: serde_json::Value = serde_json::from_str(line).ok()?;
     match v.get("type")?.as_str()? {
-        "assistant.message_delta" => v
-            .get("data")
-            .and_then(|d| d.get("deltaContent"))
-            .and_then(|t| t.as_str())
-            .map(|t| ReviewEvent::Delta { text: t.to_string() }),
+        "assistant.message_delta" => {
+            let t = v
+                .get("data")
+                .and_then(|d| d.get("deltaContent"))
+                .and_then(|t| t.as_str())?;
+            if t.is_empty() {
+                return None;
+            }
+            let text = if *pending_sep {
+                *pending_sep = false;
+                format!("\n\n{t}")
+            } else {
+                t.to_string()
+            };
+            *emitted_text = true;
+            Some(ReviewEvent::Delta { text })
+        }
         "assistant.message" => {
             if let Some(text) = v
                 .get("data")
@@ -1260,6 +1280,10 @@ fn parse_copilot_line(
                 .and_then(|t| t.as_str())
             {
                 *last_message = text.to_string();
+            }
+            // A completed message: separate the next message's narration from this one.
+            if *emitted_text {
+                *pending_sep = true;
             }
             None
         }
@@ -1308,13 +1332,18 @@ fn parse_copilot_line(
 /// single terminal event — a turn is a sequence of steps; `step_finish` with
 /// `reason == "stop"` ends it (`"tool-calls"` means another step follows). It emits
 /// whole `text` parts (not token deltas), each a distinct segment, so we stream them
-/// as deltas *and* accumulate them; the final `Done` carries the full text. The
-/// generated `sessionID` (on every event) is surfaced once as `NativeSession` so a
-/// host resume targets the right session — the store de-dups, so re-emitting is fine.
+/// as deltas *and* accumulate them. The agent narrates as it works, so the final
+/// `Done` carries only the FINAL step's text (the actual answer, in `step_text`) —
+/// the earlier steps' narration stays in the `Delta` stream but is stripped off the
+/// final body. `last_message` accumulates every step for the degenerate fallback (a
+/// final step that produced no text). The generated `sessionID` (on every event) is
+/// surfaced once as `NativeSession` so a host resume targets the right session — the
+/// store de-dups, so re-emitting is fine.
 fn parse_opencode_line(
     line: &str,
     saw_terminal: &mut bool,
     last_message: &mut String,
+    step_text: &mut String,
 ) -> Option<ReviewEvent> {
     let line = line.trim();
     if line.is_empty() {
@@ -1322,24 +1351,36 @@ fn parse_opencode_line(
     }
     let v: serde_json::Value = serde_json::from_str(line).ok()?;
     match v.get("type")?.as_str()? {
-        // First event of the run carries the session id we need for resume.
-        "step_start" => v
-            .get("sessionID")
-            .and_then(|s| s.as_str())
-            .map(|id| ReviewEvent::NativeSession { id: id.to_string() }),
+        // First event of the run carries the session id we need for resume. A new
+        // step starts here — reset the per-step accumulator so `Done` reflects only
+        // the final step's text.
+        "step_start" => {
+            step_text.clear();
+            v.get("sessionID")
+                .and_then(|s| s.as_str())
+                .map(|id| ReviewEvent::NativeSession { id: id.to_string() })
+        }
         "text" => {
             let text = v.get("part")?.get("text")?.as_str()?;
             if text.is_empty() {
                 return None;
             }
             // Separate consecutive segments so multi-step narration stays readable;
-            // the delta mirrors what we append, so the buffer == last_message.
+            // the delta mirrors what we append, so the buffer == last_message and its
+            // tail == the current step's text.
             let chunk = if last_message.is_empty() {
                 text.to_string()
             } else {
                 format!("\n\n{text}")
             };
             last_message.push_str(&chunk);
+            // Mirror into the per-step accumulator (join parts within a step the same
+            // way) so `Done.text` can carry the final step verbatim as the buffer tail.
+            if step_text.is_empty() {
+                step_text.push_str(text);
+            } else {
+                step_text.push_str(&format!("\n\n{text}"));
+            }
             Some(ReviewEvent::Delta { text: chunk })
         }
         "tool_use" => {
@@ -1368,8 +1409,18 @@ fn parse_opencode_line(
                 return None;
             }
             *saw_terminal = true;
+            // The final answer is the final step's text; earlier steps were narration
+            // and stay in the delta stream only. Fall back to the full accumulation
+            // only for a degenerate final step that produced no text — never emit an
+            // empty Done when text existed.
+            let text = std::mem::take(step_text);
+            let text = if text.is_empty() {
+                std::mem::take(last_message)
+            } else {
+                text
+            };
             Some(ReviewEvent::Done {
-                text: std::mem::take(last_message),
+                text,
                 is_error: false,
                 cost_usd: None,
             })
@@ -1394,10 +1445,19 @@ fn parse_opencode_line(
 /// accumulates each in-flight tool call's streamed input JSON, keyed by block
 /// index (the input arrives as `input_json_delta` fragments after the block
 /// starts); a completed block emits one `Tool` event with the extracted target.
+///
+/// Consecutive text blocks/messages would otherwise concatenate with no separator
+/// ("…real context.Let me check…"), so a paragraph break is lazily PREPENDED to the
+/// first non-empty `text_delta` following a completed TEXT block (every text block
+/// ends with `content_block_stop`), gated on some text already having been emitted
+/// (`emitted_text`/`pending_sep`). The separator lands before the delta text, so the
+/// delta buffer still ends with `Done.text` (the raw `result`, never separator-prefixed).
 fn parse_claude_line(
     line: &str,
     saw_result: &mut bool,
     tool_inputs: &mut std::collections::HashMap<i64, (String, String)>,
+    emitted_text: &mut bool,
+    pending_sep: &mut bool,
 ) -> Option<ReviewEvent> {
     let line = line.trim();
     if line.is_empty() {
@@ -1427,9 +1487,24 @@ fn parse_claude_line(
                 "content_block_delta" => {
                     let delta = event.get("delta")?;
                     match delta.get("type")?.as_str()? {
-                        "text_delta" => Some(ReviewEvent::Delta {
-                            text: delta.get("text")?.as_str()?.to_string(),
-                        }),
+                        "text_delta" => {
+                            let t = delta.get("text")?.as_str()?;
+                            // Empty deltas keep today's behavior and must NOT consume
+                            // the pending separator (it belongs on the first REAL text).
+                            if t.is_empty() {
+                                return Some(ReviewEvent::Delta {
+                                    text: String::new(),
+                                });
+                            }
+                            let text = if *pending_sep {
+                                *pending_sep = false;
+                                format!("\n\n{t}")
+                            } else {
+                                t.to_string()
+                            };
+                            *emitted_text = true;
+                            Some(ReviewEvent::Delta { text })
+                        }
                         // A tool's input streams as JSON fragments — append to its buffer.
                         "input_json_delta" => {
                             if let (Some(idx), Some(frag)) = (
@@ -1445,10 +1520,18 @@ fn parse_claude_line(
                         _ => None,
                     }
                 }
-                // The tool call is fully described now — emit one structured step.
+                // A block finished. A tool block (idx in `tool_inputs`) emits one
+                // structured Tool step. A TEXT block (idx absent) ends a paragraph:
+                // arm the lazy separator so the next message/block's first text delta
+                // is prefixed — but only once some text has actually been emitted.
                 "content_block_stop" => {
                     let idx = event.get("index").and_then(|i| i.as_i64())?;
-                    let (name, json) = tool_inputs.remove(&idx)?;
+                    let Some((name, json)) = tool_inputs.remove(&idx) else {
+                        if *emitted_text {
+                            *pending_sep = true;
+                        }
+                        return None;
+                    };
                     let input = serde_json::from_str(&json).unwrap_or(serde_json::Value::Null);
                     Some(ReviewEvent::Tool {
                         tool: normalize_tool(&name).to_string(),
@@ -1598,6 +1681,11 @@ async fn stream_agent(
     // claude: per-tool-call streamed input JSON, keyed by content-block index.
     let mut claude_tool_inputs: std::collections::HashMap<i64, (String, String)> =
         std::collections::HashMap::new();
+    // opencode: the final step's text, so `Done` carries the answer, not narration.
+    let mut opencode_step_text = String::new();
+    // claude/copilot: lazy `\n\n` between successive text blocks/messages.
+    let mut emitted_text = false;
+    let mut pending_sep = false;
     let mut cancelled = false;
     let mut timed_out = false;
 
@@ -1620,18 +1708,29 @@ async fn stream_agent(
                 match line {
                     Ok(Some(l)) => {
                         let ev = match kind {
-                            AgentKind::Claude => {
-                                parse_claude_line(&l, &mut saw_result, &mut claude_tool_inputs)
-                            }
+                            AgentKind::Claude => parse_claude_line(
+                                &l,
+                                &mut saw_result,
+                                &mut claude_tool_inputs,
+                                &mut emitted_text,
+                                &mut pending_sep,
+                            ),
                             AgentKind::Codex => {
                                 parse_codex_line(&l, &mut saw_result, &mut last_message)
                             }
-                            AgentKind::Copilot => {
-                                parse_copilot_line(&l, &mut saw_result, &mut last_message)
-                            }
-                            AgentKind::Opencode => {
-                                parse_opencode_line(&l, &mut saw_result, &mut last_message)
-                            }
+                            AgentKind::Copilot => parse_copilot_line(
+                                &l,
+                                &mut saw_result,
+                                &mut last_message,
+                                &mut emitted_text,
+                                &mut pending_sep,
+                            ),
+                            AgentKind::Opencode => parse_opencode_line(
+                                &l,
+                                &mut saw_result,
+                                &mut last_message,
+                                &mut opencode_step_text,
+                            ),
                         };
                         if let Some(ev) = ev {
                             on_event.send(ev);
@@ -2288,8 +2387,8 @@ mod tests {
 
     #[test]
     fn opencode_step_start_yields_native_session_id() {
-        let (mut term, mut msg) = (false, String::new());
-        let ev = parse_opencode_line(STEP_START, &mut term, &mut msg).unwrap();
+        let (mut term, mut msg, mut step) = (false, String::new(), String::new());
+        let ev = parse_opencode_line(STEP_START, &mut term, &mut msg, &mut step).unwrap();
         match ev {
             ReviewEvent::NativeSession { id } => assert_eq!(id, "ses_abc"),
             other => panic!("expected NativeSession, got {other:?}"),
@@ -2299,21 +2398,21 @@ mod tests {
 
     #[test]
     fn opencode_text_parts_stream_as_separated_deltas() {
-        let (mut term, mut msg) = (false, String::new());
+        let (mut term, mut msg, mut step) = (false, String::new(), String::new());
         // First segment: emitted verbatim, no leading separator.
-        let ev = parse_opencode_line(TEXT_A, &mut term, &mut msg).unwrap();
+        let ev = parse_opencode_line(TEXT_A, &mut term, &mut msg, &mut step).unwrap();
         assert!(matches!(ev, ReviewEvent::Delta { text } if text == "First."));
         // Second segment: separated so multi-step narration stays readable, and the
         // delta mirrors exactly what we appended (buffer == last_message).
-        let ev = parse_opencode_line(TEXT_B, &mut term, &mut msg).unwrap();
+        let ev = parse_opencode_line(TEXT_B, &mut term, &mut msg, &mut step).unwrap();
         assert!(matches!(ev, ReviewEvent::Delta { text } if text == "\n\nSecond."));
         assert_eq!(msg, "First.\n\nSecond.");
     }
 
     #[test]
     fn opencode_tool_use_emits_a_tool_step() {
-        let (mut term, mut msg) = (false, String::new());
-        let ev = parse_opencode_line(TOOL, &mut term, &mut msg).unwrap();
+        let (mut term, mut msg, mut step) = (false, String::new(), String::new());
+        let ev = parse_opencode_line(TOOL, &mut term, &mut msg, &mut step).unwrap();
         match ev {
             ReviewEvent::Tool { tool, target } => {
                 assert_eq!(tool, "write");
@@ -2328,8 +2427,8 @@ mod tests {
 
     #[test]
     fn opencode_tool_use_extracts_target_from_input() {
-        let (mut term, mut msg) = (false, String::new());
-        let ev = parse_opencode_line(OC_TOOL_WITH_INPUT, &mut term, &mut msg).unwrap();
+        let (mut term, mut msg, mut step) = (false, String::new(), String::new());
+        let ev = parse_opencode_line(OC_TOOL_WITH_INPUT, &mut term, &mut msg, &mut step).unwrap();
         match ev {
             ReviewEvent::Tool { tool, target } => {
                 assert_eq!(tool, "read");
@@ -2383,14 +2482,15 @@ mod tests {
         // fragments, stop — only the stop emits a Tool, carrying the joined input.
         let mut saw = false;
         let mut acc = std::collections::HashMap::new();
+        let (mut emitted, mut pending) = (false, false);
         let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","name":"Read","input":{}}}}"#;
         let d1 = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"file_pa"}}}"#;
         let d2 = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"th\":\"src/x.ts\"}"}}}"#;
         let stop = r#"{"type":"stream_event","event":{"type":"content_block_stop","index":1}}"#;
-        assert!(parse_claude_line(start, &mut saw, &mut acc).is_none());
-        assert!(parse_claude_line(d1, &mut saw, &mut acc).is_none());
-        assert!(parse_claude_line(d2, &mut saw, &mut acc).is_none());
-        let ev = parse_claude_line(stop, &mut saw, &mut acc).unwrap();
+        assert!(parse_claude_line(start, &mut saw, &mut acc, &mut emitted, &mut pending).is_none());
+        assert!(parse_claude_line(d1, &mut saw, &mut acc, &mut emitted, &mut pending).is_none());
+        assert!(parse_claude_line(d2, &mut saw, &mut acc, &mut emitted, &mut pending).is_none());
+        let ev = parse_claude_line(stop, &mut saw, &mut acc, &mut emitted, &mut pending).unwrap();
         match ev {
             ReviewEvent::Tool { tool, target } => {
                 assert_eq!(tool, "read");
@@ -2399,16 +2499,117 @@ mod tests {
             other => panic!("expected Tool, got {other:?}"),
         }
         assert!(acc.is_empty(), "the completed block is removed from the buffer");
+        // A tool block's stop must NOT arm the separator (no text emitted yet).
+        assert!(!pending, "a tool block does not arm the paragraph separator");
+    }
+
+    #[test]
+    fn claude_lazy_separator_between_text_blocks_across_a_tool() {
+        // Two text blocks separated by a tool call: the second block's first delta is
+        // prefixed `\n\n`; the first block's first delta is NOT. `Done.text` is the raw
+        // `result` string, with no separator prepended — and the delta buffer, once
+        // concatenated, ENDS WITH `Done.text` (the frontend's suffix-strip invariant).
+        let mut saw = false;
+        let mut acc = std::collections::HashMap::new();
+        let (mut emitted, mut pending) = (false, false);
+        let mut buffer = String::new();
+
+        // Text block 1: "Looking at the code." then its stop.
+        let t1a = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Looking at "}}}"#;
+        let t1b = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"the code."}}}"#;
+        let stop1 = r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#;
+        // A tool block (start + stop) — its stop must not add a separator.
+        let tstart = r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","name":"Read","input":{}}}}"#;
+        let tstop = r#"{"type":"stream_event","event":{"type":"content_block_stop","index":1}}"#;
+        // Text block 2: the final answer.
+        let t2 = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"The fix is X."}}}"#;
+        let stop2 = r#"{"type":"stream_event","event":{"type":"content_block_stop","index":2}}"#;
+        let result = r#"{"type":"result","result":"The fix is X.","is_error":false}"#;
+
+        for (line, expect) in [
+            (t1a, Some("Looking at ")),
+            (t1b, Some("the code.")),
+        ] {
+            let ev = parse_claude_line(line, &mut saw, &mut acc, &mut emitted, &mut pending).unwrap();
+            match ev {
+                ReviewEvent::Delta { text } => {
+                    assert_eq!(text, expect.unwrap());
+                    buffer.push_str(&text);
+                }
+                other => panic!("expected Delta, got {other:?}"),
+            }
+        }
+        // Block-1 stop arms the separator; the tool block's stop leaves it armed.
+        parse_claude_line(stop1, &mut saw, &mut acc, &mut emitted, &mut pending);
+        assert!(pending, "a text block's stop arms the separator");
+        parse_claude_line(tstart, &mut saw, &mut acc, &mut emitted, &mut pending);
+        parse_claude_line(tstop, &mut saw, &mut acc, &mut emitted, &mut pending);
+        assert!(pending, "a tool block's stop leaves the pending separator intact");
+
+        // Block-2's first delta is prefixed `\n\n`.
+        let ev = parse_claude_line(t2, &mut saw, &mut acc, &mut emitted, &mut pending).unwrap();
+        match ev {
+            ReviewEvent::Delta { text } => {
+                assert_eq!(text, "\n\nThe fix is X.");
+                buffer.push_str(&text);
+            }
+            other => panic!("expected Delta, got {other:?}"),
+        }
+        parse_claude_line(stop2, &mut saw, &mut acc, &mut emitted, &mut pending);
+
+        let done = parse_claude_line(result, &mut saw, &mut acc, &mut emitted, &mut pending).unwrap();
+        match done {
+            ReviewEvent::Done { text, .. } => {
+                assert_eq!(text, "The fix is X.", "Done.text is the raw result, no separator");
+                assert!(saw);
+                // Load-bearing: concatenated deltas END WITH Done.text.
+                assert_eq!(buffer, "Looking at the code.\n\nThe fix is X.");
+                assert!(buffer.ends_with(&text));
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn copilot_lazy_separator_between_assistant_messages() {
+        // Deltas across two assistant messages get exactly one `\n\n` between them.
+        let (mut term, mut msg) = (false, String::new());
+        let (mut emitted, mut pending) = (false, false);
+        let d1 = r#"{"type":"assistant.message_delta","data":{"deltaContent":"First."}}"#;
+        let m1 = r#"{"type":"assistant.message","data":{"content":"First."}}"#;
+        let d2 = r#"{"type":"assistant.message_delta","data":{"deltaContent":"Second."}}"#;
+
+        let ev = parse_copilot_line(d1, &mut term, &mut msg, &mut emitted, &mut pending).unwrap();
+        assert!(matches!(ev, ReviewEvent::Delta { text } if text == "First."));
+        // A completed message arms the separator; the next delta is prefixed once.
+        assert!(parse_copilot_line(m1, &mut term, &mut msg, &mut emitted, &mut pending).is_none());
+        assert!(pending);
+        let ev = parse_copilot_line(d2, &mut term, &mut msg, &mut emitted, &mut pending).unwrap();
+        assert!(matches!(ev, ReviewEvent::Delta { text } if text == "\n\nSecond."));
+        assert!(!pending, "the separator is consumed by the first following delta");
+    }
+
+    #[test]
+    fn copilot_first_delta_has_no_separator() {
+        // The very first delta of a run must not be prefixed (nothing emitted before).
+        let (mut term, mut msg) = (false, String::new());
+        let (mut emitted, mut pending) = (false, false);
+        let d = r#"{"type":"assistant.message_delta","data":{"deltaContent":"Hello."}}"#;
+        let ev = parse_copilot_line(d, &mut term, &mut msg, &mut emitted, &mut pending).unwrap();
+        assert!(matches!(ev, ReviewEvent::Delta { text } if text == "Hello."));
+        assert!(emitted);
     }
 
     #[test]
     fn opencode_tool_calls_finish_is_not_terminal_but_stop_is() {
-        let (mut term, mut msg) = (false, "hello".to_string());
+        // Degenerate: the final step produced no text (step accumulator empty), so
+        // `Done` falls back to the full accumulation rather than emitting empty.
+        let (mut term, mut msg, mut step) = (false, "hello".to_string(), String::new());
         // `reason: tool-calls` means another step follows — not the turn's end.
-        assert!(parse_opencode_line(FINISH_TOOLS, &mut term, &mut msg).is_none());
+        assert!(parse_opencode_line(FINISH_TOOLS, &mut term, &mut msg, &mut step).is_none());
         assert!(!term);
-        // `reason: stop` ends the turn and carries the accumulated text.
-        let ev = parse_opencode_line(FINISH_STOP, &mut term, &mut msg).unwrap();
+        // `reason: stop` ends the turn and carries the fallback text.
+        let ev = parse_opencode_line(FINISH_STOP, &mut term, &mut msg, &mut step).unwrap();
         match ev {
             ReviewEvent::Done { text, is_error, .. } => {
                 assert_eq!(text, "hello");
@@ -2417,6 +2618,66 @@ mod tests {
             other => panic!("expected Done, got {other:?}"),
         }
         assert!(term);
+    }
+
+    #[test]
+    fn opencode_done_carries_only_the_final_step_text() {
+        // A run of [step1 text "A", tool, step2 text "B"]: both stream as deltas ("A"
+        // then "\n\nB"), but `Done.text` is the FINAL step's text only — the step-1
+        // narration is stripped off the body.
+        let (mut term, mut msg, mut step) = (false, String::new(), String::new());
+        let s1 = r#"{"type":"step_start","sessionID":"s","part":{"type":"step-start"}}"#;
+        let a = r#"{"type":"text","sessionID":"s","part":{"type":"text","text":"A"}}"#;
+        let tool = r#"{"type":"tool_use","sessionID":"s","part":{"type":"tool","tool":"read","state":{"status":"completed"}}}"#;
+        let fin_tool = r#"{"type":"step_finish","sessionID":"s","part":{"type":"step-finish","reason":"tool-calls"}}"#;
+        let s2 = r#"{"type":"step_start","sessionID":"s","part":{"type":"step-start"}}"#;
+        let b = r#"{"type":"text","sessionID":"s","part":{"type":"text","text":"B"}}"#;
+        let fin_stop = r#"{"type":"step_finish","sessionID":"s","part":{"type":"step-finish","reason":"stop"}}"#;
+
+        let mut buffer = String::new();
+        parse_opencode_line(s1, &mut term, &mut msg, &mut step); // NativeSession
+        if let Some(ReviewEvent::Delta { text }) =
+            parse_opencode_line(a, &mut term, &mut msg, &mut step)
+        {
+            buffer.push_str(&text);
+        }
+        parse_opencode_line(tool, &mut term, &mut msg, &mut step); // Tool
+        parse_opencode_line(fin_tool, &mut term, &mut msg, &mut step); // not terminal
+        parse_opencode_line(s2, &mut term, &mut msg, &mut step); // NativeSession, clears step
+        if let Some(ReviewEvent::Delta { text }) =
+            parse_opencode_line(b, &mut term, &mut msg, &mut step)
+        {
+            buffer.push_str(&text);
+        }
+        let done = parse_opencode_line(fin_stop, &mut term, &mut msg, &mut step).unwrap();
+        match done {
+            ReviewEvent::Done { text, .. } => {
+                assert_eq!(text, "B");
+                // Load-bearing frontend invariant: the delta buffer ENDS WITH Done.text.
+                assert_eq!(buffer, "A\n\nB");
+                assert!(buffer.ends_with(&text));
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn opencode_final_step_joins_multiple_text_parts() {
+        // A final step with several text parts joins them with `\n\n` — so Done.text
+        // (the buffer tail) matches exactly what streamed within the final step.
+        let (mut term, mut msg, mut step) = (false, String::new(), String::new());
+        let s = r#"{"type":"step_start","sessionID":"s","part":{"type":"step-start"}}"#;
+        let p1 = r#"{"type":"text","sessionID":"s","part":{"type":"text","text":"one"}}"#;
+        let p2 = r#"{"type":"text","sessionID":"s","part":{"type":"text","text":"two"}}"#;
+        let fin_stop = r#"{"type":"step_finish","sessionID":"s","part":{"type":"step-finish","reason":"stop"}}"#;
+        parse_opencode_line(s, &mut term, &mut msg, &mut step);
+        parse_opencode_line(p1, &mut term, &mut msg, &mut step);
+        parse_opencode_line(p2, &mut term, &mut msg, &mut step);
+        let done = parse_opencode_line(fin_stop, &mut term, &mut msg, &mut step).unwrap();
+        match done {
+            ReviewEvent::Done { text, .. } => assert_eq!(text, "one\n\ntwo"),
+            other => panic!("expected Done, got {other:?}"),
+        }
     }
 
     #[cfg(windows)]

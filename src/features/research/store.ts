@@ -609,10 +609,12 @@ export const useResearchStore = create<ResearchState>((set, get) => {
             if (ev.kind === "delta") {
               finalText += ev.text;
             } else if (ev.kind === "done") {
-              // Defensive fallback — Claude's `done` event may carry more text than
-              // the accumulated deltas (this branch is Claude-only: non-Claude runs
-              // return null above, so no whole-message agent ever reaches here).
-              if (ev.text.length > finalText.length) finalText = ev.text;
+              // The distill has web tools, so its streamed deltas are working
+              // narration ("Let me search…") ahead of the synthesized report. The
+              // terminal event's text is the authoritative final answer — adopt it
+              // whenever present (falling back to the deltas only for a degenerate
+              // empty terminal event) so the narration never leaks into the report.
+              if (ev.text.trim()) finalText = ev.text;
               // The distill IS the latest turn, so its cost is the run's latest cost.
               if (ev.costUsd != null) patch(id, { costUsd: ev.costUsd });
               if (ev.isError) errored = true;

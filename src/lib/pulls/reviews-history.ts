@@ -25,6 +25,11 @@ export interface PersistedReview {
   title: string;
   /** Raw finding markdown — the soft context fed into the next run. */
   text: string;
+  /** The agentic run's streamed working narration ("Let me check…"), shown behind
+   *  a collapsed "Thought process" disclosure. DISPLAY-ONLY metadata — never fed
+   *  into the next run's soft context (that reads `text` alone). Absent for
+   *  non-agentic / codex runs. Additive optional field; schemaVersion stays 1. */
+  thoughts?: string;
   /** PR head at the time this review ran — the delta anchor for the next run. */
   headSha: string;
   startedAt: number;

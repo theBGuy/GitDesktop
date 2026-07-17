@@ -774,7 +774,10 @@ call, so agentic runs are slower and pricier than a one-shot review; and small l
 (some Ollama models) may not support tool calling — the review fails with a clear message
 suggesting you turn agentic off or pick another model. (Codex reviews already explore the
 repo on their own but can't attach the GitDesktop tools, so they get the file-exploration
-framing without the PR tools.)
+framing without the PR tools.) When an agentic run finishes, the panel shows only its
+final review; the exploration narration it streamed along the way is tucked under a
+collapsible **Thought process** disclosure below the review (and saved with it in
+*Previous reviews*).
 
 Every AI-posted review is **clearly machine-authored**: a branded GitDesktop header and
 footer on the comment, and on a **local PR** a "GitDesktop" bot author with a robot avatar.
