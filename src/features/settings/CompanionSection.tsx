@@ -133,8 +133,8 @@ export function CompanionSection() {
           ) : (
             <p>
               Sharing on port{" "}
-              <span className="font-mono">{status.data.port}</span> — no
-              network address detected. Check you're connected to Wi-Fi.
+              <span className="font-mono">{status.data.port}</span> — no network
+              address detected. Check you're connected to Wi-Fi.
             </p>
           )}
         </div>

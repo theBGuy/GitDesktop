@@ -3098,8 +3098,7 @@ export const lanDisable = () => invoke<LanStatus>("lan_disable");
 export const lanSetActiveRepo = (repoPath: string | null) =>
   invoke<void>("lan_set_active_repo", { repoPath });
 
-export const lanPairingStart = () =>
-  invoke<LanPairing>("lan_pairing_start");
+export const lanPairingStart = () => invoke<LanPairing>("lan_pairing_start");
 
 export const lanPairingCancel = () => invoke<void>("lan_pairing_cancel");
 

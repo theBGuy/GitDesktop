@@ -9,13 +9,13 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
-import { errorMessage } from "@/lib/tauri/invoke";
 import {
   useLanDevices,
   useLanPairingCancel,
   useLanPairingStart,
 } from "@/lib/git/queries";
 import type { LanPairing } from "@/lib/git/types";
+import { errorMessage } from "@/lib/tauri/invoke";
 
 /** Remaining whole seconds until `expiresAt`, clamped at 0. */
 function secondsLeft(expiresAt: string): number {
