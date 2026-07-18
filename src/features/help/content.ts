@@ -1820,9 +1820,13 @@ connects, choose **Start again**. When a device pairs, the dialog confirms it by
 ## Managing paired devices
 
 Each paired device is listed with its name, its **read-only** scope, and when it paired
-and was last seen. Every device holds its **own token**, and you can **Revoke** any of
-them at any time — a revoked device immediately loses access and has to pair again to
-reconnect. Arrow keys move between devices in the list.
+and was last seen. The list stays visible **even while sharing is off** — pairings
+persist across sharing sessions, so you can always see (and revoke) which devices could
+connect the next time you turn sharing on. Every device holds its **own token**, and you
+can **Revoke** any of them at any time — a revoked device immediately loses access and
+has to pair again to reconnect. Stopping sharing, switching repos, or revoking a device
+also **disconnects any phone that's watching live** right away. Arrow keys move between
+devices in the list.
 
 ## Security — please read
 

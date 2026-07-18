@@ -19,6 +19,15 @@
 //! unknown id, so there's no probe oracle). This upholds the clear-on-close
 //! containment: paired devices never watch a run on a repo that isn't shared.
 //!
+//! **In-flight sockets are actively cut.** Scoping only gates NEW requests; a
+//! WebSocket accepted while a repo was shared is hijacked out of the serve loop
+//! and would keep forwarding after the desktop disables sharing, switches/clears
+//! the shared repo, or revokes the device (auth runs only at upgrade time). So
+//! [`forward_stream`] also selects on a broadcast cut signal
+//! ([`crate::lan::LanState::monitor_cut`]) that the desktop fires at each of
+//! those lifecycle points; on a cut the socket is closed and the phone must
+//! reconnect and re-authorize.
+//!
 //! **No replay.** The underlying channel is a `tokio::sync::broadcast` with no
 //! history, so a subscriber that connects mid-stream sees only events emitted
 //! *after* it subscribed; earlier deltas are not resent. Acceptable for v1 (the
@@ -86,16 +95,38 @@ pub async fn stream(
         )
             .into_response();
     };
-    ws.on_upgrade(move |socket| forward_stream(socket, rx))
+    // Subscribe to the lifecycle cut signal BEFORE upgrading, so a cut fired
+    // between here and the pump starting isn't missed. Auth ran at upgrade time
+    // only; this receiver is how a later disable / repo-switch / revoke reaches an
+    // already-accepted socket and forces it closed.
+    let cut_rx = state.monitor_cut.subscribe();
+    ws.on_upgrade(move |socket| forward_stream(socket, rx, cut_rx))
 }
 
 /// The per-connection pump: forward each broadcast event as one JSON text frame,
 /// translate lag/close, and drain inbound client frames (read-only monitor — no
 /// stdin path exists). Terminates on the terminal `Done`/`Error` event, on the
 /// stream ending (`Closed`), or when the client hangs up.
-async fn forward_stream(mut socket: WebSocket, mut rx: tokio::sync::broadcast::Receiver<ReviewEvent>) {
+async fn forward_stream(
+    mut socket: WebSocket,
+    mut rx: tokio::sync::broadcast::Receiver<ReviewEvent>,
+    mut cut_rx: tokio::sync::broadcast::Receiver<()>,
+) {
     loop {
         tokio::select! {
+            // `biased` + cut-first: when a cut and an event are both ready, the
+            // cut wins — a just-revoked/disabled socket never forwards one more
+            // buffered frame before it honors the sever.
+            biased;
+            // Lifecycle cut: sharing was disabled, the shared repo changed, or a
+            // device was revoked — sever this socket unconditionally so the phone
+            // must reconnect and re-authorize against the new state. ANY result
+            // ends the loop: Ok is a real cut; Lagged means we missed one but a cut
+            // still happened; Closed can't occur while `LanState` holds the Sender,
+            // but we match it defensively and treat it the same (terminate).
+            _cut = cut_rx.recv() => {
+                break;
+            }
             // Broadcast side: forward events to the client.
             recv = rx.recv() => match recv {
                 Ok(ev) => {
