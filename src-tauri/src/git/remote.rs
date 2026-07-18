@@ -477,24 +477,30 @@ pub(crate) async fn git_push_core(
         }
         Some(b) => {
             crate::git::branches::validate_ref_name(b)?;
-            // Resolve b's tracking state with one read-only call: its upstream's
-            // short name (e.g. `origin/feature`), the upstream's remote name, and
-            // git's `%(upstream:track)` (which carries `[gone]` when the tracked
-            // ref was deleted). Empty stdout means no such local branch.
+            // Resolve b's tracking state with one read-only call: the branch's own
+            // `%(refname)`, its upstream's short name (e.g. `origin/feature`), the
+            // upstream's remote name, and git's `%(upstream:track)` (which carries
+            // `[gone]` when the tracked ref was deleted). `for-each-ref` matches a
+            // pattern as a prefix up to a slash (`refs/heads/feat` also matches
+            // `refs/heads/feat/sub`), so emitting `%(refname)` and requiring it to
+            // equal the expected ref (below) is what makes this behave as an
+            // exact-name lookup — otherwise a non-exact `feat` would read
+            // `feat/sub`'s tracking. No matching line means no such local branch.
             let out = run_git(
                 Some(&repo_path),
                 &[
                     "for-each-ref",
                     &format!("refs/heads/{b}"),
-                    "--format=%(upstream:short)%00%(upstream:remotename)%00%(upstream:track)",
+                    "--format=%(refname)%00%(upstream:short)%00%(upstream:remotename)%00%(upstream:track)",
                 ],
                 DEFAULT_TIMEOUT,
             )
             .await?;
-            // No first line → the branch does not exist (an *untracked* branch
-            // still emits a non-empty `\0\0` line — see parse_upstream_tracking).
+            // No line whose refname is exactly `refs/heads/<b>` → the branch does
+            // not exist (an *untracked* branch still emits a non-empty
+            // `refs/heads/<b>\0\0\0` line — see parse_upstream_tracking).
             let Some((upstream_short, remotename, gone)) =
-                parse_upstream_tracking(&out.stdout_lossy())
+                parse_upstream_tracking(&out.stdout_lossy(), &format!("refs/heads/{b}"))
             else {
                 return Err(AppError::InvalidArgument(format!("no such branch: {b}")));
             };
@@ -513,16 +519,21 @@ pub(crate) async fn git_push_core(
     Ok(())
 }
 
-/// Parse one `for-each-ref … --format=%(upstream:short)%00%(upstream:remotename)%00%(upstream:track)`
-/// line into `(upstream_short, remotename, gone)`. Returns `None` when stdout has
-/// no first line — i.e. the branch does not exist (an *untracked* branch still
-/// emits a non-empty `\0\0` line, so it parses to `Some(("","",false))`, NOT None).
-fn parse_upstream_tracking(stdout: &str) -> Option<(String, String, bool)> {
+/// Parse one `for-each-ref … --format=%(refname)%00%(upstream:short)%00%(upstream:remotename)%00%(upstream:track)`
+/// line into `(upstream_short, remotename, gone)`, but ONLY when its `%(refname)`
+/// equals `expected_ref`. `for-each-ref` matches a pattern as a prefix up to a
+/// slash (`refs/heads/feat` also matches `refs/heads/feat/sub`), so the exact
+/// refname check is what enforces "no such branch" for a non-exact name.
+/// Returns `None` when there is no line, or the first line's refname isn't
+/// `expected_ref`. An *untracked* branch still emits `refs/heads/<b>\0\0\0`,
+/// which (refname matches) parses to `Some(("","",false))`.
+fn parse_upstream_tracking(stdout: &str, expected_ref: &str) -> Option<(String, String, bool)> {
     let line = stdout.lines().next()?;
-    if line.is_empty() {
+    let mut parts = line.split('\0');
+    let refname = parts.next().unwrap_or("");
+    if refname != expected_ref {
         return None;
     }
-    let mut parts = line.split('\0');
     let upstream_short = parts.next().unwrap_or("").to_string();
     let remotename = parts.next().unwrap_or("").to_string();
     let track = parts.next().unwrap_or("");
@@ -804,14 +815,14 @@ mod tests {
 
     #[test]
     fn parse_upstream_tracking_missing_branch_is_none() {
-        assert_eq!(parse_upstream_tracking(""), None);
+        assert_eq!(parse_upstream_tracking("", "refs/heads/feature"), None);
     }
 
     #[test]
     fn parse_upstream_tracking_untracked_is_some_empty() {
-        // An untracked branch emits a non-empty `\0\0` line → valid publish.
+        // An untracked branch: refname present, empty upstream fields → valid publish.
         assert_eq!(
-            parse_upstream_tracking("\0\0\n"),
+            parse_upstream_tracking("refs/heads/feature\0\0\0\n", "refs/heads/feature"),
             Some(("".into(), "".into(), false))
         );
     }
@@ -819,7 +830,7 @@ mod tests {
     #[test]
     fn parse_upstream_tracking_gone() {
         assert_eq!(
-            parse_upstream_tracking("origin/feat\0origin\0[gone]"),
+            parse_upstream_tracking("refs/heads/feature\0origin/feat\0origin\0[gone]", "refs/heads/feature"),
             Some(("origin/feat".into(), "origin".into(), true))
         );
     }
@@ -827,8 +838,19 @@ mod tests {
     #[test]
     fn parse_upstream_tracking_normal() {
         assert_eq!(
-            parse_upstream_tracking("origin/feature\0origin\0[ahead 2]"),
+            parse_upstream_tracking("refs/heads/feature\0origin/feature\0origin\0[ahead 2]", "refs/heads/feature"),
             Some(("origin/feature".into(), "origin".into(), false))
+        );
+    }
+
+    #[test]
+    fn parse_upstream_tracking_prefix_match_is_rejected() {
+        // Round-3 regression guard: `for-each-ref refs/heads/feat` also matches
+        // `refs/heads/feat/sub`; the exact-refname check must reject it so the caller
+        // returns "no such branch" instead of reading feat/sub's tracking.
+        assert_eq!(
+            parse_upstream_tracking("refs/heads/feat/sub\0\0\0\n", "refs/heads/feat"),
+            None
         );
     }
 
