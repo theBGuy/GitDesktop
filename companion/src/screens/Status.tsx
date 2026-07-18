@@ -4,7 +4,7 @@ import {
   GitBranchIcon,
 } from "@phosphor-icons/react";
 import type { FileEntry } from "@/lib/git/types";
-import { SkeletonRows } from "../components/states";
+import { ErrorState, SkeletonRows } from "../components/states";
 import { useStatus } from "../lib/queries";
 
 // Status is a calm glanceable column (not a dashboard): current branch, its
@@ -22,11 +22,14 @@ function changeCounts(entries: FileEntry[]) {
   return { staged, unstaged, untracked, total: entries.length };
 }
 
-/** The Status body. Loading/error/no-repo are handled by the shell; this only
- *  renders once data (or a skeleton) is available. */
+/** The Status body. The shell handles 401 (→ #pair) and 409 (no repo shared)
+ *  centrally; every OTHER error must be handled here like the sibling bodies do —
+ *  without this branch, an errored query with no cached data (`isPending` false,
+ *  `data` undefined) would render a skeleton forever. */
 export function StatusBody({ active }: { active: boolean }) {
-  const { data, isPending } = useStatus(active);
+  const { data, isPending, isError, error, refetch } = useStatus(active);
 
+  if (isError) return <ErrorState error={error} onRetry={() => refetch()} />;
   if (isPending || !data) return <SkeletonRows count={4} />;
 
   const branch = data.branch;

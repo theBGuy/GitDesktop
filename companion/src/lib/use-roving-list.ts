@@ -15,16 +15,21 @@ export function useRovingList() {
     [],
   );
 
-  const onKeyDown = useCallback((e: React.KeyboardEvent, index: number) => {
+  const onKeyDown = useCallback((e: React.KeyboardEvent) => {
     const items = rows.current.filter(Boolean) as HTMLElement[];
     if (items.length === 0) return;
+    // Locate the row that fired the event IN the compacted array, so a null
+    // middle ref can never skew the arithmetic — registration indices and
+    // compacted positions diverge exactly then.
+    const cur = items.indexOf(e.currentTarget as HTMLElement);
+    if (cur === -1) return;
     let next: number | null = null;
     switch (e.key) {
       case "ArrowDown":
-        next = Math.min(index + 1, items.length - 1);
+        next = Math.min(cur + 1, items.length - 1);
         break;
       case "ArrowUp":
-        next = Math.max(index - 1, 0);
+        next = Math.max(cur - 1, 0);
         break;
       case "Home":
         next = 0;
@@ -36,8 +41,6 @@ export function useRovingList() {
         return;
     }
     e.preventDefault();
-    // `next` indexes the COMPACTED `items` array — focus through it, not the raw
-    // ref array, whose indices could diverge if a middle row were ever null.
     items[next]?.focus();
   }, []);
 

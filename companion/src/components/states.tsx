@@ -44,7 +44,10 @@ function CenteredState({
       {icon}
       <p className="text-sm font-medium text-foreground">{title}</p>
       {children ? (
-        <p className="max-w-xs text-sm text-muted-foreground">{children}</p>
+        // A div, not a <p>: some callers pass action buttons alongside text
+        // (valid phrasing content in a <p>, but a paragraph isn't the right
+        // container for controls — and a div also tolerates future block content).
+        <div className="max-w-xs text-sm text-muted-foreground">{children}</div>
       ) : null}
     </div>
   );

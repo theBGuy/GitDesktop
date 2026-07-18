@@ -30,7 +30,7 @@ export function PrsBody({ active }: { active: boolean }) {
           <button
             type="button"
             ref={register(i)}
-            onKeyDown={(e) => onKeyDown(e, i)}
+            onKeyDown={onKeyDown}
             onClick={() => navigate(`#prs/${pr.number}`)}
             className="flex w-full min-h-14 items-center gap-3 px-4 py-3 text-left"
           >

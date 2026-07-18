@@ -56,12 +56,12 @@ export class ApiError extends Error {
    * Grounded in the server shape: `auth.rs`'s `pairing_inactive()` returns
    * `403 Forbidden` with `{ kind: "pairingInactive", … }` from both the
    * challenge and submit routes (a `None` session AND an expired one collapse to
-   * the same response). Match the distinctive `kind` primarily; the 403 status
-   * is a secondary signal (the only other 403s are `host_guard`'s bad-host /
-   * bad-origin, which carry a plain-text body, so no `kind`).
+   * the same response). Match ONLY the distinctive `kind` — the other 403s
+   * (`host_guard`'s bad-host / bad-origin, plain-text body, no `kind`) are real
+   * connectivity/security problems that must NOT read as "waiting for desktop".
    */
   get isPairingInactive(): boolean {
-    return this.kind === "pairingInactive" || this.status === 403;
+    return this.kind === "pairingInactive";
   }
   /**
    * The repo has no `origin` remote (a local-only repo the desktop shows
