@@ -13,15 +13,11 @@ import { Label } from "@/components/ui/label";
 import { branchNameError, branchNameHint } from "@/lib/branch-rules/match";
 import type { BranchRulesConfig } from "@/lib/branch-rules/types";
 import { required, useAppForm } from "@/lib/form";
-import {
-  useBranches,
-  useCreateBranch,
-  useRemoteBranches,
-} from "@/lib/git/queries";
+import { useCreateBranch } from "@/lib/git/queries";
 import { refNameWarning, sanitizeRefName } from "@/lib/git/ref-name";
 import type { FileEntry } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
-import { BaseBranchCombobox } from "./BaseBranchCombobox";
+import { BaseBranchCombobox, useHasBaseOptions } from "./BaseBranchCombobox";
 import { GenerateBranchNameButton } from "./GenerateBranchNameButton";
 
 /**
@@ -62,13 +58,12 @@ export function CreateBranchDialog({
 }) {
   const createBranch = useCreateBranch(repoPath);
 
-  // The base picker owns its own data, but the dialog checks the same two
-  // queries' lengths to hide the whole field when there's nothing to base on
-  // (unborn HEAD / fresh repo → submit with no start point creates from HEAD).
-  const branches = useBranches(repoPath);
-  const remoteBranches = useRemoteBranches(repoPath, open);
-  const hasBases =
-    (branches.data?.length ?? 0) > 0 || (remoteBranches.data?.length ?? 0) > 0;
+  // The base picker owns its own data; the dialog hides the whole field when
+  // there's no offerable base to pick (unborn HEAD / fresh repo → submit with no
+  // start point creates from HEAD). Gate on the SAME offerable predicates the
+  // picker derives its groups from (via `useHasBaseOptions`) rather than raw
+  // query counts, so the field can't render with an empty dropdown.
+  const hasBases = useHasBaseOptions(repoPath, open, currentName);
 
   // Whether the picked base is a remote-tracking ref → drives `--no-track` so
   // the new branch starts with NO upstream and its first push publishes it
@@ -104,10 +99,13 @@ export function CreateBranchDialog({
   // sync sees "different defaults + untouched form" and clobbers the seeded
   // values right back on the next render.
   const seedOnOpen = useEffectEvent(() => {
-    createForm.reset(
-      { name: "", base: currentName ?? defaultName ?? "" },
-      { keepDefaultValues: true },
-    );
+    // Never seed a `gd/session/*` branch: the picker filters that namespace (a
+    // hard repo invariant — no surface may offer session branches), so a seeded
+    // session base would render in the trigger but be absent from the list.
+    const seedBase = currentName?.startsWith("gd/session/")
+      ? (defaultName ?? "")
+      : (currentName ?? defaultName ?? "");
+    createForm.reset({ name: "", base: seedBase }, { keepDefaultValues: true });
     // Seeded base is a local branch (current/default) → tracking stays on.
     setBaseIsRemote(false);
   });
@@ -179,6 +177,8 @@ export function CreateBranchDialog({
             <createForm.AppField name="base">
               {(field) => (
                 <div className="space-y-2">
+                  {/* Programmatic label↔control association is deferred to the
+                      planned shared field-primitives a11y sweep. */}
                   <Label>Base it on</Label>
                   <BaseBranchCombobox
                     repoPath={repoPath}

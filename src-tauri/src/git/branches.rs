@@ -829,7 +829,11 @@ fn unique_suffix() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_create_branch_args, parse_upstream_track, validate_ref_name};
+    use super::{
+        build_create_branch_args, git_create_branch_core, parse_upstream_track, validate_ref_name,
+    };
+    use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
+    use crate::state::AppState;
 
     // Full decision table for the create-branch argv: checkout × start_point ×
     // no_track (8 cases). The no_track=false rows must stay byte-identical to the
@@ -951,5 +955,116 @@ mod tests {
         assert_eq!(parse_upstream_track(""), (0, 0, false));
         assert_eq!(parse_upstream_track("   "), (0, 0, false));
         assert_eq!(parse_upstream_track("garbage"), (0, 0, false));
+    }
+
+    // --- Real-repo test for the `--no-track` seam (temp_dir, git on PATH). ---
+
+    async fn run(repo: &str, args: &[&str]) -> String {
+        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+            .await
+            .unwrap()
+            .stdout_lossy()
+    }
+
+    /// A unique temp base dir for a test, cleaned up by the caller.
+    fn temp_base(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "gd-branches-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    async fn init_repo(repo_s: &str, seed_file: &str) {
+        run(repo_s, &["init", "-q"]).await;
+        run(repo_s, &["config", "user.email", "t@t.local"]).await;
+        run(repo_s, &["config", "user.name", "T"]).await;
+        std::fs::write(std::path::Path::new(repo_s).join(seed_file), "hello\n").unwrap();
+        run(repo_s, &["add", "-A"]).await;
+        run(repo_s, &["commit", "-qm", "seed"]).await;
+    }
+
+    /// The argv table pins `--no-track` placement; this closes the argv→outcome
+    /// gap by driving `git_create_branch_core` against a real repo and asserting
+    /// git actually honors it. Synthesizes a remote-tracking ref
+    /// (`refs/remotes/origin/x` via `update-ref`, so nothing is ever fetched) and
+    /// bases two branches on it: the `no_track=true` arm must have NO upstream,
+    /// the `no_track=false` control arm must track `origin/x`. Both arms create
+    /// without checkout (`checkout=false`) to keep the assertions simple; the
+    /// checkout arm shares the same `--no-track` placement per the argv table.
+    #[tokio::test]
+    async fn create_branch_honors_no_track_against_real_repo() {
+        let base = temp_base("no-track");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+
+        init_repo(&repo_s, "r.txt").await;
+        // A remote named `origin` (URL is the repo's own path — never fetched) and
+        // a synthetic remote-tracking ref pointing at HEAD.
+        run(&repo_s, &["remote", "add", "origin", &repo_s]).await;
+        run(&repo_s, &["update-ref", "refs/remotes/origin/x", "HEAD"]).await;
+
+        let state = AppState::default();
+
+        // no-track arm: branch `y` from `origin/x` with tracking suppressed.
+        git_create_branch_core(
+            &state,
+            repo_s.clone(),
+            "y".into(),
+            false,
+            Some("origin/x".into()),
+            true,
+        )
+        .await
+        .expect("create y succeeds");
+        // No upstream → `y@{upstream}` fails to resolve.
+        assert!(
+            run_git(
+                Some(&repo_s),
+                &["rev-parse", "--abbrev-ref", "y@{upstream}"],
+                DEFAULT_TIMEOUT,
+            )
+            .await
+            .is_err(),
+            "no-track branch y must have no upstream"
+        );
+        // But it still starts at origin/x's tip.
+        assert_eq!(
+            run(&repo_s, &["rev-parse", "y"]).await.trim(),
+            run(&repo_s, &["rev-parse", "origin/x"]).await.trim(),
+            "y should start at origin/x"
+        );
+
+        // control arm: branch `z` from `origin/x` with tracking left on.
+        git_create_branch_core(
+            &state,
+            repo_s.clone(),
+            "z".into(),
+            false,
+            Some("origin/x".into()),
+            false,
+        )
+        .await
+        .expect("create z succeeds");
+        // Upstream resolves and IS origin/x.
+        assert_eq!(
+            run(&repo_s, &["rev-parse", "--abbrev-ref", "z@{upstream}"])
+                .await
+                .trim(),
+            "origin/x",
+            "z should track origin/x"
+        );
+        assert_eq!(
+            run(&repo_s, &["rev-parse", "z"]).await.trim(),
+            run(&repo_s, &["rev-parse", "origin/x"]).await.trim(),
+            "z should start at origin/x"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

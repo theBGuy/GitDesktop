@@ -18,11 +18,32 @@ import {
   useRemoteBranches,
   useUserWorktrees,
 } from "@/lib/git/queries";
+import type { Branch } from "@/lib/git/types";
 import { formatRelativeTime } from "@/lib/time";
 
 /** Lower-cased, forward-slashed path for cross-source comparison — git emits
  *  "/", the app stores "\" on Windows (mirrors BranchSwitcher's helper). */
 const normPath = (p: string) => p.replace(/\\/g, "/").toLowerCase();
+
+/** Whether a local branch may be offered as a base: drop the agent-session
+ *  namespace (a hard repo invariant — every branch surface filters
+ *  `gd/session/*`) and archived branches, EXCEPT always keep the current branch
+ *  even if archived (it's the seeded value and must render). Single-sourced so
+ *  the picker's Local group and the `useHasBaseOptions` gate can't drift. */
+function isOfferableLocal(b: Branch, currentName: string | null): boolean {
+  return (
+    !b.name.startsWith("gd/session/") && (!b.archived || b.name === currentName)
+  );
+}
+
+/** Whether a remote branch's short name may be offered as a base — drops the
+ *  agent-session namespace. (The full `remote/name` value's collision drop with
+ *  a same-named local lives inside the component; it can't affect emptiness —
+ *  if the only remote collides with a local, that local exists and the Local
+ *  group is non-empty.) */
+function isOfferableRemoteName(name: string): boolean {
+  return !name.startsWith("gd/session/");
+}
 
 /** Metadata a combobox row renders, keyed off the option's value string. */
 interface RowMeta {
@@ -82,15 +103,11 @@ export function BaseBranchCombobox({
     return map;
   }, [userWorktrees.data, activeNorm]);
 
-  // Local group: drop the agent-session namespace (a hard repo invariant — every
-  // branch surface filters `gd/session/*`) and archived branches, EXCEPT always
-  // keep the current branch even if archived (it's the seeded value and must
-  // render). Order: current first, then default, then most-recently-committed.
+  // Local group: keep only offerable branches (see `isOfferableLocal`). Order:
+  // current first, then default, then most-recently-committed.
   const localBranches = useMemo(() => {
-    const list = (branches.data ?? []).filter(
-      (b) =>
-        !b.name.startsWith("gd/session/") &&
-        (!b.archived || b.name === currentName),
+    const list = (branches.data ?? []).filter((b) =>
+      isOfferableLocal(b, currentName),
     );
     return list.sort((a, b) => {
       if (a.name === currentName) return -1;
@@ -115,7 +132,7 @@ export function BaseBranchCombobox({
   // alongside a stale local `epic/x` IS the motivating case. Order by recency.
   const remoteBranchList = useMemo(() => {
     return (remoteBranches.data ?? [])
-      .filter((b) => !b.name.startsWith("gd/session/"))
+      .filter((b) => isOfferableRemoteName(b.name))
       .map((b) => ({ value: `${b.remote}/${b.name}`, meta: b }))
       .filter((r) => !localSet.has(r.value))
       .sort((a, b) =>
@@ -194,6 +211,32 @@ export function BaseBranchCombobox({
       </ComboboxContent>
     </Combobox>
   );
+}
+
+/**
+ * Whether the picker would render ANY offerable base — the single source of
+ * truth for the dialog's "hide the whole field" gate. It subscribes to the SAME
+ * two queries the combobox does (`useBranches`, `useRemoteBranches`; react-query
+ * dedupes) and applies the SAME offerable predicates, so the field can never
+ * show with an empty dropdown (e.g. detached HEAD + only-archived locals + no
+ * remotes) the way a raw-count gate could.
+ */
+export function useHasBaseOptions(
+  repoPath: string,
+  open: boolean,
+  currentName: string | null,
+): boolean {
+  const branches = useBranches(repoPath);
+  const remoteBranches = useRemoteBranches(repoPath, open);
+  return useMemo(() => {
+    const hasLocal = (branches.data ?? []).some((b) =>
+      isOfferableLocal(b, currentName),
+    );
+    const hasRemote = (remoteBranches.data ?? []).some((b) =>
+      isOfferableRemoteName(b.name),
+    );
+    return hasLocal || hasRemote;
+  }, [branches.data, remoteBranches.data, currentName]);
 }
 
 /** One combobox row, keyed by the option value Base UI's Collection hands the
