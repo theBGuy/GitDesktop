@@ -32,7 +32,7 @@
 //! auto-reconnects, and that reconnect hits a non-200 — 401 if the device was
 //! revoked, 404 if the stream is gone or the shared repo switched away. A non-200
 //! response permanently closes an `EventSource` (it does not retry a hard error),
-//! so the sever is durable with nothing extra server-side. A clean terminal
+//! so the cut is durable with nothing extra server-side. A clean terminal
 //! (`Done`/`Error`) behaves the same way: the stream ends, the reconnect 404s the
 //! now-absent stream, and the client stays closed. The slice-3 client
 //! probe-classifies that reconnect status (401 vs 404) to tell "revoked" from
@@ -178,7 +178,7 @@ fn forward_stream(
             tokio::select! {
                 // `biased` + cut-first: when a cut and an event are both ready, the
                 // cut wins — a just-revoked/disabled stream never forwards one more
-                // buffered frame before it honors the sever.
+                // buffered frame before it honors the cut.
                 biased;
                 // Lifecycle cut: sharing was disabled, the shared repo changed, or a
                 // device was revoked — end this stream unconditionally so the phone

@@ -130,18 +130,22 @@ impl LanState {
     ///
     /// Change-detection and the monitor cut stay keyed on the PATH exactly as
     /// before: a same-value set is a no-op that must NOT cut (the App effect
-    /// re-pushes the same repoPath on every render).
+    /// re-pushes the same repoPath on every render). That no-op is SUBPROCESS-FREE —
+    /// it returns right after the cheap `*guard == repo_path` compare, without
+    /// resolving the registry id or touching the registry (the prior *changed* call
+    /// already installed the right entry). This keeps a chatty per-render re-push
+    /// off the git subprocess `repo_id_for` spawns, even while the companion is off.
     ///
-    /// The registry install is guarded against a concurrent-call interleave: the
-    /// opaque id resolves via a git subprocess (an `.await`), so two rapid calls
-    /// A→B could race — A's slower resolve could otherwise install `{id_A → A}`
-    /// AFTER B's install, leaving the scoped registry pointing at A while
-    /// `active_repo == B`. So the post-await install ([`install_active_repo`]) only
-    /// clears+inserts when `active_repo` STILL equals the path this call resolved;
-    /// if a later call has already moved it on, this call skips the install (the
-    /// later call owns the registry). No `std::Mutex` is held across the await, and
-    /// the locks are never nested (each install takes `active_repo`, compares, drops
-    /// it, then takes `repos`).
+    /// The registry install (only reached on a real switch/clear) is guarded against
+    /// a concurrent-call interleave: the opaque id resolves via a git subprocess (an
+    /// `.await`), so two rapid *changed* calls A→B could race — A's slower resolve
+    /// could otherwise install `{id_A → A}` AFTER B's install, leaving the scoped
+    /// registry pointing at A while `active_repo == B`. So the post-await install
+    /// ([`install_active_repo`]) only clears+inserts when `active_repo` STILL equals
+    /// the path this call resolved; if a later call has already moved it on, this
+    /// call skips the install (the later call owns the registry). No `std::Mutex` is
+    /// held across the await, and the locks are never nested (each install takes
+    /// `active_repo`, compares, drops it, then takes `repos`).
     async fn set_active_repo(&self, repo_path: Option<String>) -> bool {
         let changed = {
             let mut guard = self.active_repo.lock().unwrap_or_else(|p| p.into_inner());
@@ -152,6 +156,12 @@ impl LanState {
                 true
             }
         };
+        // A same-value re-push is a no-op: the registry already holds the right entry
+        // from the prior changed call, so skip the git-subprocess resolve AND the
+        // install entirely. Only a real switch/clear resolves + guarded-installs.
+        if !changed {
+            return false;
+        }
         // Resolve the opaque id OUTSIDE any lock (it awaits git), then guarded-install
         // it — the install no-ops if `active_repo` has since moved past this path.
         let entry = match repo_path {
@@ -163,15 +173,11 @@ impl LanState {
             None => None,
         };
         self.install_active_repo(repo_path.as_deref(), entry);
-        // Only cut live monitors when the shared repo ACTUALLY changed. The App
-        // effect re-pushes on every repoPath render, so a same-value set is a
-        // no-op and must not sever a healthy stream; a real switch/clear must,
-        // since the phone's in-flight stream is now scoped to a repo we no longer
-        // share.
-        if changed {
-            let _ = self.monitor_cut.send(());
-        }
-        changed
+        // The shared repo actually changed → cut live monitors: a real switch/clear
+        // means the phone's in-flight stream is now scoped to a repo we no longer
+        // share, so it must reconnect and re-authorize against the new state.
+        let _ = self.monitor_cut.send(());
+        true
     }
 
     /// Guarded registry install: mirror the active repo into the registry — clear
@@ -627,6 +633,27 @@ mod tests {
         assert_eq!(id.len(), 16, "opaque id is 16 hex chars: {id}");
         assert!(id.chars().all(|c| c.is_ascii_hexdigit()), "id is hex: {id}");
         assert_ne!(id, "C:/repo", "id must not leak the path");
+
+        // A same-value re-push (the App effect fires one per render) is a no-op: it
+        // returns `false` and leaves BOTH active_repo and the registry entry exactly
+        // as they were — proving the resolve + install were skipped (no per-render
+        // git subprocess). Same id object, same path.
+        assert!(
+            !state.set_active_repo(Some("C:/repo".to_string())).await,
+            "a same-value set reports no change"
+        );
+        {
+            let repos = state.repos.lock().unwrap();
+            assert_eq!(repos.len(), 1, "same-value set leaves the single entry");
+            let (id2, repo2) = repos.iter().next().unwrap();
+            assert_eq!(id2, &id, "same-value set does not re-resolve the id");
+            assert_eq!(repo2.path, "C:/repo", "same-value set leaves the entry path");
+        }
+        assert_eq!(
+            state.active_repo.lock().unwrap().as_deref(),
+            Some("C:/repo"),
+            "same-value set leaves active_repo untouched"
+        );
 
         // A switch replaces the entry (still exactly one).
         state.set_active_repo(Some("C:/other".to_string())).await;

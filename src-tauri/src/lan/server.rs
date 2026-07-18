@@ -324,9 +324,14 @@ fn bind_listener(bind_ip: IpAddr) -> AppResult<(std::net::TcpListener, u16)> {
         let addr = SocketAddr::new(bind_ip, port);
         match std::net::TcpListener::bind(addr) {
             Ok(listener) => {
-                listener
-                    .set_nonblocking(true)
-                    .map_err(|e| bind_error(bind_ip, &e))?;
+                // The bind SUCCEEDED; a set_nonblocking failure is a distinct
+                // condition, so it gets its own message (not `bind_error`'s "could
+                // not bind", which would misattribute the failure).
+                listener.set_nonblocking(true).map_err(|e| {
+                    AppError::Command(format!(
+                        "could not configure the phone-companion listener (set_nonblocking) on {bind_ip}: {e}"
+                    ))
+                })?;
                 return Ok((listener, port));
             }
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
@@ -393,19 +398,22 @@ pub async fn start(
     let handle = Handle::new();
     let serve_handle = handle.clone();
     let tls_config = RustlsConfig::from_config(material.config);
+    // Build the TLS server BEFORE spawning: `from_tcp_rustls` is synchronous and
+    // fallible (it wraps the std listener into a tokio one), so its failure must
+    // propagate out of `start()` as an error — otherwise the caller would store a
+    // RunningServer, flip the tray to "sharing on", and advertise urls + fingerprint
+    // while nothing is actually serving. Only the async `.serve(...)` goes in the task.
+    let server = axum_server::from_tcp_rustls(listener, tls_config).map_err(|e| {
+        AppError::Command(format!(
+            "could not construct the phone-companion TLS server on {bind_ip}: {e}"
+        ))
+    })?;
     // Quit-time teardown is IMPLICIT: `app.exit(0)` from the tray kills the
     // process, which drops the listener — so there's no exit-site hook to add.
     // A user-driven `lan_disable` calls `ServerHandle::shutdown`, which drives this
     // handle's graceful shutdown. (Sleep auto-off is a known later-slice gap — not
     // handled here.)
     let task = tauri::async_runtime::spawn(async move {
-        let server = match axum_server::from_tcp_rustls(listener, tls_config) {
-            Ok(server) => server,
-            Err(e) => {
-                eprintln!("lan companion server could not start over TLS: {e}");
-                return;
-            }
-        };
         if let Err(e) = server
             .handle(serve_handle)
             .serve(router.into_make_service_with_connect_info::<SocketAddr>())
