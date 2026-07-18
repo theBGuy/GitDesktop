@@ -73,6 +73,13 @@ sha2 = "0.11.0"
 rand = "0.10.2"
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 local-ip-address = "0.6.13"
+# Embeds the companion frontend bundle (src-tauri/companion-dist/, written by the
+# sibling `pnpm build:companion`) into the binary so a shipped app serves the phone
+# UI with nothing extra to ship. `mime-guess` powers `EmbeddedFile::metadata().mimetype()`
+# for the Content-Type of served assets. In DEBUG builds rust-embed reads the folder
+# from disk at request time (no rebuild needed to pick up a fresh frontend build) — that
+# IS the dev loop; RELEASE builds bake the files in.
+rust-embed = { version = "8.12.0", features = ["mime-guess"] }
 
 # Desktop-only: the updater plugin doesn't build for mobile.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
