@@ -136,7 +136,7 @@ export function ChangesContextMenuItems({
         )}
         {aiEnabled && (
           <ContextMenuItem onClick={actions.aiExcludeSelected}>
-            Exclude {selectionCount} files from AI (add to aiignore)
+            Exclude {selectionCount} files from AI (add to .gitdesktop/aiignore)
           </ContextMenuItem>
         )}
       </>
@@ -259,12 +259,12 @@ export function ChangesContextMenuItems({
         <>
           <ContextMenuSeparator />
           <ContextMenuItem onClick={() => actions.aiExclude(entry.path)}>
-            Exclude from AI (add to aiignore)
+            Exclude from AI (add to .gitdesktop/aiignore)
           </ContextMenuItem>
           {folders.length > 0 && (
             <ContextMenuSub>
               <ContextMenuSubTrigger>
-                Exclude folder from AI (add to aiignore)
+                Exclude folder from AI (add to .gitdesktop/aiignore)
               </ContextMenuSubTrigger>
               <ContextMenuSubContent>
                 {folders.map((folder) => (
@@ -282,7 +282,8 @@ export function ChangesContextMenuItems({
             <ContextMenuItem
               onClick={() => actions.aiExclude(`*.${extension}`)}
             >
-              Exclude all .{extension} files from AI (add to aiignore)
+              Exclude all .{extension} files from AI (add to
+              .gitdesktop/aiignore)
             </ContextMenuItem>
           )}
         </>

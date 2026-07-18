@@ -2949,8 +2949,12 @@ export function useAppendToGitignore(repo: string) {
 }
 
 export function useAppendRepoAiIgnore(repo: string) {
-  return useRepoMutation(repo, (patterns: string[]) =>
-    api.appendRepoAiIgnore(repo, patterns),
+  return useRepoMutation(
+    repo,
+    (patterns: string[]) => api.appendRepoAiIgnore(repo, patterns),
+    // Staging-class edit — only the working tree changes (the aiignore file
+    // appears/updates), so narrow like useStage/useApplySuggestion.
+    { invalidate: workingTreeKeys(repo) },
   );
 }
 
