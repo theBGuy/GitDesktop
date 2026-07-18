@@ -78,6 +78,10 @@ pub struct Branch {
     /// ref is gone (e.g. the remote branch was deleted after a PR merge). Read as
     /// "no upstream" for pushed-ness decisions.
     pub upstream_gone: bool,
+    /// The remote of the branch's upstream (`%(upstream:remotename)`), e.g.
+    /// `origin` — null when untracked. Authoritative source for which remote a
+    /// push targets; the UI must never re-derive it from the upstream string.
+    pub upstream_remote: Option<String>,
 }
 
 /// A branch that exists on a remote but not (yet) as a local branch — offered in

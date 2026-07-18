@@ -38,7 +38,7 @@ pub async fn git_branches(repo_path: String) -> AppResult<Vec<Branch>> {
         &[
             "for-each-ref",
             "refs/heads",
-            "--format=%(refname:short)%00%(upstream:short)%00%(HEAD)%00%(committerdate:iso8601-strict)%00%(upstream:track)",
+            "--format=%(refname:short)%00%(upstream:short)%00%(HEAD)%00%(committerdate:iso8601-strict)%00%(upstream:track)%00%(upstream:remotename)",
         ],
         DEFAULT_TIMEOUT,
     )
@@ -48,7 +48,8 @@ pub async fn git_branches(repo_path: String) -> AppResult<Vec<Branch>> {
     let mut branches = Vec::new();
     for line in text.lines() {
         let mut parts = line.split('\0');
-        let (Some(name), upstream, head, date, track) = (
+        let (Some(name), upstream, head, date, track, upstream_remote) = (
+            parts.next(),
             parts.next(),
             parts.next(),
             parts.next(),
@@ -71,6 +72,7 @@ pub async fn git_branches(repo_path: String) -> AppResult<Vec<Branch>> {
             upstream_ahead,
             upstream_behind,
             upstream_gone,
+            upstream_remote: upstream_remote.filter(|r| !r.is_empty()).map(str::to_string),
         });
     }
     Ok(branches)
@@ -830,7 +832,8 @@ fn unique_suffix() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_create_branch_args, git_create_branch_core, parse_upstream_track, validate_ref_name,
+        build_create_branch_args, git_branches, git_create_branch_core, parse_upstream_track,
+        validate_ref_name,
     };
     use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
     use crate::state::AppState;
@@ -1069,6 +1072,73 @@ mod tests {
             run(&repo_s, &["rev-parse", "z"]).await.trim(),
             run(&repo_s, &["rev-parse", "origin/x"]).await.trim(),
             "z should start at origin/x"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `git_branches` must surface git's authoritative `%(upstream:remotename)`
+    /// on each branch: a tracked branch carries its remote, an untracked one
+    /// carries none. This is the single source of truth the UI reads instead of
+    /// re-deriving the remote from the upstream string.
+    #[tokio::test]
+    async fn git_branches_reports_upstream_remote() {
+        let base = temp_base("upstream-remote");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+
+        init_repo(&repo_s, "r.txt").await;
+        // A remote named `origin` (URL is the repo's own path — never fetched) and
+        // a synthetic remote-tracking ref pointing at HEAD.
+        run(&repo_s, &["remote", "add", "origin", &repo_s]).await;
+        run(&repo_s, &["update-ref", "refs/remotes/origin/x", "HEAD"]).await;
+
+        let state = AppState::default();
+        // Pin tracking mode repo-locally so an ambient global
+        // `branch.autoSetupMerge = simple|false` can't leave `tracked` untracked
+        // and false-fail the assertion (same guard as the no-track control arm).
+        run(&repo_s, &["config", "branch.autoSetupMerge", "true"]).await;
+        // Tracked branch `tracked` → tracks origin/x.
+        git_create_branch_core(
+            &state,
+            repo_s.clone(),
+            "tracked".into(),
+            false,
+            Some("origin/x".into()),
+            false,
+        )
+        .await
+        .expect("create tracked succeeds");
+        // Untracked branch `solo` → based on the same ref with tracking suppressed.
+        git_create_branch_core(
+            &state,
+            repo_s.clone(),
+            "solo".into(),
+            false,
+            Some("origin/x".into()),
+            true,
+        )
+        .await
+        .expect("create solo succeeds");
+
+        let branches = git_branches(repo_s.clone()).await.expect("list branches");
+        let tracked = branches
+            .iter()
+            .find(|b| b.name == "tracked")
+            .expect("tracked branch present");
+        assert_eq!(
+            tracked.upstream_remote.as_deref(),
+            Some("origin"),
+            "a tracked branch carries its upstream's remote"
+        );
+        let solo = branches
+            .iter()
+            .find(|b| b.name == "solo")
+            .expect("solo branch present");
+        assert_eq!(
+            solo.upstream_remote, None,
+            "an untracked branch carries no upstream remote"
         );
 
         let _ = std::fs::remove_dir_all(&base);

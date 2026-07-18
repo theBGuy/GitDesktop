@@ -121,23 +121,6 @@ const PR_STATE_LABEL: Record<PrState, string> = {
   closed: "Closed",
 };
 
-/** The remote a branch's upstream lives on, by LONGEST-prefix match against the
- *  repo's actual remotes — remote names may contain slashes, so `split("/")[0]`
- *  is wrong and the remotes list is the ground truth. Returns null when the
- *  upstream matches no configured remote (e.g. a stale tracking ref). */
-function upstreamRemoteOf(upstream: string, remotes: string[]): string | null {
-  let best: string | null = null;
-  for (const r of remotes) {
-    if (
-      upstream.startsWith(`${r}/`) &&
-      (best === null || r.length > best.length)
-    ) {
-      best = r;
-    }
-  }
-  return best;
-}
-
 function MenuRow({
   disabled,
   onClick,
@@ -874,8 +857,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     // Publish (one item per remote on a multi-remote repo). Hidden (not disabled)
     // when in-sync, or tracked on a remote that no longer exists.
     const upstreamRemote =
-      branch.upstream && !branch.upstreamGone
-        ? upstreamRemoteOf(branch.upstream, remoteNames)
+      branch.upstream &&
+      !branch.upstreamGone &&
+      branch.upstreamRemote &&
+      remoteNames.includes(branch.upstreamRemote)
+        ? branch.upstreamRemote
         : null;
     const pushable = Boolean(upstreamRemote) && branch.upstreamAhead > 0;
     const publishable =

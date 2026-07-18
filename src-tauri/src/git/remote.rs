@@ -495,7 +495,11 @@ pub(crate) async fn git_push_core(
             // validate_ref_name's blocklist already rejects). We never interpolate
             // the remote into a refspec — it's the bare `push <remote>` argument.
             if let Some(r) = &remote {
-                crate::git::branches::validate_ref_name(r)?;
+                // `validate_ref_name` is the checker, but its message speaks of a
+                // "branch name" — remap it so an invalid remote reads accurately.
+                crate::git::branches::validate_ref_name(r).map_err(|_| {
+                    AppError::InvalidArgument(format!("invalid remote name: {r}"))
+                })?;
                 let remotes = git_remotes(repo_path.clone()).await?;
                 if !remotes.iter().any(|n| n == r) {
                     return Err(AppError::InvalidArgument(format!("unknown remote: {r}")));

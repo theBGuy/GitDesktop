@@ -61,6 +61,10 @@ export interface Branch {
    *  remote branch was deleted after a PR merge). Read as "no upstream" for
    *  pushed-ness decisions. */
   upstreamGone: boolean;
+  /** The remote of the branch's upstream (git's `%(upstream:remotename)`), e.g.
+   *  `origin` — null when untracked. Authoritative source for which remote a push
+   *  targets; the UI must never re-derive it from the upstream string. */
+  upstreamRemote: string | null;
 }
 
 /** A branch that exists on a remote but not locally — offered in the switcher so
