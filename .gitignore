@@ -12,6 +12,12 @@ dist
 dist-ssr
 *.local
 
+# Embedded LAN-companion frontend bundle (built by `pnpm build:companion` into
+# src-tauri/companion-dist/). The build output is generated, but the folder must
+# exist for rust-embed, so keep the .gitkeep and ignore everything else.
+src-tauri/companion-dist/*
+!src-tauri/companion-dist/.gitkeep
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

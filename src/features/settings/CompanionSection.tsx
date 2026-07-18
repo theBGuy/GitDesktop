@@ -81,9 +81,9 @@ export function CompanionSection() {
         </h2>
         <p className="text-xs text-muted-foreground">
           Share the open repository with your phone over your local network.
-          This is an early preview: it exposes a{" "}
-          <strong className="font-medium">read-only</strong> API for the open
-          repo, and the companion phone app arrives in an upcoming release.
+          Scanning the pairing code opens the companion app in your phone's
+          browser — <strong className="font-medium">read-only</strong> Status,
+          pull requests, and CI. Early preview.
         </p>
       </div>
 

@@ -15,6 +15,7 @@ on:
       - "pnpm-workspace.yaml"
       - "patches/**"
       - "src/**"
+      - "companion/**"
       - "index.html"
       - "vite.config.ts"
       - "tsconfig*.json"
@@ -47,4 +48,4 @@ jobs:
 
       # Check-only (biome ci never writes); `pnpm lint` locally is --write.
       - name: Lint and format check
-        run: pnpm exec biome ci ./src/
+        run: pnpm exec biome ci ./src/ ./companion/

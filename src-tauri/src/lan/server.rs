@@ -22,6 +22,7 @@ use tokio::sync::Notify;
 use crate::error::{AppError, AppResult};
 use crate::lan::auth::{self, RouterState};
 use crate::lan::routes::{forge, git, reviews};
+use crate::lan::static_serve;
 
 /// The default port the server tries first — a fixed value in the IANA dynamic /
 /// private range (49152–65535 is the strict private range, but the 38400s are
@@ -90,11 +91,21 @@ pub fn build_router(state: RouterState) -> Router {
         .route("/api/pair/challenge", post(auth::pair_challenge))
         .route("/api/pair", post(auth::pair_submit));
 
+    // The static companion frontend — served UNauthenticated (the pairing page must
+    // load before a device is paired) but still inside the outer host guard. `/` is
+    // the SPA entry (embedded index.html; 503 with a "not built" marker in CI) and
+    // `/assets/{*path}` serves its hashed assets. The app is hash-routed, so there's
+    // no history-API fallback: an unknown asset 404s.
+    let static_assets = Router::new()
+        .route("/", get(static_serve::index))
+        .route("/assets/{*path}", get(static_serve::asset));
+
     // Merge, then wrap EVERYTHING in the host guard (which also stamps the
     // hardening headers on every response, including 404s for unknown paths).
     Router::new()
         .merge(api)
         .merge(pairing)
+        .merge(static_assets)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::host_guard,
@@ -114,25 +125,111 @@ fn resolve_ips(bind_lan: bool) -> (IpAddr, Vec<Ipv4Addr>) {
             vec![Ipv4Addr::LOCALHOST],
         );
     }
-    let mut ips: Vec<Ipv4Addr> = local_ip_address::list_afinet_netifas()
+    let ifaces: Vec<(String, Ipv4Addr)> = local_ip_address::list_afinet_netifas()
         .map(|ifaces| {
             ifaces
                 .into_iter()
-                .filter_map(|(_name, ip)| match ip {
-                    IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_unspecified() => Some(v4),
+                .filter_map(|(name, ip)| match ip {
+                    IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_unspecified() => Some((name, v4)),
                     _ => None,
                 })
                 .collect()
         })
         .unwrap_or_default();
-    ips.sort();
-    ips.dedup();
+    let mut ips = rank_ips(ifaces);
     if ips.is_empty() {
         // No LAN interface found — still bind 0.0.0.0 but advertise loopback so
         // the UI has at least one working url.
         ips.push(Ipv4Addr::LOCALHOST);
     }
     (IpAddr::V4(Ipv4Addr::UNSPECIFIED), ips)
+}
+
+/// Interface-name substrings that mark a virtual / tunnel / VPN adapter whose IPv4
+/// we'd rather NOT lead the advertised-url list with (a phone can't reach a WSL,
+/// Docker, or Hyper-V virtual switch address). Case-insensitive substring match.
+/// `tap` is NOT here — it's too short to substring-match safely (it would flag
+/// "laptop"); it's handled token-aware by [`name_has_tap_token`].
+const VIRTUAL_IFACE_MARKERS: &[&str] = &[
+    "vethernet",
+    "wsl",
+    "docker",
+    "tailscale",
+    "zerotier",
+    "npcap",
+    "hyper-v",
+    "virtual",
+    "loopback",
+];
+
+/// Whether `lower` (an already-lowercased interface name) contains a "tap" adapter
+/// TOKEN — the VPN/TAP virtual-adapter marker — without over-matching words that
+/// merely embed the letters (e.g. "laptop"). Split on non-alphanumeric boundaries
+/// and match a token that is exactly "tap" or "tap" followed by digits (e.g.
+/// "tap0"). So "TAP-Windows Adapter V9" and "OpenVPN TAP" match; "Laptop Dock
+/// Ethernet" does not.
+fn name_has_tap_token(lower: &str) -> bool {
+    lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|tok| {
+            let Some(rest) = tok.strip_prefix("tap") else {
+                return false;
+            };
+            rest.is_empty() || rest.chars().all(|c| c.is_ascii_digit())
+        })
+}
+
+/// Rank enumerated `(interface_name, IPv4)` pairs so the most likely
+/// phone-reachable address leads — the QR/URL list uses `first()`, and a VPN 10.x
+/// or Docker 172.17.x must not beat the real 192.168.x Wi-Fi address.
+///
+/// Score (lower = better): a private-class base by prefix — 192.168.0.0/16 → 0,
+/// 10.0.0.0/8 → 1, 172.16.0.0/12 → 2, anything else → 3, link-local 169.254.0.0/16
+/// → 9 (last) — plus a +10 penalty when the interface NAME looks virtual: it
+/// contains any [`VIRTUAL_IFACE_MARKERS`] substring (case-insensitive) or a "tap"
+/// adapter token (see [`name_has_tap_token`]). That demotes a virtual adapter below
+/// every physical one in its own class. A STABLE sort preserves enumeration order
+/// within a score, and we dedup keeping the first occurrence.
+fn rank_ips(ifaces: Vec<(String, Ipv4Addr)>) -> Vec<Ipv4Addr> {
+    fn class_score(ip: &Ipv4Addr) -> u32 {
+        let o = ip.octets();
+        if o[0] == 169 && o[1] == 254 {
+            9 // link-local (169.254.0.0/16) — always last
+        } else if o[0] == 192 && o[1] == 168 {
+            0 // 192.168.0.0/16
+        } else if o[0] == 10 {
+            1 // 10.0.0.0/8
+        } else if o[0] == 172 && (16..=31).contains(&o[1]) {
+            2 // 172.16.0.0/12
+        } else {
+            3 // anything else
+        }
+    }
+    fn name_penalty(name: &str) -> u32 {
+        let lower = name.to_ascii_lowercase();
+        // Plain substrings for the long markers; token-aware for the short "tap" so
+        // it doesn't flag "laptop".
+        let is_virtual =
+            VIRTUAL_IFACE_MARKERS.iter().any(|m| lower.contains(m)) || name_has_tap_token(&lower);
+        if is_virtual {
+            10
+        } else {
+            0
+        }
+    }
+    let mut scored: Vec<(u32, Ipv4Addr)> = ifaces
+        .into_iter()
+        .map(|(name, ip)| (class_score(&ip) + name_penalty(&name), ip))
+        .collect();
+    // Stable sort by score keeps enumeration order within a score.
+    scored.sort_by_key(|(score, _)| *score);
+    let mut out: Vec<Ipv4Addr> = Vec::with_capacity(scored.len());
+    for (_, ip) in scored {
+        if !out.contains(&ip) {
+            out.push(ip); // dedup, keeping the first (best-ranked) occurrence
+        }
+    }
+    out
 }
 
 /// The `http://<ip>:<port>` urls for the advertised addresses.
@@ -280,5 +377,82 @@ mod tests {
         let (bind_ip, ips) = resolve_ips(true);
         assert_eq!(bind_ip, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
         assert!(!ips.is_empty());
+    }
+
+    #[test]
+    fn rank_ips_leads_with_the_reachable_lan_address() {
+        // The user's real case: a VPN 10.x enumerates before the physical 192.168.x,
+        // but the phone-reachable 192.168.x must lead (the QR uses `first()`).
+        let ranked = rank_ips(vec![
+            ("VPN".to_string(), Ipv4Addr::new(10, 8, 0, 3)),
+            ("Wi-Fi".to_string(), Ipv4Addr::new(192, 168, 1, 20)),
+        ]);
+        assert_eq!(ranked.first(), Some(&Ipv4Addr::new(192, 168, 1, 20)));
+        assert_eq!(ranked, vec![Ipv4Addr::new(192, 168, 1, 20), Ipv4Addr::new(10, 8, 0, 3)]);
+    }
+
+    #[test]
+    fn rank_ips_demotes_docker_by_name_and_by_class() {
+        // A Docker 172.17.x is demoted BOTH by its interface name (+10) and its
+        // class (172.16/12 → 2), landing below a real 192.168.x. Even a Docker
+        // address that happened to be a 192.168.x is demoted below the physical one
+        // by the name penalty alone.
+        let ranked = rank_ips(vec![
+            ("vEthernet (Default Switch)".to_string(), Ipv4Addr::new(172, 17, 0, 1)),
+            ("docker0".to_string(), Ipv4Addr::new(192, 168, 99, 1)),
+            ("Ethernet".to_string(), Ipv4Addr::new(192, 168, 1, 10)),
+        ]);
+        assert_eq!(ranked.first(), Some(&Ipv4Addr::new(192, 168, 1, 10)));
+        // The two virtual adapters both rank after the physical one.
+        assert_eq!(ranked[0], Ipv4Addr::new(192, 168, 1, 10));
+        assert!(ranked.contains(&Ipv4Addr::new(172, 17, 0, 1)));
+        assert!(ranked.contains(&Ipv4Addr::new(192, 168, 99, 1)));
+    }
+
+    #[test]
+    fn rank_ips_puts_link_local_last() {
+        let ranked = rank_ips(vec![
+            ("APIPA".to_string(), Ipv4Addr::new(169, 254, 1, 1)),
+            ("Ethernet".to_string(), Ipv4Addr::new(10, 0, 0, 5)),
+        ]);
+        assert_eq!(ranked, vec![Ipv4Addr::new(10, 0, 0, 5), Ipv4Addr::new(169, 254, 1, 1)]);
+    }
+
+    #[test]
+    fn rank_ips_dedups_keeping_first() {
+        // The same address on two interfaces appears once, at its best rank.
+        let ranked = rank_ips(vec![
+            ("Wi-Fi".to_string(), Ipv4Addr::new(192, 168, 1, 5)),
+            ("Ethernet".to_string(), Ipv4Addr::new(192, 168, 1, 5)),
+        ]);
+        assert_eq!(ranked, vec![Ipv4Addr::new(192, 168, 1, 5)]);
+    }
+
+    #[test]
+    fn rank_ips_empty_input() {
+        assert!(rank_ips(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn tap_token_matches_adapters_not_laptop() {
+        // The three named cases: TAP virtual adapters match; "laptop" (which merely
+        // embeds the letters) does NOT.
+        assert!(name_has_tap_token("tap-windows adapter v9"));
+        assert!(name_has_tap_token("openvpn tap"));
+        assert!(!name_has_tap_token("laptop dock ethernet"));
+        // A numbered tap adapter (tap0) still matches; a bare physical name doesn't.
+        assert!(name_has_tap_token("tap0"));
+        assert!(!name_has_tap_token("wi-fi"));
+    }
+
+    #[test]
+    fn rank_ips_does_not_demote_a_laptop_named_adapter() {
+        // A physical adapter whose name contains "laptop" must NOT be demoted by the
+        // tap marker — it should lead a genuinely virtual TAP adapter in the same class.
+        let ranked = rank_ips(vec![
+            ("TAP-Windows Adapter V9".to_string(), Ipv4Addr::new(192, 168, 1, 8)),
+            ("Laptop Dock Ethernet".to_string(), Ipv4Addr::new(192, 168, 1, 4)),
+        ]);
+        assert_eq!(ranked.first(), Some(&Ipv4Addr::new(192, 168, 1, 4)));
     }
 }
