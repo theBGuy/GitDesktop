@@ -422,8 +422,10 @@ workflow against any two branches with no remote at all).
   at your fork or the **parent** repository. Opening a PR targets a repository explicitly,
   offering your fork or the upstream repo on a fork. When you're done with a fork, the
   settings **Danger zone** can **remove the upstream remote** (a local detach — reversible)
-  or, on GitHub, link out to **leave the fork network** entirely (permanent, done on
-  github.com), with a **Re-check fork status** button that refreshes the fork badge in place.
+  or **leave the fork network** entirely: on **GitLab** this happens right in the app
+  (Owner-only — open MRs to the parent close), and on **GitHub** and **Bitbucket** it links
+  out to the provider's detach page. A **Re-check fork status** button refreshes the fork
+  badge in place afterward.
 
 A Write/Preview markdown editor (formatting toolbar + live preview) is everywhere you author.
 

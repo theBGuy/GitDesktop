@@ -4449,6 +4449,23 @@ pub async fn repo_visibility(repo_path: &str) -> AppResult<crate::forge::RepoVis
     })
 }
 
+/// Remove the project's fork relationship (`DELETE projects/{enc}/fork`),
+/// detaching it from the fork network. Requires the administrator or project
+/// Owner role — glab surfaces a non-Owner's 403 as an error, which bubbles up
+/// as an honest toast. Side effect: any open merge requests from the fork to
+/// the source are closed (and stay closed even if the relationship is later
+/// re-established via the GitLab API).
+pub async fn remove_fork_relationship(repo_path: &str) -> AppResult<()> {
+    let enc = encode_project(&project_path(repo_path).await?);
+    run_glab(
+        Some(repo_path),
+        &["api", "--method", "DELETE", &format!("projects/{enc}/fork")],
+        GLAB_NETWORK_TIMEOUT,
+    )
+    .await?;
+    Ok(())
+}
+
 /// One of the viewer's starred projects (only the path is needed).
 #[derive(Deserialize)]
 struct GlabStarredProject {

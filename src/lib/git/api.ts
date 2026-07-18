@@ -2194,6 +2194,11 @@ export const forgeGlMrAutoMerge = (
 export const forgeGlMrCancelAutoMerge = (repoPath: string, number: number) =>
   invoke<void>("forge_gl_mr_cancel_auto_merge", { repoPath, number });
 
+/** Remove the project's fork relationship (detach from the fork network) —
+ *  GitLab-only. Requires the Owner role; open MRs to the parent are closed. */
+export const forgeGlRemoveForkRelationship = (repoPath: string) =>
+  invoke<void>("forge_gl_remove_fork_relationship", { repoPath });
+
 export const forgePrClose = (
   repoPath: string,
   number: number,

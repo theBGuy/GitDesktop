@@ -31,6 +31,7 @@ import {
   useBbRepoSettings,
   useDeleteRepo,
   useForgeStatus,
+  useGlRemoveForkRelationship,
   useGlRepoSettings,
   useRemotes,
   useRemoveRemote,
@@ -41,6 +42,7 @@ import {
   useSetVisibility,
   useTransferRepo,
 } from "@/lib/git/queries";
+import { type ForgeProvider, providerLabel } from "@/lib/git/types";
 import { deleteRepoLens } from "@/lib/repo-lens/store";
 import { settingsKeys, useSettings } from "@/lib/settings/queries";
 import { toastError } from "@/lib/toast";
@@ -354,32 +356,61 @@ function RemoveUpstreamAction({ repoPath }: { repoPath: string }) {
   );
 }
 
-/** GitHub-only link-out: GitHub has NO API to leave a fork network, so we send
- *  the user to the repo's settings page. A "Re-check fork status" affordance
- *  re-probes and re-persists after they detach on github.com, so the fork badge
- *  + persisted `isFork` clear without an app restart — never cleared
- *  optimistically (it reflects GitHub-side truth). Gated on the persisted fork
- *  provenance, independent of the upstream-remote gate. */
+/** Leave the fork network — provider-branched, gated on the persisted fork
+ *  provenance (independent of the upstream-remote gate):
+ *  - **GitLab** has a real API, so this is an in-app, Owner-gated detach that
+ *    removes the fork relationship (open MRs to the parent are closed).
+ *  - **GitHub** and **Bitbucket** have no detach API, so they link out to the
+ *    provider's settings page (GitHub `…/settings`, Bitbucket `…/admin`).
+ *  A shared "Re-check fork status" affordance re-probes and re-persists, so the
+ *  fork badge + persisted `isFork` clear once the network is left — never
+ *  cleared optimistically (it reflects forge-side truth). Its toasts name the
+ *  active provider. The GitLab arm also fires the re-probe itself on success. */
 function LeaveForkNetworkAction({
   repoPath,
   fullName,
+  provider,
+  isOwner,
 }: {
   repoPath: string;
   fullName: string;
+  provider: ForgeProvider;
+  isOwner: boolean;
 }) {
   const queryClient = useQueryClient();
   const settings = useSettings();
   const forge = useForgeStatus(repoPath);
+  const removeFork = useGlRemoveForkRelationship(repoPath);
   const [rechecking, setRechecking] = useState(false);
+  const [confirming, setConfirming] = useState(false);
   const record = settings.data?.recentRepos.find((r) => r.path === repoPath);
 
   if (record?.isFork !== true) return null;
 
+  const isGitLab = provider === "gitlab";
+  const isBitbucket = provider === "bitbucket";
+  // The provider's own label, for the re-check toasts.
+  const label = providerLabel(provider);
+
   // Derive the host — on GitHub Enterprise the provider is still "github" but a
   // hardcoded github.com would open the wrong host's settings page. While the
   // forge status is still resolving (or errored — retry: false), fall back to
-  // the persisted RecentRepo host, which is available synchronously.
+  // the persisted RecentRepo host, which is available synchronously. Bitbucket
+  // support is Cloud-only, so its fallback is always bitbucket.org.
   const ghHost = forge.data?.host || record?.host || "github.com";
+  const bbHost = record?.host || "bitbucket.org";
+
+  // Post-success confirmation probe (GitLab in-app detach). A failure is
+  // swallowed deliberately: the detach itself already succeeded (and toasted),
+  // the persisted badge self-heals on the next repo open, and the row's own
+  // "Re-check fork status" button — which does surface errors — remains
+  // available meanwhile.
+  const reprobe = () =>
+    probeAndPersistVisibility(repoPath)
+      .then(() =>
+        queryClient.invalidateQueries({ queryKey: settingsKeys.settings }),
+      )
+      .catch(() => undefined);
 
   const recheck = async () => {
     setRechecking(true);
@@ -390,12 +421,12 @@ function LeaveForkNetworkAction({
       // gone) — the badge still clears, but don't present that as a verified
       // detach.
       if (probe === null) {
-        toast.success("Couldn't verify on GitHub — fork badge cleared");
+        toast.success(`Couldn't verify on ${label} — fork badge cleared`);
       } else {
         toast.success(
           probe.isFork
-            ? "Still a fork on GitHub"
-            : "No longer a fork — badge cleared",
+            ? `Still a fork on ${label}`
+            : `No longer a fork on ${label} — badge cleared`,
         );
       }
     } catch (e) {
@@ -405,23 +436,65 @@ function LeaveForkNetworkAction({
     }
   };
 
+  const desc = isGitLab
+    ? "Removes the fork relationship on GitLab. Open merge requests to the parent are closed — they stay closed even if the relationship is later re-established via the GitLab API. Your code and history are kept. Requires the Owner role."
+    : isBitbucket
+      ? "Bitbucket has no API for this — detach on bitbucket.org under Repository settings → Repository details → Manage repository → Detach fork. A one-time action that cannot be undone. Existing pull requests to the parent stay viewable; new ones can't be created."
+      : "Permanently detaches this repository from its fork network on GitHub — this cannot be undone. GitHub requires the fork be public, under 1 GB, and have no child forks. Your code and history are kept; issues, PRs, stars, and watchers are lost.";
+
   return (
     <>
       <div className="border-t" />
-      <Row
-        title="Leave fork network"
-        desc="Permanently detaches this repository from its fork network on GitHub — this cannot be undone. GitHub requires the fork be public, under 1 GB, and have no child forks. Your code and history are kept; issues, PRs, stars, and watchers are lost."
-      >
+      <Row title="Leave fork network" desc={desc}>
         {/* Stacked so the description keeps its width — two side-by-side
             buttons squeezed the copy into a tall, narrow column. */}
         <div className="flex shrink-0 flex-col gap-2">
-          <Button
-            variant="destructive"
-            size="sm"
-            onClick={() => openUrl(`https://${ghHost}/${fullName}/settings`)}
-          >
-            Leave on GitHub…
-          </Button>
+          {isGitLab ? (
+            confirming ? (
+              <InlineConfirm
+                actLabel="Remove"
+                pending={removeFork.isPending}
+                onCancel={() => setConfirming(false)}
+                onAct={() =>
+                  removeFork.mutate(undefined, {
+                    onSuccess: () => {
+                      toast.success("Fork relationship removed");
+                      setConfirming(false);
+                      // Re-probe to flip the persisted badge; the row unmounts
+                      // itself once `isFork` reads false.
+                      reprobe();
+                    },
+                    onError: toastError,
+                  })
+                }
+              />
+            ) : (
+              <DangerButton
+                variant="destructive"
+                disabled={!isOwner}
+                hint={isOwner ? undefined : OWNER_HINT}
+                onClick={() => setConfirming(true)}
+              >
+                Remove fork relationship
+              </DangerButton>
+            )
+          ) : isBitbucket ? (
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() => openUrl(`https://${bbHost}/${fullName}/admin`)}
+            >
+              Detach on Bitbucket…
+            </Button>
+          ) : (
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() => openUrl(`https://${ghHost}/${fullName}/settings`)}
+            >
+              Leave on GitHub…
+            </Button>
+          )}
           <Button
             variant="outline"
             size="sm"
@@ -656,7 +729,7 @@ function DeleteAction({
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const noun = isGitLab ? "project" : "repository";
-  const providerLabel = isGitLab
+  const providerName = isGitLab
     ? "GitLab"
     : isBitbucket
       ? "Bitbucket"
@@ -665,7 +738,7 @@ function DeleteAction({
   return (
     <Row
       title={`Delete this ${noun}`}
-      desc={`Permanently remove the ${noun} on ${providerLabel}.`}
+      desc={`Permanently remove the ${noun} on ${providerName}.`}
     >
       <DangerButton
         variant="destructive"
@@ -693,7 +766,7 @@ function DeleteAction({
           del.mutate(undefined, {
             onSuccess: () => {
               toast.success(
-                `${isGitLab ? "Project" : "Repository"} deleted on ${providerLabel}`,
+                `${isGitLab ? "Project" : "Repository"} deleted on ${providerName}`,
               );
               setOpen(false);
               // The remote is gone — re-probe the repo's hosted panels so they
@@ -789,12 +862,18 @@ export function DangerZone({
       />
       {/* Local detach — any provider, whenever an `upstream` remote exists. */}
       <RemoveUpstreamAction repoPath={repoPath} />
-      {/* Leave-fork-network — GitHub only, gated on persisted fork provenance.
-          Gates are independent: a detached-on-GitHub repo may still have the
-          remote; a remote-less fork may still be in the network. */}
-      {isGitHub && (
-        <LeaveForkNetworkAction repoPath={repoPath} fullName={info.fullName} />
-      )}
+      {/* Leave-fork-network — every provider, gated on persisted fork
+          provenance. The row itself branches three ways: an in-app,
+          Owner-gated detach on GitLab (real API), and a link-out on GitHub
+          (…/settings) and Bitbucket (…/admin), neither of which has a detach
+          API. Independent of the upstream-remote gate: a detached fork may
+          still have the remote; a remote-less fork may still be in the network. */}
+      <LeaveForkNetworkAction
+        repoPath={repoPath}
+        fullName={info.fullName}
+        provider={provider}
+        isOwner={isOwner}
+      />
       {/* Bitbucket can't archive over the API — hide the row (platform limit). */}
       {!isBitbucket && (
         <>

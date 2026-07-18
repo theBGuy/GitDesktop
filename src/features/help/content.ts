@@ -168,9 +168,11 @@ like this:
   never touched. When the repo has an **upstream remote**, **Remove upstream remote**
   detaches this clone from the parent locally (the Fork/Upstream switcher and "Update
   from upstream" disappear — reversible by re-adding the remote). On a **fork**, **Leave
-  fork network** links out to GitHub to permanently detach the repository from its fork
-  network (GitHub has no API for this; it's done on the web and can't be undone). After
-  you leave the network on GitHub, **Re-check fork status** refreshes the badge in place.
+  fork network** detaches the repository from its fork network: on **GitLab** it happens
+  right here (Owner-only — open merge requests to the parent are closed, and stay closed),
+  while on **GitHub** and **Bitbucket** it links out to the provider's page (neither has an
+  API for it; the action can't be undone). **Re-check fork status** then refreshes the badge
+  in place.
 
 > Some options GitHub exposes to no app appear as **"Manage on GitHub"** links rather
 > than dead toggles.

@@ -2601,6 +2601,12 @@ pub async fn forge_gl_mr_cancel_auto_merge(repo_path: String, number: u64) -> Ap
     gl_only!(repo_path, gitlab::cancel_auto_merge_mr(&repo_path, number))
 }
 
+/// Remove the project's fork relationship (detach from the fork network). GitLab-only.
+#[tauri::command]
+pub async fn forge_gl_remove_fork_relationship(repo_path: String) -> AppResult<()> {
+    gl_only!(repo_path, gitlab::remove_fork_relationship(&repo_path))
+}
+
 /// Play (start) a manual CI job. GitLab-only — GitHub Actions has no per-job
 /// manual play, so this is `gl_only` rather than a neutral forge dispatch.
 #[tauri::command]
