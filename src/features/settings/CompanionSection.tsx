@@ -9,6 +9,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -31,8 +32,10 @@ export function CompanionSection() {
   const revoke = useLanDeviceRevoke();
 
   const enabled = status.data?.enabled ?? false;
-  // Read the device list only while sharing is on (nothing to show otherwise).
-  const devices = useLanDevices({ enabled });
+  // Always read the device list, even while sharing is off: a paired device's
+  // token persists across sharing being toggled, so the user must be able to see
+  // and revoke standing access at any time (the guide promises exactly this).
+  const devices = useLanDevices({ enabled: true });
   const deviceList = devices.data ?? [];
 
   const [pairOpen, setPairOpen] = useState(false);
@@ -160,50 +163,69 @@ export function CompanionSection() {
         </span>
       </div>
 
-      {deviceList.length === 0 ? (
+      {devices.isPending ? (
+        // First fetch: paired devices may exist, so don't flash the empty-state
+        // copy — show a placeholder of roughly list-row height instead.
+        <Skeleton className="h-16 w-full" />
+      ) : devices.isError ? (
+        // A failed read is not "no devices" — paired devices may exist, so never
+        // show the empty-state copy on error.
+        <p className="text-xs text-muted-foreground">
+          Couldn't load paired devices.
+        </p>
+      ) : deviceList.length === 0 ? (
         <p className="text-xs text-muted-foreground">
           {enabled
             ? "No devices paired yet. Choose “Pair a device” to add your phone."
             : "Turn on sharing to pair a device."}
         </p>
       ) : (
-        // A roving-focus list (arrow keys move between rows).
-        <div ref={listRef} onKeyDown={onKeyDown} className="space-y-2">
-          {deviceList.map((device, i) => (
-            <div
-              key={device.id}
-              data-device-row={device.id}
-              aria-label={`${device.name}, ${device.scope}, last seen ${formatRelativeTime(
-                device.lastSeenAt,
-              )}`}
-              tabIndex={
-                i === safeActive || (safeActive === -1 && i === 0) ? 0 : -1
-              }
-              onFocus={() => setActiveIndex(i)}
-              className="flex items-center gap-2 rounded border px-3 py-2 outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            >
-              <span className="shrink-0 text-xs font-medium">
-                {device.name}
-              </span>
-              <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground uppercase">
-                {device.scope}
-              </span>
-              <span className="ml-auto shrink-0 text-[11px] text-muted-foreground">
-                paired {formatRelativeTime(device.createdAt)} · seen{" "}
-                {formatRelativeTime(device.lastSeenAt)}
-              </span>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="shrink-0"
-                onClick={() => setConfirmRevoke(device)}
-                aria-label={`Revoke ${device.name}`}
+        <>
+          {/* Paired tokens persist while sharing is off, so the list stays
+              visible and revocable — but note they can't connect right now. */}
+          {!enabled && (
+            <p className="text-xs text-muted-foreground">
+              These devices can connect the next time sharing is on.
+            </p>
+          )}
+          {/* A roving-focus list (arrow keys move between rows). */}
+          <div ref={listRef} onKeyDown={onKeyDown} className="space-y-2">
+            {deviceList.map((device, i) => (
+              <div
+                key={device.id}
+                data-device-row={device.id}
+                aria-label={`${device.name}, ${device.scope}, last seen ${formatRelativeTime(
+                  device.lastSeenAt,
+                )}`}
+                tabIndex={
+                  i === safeActive || (safeActive === -1 && i === 0) ? 0 : -1
+                }
+                onFocus={() => setActiveIndex(i)}
+                className="flex items-center gap-2 rounded border px-3 py-2 outline-none focus-visible:ring-1 focus-visible:ring-ring"
               >
-                Revoke
-              </Button>
-            </div>
-          ))}
-        </div>
+                <span className="shrink-0 text-xs font-medium">
+                  {device.name}
+                </span>
+                <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground uppercase">
+                  {device.scope}
+                </span>
+                <span className="ml-auto shrink-0 text-[11px] text-muted-foreground">
+                  paired {formatRelativeTime(device.createdAt)} · seen{" "}
+                  {formatRelativeTime(device.lastSeenAt)}
+                </span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="shrink-0"
+                  onClick={() => setConfirmRevoke(device)}
+                  aria-label={`Revoke ${device.name}`}
+                >
+                  Revoke
+                </Button>
+              </div>
+            ))}
+          </div>
+        </>
       )}
 
       <PairDeviceDialog open={pairOpen} onOpenChange={setPairOpen} />
