@@ -74,38 +74,71 @@ function multiplierForWindow(windowTokens: number): number {
  *  — it just avoids re-probing Ollama once per review. */
 const profileCache = new Map<string, ContextBudgetProfile>();
 
+/** Session cache of raw probed window tokens (or null when a probe failed),
+ *  keyed `${ollamaBaseUrl}#${model}`. Separate from {@link profileCache} so the
+ *  budget-profile resolver and the AI client (which sizes each request's
+ *  `num_ctx`) share one `/api/show` round-trip per model per session. Caches the
+ *  null result too, so an unreachable host is probed at most once. */
+const ollamaWindowCache = new Map<string, number | null>();
+
 /** Probes a local Ollama model's context window (in tokens) via `/api/show`,
  *  mirroring the fetch idiom in models.ts (guardedFetch → res.json()) but as a
  *  POST with a JSON body. The window is the `model_info` entry whose key ends
  *  with ".context_length" (architecture-prefixed, e.g. "llama.context_length").
  *  Returns null on any failure or when the key is absent — the caller then falls
- *  back to a conservative profile.
+ *  back to a conservative profile / omits `num_ctx`.
+ *
+ *  Never throws (best-effort by contract): any fetch/parse error resolves to
+ *  null. Results are cached per `${ollamaBaseUrl}#${model}` for the session
+ *  (including nulls), so both {@link resolveAutoProfile} and the AI client's
+ *  request-sizing share one probe.
  *
  *  Bounded to 5s via `AbortSignal.timeout`: neither guardedFetch nor the Tauri
  *  HTTP plugin imposes a timeout, so an unreachable/asleep LAN Ollama host would
  *  otherwise hang the first review of a session for the full OS TCP timeout. The
- *  timeout aborts the fetch, which throws → the conservative 1× fallback. */
-async function probeOllamaWindow(ai: AiSettings): Promise<number | null> {
+ *  timeout aborts the fetch, which throws → null. */
+export async function probeOllamaWindowTokens(
+  ai: AiSettings,
+): Promise<number | null> {
   const base = ai.ollamaBaseUrl.replace(/\/$/, "");
-  const aiFetch = guardedFetch();
-  const res = await aiFetch(`${base}/api/show`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: ai.model }),
-    signal: AbortSignal.timeout(5_000),
-  });
-  if (!res.ok) return null;
-  const json = (await res.json()) as {
-    model_info?: Record<string, unknown>;
-  };
-  const info = json.model_info;
-  if (!info || typeof info !== "object") return null;
-  for (const [key, value] of Object.entries(info)) {
-    if (key.endsWith(".context_length") && typeof value === "number") {
-      return value;
+  const cacheKey = `${base}#${ai.model}`;
+  const cached = ollamaWindowCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+
+  const tokens = await probeOllamaWindowUncached(base, ai.model);
+  ollamaWindowCache.set(cacheKey, tokens);
+  return tokens;
+}
+
+/** The uncached probe. Wrapped so {@link probeOllamaWindowTokens} can honour its
+ *  never-throw contract while still caching a failed probe as null. */
+async function probeOllamaWindowUncached(
+  base: string,
+  model: string,
+): Promise<number | null> {
+  try {
+    const aiFetch = guardedFetch();
+    const res = await aiFetch(`${base}/api/show`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model }),
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!res.ok) return null;
+    const json = (await res.json()) as {
+      model_info?: Record<string, unknown>;
+    };
+    const info = json.model_info;
+    if (!info || typeof info !== "object") return null;
+    for (const [key, value] of Object.entries(info)) {
+      if (key.endsWith(".context_length") && typeof value === "number") {
+        return value;
+      }
     }
+    return null;
+  } catch {
+    return null;
   }
-  return null;
 }
 
 /**
@@ -150,13 +183,11 @@ async function resolveAutoProfile(
 ): Promise<ContextBudgetProfile> {
   switch (ai.provider) {
     case "ollama": {
-      try {
-        const windowTokens = await probeOllamaWindow(ai);
-        if (windowTokens && windowTokens > 0) {
-          return scaledProfile(multiplierForWindow(windowTokens));
-        }
-      } catch {
-        // Probe failure — fall through to the conservative default.
+      // Shares the cached `/api/show` probe with the AI client's request sizing;
+      // never throws, so a failed probe falls through to the conservative default.
+      const windowTokens = await probeOllamaWindowTokens(ai);
+      if (windowTokens && windowTokens > 0) {
+        return scaledProfile(multiplierForWindow(windowTokens));
       }
       return scaledProfile(1);
     }

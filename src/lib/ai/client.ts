@@ -7,6 +7,7 @@ import {
 } from "ai";
 import { getSecret } from "@/lib/git/api";
 import { errorMessage } from "@/lib/tauri/invoke";
+import { probeOllamaWindowTokens } from "./context-budget";
 import { isCliProvider, PROVIDERS_REQUIRING_KEY } from "./providers";
 import { httpToolStatusLine } from "./review-tools";
 import type { AiClient, AiSettings, AiStreamRequest } from "./types";
@@ -77,11 +78,23 @@ export async function createAiClient(
 
   return {
     async *stream(req: AiStreamRequest) {
+      // Ollama's server-side default context window is version/config-dependent
+      // and unobservable from the client; without an explicit `num_ctx` a
+      // budgeted prompt larger than that default is SILENTLY truncated (worst on
+      // the biggest models, whose prompts the Auto budget scales up the most). We
+      // size `num_ctx` to THIS request's need — not the model's full architectural
+      // window — so the KV-cache allocation stays proportional to actual usage
+      // (requesting the full window would risk OOM on smaller boxes). Probe
+      // failure → omit `providerOptions` entirely (status quo: server default
+      // applies). Excludes ollama-cloud: its managed host owns its defaults and we
+      // can't verify it honours `num_ctx`.
+      const providerOptions = await ollamaProviderOptions(settings, req);
       const result = streamText({
         model,
         system: req.system,
         prompt: req.prompt,
         abortSignal: req.abortSignal,
+        ...(providerOptions ? { providerOptions } : {}),
       });
       for await (const chunk of result.textStream) {
         yield chunk;
@@ -104,6 +117,43 @@ export async function createAiClient(
       }
     },
   };
+}
+
+/**
+ * Computes the `providerOptions` payload that pins Ollama's request context
+ * window (`num_ctx`) to what THIS request actually needs, or `null` to omit it.
+ *
+ * Only applies to the self-hosted `ollama` provider (never `ollama-cloud`: its
+ * managed host owns its defaults and we can't verify it honours `num_ctx`).
+ * Returns `null` — status quo, server default applies — for any other provider
+ * or when the window probe fails. The `num_ctx` is the request's estimated
+ * prompt tokens plus response headroom, floored at a common default (4,096) and
+ * capped at the model's architectural window so it never requests more than the
+ * model supports. It MAY set a window smaller than a generous server default —
+ * that's harmless because the estimate still covers this request's own need; the
+ * byte-based estimate below is what guarantees that coverage for multi-byte text.
+ */
+async function ollamaProviderOptions(
+  settings: AiSettings,
+  req: AiStreamRequest,
+): Promise<{ ollama: { options: { num_ctx: number } } } | null> {
+  if (settings.provider !== "ollama") return null;
+  const windowTokens = await probeOllamaWindowTokens(settings);
+  if (!windowTokens || windowTokens <= 0) return null;
+  // ÷3 BYTES/token is deliberately conservative (over-estimates tokens) so the
+  // window is sized against truncation. Measuring UTF-8 bytes, not UTF-16 chars,
+  // keeps the margin for multi-byte content: CJK runs ~1-1.5 chars/token but ~3
+  // bytes/char, so a char-based ÷3 would undershoot 2-3× and truncate exactly
+  // where a generous server default would have covered it (ASCII is unchanged).
+  const promptBytes = new TextEncoder().encode(
+    (req.system ?? "") + req.prompt,
+  ).length;
+  const promptTokensEstimate = Math.ceil(promptBytes / 3);
+  const numCtx = Math.min(
+    windowTokens,
+    Math.max(4_096, promptTokensEstimate + 8_192),
+  );
+  return { ollama: { options: { num_ctx: numCtx } } };
 }
 
 /** Options for {@link runAgenticStream}. */
