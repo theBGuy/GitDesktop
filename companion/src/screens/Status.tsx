@@ -42,7 +42,7 @@ export function StatusBody({ active }: { active: boolean }) {
 
   return (
     <div className="flex flex-col">
-      {isError ? <StaleBanner onRetry={() => refetch()} /> : null}
+      {isError ? <StaleBanner error={error} onRetry={() => refetch()} /> : null}
       <div className="flex flex-col gap-6 px-4 py-6">
         <section className="flex flex-col gap-1">
           <p className="text-xs uppercase tracking-wide text-muted-foreground">

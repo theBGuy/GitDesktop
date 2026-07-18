@@ -169,13 +169,27 @@ export function ErrorState({
  * query — render stale data with THIS banner above it, and only full-screen
  * `ErrorState` when there's no data to show. Do not reintroduce a shell-level
  * banner.
+ *
+ * The copy blames the LAN link ONLY for a genuinely unreachable server (status
+ * 0); any other error (e.g. a transient forge 5xx behind a reachable desktop)
+ * gets neutral "couldn't refresh" wording — round-5 finding: a hardcoded
+ * "can't reach your desktop" misattributed forge blips to the LAN.
  */
-export function StaleBanner({ onRetry }: { onRetry: () => void }) {
+export function StaleBanner({
+  error,
+  onRetry,
+}: {
+  error?: unknown;
+  onRetry: () => void;
+}) {
+  const unreachable = error instanceof ApiError && error.isUnreachable;
   return (
     <div className="flex items-center justify-between gap-3 border-b border-border bg-warning/15 px-4 py-2 text-sm">
       <span className="flex items-center gap-2 text-foreground">
         <PlugsIcon size={16} className="text-warning" />
-        Can't reach your desktop — showing the last known state.
+        {unreachable
+          ? "Can't reach your desktop — showing the last known state."
+          : "Couldn't refresh — showing the last known state."}
       </span>
       <button
         type="button"

@@ -28,7 +28,7 @@ export function PrsBody({ active }: { active: boolean }) {
 
   return (
     <div className="flex flex-col">
-      {isError ? <StaleBanner onRetry={() => refetch()} /> : null}
+      {isError ? <StaleBanner error={error} onRetry={() => refetch()} /> : null}
       {data.length === 0 ? (
         <EmptyState
           title="No open pull requests."

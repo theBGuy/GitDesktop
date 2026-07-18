@@ -25,8 +25,9 @@
 //!
 //! ## Page CSP
 //!
-//! HTML/asset responses carry a fuller [`PAGE_CSP`] (self-only scripts/styles, a
-//! `ws:` connect-src for the slice-3 monitor, framing locked down). The outer
+//! HTML/asset responses carry a fuller [`PAGE_CSP`] (self-only scripts/styles;
+//! `connect-src 'self'` covers same-origin fetch/SSE/WebSockets; framing locked
+//! down). The outer
 //! [`crate::lan::auth::harden_headers`] is insert-if-absent for the CSP, so this
 //! page CSP survives while API responses keep their bare one.
 
