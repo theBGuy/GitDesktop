@@ -1,0 +1,137 @@
+@import "tailwindcss";
+@import "@fontsource-variable/jetbrains-mono";
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Design tokens DUPLICATED from src/App.css — keep in sync; extraction to a
+   shared token file is slice-3. Only the subset the companion actually uses is
+   copied (mono + dark + mint accent + semantic state colors). Values are the
+   exact OKLCH from App.css so the companion carries GitDesktop's visual identity.
+
+   Dark-first WITHOUT inline script (the LAN CSP forbids inline JS/CSS): the dark
+   palette is applied BOTH under `.dark` (for an explicit toggle, unused today)
+   AND under `@media (prefers-color-scheme: dark)` on :root, so the OS scheme
+   drives the theme with zero JavaScript.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --font-sans: "JetBrains Mono Variable", monospace;
+  --font-mono: "JetBrains Mono Variable", monospace;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-info: var(--info);
+  --color-merged: var(--merged);
+  --color-border: var(--border);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+}
+
+:root {
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.48 0.1 175);
+  --primary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.516 0 0);
+  --accent: oklch(0.93 0.035 175);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --success: oklch(0.55 0.13 150);
+  --warning: oklch(0.62 0.13 65);
+  --info: oklch(0.52 0.16 250);
+  --merged: oklch(0.53 0.2 300);
+  --border: oklch(0.922 0 0);
+  --ring: oklch(0.55 0.11 175);
+  --radius: 0.625rem;
+}
+
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.82 0.11 175);
+  --primary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.715 0 0);
+  --accent: oklch(0.32 0.04 175);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --success: oklch(0.8 0.17 150);
+  --warning: oklch(0.83 0.15 75);
+  --info: oklch(0.72 0.15 250);
+  --merged: oklch(0.75 0.16 305);
+  --border: oklch(1 0 0 / 10%);
+  --ring: oklch(0.82 0.11 175);
+}
+
+/* OS dark mode, no JS: mirror the `.dark` palette onto :root. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: oklch(0.145 0 0);
+    --foreground: oklch(0.985 0 0);
+    --card: oklch(0.205 0 0);
+    --card-foreground: oklch(0.985 0 0);
+    --primary: oklch(0.82 0.11 175);
+    --primary-foreground: oklch(0.205 0 0);
+    --muted: oklch(0.269 0 0);
+    --muted-foreground: oklch(0.715 0 0);
+    --accent: oklch(0.32 0.04 175);
+    --accent-foreground: oklch(0.985 0 0);
+    --destructive: oklch(0.704 0.191 22.216);
+    --success: oklch(0.8 0.17 150);
+    --warning: oklch(0.83 0.15 75);
+    --info: oklch(0.72 0.15 250);
+    --merged: oklch(0.75 0.16 305);
+    --border: oklch(1 0 0 / 10%);
+    --ring: oklch(0.82 0.11 175);
+  }
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+  html {
+    font-family: var(--font-mono);
+    /* Respect the phone's safe areas (notches / home indicator). */
+    background-color: var(--background);
+  }
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    -webkit-font-smoothing: antialiased;
+    /* No overscroll bounce revealing a mismatched background. */
+    overscroll-behavior-y: none;
+  }
+  /* Keyboard focus is always visible (WCAG 2.4.7) — never remove the outline. */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}

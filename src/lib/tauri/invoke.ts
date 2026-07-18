@@ -58,3 +58,26 @@ export async function invoke<T>(
     } satisfies AppError;
   }
 }
+
+/** Typed wrapper around the installed transport's invokeStreaming: a backend
+ *  command that streams `E` events (via `onEvent`) before resolving to `T`. The
+ *  transport owns the channel primitive and injects it into `args` under
+ *  `eventArg`, keeping the Tauri `Channel` off this call site. Errors normalize
+ *  to AppError exactly as {@link invoke} does. */
+export async function invokeStreaming<T, E>(
+  cmd: string,
+  args: Record<string, unknown>,
+  eventArg: string,
+  onEvent: (event: E) => void,
+): Promise<T> {
+  const transport = getTransport();
+  try {
+    return await transport.invokeStreaming<T, E>(cmd, args, eventArg, onEvent);
+  } catch (e) {
+    if (isAppError(e)) throw e;
+    throw {
+      kind: "io",
+      message: typeof e === "string" ? e : errorMessage(e),
+    } satisfies AppError;
+  }
+}

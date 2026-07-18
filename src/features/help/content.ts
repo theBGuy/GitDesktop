@@ -1581,9 +1581,9 @@ there's an equivalent.`,
 The **Phone companion** lets you share the repository that's currently open with your
 phone over your **local network**. Open it in **Settings → Phone companion**.
 
-This is an **early preview**. Right now it exposes a **read-only** API for the open
-repo over the LAN — there's no companion phone app yet (it's coming in a later release),
-so pairing today is mainly for trying the connection out. It's **off by default**.
+This is an **early preview**. Once paired, your phone opens a slim companion web app in
+its browser that shows the open repo's **Status**, **pull requests**, and **CI** — all
+**read-only**. It's **off by default**.
 
 ## Turning it on
 
@@ -1601,8 +1601,15 @@ Choose **Pair a device** (available once sharing is on). A dialog shows:
 - the same **URL** as selectable text, in case you'd rather open it manually, and
 - a short **PIN** that you type on the phone to confirm it's really you.
 
+Scanning the code (or opening the URL) loads the companion's **pairing page** in your
+phone's browser. Type the PIN there; once it matches, the phone is paired and drops
+straight into the companion app — a bottom tab bar with **Status**, **PRs**, and **CI**,
+each read-only.
+
 The offer counts down and expires after a short while; if it lapses before the phone
-connects, choose **Start again**. When a device pairs, the dialog confirms it by name.
+connects, choose **Start again** (the desktop shows a fresh QR and PIN), and the phone's
+pairing page will prompt you to enter the new code. When a device pairs, the dialog
+confirms it by name.
 
 ## Managing paired devices
 

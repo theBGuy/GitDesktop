@@ -9,6 +9,18 @@ export interface Transport {
   /** Invoke a backend command. Implementations reject with raw errors —
    *  normalization to AppError happens once, in the invoke() wrapper. */
   invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T>;
+  /** Invoke a backend command that streams events back before it resolves. The
+   *  implementation constructs whatever channel primitive it uses, wires
+   *  `onEvent` to each streamed event, injects the channel into `args` under
+   *  `eventArg`, and forwards to the same backend bridge as {@link invoke}. Keeps
+   *  the Tauri `Channel` off the call sites so an HTTP/mock transport can model
+   *  streaming its own way. */
+  invokeStreaming<T, E>(
+    cmd: string,
+    args: Record<string, unknown>,
+    eventArg: string,
+    onEvent: (event: E) => void,
+  ): Promise<T>;
 }
 
 let current: Transport | null = null;
