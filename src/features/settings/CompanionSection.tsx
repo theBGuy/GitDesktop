@@ -167,6 +167,12 @@ export function CompanionSection() {
         // First fetch: paired devices may exist, so don't flash the empty-state
         // copy — show a placeholder of roughly list-row height instead.
         <Skeleton className="h-16 w-full" />
+      ) : devices.isError ? (
+        // A failed read is not "no devices" — paired devices may exist, so never
+        // show the empty-state copy on error.
+        <p className="text-xs text-muted-foreground">
+          Couldn't load paired devices.
+        </p>
       ) : deviceList.length === 0 ? (
         <p className="text-xs text-muted-foreground">
           {enabled
