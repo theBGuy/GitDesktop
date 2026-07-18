@@ -239,6 +239,34 @@ export function useHasBaseOptions(
   }, [branches.data, remoteBranches.data, currentName]);
 }
 
+/** First offerable seed among [current, default] — "" when neither is offerable
+ *  (⇒ create from HEAD). Single-sourced with the picker's predicates so the
+ *  seeded value can never be one the list won't show. */
+export function useSeedBase(
+  repoPath: string,
+  currentName: string | null,
+  defaultName: string | null,
+): string {
+  const branches = useBranches(repoPath);
+  return useMemo(() => {
+    const byName = new Map<string, Branch>();
+    for (const b of branches.data ?? []) byName.set(b.name, b);
+    for (const candidate of [currentName, defaultName]) {
+      if (!candidate) continue;
+      const b = byName.get(candidate);
+      // When the branch is loaded, only seed it if the picker would offer it.
+      // When it isn't loaded yet (data momentarily absent), fall back to the
+      // session-namespace check alone — preserving today's seed behavior until
+      // the offerability check can run against real data.
+      const offerable = b
+        ? isOfferableLocal(b, currentName)
+        : !candidate.startsWith("gd/session/");
+      if (offerable) return candidate;
+    }
+    return "";
+  }, [branches.data, currentName, defaultName]);
+}
+
 /** One combobox row, keyed by the option value Base UI's Collection hands the
  *  render function (a local branch name or a `remote/name` string). */
 function BaseBranchRow({

@@ -17,7 +17,11 @@ import { useCreateBranch } from "@/lib/git/queries";
 import { refNameWarning, sanitizeRefName } from "@/lib/git/ref-name";
 import type { FileEntry } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
-import { BaseBranchCombobox, useHasBaseOptions } from "./BaseBranchCombobox";
+import {
+  BaseBranchCombobox,
+  useHasBaseOptions,
+  useSeedBase,
+} from "./BaseBranchCombobox";
 import { GenerateBranchNameButton } from "./GenerateBranchNameButton";
 
 /**
@@ -65,6 +69,10 @@ export function CreateBranchDialog({
   // query counts, so the field can't render with an empty dropdown.
   const hasBases = useHasBaseOptions(repoPath, open, currentName);
 
+  // The value to seed the base picker with on open — the first of
+  // current/default the picker would actually offer, "" otherwise (⇒ HEAD).
+  const seedBase = useSeedBase(repoPath, currentName, defaultName);
+
   // Whether the picked base is a remote-tracking ref → drives `--no-track` so
   // the new branch starts with NO upstream and its first push publishes it
   // under its own name.
@@ -99,14 +107,12 @@ export function CreateBranchDialog({
   // sync sees "different defaults + untouched form" and clobbers the seeded
   // values right back on the next render.
   const seedOnOpen = useEffectEvent(() => {
-    // Never seed a `gd/session/*` branch: the picker filters that namespace (a
-    // hard repo invariant — no surface may offer session branches), so a seeded
-    // session base would render in the trigger but be absent from the list.
-    const seedBase = currentName?.startsWith("gd/session/")
-      ? (defaultName ?? "")
-      : (currentName ?? defaultName ?? "");
+    // Seed only a value the picker would actually offer (see `useSeedBase`) — a
+    // seeded base absent from the list would render in the trigger yet be
+    // unselectable. `seedBase` already encodes that invariant.
     createForm.reset({ name: "", base: seedBase }, { keepDefaultValues: true });
-    // Seeded base is a local branch (current/default) → tracking stays on.
+    // Seeded base is an offerable local branch (current/default) → never a
+    // remote value, so tracking stays on.
     setBaseIsRemote(false);
   });
   useEffect(() => {
