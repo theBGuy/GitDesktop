@@ -24,10 +24,13 @@
 //!
 //! ### Transport hardening
 //!
-//! Every response carries `X-Frame-Options: DENY` + `Content-Security-Policy:
-//! frame-ancestors 'none'`, and every request's `Host` (and `Origin`, when
-//! present) must match a bound address — the DNS-rebinding defense that a
-//! localhost HTTP service otherwise lacks (the qBittorrent CVE lesson).
+//! The companion serves HTTPS with a persistent self-signed certificate (see
+//! [`crate::lan::tls`]) so the phone origin is a secure context and the bearer
+//! cookie can be `Secure`. On top of TLS, every response carries `X-Frame-Options:
+//! DENY` + `Content-Security-Policy: frame-ancestors 'none'`, and every request's
+//! `Host` (and `Origin`, when present) must match a bound address — the
+//! DNS-rebinding defense that a bound localhost service otherwise lacks (the
+//! qBittorrent CVE lesson).
 //!
 //! ### Rate limiting
 //!
@@ -602,18 +605,26 @@ pub fn clear_failures(map: &RateLimitMap, ip: IpAddr) {
 /// `AppState` shares individual fields rather than `Arc<Whole>`). Cheap to clone.
 #[derive(Clone)]
 pub struct RouterState {
-    /// The currently-active repo path the read routes operate on. `None` → 409.
+    /// The currently-active repo path the alias read routes operate on. `None` →
+    /// 409. The alias resolver middleware reads this and inserts a `ScopedRepo`.
     pub active_repo: Arc<Mutex<Option<String>>>,
+    /// The repo registry (opaque-id → [`crate::lan::RegisteredRepo`]) backing the
+    /// scoped `/api/repos/{repoId}/…` routes. The SAME `Arc` [`crate::lan::LanState`]
+    /// owns, so `lan_set_active_repo` refreshes it live. The scoped resolver looks a
+    /// `{repoId}` up here (miss → 404) and the `/api/repos` list enumerates it.
+    pub repos: crate::lan::RepoRegistry,
     /// The single active pairing session, if any.
     pub pairing: Arc<Mutex<Option<PairingSession>>>,
     /// Per-IP failure windows.
     pub rate_limit: RateLimitMap,
     /// Every bound `<ip>:<port>` we accept in a `Host`/`Origin` header.
     pub bound_hosts: Arc<Vec<String>>,
-    /// Cut signal for live WebSocket monitors. A `stream` handler subscribes a
-    /// receiver from this before upgrading; the desktop fires `()` on it when
-    /// sharing is disabled, the shared repo changes, or a device is revoked, so
-    /// in-flight sockets close and the phone must reconnect and re-authorize.
+    /// Cut signal for live SSE monitors. The `stream` handler (a plain GET, no
+    /// upgrade) subscribes a receiver from this before returning its `Sse` response;
+    /// the desktop fires `()` on it when sharing is disabled, the shared repo
+    /// changes, or a device is revoked, so in-flight event streams end and the phone
+    /// must reconnect and re-authorize (its EventSource auto-reconnect then hits a
+    /// 401/404 and closes permanently).
     pub monitor_cut: tokio::sync::broadcast::Sender<()>,
     /// The live agent-stream registry — the SAME `Arc` [`crate::state::AppState`]
     /// holds, so a review/session registered there is watchable from the LAN
@@ -658,10 +669,19 @@ pub async fn host_guard(
     req: Request<Body>,
     next: Next,
 ) -> Response {
-    let host_ok = req
+    // The request authority to match against the bound-host allowlist. HTTP/1.1
+    // carries it in the `Host` header; HTTP/2 (which we negotiate via ALPN `h2`)
+    // drops `Host` and puts it in the `:authority` pseudo-header, which hyper/axum
+    // surface on `req.uri().authority()`. Check the `Host` header first, then fall
+    // back to the URI authority, so both protocol versions are guarded identically.
+    let host = req
         .headers()
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .or_else(|| req.uri().authority().map(|a| a.as_str().to_string()));
+    let host_ok = host
+        .as_deref()
         .map(|h| state.bound_hosts.iter().any(|b| b == h))
         .unwrap_or(false);
     if !host_ok {
@@ -699,9 +719,11 @@ pub const AUTH_COOKIE: &str = "gd_lan";
 /// of page JS; `SameSite=Strict` (with the existing [`host_guard`] Origin/Host
 /// validation) is the CSRF story — a cross-site request can't attach this cookie,
 /// and the only unauthenticated state-changing routes are the rate-limited pairing
-/// endpoints. No `Secure`: the companion is plain HTTP on the LAN by design (v1),
-/// so `Secure` would suppress the cookie entirely. One year `Max-Age`.
-const AUTH_COOKIE_ATTRS: &str = "HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000";
+/// endpoints. `Secure` is now both SAFE and load-bearing: the companion serves
+/// HTTPS (self-signed; see [`crate::lan::tls`]), so the cookie is delivered and
+/// returned normally, and `Secure` guarantees the bearer never rides a plaintext
+/// downgrade if a request somehow hit an `http://` origin. One year `Max-Age`.
+const AUTH_COOKIE_ATTRS: &str = "HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=31536000";
 
 /// Pull the value of the cookie named `name` from a request's `Cookie` header, if
 /// present. A manual parse (split on `;`, trim, match `name=`) — no cookie crate,

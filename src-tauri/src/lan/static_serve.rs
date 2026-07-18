@@ -26,7 +26,7 @@
 //! ## Page CSP
 //!
 //! HTML/asset responses carry a fuller [`PAGE_CSP`] (self-only scripts/styles;
-//! `connect-src 'self'` covers same-origin fetch/SSE/WebSockets; framing locked
+//! `connect-src 'self'` covers same-origin fetch/SSE; framing locked
 //! down). The outer
 //! [`crate::lan::auth::harden_headers`] is insert-if-absent for the CSP, so this
 //! page CSP survives while API responses keep their bare one.
@@ -46,9 +46,10 @@ struct Companion;
 
 /// The page Content-Security-Policy stamped on served HTML/asset responses. Locks
 /// scripts/styles to self, allows `data:` images, and denies framing / external
-/// base & form targets. `connect-src 'self'` covers same-origin fetch, SSE, AND
-/// same-origin WebSockets in modern browsers — a bare `ws:` scheme-source would
-/// permit sockets to ANY host, so it is deliberately absent.
+/// base & form targets. `connect-src 'self'` covers same-origin fetch AND the
+/// same-origin SSE stream (`EventSource`) the reviews monitor uses — no WebSocket
+/// scheme-source is needed (the monitor moved from `wss:` to SSE, partly because
+/// iOS Safari won't extend a self-signed-cert exception to `wss://`).
 pub const PAGE_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 
 /// The 503 body shown when the companion bundle hasn't been built (CI, or a dev who

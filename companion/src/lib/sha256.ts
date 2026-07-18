@@ -1,12 +1,13 @@
 // Pure-TS SHA-256 (FIPS 180-4), no npm dependency and — critically — no
 // `crypto.subtle`.
 //
-// WHY NOT `crypto.subtle`: the Web Crypto API is only exposed on SECURE contexts
-// (https:, or http://localhost). The phone companion is served over PLAIN HTTP on
-// a LAN IP (e.g. http://192.168.1.5:38473), which the browser treats as an
-// INSECURE origin — so `crypto.subtle` is `undefined` there and any call throws.
-// A dependency-free implementation is the only option that works on the real
-// transport. Do NOT "simplify" this back to `crypto.subtle.digest`.
+// WHY NOT `crypto.subtle`: the Web Crypto API is only exposed on SECURE contexts.
+// The companion is served over self-signed HTTPS, and whether a browser treats an
+// origin whose certificate error the user clicked through as a secure context (and
+// exposes `crypto.subtle`) is NOT guaranteed across browsers/versions — and the
+// loopback dev/preview mode plus any future plain-HTTP fallback sit outside it
+// entirely. A dependency-free implementation works on every transport the pairing
+// page can load from. Do NOT "simplify" this back to `crypto.subtle.digest`.
 //
 // The algorithm below is the standard public-domain SHA-256; it is validated by
 // the companion's pairing round-trip and by the shared test vectors the Rust
