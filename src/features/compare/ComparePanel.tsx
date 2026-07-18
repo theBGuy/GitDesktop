@@ -17,14 +17,8 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { CompareBranchCombobox } from "@/features/compare/CompareBranchCombobox";
 import { CreatePrDialog } from "@/features/pulls/CreatePrDialog";
 import {
   forgeFeatureReady,
@@ -75,22 +69,28 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
   const branchPrs = usePrsForBranch(repoPath, currentName, prProbe, "origin");
   // Agent-session branches (`gd/session/*`) are app-internal — never offer them
   // as a compare target (the PR button would even push one), like BranchSwitcher.
+  // Archived branches are hidden here too, matching BranchSwitcher (they were
+  // archived to get them out of the way); archiving a branch that was the
+  // compare target auto-falls-back via the default effect below.
   const otherBranches = (branches.data ?? []).filter(
-    (b) => !b.isCurrent && !b.name.startsWith("gd/session/"),
+    (b) => !b.isCurrent && !b.name.startsWith("gd/session/") && !b.archived,
   );
   const firstOther = otherBranches[0]?.name ?? null;
   const compareValid =
     compareBranch !== null &&
     otherBranches.some((b) => b.name === compareBranch);
   const defaultName = defaultBranch.data ?? null;
+  // Only pick the default branch when it's actually offered: an archived default
+  // must fall back to `firstOther`, else `compareValid` stays false forever and
+  // the effect keeps firing a no-op set. Stable primitive for the effect deps.
+  const defaultOffered = otherBranches.some((b) => b.name === defaultName);
 
-  // Default the comparison to the default branch, else the first other branch.
+  // Default the comparison to the default branch (when offered), else the first
+  // other branch.
   useEffect(() => {
     if (firstOther === null || compareValid) return;
-    setCompareBranch(
-      defaultName && defaultName !== currentName ? defaultName : firstOther,
-    );
-  }, [firstOther, compareValid, defaultName, currentName, setCompareBranch]);
+    setCompareBranch(defaultOffered && defaultName ? defaultName : firstOther);
+  }, [firstOther, compareValid, defaultOffered, defaultName, setCompareBranch]);
 
   const comparison = useCompareBranches(repoPath, compareBranch, currentName);
 
@@ -199,22 +199,14 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
         <p className="px-1 text-xs text-muted-foreground">
           Compare <span className="font-mono">{currentName}</span> with
         </p>
-        <Select
-          items={Object.fromEntries(otherBranches.map((b) => [b.name, b.name]))}
-          value={compareBranch || null}
-          onValueChange={(v) => v && setCompareBranch(v)}
-        >
-          <SelectTrigger className="w-full">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {otherBranches.map((b) => (
-              <SelectItem key={b.name} value={b.name}>
-                {b.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <CompareBranchCombobox
+          repoPath={repoPath}
+          branches={otherBranches}
+          currentName={currentName}
+          defaultName={defaultName}
+          value={compareBranch}
+          onValueChange={setCompareBranch}
+        />
         {canPr && compareBranch && existingPr && (
           <Button
             variant="outline"

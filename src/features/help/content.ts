@@ -415,7 +415,9 @@ dismiss the notice.
 
 The **Compare** tab ({{kbd:tab-compare}}) lets you pick any base branch and see what the
 current branch adds: the commits ahead and behind, and the full three-dot diff a PR would
-show. From here you can merge, rebase, or jump straight to opening a pull request.
+show. The base-branch picker is searchable — type to filter — hides archived branches, and
+shows which branches live in other worktrees plus how far each is ahead of and behind your
+current branch. From here you can merge, rebase, or jump straight to opening a pull request.
 
 ## Branch rules
 
