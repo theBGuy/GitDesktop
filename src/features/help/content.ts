@@ -1819,6 +1819,12 @@ phone's browser. Type the PIN there; once it matches, the phone is paired and dr
 straight into the companion app — a bottom tab bar with **Status**, **PRs**, and **CI**,
 each read-only.
 
+Because the connection uses a **self-signed certificate** GitDesktop generates, your
+phone shows a **certificate warning on first connect** — that's expected; tap through to
+continue. If you'd rather verify it first, the pairing dialog shows the certificate's
+**SHA-256 fingerprint**, which you can compare against the one your phone's browser
+reports.
+
 The offer counts down and expires after a short while; if it lapses before the phone
 connects, choose **Start again** (the desktop shows a fresh QR and PIN), and the phone's
 pairing page will prompt you to enter the new code. When a device pairs, the dialog
@@ -1841,8 +1847,11 @@ Sharing is convenient but deliberately simple, so treat it accordingly:
 
 - **Anyone on the same Wi-Fi who has the pairing PIN can read this repo** while sharing
   is on.
-- The connection is **unencrypted** on your local network. Use it on **trusted networks
-  only** (your home or a private office network — not public or café Wi-Fi).
+- The connection is **encrypted** with a **self-signed certificate** GitDesktop
+  generates, so your phone shows a one-time certificate warning on first connect
+  (expected — you can verify it against the fingerprint shown while pairing). Use it on
+  **trusted networks only** (your home or a private office network — not public or café
+  Wi-Fi).
 - **Turn sharing off when you're done.** It doesn't turn itself off.
 
 ## Phone can't reach your computer?

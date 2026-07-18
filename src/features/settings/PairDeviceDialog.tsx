@@ -194,6 +194,16 @@ export function PairDeviceDialog({
                   : `Expires in ${remaining}s`}
               </p>
             </div>
+            <div className="space-y-1 text-center">
+              <p className="text-xs text-muted-foreground">
+                On first connect your phone shows a certificate warning — that's
+                expected for a self-signed certificate. To verify, compare the
+                certificate SHA-256 your phone reports with this one:
+              </p>
+              <p className="font-mono text-[10px] break-all select-all">
+                {pairing.certFingerprint}
+              </p>
+            </div>
           </div>
         )}
 

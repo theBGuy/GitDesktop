@@ -2013,6 +2013,10 @@ export interface LanStatus {
   deviceCount: number;
   /** Whether a pairing window is currently open (a PIN is live). */
   pairingActive: boolean;
+  /** Colon-separated uppercase-hex SHA-256 of the self-signed certificate's DER
+   *  (e.g. "AB:12:…"), for trust-on-first-use verification on the phone.
+   *  Non-null exactly when `enabled` is true — null iff sharing is off. */
+  certFingerprint: string | null;
 }
 
 /** A live pairing offer — the phone scans the QR (or opens the URL) and types
@@ -2026,6 +2030,10 @@ export interface LanPairing {
   pin: string;
   /** ISO-8601 instant when this pairing offer expires. */
   expiresAt: string;
+  /** Colon-separated uppercase-hex SHA-256 of the self-signed certificate's DER
+   *  (e.g. "AB:12:…") — shown while pairing so the user can compare it against the
+   *  certificate the phone's browser reports on the first-connect warning. */
+  certFingerprint: string;
 }
 
 /** A phone that has paired and holds a revocable access token. */

@@ -63,16 +63,37 @@ sha1 = "0.10"
 # a killed or panicking run leaks nothing.
 tempfile = "3"
 # LAN phone-companion server (src/lan/): an embedded, default-OFF axum HTTP server
-# that lets a paired phone read the active repo over the LAN. `ws` is enabled now
-# (slice 2 needs it; cheaper to land the feature up front). `sha2`/`rand` back the
-# pairing challenge/response + bearer tokens; `qrcode` renders the pairing QR as an
-# inline SVG (svg-only — no `image` default feature); `local-ip-address` enumerates
-# the machine's LAN IPv4s for the advertised urls.
-axum = { version = "0.8.9", features = ["ws"] }
+# that lets a paired phone read the active repo over the LAN. The reviews monitor
+# is a Server-Sent-Events stream (axum's built-in `Sse`, no extra feature), NOT a
+# WebSocket — SSE is one-way (all this route needs) and, unlike `wss:`, an
+# `EventSource` rides a self-signed-cert exception on iOS Safari. `sha2`/`rand`
+# back the pairing challenge/response + bearer tokens; `qrcode` renders the pairing
+# QR as an inline SVG (svg-only — no `image` default feature); `local-ip-address`
+# enumerates the machine's LAN IPv4s for the advertised urls; `futures-util`
+# powers the hand-rolled SSE event stream (`stream::unfold`).
+axum = "0.8.9"
 sha2 = "0.11.0"
 rand = "0.10.2"
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 local-ip-address = "0.6.13"
+futures-util = "0.3.32"
+# LAN companion TLS (src/lan/tls.rs): the phone browser needs a secure context
+# (`crypto.subtle`, no mixed-content), so the server speaks HTTPS with a persistent
+# self-signed cert the user excepts once (TOFU). `rcgen` mints the cert — KEEP its
+# default features (crypto+pem+ring); its `aws_lc_rs` feature is deliberately NOT
+# enabled (aws-lc-rs needs NASM/CMake on Windows MSVC, which our 3-OS CI must stay
+# free of). `axum-server` serves it over the pre-bound TcpListener with graceful
+# shutdown — the `tls-rustls-no-provider` feature (NOT plain `tls-rustls`, which
+# would pull `rustls/aws-lc-rs` into the tree) keeps us ring-only. `rustls` is a
+# direct dep so we build the `ServerConfig` with an EXPLICIT ring provider (not the
+# process-global default) — hence `default-features = false` + `ring`; `std`/`tls12`/
+# `logging` are the plain-server essentials. `rustls-pki-types` (already transitive)
+# is direct for its PEM parser (`PemObject`) that turns the stored cert/key back into
+# rustls DER types on reuse.
+rcgen = "0.14"
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pki-types = { version = "1", features = ["std"] }
 # Embeds the companion frontend bundle (src-tauri/companion-dist/, written by the
 # sibling `pnpm build:companion`) into the binary so a shipped app serves the phone
 # UI with nothing extra to ship. `mime-guess` powers `EmbeddedFile::metadata().mimetype()`
@@ -111,10 +132,18 @@ portable-pty = { path = "vendor/portable-pty" }
 # Already in the dependency graph transitively, so near-zero cost.
 tempfile = "3"
 # `tower::ServiceExt::oneshot` drives the LAN router in unit tests without opening
-# a socket (auth/host/allowlist assertions in src/lan/).
+# a socket (auth/host/allowlist assertions in src/lan/). `futures-util` (a direct
+# dependency above, for the SSE stream) also reads the router's SSE body
+# incrementally in the reviews-monitor test.
 tower = { version = "0.5.3", features = ["util"] }
 futures-util = "0.3.32"
 # 0.29 (not latest) on purpose: axum's ws feature already pulls tokio-tungstenite
 # 0.29, so matching it reuses that tree instead of compiling a second
 # tungstenite/sha1 stack into every test build.
 tokio-tungstenite = "0.29"
+# The real-socket TLS smoke test (src/lan/mod.rs) drives the started server over an
+# actual `https://` connection to prove the rustls handshake + serve loop + auth
+# chain all work end-to-end (the oneshot router tests are transport-agnostic). 0.12
+# is already in the graph via tauri-plugin-http, so this is near-zero extra compile;
+# `rustls-tls` (no default features) keeps it off the native-TLS / aws-lc path.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
