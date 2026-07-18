@@ -94,4 +94,9 @@ portable-pty = { path = "vendor/portable-pty" }
 # `tower::ServiceExt::oneshot` drives the LAN router in unit tests without opening
 # a socket (auth/host/allowlist assertions in src/lan/).
 [dev-dependencies]
+futures-util = "0.3.32"
+# 0.29 (not latest) on purpose: axum's ws feature already pulls tokio-tungstenite
+# 0.29, so matching it reuses that tree instead of compiling a second
+# tungstenite/sha1 stack into every test build.
+tokio-tungstenite = "0.29"
 tower = { version = "0.5.3", features = ["util"] }

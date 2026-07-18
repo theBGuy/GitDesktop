@@ -549,6 +549,11 @@ pub struct RouterState {
     pub rate_limit: RateLimitMap,
     /// Every bound `<ip>:<port>` we accept in a `Host`/`Origin` header.
     pub bound_hosts: Arc<Vec<String>>,
+    /// Cut signal for live WebSocket monitors. A `stream` handler subscribes a
+    /// receiver from this before upgrading; the desktop fires `()` on it when
+    /// sharing is disabled, the shared repo changes, or a device is revoked, so
+    /// in-flight sockets close and the phone must reconnect and re-authorize.
+    pub monitor_cut: tokio::sync::broadcast::Sender<()>,
     /// The live agent-stream registry — the SAME `Arc` [`crate::state::AppState`]
     /// holds, so a review/session registered there is watchable from the LAN
     /// review routes without any further plumbing.
@@ -741,8 +746,15 @@ pub async fn pair_submit(
         return bad_request("deviceName must not be empty");
     }
 
-    // Compute the expected proof from the stored PIN + this session's challenge.
-    let expected = {
+    // Verify AND consume the session ATOMICALLY under a single lock: check the
+    // session, compute the expected proof, compare it, and — only on a match —
+    // `take()` the session before releasing. Doing the compare and the consume in
+    // one critical section closes a double-mint race: two concurrent submissions
+    // with the correct proof would otherwise both see a live session and both mint
+    // a token from one PIN entry. A racing second submission now finds the session
+    // already taken and hits `pairing_inactive`. (Rate-limit record/clear stays
+    // exactly as before on every path.)
+    {
         let mut guard = state.pairing.lock().unwrap_or_else(|p| p.into_inner());
         let Some(session) = guard.as_mut() else {
             record_failure(&state.rate_limit, ip);
@@ -759,22 +771,24 @@ pub async fn pair_submit(
             record_failure(&state.rate_limit, ip);
             return bad_request("fetch a challenge first");
         };
-        compute_proof(&session.pin, &salt, &challenge)
-    };
-
-    if !constant_time_eq(&expected, body.proof.trim()) {
-        record_failure(&state.rate_limit, ip);
-        return unauthorized();
+        let expected = compute_proof(&session.pin, &salt, &challenge);
+        if !constant_time_eq(&expected, body.proof.trim()) {
+            record_failure(&state.rate_limit, ip);
+            return unauthorized();
+        }
+        // Proof accepted → consume the session under the same lock so no second
+        // submission can also pass. From here the session is gone; a persist
+        // failure below does NOT restore it — deliberately fail-closed: we never
+        // leave a session live once its proof has been accepted, so the phone
+        // re-pairs via "Start again" rather than risk a second mint on a session
+        // whose proof already leaked to a racer.
+        guard.take();
     }
 
-    // Correct proof → mint + persist, then clear the pairing session.
+    // Correct proof, session consumed → mint + persist OUTSIDE the lock.
     let (device, bearer, token_hash) = mint_device(device_name);
     if let Err(e) = persist_device(&device, &token_hash) {
         return app_error_response(&e);
-    }
-    {
-        let mut guard = state.pairing.lock().unwrap_or_else(|p| p.into_inner());
-        *guard = None;
     }
     clear_failures(&state.rate_limit, ip);
     (
