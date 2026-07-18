@@ -14,6 +14,7 @@ mod hooks;
 mod instructions;
 mod jira_field_maps;
 mod jira_links;
+mod lan;
 mod local_issues;
 mod local_prs;
 mod mcp;
@@ -104,6 +105,7 @@ pub fn run() {
         .on_window_event(tray::handle_window_event)
         .manage(AppState::default())
         .manage(pty::PtyState::default())
+        .manage(lan::LanState::default())
         .invoke_handler(tauri::generate_handler![
             git::repo::check_git_installed,
             git::repo::validate_repo,
@@ -669,6 +671,15 @@ pub fn run() {
             agent::agent_review_cancel,
             agent::agent_session,
             tray::set_close_to_tray,
+            // LAN companion
+            lan::lan_status,
+            lan::lan_enable,
+            lan::lan_disable,
+            lan::lan_set_active_repo,
+            lan::lan_pairing_start,
+            lan::lan_pairing_cancel,
+            lan::lan_devices_list,
+            lan::lan_device_revoke,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

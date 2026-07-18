@@ -24,22 +24,45 @@ pub fn app_display_name() -> &'static str {
     }
 }
 
-/// Builds the system-tray icon + menu. Left-click restores the window; the
-/// menu (right-click on Windows) offers Open and a real Quit.
-pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
+/// Build the tray menu reflecting whether the LAN phone companion is currently
+/// sharing. Shared by [`setup_tray`] (initial menu, `sharing = false`) and
+/// [`update_companion_indicator`] (rebuilt on each toggle) so the companion row
+/// exists from the first render and its wording stays in one place.
+fn companion_menu(app: &AppHandle, sharing: bool) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     let name = app_display_name();
-    let menu = MenuBuilder::new(app)
+    let companion_text = if sharing {
+        "Phone companion — sharing ON"
+    } else {
+        "Phone companion"
+    };
+    MenuBuilder::new(app)
         .text("open", format!("Open {name}"))
+        .text("companion", companion_text)
         .separator()
         .text("quit", "Quit")
-        .build()?;
+        .build()
+}
 
-    let mut builder = TrayIconBuilder::new()
+/// Builds the system-tray icon + menu. Left-click restores the window; the
+/// menu (right-click on Windows) offers Open, the Phone-companion row, and a
+/// real Quit.
+pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
+    let name = app_display_name();
+    // Initial menu already carries the companion row (sharing off), so it's
+    // present before the first `lan_enable`/`lan_disable` toggle runs.
+    let menu = companion_menu(app, false)?;
+
+    // Explicit id so `update_companion_indicator` can re-fetch this tray icon by
+    // id (`tray_by_id("main")`) to swap its menu when LAN sharing toggles.
+    let mut builder = TrayIconBuilder::with_id("main")
         .tooltip(name)
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open" => show_main_window(app),
+            // The companion row brings the window up so the user can manage
+            // sharing / paired devices.
+            "companion" => show_main_window(app),
             "quit" => {
                 // Capture geometry before exiting (the window may still be visible
                 // and moved since the last close).
@@ -63,6 +86,24 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     }
     builder.build(app)?;
     Ok(())
+}
+
+/// Rebuild the tray menu to reflect whether the LAN phone companion is currently
+/// sharing, and swap it onto the existing "main" tray icon (Tauri 2.11 supports
+/// replacing a tray's menu in place via `set_menu` — we do NOT rebuild the whole
+/// `TrayIcon`, which would drop its click/event wiring). Adds one "companion" row
+/// before the separator whose text reflects `sharing`; clicking it brings the
+/// window up (see the `on_menu_event` arm). Called from `lan_enable` / `lan_disable`
+/// so the tray always mirrors reality. Best-effort: a build/set failure is
+/// swallowed (the tray simply keeps its prior menu).
+pub fn update_companion_indicator(app: &AppHandle, sharing: bool) {
+    let menu = match companion_menu(app, sharing) {
+        Ok(menu) => menu,
+        Err(_) => return,
+    };
+    if let Some(tray) = app.tray_by_id("main") {
+        let _ = tray.set_menu(Some(menu));
+    }
 }
 
 pub(crate) fn show_main_window(app: &AppHandle) {

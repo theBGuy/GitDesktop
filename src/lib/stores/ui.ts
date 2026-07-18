@@ -44,6 +44,7 @@ export type SettingsTarget =
   | "mcp-servers"
   | "automations"
   | "notifications"
+  | "companion"
   | "keyboard"
   | "accounts"
   | "git"
