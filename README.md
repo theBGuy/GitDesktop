@@ -356,6 +356,10 @@ commit that hasn't been pushed yet.
   main checkout, and remove linked worktrees, so you can work on several branches in
   parallel folders without stashing — with one-click jumps to the main workspace right
   from the branch switcher.
+- **Push or publish a branch without switching to it** — from the branch switcher's
+  right-click menu, push a branch that's ahead of its `origin` remote or publish an
+  unpushed one, without checking it out; it works even when the branch is checked out
+  in another worktree.
 
 Plus tag and submodule management.
 

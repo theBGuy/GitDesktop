@@ -42,9 +42,11 @@ import {
   useForgeStatus,
   useMergeBranch,
   usePrList,
+  usePush,
   useRebaseBranch,
   useRebaseOnto,
   useRemoteBranches,
+  useRemotes,
   useRepoStatus,
   useSetBranchArchived,
   useStashAll,
@@ -156,6 +158,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   const rebaseBranch = useRebaseBranch(repoPath);
   const rebaseOnto = useRebaseOnto(repoPath);
   const updateBranchFrom = useUpdateBranchFrom(repoPath);
+  const push = usePush(repoPath);
+  const remotes = useRemotes(repoPath);
   const setBranchArchived = useSetBranchArchived(repoPath);
   const openWorktree = useOpenWorktree();
   const rulesConfig = useEffectiveBranchRules(repoPath);
@@ -448,6 +452,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     [currentName, defaultName],
   );
 
+  // Origin presence gates the per-row push/publish items (mirrors SyncControls):
+  // a repo with no `origin` can't push a branch there.
+  const hasOrigin = remotes.isSuccess && remotes.data.includes("origin");
+
   const onError = (e: unknown) => toastError(e);
 
   function setArchived(name: string, archived: boolean) {
@@ -696,12 +704,33 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     );
   }
 
+  // Push a branch's ref to origin without checking it out — the outbound
+  // counterpart of doUpdateFromUpstream. Whether this publishes (-u) or plain
+  // pushes is decided backend-side from the branch's tracking state.
+  function doPushBranch(branch: Branch) {
+    const publishing = !branch.upstream || branch.upstreamGone;
+    setOpen(false);
+    push.mutate(
+      { setUpstream: false, branch: branch.name },
+      {
+        onSuccess: () =>
+          toast.success(
+            publishing
+              ? `Published ${branch.name} to origin`
+              : `Pushed ${branch.name} to ${branch.upstream}`,
+          ),
+        onError,
+      },
+    );
+  }
+
   const busy =
     checkout.isPending ||
     checkoutRemote.isPending ||
     mergeBranch.isPending ||
     rebaseBranch.isPending ||
     rebaseOnto.isPending ||
+    push.isPending ||
     updateBranchFrom.isPending;
 
   // Hotkey handlers reuse the menu's own flows, so every gate (clean tree,
@@ -830,6 +859,14 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     const canUpdate = Boolean(defaultName) && branch.name !== defaultName;
     const deletionBlocked = isDeletionBlocked(rulesConfig, branch.name);
     const inWorktree = worktreeByBranch.has(branch.name);
+    // Outbound sync gating. `pushable` = tracked on origin and ahead → offer a
+    // plain push (disabled with "(diverged)" when also behind). `publishable` =
+    // untracked or gone → offer Publish. Both need origin. Hidden (not disabled)
+    // when in-sync / no origin / tracked on a non-origin remote.
+    const trackedOnOrigin =
+      Boolean(branch.upstream?.startsWith("origin/")) && !branch.upstreamGone;
+    const pushable = hasOrigin && trackedOnOrigin && branch.upstreamAhead > 0;
+    const publishable = hasOrigin && (!branch.upstream || branch.upstreamGone);
     return (
       <ContextMenu key={branch.name}>
         <ContextMenuTrigger
@@ -946,7 +983,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           }
         />
         <ContextMenuContent className="min-w-48">
-          {(canUpdate || (branch.upstream && branch.upstreamBehind > 0)) && (
+          {(canUpdate ||
+            (branch.upstream && branch.upstreamBehind > 0) ||
+            pushable ||
+            publishable) && (
             <>
               {canUpdate && (
                 <ContextMenuItem
@@ -967,6 +1007,30 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                   }
                 >
                   Update from {branch.upstream}
+                </ContextMenuItem>
+              )}
+              {/* Sync-out below sync-in. Push a branch's ref to origin without
+                  checking it out — works even when the branch is checked out in
+                  another worktree, since a push touches refs, never a working
+                  tree (hence deliberately NO inWorktree gate). Diverged branches
+                  push disabled with the reason in the label; the "Update from"
+                  item above is their remedy. */}
+              {pushable && (
+                <ContextMenuItem
+                  disabled={busy || branch.upstreamBehind > 0}
+                  onClick={() => doPushBranch(branch)}
+                >
+                  {branch.upstreamBehind > 0
+                    ? `Push to ${branch.upstream} (diverged)`
+                    : `Push to ${branch.upstream}`}
+                </ContextMenuItem>
+              )}
+              {publishable && (
+                <ContextMenuItem
+                  disabled={busy}
+                  onClick={() => doPushBranch(branch)}
+                >
+                  Publish branch
                 </ContextMenuItem>
               )}
               <ContextMenuSeparator />
