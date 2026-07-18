@@ -3654,6 +3654,89 @@ pub struct ExternalReviewItem {
     pub created_at: String,
 }
 
+/// Map the `reviewThreads/nodes` array of the external-reviews query onto
+/// `ExternalReviewItem`s — the pure core of `gh_pr_external_reviews`'s
+/// inline/reply harvest, factored out so its subtle empty-opener promotion rule
+/// is unit-testable without a `gh` round trip. Per thread: the first NON-EMPTY
+/// comment is the opener (`inline`); every non-empty comment after it is a
+/// `reply`, inheriting the thread's path/line/isResolved/isOutdated with its own
+/// author/body/createdAt/commit. Empty-bodied comments are skipped, and because
+/// `saw_opener` flips only after the first PUSHED item, an empty-bodied opener
+/// promotes the first real comment to `inline` rather than orphaning replies with
+/// no opener. Threads (or comment sets) that yield nothing contribute nothing.
+fn external_items_from_thread_nodes(nodes: &[serde_json::Value]) -> Vec<ExternalReviewItem> {
+    let str_at = |v: &serde_json::Value, p: &str| {
+        v.pointer(p).and_then(|x| x.as_str()).unwrap_or("").to_string()
+    };
+    let is_bot = |v: &serde_json::Value, p: &str| {
+        v.pointer(p).and_then(|x| x.as_str()) == Some("Bot")
+    };
+
+    let mut items: Vec<ExternalReviewItem> = Vec::new();
+    for t in nodes {
+        let Some(comments) = t
+            .pointer("/comments/nodes")
+            .and_then(|v| v.as_array())
+        else {
+            continue;
+        };
+        // Outdated threads carry `"line": null` (key present, value null), and
+        // `pointer` returns `Some(Null)` for that — so convert to `u64` BEFORE
+        // the `originalLine` fallback, else a null `line` swallows the fallback
+        // and reports line 0 (see `gh_pr_review_threads` for the same trap).
+        let line = t
+            .pointer("/line")
+            .and_then(|x| x.as_u64())
+            .or_else(|| t.pointer("/originalLine").and_then(|x| x.as_u64()))
+            .unwrap_or(0) as u32;
+        let path = str_at(t, "/path");
+        let is_resolved = t
+            .pointer("/isResolved")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+        let is_outdated = t
+            .pointer("/isOutdated")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+        // The first non-empty comment is the thread's opener (`inline`); the
+        // rest are `reply`. Keying on the raw index would tag replies "reply"
+        // with no `inline` opener when the opener's body is empty — so flip
+        // `saw_opener` only after the first pushed item, promoting the first
+        // real comment.
+        let mut saw_opener = false;
+        for c in comments {
+            let body = str_at(c, "/body");
+            if body.trim().is_empty() {
+                continue;
+            }
+            let commit_sha = {
+                let latest = str_at(c, "/commit/oid");
+                if latest.is_empty() {
+                    str_at(c, "/originalCommit/oid")
+                } else {
+                    latest
+                }
+            };
+            let kind = if saw_opener { "reply" } else { "inline" };
+            saw_opener = true;
+            items.push(ExternalReviewItem {
+                kind: kind.into(),
+                author: str_at(c, "/author/login"),
+                is_bot: is_bot(c, "/author/__typename"),
+                body,
+                path: path.clone(),
+                line,
+                commit_sha,
+                state: String::new(),
+                is_resolved,
+                is_outdated,
+                created_at: str_at(c, "/createdAt"),
+            });
+        }
+    }
+    items
+}
+
 /// All review activity on a PR — submitted reviews, inline review-thread
 /// comments (each thread's opener plus the follow-up replies beneath it), and
 /// conversation comments — in one GraphQL round trip, each tagged with its
@@ -3738,67 +3821,7 @@ pub async fn gh_pr_external_reviews(
         .and_then(|p| p.pointer("/reviewThreads/nodes"))
         .and_then(|v| v.as_array())
     {
-        for t in nodes {
-            let Some(comments) = t
-                .pointer("/comments/nodes")
-                .and_then(|v| v.as_array())
-            else {
-                continue;
-            };
-            // Outdated threads carry `"line": null` (key present, value null), and
-            // `pointer` returns `Some(Null)` for that — so convert to `u64` BEFORE
-            // the `originalLine` fallback, else a null `line` swallows the fallback
-            // and reports line 0 (see `gh_pr_review_threads` for the same trap).
-            let line = t
-                .pointer("/line")
-                .and_then(|x| x.as_u64())
-                .or_else(|| t.pointer("/originalLine").and_then(|x| x.as_u64()))
-                .unwrap_or(0) as u32;
-            let path = str_at(t, "/path");
-            let is_resolved = t
-                .pointer("/isResolved")
-                .and_then(|x| x.as_bool())
-                .unwrap_or(false);
-            let is_outdated = t
-                .pointer("/isOutdated")
-                .and_then(|x| x.as_bool())
-                .unwrap_or(false);
-            // The first non-empty comment is the thread's opener (`inline`); the
-            // rest are `reply`. Keying on the raw index would tag replies "reply"
-            // with no `inline` opener when the opener's body is empty — so flip
-            // `saw_opener` only after the first pushed item, promoting the first
-            // real comment.
-            let mut saw_opener = false;
-            for c in comments {
-                let body = str_at(c, "/body");
-                if body.trim().is_empty() {
-                    continue;
-                }
-                let commit_sha = {
-                    let latest = str_at(c, "/commit/oid");
-                    if latest.is_empty() {
-                        str_at(c, "/originalCommit/oid")
-                    } else {
-                        latest
-                    }
-                };
-                let kind = if saw_opener { "reply" } else { "inline" };
-                saw_opener = true;
-                items.push(ExternalReviewItem {
-                    kind: kind.into(),
-                    author: str_at(c, "/author/login"),
-                    is_bot: is_bot(c, "/author/__typename"),
-                    body,
-                    path: path.clone(),
-                    line,
-                    commit_sha,
-                    state: String::new(),
-                    is_resolved,
-                    is_outdated,
-                    created_at: str_at(c, "/createdAt"),
-                });
-            }
-        }
+        items.extend(external_items_from_thread_nodes(nodes));
     }
 
     // Top-level conversation comments — CodeRabbit posts its walkthrough/summary
@@ -4464,7 +4487,8 @@ fn scrape_pr_ref(stdout: &str) -> (u64, String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        host_from_url, is_diff_too_large, map_timeline_node, parse_actions_run_job,
+        external_items_from_thread_nodes, host_from_url, is_diff_too_large, map_timeline_node,
+        parse_actions_run_job,
         parse_auth_accounts, parse_pr_url_repo, reconstruct_pr_diff,
         reject_upstream_create_metadata, rest_comment_to_out, rest_commit_to_out,
         rest_pull_to_pr_info, rest_review_to_out, rollup_state_to_ci, scrape_pr_ref,
@@ -5047,5 +5071,136 @@ github.acme.com
         assert_eq!(url, "https://github.com/o/r/pull/42");
         // No URL line → number 0, empty url (create still returns Ok elsewhere).
         assert_eq!(scrape_pr_ref("no url here"), (0, String::new()));
+    }
+
+    #[test]
+    fn external_items_single_comment_thread_is_one_inline() {
+        let nodes = vec![serde_json::json!({
+            "isResolved": false,
+            "isOutdated": false,
+            "path": "src/foo.rs",
+            "line": 12,
+            "comments": { "nodes": [
+                { "author": { "login": "copilot", "__typename": "Bot" },
+                  "body": "possible off-by-one", "createdAt": "2026-05-12T10:00:00Z",
+                  "commit": { "oid": "abc123" } },
+            ] },
+        })];
+        let items = external_items_from_thread_nodes(&nodes);
+        assert_eq!(items.len(), 1);
+        let it = &items[0];
+        assert_eq!(it.kind, "inline");
+        assert_eq!(it.author, "copilot");
+        assert!(it.is_bot);
+        assert_eq!(it.body, "possible off-by-one");
+        assert_eq!(it.path, "src/foo.rs");
+        assert_eq!(it.line, 12);
+        assert_eq!(it.commit_sha, "abc123");
+        assert_eq!(it.created_at, "2026-05-12T10:00:00Z");
+        assert!(!it.is_resolved && !it.is_outdated);
+    }
+
+    #[test]
+    fn external_items_opener_then_replies_are_ordered_and_inherit_thread() {
+        let nodes = vec![serde_json::json!({
+            "isResolved": true,
+            "isOutdated": false,
+            "path": "src/bar.rs",
+            "line": 7,
+            "comments": { "nodes": [
+                { "author": { "login": "coderabbitai", "__typename": "Bot" },
+                  "body": "finding", "createdAt": "t0", "commit": { "oid": "sha0" } },
+                { "author": { "login": "alice", "__typename": "User" },
+                  "body": "deferred by design", "createdAt": "t1",
+                  "commit": { "oid": "sha1" } },
+                { "author": { "login": "bob", "__typename": "User" },
+                  "body": "agreed", "createdAt": "t2", "commit": { "oid": "sha2" } },
+            ] },
+        })];
+        let items = external_items_from_thread_nodes(&nodes);
+        assert_eq!(items.len(), 3);
+        // Opener → inline; the two follow-ups → reply, in order.
+        assert_eq!(items[0].kind, "inline");
+        assert_eq!(items[1].kind, "reply");
+        assert_eq!(items[2].kind, "reply");
+        // Replies carry their OWN author/body/createdAt…
+        assert_eq!(items[1].author, "alice");
+        assert_eq!(items[1].body, "deferred by design");
+        assert_eq!(items[1].created_at, "t1");
+        assert_eq!(items[2].author, "bob");
+        // …but INHERIT the thread's path/line/isResolved/isOutdated.
+        for it in &items {
+            assert_eq!(it.path, "src/bar.rs");
+            assert_eq!(it.line, 7);
+            assert!(it.is_resolved);
+            assert!(!it.is_outdated);
+        }
+    }
+
+    #[test]
+    fn external_items_empty_opener_promotes_first_reply_to_inline() {
+        // The opener's body is blank (a review-thread whose lead comment carried no
+        // text); the first NON-EMPTY comment must be promoted to `inline`, not left
+        // as an orphaned `reply` with no opener.
+        let nodes = vec![serde_json::json!({
+            "isResolved": false,
+            "isOutdated": false,
+            "path": "src/baz.rs",
+            "line": 3,
+            "comments": { "nodes": [
+                { "author": { "login": "ghost", "__typename": "User" },
+                  "body": "   ", "createdAt": "t0", "commit": { "oid": "sha0" } },
+                { "author": { "login": "carol", "__typename": "User" },
+                  "body": "real content", "createdAt": "t1",
+                  "commit": { "oid": "sha1" } },
+            ] },
+        })];
+        let items = external_items_from_thread_nodes(&nodes);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, "inline");
+        assert_eq!(items[0].author, "carol");
+        assert_eq!(items[0].body, "real content");
+    }
+
+    #[test]
+    fn external_items_null_line_falls_back_to_original_line() {
+        // Outdated thread: `line` present but null → the `originalLine` fallback
+        // must land on every item (opener and reply alike).
+        let nodes = vec![serde_json::json!({
+            "isResolved": false,
+            "isOutdated": true,
+            "path": "src/qux.rs",
+            "line": serde_json::Value::Null,
+            "originalLine": 42,
+            "comments": { "nodes": [
+                { "author": { "login": "copilot", "__typename": "Bot" },
+                  "body": "opener", "createdAt": "t0", "commit": { "oid": "sha0" } },
+                { "author": { "login": "dave", "__typename": "User" },
+                  "body": "reply", "createdAt": "t1", "commit": { "oid": "sha1" } },
+            ] },
+        })];
+        let items = external_items_from_thread_nodes(&nodes);
+        assert_eq!(items.len(), 2);
+        for it in &items {
+            assert_eq!(it.line, 42);
+            assert!(it.is_outdated);
+        }
+    }
+
+    #[test]
+    fn external_items_all_empty_thread_yields_nothing() {
+        let nodes = vec![serde_json::json!({
+            "isResolved": false,
+            "isOutdated": false,
+            "path": "src/empty.rs",
+            "line": 1,
+            "comments": { "nodes": [
+                { "author": { "login": "x", "__typename": "User" }, "body": "",
+                  "createdAt": "t0" },
+                { "author": { "login": "y", "__typename": "User" }, "body": "   \n\t",
+                  "createdAt": "t1" },
+            ] },
+        })];
+        assert!(external_items_from_thread_nodes(&nodes).is_empty());
     }
 }

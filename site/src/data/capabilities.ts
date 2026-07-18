@@ -141,6 +141,7 @@ export const capabilities: Capability[] = [
   { group: "AI · generate & review", ai: true, label: "Agentic review — reads the full diff, files, search & history, read-only" },
   { group: "AI · generate & review", ai: true, label: "Reviews keep running in the background & finish in the tray" },
   { group: "AI · generate & review", ai: true, label: "Iterative reviews build on the last round & other bots' findings" },
+  { group: "AI · generate & review", ai: true, label: "Re-reviews remember the discussion — triage replies honored, context sized to your model" },
   { group: "AI · generate & review", ai: true, label: "AI reviews are clearly machine-authored — post as a GitLab project bot" },
   { group: "AI · generate & review", ai: true, label: "Automations — review or audit on commit, PR open, or new commits" },
   { group: "AI · generate & review", ai: true, label: "Resolve merge conflicts with AI — review the proposal, then accept" },

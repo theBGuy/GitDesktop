@@ -242,8 +242,13 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
 - **AI review that doesn't quit or repeat itself** — it keeps running while you move
   between PRs, and finishes in the tray even after you close the window.
   - **Iterative** — re-runs remember the last round, fold in other reviewers' findings,
-    and read GitDesktop's own earlier comments on the PR, so a finding it already
-    refuted or marked fixed is treated as settled instead of re-raised
+    and ground against the prior discussion — including the triage replies and decisions
+    GitDesktop itself posted — so a finding it already refuted or marked fixed is treated
+    as settled instead of re-raised; once rounds accumulate, that history is distilled
+    into a compact ledger so it stays in budget
+  - **Sized to your model** — a **Review context** setting scales the review's context
+    budget to the reviewing model's window (Auto probes a local **Ollama** model's context
+    length live), so a larger model sees more of the PR before agentic review is needed
   - **Clearly machine-authored** — a branded header/footer and a robot-avatar
     "GitDesktop" bot on local PRs; with a GitLab project/group access token, posts as
     the real **GitLab project bot** rather than your own account
