@@ -1441,7 +1441,9 @@ notes**, and **repository descriptions**.
   takes precedence.
 - **AI-ignore patterns** keep sensitive or noisy files (lockfiles, vendored folders) out
   of the AI's context while still committing them normally — global in Settings, or
-  per-repo via \`.gitdesktop/aiignore\`.
+  per-repo via \`.gitdesktop/aiignore\`. Build the per-repo file in flow: right-click a
+  changed file → *Exclude from AI* (the file, its folder, or its file type — or a
+  multi-selection) creates and updates \`.gitdesktop/aiignore\` for you.
 - **Hide AI** (Settings → General) removes every AI surface from the app while keeping
   your configuration.
 

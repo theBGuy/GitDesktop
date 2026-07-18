@@ -2917,6 +2917,10 @@ export const readRepoInstructions = (repoPath: string) =>
 export const readRepoAiIgnore = (repoPath: string) =>
   invoke<string[]>("read_repo_ai_ignore", { repoPath });
 
+/** Appends AI-ignore patterns to `<repo>/.gitdesktop/aiignore` (created if absent). */
+export const appendRepoAiIgnore = (repoPath: string, patterns: string[]) =>
+  invoke<void>("append_repo_ai_ignore", { repoPath, patterns });
+
 /** Raw contents of `<repo>/.gitdesktop/branch-rules.json`, or null if absent. */
 export const readRepoBranchRules = (repoPath: string) =>
   invoke<string | null>("read_repo_branch_rules", { repoPath });

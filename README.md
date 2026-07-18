@@ -533,7 +533,9 @@ display can't strand it off-screen.
 - **AI ignore patterns** (keep files out of AI context; they still commit
   normally), gitignore-style:
   - **Global** — Settings → Excluded files (one pattern per line).
-  - **Per-repo** — `.gitdesktop/aiignore` in the repo.
+  - **Per-repo** — `.gitdesktop/aiignore` in the repo. Right-click a changed
+    file → **Exclude from AI** (file, folder, or file type — or a
+    multi-selection) creates and updates this file for you.
 - **Keys** live in the OS keychain (Windows Credential Manager, macOS Keychain,
   libsecret). **Hide AI** (Settings → General) hides every AI surface while
   keeping your config.

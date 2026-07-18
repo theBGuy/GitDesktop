@@ -45,6 +45,8 @@ export interface ChangesMenuActions {
   blame: (path: string) => void;
   ignore: (pattern: string) => void;
   untrack: (pathspec: string, ignorePattern: string, label: string) => void;
+  aiExclude: (pattern: string) => void;
+  aiExcludeSelected: () => void;
 }
 
 /** "src/lib/x.ts" -> ["src/lib", "src"] (closest folder first). */
@@ -130,6 +132,11 @@ export function ChangesContextMenuItems({
         {selectedTrackedCount > 0 && (
           <ContextMenuItem onClick={actions.untrackSelected}>
             Untrack {selectedTrackedCount} files (keep on disk)
+          </ContextMenuItem>
+        )}
+        {aiEnabled && (
+          <ContextMenuItem onClick={actions.aiExcludeSelected}>
+            Exclude {selectionCount} files from AI (add to aiignore)
           </ContextMenuItem>
         )}
       </>
@@ -244,6 +251,38 @@ export function ChangesContextMenuItems({
               }
             >
               Untrack all .{extension} files (keep on disk)
+            </ContextMenuItem>
+          )}
+        </>
+      )}
+      {aiEnabled && (
+        <>
+          <ContextMenuSeparator />
+          <ContextMenuItem onClick={() => actions.aiExclude(entry.path)}>
+            Exclude from AI (add to aiignore)
+          </ContextMenuItem>
+          {folders.length > 0 && (
+            <ContextMenuSub>
+              <ContextMenuSubTrigger>
+                Exclude folder from AI (add to aiignore)
+              </ContextMenuSubTrigger>
+              <ContextMenuSubContent>
+                {folders.map((folder) => (
+                  <ContextMenuItem
+                    key={folder}
+                    onClick={() => actions.aiExclude(`${folder}/`)}
+                  >
+                    <span className="font-mono">{folder}/</span>
+                  </ContextMenuItem>
+                ))}
+              </ContextMenuSubContent>
+            </ContextMenuSub>
+          )}
+          {extension && (
+            <ContextMenuItem
+              onClick={() => actions.aiExclude(`*.${extension}`)}
+            >
+              Exclude all .{extension} files from AI (add to aiignore)
             </ContextMenuItem>
           )}
         </>

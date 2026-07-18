@@ -2948,6 +2948,12 @@ export function useAppendToGitignore(repo: string) {
   );
 }
 
+export function useAppendRepoAiIgnore(repo: string) {
+  return useRepoMutation(repo, (patterns: string[]) =>
+    api.appendRepoAiIgnore(repo, patterns),
+  );
+}
+
 export function useUntrack(repo: string) {
   return useRepoMutation(
     repo,
