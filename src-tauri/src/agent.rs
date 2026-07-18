@@ -135,6 +135,50 @@ impl EventSink for Channel<ReviewEvent> {
     }
 }
 
+/// Fans one agent stream out to BOTH the desktop Tauri channel and the LAN
+/// broadcast, so a paired phone can watch a review/session live alongside the
+/// desktop. The desktop leg is unchanged (byte-for-byte the same `Channel::send`
+/// the old direct path did); the broadcast leg is best-effort — a `send` with no
+/// live subscribers returns `Err`, which is normal and ignored.
+struct FanoutSink {
+    channel: Channel<ReviewEvent>,
+    tx: tokio::sync::broadcast::Sender<ReviewEvent>,
+}
+
+impl EventSink for FanoutSink {
+    fn send(&self, ev: ReviewEvent) {
+        // LAN leg first (a clone). Skip the clone entirely when nobody's
+        // listening — the common default-off case where the LAN server is
+        // disabled and the broadcast has zero subscribers, so we don't pay a
+        // per-event clone (including chatty token `Delta`s) on the hot desktop
+        // path. Benign race: a subscriber attaching between this check and the
+        // send just misses that one event — the same as connecting a moment
+        // later, which the WS route already handles for mid-stream joins. Then
+        // the desktop leg, fully qualified so it hits the inherent
+        // `Channel::send`, not this trait.
+        if self.tx.receiver_count() > 0 {
+            let _ = self.tx.send(ev.clone());
+        }
+        let _ = Channel::send(&self.channel, ev);
+    }
+}
+
+/// Clears a stream's registry entry when dropped, so the entry's lifetime matches
+/// the streaming run's on EVERY exit path — the normal return, an early `?`
+/// error, and the container branch's early `return` all run this via the guard's
+/// `Drop`, with no per-path bookkeeping to forget. Borrows `AppState` immutably
+/// (as does the `FanoutSink`/`stream_agent` on the same `&state` — shared reads).
+struct StreamGuard<'a> {
+    state: &'a AppState,
+    id: String,
+}
+
+impl Drop for StreamGuard<'_> {
+    fn drop(&mut self) {
+        self.state.clear_stream(&self.id);
+    }
+}
+
 // --- binary resolution -----------------------------------------------------
 //
 // A GUI app does not reliably inherit the user's shell PATH, and npm-installed
@@ -1908,9 +1952,22 @@ pub async fn agent_review(
     } else {
         REVIEW_TIMEOUT
     };
+    // Register this run in the live-stream registry so a paired phone can watch
+    // it, fanning events out to the LAN broadcast alongside the desktop channel.
+    // The guard clears the entry on every exit path (registered lifetime ==
+    // streaming lifetime); the desktop leg stays byte-for-byte unchanged.
+    let tx = state.register_stream(&review_id, "review", &repo_path);
+    let _stream_guard = StreamGuard {
+        state: &state,
+        id: review_id.clone(),
+    };
+    let sink = FanoutSink {
+        channel: on_event,
+        tx,
+    };
     let result = stream_agent(
         &state, kind, &binary, args, stdin_text, &repo_path, timeout, &review_id, "review", None,
-        &extra_env, &on_event,
+        &extra_env, &sink,
     )
     .await;
     // Remove the generated config on EVERY path (success, error), mirroring the
@@ -1959,6 +2016,12 @@ pub async fn agent_session(
     system_prompt: String,
     user_prompt: String,
     worktree_path: String,
+    // The open repo this session was spawned from. `worktree_path` for a write
+    // session is a `gd/session/*` worktree of it, while read-only Plan/Research
+    // sessions pass the live repo for both. The LAN monitor authorizes streams
+    // against the SHARED repo, which is this value — so a session spawned from the
+    // shared repo stays visible to a paired phone even though it runs in a worktree.
+    origin_repo_path: String,
     session_id: String,
     resume: bool,
     // Claude-only: forks a resumed conversation to a throwaway session id
@@ -2186,6 +2249,21 @@ pub async fn agent_session(
         }
     };
 
+    // Register this session in the live-stream registry so a paired phone can
+    // watch it, fanning events out to the LAN broadcast alongside the desktop
+    // channel. The guard clears the entry on EVERY exit path — the host tail, the
+    // container branch's early `return`, and any `?` below (registered lifetime ==
+    // streaming lifetime). The desktop leg stays byte-for-byte unchanged.
+    let tx = state.register_stream(&session_id, "session", &origin_repo_path);
+    let _stream_guard = StreamGuard {
+        state: &state,
+        id: session_id.clone(),
+    };
+    let sink = FanoutSink {
+        channel: on_event,
+        tx,
+    };
+
     // Container isolation: wrap the same invocation in an ephemeral,
     // worktree-confined container. The agent CLI lives in the image, so we don't
     // resolve a host binary; the runtime drives it.
@@ -2334,7 +2412,7 @@ pub async fn agent_session(
             "session",
             Some((runtime.clone(), name)),
             &extra_env,
-            &on_event,
+            &sink,
         )
         .await;
     }
@@ -2372,7 +2450,7 @@ pub async fn agent_session(
         "session",
         None,
         &host_extra_env,
-        &on_event,
+        &sink,
     )
     .await
 }
@@ -2922,5 +3000,71 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert!(matches!(&events[0], ReviewEvent::Delta { text } if text == "hello"));
         assert!(matches!(&events[1], ReviewEvent::Error { message } if message == "boom"));
+    }
+
+    #[test]
+    // Covers the live-subscriber path; the zero-subscriber branch of the
+    // `receiver_count()` guard is pinned by
+    // `fanout_sink_with_no_subscribers_still_delivers_to_desktop` below.
+    fn fanout_sink_delivers_to_both_legs() {
+        use std::sync::{Arc, Mutex};
+        // Desktop leg: a real `Channel` whose message handler captures the raw JSON
+        // body each `send` produces (a `Channel` IS unit-constructible in a test —
+        // `Channel::new` just takes a handler closure).
+        let desktop: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink_desktop = desktop.clone();
+        let channel: Channel<ReviewEvent> = Channel::new(move |body| {
+            // ReviewEvent serializes to a JSON string body; record it.
+            if let tauri::ipc::InvokeResponseBody::Json(s) = body {
+                sink_desktop.lock().unwrap().push(s);
+            }
+            Ok(())
+        });
+
+        // LAN leg: a broadcast channel with a live subscriber.
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<ReviewEvent>(16);
+        let fanout = FanoutSink { channel, tx };
+
+        fanout.send(ReviewEvent::Delta {
+            text: "hi".to_string(),
+        });
+
+        // LAN leg received the event verbatim.
+        match rx.try_recv() {
+            Ok(ReviewEvent::Delta { text }) => assert_eq!(text, "hi"),
+            other => panic!("broadcast leg missed the event: {other:?}"),
+        }
+        // Desktop leg received exactly one message carrying the same event.
+        let desktop_msgs = desktop.lock().unwrap();
+        assert_eq!(desktop_msgs.len(), 1);
+        assert!(desktop_msgs[0].contains("\"kind\":\"delta\""));
+        assert!(desktop_msgs[0].contains("\"text\":\"hi\""));
+    }
+
+    #[test]
+    fn fanout_sink_with_no_subscribers_still_delivers_to_desktop() {
+        use std::sync::{Arc, Mutex};
+        // A broadcast `send` with no receivers returns `Err` — which FanoutSink
+        // ignores; the desktop leg must still receive normally.
+        let desktop: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink_desktop = desktop.clone();
+        let channel: Channel<ReviewEvent> = Channel::new(move |body| {
+            if let tauri::ipc::InvokeResponseBody::Json(s) = body {
+                sink_desktop.lock().unwrap().push(s);
+            }
+            Ok(())
+        });
+        // Drop the receiver so the broadcast has zero subscribers.
+        let (tx, rx) = tokio::sync::broadcast::channel::<ReviewEvent>(16);
+        drop(rx);
+        let fanout = FanoutSink { channel, tx };
+
+        fanout.send(ReviewEvent::Status {
+            text: "note".to_string(),
+        });
+
+        let desktop_msgs = desktop.lock().unwrap();
+        assert_eq!(desktop_msgs.len(), 1);
+        assert!(desktop_msgs[0].contains("\"kind\":\"status\""));
     }
 }

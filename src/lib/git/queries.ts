@@ -39,6 +39,7 @@ import type {
   IssueReactions,
   IssueRelation,
   IssueType,
+  LanStatus,
   PrDetails,
   PrInfo,
   PrThreadOut,
@@ -5557,4 +5558,101 @@ export function useCreatePr(repo: string) {
         args.lens ?? "origin",
       ),
   );
+}
+
+// ---------------------------------------------------------------------------
+// LAN phone companion (experimental). All state is runtime (not persisted
+// settings) and there's no push channel, so status is polled. The mutations
+// return the fresh status, which we write straight into the cache (no poll
+// lag) and also invalidate the status + device keys so any parallel reader
+// re-syncs.
+// ---------------------------------------------------------------------------
+
+const LAN_STATUS_KEY = ["lan", "status"] as const;
+const LAN_DEVICES_KEY = ["lan", "devices"] as const;
+
+/** The companion server's runtime status, polled every 5s. Kept mounted at the
+ *  App level (the "Sharing ON" banner subscribes to it), so the panel and the
+ *  banner share one poller. */
+export function useLanStatus() {
+  return useQuery({
+    queryKey: LAN_STATUS_KEY,
+    queryFn: api.lanStatus,
+    refetchInterval: 5000,
+    refetchIntervalInBackground: false,
+  });
+}
+
+/** Paired devices. Enabled on demand (the panel + pairing dialog); the pairing
+ *  dialog bumps `refetchInterval` to ~1.5s while it watches for a new device. */
+export function useLanDevices(options?: {
+  enabled?: boolean;
+  refetchInterval?: number | false;
+}) {
+  return useQuery({
+    queryKey: LAN_DEVICES_KEY,
+    queryFn: api.lanDevicesList,
+    enabled: options?.enabled ?? true,
+    refetchInterval: options?.refetchInterval ?? false,
+    refetchIntervalInBackground: false,
+  });
+}
+
+/** Shared invalidation for the mutations below: prime the status cache with the
+ *  freshly returned value, then invalidate both keys so any other reader syncs. */
+function useSyncLanStatus() {
+  const queryClient = useQueryClient();
+  return (status?: LanStatus) => {
+    if (status) queryClient.setQueryData(LAN_STATUS_KEY, status);
+    void queryClient.invalidateQueries({ queryKey: LAN_STATUS_KEY });
+    void queryClient.invalidateQueries({ queryKey: LAN_DEVICES_KEY });
+  };
+}
+
+/** Start sharing. The panel always passes `bindLan: true` (loopback-only is a
+ *  dev/test mode with no UI). */
+export function useLanEnable() {
+  const sync = useSyncLanStatus();
+  return useMutation({
+    mutationFn: (bindLan: boolean) => api.lanEnable(bindLan),
+    onSuccess: (status) => sync(status),
+  });
+}
+
+/** Stop sharing (also drops any live pairing offer, server-side). */
+export function useLanDisable() {
+  const sync = useSyncLanStatus();
+  return useMutation({
+    mutationFn: () => api.lanDisable(),
+    onSuccess: (status) => sync(status),
+  });
+}
+
+/** Open a pairing window (returns the QR/URL/PIN + expiry). */
+export function useLanPairingStart() {
+  const sync = useSyncLanStatus();
+  return useMutation({
+    mutationFn: () => api.lanPairingStart(),
+    // A pairing offer flips `pairingActive` in the status — re-sync so the panel
+    // reflects it. The offer itself is returned to the caller, not cached.
+    onSettled: () => sync(),
+  });
+}
+
+/** Cancel the current pairing window (best-effort — called on dialog close). */
+export function useLanPairingCancel() {
+  const sync = useSyncLanStatus();
+  return useMutation({
+    mutationFn: () => api.lanPairingCancel(),
+    onSettled: () => sync(),
+  });
+}
+
+/** Revoke a paired device's token — it immediately loses access. */
+export function useLanDeviceRevoke() {
+  const sync = useSyncLanStatus();
+  return useMutation({
+    mutationFn: (deviceId: string) => api.lanDeviceRevoke(deviceId),
+    onSettled: () => sync(),
+  });
 }

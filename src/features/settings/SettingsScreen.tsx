@@ -24,6 +24,7 @@ import { AboutSection } from "./AboutSection";
 import { AccountsSection } from "./AccountsSection";
 import { AiProviderSection } from "./AiProviderSection";
 import { CommandsSection } from "./CommandsSection";
+import { CompanionSection } from "./CompanionSection";
 import { EditorSection } from "./EditorSection";
 import { GeneralSection } from "./GeneralSection";
 import {
@@ -59,6 +60,7 @@ const PANELS = [
   { id: "mcp-servers", label: "MCP servers" },
   { id: "automations", label: "Automations" },
   { id: "notifications", label: "Notifications" },
+  { id: "companion", label: "Phone companion" },
   { id: "keyboard", label: "Keyboard" },
   { id: "accounts", label: "Accounts" },
   { id: "git", label: "Git" },
@@ -276,6 +278,7 @@ export function SettingsScreen() {
               {activePanel === "notifications" && (
                 <NotificationsSection form={form} />
               )}
+              {activePanel === "companion" && <CompanionSection />}
               {activePanel === "keyboard" && <KeyboardSection form={form} />}
               {activePanel === "accounts" && <AccountsSection />}
               {activePanel === "git" && (
