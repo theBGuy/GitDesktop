@@ -743,10 +743,13 @@ pub async fn create_issue(
 /// in the remote URL. Mirrors gitlab::clone_credential_config.
 ///
 /// Returns the `[reset, helper]` pair (see [`github_credential_entries`]) ONLY
-/// when gh is present AND authenticated for `host`; when gh is present but not
-/// authenticated for that host, returns an empty Vec so git's ambient behavior is
+/// when gh is present AND has a STORED token for `host`; when gh is present but has
+/// no stored token for that host, returns an empty Vec so git's ambient behavior is
 /// preserved unchanged (a user relying on git-credential-manager / the OS keychain
-/// must not be broken). Missing gh → `Err(GhNotFound)`, unchanged — callers'
+/// must not be broken). The stored-token check is a local read — it proves the
+/// token EXISTS, not that it's valid; a revoked token still passes, which is why
+/// [`crate::git::remote::run_git_mutating_with_creds`] carries the ambient
+/// fallback. Missing gh → `Err(GhNotFound)`, unchanged — callers'
 /// `.unwrap_or_default()` keeps the fail-open, strict `?` clone sites stay
 /// fail-closed on a missing CLI.
 pub async fn clone_credential_config(clone_url: &str) -> AppResult<Vec<String>> {
@@ -787,12 +790,15 @@ fn github_credential_entry(host: &str, gh_path: &str) -> String {
     format!("credential.https://{host}.helper=!\"{gh_path}\" auth git-credential")
 }
 
-/// Whether gh has a token for `host` — the auth gate deciding whether to inject
-/// the credential helper. Runs `gh auth token --hostname <host>`, which is
+/// Whether gh has a STORED token for `host` — the auth gate deciding whether to
+/// inject the credential helper. Runs `gh auth token --hostname <host>`, which is
 /// local-only (no network): exit 0 iff a token exists for that host (from gh's
 /// config file, the system keyring, or `GH_TOKEN` — the very sources `gh auth
-/// git-credential` answers from). Memoized per-host with a 60s TTL: auth state
-/// changes rarely, and 60s bounds staleness after the user signs in/out mid-session.
+/// git-credential` answers from). This proves the token EXISTS, not that it's
+/// valid — a revoked token still passes; the ambient fallback in
+/// [`crate::git::remote::run_git_mutating_with_creds`] covers that case. Memoized
+/// per-host with a 60s TTL: auth state changes rarely, and 60s bounds staleness
+/// after the user signs in/out mid-session.
 ///
 /// SECURITY: `gh auth token`'s stdout IS the user's token — this reads only the
 /// exit code and drops the output; the token is never logged or formatted anywhere.
@@ -813,8 +819,13 @@ async fn gh_authenticated(host: &str) -> bool {
             auth_cache_put(host, authed);
             authed
         }
-        // Missing binary / timeout is transient — don't cache; treat as unauthenticated.
-        Err(_) => false,
+        // A spawn/timeout hiccup, NOT absence: `resolve_named` already proved gh
+        // exists, so an Err here is transient. Optimistically inject (uncached) —
+        // with run_git_mutating_with_creds's ambient fallback in place this is safe
+        // both ways: if gh is genuinely signed out its helper returns nothing and
+        // the fallback restores ambient, whereas a pessimistic `false` here would
+        // silently reopen the stale-keychain bug for that op.
+        Err(_) => true,
     }
 }
 

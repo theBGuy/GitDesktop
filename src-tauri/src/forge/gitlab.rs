@@ -174,10 +174,14 @@ pub async fn list_repos() -> AppResult<ForgeRepoList> {
 /// token lands in the remote URL. Validated live against a private gitlab.com repo.
 ///
 /// Returns the `[reset, helper]` pair (see [`gitlab_credential_entries`]) ONLY
-/// when glab is present AND signed in to `host`; when glab is present but not
-/// signed in to that host, returns an empty Vec so git's ambient behavior is
-/// preserved unchanged. Missing glab → `Err(GlabNotFound)`, unchanged — the
-/// strict `?` clone sites stay fail-closed on a missing CLI.
+/// when glab is present AND has a STORED session for `host`; when glab is present
+/// but has no stored session for that host, returns an empty Vec so git's ambient
+/// behavior is preserved unchanged. The stored-session check is a `hosts:` entry in
+/// glab's config — it persists past PAT expiry, so it proves a session EXISTS, not
+/// that it works; the ambient fallback in
+/// [`crate::git::remote::run_git_mutating_with_creds`] covers a dead session.
+/// Missing glab → `Err(GlabNotFound)`, unchanged — the strict `?` clone sites stay
+/// fail-closed on a missing CLI.
 pub async fn clone_credential_config(clone_url: &str) -> AppResult<Vec<String>> {
     let glab = crate::agent::resolve_named(&["glab"], None)
         .await

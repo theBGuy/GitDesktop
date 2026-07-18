@@ -134,16 +134,16 @@ pub(crate) async fn detect_non_github(repo_path: &str) -> Option<(Provider, Stri
     None
 }
 
-/// The one-shot `-c credential.helper` entries to authenticate a network op on
-/// `remote`, resolved to the provider CLI's ABSOLUTE path. The provider comes from
-/// the REQUESTED remote's OWN host (not always `origin`), so a cross-forge
-/// origin/upstream pair — e.g. an `origin` on GitLab with a `github.com` `upstream`
-/// — each gets the right CLI's helper.
+/// The one-shot URL-scoped `-c credential.https://<host>.helper` entries to
+/// authenticate a network op on `remote`, resolved to the provider CLI's ABSOLUTE
+/// path. The provider comes from the REQUESTED remote's OWN host (not always
+/// `origin`), so a cross-forge origin/upstream pair — e.g. an `origin` on GitLab
+/// with a `github.com` `upstream` — each gets the right CLI's helper.
 ///
-/// Entries are injected ONLY when the provider CLI is present AND authenticated
-/// for the remote's own host, and the injection is a `[reset, helper]` PAIR: a
-/// blank reset entry (`credential.https://<host>.helper=`, empty value) that
-/// SEVERS git's accumulated helper chain for that URL, followed by the
+/// Entries are injected ONLY when the provider CLI is present AND has a stored
+/// token/session for the remote's own host, and the injection is a `[reset,
+/// helper]` PAIR: a blank reset entry (`credential.https://<host>.helper=`, empty
+/// value) that SEVERS git's accumulated helper chain for that URL, followed by the
 /// absolute-path CLI helper — the same pair `gh auth setup-git` writes. This makes
 /// the network op deterministically use the same identity as the app's forge
 /// surfaces, rather than falling through to whichever ambient helper answers first
@@ -151,13 +151,23 @@ pub(crate) async fn detect_non_github(repo_path: &str) -> Option<(Provider, Stri
 /// `osxkeychain`/git-credential-manager entry holding a stale-but-valid credential
 /// would otherwise shadow the CLI and 404 the wrong identity; that was the bug).
 ///
+/// The gates prove a credential merely EXISTS, not that it WORKS, so a stale CLI
+/// token could sever a working ambient chain (the inverse failure) —
+/// [`crate::git::remote::run_git_mutating_with_creds`] covers that with a one-shot
+/// ambient-fallback retry on an auth-class failure. Deliberate residual: the CLONE
+/// path (the `extra_config` in `repo.rs`) keeps strict injection with NO fallback —
+/// clone is user-initiated, clearly messaged, and re-runnable, and GitLab private
+/// clone was always strict-injection.
+///
 /// Empty (→ git's ambient behavior, unchanged, so this never breaks a local, SSH,
 /// or already-authenticated repo) for: SSH remotes (credential helpers don't
 /// apply), Bitbucket (its push flow injects auth its own way), a repo with no such
-/// remote, an unknown HTTPS host (the GitHub-default routing's gh gate then finds
-/// no token for it and injects nothing), and — fail open — when the provider CLI
-/// isn't installed OR is installed but not signed in to this host (ambient helpers
-/// like git-credential-manager keep working for both).
+/// remote, an unknown HTTPS host (the GitHub-default routing's gh gate injects the
+/// pair ONLY when gh holds a token for that host — e.g. a signed-in GitHub
+/// Enterprise host, which is what makes GHE work — and nothing otherwise), and —
+/// fail open — when the provider CLI isn't installed OR is installed but has no
+/// stored token/session for this host (ambient helpers like git-credential-manager
+/// keep working for both).
 pub async fn credential_config_for_remote(repo_path: &str, remote: &str) -> AppResult<Vec<String>> {
     let url = match crate::git::remote::git_remote_url(repo_path.to_string(), remote.to_string()).await
     {
