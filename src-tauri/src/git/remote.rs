@@ -993,4 +993,81 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&base);
     }
+
+    /// The real `for-each-ref` output shape feeding `parse_upstream_tracking` — the
+    /// format assumption is otherwise only checked against hand-written strings.
+    #[tokio::test]
+    async fn parse_upstream_tracking_matches_real_for_each_ref_output() {
+        let base = temp_base("track");
+        let origin = base.join("origin");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&origin).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        let origin_s = origin.to_string_lossy().into_owned();
+        let repo_s = repo.to_string_lossy().into_owned();
+
+        init_repo(&origin_s, "o.txt").await;
+        // The default branch name (main/master) is whatever git is configured for.
+        let def = run(&origin_s, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+
+        init_repo(&repo_s, "r.txt").await;
+        run(&repo_s, &["remote", "add", "origin", &origin_s]).await;
+        run(&repo_s, &["fetch", "-q", "origin"]).await;
+        run(
+            &repo_s,
+            &["branch", &format!("--set-upstream-to=origin/{def}"), &def],
+        )
+        .await;
+        run(&repo_s, &["branch", "feature"]).await; // untracked
+        run(&repo_s, &["branch", "feat/sub"]).await; // prefix sibling; no exact `feat`
+
+        let fmt = "--format=%(refname)%00%(upstream:short)%00%(upstream:remotename)%00%(upstream:track)";
+        // Run the real `for-each-ref` and parse it exactly as the caller does.
+        let track = |b: &str| {
+            let repo_s = repo_s.clone();
+            let refspec = format!("refs/heads/{b}");
+            async move {
+                let out = run(&repo_s, &["for-each-ref", &refspec, fmt]).await;
+                parse_upstream_tracking(&out, &refspec)
+            }
+        };
+
+        // Untracked branch → non-empty refname line with empty upstream fields.
+        assert_eq!(
+            track("feature").await,
+            Some((String::new(), String::new(), false))
+        );
+        // Tracked branch → upstream short + remote name; gone=false (ahead/behind are
+        // ignored by the parser, so divergent histories are fine).
+        assert_eq!(
+            track(&def).await,
+            Some((format!("origin/{def}"), "origin".into(), false))
+        );
+        // Prefix: `for-each-ref refs/heads/feat` matches `feat/sub`, whose refname
+        // isn't `refs/heads/feat` → None (the round-3 exact-match guard, end to end).
+        assert_eq!(track("feat").await, None);
+
+        // Gone upstream: track origin/<def>, then delete the remote-tracking ref so
+        // `%(upstream:track)` becomes `[gone]`. Do this LAST — it also makes <def> gone.
+        run(
+            &repo_s,
+            &["branch", "--track", "goner", &format!("origin/{def}")],
+        )
+        .await;
+        run(
+            &repo_s,
+            &["update-ref", "-d", &format!("refs/remotes/origin/{def}")],
+        )
+        .await;
+        let g = track("goner").await;
+        assert!(
+            matches!(g, Some((_, _, true))),
+            "goner upstream should read gone: {g:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

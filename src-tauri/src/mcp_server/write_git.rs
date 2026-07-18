@@ -31,8 +31,8 @@ fn ensure_not_session_branch(name: &str) -> Result<(), McpError> {
     if name.starts_with(SESSION_BRANCH_PREFIX) {
         return Err(McpError::invalid_params(
             format!(
-                "\"{name}\" is a GitDesktop agent-session branch; deleting it breaks session \
-                 Resume. Refusing."
+                "\"{name}\" is a GitDesktop agent-session branch; refusing to operate on it \
+                 (breaks session Resume)."
             ),
             None,
         ));
