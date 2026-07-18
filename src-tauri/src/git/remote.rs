@@ -28,8 +28,62 @@ fn with_credentials(cred: &[String], sub: &[&str]) -> Vec<String> {
     v
 }
 
+/// Whether a git network failure's `stderr` looks like an auth-class failure — the
+/// gate for the ambient-credential fallback in [`run_git_mutating_with_creds`].
+/// Case-insensitive substring match on three signatures:
+///
+/// 1. `"authentication failed"` — git exhausted a 401 retry with the
+///    helper-provided credentials (the injected CLI helper's token was rejected).
+/// 2. `"could not read username"` — every helper returned nothing and
+///    `GIT_TERMINAL_PROMPT=0` blocks the interactive prompt (covers the ≤60s
+///    stale-cache window after `gh auth logout`, where the cached auth gate still
+///    injects a helper that no longer answers).
+/// 3. `"repository not found"` — GitHub answers 404 (the sideband line
+///    `remote: Repository not found.`) for a VALID identity that lacks access to a
+///    private repo: it hides existence rather than 403ing, so a wrong-identity CLI
+///    token surfaces as not-found, not as an auth error. This is the exact
+///    motivating symptom, now inverted — a stale CLI token that shadows a working
+///    ambient credential.
+///
+/// Deliberately narrow: network/DNS failures (e.g. `"could not resolve hostname"`)
+/// and merge conflicts do NOT match — retrying those can't help and would double
+/// the network timeout.
+fn is_auth_class_failure(stderr: &str) -> bool {
+    let s = stderr.to_lowercase();
+    s.contains("authentication failed")
+        || s.contains("could not read username")
+        // 404 tradeoff: on a transient not-found for the CORRECT CLI identity, the
+        // ambient retry can complete the op under a DIFFERENT identity than the
+        // severed CLI one — accepted (push identity ≠ commit authorship); don't
+        // widen this classifier further.
+        || s.contains("repository not found")
+}
+
 /// Run a mutating git network op with one-shot credential `-c` entries prefixed.
-async fn run_git_mutating_with_creds(
+///
+/// When `cred` is non-empty and the injected run fails with an auth-class git
+/// error ([`is_auth_class_failure`]), this retries EXACTLY ONCE with NO injected
+/// config (plain [`run_git_mutating`] on the same sub-args) and returns that
+/// retry's result — on a double failure the RETRY's error is surfaced, because the
+/// ambient attempt's error names the true end state. When `cred` is empty there is
+/// nothing to fall back from, so behavior is unchanged.
+///
+/// The auth gates that produce `cred` prove a credential EXISTS locally
+/// (`gh auth token` is a local read; glab's `hosts:` entry persists past PAT
+/// expiry) — not that it WORKS. Severing the ambient chain for a user whose CLI
+/// token is revoked/expired but whose ambient credential (git-credential-manager,
+/// OS keychain) is valid would hard-fail an op that worked before this change (the
+/// additive helper let the ambient one answer first) — the exact inverse of the
+/// motivating bug. This one-shot fallback restores pre-change behavior for those
+/// users; an authenticated CLI never reaches it (its helper answers and the run
+/// succeeds).
+///
+/// The retry is safe because HTTPS auth happens at ref negotiation BEFORE any
+/// server-side ref update: a failed-auth push has mutated nothing on the remote, so
+/// re-running with different credentials can't double-apply. Only Git-kind errors
+/// are classified; every other error kind (timeout, IO, …) returns as-is with no
+/// retry.
+pub(crate) async fn run_git_mutating_with_creds(
     state: &AppState,
     repo_path: &str,
     cred: &[String],
@@ -37,13 +91,25 @@ async fn run_git_mutating_with_creds(
     timeout: Duration,
 ) -> AppResult<GitOutput> {
     let args = with_credentials(cred, sub);
-    run_git_mutating(
+    let result = run_git_mutating(
         state,
         repo_path,
         &args.iter().map(String::as_str).collect::<Vec<_>>(),
         timeout,
     )
-    .await
+    .await;
+
+    // Fall back to git's ambient credential helpers exactly once when injected
+    // credentials are present but rejected — the CLI token may be stale while an
+    // ambient credential still works.
+    if !cred.is_empty() {
+        if let Err(AppError::Git { stderr, .. }) = &result {
+            if is_auth_class_failure(stderr) {
+                return run_git_mutating(state, repo_path, sub, timeout).await;
+            }
+        }
+    }
+    result
 }
 
 /// How long a resolved remote URL stays trusted before we re-shell to `git`. A few seconds
@@ -406,7 +472,9 @@ pub(crate) async fn git_push_core(
 
 #[cfg(test)]
 mod tests {
-    use super::{cache_get, cache_invalidate, cache_put, git_remote_remove_core};
+    use super::{
+        cache_get, cache_invalidate, cache_put, git_remote_remove_core, is_auth_class_failure,
+    };
     use crate::error::AppError;
     use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
     use crate::state::AppState;
@@ -468,6 +536,46 @@ mod tests {
     #[test]
     fn miss_returns_none() {
         assert_eq!(cache_get("/repo/never-written", "origin", BIG), None);
+    }
+
+    // --- Auth-class classifier for the ambient-credential fallback. ---
+
+    #[test]
+    fn auth_class_matches_rejected_credentials() {
+        assert!(is_auth_class_failure(
+            "fatal: Authentication failed for 'https://github.com/x/y.git/'"
+        ));
+    }
+
+    #[test]
+    fn auth_class_matches_prompt_disabled_no_username() {
+        assert!(is_auth_class_failure(
+            "fatal: could not read Username for 'https://github.com': terminal prompts disabled"
+        ));
+    }
+
+    #[test]
+    fn auth_class_matches_repository_not_found_sideband() {
+        // The 404 sideband line is what identifies a wrong-identity token.
+        assert!(is_auth_class_failure(
+            "remote: Repository not found.\nfatal: repository 'https://github.com/x/y.git/' not found"
+        ));
+    }
+
+    #[test]
+    fn auth_class_ignores_merge_conflict() {
+        assert!(!is_auth_class_failure(
+            "CONFLICT (content): Merge conflict in file.txt\nAutomatic merge failed; fix conflicts"
+        ));
+    }
+
+    #[test]
+    fn auth_class_ignores_network_dns_error() {
+        // A DNS/network failure must NOT trigger the fallback — retrying can't help
+        // and would double the timeout.
+        assert!(!is_auth_class_failure(
+            "ssh: Could not resolve hostname github.com"
+        ));
     }
 
     // --- Real-repo tests for git_remote_remove (temp_dir, git on PATH). ---

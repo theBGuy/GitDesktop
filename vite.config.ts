@@ -109,7 +109,18 @@ export default defineConfig(async () => ({
       : undefined,
     watch: {
       // 3. tell Vite to ignore watching `src-tauri` & `site` since we don't want to trigger reloads when those files change
-      ignored: ["**/src-tauri/**", "**/site/**", "*.md", "*.yml", "*.yaml"],
+      ignored: [
+        "**/src-tauri/**",
+        "**/site/**",
+        "*.md",
+        "*.yml",
+        "*.yaml",
+        "**/.github/**",
+        "**/.claude/**",
+        "**/.agents/**",
+        "**/.impeccable/**",
+        "**/.vscode/**"
+      ],
     },
   },
 }));

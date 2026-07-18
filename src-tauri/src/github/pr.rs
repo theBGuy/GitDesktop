@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::error::{AppError, AppResult};
-use crate::git::runner::{run_git_mutating, run_git_raw, DEFAULT_TIMEOUT, NETWORK_TIMEOUT};
+use crate::git::runner::{run_git_raw, DEFAULT_TIMEOUT, NETWORK_TIMEOUT};
 use crate::github::issue::{map_reaction_groups, repo_owner_name, IssueReactions};
 use crate::github::runner::{run_gh, run_gh_input, run_gh_raw, GH_NETWORK_TIMEOUT, GH_TIMEOUT};
 use crate::state::AppState;
@@ -4337,9 +4337,11 @@ pub(crate) async fn gh_pr_create_core(
         let fork_owner = crate::github::fork_owner_of(&origin_slug).to_string();
 
         // Push `head` to origin — origin IS the fork; the PR's head lives there.
-        run_git_mutating(
+        let cred = crate::forge::credential_config_for_remote(&repo_path, "origin").await?;
+        crate::git::remote::run_git_mutating_with_creds(
             state,
             &repo_path,
+            &cred,
             &["push", "-u", "origin", &head],
             NETWORK_TIMEOUT,
         )
@@ -4373,9 +4375,11 @@ pub(crate) async fn gh_pr_create_core(
     let origin_slug = crate::github::gh_lens_slug(&repo_path, None).await?;
 
     // gh can only open a PR for a branch that exists on the remote.
-    run_git_mutating(
+    let cred = crate::forge::credential_config_for_remote(&repo_path, "origin").await?;
+    crate::git::remote::run_git_mutating_with_creds(
         state,
         &repo_path,
+        &cred,
         &["push", "-u", "origin", &head],
         NETWORK_TIMEOUT,
     )

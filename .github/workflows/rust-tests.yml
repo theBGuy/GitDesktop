@@ -13,18 +13,52 @@ name: rust-tests
 # byte-identical to the PR head's), and a non-Rust follow-up commit on a PR
 # re-triggering the whole matrix (the `pull_request` `paths` filter matches the
 # cumulative base…head diff, so one earlier Rust commit keeps re-arming it).
+#
+# Second tier: when NO byte-identical green tree exists, the gate also skips if
+# the delta vs a green run is comment-or-formatting-only in `.rs` files — i.e.
+# the two `src-tauri` trees differ only in files ending `.rs`, and each such
+# file is EQUIVALENT under `.github/scripts/canonicalize-rust.py` (doc comments
+# and every string/char literal are preserved byte-verbatim; ordinary comments
+# and all whitespace/reflow are dropped). Any non-`.rs` change, add/delete/
+# rename, or non-equivalent `.rs` file forces the matrix. Motivating case: a
+# comment-only follow-up commit (real example: `1eff119`, four `//` lines added
+# to `src/git/remote.rs`) that today re-runs the whole 3-OS matrix for a
+# foregone conclusion.
+#
+# ACCEPTED RISK (stated honestly): this tier slightly weakens the first tier's
+# "worst case is a redundant run" guarantee, because a few lint/test signals
+# live OUTSIDE the canonicalizer's equivalence — whitespace-adjacent clippy
+# lints (e.g. `suspicious_else_formatting`, `empty_line_after_outer_attr`) and
+# panic-message line numbers. Comment-KEYED clippy lints (e.g.
+# `undocumented_unsafe_blocks`, which keys on `// SAFETY:` comments) would also
+# live outside the equivalence — none are enabled today (no `[lints]` section,
+# no clippy.toml; verified 2026-07-18), so enabling one later must re-evaluate
+# this gate. Mitigations: the repo uses no `line!()` / `include_str!()` (audited
+# 2026-07-18); doc comments are preserved because the crate's rlib target runs
+# doc tests; any canonicalizer anomaly fails OPEN (runs the matrix); and "Re-run
+# all jobs" always forces the matrix.
+#
+# Base-drift caveat (pre-existing frame, applies to BOTH passes, not new to tier
+# 2): on `pull_request` the gate signs the PR HEAD tree while the matrix builds
+# the MERGE ref, so a skip forgoes re-validating the head against a base that
+# advanced since the candidate green. The post-merge `push: master` run is the
+# backstop — it builds the true merged tree and cannot inherit such a skip,
+# because base code changes make the merged tree non-equivalent to the PR head
+# tree (a different `src-tauri` tree, hence a real matrix run).
 
 on:
   pull_request:
     paths:
       - "src-tauri/**"
       - ".github/workflows/rust-tests.yml"
+      - ".github/scripts/canonicalize-rust.py"
   push:
     branches:
       - master
     paths:
       - "src-tauri/**"
       - ".github/workflows/rust-tests.yml"
+      - ".github/scripts/canonicalize-rust.py"
 
 # One in-flight run per ref; a force-push cancels the superseded run instead of
 # stacking a second one.
@@ -45,6 +79,11 @@ jobs:
   # including any direct push to master. Fail-open by construction: any hiccup
   # (API error, unresolved commit) leaves the decision at "run", so the worst
   # case is a redundant run, never a silently-skipped failure.
+  #
+  # Two passes (see the header block for the accepted risk of pass 2):
+  #   pass 1 — exact tree+wf signature match against recent greens (unchanged).
+  #   pass 2 — only when pass 1 finds nothing: comment/format-only equivalence
+  #            in `.rs` files, via `.github/scripts/canonicalize-rust.py`.
   gate:
     name: gate (skip if this Rust content already passed)
     runs-on: ubuntu-latest
@@ -84,15 +123,24 @@ jobs:
           if [ "$EVENT" = "pull_request" ]; then sha="$PR_HEAD"; else sha="$PUSH_SHA"; fi
           cur_tree=$(git rev-parse "${sha}:src-tauri" 2>/dev/null || true)
           cur_wf=$(git rev-parse "${sha}:.github/workflows/rust-tests.yml" 2>/dev/null || true)
+          # The canonicalizer's own blob, as of this commit — used in pass 2 to
+          # require chained greens share identical equivalence semantics.
+          cur_canon=$(git rev-parse "${sha}:.github/scripts/canonicalize-rust.py" 2>/dev/null || true)
           echo "signature for ${sha:0:8}: tree=${cur_tree:-?} wf=${cur_wf:-?}"
 
           decision=true
+
+          # Head SHAs of recent GREEN rust-tests runs, across every branch. A
+          # matrix-skipped run also concludes "success", so its commit joins
+          # this set — sound, because tree-identity (and, in pass 2, canonical
+          # equivalence under an identical script) is transitive.
+          greens=$(gh run list --workflow rust-tests.yml --status success \
+                     --limit 100 --json headSha --jq '.[].headSha' 2>/dev/null || true)
+
+          # --- Pass 1: exact tree+wf signature. Strictly stronger evidence than
+          # pass 2 (carries none of its accepted risk), so scan ALL candidates
+          # for an exact hit before attempting any equivalence. ---
           if [ -n "$cur_tree" ] && [ -n "$cur_wf" ]; then
-            # Head SHAs of recent GREEN rust-tests runs, across every branch. A
-            # matrix-skipped run also concludes "success", so its commit joins
-            # this set — sound, because tree-identity is transitive.
-            greens=$(gh run list --workflow rust-tests.yml --status success \
-                       --limit 100 --json headSha --jq '.[].headSha' 2>/dev/null || true)
             while read -r past; do
               [ -z "$past" ] && continue
               pt=$(git rev-parse "${past}:src-tauri" 2>/dev/null || true)
@@ -103,6 +151,140 @@ jobs:
                 break
               fi
             done <<< "$greens"
+          fi
+
+          # --- Pass 2: comment/format-only equivalence. Only when pass 1 found
+          # no exact match. Preconditions (else skip pass 2, logging why): we
+          # have a src-tauri tree + a canonicalizer blob for this commit, and
+          # that canonicalizer's own self-test passes (a self-test failure in CI
+          # means environment drift → fail open by running the matrix). ---
+          if [ "$decision" = "true" ] && [ -n "$cur_tree" ]; then
+            if [ -z "$cur_canon" ]; then
+              echo "Pass 2 skipped: no canonicalizer blob at this commit."
+            else
+              # Extract the canonicalizer AS OF this commit and self-test it, so
+              # pass 2 never trusts a script that behaves unexpectedly here. Guard
+              # the extraction (the step runs under `-e`) so an impossible-in-
+              # practice failure fails OPEN like every other guard, not job-red.
+              if ! git show "${sha}:.github/scripts/canonicalize-rust.py" > "$RUNNER_TEMP/canonicalize-rust.py"; then
+                echo "Pass 2 skipped: could not extract canonicalizer."
+              elif ! python3 "$RUNNER_TEMP/canonicalize-rust.py" --self-test; then
+                echo "Pass 2 skipped: canonicalizer self-test failed (environment drift) — failing open."
+              else
+                # Per-path cache of the CURRENT side's canonical output, so
+                # repeated candidates don't recanonicalize the same blob.
+                cur_cache="$RUNNER_TEMP/canon-cur"
+                mkdir -p "$cur_cache"
+
+                # Compare one changed `.rs` path across the two trees. Returns 0
+                # if canonically equivalent, non-zero otherwise (anomaly counts
+                # as non-equivalent — an anomaly means fail open here).
+                compare_path() {
+                  local past_tree="$1" path="$2"
+                  # Cache the current side keyed by its BLOB OID, not a flattened
+                  # path: `tr '/' '_'` would collide `a/b_c.rs` with `a_b/c.rs`,
+                  # and any coincidental equality violates the fail-open bar.
+                  # Content-addressed keys are collision-free and let two paths
+                  # with identical content share a cache entry correctly. Empty
+                  # OID (blob missing — shouldn't happen for a diff-tree M path)
+                  # fails open.
+                  local key
+                  key=$(git rev-parse "${cur_tree}:${path}" 2>/dev/null || true)
+                  if [ -z "$key" ]; then
+                    echo "  $path: could not resolve current blob OID — failing open."
+                    return 1
+                  fi
+                  local cur_out="$cur_cache/$key"
+                  if [ ! -f "$cur_out" ]; then
+                    if ! git cat-file blob "${cur_tree}:${path}" \
+                         | python3 "$RUNNER_TEMP/canonicalize-rust.py" > "$cur_out" 2>/dev/null; then
+                      echo "  $path: canonicalizer anomaly on current side."
+                      rm -f "$cur_out"
+                      return 1
+                    fi
+                  fi
+                  local past_out="$RUNNER_TEMP/canon-past"
+                  if ! git cat-file blob "${past_tree}:${path}" \
+                       | python3 "$RUNNER_TEMP/canonicalize-rust.py" > "$past_out" 2>/dev/null; then
+                    echo "  $path: canonicalizer anomaly on past side."
+                    return 1
+                  fi
+                  if cmp -s "$past_out" "$cur_out"; then
+                    return 0
+                  fi
+                  echo "  $path: canonical mismatch (real code change)."
+                  return 1
+                }
+
+                compared=0  # candidates that reached the per-file stage
+                while read -r past; do
+                  [ -z "$past" ] && continue
+                  pt=$(git rev-parse "${past}:src-tauri" 2>/dev/null || true)
+                  pw=$(git rev-parse "${past}:.github/workflows/rust-tests.yml" 2>/dev/null || true)
+                  # Same workflow file (the matrix definition must match).
+                  [ -n "$pt" ] && [ "$pw" = "$cur_wf" ] || continue
+                  # Candidate's canonicalizer blob must equal ours. This keeps
+                  # CHAINS sound: a pass-2 skip concludes "success" and joins the
+                  # greens set, so equivalence is transitive only while every
+                  # link used identical equivalence semantics — a script change
+                  # restarts chains from a real matrix run. A pre-script-era
+                  # green has no blob (empty) → rejected automatically.
+                  pc=$(git rev-parse "${past}:.github/scripts/canonicalize-rust.py" 2>/dev/null || true)
+                  [ -n "$pc" ] && [ "$pc" = "$cur_canon" ] || continue
+
+                  # Every changed path must be a modified `.rs` file. Any add/
+                  # delete/rename/type-change (status != M) or non-`.rs` path
+                  # rejects the candidate. (An empty diff can't occur — pass 1
+                  # would have matched it exactly.)
+                  status=$(git diff-tree -r --name-status "$pt" "$cur_tree" 2>/dev/null || true)
+                  reject=""
+                  changed_files=""
+                  count=0
+                  while IFS=$'\t' read -r st path rest; do
+                    [ -z "$st" ] && continue
+                    count=$((count + 1))
+                    if [ "$st" != "M" ] || [ "${path%.rs}" = "$path" ]; then
+                      reject="non-.rs or non-modify change ($st $path)"
+                      break
+                    fi
+                    changed_files="$changed_files $path"
+                  done <<< "$status"
+
+                  if [ -n "$reject" ]; then
+                    echo "Pass 2: ${past:0:8} rejected — $reject."
+                    continue
+                  fi
+                  # Guard: too many changed files → not a plausible comment-only
+                  # follow-up; reject rather than churn through it.
+                  if [ "$count" -gt 60 ]; then
+                    echo "Pass 2: ${past:0:8} rejected — $count changed files (> 60)."
+                    continue
+                  fi
+
+                  # Guard: cap how many candidates reach per-file comparison.
+                  compared=$((compared + 1))
+                  if [ "$compared" -gt 15 ]; then
+                    echo "Pass 2: stopping after 15 candidates reached per-file comparison."
+                    break
+                  fi
+
+                  all_equiv=true
+                  for path in $changed_files; do
+                    if ! compare_path "$pt" "$path"; then
+                      all_equiv=false
+                      break
+                    fi
+                  done
+
+                  if [ "$all_equiv" = "true" ]; then
+                    echo "Comment/format-only delta vs ${past:0:8} ($count .rs files) — skipping the matrix."
+                    for path in $changed_files; do echo "  $path"; done
+                    decision=false
+                    break
+                  fi
+                done <<< "$greens"
+              fi
+            fi
           fi
 
           [ "$decision" = "true" ] && echo "No prior green run for this exact content — running the matrix."

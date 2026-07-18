@@ -283,9 +283,10 @@ pub(crate) async fn git_delete_branch_core(
     Ok(())
 }
 
-/// Deletes a branch on a remote via `git push <remote> --delete`, using git's
-/// native credential flow (exactly like `git_push` — no per-provider paths).
-/// git prunes the local remote-tracking ref on success.
+/// Deletes a branch on a remote via `git push <remote> --delete`, authenticating
+/// with the same one-shot provider-CLI credential entries `git_push` uses (so a
+/// stale ambient credential can't shadow the signed-in CLI's identity). git prunes
+/// the local remote-tracking ref on success.
 #[tauri::command]
 pub async fn git_delete_remote_branch(
     state: State<'_, AppState>,
@@ -321,9 +322,11 @@ pub(crate) async fn git_delete_remote_branch_core(
         )));
     }
 
-    let out = run_git_mutating(
+    let cred = crate::forge::credential_config_for_remote(&repo_path, &remote).await?;
+    let out = crate::git::remote::run_git_mutating_with_creds(
         state,
         &repo_path,
+        &cred,
         &["push", &remote, "--delete", "--", &name],
         NETWORK_TIMEOUT,
     )
