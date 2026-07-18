@@ -434,6 +434,18 @@ async function generateReviewText(
   // same soft context the interactive path uses. Remote PRs only; best-effort;
   // resolved concurrently (independent harvests, kept separate from the external
   // path — a shared-fetch dedup is a later win, forge-dispatch-dedup backlog).
+  // Scale the prompt's character budgets to the reviewing model (per the user's
+  // Review-context knob) — best-effort, never throws, never blocks the review.
+  // Resolved BEFORE the own/external harvest so the own-comments distillation
+  // trigger + ledger cap key off the SAME scaled budget as the rest of the prompt;
+  // reused verbatim at buildReviewPrompt below (single resolution, used twice).
+  const appSettings = await loadSettings();
+  const budgetProfile = await resolveBudgetProfile(
+    ai,
+    appSettings.reviewContextSize,
+  );
+  if (signal.aborted) return null;
+
   const isRemotePr = event.kind !== "commit" && event.target.type === "remote";
   const [external, own]: [ExternalContext, OwnCommentsContext] = isRemotePr
     ? await Promise.all([
@@ -450,19 +462,14 @@ async function generateReviewText(
           "remote",
           targetRef(event),
           provider,
-          { distill: true, signal },
+          {
+            distill: true,
+            signal,
+            ownBudgetChars: budgetProfile.ownCharBudget,
+          },
         ),
       ])
     : [{}, {}];
-  if (signal.aborted) return null;
-
-  // Scale the prompt's character budgets to the reviewing model (per the user's
-  // Review-context knob) — best-effort, never throws, never blocks the review.
-  const appSettings = await loadSettings();
-  const budgetProfile = await resolveBudgetProfile(
-    ai,
-    appSettings.reviewContextSize,
-  );
   if (signal.aborted) return null;
 
   const { system, prompt } = buildReviewPrompt(

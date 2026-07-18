@@ -55,15 +55,18 @@ export function scaledProfile(multiplier: number): ContextBudgetProfile {
   };
 }
 
-/** Auto-mode multiplier from a known context window (in TOKENS). Frontier
- *  windows scale up (3× ≈ 300K chars ≈ 75-90K tokens — a deliberate cost
- *  ceiling), while a small local model scales DOWN so today's constants can't
- *  overflow it. */
+/** Auto-mode multiplier from a known context window (in TOKENS). Derived from the
+ *  window as headroom rather than a tier ladder, so the prompt body can never
+ *  overflow the model: a code-heavy prompt runs ~3.5 chars/token, and only ~55%
+ *  of the window is budgeted for the prompt body (the system prompt, metadata, and
+ *  the model's own response take the rest) ⇒ safe prompt-chars ≈ windowTokens ×
+ *  3.5 × 0.55 ≈ windowTokens × 1.9. Dividing by the 1× profile's 100K prompt-char
+ *  budget yields the multiplier. The 0.15 floor keeps every section usable
+ *  (scaledProfile's 1K-per-field floor still applies on top); the cap of 3 is the
+ *  deliberate cost ceiling. Anchors: a 24K-token window → ~0.46×, 131K → ~2.5×,
+ *  ≥158K → 3×. */
 function multiplierForWindow(windowTokens: number): number {
-  if (windowTokens >= 180_000) return 3;
-  if (windowTokens >= 60_000) return 1.5;
-  if (windowTokens >= 24_000) return 1;
-  return Math.max(0.25, windowTokens / 24_000);
+  return Math.min(3, Math.max(0.15, (windowTokens * 1.9) / 100_000));
 }
 
 /** Session cache of resolved profiles, keyed by provider#model#baseUrl. This is
@@ -173,6 +176,11 @@ async function resolveAutoProfile(
     case "openai-compatible":
       // Could be a local llama.cpp server behind an OpenAI-compatible endpoint;
       // no reliable window probe, so stay conservative.
+      return scaledProfile(1);
+    default:
+      // Runtime hardening for unvalidated persisted settings — TS exhaustiveness
+      // is compile-time only, and a hand-edited/corrupt provider string on disk
+      // would otherwise fall through and return undefined.
       return scaledProfile(1);
   }
 }

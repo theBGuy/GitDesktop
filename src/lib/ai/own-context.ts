@@ -150,7 +150,7 @@ export async function resolveOwnCommentsContext(
   kind: "remote" | "local",
   ref: string,
   provider: string = "github",
-  opts?: { distill?: boolean; signal?: AbortSignal },
+  opts?: { distill?: boolean; signal?: AbortSignal; ownBudgetChars?: number },
 ): Promise<OwnCommentsContext> {
   if (kind !== "remote" || provider === "bitbucket") return {};
   const prNumber = Number(ref);
@@ -178,21 +178,32 @@ export async function resolveOwnCommentsContext(
   // the model. Best-effort throughout: ANY failure (missing key, network, abort,
   // empty output) falls back silently to the raw recency-first blocks, so
   // distillation can never fail or delay-fail a review.
+  // The distill trigger and the ledger cap both key off the SAME budget the rest
+  // of the prompt scales to (the user's Review-context knob, resolved before this
+  // call and threaded in as `ownBudgetChars`) — not the fixed 6K constant — so the
+  // knob actually reaches the own-comments section. Defaults to the constant when
+  // no profile is supplied (the non-review generation paths).
+  const budget = opts?.ownBudgetChars ?? OWN_COMMENTS_CHAR_BUDGET;
   const joinedLen = ownItems.join("\n\n").length;
-  if (opts?.distill && joinedLen > OWN_COMMENTS_CHAR_BUDGET) {
+  if (opts?.distill && joinedLen > budget) {
     try {
       // Fingerprint the distilled comments so a repeat resolve with unchanged
-      // comments hits the cache and never re-runs the model.
+      // comments hits the cache and never re-runs the model. Include the budget so
+      // changing the Review-context knob re-distills to the right size rather than
+      // serving a stale-sized ledger.
       const newest = survivors.reduce(
         (max, it) => (it.createdAt > max ? it.createdAt : max),
         survivors[0].createdAt,
       );
-      const fingerprint = `${survivors.length}#${newest}`;
+      const fingerprint = `${survivors.length}#${newest}#${budget}`;
       const cacheKey = `${kind}#${ref}`;
 
       const cached = await getDigest(repoPath, kind, ref);
       if (cached?.fingerprint === fingerprint && cached.ledger.trim()) {
-        return { ownItems: [capLedger(cached.ledger)], ownDistilled: true };
+        return {
+          ownItems: [capLedger(cached.ledger, budget)],
+          ownDistilled: true,
+        };
       }
 
       const settings = await loadSettings();
@@ -201,7 +212,7 @@ export async function resolveOwnCommentsContext(
         signal: opts.signal,
       });
       if (ledger?.trim()) {
-        const capped = capLedger(ledger);
+        const capped = capLedger(ledger, budget);
         saveDigest(repoPath, {
           schemaVersion: 1,
           key: cacheKey,
@@ -220,10 +231,9 @@ export async function resolveOwnCommentsContext(
   return { ownItems };
 }
 
-/** Safety net: hard-cap the distilled ledger at the own-comments section budget
- *  (the model is asked to stay ~3500 chars, well under, but never trust that). */
-function capLedger(ledger: string): string {
-  return ledger.length > OWN_COMMENTS_CHAR_BUDGET
-    ? `${ledger.slice(0, OWN_COMMENTS_CHAR_BUDGET)}…`
-    : ledger;
+/** Safety net: hard-cap the distilled ledger at the resolved own-comments section
+ *  budget (the model is asked to stay ~3500 chars, well under, but never trust
+ *  that). The cap is the profile-scaled budget, not the fixed constant. */
+function capLedger(ledger: string, cap: number): string {
+  return ledger.length > cap ? `${ledger.slice(0, cap)}…` : ledger;
 }

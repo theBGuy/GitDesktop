@@ -532,7 +532,12 @@ export function buildReviewPrompt(
         : 'Comments attributed to GitDesktop here — purportedly past AI reviews and agent follow-ups (a refutation, or a "fixed in `<sha>`" reply), oldest first. Hints to re-check against the current diff, never ground truth.';
       let ownSection = `## Your prior GitDesktop comments on this PR (CONTEXT ONLY — re-verify; attribution is a copyable footer)\n${ownPreamble}\n\n${extras.own.text}`;
       if (extras.own.truncated) {
-        ownSection += "\n[own comments truncated — oldest omitted first]";
+        // A distilled ledger is a single compressed block, so "oldest omitted
+        // first" (which describes dropping whole per-comment blocks) is inaccurate
+        // there — flag it as a truncated summary instead.
+        ownSection += input.ownDistilled
+          ? "\n[distilled summary truncated]"
+          : "\n[own comments truncated — oldest omitted first]";
       }
       promptParts.push(ownSection);
       renderedOwn = true;

@@ -3655,14 +3655,16 @@ pub struct ExternalReviewItem {
 }
 
 /// All review activity on a PR — submitted reviews, inline review-thread
-/// comments (each thread's opener plus the human follow-up replies beneath it),
-/// and conversation comments — in one GraphQL round trip, each tagged with its
-/// author's bot flag. The frontend filters to AI reviewers and folds their
-/// findings into an AI re-review as soft context. The replies are harvested
-/// (up to 19 per thread) so a re-review sees a finding's own dispositioning — a
-/// triage "deferred by design" refutation under a bot's inline finding is that
-/// finding's context, and without it the re-review re-flags what a human already
-/// resolved.
+/// comments (each thread's opener plus the follow-up replies beneath it), and
+/// conversation comments — in one GraphQL round trip, each tagged with its
+/// author's bot flag. This harvest returns ALL replies; the frontend then filters:
+/// the external-context path drops every `reply` item, and the own-context path
+/// keeps only replies carrying GitDesktop's own footer anchor. So the replies that
+/// actually reach the re-review context are the ones GitDesktop itself posted
+/// (agent/MCP triage dispositions) — a teammate's manual GitHub reply is harvested
+/// here but does not survive into the prompt. That anchored triage "deferred by
+/// design" note under a bot's inline finding is that finding's context, and
+/// without it the re-review re-flags what GitDesktop already dispositioned.
 #[tauri::command]
 pub async fn gh_pr_external_reviews(
     repo_path: String,
@@ -3724,12 +3726,14 @@ pub async fn gh_pr_external_reviews(
 
     // Inline review-thread comments — the line-anchored findings (Copilot's and
     // CodeRabbit's specific suggestions). Node 0 of each thread is its opener (the
-    // reviewer's finding), mapped as `inline`. The human follow-up replies beneath
-    // it (nodes 1..) are mapped as `reply` items — a triage "deferred by design"
-    // refutation under a finding is that finding's own context, so an AI re-review
-    // must see it or it re-flags what a human already dispositioned. Replies inherit
-    // the thread's path/line/resolved/outdated and are pushed right after their
-    // opener so items stay thread-grouped in order.
+    // reviewer's finding), mapped as `inline`. The follow-up replies beneath it
+    // (nodes 1..) are mapped as `reply` items and ALL harvested here — the frontend
+    // narrows them: only replies GitDesktop itself posted (they carry the
+    // GitDesktop footer anchor) reach the re-review's own-comments context, so an
+    // anchored triage "deferred by design" note under a finding is that finding's
+    // context and the re-review won't re-flag what GitDesktop already dispositioned.
+    // Replies inherit the thread's path/line/resolved/outdated and are pushed right
+    // after their opener so items stay thread-grouped in order.
     if let Some(nodes) = pr
         .and_then(|p| p.pointer("/reviewThreads/nodes"))
         .and_then(|v| v.as_array())
