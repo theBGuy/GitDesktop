@@ -761,8 +761,14 @@ On any PR — GitHub or a GitLab MR — run a streamed **code review** or a focu
 using your chosen review model, and optionally post the result as a comment. A general
 review builds on **soft context** where it exists: your prior review of the PR, findings
 other AI reviewers (Copilot, CodeRabbit) left, and **GitDesktop's own earlier comments on
-the PR** — so on a re-review it treats a finding it already refuted or marked fixed as
-resolved instead of raising it cold. See *AI & automations* to pick the review model.
+the PR** — replies inside review threads included — so on a re-review it treats a finding
+it already refuted or marked fixed as resolved instead of raising it cold. When rounds
+accumulate past the prompt budget, the newest comments win, and the full history is
+**distilled into a compact decision ledger** (via your generation model) rather than cut
+off. See *AI & automations* to pick the review model. The **Review context** size there
+controls how much diff and prior-discussion context reviews send — **Auto** fits it to the
+reviewing model's context window (probing Ollama live), or pick Compact / Standard /
+Expanded.
 
 **Agentic review.** The panel's **Agentic review** toggle gives the reviewer read-only
 tools so that, instead of relying on the prompt's truncated summary, it pulls the **full PR

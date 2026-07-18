@@ -69,6 +69,11 @@ function isReviewerFinding(
   item: ExternalReviewItem,
   provider: string,
 ): boolean {
+  // Thread replies are scoped to own-context in v1; the external section stays
+  // opener-only. Note the GitLab asymmetry: GitLab replies arrive as
+  // `inline`/`comment` (never `reply`) and remain admitted for allowlisted bots
+  // below — unchanged, deliberate. Only the GitHub harvest emits `reply`.
+  if (item.kind === "reply") return false;
   if (!item.isBot || !item.body.trim()) return false;
   if (provider === "gitlab") return isReviewerBotLogin(item.author);
   // GitHub: `isBot` is server-verified, so reviewer-only surfaces (inline/review)
@@ -165,7 +170,9 @@ function formatExternalFindings(items: ExternalReviewItem[]): string {
     byReviewer.set(name, list);
   }
 
-  const order = { inline: 0, review: 1, comment: 2 } as const;
+  // `reply` never reaches here (filtered out of the external set upstream), but
+  // it's in the union, so it's mapped for typechecking + defense if one ever does.
+  const order = { inline: 0, review: 1, comment: 2, reply: 3 } as const;
   const blocks: string[] = [];
   for (const [reviewer, list] of byReviewer) {
     const sorted = [...list].sort((a, b) => order[a.kind] - order[b.kind]);

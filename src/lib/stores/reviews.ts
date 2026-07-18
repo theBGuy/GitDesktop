@@ -2,6 +2,7 @@ import { useCallback, useMemo } from "react";
 import { toast } from "sonner";
 import { create } from "zustand";
 import { cancelAgentReview, providerKind } from "@/lib/ai/agent";
+import { resolveBudgetProfile } from "@/lib/ai/context-budget";
 import {
   type ExternalContext,
   resolveExternalContext,
@@ -397,6 +398,7 @@ export async function startReview(
           target.kind,
           target.ref,
           context.provider,
+          { distill: true },
         ),
       ]);
     if (control.cancelled) return;
@@ -432,6 +434,13 @@ export async function startReview(
           provider: context.provider,
         })
       : undefined;
+    // Scale the prompt's character budgets to the reviewing model (per the
+    // user's Review-context knob) — best-effort, never throws, never blocks.
+    const budgetProfile = await resolveBudgetProfile(
+      ai,
+      (await loadSettings()).reviewContextSize,
+    );
+    if (control.cancelled) return;
     const { system, prompt, coverage } = buildReviewPrompt(
       {
         title: context.title,
@@ -446,6 +455,7 @@ export async function startReview(
           isBinary: f.isBinary,
         })),
         provider: context.provider,
+        budgetProfile,
         agentic,
         ...prior,
         ...own,

@@ -1,3 +1,5 @@
+import type { ContextBudgetProfile } from "./context-budget";
+
 export type AiProviderId =
   | "anthropic"
   | "openai"
@@ -132,14 +134,23 @@ export interface ReviewPromptInput {
   externalReviewers?: string[];
   /** Whether any external finding may be stale (made against an older commit). */
   externalStale?: boolean;
-  /** Pre-formatted markdown of GitDesktop's OWN prior comments on this PR — past
-   *  AI reviews and agent follow-ups (refutations / "fixed in `<sha>`" replies) —
-   *  so the model resolves what it already covered instead of re-raising it.
-   *  Soft context like `priorFindings`; absent when none. */
-  ownFindings?: string;
+  /** One formatted block per comment attributed to GitDesktop on this PR — agent
+   *  follow-ups (refutations / "fixed in `<sha>`" replies) and thread replies,
+   *  oldest first — so the model resolves what it already covered instead of
+   *  re-raising it. Our own posted AI review/audit bodies are excluded (redundant
+   *  with `priorFindings`). Soft context like `priorFindings`; absent when none. */
+  ownItems?: string[];
+  /** True when `ownItems` is a single machine-distilled decision ledger (the
+   *  over-budget own comments were compressed) rather than the raw per-comment
+   *  blocks — flips the own-section preamble to frame it as a compressed summary. */
+  ownDistilled?: boolean;
   /** Target host — swaps the change-request noun + markdown flavor in the review
    *  system prompt. Absent/`"github"` keeps the original GitHub wording. */
   provider?: PromptProvider;
+  /** Per-model scaled character budgets for this review's prompt. When absent,
+   *  the module-constant defaults apply, so the prompt is byte-for-byte identical
+   *  to before the profile support. Resolved via `resolveBudgetProfile`. */
+  budgetProfile?: ContextBudgetProfile;
   /** Present only for CLI repo-aware runs — what the review agent can actually do,
    *  so the prompt frames truncation honestly instead of "coverage is partial". */
   agentic?: {

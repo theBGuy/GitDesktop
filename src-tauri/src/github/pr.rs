@@ -3629,7 +3629,9 @@ fn reconstruct_pr_diff(files: &[GhPrFile]) -> String {
 #[serde(rename_all = "camelCase")]
 pub struct ExternalReviewItem {
     /// "review" (PR-level review body), "inline" (line-anchored review comment),
-    /// or "comment" (top-level conversation comment).
+    /// "reply" (a follow-up comment beneath an inline finding — e.g. a human triage
+    /// refutation, inheriting its thread's path/line), or "comment" (top-level
+    /// conversation comment).
     pub kind: String,
     /// The author's GitHub login (e.g. "coderabbitai", "copilot-pull-request-reviewer").
     pub author: String,
@@ -3653,9 +3655,14 @@ pub struct ExternalReviewItem {
 }
 
 /// All review activity on a PR — submitted reviews, inline review-thread
-/// comments, and conversation comments — in one GraphQL round trip, each tagged
-/// with its author's bot flag. The frontend filters to AI reviewers and folds
-/// their findings into an AI re-review as soft context.
+/// comments (each thread's opener plus the human follow-up replies beneath it),
+/// and conversation comments — in one GraphQL round trip, each tagged with its
+/// author's bot flag. The frontend filters to AI reviewers and folds their
+/// findings into an AI re-review as soft context. The replies are harvested
+/// (up to 19 per thread) so a re-review sees a finding's own dispositioning — a
+/// triage "deferred by design" refutation under a bot's inline finding is that
+/// finding's context, and without it the re-review re-flags what a human already
+/// resolved.
 #[tauri::command]
 pub async fn gh_pr_external_reviews(
     repo_path: String,
@@ -3668,7 +3675,7 @@ pub async fn gh_pr_external_reviews(
 
     // `number` is a u64 (digits only), so it's safe to embed directly.
     let query = format!(
-        r#"query{{ repository(owner:"{owner}", name:"{name}"){{ pullRequest(number:{number}){{ reviews(first:50){{ nodes{{ author{{ login __typename }} body state submittedAt commit{{ oid }} }} }} reviewThreads(first:100){{ nodes{{ isResolved isOutdated path line originalLine comments(first:1){{ nodes{{ author{{ login __typename }} body createdAt commit{{ oid }} originalCommit{{ oid }} }} }} }} }} comments(first:100){{ nodes{{ author{{ login __typename }} body createdAt }} }} }} }} }}"#
+        r#"query{{ repository(owner:"{owner}", name:"{name}"){{ pullRequest(number:{number}){{ reviews(first:50){{ nodes{{ author{{ login __typename }} body state submittedAt commit{{ oid }} }} }} reviewThreads(first:100){{ nodes{{ isResolved isOutdated path line originalLine comments(first:20){{ nodes{{ author{{ login __typename }} body createdAt commit{{ oid }} originalCommit{{ oid }} }} }} }} }} comments(first:100){{ nodes{{ author{{ login __typename }} body createdAt }} }} }} }} }}"#
     );
     let out = run_gh(
         Some(&repo_path),
@@ -3716,20 +3723,24 @@ pub async fn gh_pr_external_reviews(
     }
 
     // Inline review-thread comments — the line-anchored findings (Copilot's and
-    // CodeRabbit's specific suggestions). Take each thread's first comment (its
-    // opener = the reviewer), not the human replies beneath it.
+    // CodeRabbit's specific suggestions). Node 0 of each thread is its opener (the
+    // reviewer's finding), mapped as `inline`. The human follow-up replies beneath
+    // it (nodes 1..) are mapped as `reply` items — a triage "deferred by design"
+    // refutation under a finding is that finding's own context, so an AI re-review
+    // must see it or it re-flags what a human already dispositioned. Replies inherit
+    // the thread's path/line/resolved/outdated and are pushed right after their
+    // opener so items stay thread-grouped in order.
     if let Some(nodes) = pr
         .and_then(|p| p.pointer("/reviewThreads/nodes"))
         .and_then(|v| v.as_array())
     {
         for t in nodes {
-            let Some(c) = t.pointer("/comments/nodes/0") else {
+            let Some(comments) = t
+                .pointer("/comments/nodes")
+                .and_then(|v| v.as_array())
+            else {
                 continue;
             };
-            let body = str_at(c, "/body");
-            if body.trim().is_empty() {
-                continue;
-            }
             // Outdated threads carry `"line": null` (key present, value null), and
             // `pointer` returns `Some(Null)` for that — so convert to `u64` BEFORE
             // the `originalLine` fallback, else a null `line` swallows the fallback
@@ -3739,33 +3750,50 @@ pub async fn gh_pr_external_reviews(
                 .and_then(|x| x.as_u64())
                 .or_else(|| t.pointer("/originalLine").and_then(|x| x.as_u64()))
                 .unwrap_or(0) as u32;
-            let commit_sha = {
-                let latest = str_at(c, "/commit/oid");
-                if latest.is_empty() {
-                    str_at(c, "/originalCommit/oid")
-                } else {
-                    latest
+            let path = str_at(t, "/path");
+            let is_resolved = t
+                .pointer("/isResolved")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false);
+            let is_outdated = t
+                .pointer("/isOutdated")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false);
+            // The first non-empty comment is the thread's opener (`inline`); the
+            // rest are `reply`. Keying on the raw index would tag replies "reply"
+            // with no `inline` opener when the opener's body is empty — so flip
+            // `saw_opener` only after the first pushed item, promoting the first
+            // real comment.
+            let mut saw_opener = false;
+            for c in comments {
+                let body = str_at(c, "/body");
+                if body.trim().is_empty() {
+                    continue;
                 }
-            };
-            items.push(ExternalReviewItem {
-                kind: "inline".into(),
-                author: str_at(c, "/author/login"),
-                is_bot: is_bot(c, "/author/__typename"),
-                body,
-                path: str_at(t, "/path"),
-                line,
-                commit_sha,
-                state: String::new(),
-                is_resolved: t
-                    .pointer("/isResolved")
-                    .and_then(|x| x.as_bool())
-                    .unwrap_or(false),
-                is_outdated: t
-                    .pointer("/isOutdated")
-                    .and_then(|x| x.as_bool())
-                    .unwrap_or(false),
-                created_at: str_at(c, "/createdAt"),
-            });
+                let commit_sha = {
+                    let latest = str_at(c, "/commit/oid");
+                    if latest.is_empty() {
+                        str_at(c, "/originalCommit/oid")
+                    } else {
+                        latest
+                    }
+                };
+                let kind = if saw_opener { "reply" } else { "inline" };
+                saw_opener = true;
+                items.push(ExternalReviewItem {
+                    kind: kind.into(),
+                    author: str_at(c, "/author/login"),
+                    is_bot: is_bot(c, "/author/__typename"),
+                    body,
+                    path: path.clone(),
+                    line,
+                    commit_sha,
+                    state: String::new(),
+                    is_resolved,
+                    is_outdated,
+                    created_at: str_at(c, "/createdAt"),
+                });
+            }
         }
     }
 

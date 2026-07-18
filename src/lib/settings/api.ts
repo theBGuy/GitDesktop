@@ -1,4 +1,5 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
+import type { ReviewContextSize } from "@/lib/ai/context-budget";
 import type { AiSettings } from "@/lib/ai/types";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import { storeName } from "@/lib/test-mode";
@@ -177,6 +178,10 @@ export interface AppSettings {
   ai: AiSettings;
   /** Provider/model for AI PR review (independent of the commit model). */
   reviewAi: AiSettings;
+  /** How much diff + prior-discussion context AI reviews send, scaled to the
+   *  reviewing model. `"auto"` fits the model's context window (probing Ollama
+   *  live); the others force a fixed multiple of the default budget. */
+  reviewContextSize?: ReviewContextSize;
   /** Hide every AI surface (commit/PR helpers, review panel, AI settings).
    *  Provider config and API keys are kept, just not shown. */
   hideAi: boolean;
@@ -282,6 +287,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     ollamaBaseUrl: "http://localhost:11434",
     openaiCompatibleBaseUrl: "https://ai-gateway.vercel.sh/v1",
   },
+  reviewContextSize: "auto",
   hideAi: false,
   notifications: {
     automations: true,

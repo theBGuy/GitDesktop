@@ -1,6 +1,7 @@
 import { toast } from "sonner";
 import { createAiClient } from "@/lib/ai/client";
 import { buildAiCommentBody } from "@/lib/ai/comment-branding";
+import { resolveBudgetProfile } from "@/lib/ai/context-budget";
 import {
   type ExternalContext,
   resolveExternalContext,
@@ -449,9 +450,19 @@ async function generateReviewText(
           "remote",
           targetRef(event),
           provider,
+          { distill: true, signal },
         ),
       ])
     : [{}, {}];
+  if (signal.aborted) return null;
+
+  // Scale the prompt's character budgets to the reviewing model (per the user's
+  // Review-context knob) — best-effort, never throws, never blocks the review.
+  const appSettings = await loadSettings();
+  const budgetProfile = await resolveBudgetProfile(
+    ai,
+    appSettings.reviewContextSize,
+  );
   if (signal.aborted) return null;
 
   const { system, prompt } = buildReviewPrompt(
@@ -468,6 +479,7 @@ async function generateReviewText(
         isBinary: f.isBinary,
       })),
       provider,
+      budgetProfile,
       ...prior,
       ...own,
       ...external,

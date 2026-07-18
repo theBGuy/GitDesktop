@@ -15,6 +15,13 @@
 //! constraints, low-value-file filtering, per-file cap, and truncation-marker copy).
 //! When either side changes a prompt or the budgeting, update the other.
 //!
+//! Budget note: the TS review path now SCALES `DIFF_CHAR_BUDGET`/`PER_FILE_CAP`
+//! (and the review-extras caps) per reviewing model at review time — see
+//! src/lib/ai/context-budget.ts. These MCP recipe tools deliberately keep the
+//! DEFAULT profile constants (no model is known here — the recipe just assembles
+//! context for the calling agent), so `DIFF_CHAR_BUDGET`/`PER_FILE_CAP` below
+//! stay the fixed defaults and this mirror is unaffected by that scaling.
+//!
 //! Remaining divergence from the TS path: `budgetDiff` returns the list of
 //! omitted-file names and the TS marker enumerates them (`N file(s) omitted: …`); the
 //! recipe markers here don't carry those names, so the marker copy omits that clause
@@ -217,6 +224,10 @@ fn strip_binary_sections(diff_text: &str) -> String {
 // builders run `budgetDiff(stripBinarySections(diff))`; the recipe tools mirror
 // that so a large diff (e.g. a regenerated lockfile) is filtered the same way
 // before it reaches the calling agent, instead of shipping the raw diff.
+//
+// The TS review path scales these budgets by a per-model profile at review time
+// (src/lib/ai/context-budget.ts); these recipe tools deliberately keep the
+// DEFAULT profile constants below, since no reviewing model is known here.
 
 /// Character budget for the diff inside the prompt — mirrors `DIFF_CHAR_BUDGET`
 /// in truncate.ts. Below this the diff passes through byte-identical to the raw

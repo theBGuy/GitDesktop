@@ -1656,7 +1656,11 @@ export interface ForgeUserRef {
  *  folds in from third-party AI reviewers. From `forge_pr_external_reviews`
  *  (GitHub reviews / GitLab MR discussions; Bitbucket returns none). */
 export interface ExternalReviewItem {
-  kind: "review" | "inline" | "comment";
+  /** `review` = a submitted review body, `inline` = a file:line review comment,
+   *  `comment` = a conversation comment, `reply` = a follow-up comment inside a
+   *  review thread (emitted by the GitHub harvest for thread replies; GitLab
+   *  continues to emit replies as `inline`/`comment`). */
+  kind: "review" | "inline" | "comment" | "reply";
   author: string;
   isBot: boolean;
   body: string;
