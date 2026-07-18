@@ -210,6 +210,7 @@ export async function resolveOwnCommentsContext(
       const ledger = await distillOwnComments({
         blocks: ownItems,
         signal: opts.signal,
+        repoPath,
       });
       if (ledger?.trim()) {
         const capped = capLedger(ledger, budget);

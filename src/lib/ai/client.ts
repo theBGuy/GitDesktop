@@ -186,6 +186,27 @@ const AGENTIC_MAX_STEPS = 24;
  */
 export async function runAgenticStream(opts: AgenticStreamOpts): Promise<void> {
   const model = await resolveModel(opts.settings);
+
+  // On local Ollama, pin `num_ctx` to the FULL probed architectural window — the
+  // deliberate REVERSAL of the non-agentic stream's request-sized rationale. A
+  // tool loop grows unboundedly: tool results accumulate across up to
+  // AGENTIC_MAX_STEPS, so there's no fixed prompt size to size the window against.
+  // For a run the user explicitly opted into (Agentic review), a visible
+  // allocation failure beats silently truncating the very tool results the mode
+  // exists to fetch. Only the self-hosted `ollama` provider (never ollama-cloud —
+  // gated on the exact id); probe failure → omit providerOptions (server default).
+  let agenticProviderOptions:
+    | { ollama: { options: { num_ctx: number } } }
+    | undefined;
+  if (opts.settings.provider === "ollama") {
+    const windowTokens = await probeOllamaWindowTokens(opts.settings);
+    if (windowTokens && windowTokens > 0) {
+      agenticProviderOptions = {
+        ollama: { options: { num_ctx: windowTokens } },
+      };
+    }
+  }
+
   let result: ReturnType<typeof streamText>;
   try {
     result = streamText({
@@ -195,6 +216,9 @@ export async function runAgenticStream(opts: AgenticStreamOpts): Promise<void> {
       tools: opts.tools,
       abortSignal: opts.abortSignal,
       stopWhen: stepCountIs(AGENTIC_MAX_STEPS),
+      ...(agenticProviderOptions
+        ? { providerOptions: agenticProviderOptions }
+        : {}),
     });
   } catch (e) {
     throw new Error(annotateToolError(errorMessage(e)));

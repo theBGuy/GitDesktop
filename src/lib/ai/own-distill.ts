@@ -20,14 +20,18 @@ const DISTILL_SYSTEM =
  * Distills GitDesktop's own prior PR comment blocks (agent follow-ups, thread
  * replies, "fixed in `<sha>`" notes) into a compact per-finding decision ledger,
  * using the app's GENERATION model (`settings.ai`, NOT the review model) so the
- * cost lands on the cheap generation config and every provider (including the
- * CLI agents) works through the same client. Returns `null` on empty/whitespace
- * output; callers wrap the whole attempt in try/catch and fall back to the raw
- * recency-first blocks, so distillation can never fail or delay-fail a review.
+ * cost lands on the cheap generation config. `repoPath` is required so the CLI
+ * agent providers (claude/codex/copilot/opencode) work through the same client —
+ * their `stream` throws without an open repository, so omitting it would silently
+ * disable distillation whenever the generation model is a CLI. Returns `null` on
+ * empty/whitespace output; callers wrap the whole attempt in try/catch and fall
+ * back to the raw recency-first blocks, so distillation can never fail or
+ * delay-fail a review.
  */
 export async function distillOwnComments(input: {
   blocks: string[];
   signal?: AbortSignal;
+  repoPath: string;
 }): Promise<string | null> {
   const settings = await loadSettings();
   const client = await createAiClient(settings.ai);
@@ -66,6 +70,7 @@ export async function distillOwnComments(input: {
     system: DISTILL_SYSTEM,
     prompt: body,
     abortSignal: signal,
+    repoPath: input.repoPath,
   })) {
     text += chunk;
   }
