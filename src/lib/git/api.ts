@@ -705,7 +705,14 @@ export const gitPush = (
   repoPath: string,
   setUpstream: boolean,
   force = false,
-) => invoke<void>("git_push", { repoPath, setUpstream, force });
+  branch?: string,
+) =>
+  invoke<void>("git_push", {
+    repoPath,
+    setUpstream,
+    force,
+    branch: branch ?? null,
+  });
 
 export const gitRemotes = (repoPath: string) =>
   invoke<string[]>("git_remotes", { repoPath });

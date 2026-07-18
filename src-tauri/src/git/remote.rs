@@ -447,8 +447,9 @@ pub async fn git_push(
     repo_path: String,
     set_upstream: bool,
     force: bool,
+    branch: Option<String>,
 ) -> AppResult<()> {
-    git_push_core(&state, repo_path, set_upstream, force).await
+    git_push_core(&state, repo_path, set_upstream, force, branch).await
 }
 
 pub(crate) async fn git_push_core(
@@ -456,24 +457,128 @@ pub(crate) async fn git_push_core(
     repo_path: String,
     set_upstream: bool,
     force: bool,
+    branch: Option<String>,
 ) -> AppResult<()> {
-    let mut args = vec!["push"];
-    if force {
-        // refuses to clobber remote work that arrived after our last fetch
-        args.push("--force-with-lease");
-    }
-    if set_upstream {
-        args.extend(["-u", "origin", "HEAD"]);
-    }
+    // Build the git args as owned Strings — a named-branch push interpolates the
+    // branch/refspec, which can't borrow from a temporary. `None` reproduces the
+    // original HEAD-relative args exactly (bare `push`, `--force-with-lease` on
+    // force, `-u origin HEAD` on set_upstream).
+    let args: Vec<String> = match &branch {
+        None => {
+            let mut a = vec!["push".to_string()];
+            if force {
+                // refuses to clobber remote work that arrived after our last fetch
+                a.push("--force-with-lease".to_string());
+            }
+            if set_upstream {
+                a.extend(["-u", "origin", "HEAD"].map(str::to_string));
+            }
+            a
+        }
+        Some(b) => {
+            crate::git::branches::validate_ref_name(b)?;
+            // Resolve b's tracking state with one read-only call: its upstream's
+            // short name (e.g. `origin/feature`), the upstream's remote name, and
+            // git's `%(upstream:track)` (which carries `[gone]` when the tracked
+            // ref was deleted). Empty stdout means no such local branch.
+            let out = run_git(
+                Some(&repo_path),
+                &[
+                    "for-each-ref",
+                    &format!("refs/heads/{b}"),
+                    "--format=%(upstream:short)%00%(upstream:remotename)%00%(upstream:track)",
+                ],
+                DEFAULT_TIMEOUT,
+            )
+            .await?;
+            let text = out.stdout_lossy();
+            let line = text.lines().next().unwrap_or("");
+            if line.is_empty() {
+                return Err(AppError::InvalidArgument(format!("no such branch: {b}")));
+            }
+            let mut parts = line.split('\0');
+            let upstream_short = parts.next().unwrap_or("");
+            let remotename = parts.next().unwrap_or("");
+            let track = parts.next().unwrap_or("");
+            // Mirror branches.rs's gone detection: `[gone]` in %(upstream:track).
+            let gone = track.contains("[gone]");
+            build_push_args(b, upstream_short, remotename, gone, set_upstream, force)
+        }
+    };
     let cred = crate::forge::credential_config_for_remote(&repo_path, "origin").await?;
-    run_git_mutating_with_creds(state, &repo_path, &cred, &args, NETWORK_TIMEOUT).await?;
+    run_git_mutating_with_creds(
+        state,
+        &repo_path,
+        &cred,
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
+        NETWORK_TIMEOUT,
+    )
+    .await?;
     Ok(())
+}
+
+/// Decide the `git push` args for pushing a NAMED local branch `branch` to
+/// origin, from its resolved tracking state. Pure — no git calls — so the
+/// decision table is unit-testable.
+///
+/// - `upstream_short`: `%(upstream:short)` (e.g. `origin/feat`), empty when the
+///   branch is untracked.
+/// - `remotename`: `%(upstream:remotename)` (the tracked upstream's remote).
+/// - `gone`: the tracked ref was deleted (`[gone]`).
+///
+/// Rules (origin-centric v1 — we only ever push to origin):
+/// - untracked / gone / `set_upstream` → `-u origin <branch>` (publish + track).
+/// - tracked on `origin`: strip `origin/` off `upstream_short` to get the remote
+///   name `up`; `push origin <branch>` when `up == branch`, else the explicit
+///   `push origin <branch>:<up>` refspec (plain `push origin <branch>` would
+///   advance the WRONG remote ref when the names differ).
+/// - tracked on a NON-origin remote (e.g. a fork's `upstream/main`): plain
+///   `push origin <branch>` with NO `-u` — publishes/advances `origin/<branch>`
+///   and leaves the existing tracking config untouched (never retrack).
+///
+/// `force` prepends `--force-with-lease` before the refspec in every arm.
+fn build_push_args(
+    branch: &str,
+    upstream_short: &str,
+    remotename: &str,
+    gone: bool,
+    set_upstream: bool,
+    force: bool,
+) -> Vec<String> {
+    let mut args = vec!["push".to_string()];
+    if force {
+        args.push("--force-with-lease".to_string());
+    }
+    let untracked = upstream_short.is_empty();
+    if untracked || gone || set_upstream {
+        // Publish + track: first push of a branch (or a resurrected gone one), or
+        // an explicit retrack request.
+        args.extend(["-u", "origin", branch].map(str::to_string));
+    } else if remotename == "origin" {
+        // Tracked on origin. Strip the `origin/` prefix to recover the remote
+        // branch name; when it matches the local name a bare push suffices,
+        // otherwise an explicit refspec targets the right remote ref.
+        let up = upstream_short
+            .strip_prefix("origin/")
+            .unwrap_or(upstream_short);
+        if up == branch {
+            args.extend(["origin", branch].map(str::to_string));
+        } else {
+            args.push("origin".to_string());
+            args.push(format!("{branch}:{up}"));
+        }
+    } else {
+        // Tracked on a non-origin remote — plain push to origin, no retrack.
+        args.extend(["origin", branch].map(str::to_string));
+    }
+    args
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        cache_get, cache_invalidate, cache_put, git_remote_remove_core, is_auth_class_failure,
+        build_push_args, cache_get, cache_invalidate, cache_put, git_remote_remove_core,
+        is_auth_class_failure,
     };
     use crate::error::AppError;
     use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
@@ -576,6 +681,75 @@ mod tests {
         assert!(!is_auth_class_failure(
             "ssh: Could not resolve hostname github.com"
         ));
+    }
+
+    // --- Pure arg-building for a named-branch push. ---
+
+    #[test]
+    fn push_untracked_publishes_with_upstream() {
+        // Empty upstream → first-time publish + track.
+        assert_eq!(
+            build_push_args("feature", "", "", false, false, false),
+            vec!["push", "-u", "origin", "feature"]
+        );
+    }
+
+    #[test]
+    fn push_gone_upstream_publishes_with_upstream() {
+        // A deleted upstream ref (still named by %(upstream:short)) republishes.
+        assert_eq!(
+            build_push_args("feature", "origin/feature", "origin", true, false, false),
+            vec!["push", "-u", "origin", "feature"]
+        );
+    }
+
+    #[test]
+    fn push_tracked_same_name_plain_push() {
+        assert_eq!(
+            build_push_args("feature", "origin/feature", "origin", false, false, false),
+            vec!["push", "origin", "feature"]
+        );
+    }
+
+    #[test]
+    fn push_tracked_different_name_uses_refspec() {
+        // Local `feature` tracks `origin/feat` → explicit refspec so we advance
+        // the right remote ref, not `origin/feature`.
+        assert_eq!(
+            build_push_args("feature", "origin/feat", "origin", false, false, false),
+            vec!["push", "origin", "feature:feat"]
+        );
+    }
+
+    #[test]
+    fn push_tracked_non_origin_plain_push_no_upstream() {
+        // Tracks a fork's `upstream/main` → publish to origin, never retrack.
+        assert_eq!(
+            build_push_args("main", "upstream/main", "upstream", false, false, false),
+            vec!["push", "origin", "main"]
+        );
+    }
+
+    #[test]
+    fn push_set_upstream_forces_upstream_form_even_when_tracked() {
+        // An explicit set_upstream request retracks even a tracked branch.
+        assert_eq!(
+            build_push_args("feature", "origin/feature", "origin", false, true, false),
+            vec!["push", "-u", "origin", "feature"]
+        );
+    }
+
+    #[test]
+    fn push_force_flag_precedes_refspec_args() {
+        // --force-with-lease sits right after `push`, before the refspec.
+        assert_eq!(
+            build_push_args("feature", "origin/feat", "origin", false, false, true),
+            vec!["push", "--force-with-lease", "origin", "feature:feat"]
+        );
+        assert_eq!(
+            build_push_args("feature", "", "", false, false, true),
+            vec!["push", "--force-with-lease", "-u", "origin", "feature"]
+        );
     }
 
     // --- Real-repo tests for git_remote_remove (temp_dir, git on PATH). ---

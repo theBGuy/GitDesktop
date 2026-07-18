@@ -98,6 +98,10 @@ struct PushArgs {
     /// first time. Defaults to false.
     #[serde(default)]
     set_upstream: bool,
+    /// Local branch to push instead of the current one (pushed by name — no
+    /// checkout, no working-tree changes; an untracked branch is published with
+    /// `-u origin <branch>`). Defaults to the current branch.
+    branch: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -385,10 +389,11 @@ impl GitDesktopMcp {
     }
 
     #[tool(
-        description = "Push the current branch to its remote in the bound repository (uses git's \
-                       native credential flow). With `set_upstream`, sets upstream to \
-                       origin/HEAD. Never force-pushes — use force_push (destructive) for that. \
-                       Requires --allow-git-write.",
+        description = "Push the current branch (default) or a named local `branch` to origin in \
+                       the bound repository — pushing a named branch never switches to it or \
+                       touches the working tree; an untracked branch is published with `-u`. \
+                       Uses git's native credential flow. Never force-pushes — use force_push \
+                       (destructive) for that. Requires --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn push(
@@ -396,9 +401,22 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<PushArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_git_write()?;
-        crate::git::remote::git_push_core(&self.state, self.repo.clone(), args.set_upstream, false)
-            .await
-            .map_err(app_err)?;
+        if let Some(b) = &args.branch {
+            ensure_not_flag(b, "branch name")?;
+            // Protect agent-session branches: they're filtered from every UI
+            // surface, so pushing one would publish an invisible branch and
+            // could break session Resume semantics.
+            ensure_not_session_branch(b)?;
+        }
+        crate::git::remote::git_push_core(
+            &self.state,
+            self.repo.clone(),
+            args.set_upstream,
+            false,
+            args.branch.clone(),
+        )
+        .await
+        .map_err(app_err)?;
         ok_text("pushed")
     }
 
@@ -740,7 +758,7 @@ impl GitDesktopMcp {
     )]
     async fn force_push(&self) -> Result<CallToolResult, McpError> {
         self.ensure_destructive()?;
-        crate::git::remote::git_push_core(&self.state, self.repo.clone(), false, true)
+        crate::git::remote::git_push_core(&self.state, self.repo.clone(), false, true, None)
             .await
             .map_err(app_err)?;
         ok_text("force-pushed (with lease)")
@@ -884,7 +902,8 @@ mod tests {
         );
         assert_gated!(
             h.push(Parameters(PushArgs {
-                set_upstream: false
+                set_upstream: false,
+                branch: None
             })),
             "--allow-git-write"
         );

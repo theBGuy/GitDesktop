@@ -375,6 +375,10 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   is the "just merged a PR — bring the default branch current before I switch back" flow;
   the default branch's row shows how far behind its upstream it is after a fetch, and
   *Update default branch from its remote* is available from the command palette too.
+- **Push a branch without switching to it** — the outbound counterpart: a branch ahead
+  of its remote offers **Push to _origin/…_** in its right-click menu, and an untracked
+  branch offers **Publish branch**. Neither checks the branch out or touches your working
+  tree, so it works even for a branch checked out in another worktree.
 - The **Remote** section lists branches on your remotes you haven't checked out locally
   yet — click one to check it out (creating a local tracking branch), or right-click to
   **Delete on _origin_…**, a server-side delete that removes the branch from the remote for

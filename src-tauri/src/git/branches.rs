@@ -7,7 +7,7 @@ use crate::git::runner::{
 use crate::git::types::{Branch, BranchDivergence, RemoteBranch};
 use crate::state::AppState;
 
-fn validate_ref_name(name: &str) -> AppResult<()> {
+pub(crate) fn validate_ref_name(name: &str) -> AppResult<()> {
     if name.is_empty() || name.starts_with('-') {
         return Err(AppError::InvalidArgument(format!(
             "invalid branch name: {name}"
