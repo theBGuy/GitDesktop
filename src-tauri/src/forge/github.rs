@@ -821,10 +821,15 @@ async fn gh_authenticated(host: &str) -> bool {
         }
         // A spawn/timeout hiccup, NOT absence: `resolve_named` already proved gh
         // exists, so an Err here is transient. Optimistically inject (uncached) —
-        // with run_git_mutating_with_creds's ambient fallback in place this is safe
-        // both ways: if gh is genuinely signed out its helper returns nothing and
-        // the fallback restores ambient, whereas a pessimistic `false` here would
-        // silently reopen the stale-keychain bug for that op.
+        // on the NETWORK path run_git_mutating_with_creds's ambient fallback makes
+        // this safe both ways: if gh is genuinely signed out its helper returns
+        // nothing and the fallback restores ambient, whereas a pessimistic `false`
+        // would silently reopen the stale-keychain bug for that op. The CLONE path
+        // (repo.rs extra_config) takes this optimistic inject UNPROTECTED — a
+        // signed-out gh + a transient probe error there severs ambient and the
+        // clone hard-fails; accepted: it needs the spawn to fail right after
+        // resolve_named succeeded, and it self-heals on re-clone (a clean probe
+        // then returns false → no injection → ambient runs).
         Err(_) => true,
     }
 }
