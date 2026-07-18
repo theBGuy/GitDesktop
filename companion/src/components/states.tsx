@@ -154,19 +154,33 @@ export function ErrorState({
   );
 }
 
-/** A thin banner shown ABOVE content (in layout flow, not overlaid) when the
- *  server is unreachable but stale data is still on screen. */
-export function UnreachableBanner({ onRetry }: { onRetry: () => void }) {
+/**
+ * A slim inline banner rendered ABOVE a body's content (in layout flow, never an
+ * overlay) when that body's OWN query has errored but still holds its last
+ * successful data. Calm warning treatment — the data below is real, just stale.
+ *
+ * ROUND-4 FINDING (PR #75, doubled message + lost snapshot): the earlier design
+ * full-screened `ErrorState` from each body on `isError` AND rendered a separate
+ * shell-level unreachable banner (gated on the status query's data) at the same
+ * time — so on the Status tab a mid-session drop showed the "can't reach" message
+ * TWICE and discarded the last-known snapshot the banner was meant to preserve;
+ * meanwhile PRs/CI showed no banner at all (it derived from the status query, not
+ * theirs). The fix: each body owns its degraded presentation keyed on its own
+ * query — render stale data with THIS banner above it, and only full-screen
+ * `ErrorState` when there's no data to show. Do not reintroduce a shell-level
+ * banner.
+ */
+export function StaleBanner({ onRetry }: { onRetry: () => void }) {
   return (
     <div className="flex items-center justify-between gap-3 border-b border-border bg-warning/15 px-4 py-2 text-sm">
       <span className="flex items-center gap-2 text-foreground">
         <PlugsIcon size={16} className="text-warning" />
-        Can't reach your desktop
+        Can't reach your desktop — showing the last known state.
       </span>
       <button
         type="button"
         onClick={onRetry}
-        className="inline-flex min-h-9 items-center gap-1 rounded px-2 py-1 font-medium text-primary"
+        className="inline-flex min-h-9 shrink-0 items-center gap-1 rounded px-2 py-1 font-medium text-primary"
       >
         <ArrowClockwiseIcon size={14} weight="bold" />
         Retry

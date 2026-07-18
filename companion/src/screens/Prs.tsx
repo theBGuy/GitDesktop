@@ -1,7 +1,12 @@
 import { ArrowLeftIcon, CaretRightIcon } from "@phosphor-icons/react";
 import type { PrInfo } from "@/lib/git/types";
 import { PrStateChip } from "../components/chips";
-import { EmptyState, ErrorState, SkeletonRows } from "../components/states";
+import {
+  EmptyState,
+  ErrorState,
+  SkeletonRows,
+  StaleBanner,
+} from "../components/states";
 import { timeAgo } from "../lib/format";
 import { usePr, usePrs } from "../lib/queries";
 import { navigate } from "../lib/router";
@@ -9,40 +14,48 @@ import { useRovingList } from "../lib/use-roving-list";
 
 /** The PR list. `active` gates polling. */
 export function PrsBody({ active }: { active: boolean }) {
-  const { data, isPending, isError, error, refetch } = usePrs(active);
+  const { data, isError, error, refetch } = usePrs(active);
   const { register, onKeyDown } = useRovingList();
 
-  if (isError) return <ErrorState error={error} onRetry={() => refetch()} />;
-  if (isPending || !data) return <SkeletonRows />;
-  if (data.length === 0) {
-    return (
-      <EmptyState
-        title="No open pull requests."
-        hint="Open PRs on this repository will show up here."
-      />
-    );
+  // Prefer stale data: keep the last-known list on screen even on error, with a
+  // StaleBanner above it. Full-screen ErrorState only when there's nothing to
+  // show; skeleton only while the first fetch is pending. (401/409 route through
+  // ErrorState/the shell exactly as before.)
+  if (!data) {
+    if (isError) return <ErrorState error={error} onRetry={() => refetch()} />;
+    return <SkeletonRows />;
   }
 
   return (
-    <ul className="flex flex-col divide-y divide-border">
-      {data.map((pr, i) => (
-        <li key={pr.number}>
-          <button
-            type="button"
-            ref={register(i)}
-            onKeyDown={onKeyDown}
-            onClick={() => navigate(`#prs/${pr.number}`)}
-            className="flex w-full min-h-14 items-center gap-3 px-4 py-3 text-left"
-          >
-            <PrRow pr={pr} />
-            <CaretRightIcon
-              size={16}
-              className="shrink-0 text-muted-foreground"
-            />
-          </button>
-        </li>
-      ))}
-    </ul>
+    <div className="flex flex-col">
+      {isError ? <StaleBanner onRetry={() => refetch()} /> : null}
+      {data.length === 0 ? (
+        <EmptyState
+          title="No open pull requests."
+          hint="Open PRs on this repository will show up here."
+        />
+      ) : (
+        <ul className="flex flex-col divide-y divide-border">
+          {data.map((pr, i) => (
+            <li key={pr.number}>
+              <button
+                type="button"
+                ref={register(i)}
+                onKeyDown={onKeyDown}
+                onClick={() => navigate(`#prs/${pr.number}`)}
+                className="flex w-full min-h-14 items-center gap-3 px-4 py-3 text-left"
+              >
+                <PrRow pr={pr} />
+                <CaretRightIcon
+                  size={16}
+                  className="shrink-0 text-muted-foreground"
+                />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 

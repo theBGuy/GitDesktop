@@ -5,7 +5,12 @@ import {
 } from "@phosphor-icons/react";
 import type { WorkflowRun } from "@/lib/github/actions";
 import { CiStatusChip } from "../components/chips";
-import { EmptyState, ErrorState, SkeletonRows } from "../components/states";
+import {
+  EmptyState,
+  ErrorState,
+  SkeletonRows,
+  StaleBanner,
+} from "../components/states";
 import { timeAgo } from "../lib/format";
 import { useCiRun, useCiRuns } from "../lib/queries";
 import { navigate } from "../lib/router";
@@ -13,40 +18,47 @@ import { useRovingList } from "../lib/use-roving-list";
 
 /** The CI run list. `active` gates polling. */
 export function CiBody({ active }: { active: boolean }) {
-  const { data, isPending, isError, error, refetch } = useCiRuns(active);
+  const { data, isError, error, refetch } = useCiRuns(active);
   const { register, onKeyDown } = useRovingList();
 
-  if (isError) return <ErrorState error={error} onRetry={() => refetch()} />;
-  if (isPending || !data) return <SkeletonRows />;
-  if (data.length === 0) {
-    return (
-      <EmptyState
-        title="No CI runs."
-        hint="Workflow runs for this repository will show up here."
-      />
-    );
+  // Prefer stale data: keep the last-known runs on screen even on error, with a
+  // StaleBanner above. Full-screen ErrorState only when there's nothing to show;
+  // skeleton only while the first fetch is pending. (401/409 unchanged.)
+  if (!data) {
+    if (isError) return <ErrorState error={error} onRetry={() => refetch()} />;
+    return <SkeletonRows />;
   }
 
   return (
-    <ul className="flex flex-col divide-y divide-border">
-      {data.map((run, i) => (
-        <li key={run.id}>
-          <button
-            type="button"
-            ref={register(i)}
-            onKeyDown={onKeyDown}
-            onClick={() => navigate(`#ci/${run.id}`)}
-            className="flex w-full min-h-14 items-center gap-3 px-4 py-3 text-left"
-          >
-            <CiRow run={run} />
-            <CaretRightIcon
-              size={16}
-              className="shrink-0 text-muted-foreground"
-            />
-          </button>
-        </li>
-      ))}
-    </ul>
+    <div className="flex flex-col">
+      {isError ? <StaleBanner onRetry={() => refetch()} /> : null}
+      {data.length === 0 ? (
+        <EmptyState
+          title="No CI runs."
+          hint="Workflow runs for this repository will show up here."
+        />
+      ) : (
+        <ul className="flex flex-col divide-y divide-border">
+          {data.map((run, i) => (
+            <li key={run.id}>
+              <button
+                type="button"
+                ref={register(i)}
+                onKeyDown={onKeyDown}
+                onClick={() => navigate(`#ci/${run.id}`)}
+                className="flex w-full min-h-14 items-center gap-3 px-4 py-3 text-left"
+              >
+                <CiRow run={run} />
+                <CaretRightIcon
+                  size={16}
+                  className="shrink-0 text-muted-foreground"
+                />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 

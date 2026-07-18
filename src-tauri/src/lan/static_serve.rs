@@ -44,10 +44,11 @@ use rust_embed::RustEmbed;
 struct Companion;
 
 /// The page Content-Security-Policy stamped on served HTML/asset responses. Locks
-/// scripts/styles to self, allows `data:` images and a `ws:` connect-src (the
-/// slice-3 live monitor uses a WebSocket), and denies framing / external base &
-/// form targets. Included now so the slice-3 socket works without a later CSP edit.
-pub const PAGE_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' ws:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+/// scripts/styles to self, allows `data:` images, and denies framing / external
+/// base & form targets. `connect-src 'self'` covers same-origin fetch, SSE, AND
+/// same-origin WebSockets in modern browsers — a bare `ws:` scheme-source would
+/// permit sockets to ANY host, so it is deliberately absent.
+pub const PAGE_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 
 /// The 503 body shown when the companion bundle hasn't been built (CI, or a dev who
 /// skipped `pnpm build:companion`). Carries the literal `companion bundle not built`

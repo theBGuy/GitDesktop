@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { BottomNav, TopBar } from "./components/Chrome";
-import { ErrorState, UnreachableBanner } from "./components/states";
+import { ErrorState } from "./components/states";
 import { lastPairedAt } from "./lib/pairing-signal";
 import { asApiError, useStatus } from "./lib/queries";
 import { navigate, useRoute } from "./lib/router";
@@ -11,9 +11,12 @@ import { StatusBody } from "./screens/Status";
 
 // The app shell. It owns the cross-cutting states so every screen inherits them:
 //   • 401 anywhere → route to #pair (token revoked / never paired)
+//   • 409 no-repo → a central teaching state
 //   • the sticky TopBar (repo name + connection) + BottomNav
-//   • a top-of-flow "unreachable" banner when the server can't be reached but a
-//     screen still has stale data on show.
+// Degraded/unreachable presentation is NOT here: each body renders its own
+// StaleBanner keyed on its OWN query (see the round-4 finding in states.tsx). A
+// shell-level banner derived from the status query doubled the message on the
+// Status tab and never fired on PRs/CI — so it was removed.
 // The Status query doubles as the shell's connection probe: it drives the
 // TopBar's live/offline dot and the global 401 redirect.
 
@@ -68,7 +71,6 @@ export default function App() {
 
   const repoName = deriveRepoName(statusQuery.data?.branch.name ?? null);
   const connected = statusQuery.isSuccess;
-  const unreachable = statusErr?.isUnreachable ?? false;
   // A no-repo (409) is a whole-app state — show it centrally, not per tab.
   const noRepo = statusErr?.isNoActiveRepo ?? false;
 
@@ -79,9 +81,6 @@ export default function App() {
         subtitle={statusQuery.data?.branch.name ?? undefined}
         connected={connected}
       />
-      {unreachable && statusQuery.data ? (
-        <UnreachableBanner onRetry={() => statusQuery.refetch()} />
-      ) : null}
 
       <main className="flex-1">
         {noRepo ? (
