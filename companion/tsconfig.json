@@ -1,0 +1,35 @@
+{
+  // Standalone — deliberately NOT referenced from the root tsconfig.json project
+  // graph (mirrors how `site/` stays separate). Its strictness mirrors the
+  // desktop's tsconfig.app.json, with `strict` additionally on since this is all
+  // fresh, isolated code. The `@` alias resolves into the desktop `../src` for
+  // TYPE-ONLY imports (types.ts / actions.ts shapes the LAN server returns).
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.companion.tsbuildinfo",
+    "target": "es2023",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "esnext",
+    "types": ["vite/client"],
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    /* Linting */
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true,
+
+    "paths": {
+      "@/*": ["../src/*"]
+    }
+  },
+  "include": ["src"]
+}

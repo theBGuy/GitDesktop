@@ -75,6 +75,12 @@ pub const PAIRING_TTL: Duration = Duration::from_secs(120);
 const RATE_LIMIT_MAX_FAILURES: u32 = 5;
 const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 
+/// Test-only accessor for the lockout threshold, so the router-level pairing
+/// rate-limit tests in `super` can drive exactly N failures without hardcoding 5
+/// (which would silently rot if the threshold changed).
+#[cfg(test)]
+pub(crate) const RATE_LIMIT_MAX_FAILURES_FOR_TEST: u32 = RATE_LIMIT_MAX_FAILURES;
+
 /// Only rewrite a device's `lastSeenAt` when the stored value is more than this
 /// stale, so a burst of authenticated requests doesn't thrash the store file.
 const LAST_SEEN_THROTTLE_SECS: i64 = 60;
@@ -99,6 +105,11 @@ pub(crate) fn set_store_path_for_test(path: Option<PathBuf>) -> Option<PathBuf> 
     let mut guard = store_path_override()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
+    // Swapping the store path must drop the in-memory cache: it holds devices from
+    // the PREVIOUS path's file, and tests point this at their own temp files — a
+    // stale cache would leak one test's devices into the next. Load-bearing for the
+    // whole test-path-swap regime.
+    invalidate_device_cache();
     std::mem::replace(&mut *guard, path)
 }
 
@@ -135,6 +146,25 @@ fn store_path() -> AppResult<PathBuf> {
 fn store_lock() -> &'static Mutex<()> {
     static STORE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     STORE_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// In-memory cache of the on-disk device set, so a burst of authenticated requests
+/// doesn't re-read `lan-devices.json` on every call. `None` means "not loaded";
+/// [`authenticate_bearer`] populates it on a miss (under the store lock) and every
+/// store WRITE invalidates it back to `None`. Guarded by its own mutex — always
+/// taken WHILE the caller already holds [`store_lock`], so the two never interleave
+/// into a stale read across a concurrent write.
+static DEVICE_CACHE: OnceLock<Mutex<Option<Vec<StoredDevice>>>> = OnceLock::new();
+
+fn device_cache() -> &'static Mutex<Option<Vec<StoredDevice>>> {
+    DEVICE_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// Drop the in-memory device cache. Called on every store write (persist/revoke)
+/// and on a test store-path swap, so the next [`authenticate_bearer`] reloads from
+/// disk. Cheap (`None` assignment); safe to call under the store lock.
+fn invalidate_device_cache() {
+    *device_cache().lock().unwrap_or_else(|p| p.into_inner()) = None;
 }
 
 // --------------------------------------------------------------------------
@@ -242,7 +272,14 @@ fn write_devices(
     store.insert("devices".to_string(), Value::Array(arr));
     let body = serde_json::to_string_pretty(&Value::Object(store))
         .map_err(|e| AppError::Command(format!("serialize lan-devices store: {e}")))?;
-    crate::fsops::atomic_write(path, body.as_bytes())
+    let res = crate::fsops::atomic_write(path, body.as_bytes());
+    // Every store write invalidates the in-memory device cache. Doing it at this
+    // single write choke point (rather than in each caller — `persist_device`,
+    // `revoke_device`, and the last-seen bump all route through here) guarantees no
+    // write path can leave a stale cache. Invalidate even on a failed write: the
+    // on-disk state is then indeterminate, so a reload-from-disk is the safe default.
+    invalidate_device_cache();
+    res
 }
 
 /// The safe-to-display list of paired devices (no token hashes). Read-only.
@@ -435,21 +472,45 @@ pub fn persist_device(device: &LanDevice, token_hash: &str) -> AppResult<()> {
 
 /// Look up the device whose stored token hash matches `sha256(bearer)`; on a hit,
 /// bump its `lastSeenAt` (throttled) and return its id. `None` on no match.
+///
+/// Backed by the in-memory [`DEVICE_CACHE`] so a burst of authenticated requests
+/// doesn't re-read `lan-devices.json` every call: on a cache miss the store is read
+/// under the store lock and the cache populated; every store write invalidates it.
+/// The last-seen bump path performs a real store write (via [`write_devices`],
+/// which invalidates the cache) — so after a bump the next request repopulates from
+/// the freshly-written file, keeping the cache consistent with disk.
 fn authenticate_bearer(bearer: &str) -> Option<String> {
     let token_hash = sha256_hex(bearer.as_bytes());
     let path = store_path().ok()?;
     let _guard = store_lock().lock().unwrap_or_else(|p| p.into_inner());
-    let store = read_store(&path).ok()?;
-    let mut devices = devices_from(&store);
+
+    // Consult the cache; on a miss, load from disk under the store lock and cache.
+    let mut cache = device_cache().lock().unwrap_or_else(|p| p.into_inner());
+    if cache.is_none() {
+        let store = read_store(&path).ok()?;
+        *cache = Some(devices_from(&store));
+    }
+    let devices = cache.as_ref().expect("cache populated above");
     let idx = devices
         .iter()
         .position(|d| constant_time_eq(&d.token_hash, &token_hash))?;
     let id = devices[idx].id.clone();
+    let stale = last_seen_is_stale(&devices[idx].last_seen_at);
+    // Release the cache lock before the write path (which invalidates the cache).
+    drop(cache);
+
     // Throttled last-seen bump: only rewrite when the stored value is stale, so a
-    // chatty client doesn't hammer the store file.
-    if last_seen_is_stale(&devices[idx].last_seen_at) {
-        devices[idx].last_seen_at = now_iso();
-        let _ = write_devices(&path, store, &devices);
+    // chatty client doesn't hammer the store file. Re-read the store map fresh so
+    // the write preserves any unknown top-level keys, then persist (which
+    // invalidates the cache; the next request repopulates from the new file).
+    if stale {
+        if let Ok(store) = read_store(&path) {
+            let mut devices = devices_from(&store);
+            if let Some(d) = devices.iter_mut().find(|d| d.id == id) {
+                d.last_seen_at = now_iso();
+                let _ = write_devices(&path, store, &devices);
+            }
+        }
     }
     Some(id)
 }
@@ -570,14 +631,23 @@ fn peer_ip(req: &Request<Body>) -> IpAddr {
         .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
 }
 
-/// Apply the transport-hardening headers to every response.
+/// The default API Content-Security-Policy: bare `frame-ancestors 'none'` (an API
+/// response has no page to protect, only the clickjacking defense). The static
+/// page handler sets its OWN, fuller CSP before this middleware runs; see
+/// [`harden_headers`] for why this one defers to an already-set header.
+pub const API_CSP: &str = "frame-ancestors 'none'";
+
+/// Apply the transport-hardening headers to every response. `X-Frame-Options` is
+/// stamped unconditionally, but the CSP is insert-IF-ABSENT: the static-serving
+/// handler ([`crate::lan::static_serve`]) sets a fuller page CSP on its HTML/asset
+/// responses, and this must not clobber it. API responses (which never set a CSP
+/// themselves) still get [`API_CSP`] here, exactly as before.
 fn harden_headers(resp: &mut Response) {
     let headers = resp.headers_mut();
     headers.insert("X-Frame-Options", HeaderValue::from_static("DENY"));
-    headers.insert(
-        "Content-Security-Policy",
-        HeaderValue::from_static("frame-ancestors 'none'"),
-    );
+    if !headers.contains_key("Content-Security-Policy") {
+        headers.insert("Content-Security-Policy", HeaderValue::from_static(API_CSP));
+    }
 }
 
 /// Middleware run on EVERY request (pairing routes included): validates the
@@ -620,9 +690,40 @@ pub async fn host_guard(
     resp
 }
 
+/// The cookie name a phone BROWSER authenticates with when it can't set an
+/// `Authorization` header (a WebSocket upgrade or a top-level navigation). Its
+/// value is the raw bearer token, set by [`pair_submit`] on a successful pair.
+pub const AUTH_COOKIE: &str = "gd_lan";
+
+/// The `Set-Cookie` attributes for [`AUTH_COOKIE`]. `HttpOnly` keeps the token out
+/// of page JS; `SameSite=Strict` (with the existing [`host_guard`] Origin/Host
+/// validation) is the CSRF story — a cross-site request can't attach this cookie,
+/// and the only unauthenticated state-changing routes are the rate-limited pairing
+/// endpoints. No `Secure`: the companion is plain HTTP on the LAN by design (v1),
+/// so `Secure` would suppress the cookie entirely. One year `Max-Age`.
+const AUTH_COOKIE_ATTRS: &str = "HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000";
+
+/// Pull the value of the cookie named `name` from a request's `Cookie` header, if
+/// present. A manual parse (split on `;`, trim, match `name=`) — no cookie crate,
+/// and no quoted-value handling needed since we mint the value ourselves (a raw
+/// bearer, all hex).
+fn cookie_value(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+    let raw = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
+    for pair in raw.split(';') {
+        let pair = pair.trim();
+        if let Some(val) = pair.strip_prefix(name).and_then(|r| r.strip_prefix('=')) {
+            return Some(val.to_string());
+        }
+    }
+    None
+}
+
 /// Bearer-auth middleware for the protected `/api/` routes (everything except the
 /// two pairing routes). Enforces the per-IP rate limit, then requires a valid
-/// `Authorization: Bearer <token>` whose sha256 matches a stored device.
+/// bearer whose sha256 matches a stored device — taken from `Authorization: Bearer
+/// <token>` (checked FIRST), else the [`AUTH_COOKIE`] cookie (so a phone browser
+/// that can't set an `Authorization` header on a WS upgrade / navigation still
+/// authenticates). Same 401 on either miss.
 pub async fn require_auth(
     State(state): State<RouterState>,
     req: Request<Body>,
@@ -639,13 +740,16 @@ pub async fn require_auth(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(str::trim)
+        .map(str::to_string)
+        // Fall back to the auth cookie when there's no bearer header (browser path).
+        .or_else(|| cookie_value(req.headers(), AUTH_COOKIE))
         .filter(|s| !s.is_empty());
 
     let Some(bearer) = bearer else {
         record_failure(&state.rate_limit, ip);
         return unauthorized();
     };
-    match authenticate_bearer(bearer) {
+    match authenticate_bearer(&bearer) {
         Some(_id) => {
             clear_failures(&state.rate_limit, ip);
             next.run(req).await
@@ -690,12 +794,18 @@ pub async fn pair_challenge(State(state): State<RouterState>, req: Request<Body>
     }
     let mut guard = state.pairing.lock().unwrap_or_else(|p| p.into_inner());
     let Some(session) = guard.as_mut() else {
-        record_failure(&state.rate_limit, ip);
+        // NO rate-limit penalty for "no active session". The lockout budget is the
+        // PIN-guess budget, and there's no secret to guess here — the phone can sit
+        // on the pairing page polling `/challenge` while no offer is live (e.g.
+        // between a revoke and the desktop starting a fresh offer). Penalizing this
+        // locked a waiting phone out before the user ever typed a PIN (live-confirmed).
+        // Responding `pairingInactive` without a penalty leaks nothing.
         return pairing_inactive();
     };
     if session.is_expired() {
+        // Same reasoning as the no-session case: an expired session carries no
+        // secret to attack, so no penalty — just clear it and report inactive.
         *guard = None;
-        record_failure(&state.rate_limit, ip);
         return pairing_inactive();
     }
     let (challenge, salt) = new_challenge();
@@ -716,8 +826,14 @@ struct PairBody {
 }
 
 /// `POST /api/pair` → mint a device on a correct proof. On success clears the
-/// pairing session and the peer's failure window; on a bad proof records a
-/// failure (rate-limited) and 401s.
+/// pairing session and the peer's failure window.
+///
+/// Rate-limit policy (lockout budget = PIN-guess budget): a failure is recorded
+/// ONLY for events that carry secret-guessing or abuse information — a WRONG PROOF
+/// (the actual PIN guess) and a MALFORMED/oversized body. It is NOT recorded for a
+/// missing or expired pairing session, nor for a well-formed body sent out of
+/// protocol order (no challenge fetched yet): those carry no secret to attack, so
+/// penalizing them would only let a waiting/fumbling phone lock itself out.
 pub async fn pair_submit(
     State(state): State<RouterState>,
     req: Request<Body>,
@@ -731,17 +847,24 @@ pub async fn pair_submit(
     let bytes = match axum::body::to_bytes(body, 64 * 1024).await {
         Ok(b) => b,
         Err(_) => {
+            // KEEP: a body that fails to read (oversized past the 64 KiB cap, or a
+            // truncated/abusive stream) is malformed-body abuse — it counts.
             record_failure(&state.rate_limit, ip);
             return bad_request("could not read request body");
         }
     };
     let parsed: Result<PairBody, _> = serde_json::from_slice(&bytes);
     let Ok(body) = parsed else {
+        // KEEP: a body that isn't the expected `{ deviceName, proof }` JSON is a
+        // malformed body — it counts toward the lockout budget.
         record_failure(&state.rate_limit, ip);
         return bad_request("expected { deviceName, proof }");
     };
     let device_name = body.device_name.trim();
     if device_name.is_empty() {
+        // KEEP: a submission missing its required deviceName is a malformed body
+        // (well-formed JSON, but not a valid pair request); it counts. A legitimate
+        // polling phone never produces this — only an actual bad POST /pair does.
         record_failure(&state.rate_limit, ip);
         return bad_request("deviceName must not be empty");
     }
@@ -752,27 +875,34 @@ pub async fn pair_submit(
     // one critical section closes a double-mint race: two concurrent submissions
     // with the correct proof would otherwise both see a live session and both mint
     // a token from one PIN entry. A racing second submission now finds the session
-    // already taken and hits `pairing_inactive`. (Rate-limit record/clear stays
-    // exactly as before on every path.)
+    // already taken and hits `pairing_inactive`. (The wrong-proof path still records
+    // a failure and clears on success; the no-session / expired / no-challenge paths
+    // deliberately do NOT — see the rate-limit policy on this fn.)
     {
         let mut guard = state.pairing.lock().unwrap_or_else(|p| p.into_inner());
         let Some(session) = guard.as_mut() else {
-            record_failure(&state.rate_limit, ip);
+            // NO penalty: a missing session (or one a racing submission already
+            // consumed) carries no secret to guess. Penalizing it let a waiting
+            // phone lock itself out (live-confirmed on the challenge path).
             return pairing_inactive();
         };
         if session.is_expired() {
+            // NO penalty: an expired session is nothing to attack — clear + report.
             *guard = None;
-            record_failure(&state.rate_limit, ip);
             return pairing_inactive();
         }
         let (Some(challenge), Some(salt)) = (session.challenge.clone(), session.salt.clone())
         else {
-            // Phone must fetch a challenge first.
-            record_failure(&state.rate_limit, ip);
+            // NO penalty: a well-formed body sent before fetching a challenge is a
+            // protocol-order mistake, not a PIN guess and not a malformed body — the
+            // proof can't even be evaluated, so there's nothing to guess here.
             return bad_request("fetch a challenge first");
         };
         let expected = compute_proof(&session.pin, &salt, &challenge);
         if !constant_time_eq(&expected, body.proof.trim()) {
+            // KEEP: THIS is the actual PIN guess. The lockout budget IS the
+            // PIN-guess budget — a wrong proof is exactly the event that budget
+            // exists to cap (5 wrong guesses in 60s → locked out).
             record_failure(&state.rate_limit, ip);
             return unauthorized();
         }
@@ -791,7 +921,7 @@ pub async fn pair_submit(
         return app_error_response(&e);
     }
     clear_failures(&state.rate_limit, ip);
-    (
+    let mut resp = (
         StatusCode::OK,
         Json(json!({
             "deviceId": device.id,
@@ -800,7 +930,18 @@ pub async fn pair_submit(
             "scope": device.scope,
         })),
     )
-        .into_response()
+        .into_response();
+    // Also set the auth cookie so a phone BROWSER (which can't attach an
+    // `Authorization` header to a WS upgrade or a navigation) authenticates on
+    // subsequent requests. The JSON body is unchanged, so curl/API clients that
+    // read `token` keep working exactly as before. Value = the raw bearer.
+    if let Ok(cookie) = HeaderValue::from_str(&format!(
+        "{AUTH_COOKIE}={bearer}; {AUTH_COOKIE_ATTRS}"
+    )) {
+        resp.headers_mut()
+            .insert(axum::http::header::SET_COOKIE, cookie);
+    }
+    resp
 }
 
 fn pairing_inactive() -> Response {
@@ -985,5 +1126,57 @@ mod tests {
         assert!(!last_seen_is_stale(&now_iso()));
         assert!(last_seen_is_stale("2020-01-01T00:00:00.000Z"));
         assert!(last_seen_is_stale("not-a-timestamp"));
+    }
+
+    #[test]
+    fn cookie_value_parses_the_named_cookie() {
+        use axum::http::HeaderMap;
+        let mut headers = HeaderMap::new();
+        headers.insert("cookie", "gd_lan=abc123; other=zzz".parse().unwrap());
+        assert_eq!(cookie_value(&headers, "gd_lan").as_deref(), Some("abc123"));
+        assert_eq!(cookie_value(&headers, "other").as_deref(), Some("zzz"));
+        assert_eq!(cookie_value(&headers, "missing"), None);
+        // A cookie whose NAME is a suffix of another must not false-match: `lan`
+        // must not match `gd_lan` (the split+prefix guards this).
+        assert_eq!(cookie_value(&headers, "lan"), None);
+        // No Cookie header at all → None.
+        assert_eq!(cookie_value(&HeaderMap::new(), "gd_lan"), None);
+    }
+
+    #[test]
+    fn device_cache_invalidated_on_store_writes_and_path_swap() {
+        // The in-memory device cache must never outlive a store change:
+        //   • authenticate populates it,
+        //   • persist (a second device) refreshes it → both authenticate,
+        //   • revoke invalidates it → the revoked token stops authenticating.
+        // The whole suite runs under the test-path-swap regime, which itself
+        // invalidates the cache — this test proves the write-path invalidations.
+        let _lock = store_test_lock();
+        let tmp = std::env::temp_dir().join(format!(
+            "gd-lan-cache-test-{}-{}.json",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let prev = set_store_path_for_test(Some(tmp.clone()));
+
+        let (d1, bearer1, hash1) = mint_device("Device One");
+        persist_device(&d1, &hash1).unwrap();
+        // Populate the cache.
+        assert_eq!(authenticate_bearer(&bearer1).as_deref(), Some(d1.id.as_str()));
+
+        // Persist a second device → cache invalidated on write → both authenticate.
+        let (d2, bearer2, hash2) = mint_device("Device Two");
+        persist_device(&d2, &hash2).unwrap();
+        assert_eq!(authenticate_bearer(&bearer1).as_deref(), Some(d1.id.as_str()));
+        assert_eq!(authenticate_bearer(&bearer2).as_deref(), Some(d2.id.as_str()));
+
+        // Revoke device one → cache invalidated → its token stops authenticating,
+        // device two still does.
+        revoke_device(&d1.id).unwrap();
+        assert!(authenticate_bearer(&bearer1).is_none());
+        assert_eq!(authenticate_bearer(&bearer2).as_deref(), Some(d2.id.as_str()));
+
+        set_store_path_for_test(prev);
+        std::fs::remove_file(&tmp).ok();
     }
 }
