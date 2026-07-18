@@ -1,4 +1,4 @@
-import { QueryClient, useQuery } from "@tanstack/react-query";
+import { QueryCache, QueryClient, useQuery } from "@tanstack/react-query";
 import {
   ApiError,
   fetchCiRun,
@@ -7,15 +7,36 @@ import {
   fetchPrs,
   fetchStatus,
 } from "./api";
+import { navigate } from "./router";
 
 // A fresh QueryClient for the companion — modest freshness, one retry, and NO
 // refetch-on-focus (a phone backgrounds/foregrounds constantly; we drive
 // freshness with a polling interval on the ACTIVE screen instead).
 export const queryClient = new QueryClient({
+  // ROUND-6 FINDING (PR #75): the "401 anywhere → #pair" invariant must hold
+  // centrally, not just via the shell's status probe — that probe doesn't poll
+  // on the PRs/CI tabs, so a phone revoked while sitting there kept its stale
+  // list (the banner read "couldn't refresh") AND re-sent its dead cookie every
+  // poll, burning the server's brute-force budget until it rate-limited itself
+  // out of RE-pairing. Any query's fresh 401 now redirects; `navigate` is a
+  // no-op when already on #pair. (The shell's status-based redirect remains as
+  // belt-and-braces with its post-pair freshness gate.)
+  queryCache: new QueryCache({
+    onError: (err) => {
+      if (err instanceof ApiError && err.isUnauthorized) navigate("#pair");
+    },
+  }),
   defaultOptions: {
     queries: {
       staleTime: 10_000,
-      retry: 1,
+      // One retry for transient failures — but never for a 401/409: both are
+      // definitive, and a retried 401 re-sends the dead cookie, double-billing
+      // the per-IP lockout budget on every poll cycle.
+      retry: (failureCount, err) =>
+        !(
+          err instanceof ApiError &&
+          (err.isUnauthorized || err.isNoActiveRepo)
+        ) && failureCount < 1,
       refetchOnWindowFocus: false,
     },
   },
