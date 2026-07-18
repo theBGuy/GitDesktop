@@ -185,12 +185,14 @@ export const gitCreateBranch = (
   name: string,
   checkout: boolean,
   startPoint?: string,
+  noTrack?: boolean,
 ) =>
   invoke<void>("git_create_branch", {
     repoPath,
     name,
     checkout,
     startPoint: startPoint ?? null,
+    noTrack: noTrack ?? false,
   });
 
 export const gitDiffFile = (
@@ -708,12 +710,14 @@ export const gitPush = (
   setUpstream: boolean,
   force = false,
   branch?: string,
+  remote?: string,
 ) =>
   invoke<void>("git_push", {
     repoPath,
     setUpstream,
     force,
     branch: branch ?? null,
+    remote: remote ?? null,
   });
 
 export const gitRemotes = (repoPath: string) =>
@@ -2919,6 +2923,10 @@ export const readRepoInstructions = (repoPath: string) =>
 
 export const readRepoAiIgnore = (repoPath: string) =>
   invoke<string[]>("read_repo_ai_ignore", { repoPath });
+
+/** Appends AI-ignore patterns to `<repo>/.gitdesktop/aiignore` (created if absent). */
+export const appendRepoAiIgnore = (repoPath: string, patterns: string[]) =>
+  invoke<void>("append_repo_ai_ignore", { repoPath, patterns });
 
 /** Raw contents of `<repo>/.gitdesktop/branch-rules.json`, or null if absent. */
 export const readRepoBranchRules = (repoPath: string) =>

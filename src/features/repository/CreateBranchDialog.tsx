@@ -1,5 +1,5 @@
 import { useSelector } from "@tanstack/react-store";
-import { useEffect, useEffectEvent } from "react";
+import { useEffect, useEffectEvent, useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -9,6 +9,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
 import { branchNameError, branchNameHint } from "@/lib/branch-rules/match";
 import type { BranchRulesConfig } from "@/lib/branch-rules/types";
 import { required, useAppForm } from "@/lib/form";
@@ -16,6 +17,11 @@ import { useCreateBranch } from "@/lib/git/queries";
 import { refNameWarning, sanitizeRefName } from "@/lib/git/ref-name";
 import type { FileEntry } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
+import {
+  BaseBranchCombobox,
+  useHasBaseOptions,
+  useSeedBase,
+} from "./BaseBranchCombobox";
 import { GenerateBranchNameButton } from "./GenerateBranchNameButton";
 
 /**
@@ -36,7 +42,6 @@ export function CreateBranchDialog({
   headExists,
   entries,
   allBranchNames,
-  baseOptions,
   currentName,
   defaultName,
   onOpenSettings,
@@ -51,12 +56,28 @@ export function CreateBranchDialog({
   headExists: boolean;
   entries: FileEntry[];
   allBranchNames: string[];
-  baseOptions: string[];
   currentName: string | null;
   defaultName: string | null;
   onOpenSettings: (section: "ai") => void;
 }) {
   const createBranch = useCreateBranch(repoPath);
+
+  // The base picker owns its own data; the dialog hides the whole field when
+  // there's no offerable base to pick (unborn HEAD / fresh repo → submit with no
+  // start point creates from HEAD). Gate on the SAME offerable predicates the
+  // picker derives its groups from (via `useHasBaseOptions`) rather than raw
+  // query counts, so the field can't render with an empty dropdown.
+  const hasBases = useHasBaseOptions(repoPath, open, currentName);
+
+  // The value to seed the base picker with on open — the first of
+  // current/default the picker would actually offer, "" otherwise (⇒ HEAD).
+  const seedBase = useSeedBase(repoPath, currentName, defaultName);
+
+  // Whether the picked base is a remote-tracking ref → drives `--no-track` so
+  // the new branch starts with NO upstream and its first push publishes it
+  // under its own name.
+  const [baseIsRemote, setBaseIsRemote] = useState(false);
+  const baseTriggerId = useId();
 
   const createForm = useAppForm({
     defaultValues: { name: "", base: "" },
@@ -69,6 +90,9 @@ export function CreateBranchDialog({
           name: sanitizeRefName(value.name),
           checkout: true,
           startPoint,
+          // A remote base starts untracked so its first push publishes under
+          // its own name (no upstream copied from `origin/…`).
+          noTrack: baseIsRemote && Boolean(startPoint),
         });
         onOpenChange(false);
       } catch (e) {
@@ -84,10 +108,13 @@ export function CreateBranchDialog({
   // sync sees "different defaults + untouched form" and clobbers the seeded
   // values right back on the next render.
   const seedOnOpen = useEffectEvent(() => {
-    createForm.reset(
-      { name: "", base: currentName ?? defaultName ?? "" },
-      { keepDefaultValues: true },
-    );
+    // Seed only a value the picker would actually offer (see `useSeedBase`) — a
+    // seeded base absent from the list would render in the trigger yet be
+    // unselectable. `seedBase` already encodes that invariant.
+    createForm.reset({ name: "", base: seedBase }, { keepDefaultValues: true });
+    // Seeded base is an offerable local branch (current/default) → never a
+    // remote value, so tracking stays on.
+    setBaseIsRemote(false);
   });
   useEffect(() => {
     if (open) seedOnOpen();
@@ -153,20 +180,24 @@ export function CreateBranchDialog({
               onOpenSettings("ai");
             }}
           />
-          {baseOptions.length > 0 && (
+          {hasBases && (
             <createForm.AppField name="base">
               {(field) => (
-                <field.SelectField
-                  label="Base it on"
-                  items={Object.fromEntries(
-                    baseOptions.map((b) => [
-                      b,
-                      `${b}${b === currentName ? " (current)" : ""}${
-                        b === defaultName ? " (default)" : ""
-                      }`,
-                    ]),
-                  )}
-                />
+                <div className="space-y-2">
+                  <Label htmlFor={baseTriggerId}>Base it on</Label>
+                  <BaseBranchCombobox
+                    repoPath={repoPath}
+                    open={open}
+                    currentName={currentName}
+                    defaultName={defaultName}
+                    triggerId={baseTriggerId}
+                    value={field.state.value || null}
+                    onValueChange={(v, isRemote) => {
+                      field.handleChange(v);
+                      setBaseIsRemote(isRemote);
+                    }}
+                  />
+                </div>
               )}
             </createForm.AppField>
           )}

@@ -38,7 +38,7 @@ pub async fn git_branches(repo_path: String) -> AppResult<Vec<Branch>> {
         &[
             "for-each-ref",
             "refs/heads",
-            "--format=%(refname:short)%00%(upstream:short)%00%(HEAD)%00%(committerdate:iso8601-strict)%00%(upstream:track)",
+            "--format=%(refname:short)%00%(upstream:short)%00%(HEAD)%00%(committerdate:iso8601-strict)%00%(upstream:track)%00%(upstream:remotename)",
         ],
         DEFAULT_TIMEOUT,
     )
@@ -48,7 +48,8 @@ pub async fn git_branches(repo_path: String) -> AppResult<Vec<Branch>> {
     let mut branches = Vec::new();
     for line in text.lines() {
         let mut parts = line.split('\0');
-        let (Some(name), upstream, head, date, track) = (
+        let (Some(name), upstream, head, date, track, upstream_remote) = (
+            parts.next(),
             parts.next(),
             parts.next(),
             parts.next(),
@@ -71,6 +72,7 @@ pub async fn git_branches(repo_path: String) -> AppResult<Vec<Branch>> {
             upstream_ahead,
             upstream_behind,
             upstream_gone,
+            upstream_remote: upstream_remote.filter(|r| !r.is_empty()).map(str::to_string),
         });
     }
     Ok(branches)
@@ -450,6 +452,43 @@ pub async fn git_checkout_remote_branch(
     Ok(())
 }
 
+/// Build the argv for creating a branch. Pure so the decision table
+/// (checkout × start_point × no_track) is unit-testable without a repo.
+///
+/// `no_track` suppresses git's automatic upstream setup so that basing a new
+/// branch on a remote-tracking ref (e.g. `origin/epic/x`) yields a branch with
+/// NO upstream — its first push then publishes it under its own name. Placement
+/// matters: `--no-track` goes right after `switch` in the checkout arm, and
+/// BEFORE the `--` in the `branch` arm.
+fn build_create_branch_args(
+    name: &str,
+    checkout: bool,
+    start_point: Option<&str>,
+    no_track: bool,
+) -> Vec<String> {
+    let mut args: Vec<String> = if checkout {
+        let mut a = vec!["switch".to_string()];
+        if no_track {
+            a.push("--no-track".to_string());
+        }
+        a.push("-c".to_string());
+        a.push(name.to_string());
+        a
+    } else {
+        let mut a = vec!["branch".to_string()];
+        if no_track {
+            a.push("--no-track".to_string());
+        }
+        a.push("--".to_string());
+        a.push(name.to_string());
+        a
+    };
+    if let Some(start) = start_point {
+        args.push(start.to_string());
+    }
+    args
+}
+
 #[tauri::command]
 pub async fn git_create_branch(
     state: State<'_, AppState>,
@@ -457,8 +496,9 @@ pub async fn git_create_branch(
     name: String,
     checkout: bool,
     start_point: Option<String>,
+    no_track: bool,
 ) -> AppResult<()> {
-    git_create_branch_core(&state, repo_path, name, checkout, start_point).await
+    git_create_branch_core(&state, repo_path, name, checkout, start_point, no_track).await
 }
 
 pub(crate) async fn git_create_branch_core(
@@ -467,6 +507,7 @@ pub(crate) async fn git_create_branch_core(
     name: String,
     checkout: bool,
     start_point: Option<String>,
+    no_track: bool,
 ) -> AppResult<()> {
     validate_ref_name(&name)?;
     if let Some(start) = &start_point {
@@ -474,15 +515,9 @@ pub(crate) async fn git_create_branch_core(
         // (non-empty, no leading '-') rather than strictly a hash.
         validate_ref_name(start)?;
     }
-    let mut args: Vec<&str> = if checkout {
-        vec!["switch", "-c", &name]
-    } else {
-        vec!["branch", "--", &name]
-    };
-    if let Some(start) = &start_point {
-        args.push(start);
-    }
-    run_git_mutating(state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
+    let args = build_create_branch_args(&name, checkout, start_point.as_deref(), no_track);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_git_mutating(state, &repo_path, &arg_refs, DEFAULT_TIMEOUT).await?;
     Ok(())
 }
 
@@ -796,7 +831,81 @@ fn unique_suffix() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_upstream_track, validate_ref_name};
+    use super::{
+        build_create_branch_args, git_branches, git_create_branch_core, parse_upstream_track,
+        validate_ref_name,
+    };
+    use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
+    use crate::state::AppState;
+
+    // Full decision table for the create-branch argv: checkout × start_point ×
+    // no_track (8 cases). The no_track=false rows must stay byte-identical to the
+    // pre-`--no-track` behavior for every combination.
+    #[test]
+    fn build_create_branch_args_checkout_no_start_no_track() {
+        assert_eq!(
+            build_create_branch_args("feat", true, None, false),
+            vec!["switch", "-c", "feat"]
+        );
+    }
+
+    #[test]
+    fn build_create_branch_args_checkout_start_no_track() {
+        assert_eq!(
+            build_create_branch_args("feat", true, Some("main"), false),
+            vec!["switch", "-c", "feat", "main"]
+        );
+    }
+
+    #[test]
+    fn build_create_branch_args_checkout_no_start_track_off() {
+        assert_eq!(
+            build_create_branch_args("feat", true, None, true),
+            vec!["switch", "--no-track", "-c", "feat"]
+        );
+    }
+
+    #[test]
+    fn build_create_branch_args_checkout_remote_start_track_off() {
+        // The motivating case: `git switch --no-track -c feat origin/epic/x`.
+        assert_eq!(
+            build_create_branch_args("feat", true, Some("origin/epic/x"), true),
+            vec!["switch", "--no-track", "-c", "feat", "origin/epic/x"]
+        );
+    }
+
+    #[test]
+    fn build_create_branch_args_no_checkout_no_start_no_track() {
+        assert_eq!(
+            build_create_branch_args("feat", false, None, false),
+            vec!["branch", "--", "feat"]
+        );
+    }
+
+    #[test]
+    fn build_create_branch_args_no_checkout_start_no_track() {
+        assert_eq!(
+            build_create_branch_args("feat", false, Some("main"), false),
+            vec!["branch", "--", "feat", "main"]
+        );
+    }
+
+    #[test]
+    fn build_create_branch_args_no_checkout_no_start_track_off() {
+        // `--no-track` must come BEFORE the `--`.
+        assert_eq!(
+            build_create_branch_args("feat", false, None, true),
+            vec!["branch", "--no-track", "--", "feat"]
+        );
+    }
+
+    #[test]
+    fn build_create_branch_args_no_checkout_remote_start_track_off() {
+        assert_eq!(
+            build_create_branch_args("feat", false, Some("origin/epic/x"), true),
+            vec!["branch", "--no-track", "--", "feat", "origin/epic/x"]
+        );
+    }
 
     #[test]
     fn validate_ref_name_rejects_glob_and_refspec_metacharacters() {
@@ -849,5 +958,189 @@ mod tests {
         assert_eq!(parse_upstream_track(""), (0, 0, false));
         assert_eq!(parse_upstream_track("   "), (0, 0, false));
         assert_eq!(parse_upstream_track("garbage"), (0, 0, false));
+    }
+
+    // --- Real-repo test for the `--no-track` seam (temp_dir, git on PATH). ---
+
+    async fn run(repo: &str, args: &[&str]) -> String {
+        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+            .await
+            .unwrap()
+            .stdout_lossy()
+    }
+
+    /// A unique temp base dir for a test, cleaned up by the caller.
+    fn temp_base(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "gd-branches-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    async fn init_repo(repo_s: &str, seed_file: &str) {
+        run(repo_s, &["init", "-q"]).await;
+        run(repo_s, &["config", "user.email", "t@t.local"]).await;
+        run(repo_s, &["config", "user.name", "T"]).await;
+        std::fs::write(std::path::Path::new(repo_s).join(seed_file), "hello\n").unwrap();
+        run(repo_s, &["add", "-A"]).await;
+        run(repo_s, &["commit", "-qm", "seed"]).await;
+    }
+
+    /// The argv table pins `--no-track` placement; this closes the argv→outcome
+    /// gap by driving `git_create_branch_core` against a real repo and asserting
+    /// git actually honors it. Synthesizes a remote-tracking ref
+    /// (`refs/remotes/origin/x` via `update-ref`, so nothing is ever fetched) and
+    /// bases two branches on it: the `no_track=true` arm must have NO upstream,
+    /// the `no_track=false` control arm must track `origin/x`. Both arms create
+    /// without checkout (`checkout=false`) to keep the assertions simple; the
+    /// checkout arm shares the same `--no-track` placement per the argv table.
+    #[tokio::test]
+    async fn create_branch_honors_no_track_against_real_repo() {
+        let base = temp_base("no-track");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+
+        init_repo(&repo_s, "r.txt").await;
+        // A remote named `origin` (URL is the repo's own path — never fetched) and
+        // a synthetic remote-tracking ref pointing at HEAD.
+        run(&repo_s, &["remote", "add", "origin", &repo_s]).await;
+        run(&repo_s, &["update-ref", "refs/remotes/origin/x", "HEAD"]).await;
+
+        let state = AppState::default();
+
+        // no-track arm: branch `y` from `origin/x` with tracking suppressed.
+        git_create_branch_core(
+            &state,
+            repo_s.clone(),
+            "y".into(),
+            false,
+            Some("origin/x".into()),
+            true,
+        )
+        .await
+        .expect("create y succeeds");
+        // No upstream → `y@{upstream}` fails to resolve.
+        assert!(
+            run_git(
+                Some(&repo_s),
+                &["rev-parse", "--abbrev-ref", "y@{upstream}"],
+                DEFAULT_TIMEOUT,
+            )
+            .await
+            .is_err(),
+            "no-track branch y must have no upstream"
+        );
+        // But it still starts at origin/x's tip.
+        assert_eq!(
+            run(&repo_s, &["rev-parse", "y"]).await.trim(),
+            run(&repo_s, &["rev-parse", "origin/x"]).await.trim(),
+            "y should start at origin/x"
+        );
+
+        // Pin the tracking mode repo-locally: a contributor's ambient global
+        // `branch.autoSetupMerge = simple|false` would leave `z` untracked and
+        // false-fail this control arm (probed live both ways). The `--no-track`
+        // arm above is immune — the flag overrides config.
+        run(&repo_s, &["config", "branch.autoSetupMerge", "true"]).await;
+
+        // control arm: branch `z` from `origin/x` with tracking left on.
+        git_create_branch_core(
+            &state,
+            repo_s.clone(),
+            "z".into(),
+            false,
+            Some("origin/x".into()),
+            false,
+        )
+        .await
+        .expect("create z succeeds");
+        // Upstream resolves and IS origin/x.
+        assert_eq!(
+            run(&repo_s, &["rev-parse", "--abbrev-ref", "z@{upstream}"])
+                .await
+                .trim(),
+            "origin/x",
+            "z should track origin/x"
+        );
+        assert_eq!(
+            run(&repo_s, &["rev-parse", "z"]).await.trim(),
+            run(&repo_s, &["rev-parse", "origin/x"]).await.trim(),
+            "z should start at origin/x"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `git_branches` must surface git's authoritative `%(upstream:remotename)`
+    /// on each branch: a tracked branch carries its remote, an untracked one
+    /// carries none. This is the single source of truth the UI reads instead of
+    /// re-deriving the remote from the upstream string.
+    #[tokio::test]
+    async fn git_branches_reports_upstream_remote() {
+        let base = temp_base("upstream-remote");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+
+        init_repo(&repo_s, "r.txt").await;
+        // A remote named `origin` (URL is the repo's own path — never fetched) and
+        // a synthetic remote-tracking ref pointing at HEAD.
+        run(&repo_s, &["remote", "add", "origin", &repo_s]).await;
+        run(&repo_s, &["update-ref", "refs/remotes/origin/x", "HEAD"]).await;
+
+        let state = AppState::default();
+        // Pin tracking mode repo-locally so an ambient global
+        // `branch.autoSetupMerge = simple|false` can't leave `tracked` untracked
+        // and false-fail the assertion (same guard as the no-track control arm).
+        run(&repo_s, &["config", "branch.autoSetupMerge", "true"]).await;
+        // Tracked branch `tracked` → tracks origin/x.
+        git_create_branch_core(
+            &state,
+            repo_s.clone(),
+            "tracked".into(),
+            false,
+            Some("origin/x".into()),
+            false,
+        )
+        .await
+        .expect("create tracked succeeds");
+        // Untracked branch `solo` → based on the same ref with tracking suppressed.
+        git_create_branch_core(
+            &state,
+            repo_s.clone(),
+            "solo".into(),
+            false,
+            Some("origin/x".into()),
+            true,
+        )
+        .await
+        .expect("create solo succeeds");
+
+        let branches = git_branches(repo_s.clone()).await.expect("list branches");
+        let tracked = branches
+            .iter()
+            .find(|b| b.name == "tracked")
+            .expect("tracked branch present");
+        assert_eq!(
+            tracked.upstream_remote.as_deref(),
+            Some("origin"),
+            "a tracked branch carries its upstream's remote"
+        );
+        let solo = branches
+            .iter()
+            .find(|b| b.name == "solo")
+            .expect("solo branch present");
+        assert_eq!(
+            solo.upstream_remote, None,
+            "an untracked branch carries no upstream remote"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

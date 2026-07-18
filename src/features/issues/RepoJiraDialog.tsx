@@ -1,7 +1,7 @@
 import { CheckCircleIcon, LinkBreakIcon } from "@phosphor-icons/react";
 import { useQuery } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { toast } from "sonner";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -101,6 +101,7 @@ export function RepoJiraDialog({
   const [projectQuery, setProjectQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [project, setProject] = useState<JiraProject | null>(null);
+  const projectInputId = useId();
   // Whether the connection is good enough to search projects: either a fresh
   // validation this session, or a stored credential for the typed site.
   const connected = account !== null || (hasStored && siteHost.length > 0);
@@ -396,7 +397,7 @@ export function RepoJiraDialog({
 
           {/* ── Project ─────────────────────────────────────────────────── */}
           <div className="space-y-2">
-            <Label>Project</Label>
+            <Label htmlFor={projectInputId}>Project</Label>
             <Combobox
               items={projectSearch.data ?? []}
               itemToStringLabel={(p: JiraProject) => `${p.key} · ${p.name}`}
@@ -407,6 +408,7 @@ export function RepoJiraDialog({
               openOnInputClick
             >
               <ComboboxInput
+                id={projectInputId}
                 className="w-full"
                 placeholder={
                   connected

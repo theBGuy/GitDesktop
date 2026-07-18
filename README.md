@@ -357,9 +357,14 @@ commit that hasn't been pushed yet.
   parallel folders without stashing — with one-click jumps to the main workspace right
   from the branch switcher.
 - **Push or publish a branch without switching to it** — from the branch switcher's
-  right-click menu, push a branch that's ahead of its `origin` remote or publish an
-  unpushed one, without checking it out; it works even when the branch is checked out
+  right-click menu, push a branch that's ahead of the remote it tracks (its own remote,
+  not just `origin`) or publish an unpushed one (choosing the remote when there's more
+  than one), without checking it out; it works even when the branch is checked out
   in another worktree.
+- **Start a branch from any base** — the new-branch dialog's *Base it on* picker is a
+  searchable list grouped into local and remote branches, so you can branch off any of
+  them. Basing on a remote branch (e.g. `origin/epic/big-feature`) starts from the remote
+  tip and leaves the new branch untracked, so its first push publishes it under its own name.
 
 Plus tag and submodule management.
 
@@ -533,7 +538,9 @@ display can't strand it off-screen.
 - **AI ignore patterns** (keep files out of AI context; they still commit
   normally), gitignore-style:
   - **Global** — Settings → Excluded files (one pattern per line).
-  - **Per-repo** — `.gitdesktop/aiignore` in the repo.
+  - **Per-repo** — `.gitdesktop/aiignore` in the repo. Right-click a changed
+    file → **Exclude from AI** (file, folder, or file type — or a
+    multi-selection) creates and updates this file for you.
 - **Keys** live in the OS keychain (Windows Credential Manager, macOS Keychain,
   libsecret). **Hide AI** (Settings → General) hides every AI surface while
   keeping your config.

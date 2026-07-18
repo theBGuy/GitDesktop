@@ -1,5 +1,5 @@
 import { PlusIcon, XIcon } from "@phosphor-icons/react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -39,6 +39,8 @@ export function RunWorkflowDialog({
   onOpenChange: (open: boolean) => void;
   defaultRef: string;
 }) {
+  // Per-mount base for the field ids (label↔control association).
+  const idBase = useId();
   // GitLab and Bitbucket have no per-workflow dispatch — one pipeline config per
   // project — so the form is just ref + variables: the workflow picker hides (and
   // its GitHub-only `gh workflow list` query never fires), and "inputs" become
@@ -153,14 +155,14 @@ export function RunWorkflowDialog({
         <div className="space-y-4">
           {!isPipelineProvider && (
             <div className="space-y-2">
-              <Label htmlFor="wf-workflow">Workflow</Label>
+              <Label htmlFor={`${idBase}-workflow`}>Workflow</Label>
               <Select
                 items={workflowItems}
                 value={workflow}
                 onValueChange={(v) => v && setWorkflow(v)}
                 disabled={dispatchable.length === 0}
               >
-                <SelectTrigger id="wf-workflow" className="w-full">
+                <SelectTrigger id={`${idBase}-workflow`} className="w-full">
                   <SelectValue
                     placeholder={
                       workflows.isPending ? "Loading…" : "Select a workflow"
@@ -187,13 +189,13 @@ export function RunWorkflowDialog({
 
           {hasCustomPipelines && (
             <div className="space-y-2">
-              <Label htmlFor="wf-pipeline">Pipeline</Label>
+              <Label htmlFor={`${idBase}-pipeline`}>Pipeline</Label>
               <Select
                 items={pipelineItems}
                 value={pipeline}
                 onValueChange={(v) => setPipeline(v ?? "")}
               >
-                <SelectTrigger id="wf-pipeline" className="w-full">
+                <SelectTrigger id={`${idBase}-pipeline`} className="w-full">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -209,9 +211,9 @@ export function RunWorkflowDialog({
           )}
 
           <div className="space-y-2">
-            <Label htmlFor="wf-ref">Branch or tag</Label>
+            <Label htmlFor={`${idBase}-ref`}>Branch or tag</Label>
             <Input
-              id="wf-ref"
+              id={`${idBase}-ref`}
               value={gitRef}
               onChange={(e) => setGitRef(e.target.value)}
               placeholder="main"
@@ -219,9 +221,13 @@ export function RunWorkflowDialog({
             />
           </div>
 
-          <div className="space-y-2">
+          <div
+            className="space-y-2"
+            role="group"
+            aria-labelledby={`${idBase}-inputs-label`}
+          >
             <div className="flex items-center justify-between">
-              <Label>
+              <Label id={`${idBase}-inputs-label`}>
                 {isPipelineProvider ? "Variables" : "Inputs"}{" "}
                 <span className="font-normal text-muted-foreground">
                   (optional)

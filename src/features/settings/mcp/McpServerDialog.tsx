@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -75,6 +75,8 @@ export function McpServerDialog({
   onSave: (server: McpServer) => void;
   onClose: () => void;
 }) {
+  // Per-mount base for the field ids (label↔control association).
+  const idBase = useId();
   const editing = initial !== null;
   const [draft, setDraft] = useState<McpServer>(initial ?? emptyMcpServer());
   const [rows, setRows] = useState<EntryRow[]>(initial ? toRows(initial) : []);
@@ -202,9 +204,9 @@ export function McpServerDialog({
         <div className="max-h-[60vh] space-y-5 overflow-y-auto px-1">
           <div className="grid grid-cols-[1fr_1fr] gap-3">
             <div className="space-y-2">
-              <Label htmlFor="mcp-name">Name</Label>
+              <Label htmlFor={`${idBase}-name`}>Name</Label>
               <Input
-                id="mcp-name"
+                id={`${idBase}-name`}
                 autoFocus
                 value={draft.name}
                 onChange={(e) => set("name", e.target.value)}
@@ -234,9 +236,9 @@ export function McpServerDialog({
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="mcp-desc">Description</Label>
+            <Label htmlFor={`${idBase}-desc`}>Description</Label>
             <Input
-              id="mcp-desc"
+              id={`${idBase}-desc`}
               value={draft.description}
               onChange={(e) => set("description", e.target.value)}
               placeholder="Local file operations"
@@ -245,7 +247,7 @@ export function McpServerDialog({
 
           {scopeOptions.length > 1 && (
             <div className="space-y-2">
-              <Label>Available in</Label>
+              <Label htmlFor={`${idBase}-scope`}>Available in</Label>
               <Select
                 value={selectedScope}
                 onValueChange={(v) => v && set("scope", v)}
@@ -256,7 +258,11 @@ export function McpServerDialog({
                   scopeOptions.map((o) => [o.value, o.label]),
                 )}
               >
-                <SelectTrigger size="sm" className="w-full">
+                <SelectTrigger
+                  id={`${idBase}-scope`}
+                  size="sm"
+                  className="w-full"
+                >
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -276,9 +282,9 @@ export function McpServerDialog({
           {isStdio ? (
             <>
               <div className="space-y-2">
-                <Label htmlFor="mcp-command">Command</Label>
+                <Label htmlFor={`${idBase}-command`}>Command</Label>
                 <Input
-                  id="mcp-command"
+                  id={`${idBase}-command`}
                   value={draft.command}
                   onChange={(e) => set("command", e.target.value)}
                   placeholder="npx"
@@ -287,9 +293,9 @@ export function McpServerDialog({
                 />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="mcp-args">Arguments</Label>
+                <Label htmlFor={`${idBase}-args`}>Arguments</Label>
                 <Textarea
-                  id="mcp-args"
+                  id={`${idBase}-args`}
                   value={draft.args.join("\n")}
                   onChange={(e) =>
                     set(
@@ -311,9 +317,9 @@ export function McpServerDialog({
             </>
           ) : (
             <div className="space-y-2">
-              <Label htmlFor="mcp-url">URL</Label>
+              <Label htmlFor={`${idBase}-url`}>URL</Label>
               <Input
-                id="mcp-url"
+                id={`${idBase}-url`}
                 value={draft.url}
                 onChange={(e) => set("url", e.target.value)}
                 placeholder="https://mcp.example.com/mcp"

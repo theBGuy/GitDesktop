@@ -352,7 +352,12 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   each branch's ahead/behind counts vs. the default.
 - **Create** a branch ({{kbd:new-branch}}), **rename** ({{kbd:rename-branch}}), **delete**
   ({{kbd:delete-branch}}), or **archive** it — archiving hides a branch without deleting
-  it, collapsing it into an "Archived" section.
+  it, collapsing it into an "Archived" section. When creating, the **Base it on** picker is
+  a searchable list grouped into **Local** and **Remote** branches, so you can start from
+  *any* branch — not just the one you're on. Basing on a remote branch (e.g. \`origin/epic/…\`)
+  starts from the remote tip and leaves the new branch with **no upstream**, so its first
+  push publishes it under its own name — pairs with pushing a branch without switching to it
+  (below).
 - **Clean up branches** — from the switcher's menu or the command palette — opens a bulk
   sweep of stale branches: those **merged** into the default branch, or with no commits in a
   chosen window (30/60/90 days). Review the pre-checked list, then **archive** them
@@ -376,10 +381,11 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   the default branch's row shows how far behind its upstream it is after a fetch, and
   *Update default branch from its remote* is available from the command palette too.
 - **Push a branch without switching to it** — the outbound counterpart: a branch ahead
-  of its origin remote offers **Push to _origin/…_** in its right-click menu, and an
-  unpushed or upstream-deleted branch offers **Publish branch**. Neither checks the branch
-  out or touches your working tree, so it works even for a branch checked out in another
-  worktree.
+  of the remote it tracks offers **Push to _its remote/…_** in its right-click menu — so a
+  branch tracking a fork's _upstream_ is pushed there, not to origin. An unpushed or
+  upstream-deleted branch offers **Publish**; on a repo with several remotes you pick the
+  destination (one **Publish to _…_** item per remote). Neither checks the branch out or
+  touches your working tree, so it works even for a branch checked out in another worktree.
 - The **Remote** section lists branches on your remotes you haven't checked out locally
   yet — click one to check it out (creating a local tracking branch), or right-click to
   **Delete on _origin_…**, a server-side delete that removes the branch from the remote for
@@ -1441,7 +1447,9 @@ notes**, and **repository descriptions**.
   takes precedence.
 - **AI-ignore patterns** keep sensitive or noisy files (lockfiles, vendored folders) out
   of the AI's context while still committing them normally — global in Settings, or
-  per-repo via \`.gitdesktop/aiignore\`.
+  per-repo via \`.gitdesktop/aiignore\`. No need to hand-edit it: right-click a changed
+  file → *Exclude from AI* (the file, its folder, or its file type — or a
+  multi-selection) appends to \`.gitdesktop/aiignore\`, creating it if needed.
 - **Hide AI** (Settings → General) removes every AI surface from the app while keeping
   your configuration.
 

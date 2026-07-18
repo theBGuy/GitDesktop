@@ -76,6 +76,15 @@ struct CreateBranchArgs {
     /// Defaults to the current HEAD.
     #[serde(default)]
     from: Option<String>,
+    /// Create the branch with no upstream (git --no-track). Recommended when
+    /// `from` is a remote-tracking ref (e.g. origin/epic/x) and this branch is a
+    /// NEW line of work: without it the branch tracks that ref, and a later push
+    /// would fast-forward the tracked branch instead of publishing under this
+    /// branch's own name. Defaults to false (git's normal tracking behavior).
+    // The struct has no `rename_all`, so the wire name is spelled explicitly to
+    // match the documented `noTrack` flag (and the Tauri UI's camelCase key).
+    #[serde(default, rename = "noTrack")]
+    no_track: bool,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -102,6 +111,11 @@ struct PushArgs {
     /// checkout, no working-tree changes; an untracked branch is published with
     /// `-u origin <branch>`). Defaults to the current branch.
     branch: Option<String>,
+    /// Remote to push to; defaults to the branch's own upstream remote (or origin
+    /// when publishing). Requires branch.
+    // Single word, so camelCase == snake_case — no rename attr needed.
+    #[serde(default)]
+    remote: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -308,9 +322,10 @@ impl GitDesktopMcp {
 
     #[tool(
         description = "Create a branch in the bound repository, optionally checking it out and/or \
-                       starting from a given branch/tag/commit (defaults to HEAD). Refuses to \
-                       create a GitDesktop agent-session branch (gd/session/*). \
-                       Requires --allow-git-write.",
+                       starting from a given branch/tag/commit (defaults to HEAD), optionally with \
+                       no upstream (noTrack — recommended when starting a new branch from a \
+                       remote-tracking ref). Refuses to create a GitDesktop agent-session branch \
+                       (gd/session/*). Requires --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn create_branch(
@@ -331,6 +346,10 @@ impl GitDesktopMcp {
             args.name.clone(),
             args.checkout,
             args.from,
+            // Opt-in --no-track: agents basing on a remote-tracking ref should set
+            // this so the branch publishes under its own name instead of
+            // fast-forwarding the tracked ref on a later push.
+            args.no_track,
         )
         .await
         .map_err(app_err)?;
@@ -389,11 +408,12 @@ impl GitDesktopMcp {
     }
 
     #[tool(
-        description = "Push the current branch (default) or a named local `branch` to origin in \
-                       the bound repository — pushing a named branch never switches to it or \
-                       touches the working tree; an untracked branch is published with `-u`. \
-                       Uses git's native credential flow. Never force-pushes — use force_push \
-                       (destructive) for that. Requires --allow-git-write.",
+        description = "Push the current branch (default) or a named local `branch` in the bound \
+                       repository — pushing a named branch never switches to it or touches the \
+                       working tree; an untracked branch is published with `-u`. A named branch \
+                       targets its own upstream remote (or origin when publishing) unless `remote` \
+                       overrides it. Uses git's native credential flow. Never force-pushes — use \
+                       force_push (destructive) for that. Requires --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn push(
@@ -408,12 +428,16 @@ impl GitDesktopMcp {
             // could break session Resume semantics.
             ensure_not_session_branch(b)?;
         }
+        if let Some(r) = &args.remote {
+            ensure_not_flag(r, "remote")?;
+        }
         crate::git::remote::git_push_core(
             &self.state,
             self.repo.clone(),
             args.set_upstream,
             false,
             args.branch.clone(),
+            args.remote.clone(),
         )
         .await
         .map_err(app_err)?;
@@ -758,7 +782,7 @@ impl GitDesktopMcp {
     )]
     async fn force_push(&self) -> Result<CallToolResult, McpError> {
         self.ensure_destructive()?;
-        crate::git::remote::git_push_core(&self.state, self.repo.clone(), false, true, None)
+        crate::git::remote::git_push_core(&self.state, self.repo.clone(), false, true, None, None)
             .await
             .map_err(app_err)?;
         ok_text("force-pushed (with lease)")
@@ -885,7 +909,8 @@ mod tests {
             h.create_branch(Parameters(CreateBranchArgs {
                 name: "b".into(),
                 checkout: false,
-                from: None
+                from: None,
+                no_track: false
             })),
             "--allow-git-write"
         );
@@ -903,7 +928,8 @@ mod tests {
         assert_gated!(
             h.push(Parameters(PushArgs {
                 set_upstream: false,
-                branch: None
+                branch: None,
+                remote: None
             })),
             "--allow-git-write"
         );
@@ -1074,6 +1100,7 @@ mod tests {
                 name: "gd/session/fake".into(),
                 checkout: false,
                 from: None,
+                no_track: false,
             }))
             .await
             .expect_err("create_branch into gd/session/* must be refused");
@@ -1093,6 +1120,36 @@ mod tests {
             err.to_string().contains("agent-session branch"),
             "expected the session-branch refusal, got: {err}"
         );
+    }
+
+    /// `noTrack` is optional on the wire (#[serde(default)]): absent → false so
+    /// existing agents keep git's normal tracking, and an explicit true opts into
+    /// --no-track. Guards the default that keeps MCP behavior byte-identical.
+    #[test]
+    fn create_branch_args_no_track_defaults_false_and_parses_true() {
+        let absent: CreateBranchArgs =
+            serde_json::from_value(serde_json::json!({ "name": "b" })).unwrap();
+        assert!(!absent.no_track);
+
+        let explicit: CreateBranchArgs = serde_json::from_value(
+            serde_json::json!({ "name": "b", "from": "origin/epic/x", "noTrack": true }),
+        )
+        .unwrap();
+        assert!(explicit.no_track);
+    }
+
+    /// `remote` is optional on the wire (#[serde(default)]): absent → None so a
+    /// bare `push {branch}` keeps resolving to the branch's own upstream remote,
+    /// and an explicit value parses through. Single word, so no rename attr.
+    #[test]
+    fn push_args_remote_defaults_none_and_parses_value() {
+        let absent: PushArgs = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(absent.remote, None);
+
+        let explicit: PushArgs =
+            serde_json::from_value(serde_json::json!({ "branch": "feature", "remote": "upstream" }))
+                .unwrap();
+        assert_eq!(explicit.remote.as_deref(), Some("upstream"));
     }
 
     /// The session-branch guard is wired into the branch-mutating tools even when the

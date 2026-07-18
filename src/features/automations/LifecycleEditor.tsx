@@ -4,7 +4,7 @@ import {
   PlusIcon,
   TrashIcon,
 } from "@phosphor-icons/react";
-import { useState } from "react";
+import { useId, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -118,6 +118,10 @@ function ConditionsEditor({
   const [testBranch, setTestBranch] = useState("");
   const c = conditions ?? EMPTY_CONDITIONS;
   const summary = conditionsSummary(conditions);
+  const includeLabelId = useId();
+  const excludeLabelId = useId();
+  const matchSelectId = useId();
+  const testBranchId = useId();
 
   function patchList(key: "include" | "exclude", next: string[]) {
     onChange({ ...c, [key]: next });
@@ -203,17 +207,31 @@ function ConditionsEditor({
 
       {open && (
         <div className="mt-2 space-y-3">
-          <div className="space-y-1">
-            <Label className="text-xs">Only these branches (optional)</Label>
+          <div
+            className="space-y-1"
+            role="group"
+            aria-labelledby={includeLabelId}
+          >
+            <Label id={includeLabelId} className="text-xs">
+              Only these branches (optional)
+            </Label>
             {renderPatternRows("include", "release/**")}
           </div>
-          <div className="space-y-1">
-            <Label className="text-xs">Except these branches</Label>
+          <div
+            className="space-y-1"
+            role="group"
+            aria-labelledby={excludeLabelId}
+          >
+            <Label id={excludeLabelId} className="text-xs">
+              Except these branches
+            </Label>
             {renderPatternRows("exclude", "wip/*")}
           </div>
           {usesMatch(lifecycle) && (
             <div className="space-y-1">
-              <Label className="text-xs">Match against</Label>
+              <Label htmlFor={matchSelectId} className="text-xs">
+                Match against
+              </Label>
               <Select
                 items={MATCH_LABELS}
                 value={c.match}
@@ -221,7 +239,7 @@ function ConditionsEditor({
                   v && onChange({ ...c, match: v as BranchConditions["match"] })
                 }
               >
-                <SelectTrigger className="w-full" size="sm">
+                <SelectTrigger id={matchSelectId} className="w-full" size="sm">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -237,9 +255,12 @@ function ConditionsEditor({
             </div>
           )}
           <div className="space-y-1">
-            <Label className="text-xs">Try a branch</Label>
+            <Label htmlFor={testBranchId} className="text-xs">
+              Try a branch
+            </Label>
             <div className="flex items-center gap-2">
               <Input
+                id={testBranchId}
                 value={testBranch}
                 onChange={(e) => setTestBranch(e.target.value)}
                 placeholder="feature/login"

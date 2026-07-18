@@ -1,5 +1,5 @@
 import { GithubLogoIcon, PlusIcon, TrashIcon } from "@phosphor-icons/react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -59,6 +59,9 @@ export function BranchRulesDialog({
   const [importing, setImporting] = useState(false);
   const [draft, setDraft] = useState<BranchRulesConfig>(EMPTY_BRANCH_RULES);
   const [testName, setTestName] = useState("");
+  const patternInputId = useId();
+  const hintInputId = useId();
+  const testNameInputId = useId();
 
   const active = scope === "shared" ? shared : personal;
   const saving = scope === "shared" ? saveShared : savePersonal;
@@ -250,8 +253,11 @@ export function BranchRulesDialog({
                 {draft.naming.enabled && (
                   <div className="space-y-2 pl-6">
                     <div className="space-y-1">
-                      <Label className="text-xs">Pattern</Label>
+                      <Label htmlFor={patternInputId} className="text-xs">
+                        Pattern
+                      </Label>
                       <Input
+                        id={patternInputId}
                         value={draft.naming.pattern}
                         onChange={(e) => setNaming({ pattern: e.target.value })}
                         placeholder="{feature,fix,chore}/*"
@@ -259,19 +265,23 @@ export function BranchRulesDialog({
                       />
                     </div>
                     <div className="space-y-1">
-                      <Label className="text-xs">
+                      <Label htmlFor={hintInputId} className="text-xs">
                         Hint (shown when rejected)
                       </Label>
                       <Input
+                        id={hintInputId}
                         value={draft.naming.hint}
                         onChange={(e) => setNaming({ hint: e.target.value })}
                         placeholder="feature/login, fix/crash"
                       />
                     </div>
                     <div className="space-y-1">
-                      <Label className="text-xs">Try a name</Label>
+                      <Label htmlFor={testNameInputId} className="text-xs">
+                        Try a name
+                      </Label>
                       <div className="flex items-center gap-2">
                         <Input
+                          id={testNameInputId}
                           value={testName}
                           onChange={(e) => setTestName(e.target.value)}
                           placeholder="feature/login"

@@ -21,6 +21,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { BlameDialog } from "@/features/history/BlameDialog";
 import { FileHistoryDialog } from "@/features/history/FileHistoryDialog";
 import {
+  useAppendRepoAiIgnore,
   useAppendToGitignore,
   useCompareBranches,
   useDefaultBranch,
@@ -110,6 +111,7 @@ export function ChangesPanel({ repoPath }: { repoPath: string }) {
   const stashPaths = useStashPaths(repoPath);
   const stashAll = useStashAll(repoPath);
   const appendIgnore = useAppendToGitignore(repoPath);
+  const appendAiIgnore = useAppendRepoAiIgnore(repoPath);
   const untrack = useUntrack(repoPath);
   const selectedFile = useUiStore((s) => s.selectedFile);
   const selectFile = useUiStore((s) => s.selectFile);
@@ -398,6 +400,13 @@ export function ChangesPanel({ repoPath }: { repoPath: string }) {
       onError,
     });
   }
+  function aiExcludeOne(pattern: string) {
+    appendAiIgnore.mutate([pattern], {
+      onSuccess: () =>
+        toast.success(`Added "${pattern}" to .gitdesktop/aiignore`),
+      onError,
+    });
+  }
   function untrackOne(pathspec: string, ignorePattern: string, label: string) {
     untrack.mutate(
       { pathspecs: [pathspec], ignorePatterns: [ignorePattern] },
@@ -476,6 +485,22 @@ export function ChangesPanel({ repoPath }: { repoPath: string }) {
     appendIgnore.mutate(patterns, {
       onSuccess: () => {
         toast.success(`Added ${patterns.length} entries to .gitignore`);
+        setSelectedKeys(new Set());
+      },
+      onError,
+    });
+  }
+
+  // Bulk AI-exclude: add a root-relative pathspec per selected file. The Rust
+  // side strips leading slashes, de-dupes, and skips lines already present.
+  function aiExcludeSelected() {
+    if (selectionCount === 0) return;
+    const patterns = selectedEntries.map((e) => e.path);
+    appendAiIgnore.mutate(patterns, {
+      onSuccess: () => {
+        toast.success(
+          `Added ${patterns.length} entries to .gitdesktop/aiignore`,
+        );
         setSelectedKeys(new Set());
       },
       onError,
@@ -907,6 +932,8 @@ export function ChangesPanel({ repoPath }: { repoPath: string }) {
                   blame: setBlamePath,
                   ignore: ignoreOne,
                   untrack: untrackOne,
+                  aiExclude: aiExcludeOne,
+                  aiExcludeSelected,
                 }}
               />
             </ContextMenuContent>

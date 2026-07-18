@@ -2929,8 +2929,19 @@ export function useCheckoutRemoteBranch(repo: string) {
 export function useCreateBranch(repo: string) {
   return useRepoMutation(
     repo,
-    (args: { name: string; checkout: boolean; startPoint?: string }) =>
-      api.gitCreateBranch(repo, args.name, args.checkout, args.startPoint),
+    (args: {
+      name: string;
+      checkout: boolean;
+      startPoint?: string;
+      noTrack?: boolean;
+    }) =>
+      api.gitCreateBranch(
+        repo,
+        args.name,
+        args.checkout,
+        args.startPoint,
+        args.noTrack,
+      ),
   );
 }
 
@@ -2946,6 +2957,16 @@ export function useDiscard(repo: string) {
 export function useAppendToGitignore(repo: string) {
   return useRepoMutation(repo, (patterns: string[]) =>
     api.appendToGitignore(repo, patterns),
+  );
+}
+
+export function useAppendRepoAiIgnore(repo: string) {
+  return useRepoMutation(
+    repo,
+    (patterns: string[]) => api.appendRepoAiIgnore(repo, patterns),
+    // Staging-class edit — only the working tree changes (the aiignore file
+    // appears/updates), so narrow like useStage/useApplySuggestion.
+    { invalidate: workingTreeKeys(repo) },
   );
 }
 
@@ -3292,8 +3313,19 @@ export function useUpdateSubmodule(repo: string) {
 export function usePush(repo: string) {
   return useRepoMutation(
     repo,
-    (args: { setUpstream: boolean; force?: boolean; branch?: string }) =>
-      api.gitPush(repo, args.setUpstream, args.force ?? false, args.branch),
+    (args: {
+      setUpstream: boolean;
+      force?: boolean;
+      branch?: string;
+      remote?: string;
+    }) =>
+      api.gitPush(
+        repo,
+        args.setUpstream,
+        args.force ?? false,
+        args.branch,
+        args.remote,
+      ),
   );
 }
 

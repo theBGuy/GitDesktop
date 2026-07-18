@@ -649,6 +649,7 @@ pub fn run() {
             mcp::mcp_global_remove,
             instructions::read_repo_instructions,
             instructions::read_repo_ai_ignore,
+            instructions::append_repo_ai_ignore,
             instructions::read_repo_branch_rules,
             instructions::write_repo_branch_rules,
             instructions::read_repo_syntax,

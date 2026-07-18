@@ -1,5 +1,5 @@
 import { InfoIcon, WarningIcon } from "@phosphor-icons/react";
-import { useEffect, useEffectEvent, useState } from "react";
+import { useEffect, useEffectEvent, useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -62,6 +62,8 @@ export function RebaseOntoDialog({
 }) {
   const [newBase, setNewBase] = useState("");
   const [oldBase, setOldBase] = useState("");
+  const newBaseSelectId = useId();
+  const oldBaseSelectId = useId();
 
   // On open, default the new base to the default branch (the usual "I meant to
   // branch off main" case) and the original base to any other branch.
@@ -175,7 +177,7 @@ export function RebaseOntoDialog({
 
         <div className="flex min-h-0 flex-col gap-4 overflow-y-auto">
           <div className="space-y-2">
-            <Label>New base</Label>
+            <Label htmlFor={newBaseSelectId}>New base</Label>
             <Select
               items={Object.fromEntries(
                 otherBranches.map((b) => [b.name, b.name]),
@@ -183,7 +185,7 @@ export function RebaseOntoDialog({
               value={newBase || null}
               onValueChange={(v) => v && setNewBase(v)}
             >
-              <SelectTrigger className="w-full">
+              <SelectTrigger id={newBaseSelectId} className="w-full">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -197,7 +199,7 @@ export function RebaseOntoDialog({
           </div>
 
           <div className="space-y-2">
-            <Label>Original base</Label>
+            <Label htmlFor={oldBaseSelectId}>Original base</Label>
             <Select
               items={Object.fromEntries(
                 otherBranches.map((b) => [b.name, b.name]),
@@ -205,7 +207,7 @@ export function RebaseOntoDialog({
               value={oldBase || null}
               onValueChange={(v) => v && setOldBase(v)}
             >
-              <SelectTrigger className="w-full">
+              <SelectTrigger id={oldBaseSelectId} className="w-full">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
