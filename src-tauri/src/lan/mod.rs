@@ -39,6 +39,14 @@ pub struct LanState {
     pairing: Arc<Mutex<Option<PairingSession>>>,
     /// Per-IP failure windows for rate-limiting, shared with the router state.
     rate_limit: RateLimitMap,
+    /// Fires a cut signal to every live WebSocket monitor (see
+    /// [`routes::reviews::forward_stream`]). Sent on `lan_disable`, on a
+    /// mode-switch rebind, when the active repo actually changes, and on a
+    /// device revoke — each closes in-flight sockets so a phone must reconnect
+    /// and re-authorize against the new state. The `Sender` is shared (cloned)
+    /// into the router state; only the send half is ever needed there (each
+    /// socket subscribes its own receiver).
+    monitor_cut: tokio::sync::broadcast::Sender<()>,
     /// Serializes the WHOLE enable/disable lifecycle transition (an async-aware
     /// `Mutex`, held across the bind/shutdown `.await`s). Without it, two
     /// concurrent `lan_enable`s could both observe "not running", both bind a
@@ -64,12 +72,53 @@ impl Default for LanState {
             running: Mutex::new(None),
             pairing: Arc::new(Mutex::new(None)),
             rate_limit: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            // Capacity 4: cut signals are rare lifecycle blips, and each monitor
+            // only needs to observe that *a* cut happened (the value is `()`), so
+            // a shallow buffer is plenty — a lagged receiver still terminates.
+            monitor_cut: tokio::sync::broadcast::channel(4).0,
             lifecycle: tokio::sync::Mutex::new(()),
         }
     }
 }
 
 impl LanState {
+    /// Point the read routes at `repo_path`, cutting live monitors iff the shared
+    /// repo actually changed. Returns whether it changed (the cut fired). Split
+    /// out from the [`lan_set_active_repo`] command so the change-detection +
+    /// cut-fire behavior is unit-testable without a Tauri `State`.
+    fn set_active_repo(&self, repo_path: Option<String>) -> bool {
+        let changed = {
+            let mut guard = self.active_repo.lock().unwrap_or_else(|p| p.into_inner());
+            if *guard == repo_path {
+                false
+            } else {
+                *guard = repo_path;
+                true
+            }
+        };
+        // Only cut live monitors when the shared repo ACTUALLY changed. The App
+        // effect re-pushes on every repoPath render, so a same-value set is a
+        // no-op and must not sever a healthy stream; a real switch/clear must,
+        // since the phone's in-flight stream is now scoped to a repo we no longer
+        // share.
+        if changed {
+            let _ = self.monitor_cut.send(());
+        }
+        changed
+    }
+
+    /// Revoke a paired device, then cut live monitors on success. Split out from
+    /// the [`lan_device_revoke`] command so the on-success cut-fire is unit-
+    /// testable without a Tauri `State`. The cut is deliberately coarse (all live
+    /// monitors, not just the revoked device's — per-device cut tracking is
+    /// deferred): every phone reconnects, and the revoked token is now rejected at
+    /// the upgrade, closing the "auth runs only at upgrade time" hole.
+    fn revoke_device(&self, device_id: &str) -> AppResult<()> {
+        auth::revoke_device(device_id)?;
+        let _ = self.monitor_cut.send(());
+        Ok(())
+    }
+
     /// Build the current [`LanStatus`] snapshot.
     fn status(&self) -> LanStatus {
         let running = self.running.lock().unwrap_or_else(|p| p.into_inner());
@@ -185,6 +234,10 @@ pub async fn lan_enable(
             running.take()
         };
         if let Some(rs) = old {
+            // Cut any sockets accepted on the old listener before it's torn down:
+            // a mode switch rebinds on a new port/interface, so in-flight monitors
+            // must reconnect against the new server.
+            let _ = state.monitor_cut.send(());
             rs.handle.shutdown().await;
         }
     }
@@ -197,6 +250,7 @@ pub async fn lan_enable(
         // The SAME stream registry `AppState` owns — so a review/session running
         // there is enumerable + watchable over the LAN.
         app_state.streams_arc(),
+        state.monitor_cut.clone(),
     )
     .await?;
     {
@@ -225,6 +279,11 @@ pub async fn lan_disable(app: AppHandle, state: State<'_, LanState>) -> AppResul
         running.take()
     };
     if let Some(rs) = old {
+        // Cut every live monitor before we drop the listener: `shutdown()` stops
+        // accepting, but sockets already hijacked out of the serve loop keep
+        // forwarding until told to stop. Firing here closes them so "Stop sharing"
+        // actually severs the phone.
+        let _ = state.monitor_cut.send(());
         rs.handle.shutdown().await;
     }
     // Any in-flight pairing is meaningless once the server is down.
@@ -244,8 +303,7 @@ pub fn lan_set_active_repo(
     state: State<'_, LanState>,
     repo_path: Option<String>,
 ) -> AppResult<()> {
-    let mut guard = state.active_repo.lock().unwrap_or_else(|p| p.into_inner());
-    *guard = repo_path;
+    state.set_active_repo(repo_path);
     Ok(())
 }
 
@@ -300,8 +358,8 @@ pub fn lan_devices_list(_state: State<'_, LanState>) -> AppResult<Vec<LanDevice>
 
 /// Revoke a paired device by id. Its bearer token stops authenticating.
 #[tauri::command]
-pub fn lan_device_revoke(_state: State<'_, LanState>, device_id: String) -> AppResult<()> {
-    auth::revoke_device(&device_id)
+pub fn lan_device_revoke(state: State<'_, LanState>, device_id: String) -> AppResult<()> {
+    state.revoke_device(&device_id)
 }
 
 /// Render `data` as an SVG QR code (string). Uses medium error correction and a
@@ -345,6 +403,7 @@ mod tests {
             rate_limit: Arc::new(Mutex::new(std::collections::HashMap::new())),
             bound_hosts: Arc::new(vec!["testhost".to_string()]),
             streams: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            monitor_cut: tokio::sync::broadcast::channel(4).0,
         }
     }
 
@@ -371,6 +430,62 @@ mod tests {
             *guard = None;
         }
         assert_eq!(state.status().active_repo, None);
+    }
+
+    #[test]
+    fn set_active_repo_cuts_monitors_only_on_change() {
+        // The monitor-cut signal fires when the shared repo actually changes, and
+        // NOT on a same-value set (the App effect re-pushes the same repoPath on
+        // every render — cutting on those would sever healthy phone streams).
+        let state = LanState::default();
+        let mut cut_rx = state.monitor_cut.subscribe();
+
+        // (1) None → Some(repo) is a change → fires.
+        assert!(state.set_active_repo(Some("C:/repo".to_string())));
+        assert!(cut_rx.try_recv().is_ok());
+
+        // (2) Setting the SAME value again is a no-op → no fire.
+        assert!(!state.set_active_repo(Some("C:/repo".to_string())));
+        assert!(matches!(
+            cut_rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+
+        // (3) A real switch (and a clear) each fire.
+        assert!(state.set_active_repo(Some("C:/other".to_string())));
+        assert!(cut_rx.try_recv().is_ok());
+        assert!(state.set_active_repo(None));
+        assert!(cut_rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn revoke_device_cuts_monitors_on_success() {
+        // A successful revoke fires the monitor-cut signal (so a phone with the
+        // revoked token — auth only ran at upgrade time — is severed and 401ed on
+        // reconnect). A failed revoke (unknown id) does NOT fire.
+        let _lock = auth::store_test_lock();
+        let tmp = temp_store();
+        let prev = auth::set_store_path_for_test(Some(tmp.clone()));
+
+        let state = LanState::default();
+        let mut cut_rx = state.monitor_cut.subscribe();
+
+        let (device, _bearer, token_hash) = auth::mint_device("Revoke Phone");
+        auth::persist_device(&device, &token_hash).unwrap();
+
+        // Successful revoke → fires.
+        state.revoke_device(&device.id).unwrap();
+        assert!(cut_rx.try_recv().is_ok());
+
+        // A second revoke of the same (now-unknown) id errors and must NOT fire.
+        assert!(state.revoke_device(&device.id).is_err());
+        assert!(matches!(
+            cut_rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+
+        auth::set_store_path_for_test(prev);
+        std::fs::remove_file(&tmp).ok();
     }
 
     #[tokio::test]
@@ -505,6 +620,28 @@ mod tests {
             .unwrap();
         let auth_resp = router.clone().oneshot(auth_req).await.unwrap();
         assert_ne!(auth_resp.status(), StatusCode::UNAUTHORIZED);
+
+        // 3b) The session was CONSUMED atomically on the successful pair, so a
+        //     second submit with the SAME correct proof (the double-mint race, run
+        //     sequentially here) now hits `pairingInactive`/403 — it can't mint a
+        //     second token from one PIN entry.
+        let replay_body = serde_json::json!({ "deviceName": "Replay Phone", "proof": proof });
+        let replay_req = Request::builder()
+            .uri("/api/pair")
+            .method("POST")
+            .header("host", "testhost")
+            .header("content-type", "application/json")
+            .body(Body::from(replay_body.to_string()))
+            .unwrap();
+        let replay_resp = router.clone().oneshot(replay_req).await.unwrap();
+        assert_eq!(replay_resp.status(), StatusCode::FORBIDDEN);
+        let replay_bytes = axum::body::to_bytes(replay_resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let replay: serde_json::Value = serde_json::from_slice(&replay_bytes).unwrap();
+        assert_eq!(replay["kind"], "pairingInactive");
+        // Still exactly one device — no second mint slipped through.
+        assert_eq!(auth::list_devices().unwrap().len(), 1);
 
         // 4) Revoke the device → the same token now 401s.
         auth::revoke_device(&device_id).unwrap();
@@ -744,4 +881,14 @@ mod tests {
     // out-of-scope id and unknown id → `None` (the 404 source), with no oracle
     // distinguishing them. Asserting the route-level 404/409 would need a live
     // socket, out of scope for these in-memory router tests.
+    //
+    // NOTE on `forward_stream`'s monitor-cut `select!` branch: for the same reason
+    // the WS route can't be driven via `tower::oneshot` (the `WebSocketUpgrade`
+    // extractor rejects a non-upgrade GET during extraction, before the handler
+    // runs), the cut branch inside the pump can't be exercised here either — it
+    // only runs on an upgraded socket. What IS testable — and is tested above — is
+    // that the desktop FIRES the cut at each lifecycle point
+    // (`set_active_repo_cuts_monitors_only_on_change`,
+    // `revoke_device_cuts_monitors_on_success`); the pump's reaction (break + Close
+    // frame on any `cut_rx.recv()` result) is verified by inspection.
 }
