@@ -5,4 +5,6 @@
   requests, and CI** from your phone, read-only. Off by default, with per-device tokens
   you can review and revoke at any time (even while sharing is off), and connected
   phones are disconnected the moment you stop sharing, switch repos, or revoke their
-  device.
+  device. The connection is served over HTTPS with a self-signed certificate GitDesktop
+  generates — your phone shows a one-time certificate warning on first connect, and the
+  pairing dialog shows the certificate's SHA-256 fingerprint so you can verify it.

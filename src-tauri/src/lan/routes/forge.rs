@@ -1,18 +1,31 @@
 //! Read-only forge routes — thin adapters over the existing `crate::forge::*`
 //! core fns (which fan out to GitHub/GitLab/Bitbucket by the repo's remote). Each
-//! pulls the active repo from state and calls the core fn unchanged. The `lens`
-//! param is deliberately omitted from the HTTP surface (always `None`).
+//! reads its scoped repo from the `Extension<ScopedRepo>` a resolver middleware
+//! inserts and calls the core fn unchanged. The `lens` param is deliberately
+//! omitted from the HTTP surface (always `None`).
 //!
 //! Note: the forge issue fns hard-error on Bitbucket ("Bitbucket issues aren't
 //! supported yet."); that surfaces as the mapped `InvalidArgument` → 400. It is
 //! NOT special-cased here — the error propagates like any other.
 
-use axum::extract::{Path, Query, State};
+use std::collections::HashMap;
+
+use axum::extract::{Path, Query};
 use axum::response::Response;
+use axum::Extension;
 use serde::Deserialize;
 
-use crate::lan::auth::RouterState;
-use crate::lan::routes::{repo_or_409, respond};
+use crate::lan::routes::{bad_request, path_param, respond, ScopedRepo};
+
+/// Read a `u64` path param by name (`number`/`id`), returning the app's standard
+/// 400 when it's absent or not a non-negative integer. Shared across both mounts,
+/// so the param is read by name (see [`crate::lan::routes`]). The `Err` `Response`
+/// is boxed to keep the `Result` small (the `result_large_err` lint).
+fn u64_param(params: &HashMap<String, String>, name: &str) -> Result<u64, Box<Response>> {
+    let raw = path_param(params, name)?;
+    raw.parse::<u64>()
+        .map_err(|_| Box::new(bad_request(&format!("{name} must be a non-negative integer"))))
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -21,29 +34,45 @@ pub struct ListQuery {
     limit: Option<u32>,
 }
 
-/// GET /api/forge/prs?state&limit
-pub async fn pr_list(State(state): State<RouterState>, Query(q): Query<ListQuery>) -> Response {
-    let repo = repo_or_409!(state);
+/// GET PR list (alias: `/api/forge/prs?state&limit`).
+pub async fn pr_list(
+    Extension(ScopedRepo(repo)): Extension<ScopedRepo>,
+    Query(q): Query<ListQuery>,
+) -> Response {
     let pr_state = q.state.unwrap_or_else(|| "open".to_string());
     respond(crate::forge::forge_pr_list(repo, pr_state, q.limit, None).await)
 }
 
-/// GET /api/forge/prs/{number}
-pub async fn pr_view(State(state): State<RouterState>, Path(number): Path<u64>) -> Response {
-    let repo = repo_or_409!(state);
+/// GET PR view (alias: `/api/forge/prs/{number}`).
+pub async fn pr_view(
+    Extension(ScopedRepo(repo)): Extension<ScopedRepo>,
+    Path(params): Path<HashMap<String, String>>,
+) -> Response {
+    let number = match u64_param(&params, "number") {
+        Ok(n) => n,
+        Err(resp) => return *resp,
+    };
     respond(crate::forge::forge_pr_view(repo, number, None).await)
 }
 
-/// GET /api/forge/issues?state&limit
-pub async fn issue_list(State(state): State<RouterState>, Query(q): Query<ListQuery>) -> Response {
-    let repo = repo_or_409!(state);
+/// GET issue list (alias: `/api/forge/issues?state&limit`).
+pub async fn issue_list(
+    Extension(ScopedRepo(repo)): Extension<ScopedRepo>,
+    Query(q): Query<ListQuery>,
+) -> Response {
     let issue_state = q.state.unwrap_or_else(|| "open".to_string());
     respond(crate::forge::forge_issue_list(repo, issue_state, q.limit, None).await)
 }
 
-/// GET /api/forge/issues/{number}
-pub async fn issue_view(State(state): State<RouterState>, Path(number): Path<u64>) -> Response {
-    let repo = repo_or_409!(state);
+/// GET issue view (alias: `/api/forge/issues/{number}`).
+pub async fn issue_view(
+    Extension(ScopedRepo(repo)): Extension<ScopedRepo>,
+    Path(params): Path<HashMap<String, String>>,
+) -> Response {
+    let number = match u64_param(&params, "number") {
+        Ok(n) => n,
+        Err(resp) => return *resp,
+    };
     respond(crate::forge::forge_issue_view(repo, number, None).await)
 }
 
@@ -54,18 +83,23 @@ pub struct CiListQuery {
     branch: Option<String>,
 }
 
-/// GET /api/forge/ci/runs?limit&branch
+/// GET CI run list (alias: `/api/forge/ci/runs?limit&branch`).
 pub async fn ci_run_list(
-    State(state): State<RouterState>,
+    Extension(ScopedRepo(repo)): Extension<ScopedRepo>,
     Query(q): Query<CiListQuery>,
 ) -> Response {
-    let repo = repo_or_409!(state);
     let limit = q.limit.unwrap_or(20);
     respond(crate::forge::forge_ci_run_list(repo, limit, q.branch).await)
 }
 
-/// GET /api/forge/ci/runs/{id}
-pub async fn ci_run_view(State(state): State<RouterState>, Path(id): Path<u64>) -> Response {
-    let repo = repo_or_409!(state);
+/// GET CI run view (alias: `/api/forge/ci/runs/{id}`).
+pub async fn ci_run_view(
+    Extension(ScopedRepo(repo)): Extension<ScopedRepo>,
+    Path(params): Path<HashMap<String, String>>,
+) -> Response {
+    let id = match u64_param(&params, "id") {
+        Ok(i) => i,
+        Err(resp) => return *resp,
+    };
     respond(crate::forge::forge_ci_run_view(repo, id.to_string()).await)
 }

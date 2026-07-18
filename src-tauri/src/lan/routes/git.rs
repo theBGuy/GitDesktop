@@ -1,23 +1,26 @@
 //! Read-only git routes — thin adapters over the existing `crate::git::*` core
-//! fns. Each pulls the active repo from state, calls the core fn with no shape
-//! translation, and returns its result as JSON. No new git logic lives here.
+//! fns. Each reads its scoped repo from the `Extension<ScopedRepo>` a resolver
+//! middleware inserts, calls the core fn with no shape translation, and returns its
+//! result as JSON. No new git logic lives here. Handlers with a path param read it
+//! by name (see [`crate::lan::routes`]) so they work under both the alias and the
+//! scoped mounts.
 
-use axum::extract::{Path, Query, State};
+use std::collections::HashMap;
+
+use axum::extract::{Path, Query};
 use axum::response::Response;
+use axum::Extension;
 use serde::Deserialize;
 
-use crate::lan::auth::RouterState;
-use crate::lan::routes::{bad_request, is_safe_relative_path, repo_or_409, respond};
+use crate::lan::routes::{bad_request, is_safe_relative_path, path_param, respond, ScopedRepo};
 
-/// GET /api/repo/status
-pub async fn status(State(state): State<RouterState>) -> Response {
-    let repo = repo_or_409!(state);
+/// GET status — for the shared repo (alias: `/api/repo/status`).
+pub async fn status(Extension(ScopedRepo(repo)): Extension<ScopedRepo>) -> Response {
     respond(crate::git::status::status_core(&repo).await)
 }
 
-/// GET /api/repo/branches
-pub async fn branches(State(state): State<RouterState>) -> Response {
-    let repo = repo_or_409!(state);
+/// GET branches (alias: `/api/repo/branches`).
+pub async fn branches(Extension(ScopedRepo(repo)): Extension<ScopedRepo>) -> Response {
     respond(crate::git::branches::git_branches(repo).await)
 }
 
@@ -29,20 +32,27 @@ pub struct LogQuery {
     search: Option<String>,
 }
 
-/// GET /api/repo/log?limit&skip&search
-pub async fn log(State(state): State<RouterState>, Query(q): Query<LogQuery>) -> Response {
-    let repo = repo_or_409!(state);
+/// GET log (alias: `/api/repo/log?limit&skip&search`).
+pub async fn log(
+    Extension(ScopedRepo(repo)): Extension<ScopedRepo>,
+    Query(q): Query<LogQuery>,
+) -> Response {
     let limit = q.limit.unwrap_or(50);
     let skip = q.skip.unwrap_or(0);
     respond(crate::git::history::git_log(repo, limit, skip, q.search).await)
 }
 
-/// GET /api/repo/commits/{hash}
+/// GET commit details (alias: `/api/repo/commits/{hash}`). The `hash` path param
+/// is read by name so the handler works under BOTH the alias (`{hash}`) and scoped
+/// (`{repoId}` + `{hash}`) mounts (see [`crate::lan::routes`]).
 pub async fn commit_details(
-    State(state): State<RouterState>,
-    Path(hash): Path<String>,
+    Extension(ScopedRepo(repo)): Extension<ScopedRepo>,
+    Path(params): Path<HashMap<String, String>>,
 ) -> Response {
-    let repo = repo_or_409!(state);
+    let hash = match path_param(&params, "hash") {
+        Ok(h) => h,
+        Err(resp) => return *resp,
+    };
     respond(crate::git::history::git_commit_details(repo, hash).await)
 }
 
@@ -52,13 +62,16 @@ pub struct MaxBytesQuery {
     max_bytes: Option<usize>,
 }
 
-/// GET /api/repo/commits/{hash}/diff?maxBytes
+/// GET commit diff (alias: `/api/repo/commits/{hash}/diff?maxBytes`).
 pub async fn commit_diff(
-    State(state): State<RouterState>,
-    Path(hash): Path<String>,
+    Extension(ScopedRepo(repo)): Extension<ScopedRepo>,
+    Path(params): Path<HashMap<String, String>>,
     Query(q): Query<MaxBytesQuery>,
 ) -> Response {
-    let repo = repo_or_409!(state);
+    let hash = match path_param(&params, "hash") {
+        Ok(h) => h,
+        Err(resp) => return *resp,
+    };
     respond(crate::git::history::git_commit_diff(repo, hash, q.max_bytes).await)
 }
 
@@ -69,12 +82,11 @@ pub struct WorkingDiffQuery {
     worktree: Option<bool>,
 }
 
-/// GET /api/repo/diff/working?maxBytes&worktree
+/// GET working diff (alias: `/api/repo/diff/working?maxBytes&worktree`).
 pub async fn diff_working(
-    State(state): State<RouterState>,
+    Extension(ScopedRepo(repo)): Extension<ScopedRepo>,
     Query(q): Query<WorkingDiffQuery>,
 ) -> Response {
-    let repo = repo_or_409!(state);
     // `exclude` has no HTTP surface in this slice — always None.
     respond(crate::git::diff::git_staged_diff(repo, q.max_bytes, None, q.worktree).await)
 }
@@ -89,12 +101,11 @@ pub struct FileDiffQuery {
     untracked: bool,
 }
 
-/// GET /api/repo/diff/file?path&staged&untracked
+/// GET file diff (alias: `/api/repo/diff/file?path&staged&untracked`).
 pub async fn diff_file(
-    State(state): State<RouterState>,
+    Extension(ScopedRepo(repo)): Extension<ScopedRepo>,
     Query(q): Query<FileDiffQuery>,
 ) -> Response {
-    let repo = repo_or_409!(state);
     // Path containment: this is a paired LAN device supplying `path`, and the
     // untracked branch of `git_diff_file` runs `git diff --no-index` (NOT
     // repo-confined). Reject anything that isn't a safe repo-relative path so a

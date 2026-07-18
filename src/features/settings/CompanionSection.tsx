@@ -117,8 +117,9 @@ export function CompanionSection() {
       {/* The honest security caveat — always visible, never a tooltip. */}
       <p className="rounded border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
         Anyone on this Wi-Fi with the pairing PIN can read this repo while
-        sharing is on. It's unencrypted on your local network — use it on
-        trusted networks only. Turn sharing off when you're done.
+        sharing is on. Traffic is encrypted with a certificate this app
+        generates, so your phone asks you to confirm it on first connect. Use it
+        on trusted networks only, and turn sharing off when you're done.
       </p>
 
       {enabled && status.data && (
@@ -138,6 +139,14 @@ export function CompanionSection() {
               Sharing on port{" "}
               <span className="font-mono">{status.data.port}</span> — no network
               address detected. Check you're connected to Wi-Fi.
+            </p>
+          )}
+          {status.data.certFingerprint !== null && (
+            <p>
+              Certificate SHA-256:{" "}
+              <span className="font-mono break-all select-all">
+                {status.data.certFingerprint}
+              </span>
             </p>
           )}
         </div>
