@@ -47,6 +47,7 @@ export const capabilities: Capability[] = [
   // — Branches & history —
   { group: "Branches & history", label: "Branch compare — ahead/behind, three-dot diff, jump to PR", highlight: true },
   { group: "Branches & history", label: "Update a branch from its upstream — no checkout needed" },
+  { group: "Branches & history", label: "Push or publish a branch — no checkout needed" },
   { group: "Branches & history", label: "Check out or delete remote-only branches from the switcher" },
   { group: "Branches & history", label: "Archive branches — hide from the switcher without deleting" },
   { group: "Branches & history", label: "Clean up branches in bulk — archive or delete stale ones in one sweep", highlight: true },
