@@ -18,6 +18,7 @@
 pub mod auth;
 pub mod routes;
 pub mod server;
+pub mod static_serve;
 
 use std::sync::{Arc, Mutex};
 
@@ -658,6 +659,95 @@ mod tests {
         std::fs::remove_file(&tmp).ok();
     }
 
+    /// Build a POST request to `path` with an optional JSON body (host = testhost).
+    fn post(path: &str, json_body: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder()
+            .uri(path)
+            .method("POST")
+            .header("host", "testhost");
+        let body = match json_body {
+            Some(j) => {
+                b = b.header("content-type", "application/json");
+                Body::from(j.to_string())
+            }
+            None => Body::empty(),
+        };
+        b.body(body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn challenge_polling_without_a_session_never_locks_out() {
+        // The live self-lockout bug: a phone sitting on the pairing page polls
+        // `/challenge` while NO session is active (e.g. between a revoke and the next
+        // offer). Each poll gets `pairingInactive` — but must NOT count toward the
+        // lockout budget, or the phone locks ITSELF out before the user types a PIN.
+        // Poll well past the threshold; every response stays 403 pairingInactive,
+        // never 429.
+        let router = server::build_router(test_router(None));
+        for _ in 0..(auth::RATE_LIMIT_MAX_FAILURES_FOR_TEST + 3) {
+            let resp = router
+                .clone()
+                .oneshot(post("/api/pair/challenge", None))
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "polling with no session must stay pairingInactive, never lock out"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn wrong_proofs_still_lock_out_after_the_threshold() {
+        // The lockout budget IS the PIN-guess budget: repeated WRONG proofs must
+        // still trip the lockout at the threshold (the calibration fix removed the
+        // no-session/expired penalties but must NOT weaken the real guess defense).
+        let _lock = auth::store_test_lock();
+        let tmp = temp_store();
+        let prev = auth::set_store_path_for_test(Some(tmp.clone()));
+
+        // An active session with a fetched challenge, so a submitted proof is
+        // actually evaluated (and a wrong one records a failure).
+        let session = auth::new_pairing_session("http://testhost/#pair".to_string());
+        let state = test_router(Some("C:/repo".to_string()));
+        *state.pairing.lock().unwrap() = Some(session);
+        let router = server::build_router(state);
+
+        // Fetch a challenge so proofs reach the compare (not the no-challenge branch).
+        let chal = router
+            .clone()
+            .oneshot(post("/api/pair/challenge", None))
+            .await
+            .unwrap();
+        assert_eq!(chal.status(), StatusCode::OK);
+
+        // Submit wrong proofs up to (but not hitting) the threshold → each 401s.
+        let wrong = serde_json::json!({ "deviceName": "Guesser", "proof": "00" }).to_string();
+        for _ in 0..auth::RATE_LIMIT_MAX_FAILURES_FOR_TEST {
+            let resp = router
+                .clone()
+                .oneshot(post("/api/pair", Some(&wrong)))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "a wrong proof is a 401");
+        }
+        // The threshold is now reached → the next attempt is rate-limited (429).
+        let locked = router
+            .oneshot(post("/api/pair", Some(&wrong)))
+            .await
+            .unwrap();
+        assert_eq!(
+            locked.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "wrong proofs must still lock out at the threshold"
+        );
+
+        auth::set_store_path_for_test(prev);
+        std::fs::remove_file(&tmp).ok();
+    }
+
     /// Build an authed GET request by seeding a device in the store and using its
     /// raw bearer. Caller must hold `store_test_lock` + a store-path override.
     fn authed_get(path: &str, bearer: &str) -> Request<Body> {
@@ -667,6 +757,298 @@ mod tests {
             .header("authorization", format!("Bearer {bearer}"))
             .body(Body::empty())
             .unwrap()
+    }
+
+    /// Build a GET request authed via the `gd_lan` cookie (the phone-browser path).
+    fn cookie_get(path: &str, cookie_value: &str) -> Request<Body> {
+        Request::builder()
+            .uri(path)
+            .header("host", "testhost")
+            .header("cookie", format!("gd_lan={cookie_value}"))
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn cookie_auth_reaches_protected_routes() {
+        // A phone browser can't set an Authorization header on a WS upgrade or
+        // navigation, so it authenticates via the `gd_lan` cookie. A valid cookie
+        // reaches a protected route (not 401), a bad cookie 401s, and an explicit
+        // Authorization header still works.
+        let _lock = auth::store_test_lock();
+        let tmp = temp_store();
+        let prev = auth::set_store_path_for_test(Some(tmp.clone()));
+
+        let (device, bearer, token_hash) = auth::mint_device("Cookie Phone");
+        auth::persist_device(&device, &token_hash).unwrap();
+        let router = server::build_router(test_router(Some("C:/repo".to_string())));
+
+        // (1) A valid cookie reaches the protected route (past auth — may fail at the
+        //     git layer since C:/repo isn't real, but NOT 401).
+        let ok = router
+            .clone()
+            .oneshot(cookie_get("/api/repo/status", &bearer))
+            .await
+            .unwrap();
+        assert_ne!(ok.status(), StatusCode::UNAUTHORIZED);
+
+        // (2) A bad cookie 401s.
+        let bad = router
+            .clone()
+            .oneshot(cookie_get("/api/repo/status", "not-a-real-token"))
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), StatusCode::UNAUTHORIZED);
+
+        // (3) The Authorization header path still works (checked FIRST).
+        let hdr = router
+            .oneshot(authed_get("/api/repo/status", &bearer))
+            .await
+            .unwrap();
+        assert_ne!(hdr.status(), StatusCode::UNAUTHORIZED);
+
+        auth::set_store_path_for_test(prev);
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn no_credential_probes_never_lock_out_and_leave_pairing_working() {
+        // The companion shell's status probe hits a protected route with NO
+        // credential while the phone sits on #pair (no cookie yet). A request with no
+        // credential at all carries zero guessing info, so it must NOT bank a failure
+        // — otherwise these probes reintroduce the self-lockout. Fire well past the
+        // threshold: every probe 401s, never 429, and a correct pairing flow AFTER
+        // them still succeeds (the budget was never spent).
+        let _lock = auth::store_test_lock();
+        let tmp = temp_store();
+        let prev = auth::set_store_path_for_test(Some(tmp.clone()));
+
+        let session = auth::new_pairing_session("http://testhost/#pair".to_string());
+        let pin = session.pin.clone();
+        let state = test_router(Some("C:/repo".to_string()));
+        *state.pairing.lock().unwrap() = Some(session);
+        let router = server::build_router(state);
+
+        // Many no-credential probes → always 401, never 429.
+        for _ in 0..(auth::RATE_LIMIT_MAX_FAILURES_FOR_TEST + 5) {
+            let resp = router
+                .clone()
+                .oneshot(get("/api/repo/status"))
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "a no-credential probe must 401, never lock out"
+            );
+        }
+
+        // A correct pairing flow after the probes still works (budget untouched).
+        let chal = router
+            .clone()
+            .oneshot(post("/api/pair/challenge", None))
+            .await
+            .unwrap();
+        assert_eq!(chal.status(), StatusCode::OK);
+        let chal_bytes = axum::body::to_bytes(chal.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let chal: serde_json::Value = serde_json::from_slice(&chal_bytes).unwrap();
+        let challenge = chal["challenge"].as_str().unwrap().to_string();
+        let salt = chal["salt"].as_str().unwrap().to_string();
+        let proof = auth::compute_proof(&pin, &salt, &challenge);
+        let pair = serde_json::json!({ "deviceName": "Late Pair", "proof": proof }).to_string();
+        let pair_resp = router
+            .oneshot(post("/api/pair", Some(&pair)))
+            .await
+            .unwrap();
+        assert_eq!(
+            pair_resp.status(),
+            StatusCode::OK,
+            "pairing must still succeed after no-credential probes"
+        );
+
+        auth::set_store_path_for_test(prev);
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn invalid_bearer_probes_still_lock_out_after_the_threshold() {
+        // A PRESENT-but-invalid bearer IS a guessing event (token brute force), so it
+        // must still count toward the lockout budget: N invalid-bearer requests trip
+        // the 429 at the threshold. The brute-force defense stays intact.
+        let _lock = auth::store_test_lock();
+        let tmp = temp_store();
+        let prev = auth::set_store_path_for_test(Some(tmp.clone()));
+
+        // An empty store (no devices) — every bearer here is invalid.
+        let router = server::build_router(test_router(Some("C:/repo".to_string())));
+
+        // Invalid bearers up to the threshold → each 401.
+        for _ in 0..auth::RATE_LIMIT_MAX_FAILURES_FOR_TEST {
+            let resp = router
+                .clone()
+                .oneshot(authed_get("/api/repo/status", "deadbeefdeadbeef"))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "an invalid bearer is a 401");
+        }
+        // Threshold reached → the next attempt is rate-limited.
+        let locked = router
+            .oneshot(authed_get("/api/repo/status", "deadbeefdeadbeef"))
+            .await
+            .unwrap();
+        assert_eq!(
+            locked.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "invalid-bearer brute force must still lock out at the threshold"
+        );
+
+        auth::set_store_path_for_test(prev);
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn pair_submit_sets_the_auth_cookie() {
+        // A successful pair returns the auth cookie with the exact frozen attributes
+        // (in ADDITION to the unchanged JSON body), so a phone browser is
+        // authenticated for subsequent navigations/upgrades.
+        let _lock = auth::store_test_lock();
+        let tmp = temp_store();
+        let prev = auth::set_store_path_for_test(Some(tmp.clone()));
+
+        let session = auth::new_pairing_session("http://testhost/#pair".to_string());
+        let pin = session.pin.clone();
+        let state = test_router(Some("C:/repo".to_string()));
+        *state.pairing.lock().unwrap() = Some(session);
+        let router = server::build_router(state);
+
+        // Challenge → proof → pair.
+        let chal_req = Request::builder()
+            .uri("/api/pair/challenge")
+            .method("POST")
+            .header("host", "testhost")
+            .body(Body::empty())
+            .unwrap();
+        let chal_resp = router.clone().oneshot(chal_req).await.unwrap();
+        let chal_bytes = axum::body::to_bytes(chal_resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let chal: serde_json::Value = serde_json::from_slice(&chal_bytes).unwrap();
+        let challenge = chal["challenge"].as_str().unwrap().to_string();
+        let salt = chal["salt"].as_str().unwrap().to_string();
+        let proof = auth::compute_proof(&pin, &salt, &challenge);
+        let pair_body = serde_json::json!({ "deviceName": "Cookie Pair Phone", "proof": proof });
+        let pair_req = Request::builder()
+            .uri("/api/pair")
+            .method("POST")
+            .header("host", "testhost")
+            .header("content-type", "application/json")
+            .body(Body::from(pair_body.to_string()))
+            .unwrap();
+        let pair_resp = router.oneshot(pair_req).await.unwrap();
+        assert_eq!(pair_resp.status(), StatusCode::OK);
+
+        // The Set-Cookie carries the exact frozen name + attributes.
+        let set_cookie = pair_resp
+            .headers()
+            .get("set-cookie")
+            .expect("pair success must set the auth cookie")
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(set_cookie.starts_with("gd_lan="), "cookie name: {set_cookie}");
+        assert!(set_cookie.contains("HttpOnly"), "HttpOnly: {set_cookie}");
+        assert!(set_cookie.contains("SameSite=Strict"), "SameSite=Strict: {set_cookie}");
+        assert!(set_cookie.contains("Path=/"), "Path=/: {set_cookie}");
+        assert!(set_cookie.contains("Max-Age=31536000"), "Max-Age: {set_cookie}");
+        // No Secure — plain HTTP on the LAN by design.
+        assert!(!set_cookie.contains("Secure"), "must NOT be Secure: {set_cookie}");
+
+        // The JSON body is unchanged — the token is still returned for API clients.
+        let bytes = axum::body::to_bytes(pair_resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let minted: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let token = minted["token"].as_str().unwrap();
+        // The cookie value equals the raw bearer.
+        assert_eq!(set_cookie, format!("gd_lan={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000"));
+
+        auth::set_store_path_for_test(prev);
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[tokio::test]
+    async fn static_index_serves_bundle_or_reports_not_built_with_page_csp() {
+        // Through the full router (host guard + insert-if-absent hardening), `/`
+        // carries the fuller PAGE CSP — NOT the bare API CSP — in BOTH embed states.
+        // DEBUG rust-embed reads `companion-dist/` from disk, so this must be green
+        // whether or not `pnpm build:companion` has run: bundle present → 200 + the
+        // real index.html; absent (CI) → 503 + the marker.
+        let router = server::build_router(test_router(Some("C:/repo".to_string())));
+        let resp = router.oneshot(get("/")).await.unwrap();
+        assert_eq!(
+            resp.headers().get("Content-Security-Policy").unwrap(),
+            static_serve::PAGE_CSP
+        );
+        if static_serve::bundle_present() {
+            assert_eq!(resp.status(), StatusCode::OK);
+            let ct = resp
+                .headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap();
+            assert!(ct.starts_with("text/html"), "index Content-Type: {ct}");
+            // The entry document must revalidate every load (no-cache).
+            assert_eq!(
+                resp.headers().get("cache-control").unwrap(),
+                "no-cache"
+            );
+        } else {
+            assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            assert!(String::from_utf8_lossy(&bytes).contains("companion bundle not built"));
+        }
+    }
+
+    #[tokio::test]
+    async fn api_response_keeps_the_bare_csp() {
+        // An API response (here the 404 for an unknown route) keeps EXACTLY the
+        // current bare API CSP — the insert-if-absent change must not leak the page
+        // CSP onto API responses.
+        let router = server::build_router(test_router(Some("C:/repo".to_string())));
+        let resp = router.oneshot(get("/api/nope")).await.unwrap();
+        assert_eq!(
+            resp.headers().get("Content-Security-Policy").unwrap(),
+            auth::API_CSP
+        );
+    }
+
+    #[tokio::test]
+    async fn static_unknown_asset_is_404() {
+        let router = server::build_router(test_router(Some("C:/repo".to_string())));
+        let resp = router.oneshot(get("/assets/nope.js")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn static_index_is_host_guarded() {
+        // The `/` route is wrapped by the outer host guard like every other route.
+        let router = server::build_router(test_router(Some("C:/repo".to_string())));
+        let req = Request::builder()
+            .uri("/")
+            .header("host", "evil.example.com")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

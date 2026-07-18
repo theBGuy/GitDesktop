@@ -1,5 +1,4 @@
-import { Channel } from "@tauri-apps/api/core";
-import { invoke } from "@/lib/tauri/invoke";
+import { invoke, invokeStreaming } from "@/lib/tauri/invoke";
 import {
   COLD_START,
   coldStartDeleteSecret,
@@ -1131,17 +1130,18 @@ export const forgeReconnect = (args: {
   host: string;
   mode: "login" | "refresh";
   onEvent: (event: ReconnectEvent) => void;
-}): Promise<void> => {
-  const channel = new Channel<ReconnectEvent>();
-  channel.onmessage = args.onEvent;
-  return invoke<void>("forge_reconnect", {
-    sessionId: args.sessionId,
-    provider: args.provider,
-    host: args.host,
-    mode: args.mode,
-    onEvent: channel,
-  });
-};
+}): Promise<void> =>
+  invokeStreaming<void, ReconnectEvent>(
+    "forge_reconnect",
+    {
+      sessionId: args.sessionId,
+      provider: args.provider,
+      host: args.host,
+      mode: args.mode,
+    },
+    "onEvent",
+    args.onEvent,
+  );
 
 /** Cancel an in-flight reconnect flow (kills the CLI subprocess). */
 export const forgeReconnectCancel = (sessionId: string) =>

@@ -6,8 +6,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
-    "lint": "biome check --write ./src/ ./site/",
+    "build": "tsc -b && vite build && pnpm run build:companion",
+    "build:companion": "tsc -p companion/tsconfig.json --noEmit && vite build --config companion/vite.config.ts && node -e \"require('fs').writeFileSync('src-tauri/companion-dist/.gitkeep','')\"",
+    "lint": "biome check --write ./src/ ./site/ ./companion/",
     "preview": "vite preview",
     "changelog": "node scripts/changelog-draft.mjs",
     "changelog:preview": "node scripts/changelog-draft.mjs --preview",
