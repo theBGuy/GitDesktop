@@ -52,6 +52,10 @@ fn is_auth_class_failure(stderr: &str) -> bool {
     let s = stderr.to_lowercase();
     s.contains("authentication failed")
         || s.contains("could not read username")
+        // 404 tradeoff: on a transient not-found for the CORRECT CLI identity, the
+        // ambient retry can complete the op under a DIFFERENT identity than the
+        // severed CLI one — accepted (push identity ≠ commit authorship); don't
+        // widen this classifier further.
         || s.contains("repository not found")
 }
 
