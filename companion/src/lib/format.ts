@@ -16,7 +16,9 @@ export function timeAgo(iso: string): string {
   const days = Math.floor(hours / 24);
   if (days < 7) return `${days}d ago`;
   const weeks = Math.floor(days / 7);
-  if (weeks < 52) return `${weeks}w ago`;
   const years = Math.floor(days / 365);
+  // Guard on years, not weeks: at day 364, weeks is already 52 but years still
+  // floors to 0 — a weeks-based cutoff would render "0y ago" for that window.
+  if (years < 1) return `${weeks}w ago`;
   return `${years}y ago`;
 }
