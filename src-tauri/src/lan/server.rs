@@ -203,6 +203,7 @@ pub async fn start(
     pairing: Arc<std::sync::Mutex<Option<auth::PairingSession>>>,
     rate_limit: auth::RateLimitMap,
     streams: Arc<std::sync::Mutex<std::collections::HashMap<String, crate::state::StreamInfo>>>,
+    monitor_cut: tokio::sync::broadcast::Sender<()>,
 ) -> AppResult<(ServerHandle, Vec<String>, Vec<String>)> {
     let (bind_ip, ips) = resolve_ips(bind_lan);
     let (listener, port) = bind_listener(bind_ip).await?;
@@ -215,6 +216,7 @@ pub async fn start(
         rate_limit,
         bound_hosts: Arc::new(bound_hosts.clone()),
         streams,
+        monitor_cut,
     };
     let router = build_router(state);
 
