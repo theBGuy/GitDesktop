@@ -29,7 +29,7 @@ fn with_credentials(cred: &[String], sub: &[&str]) -> Vec<String> {
 }
 
 /// Run a mutating git network op with one-shot credential `-c` entries prefixed.
-async fn run_git_mutating_with_creds(
+pub(crate) async fn run_git_mutating_with_creds(
     state: &AppState,
     repo_path: &str,
     cred: &[String],

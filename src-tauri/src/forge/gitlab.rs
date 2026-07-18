@@ -167,20 +167,46 @@ pub async fn list_repos() -> AppResult<ForgeRepoList> {
     })
 }
 
-/// The `git -c credential.https://<host>.helper=…` entry that lets `git clone` of
-/// a private GitLab repo authenticate via glab's token — glab's token isn't in
-/// git's credential store, so plain `git clone` (and even `glab repo clone`) 401s.
+/// The one-shot `git -c` credential entries that let a network op on a private
+/// GitLab repo authenticate via glab's token — glab's token isn't in git's
+/// credential store, so plain `git clone` (and even `glab repo clone`) 401s.
 /// One-shot (per `git` invocation), so nothing is written to git config and no
 /// token lands in the remote URL. Validated live against a private gitlab.com repo.
+///
+/// Returns the `[reset, helper]` pair (see [`gitlab_credential_entries`]) ONLY
+/// when glab is present AND signed in to `host`; when glab is present but not
+/// signed in to that host, returns an empty Vec so git's ambient behavior is
+/// preserved unchanged. Missing glab → `Err(GlabNotFound)`, unchanged — the
+/// strict `?` clone sites stay fail-closed on a missing CLI.
 pub async fn clone_credential_config(clone_url: &str) -> AppResult<Vec<String>> {
     let glab = crate::agent::resolve_named(&["glab"], None)
         .await
         .ok_or(AppError::GlabNotFound)?;
     let host = crate::forge::remote_host(clone_url).unwrap_or_else(|| "gitlab.com".to_string());
-    Ok(vec![format!(
-        "credential.https://{host}.helper=!\"{}\" auth git-credential",
-        glab.display()
-    )])
+    // glab's signed-in hosts are the `hosts:` keys of its config.yml — an entry
+    // exists only after `glab auth login`. No signed-in host → inject nothing so
+    // git's ambient credential helpers still run (the established repo signal; we
+    // don't invent a new `glab auth status` probe).
+    if !crate::forge::glab::known_hosts().await.contains(&host) {
+        return Ok(Vec::new());
+    }
+    Ok(gitlab_credential_entries(&host, &glab.display().to_string()))
+}
+
+/// The one-shot `-c` credential entries for a signed-in GitLab host — a
+/// `[reset, helper]` pair, mirroring the GitHub arm. entry[0] SEVERS git's
+/// accumulated helper chain for this URL (empty value = "clear the helper list",
+/// per gitcredentials(7); the trailing `=` is load-bearing — `-c name` without it
+/// sets boolean `true` and breaks the reset), and entry[1] installs glab as the
+/// sole helper so an ambient helper earlier in the config chain can't shadow
+/// glab's identity. Order matters: reset FIRST — consumers prefix `-c` pairs in
+/// Vec order. Pure/format-only.
+fn gitlab_credential_entries(host: &str, glab_path: &str) -> Vec<String> {
+    vec![
+        // Reset: empty value clears the accumulated helper list for this URL.
+        format!("credential.https://{host}.helper="),
+        format!("credential.https://{host}.helper=!\"{glab_path}\" auth git-credential"),
+    ]
 }
 
 // ── Merge requests (read) ─────────────────────────────────────────────────────
@@ -7261,6 +7287,30 @@ pub async fn unlink_issue(repo_path: &str, number: u64, link_id: &str) -> AppRes
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_entries_are_reset_then_helper() {
+        let entries = gitlab_credential_entries("gitlab.com", "/abs/glab");
+        assert_eq!(entries.len(), 2);
+        // entry[0] resets the helper chain: empty value, nothing after the `=`.
+        assert_eq!(entries[0], "credential.https://gitlab.com.helper=");
+        // entry[1] is byte-identical to the historical single helper entry.
+        assert_eq!(
+            entries[1],
+            "credential.https://gitlab.com.helper=!\"/abs/glab\" auth git-credential"
+        );
+    }
+
+    #[test]
+    fn credential_entries_substitute_self_managed_host() {
+        let entries = gitlab_credential_entries("gitlab.example.com", "/abs/glab");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0], "credential.https://gitlab.example.com.helper=");
+        assert_eq!(
+            entries[1],
+            "credential.https://gitlab.example.com.helper=!\"/abs/glab\" auth git-credential"
+        );
+    }
 
     #[test]
     fn job_status_maps_to_check_buckets() {

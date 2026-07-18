@@ -735,18 +735,51 @@ pub async fn create_issue(
     .await
 }
 
-/// The `git -c credential.https://<host>.helper=…` entry that lets a private
-/// GitHub repo authenticate via gh's token with an ABSOLUTE gh path — so it works
-/// even when git's ambient `!gh` helper can't find gh on a GUI-launch minimal PATH
-/// (macOS launchd), or when gh was configured for SSH and never installed the
-/// HTTPS helper. One-shot per `git` invocation; nothing written to git config, no
-/// token in the remote URL. Mirrors gitlab::clone_credential_config.
+/// The one-shot `git -c` credential entries that authenticate a private GitHub
+/// repo via gh's token with an ABSOLUTE gh path — so it works even when git's
+/// ambient `!gh` helper can't find gh on a GUI-launch minimal PATH (macOS
+/// launchd), or when gh was configured for SSH and never installed the HTTPS
+/// helper. One-shot per `git` invocation; nothing written to git config, no token
+/// in the remote URL. Mirrors gitlab::clone_credential_config.
+///
+/// Returns the `[reset, helper]` pair (see [`github_credential_entries`]) ONLY
+/// when gh is present AND authenticated for `host`; when gh is present but not
+/// authenticated for that host, returns an empty Vec so git's ambient behavior is
+/// preserved unchanged (a user relying on git-credential-manager / the OS keychain
+/// must not be broken). Missing gh → `Err(GhNotFound)`, unchanged — callers'
+/// `.unwrap_or_default()` keeps the fail-open, strict `?` clone sites stay
+/// fail-closed on a missing CLI.
 pub async fn clone_credential_config(clone_url: &str) -> AppResult<Vec<String>> {
     let gh = crate::agent::resolve_named(&["gh"], None)
         .await
         .ok_or(AppError::GhNotFound)?;
     let host = crate::forge::remote_host(clone_url).unwrap_or_else(|| "github.com".to_string());
-    Ok(vec![github_credential_entry(&host, &gh.display().to_string())])
+    if !gh_authenticated(&host).await {
+        // gh is installed but has no token for this host — inject nothing so git's
+        // ambient credential helpers (keychain, git-credential-manager) still run.
+        return Ok(Vec::new());
+    }
+    Ok(github_credential_entries(&host, &gh.display().to_string()))
+}
+
+/// The one-shot `-c` credential entries for an authenticated GitHub host — a
+/// `[reset, helper]` pair. Pure/format-only.
+///
+/// entry[0] SEVERS git's accumulated helper chain for this URL: `-c
+/// credential.https://<host>.helper=` sets the key to the EMPTY string, which git
+/// treats as "clear the list of helpers so far" (gitcredentials(7); this is the
+/// same blank entry `gh auth setup-git` writes before its own). The trailing `=`
+/// is load-bearing — `-c name=` sets the empty string, whereas `-c name` without
+/// the `=` would set boolean `true` and break the reset. entry[1] then installs
+/// gh as the sole helper, so an ambient helper earlier in the config chain (e.g.
+/// macOS `osxkeychain` in Apple Git's system gitconfig) can't shadow gh's identity.
+/// Order matters: reset FIRST — consumers prefix `-c` pairs in Vec order.
+fn github_credential_entries(host: &str, gh_path: &str) -> Vec<String> {
+    vec![
+        // Reset: empty value clears the accumulated helper list for this URL.
+        format!("credential.https://{host}.helper="),
+        github_credential_entry(host, gh_path),
+    ]
 }
 
 /// The one-shot `-c` credential-helper config value for a GitHub host. Pure/format-only.
@@ -754,24 +787,133 @@ fn github_credential_entry(host: &str, gh_path: &str) -> String {
     format!("credential.https://{host}.helper=!\"{gh_path}\" auth git-credential")
 }
 
+/// Whether gh has a token for `host` — the auth gate deciding whether to inject
+/// the credential helper. Runs `gh auth token --hostname <host>`, which is
+/// local-only (no network): exit 0 iff a token exists for that host (from gh's
+/// config file, the system keyring, or `GH_TOKEN` — the very sources `gh auth
+/// git-credential` answers from). Memoized per-host with a 60s TTL: auth state
+/// changes rarely, and 60s bounds staleness after the user signs in/out mid-session.
+///
+/// SECURITY: `gh auth token`'s stdout IS the user's token — this reads only the
+/// exit code and drops the output; the token is never logged or formatted anywhere.
+async fn gh_authenticated(host: &str) -> bool {
+    if let Some(hit) = auth_cache_get(host, GH_AUTH_TTL) {
+        return hit;
+    }
+    match crate::github::runner::run_gh_raw(
+        None,
+        &["auth", "token", "--hostname", host],
+        crate::github::runner::GH_TIMEOUT,
+    )
+    .await
+    {
+        // Successful spawn: exit 0 ⇔ a token exists. Cache both outcomes.
+        Ok(out) => {
+            let authed = out.code == 0;
+            auth_cache_put(host, authed);
+            authed
+        }
+        // Missing binary / timeout is transient — don't cache; treat as unauthenticated.
+        Err(_) => false,
+    }
+}
+
+/// TTL bounding how long a per-host gh auth result stays trusted before we re-probe.
+const GH_AUTH_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Per-host cache of `(probe time, authenticated)` for [`gh_authenticated`]. Bounded
+/// by the number of distinct hosts (tiny) — a stale entry is overwritten, not evicted.
+type GhAuthCache =
+    std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, bool)>>;
+static GH_AUTH_CACHE: std::sync::OnceLock<GhAuthCache> = std::sync::OnceLock::new();
+
+fn gh_auth_cache() -> &'static GhAuthCache {
+    GH_AUTH_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// The cached auth result for `host` only if an entry exists AND it was probed less
+/// than `ttl` ago. Pure over the module-level cache; the lock is held only long
+/// enough to copy the value out.
+fn auth_cache_get(host: &str, ttl: std::time::Duration) -> Option<bool> {
+    let guard = gh_auth_cache().lock().unwrap();
+    let (probed_at, authed) = guard.get(host)?;
+    if probed_at.elapsed() < ttl {
+        Some(*authed)
+    } else {
+        None
+    }
+}
+
+/// Record `authed` as the current result for `host`, stamped with the probe time.
+fn auth_cache_put(host: &str, authed: bool) {
+    gh_auth_cache()
+        .lock()
+        .unwrap()
+        .insert(host.to_string(), (std::time::Instant::now(), authed));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn credential_entry_uses_host_and_absolute_gh_path() {
+    fn credential_entries_are_reset_then_helper_for_default_host() {
+        let entries = github_credential_entries("github.com", "/abs/gh");
+        assert_eq!(entries.len(), 2);
+        // entry[0] resets the helper chain: empty value, nothing after the `=`.
+        assert_eq!(entries[0], "credential.https://github.com.helper=");
+        // entry[1] is byte-identical to the historical single helper entry.
         assert_eq!(
-            github_credential_entry("github.com", "/abs/gh"),
+            entries[1],
             "credential.https://github.com.helper=!\"/abs/gh\" auth git-credential"
         );
     }
 
     #[test]
-    fn credential_entry_substitutes_enterprise_host() {
+    fn credential_entries_substitute_enterprise_host() {
+        let entries = github_credential_entries("github.example.com", "/abs/gh");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0], "credential.https://github.example.com.helper=");
         assert_eq!(
-            github_credential_entry("github.example.com", "/abs/gh"),
+            entries[1],
             "credential.https://github.example.com.helper=!\"/abs/gh\" auth git-credential"
         );
+    }
+
+    // --- gh-auth TTL cache (mirrors remote.rs's cache tests). Distinct host keys
+    // per test — the cache is a process-wide static shared across all tests. ---
+
+    const BIG: std::time::Duration = std::time::Duration::from_secs(3600);
+
+    #[test]
+    fn auth_cache_put_then_get_within_ttl_hits() {
+        auth_cache_put("cache-a.example.com", true);
+        assert_eq!(auth_cache_get("cache-a.example.com", BIG), Some(true));
+        auth_cache_put("cache-a-false.example.com", false);
+        assert_eq!(auth_cache_get("cache-a-false.example.com", BIG), Some(false));
+    }
+
+    #[test]
+    fn auth_cache_zero_ttl_is_always_expired() {
+        auth_cache_put("cache-b.example.com", true);
+        // Zero TTL: any elapsed time is >= the TTL, so the entry reads as expired.
+        assert_eq!(
+            auth_cache_get("cache-b.example.com", std::time::Duration::ZERO),
+            None
+        );
+    }
+
+    #[test]
+    fn auth_cache_distinct_hosts_do_not_collide() {
+        auth_cache_put("cache-c-one.example.com", true);
+        auth_cache_put("cache-c-two.example.com", false);
+        assert_eq!(auth_cache_get("cache-c-one.example.com", BIG), Some(true));
+        assert_eq!(auth_cache_get("cache-c-two.example.com", BIG), Some(false));
+    }
+
+    #[test]
+    fn auth_cache_miss_returns_none() {
+        assert_eq!(auth_cache_get("cache-never-written.example.com", BIG), None);
     }
 
     #[test]

@@ -2769,9 +2769,11 @@ pub(crate) async fn git_push_tag_core(
 ) -> AppResult<()> {
     validate_tag_name(&name)?;
     let spec = format!("refs/tags/{name}");
-    run_git_mutating(
+    let cred = crate::forge::credential_config_for_remote(&repo_path, "origin").await?;
+    crate::git::remote::run_git_mutating_with_creds(
         state,
         &repo_path,
+        &cred,
         &["push", "origin", &spec],
         crate::git::runner::NETWORK_TIMEOUT,
     )
@@ -2806,9 +2808,11 @@ pub(crate) async fn git_delete_tag_core(
     .await?;
     if on_remote {
         let spec = format!(":refs/tags/{name}");
-        run_git_mutating(
+        let cred = crate::forge::credential_config_for_remote(&repo_path, "origin").await?;
+        crate::git::remote::run_git_mutating_with_creds(
             state,
             &repo_path,
+            &cred,
             &["push", "origin", &spec],
             crate::git::runner::NETWORK_TIMEOUT,
         )
