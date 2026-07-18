@@ -331,6 +331,8 @@ export const useResearchStore = create<ResearchState>((set, get) => {
         userPrompt,
         // Read-only: runs in the live repo, never a worktree, and can't write.
         worktreePath: run0.repoPath,
+        // Same live repo it was spawned from (read-only sessions never worktree).
+        originRepoPath: run0.repoPath,
         sessionId: run0.sessionId,
         resume,
         readOnly: true,
@@ -593,6 +595,8 @@ export const useResearchStore = create<ResearchState>((set, get) => {
           systemPrompt: "",
           userPrompt: buildResearchDistillPrompt(),
           worktreePath: run0.repoPath,
+          // Same live repo it was spawned from (read-only sessions never worktree).
+          originRepoPath: run0.repoPath,
           sessionId: run0.sessionId,
           resume: true,
           // Fork the resumed conversation to a throwaway session: the distill reads

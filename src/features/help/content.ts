@@ -1526,6 +1526,65 @@ commands{{/ai}}) are palette-only until you bind a key. Defaults match GitHub De
 there's an equivalent.`,
   },
   {
+    id: "phone-companion",
+    label: "Phone companion",
+    body: `# Phone companion (experimental)
+
+The **Phone companion** lets you share the repository that's currently open with your
+phone over your **local network**. Open it in **Settings → Phone companion**.
+
+This is an **early preview**. Right now it exposes a **read-only** API for the open
+repo over the LAN — there's no companion phone app yet (it's coming in a later release),
+so pairing today is mainly for trying the connection out. It's **off by default**.
+
+## Turning it on
+
+Flip **Share with your phone on this network**. GitDesktop starts a small server bound
+to your machine's LAN address and shows the address(es) and port it's reachable at.
+While sharing is on, a **Sharing on** banner runs across the top of the window
+(click it to jump back here). If the port can't be opened, the reason appears
+right in the panel.
+
+## Pairing a phone
+
+Choose **Pair a device** (available once sharing is on). A dialog shows:
+
+- a **QR code** to scan with your phone,
+- the same **URL** as selectable text, in case you'd rather open it manually, and
+- a short **PIN** that you type on the phone to confirm it's really you.
+
+The offer counts down and expires after a short while; if it lapses before the phone
+connects, choose **Start again**. When a device pairs, the dialog confirms it by name.
+
+## Managing paired devices
+
+Each paired device is listed with its name, its **read-only** scope, and when it paired
+and was last seen. Every device holds its **own token**, and you can **Revoke** any of
+them at any time — a revoked device immediately loses access and has to pair again to
+reconnect. Arrow keys move between devices in the list.
+
+## Security — please read
+
+Sharing is convenient but deliberately simple, so treat it accordingly:
+
+- **Anyone on the same Wi-Fi who has the pairing PIN can read this repo** while sharing
+  is on.
+- The connection is **unencrypted** on your local network. Use it on **trusted networks
+  only** (your home or a private office network — not public or café Wi-Fi).
+- **Turn sharing off when you're done.** It doesn't turn itself off.
+
+## Phone can't reach your computer?
+
+If the phone scans the code but can't connect, the most common cause is **network
+isolation**: many guest networks and some routers enable **AP/client isolation**, which
+blocks devices on the same Wi-Fi from talking to each other. Put both devices on a
+network without client isolation (or your normal home Wi-Fi), and make sure the phone is
+on the **same** network — not a guest SSID or cellular data.
+
+You can jump straight here anytime from the command palette
+({{kbd:command-palette}} → *Phone companion settings*).`,
+  },
+  {
     id: "settings",
     label: "Settings & updates",
     body: `# Settings & updates
@@ -1548,6 +1607,8 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   update is never a missed moment. Open it from the command palette
   ({{kbd:command-palette}} → *Activity & notifications*), click an entry to jump to it,
   arrow-key through the list, and clear items or mark all read.
+- **Phone companion** — *experimental.* Share the open repo (read-only) with your phone
+  over your local network. Off by default; see **Phone companion** above.
 - **Keyboard** — rebind any shortcut, with live key-capture.
 - **Accounts** — your **GitHub** and **GitLab** sign-ins and your **Bitbucket**
   connection. **Sign in to GitHub…** and **Sign in to gitlab.com…** run the CLI's
