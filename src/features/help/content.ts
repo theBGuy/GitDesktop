@@ -352,7 +352,12 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   each branch's ahead/behind counts vs. the default.
 - **Create** a branch ({{kbd:new-branch}}), **rename** ({{kbd:rename-branch}}), **delete**
   ({{kbd:delete-branch}}), or **archive** it — archiving hides a branch without deleting
-  it, collapsing it into an "Archived" section.
+  it, collapsing it into an "Archived" section. When creating, the **Base it on** picker is
+  a searchable list grouped into **Local** and **Remote** branches, so you can start from
+  *any* branch — not just the one you're on. Basing on a remote branch (e.g. \`origin/epic/…\`)
+  starts from the remote tip and leaves the new branch with **no upstream**, so its first
+  push publishes it under its own name — pairs with pushing a branch without switching to it
+  (below).
 - **Clean up branches** — from the switcher's menu or the command palette — opens a bulk
   sweep of stale branches: those **merged** into the default branch, or with no commits in a
   chosen window (30/60/90 days). Review the pre-checked list, then **archive** them

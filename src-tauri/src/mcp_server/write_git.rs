@@ -76,6 +76,15 @@ struct CreateBranchArgs {
     /// Defaults to the current HEAD.
     #[serde(default)]
     from: Option<String>,
+    /// Create the branch with no upstream (git --no-track). Recommended when
+    /// `from` is a remote-tracking ref (e.g. origin/epic/x) and this branch is a
+    /// NEW line of work: without it the branch tracks that ref, and a later push
+    /// would fast-forward the tracked branch instead of publishing under this
+    /// branch's own name. Defaults to false (git's normal tracking behavior).
+    // The struct has no `rename_all`, so the wire name is spelled explicitly to
+    // match the documented `noTrack` flag (and the Tauri UI's camelCase key).
+    #[serde(default, rename = "noTrack")]
+    no_track: bool,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -308,9 +317,10 @@ impl GitDesktopMcp {
 
     #[tool(
         description = "Create a branch in the bound repository, optionally checking it out and/or \
-                       starting from a given branch/tag/commit (defaults to HEAD). Refuses to \
-                       create a GitDesktop agent-session branch (gd/session/*). \
-                       Requires --allow-git-write.",
+                       starting from a given branch/tag/commit (defaults to HEAD), optionally with \
+                       no upstream (noTrack — recommended when starting a new branch from a \
+                       remote-tracking ref). Refuses to create a GitDesktop agent-session branch \
+                       (gd/session/*). Requires --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn create_branch(
@@ -331,6 +341,10 @@ impl GitDesktopMcp {
             args.name.clone(),
             args.checkout,
             args.from,
+            // Opt-in --no-track: agents basing on a remote-tracking ref should set
+            // this so the branch publishes under its own name instead of
+            // fast-forwarding the tracked ref on a later push.
+            args.no_track,
         )
         .await
         .map_err(app_err)?;
@@ -885,7 +899,8 @@ mod tests {
             h.create_branch(Parameters(CreateBranchArgs {
                 name: "b".into(),
                 checkout: false,
-                from: None
+                from: None,
+                no_track: false
             })),
             "--allow-git-write"
         );
@@ -1074,6 +1089,7 @@ mod tests {
                 name: "gd/session/fake".into(),
                 checkout: false,
                 from: None,
+                no_track: false,
             }))
             .await
             .expect_err("create_branch into gd/session/* must be refused");
@@ -1093,6 +1109,22 @@ mod tests {
             err.to_string().contains("agent-session branch"),
             "expected the session-branch refusal, got: {err}"
         );
+    }
+
+    /// `noTrack` is optional on the wire (#[serde(default)]): absent → false so
+    /// existing agents keep git's normal tracking, and an explicit true opts into
+    /// --no-track. Guards the default that keeps MCP behavior byte-identical.
+    #[test]
+    fn create_branch_args_no_track_defaults_false_and_parses_true() {
+        let absent: CreateBranchArgs =
+            serde_json::from_value(serde_json::json!({ "name": "b" })).unwrap();
+        assert!(!absent.no_track);
+
+        let explicit: CreateBranchArgs = serde_json::from_value(
+            serde_json::json!({ "name": "b", "from": "origin/epic/x", "noTrack": true }),
+        )
+        .unwrap();
+        assert!(explicit.no_track);
     }
 
     /// The session-branch guard is wired into the branch-mutating tools even when the

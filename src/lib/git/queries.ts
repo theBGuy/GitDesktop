@@ -2928,8 +2928,19 @@ export function useCheckoutRemoteBranch(repo: string) {
 export function useCreateBranch(repo: string) {
   return useRepoMutation(
     repo,
-    (args: { name: string; checkout: boolean; startPoint?: string }) =>
-      api.gitCreateBranch(repo, args.name, args.checkout, args.startPoint),
+    (args: {
+      name: string;
+      checkout: boolean;
+      startPoint?: string;
+      noTrack?: boolean;
+    }) =>
+      api.gitCreateBranch(
+        repo,
+        args.name,
+        args.checkout,
+        args.startPoint,
+        args.noTrack,
+      ),
   );
 }
 

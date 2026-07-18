@@ -183,12 +183,14 @@ export const gitCreateBranch = (
   name: string,
   checkout: boolean,
   startPoint?: string,
+  noTrack?: boolean,
 ) =>
   invoke<void>("git_create_branch", {
     repoPath,
     name,
     checkout,
     startPoint: startPoint ?? null,
+    noTrack: noTrack ?? false,
   });
 
 export const gitDiffFile = (

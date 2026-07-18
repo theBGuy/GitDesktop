@@ -450,6 +450,43 @@ pub async fn git_checkout_remote_branch(
     Ok(())
 }
 
+/// Build the argv for creating a branch. Pure so the decision table
+/// (checkout × start_point × no_track) is unit-testable without a repo.
+///
+/// `no_track` suppresses git's automatic upstream setup so that basing a new
+/// branch on a remote-tracking ref (e.g. `origin/epic/x`) yields a branch with
+/// NO upstream — its first push then publishes it under its own name. Placement
+/// matters: `--no-track` goes right after `switch` in the checkout arm, and
+/// BEFORE the `--` in the `branch` arm.
+fn build_create_branch_args(
+    name: &str,
+    checkout: bool,
+    start_point: Option<&str>,
+    no_track: bool,
+) -> Vec<String> {
+    let mut args: Vec<String> = if checkout {
+        let mut a = vec!["switch".to_string()];
+        if no_track {
+            a.push("--no-track".to_string());
+        }
+        a.push("-c".to_string());
+        a.push(name.to_string());
+        a
+    } else {
+        let mut a = vec!["branch".to_string()];
+        if no_track {
+            a.push("--no-track".to_string());
+        }
+        a.push("--".to_string());
+        a.push(name.to_string());
+        a
+    };
+    if let Some(start) = start_point {
+        args.push(start.to_string());
+    }
+    args
+}
+
 #[tauri::command]
 pub async fn git_create_branch(
     state: State<'_, AppState>,
@@ -457,8 +494,9 @@ pub async fn git_create_branch(
     name: String,
     checkout: bool,
     start_point: Option<String>,
+    no_track: bool,
 ) -> AppResult<()> {
-    git_create_branch_core(&state, repo_path, name, checkout, start_point).await
+    git_create_branch_core(&state, repo_path, name, checkout, start_point, no_track).await
 }
 
 pub(crate) async fn git_create_branch_core(
@@ -467,6 +505,7 @@ pub(crate) async fn git_create_branch_core(
     name: String,
     checkout: bool,
     start_point: Option<String>,
+    no_track: bool,
 ) -> AppResult<()> {
     validate_ref_name(&name)?;
     if let Some(start) = &start_point {
@@ -474,15 +513,9 @@ pub(crate) async fn git_create_branch_core(
         // (non-empty, no leading '-') rather than strictly a hash.
         validate_ref_name(start)?;
     }
-    let mut args: Vec<&str> = if checkout {
-        vec!["switch", "-c", &name]
-    } else {
-        vec!["branch", "--", &name]
-    };
-    if let Some(start) = &start_point {
-        args.push(start);
-    }
-    run_git_mutating(state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
+    let args = build_create_branch_args(&name, checkout, start_point.as_deref(), no_track);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_git_mutating(state, &repo_path, &arg_refs, DEFAULT_TIMEOUT).await?;
     Ok(())
 }
 
@@ -796,7 +829,76 @@ fn unique_suffix() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_upstream_track, validate_ref_name};
+    use super::{build_create_branch_args, parse_upstream_track, validate_ref_name};
+
+    // Full decision table for the create-branch argv: checkout × start_point ×
+    // no_track (8 cases). The no_track=false rows must stay byte-identical to the
+    // pre-`--no-track` behavior for every combination.
+    #[test]
+    fn build_create_branch_args_checkout_no_start_no_track() {
+        assert_eq!(
+            build_create_branch_args("feat", true, None, false),
+            vec!["switch", "-c", "feat"]
+        );
+    }
+
+    #[test]
+    fn build_create_branch_args_checkout_start_no_track() {
+        assert_eq!(
+            build_create_branch_args("feat", true, Some("main"), false),
+            vec!["switch", "-c", "feat", "main"]
+        );
+    }
+
+    #[test]
+    fn build_create_branch_args_checkout_no_start_track_off() {
+        assert_eq!(
+            build_create_branch_args("feat", true, None, true),
+            vec!["switch", "--no-track", "-c", "feat"]
+        );
+    }
+
+    #[test]
+    fn build_create_branch_args_checkout_remote_start_track_off() {
+        // The motivating case: `git switch --no-track -c feat origin/epic/x`.
+        assert_eq!(
+            build_create_branch_args("feat", true, Some("origin/epic/x"), true),
+            vec!["switch", "--no-track", "-c", "feat", "origin/epic/x"]
+        );
+    }
+
+    #[test]
+    fn build_create_branch_args_no_checkout_no_start_no_track() {
+        assert_eq!(
+            build_create_branch_args("feat", false, None, false),
+            vec!["branch", "--", "feat"]
+        );
+    }
+
+    #[test]
+    fn build_create_branch_args_no_checkout_start_no_track() {
+        assert_eq!(
+            build_create_branch_args("feat", false, Some("main"), false),
+            vec!["branch", "--", "feat", "main"]
+        );
+    }
+
+    #[test]
+    fn build_create_branch_args_no_checkout_no_start_track_off() {
+        // `--no-track` must come BEFORE the `--`.
+        assert_eq!(
+            build_create_branch_args("feat", false, None, true),
+            vec!["branch", "--no-track", "--", "feat"]
+        );
+    }
+
+    #[test]
+    fn build_create_branch_args_no_checkout_remote_start_track_off() {
+        assert_eq!(
+            build_create_branch_args("feat", false, Some("origin/epic/x"), true),
+            vec!["branch", "--no-track", "--", "feat", "origin/epic/x"]
+        );
+    }
 
     #[test]
     fn validate_ref_name_rejects_glob_and_refspec_metacharacters() {

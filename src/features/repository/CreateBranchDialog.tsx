@@ -1,5 +1,5 @@
 import { useSelector } from "@tanstack/react-store";
-import { useEffect, useEffectEvent } from "react";
+import { useEffect, useEffectEvent, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -9,13 +9,19 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
 import { branchNameError, branchNameHint } from "@/lib/branch-rules/match";
 import type { BranchRulesConfig } from "@/lib/branch-rules/types";
 import { required, useAppForm } from "@/lib/form";
-import { useCreateBranch } from "@/lib/git/queries";
+import {
+  useBranches,
+  useCreateBranch,
+  useRemoteBranches,
+} from "@/lib/git/queries";
 import { refNameWarning, sanitizeRefName } from "@/lib/git/ref-name";
 import type { FileEntry } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
+import { BaseBranchCombobox } from "./BaseBranchCombobox";
 import { GenerateBranchNameButton } from "./GenerateBranchNameButton";
 
 /**
@@ -36,7 +42,6 @@ export function CreateBranchDialog({
   headExists,
   entries,
   allBranchNames,
-  baseOptions,
   currentName,
   defaultName,
   onOpenSettings,
@@ -51,12 +56,24 @@ export function CreateBranchDialog({
   headExists: boolean;
   entries: FileEntry[];
   allBranchNames: string[];
-  baseOptions: string[];
   currentName: string | null;
   defaultName: string | null;
   onOpenSettings: (section: "ai") => void;
 }) {
   const createBranch = useCreateBranch(repoPath);
+
+  // The base picker owns its own data, but the dialog checks the same two
+  // queries' lengths to hide the whole field when there's nothing to base on
+  // (unborn HEAD / fresh repo → submit with no start point creates from HEAD).
+  const branches = useBranches(repoPath);
+  const remoteBranches = useRemoteBranches(repoPath, open);
+  const hasBases =
+    (branches.data?.length ?? 0) > 0 || (remoteBranches.data?.length ?? 0) > 0;
+
+  // Whether the picked base is a remote-tracking ref → drives `--no-track` so
+  // the new branch starts with NO upstream and its first push publishes it
+  // under its own name.
+  const [baseIsRemote, setBaseIsRemote] = useState(false);
 
   const createForm = useAppForm({
     defaultValues: { name: "", base: "" },
@@ -69,6 +86,9 @@ export function CreateBranchDialog({
           name: sanitizeRefName(value.name),
           checkout: true,
           startPoint,
+          // A remote base starts untracked so its first push publishes under
+          // its own name (no upstream copied from `origin/…`).
+          noTrack: baseIsRemote && Boolean(startPoint),
         });
         onOpenChange(false);
       } catch (e) {
@@ -88,6 +108,8 @@ export function CreateBranchDialog({
       { name: "", base: currentName ?? defaultName ?? "" },
       { keepDefaultValues: true },
     );
+    // Seeded base is a local branch (current/default) → tracking stays on.
+    setBaseIsRemote(false);
   });
   useEffect(() => {
     if (open) seedOnOpen();
@@ -153,20 +175,23 @@ export function CreateBranchDialog({
               onOpenSettings("ai");
             }}
           />
-          {baseOptions.length > 0 && (
+          {hasBases && (
             <createForm.AppField name="base">
               {(field) => (
-                <field.SelectField
-                  label="Base it on"
-                  items={Object.fromEntries(
-                    baseOptions.map((b) => [
-                      b,
-                      `${b}${b === currentName ? " (current)" : ""}${
-                        b === defaultName ? " (default)" : ""
-                      }`,
-                    ]),
-                  )}
-                />
+                <div className="space-y-2">
+                  <Label>Base it on</Label>
+                  <BaseBranchCombobox
+                    repoPath={repoPath}
+                    open={open}
+                    currentName={currentName}
+                    defaultName={defaultName}
+                    value={field.state.value || null}
+                    onValueChange={(v, isRemote) => {
+                      field.handleChange(v);
+                      setBaseIsRemote(isRemote);
+                    }}
+                  />
+                </div>
               )}
             </createForm.AppField>
           )}

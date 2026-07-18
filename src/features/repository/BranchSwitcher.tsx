@@ -441,17 +441,6 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // this branch, so switching would strand the in-progress amend and leave its
   // banner up. Lock the switcher until the user finishes or stops amending.
   const amending = amendingHash !== null;
-  // Bases offered when creating a branch: the current branch and/or the
-  // default branch (deduped — they're the same when you're on the default).
-  const baseOptions = useMemo(
-    () => [
-      ...new Set(
-        [currentName, defaultName].filter((b): b is string => Boolean(b)),
-      ),
-    ],
-    [currentName, defaultName],
-  );
-
   // Origin presence gates the per-row push/publish items (mirrors SyncControls):
   // a repo with no `origin` can't push a branch there.
   const hasOrigin = remotes.isSuccess && remotes.data.includes("origin");
@@ -1497,7 +1486,6 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         headExists={headExists}
         entries={status.data?.entries ?? []}
         allBranchNames={allBranches.map((b) => b.name)}
-        baseOptions={baseOptions}
         currentName={currentName}
         defaultName={defaultName}
         onOpenSettings={openSettings}

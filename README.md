@@ -360,6 +360,10 @@ commit that hasn't been pushed yet.
   right-click menu, push a branch that's ahead of its `origin` remote or publish an
   unpushed one, without checking it out; it works even when the branch is checked out
   in another worktree.
+- **Start a branch from any base** — the new-branch dialog's *Base it on* picker is a
+  searchable list grouped into local and remote branches, so you can branch off any of
+  them. Basing on a remote branch (e.g. `origin/epic/big-feature`) starts from the remote
+  tip and leaves the new branch untracked, so its first push publishes it under its own name.
 
 Plus tag and submodule management.
 
