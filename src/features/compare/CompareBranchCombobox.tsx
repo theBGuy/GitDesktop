@@ -30,8 +30,12 @@ const normPath = (p: string) => p.replace(/\\/g, "/").toLowerCase();
  * context menu — this is the daily "what am I about to PR" surface.
  *
  * The ahead/behind badges are computed vs `currentName` (the compare base shown
- * in the header "Compare {current} with"), not vs the default branch, so each
- * row previews the comparison the tab would show.
+ * in the header "Compare {current} with"), not vs the default branch. Note the
+ * frame: a row's badges describe the ROW's branch (↑ = commits it has that
+ * `currentName` lacks) — the subject-is-the-row idiom every BranchSwitcher row
+ * uses — while the tab's "N ahead / M behind" reads from `currentName`'s side,
+ * so the same two numbers swap labels between a row and the selected
+ * comparison. The badge tooltip names the direction.
  */
 export function CompareBranchCombobox({
   repoPath,
@@ -191,6 +195,9 @@ function BranchRow({
           worktree
         </span>
       )}
+      {/* ↑/↓ describe THIS row's branch vs `currentName` (the app-wide row-badge
+          frame) — deliberately not the tab's current-side frame; the tooltip
+          names the direction. Hidden when the branches are even. */}
       {div && (div.ahead > 0 || div.behind > 0) && (
         <span
           className="flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground tabular-nums"

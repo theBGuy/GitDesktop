@@ -75,7 +75,14 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
   const otherBranches = (branches.data ?? []).filter(
     (b) => !b.isCurrent && !b.name.startsWith("gd/session/") && !b.archived,
   );
-  const firstOther = otherBranches[0]?.name ?? null;
+  // Fallback when the default branch isn't offered: the most recently committed
+  // other branch — the same row the picker surfaces first, so the auto-pick
+  // matches the top of the list the user sees (not raw git ref order).
+  const firstOther = otherBranches.length
+    ? otherBranches.reduce((a, b) =>
+        b.lastCommitDate > a.lastCommitDate ? b : a,
+      ).name
+    : null;
   const compareValid =
     compareBranch !== null &&
     otherBranches.some((b) => b.name === compareBranch);
