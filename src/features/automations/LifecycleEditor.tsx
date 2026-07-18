@@ -207,13 +207,21 @@ function ConditionsEditor({
 
       {open && (
         <div className="mt-2 space-y-3">
-          <div className="space-y-1" role="group" aria-labelledby={includeLabelId}>
+          <div
+            className="space-y-1"
+            role="group"
+            aria-labelledby={includeLabelId}
+          >
             <Label id={includeLabelId} className="text-xs">
               Only these branches (optional)
             </Label>
             {renderPatternRows("include", "release/**")}
           </div>
-          <div className="space-y-1" role="group" aria-labelledby={excludeLabelId}>
+          <div
+            className="space-y-1"
+            role="group"
+            aria-labelledby={excludeLabelId}
+          >
             <Label id={excludeLabelId} className="text-xs">
               Except these branches
             </Label>
