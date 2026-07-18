@@ -114,6 +114,10 @@ async fn forward_stream(
 ) {
     loop {
         tokio::select! {
+            // `biased` + cut-first: when a cut and an event are both ready, the
+            // cut wins — a just-revoked/disabled socket never forwards one more
+            // buffered frame before it honors the sever.
+            biased;
             // Lifecycle cut: sharing was disabled, the shared repo changed, or a
             // device was revoked — sever this socket unconditionally so the phone
             // must reconnect and re-authorize against the new state. ANY result
