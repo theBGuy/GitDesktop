@@ -1040,6 +1040,12 @@ mod tests {
             "y should start at origin/x"
         );
 
+        // Pin the tracking mode repo-locally: a contributor's ambient global
+        // `branch.autoSetupMerge = simple|false` would leave `z` untracked and
+        // false-fail this control arm (probed live both ways). The `--no-track`
+        // arm above is immune — the flag overrides config.
+        run(&repo_s, &["config", "branch.autoSetupMerge", "true"]).await;
+
         // control arm: branch `z` from `origin/x` with tracking left on.
         git_create_branch_core(
             &state,
