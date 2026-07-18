@@ -111,6 +111,11 @@ struct PushArgs {
     /// checkout, no working-tree changes; an untracked branch is published with
     /// `-u origin <branch>`). Defaults to the current branch.
     branch: Option<String>,
+    /// Remote to push to; defaults to the branch's own upstream remote (or origin
+    /// when publishing). Requires branch.
+    // Single word, so camelCase == snake_case — no rename attr needed.
+    #[serde(default)]
+    remote: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -403,11 +408,12 @@ impl GitDesktopMcp {
     }
 
     #[tool(
-        description = "Push the current branch (default) or a named local `branch` to origin in \
-                       the bound repository — pushing a named branch never switches to it or \
-                       touches the working tree; an untracked branch is published with `-u`. \
-                       Uses git's native credential flow. Never force-pushes — use force_push \
-                       (destructive) for that. Requires --allow-git-write.",
+        description = "Push the current branch (default) or a named local `branch` in the bound \
+                       repository — pushing a named branch never switches to it or touches the \
+                       working tree; an untracked branch is published with `-u`. A named branch \
+                       targets its own upstream remote (or origin when publishing) unless `remote` \
+                       overrides it. Uses git's native credential flow. Never force-pushes — use \
+                       force_push (destructive) for that. Requires --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn push(
@@ -422,12 +428,16 @@ impl GitDesktopMcp {
             // could break session Resume semantics.
             ensure_not_session_branch(b)?;
         }
+        if let Some(r) = &args.remote {
+            ensure_not_flag(r, "remote")?;
+        }
         crate::git::remote::git_push_core(
             &self.state,
             self.repo.clone(),
             args.set_upstream,
             false,
             args.branch.clone(),
+            args.remote.clone(),
         )
         .await
         .map_err(app_err)?;
@@ -772,7 +782,7 @@ impl GitDesktopMcp {
     )]
     async fn force_push(&self) -> Result<CallToolResult, McpError> {
         self.ensure_destructive()?;
-        crate::git::remote::git_push_core(&self.state, self.repo.clone(), false, true, None)
+        crate::git::remote::git_push_core(&self.state, self.repo.clone(), false, true, None, None)
             .await
             .map_err(app_err)?;
         ok_text("force-pushed (with lease)")
@@ -918,7 +928,8 @@ mod tests {
         assert_gated!(
             h.push(Parameters(PushArgs {
                 set_upstream: false,
-                branch: None
+                branch: None,
+                remote: None
             })),
             "--allow-git-write"
         );
@@ -1125,6 +1136,20 @@ mod tests {
         )
         .unwrap();
         assert!(explicit.no_track);
+    }
+
+    /// `remote` is optional on the wire (#[serde(default)]): absent → None so a
+    /// bare `push {branch}` keeps resolving to the branch's own upstream remote,
+    /// and an explicit value parses through. Single word, so no rename attr.
+    #[test]
+    fn push_args_remote_defaults_none_and_parses_value() {
+        let absent: PushArgs = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(absent.remote, None);
+
+        let explicit: PushArgs =
+            serde_json::from_value(serde_json::json!({ "branch": "feature", "remote": "upstream" }))
+                .unwrap();
+        assert_eq!(explicit.remote.as_deref(), Some("upstream"));
     }
 
     /// The session-branch guard is wired into the branch-mutating tools even when the

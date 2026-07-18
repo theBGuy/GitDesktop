@@ -708,12 +708,14 @@ export const gitPush = (
   setUpstream: boolean,
   force = false,
   branch?: string,
+  remote?: string,
 ) =>
   invoke<void>("git_push", {
     repoPath,
     setUpstream,
     force,
     branch: branch ?? null,
+    remote: remote ?? null,
   });
 
 export const gitRemotes = (repoPath: string) =>

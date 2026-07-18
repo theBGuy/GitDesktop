@@ -8,7 +8,7 @@ import {
 import { useQuery } from "@tanstack/react-query";
 import { useSelector } from "@tanstack/react-store";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -148,6 +148,12 @@ export function CreatePrDialog({
   const [reviewers, setReviewers] = useState<ForgeUserRef[]>([]);
   const [labels, setLabels] = useState<Set<string>>(new Set());
   const [assignees, setAssignees] = useState<ForgeUserRef[]>([]);
+  // Group-label ids: these fields wrap trigger-style widgets (segmented buttons
+  // and popover triggers) that carry their own aria-label, so the visible field
+  // label names the surrounding group via aria-labelledby rather than htmlFor.
+  const createInGroupId = useId();
+  const reviewersGroupId = useId();
+  const assigneesGroupId = useId();
   // Labels come from whichever repo the PR targets (parent's own labels when
   // creating upstream). The picker is hidden on the parent path anyway, but the
   // AI-description prompt still reads this list, so keep it lens-correct.
@@ -441,8 +447,12 @@ export function CreatePrDialog({
                 this is a GitHub fork with an upstream remote. Default = parent. */}
             {lensGate && (
               <div className="space-y-1.5">
-                <Label>Create in</Label>
-                <div className="flex items-center gap-1">
+                <Label id={createInGroupId}>Create in</Label>
+                <div
+                  className="flex items-center gap-1"
+                  role="group"
+                  aria-labelledby={createInGroupId}
+                >
                   {(
                     [
                       {
@@ -584,8 +594,12 @@ export function CreatePrDialog({
             )}
 
             {canPickReviewers && (
-              <div className="space-y-1.5">
-                <Label>Reviewers</Label>
+              <div
+                className="space-y-1.5"
+                role="group"
+                aria-labelledby={reviewersGroupId}
+              >
+                <Label id={reviewersGroupId}>Reviewers</Label>
                 <ReviewersPopover
                   repoPath={repoPath}
                   number={null}
@@ -661,8 +675,12 @@ export function CreatePrDialog({
             )}
 
             {canPickAssignees && (
-              <div className="space-y-1.5">
-                <Label>Assignees</Label>
+              <div
+                className="space-y-1.5"
+                role="group"
+                aria-labelledby={assigneesGroupId}
+              >
+                <Label id={assigneesGroupId}>Assignees</Label>
                 <AssigneesPopover
                   repoPath={repoPath}
                   enabled={open}

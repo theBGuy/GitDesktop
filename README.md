@@ -357,8 +357,9 @@ commit that hasn't been pushed yet.
   parallel folders without stashing — with one-click jumps to the main workspace right
   from the branch switcher.
 - **Push or publish a branch without switching to it** — from the branch switcher's
-  right-click menu, push a branch that's ahead of its `origin` remote or publish an
-  unpushed one, without checking it out; it works even when the branch is checked out
+  right-click menu, push a branch that's ahead of the remote it tracks (its own remote,
+  not just `origin`) or publish an unpushed one (choosing the remote when there's more
+  than one), without checking it out; it works even when the branch is checked out
   in another worktree.
 - **Start a branch from any base** — the new-branch dialog's *Base it on* picker is a
   searchable list grouped into local and remote branches, so you can branch off any of

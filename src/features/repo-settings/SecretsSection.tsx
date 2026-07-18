@@ -1,5 +1,5 @@
 import { PlusIcon, TrashIcon } from "@phosphor-icons/react";
-import { useState } from "react";
+import { useId, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -56,6 +56,8 @@ export function SecretsSection({
   const [kind, setKind] = useState<"secrets" | "variables">("secrets");
   const [app, setApp] = useState<SecretApp>("actions");
   const [scope, setScope] = useState<string>(REPO_SCOPE);
+  const storeSelectId = useId();
+  const scopeSelectId = useId();
 
   const envs = useEnvironments(repoPath, open);
   // Environment scope exists only for Actions (secrets and variables).
@@ -85,12 +87,17 @@ export function SecretsSection({
 
         {kind === "secrets" && (
           <div className="space-y-1">
-            <Label className="text-[11px] text-muted-foreground">Store</Label>
+            <Label
+              htmlFor={storeSelectId}
+              className="text-[11px] text-muted-foreground"
+            >
+              Store
+            </Label>
             <Select
               value={app}
               onValueChange={(v) => v && setApp(v as SecretApp)}
             >
-              <SelectTrigger size="sm" className="w-36">
+              <SelectTrigger id={storeSelectId} size="sm" className="w-36">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -105,13 +112,18 @@ export function SecretsSection({
         )}
 
         <div className="space-y-1">
-          <Label className="text-[11px] text-muted-foreground">Scope</Label>
+          <Label
+            htmlFor={scopeSelectId}
+            className="text-[11px] text-muted-foreground"
+          >
+            Scope
+          </Label>
           <Select
             value={env ?? REPO_SCOPE}
             onValueChange={(v) => v && setScope(v)}
             disabled={!envAllowed}
           >
-            <SelectTrigger size="sm" className="w-40">
+            <SelectTrigger id={scopeSelectId} size="sm" className="w-40">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>

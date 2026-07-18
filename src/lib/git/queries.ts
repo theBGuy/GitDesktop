@@ -3302,8 +3302,19 @@ export function useUpdateSubmodule(repo: string) {
 export function usePush(repo: string) {
   return useRepoMutation(
     repo,
-    (args: { setUpstream: boolean; force?: boolean; branch?: string }) =>
-      api.gitPush(repo, args.setUpstream, args.force ?? false, args.branch),
+    (args: {
+      setUpstream: boolean;
+      force?: boolean;
+      branch?: string;
+      remote?: string;
+    }) =>
+      api.gitPush(
+        repo,
+        args.setUpstream,
+        args.force ?? false,
+        args.branch,
+        args.remote,
+      ),
   );
 }
 

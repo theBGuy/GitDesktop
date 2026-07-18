@@ -1,5 +1,5 @@
 import { formOptions } from "@tanstack/react-form";
-import type { ReactNode } from "react";
+import { type ReactNode, useId } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -183,6 +183,7 @@ export function CherryPickOntoDialog({
   onDone: () => void;
 }) {
   const cherryPickOnto = useCherryPickOnto(repoPath);
+  const destId = useId();
   function run() {
     if (!hashes || !branch) return;
     const target = branch;
@@ -229,13 +230,13 @@ export function CherryPickOntoDialog({
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-2">
-          <Label>Destination branch</Label>
+          <Label htmlFor={destId}>Destination branch</Label>
           <Select
             items={Object.fromEntries(branches.map((b) => [b.name, b.name]))}
             value={branch || null}
             onValueChange={(v) => v && onBranchChange(v)}
           >
-            <SelectTrigger className="w-full">
+            <SelectTrigger id={destId} className="w-full">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>

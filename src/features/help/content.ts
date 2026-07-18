@@ -381,10 +381,11 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   the default branch's row shows how far behind its upstream it is after a fetch, and
   *Update default branch from its remote* is available from the command palette too.
 - **Push a branch without switching to it** — the outbound counterpart: a branch ahead
-  of its origin remote offers **Push to _origin/…_** in its right-click menu, and an
-  unpushed or upstream-deleted branch offers **Publish branch**. Neither checks the branch
-  out or touches your working tree, so it works even for a branch checked out in another
-  worktree.
+  of the remote it tracks offers **Push to _its remote/…_** in its right-click menu — so a
+  branch tracking a fork's _upstream_ is pushed there, not to origin. An unpushed or
+  upstream-deleted branch offers **Publish**; on a repo with several remotes you pick the
+  destination (one **Publish to _…_** item per remote). Neither checks the branch out or
+  touches your working tree, so it works even for a branch checked out in another worktree.
 - The **Remote** section lists branches on your remotes you haven't checked out locally
   yet — click one to check it out (creating a local tracking branch), or right-click to
   **Delete on _origin_…**, a server-side delete that removes the branch from the remote for

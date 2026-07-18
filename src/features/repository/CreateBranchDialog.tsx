@@ -1,5 +1,5 @@
 import { useSelector } from "@tanstack/react-store";
-import { useEffect, useEffectEvent, useState } from "react";
+import { useEffect, useEffectEvent, useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -77,6 +77,7 @@ export function CreateBranchDialog({
   // the new branch starts with NO upstream and its first push publishes it
   // under its own name.
   const [baseIsRemote, setBaseIsRemote] = useState(false);
+  const baseTriggerId = useId();
 
   const createForm = useAppForm({
     defaultValues: { name: "", base: "" },
@@ -183,14 +184,13 @@ export function CreateBranchDialog({
             <createForm.AppField name="base">
               {(field) => (
                 <div className="space-y-2">
-                  {/* Programmatic label↔control association is deferred to the
-                      planned shared field-primitives a11y sweep. */}
-                  <Label>Base it on</Label>
+                  <Label htmlFor={baseTriggerId}>Base it on</Label>
                   <BaseBranchCombobox
                     repoPath={repoPath}
                     open={open}
                     currentName={currentName}
                     defaultName={defaultName}
+                    triggerId={baseTriggerId}
                     value={field.state.value || null}
                     onValueChange={(v, isRemote) => {
                       field.handleChange(v);

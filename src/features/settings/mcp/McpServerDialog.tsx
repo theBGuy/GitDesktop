@@ -245,7 +245,7 @@ export function McpServerDialog({
 
           {scopeOptions.length > 1 && (
             <div className="space-y-2">
-              <Label>Available in</Label>
+              <Label htmlFor="mcp-scope">Available in</Label>
               <Select
                 value={selectedScope}
                 onValueChange={(v) => v && set("scope", v)}
@@ -256,7 +256,7 @@ export function McpServerDialog({
                   scopeOptions.map((o) => [o.value, o.label]),
                 )}
               >
-                <SelectTrigger size="sm" className="w-full">
+                <SelectTrigger id="mcp-scope" size="sm" className="w-full">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>

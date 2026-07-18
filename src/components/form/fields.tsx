@@ -186,12 +186,13 @@ export function SelectField({
   sizeToContent?: boolean;
 }) {
   const field = useFieldContext<string>();
+  const id = useId();
   // Opt-in rich rows: wrap the label so it can truncate and leave room for a
   // trailing annotation. Plain callers keep the exact prior markup.
   const rich = sizeToContent || annotations !== undefined;
   return (
     <div className="space-y-2">
-      {label && <Label>{label}</Label>}
+      {label && <Label htmlFor={id}>{label}</Label>}
       <Select
         items={items}
         value={field.state.value || null}
@@ -200,7 +201,7 @@ export function SelectField({
         }}
         disabled={disabled}
       >
-        <SelectTrigger className="w-full">
+        <SelectTrigger id={id} className="w-full">
           <SelectValue />
         </SelectTrigger>
         <SelectContent

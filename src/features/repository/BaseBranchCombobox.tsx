@@ -73,6 +73,7 @@ export function BaseBranchCombobox({
   defaultName,
   value,
   onValueChange,
+  triggerId,
 }: {
   repoPath: string;
   /** The create-branch DIALOG's open state — gates the queries. */
@@ -83,6 +84,9 @@ export function BaseBranchCombobox({
   /** isRemote: whether the picked value is a remote-tracking ref (drives
    *  --no-track). */
   onValueChange: (value: string, isRemote: boolean) => void;
+  /** id applied to the combobox trigger so a caller's `<Label htmlFor>` can
+   *  name it (the trigger is a labelable button). */
+  triggerId?: string;
 }) {
   // useBranches is cached app-wide; the remote list + worktrees fetch only while
   // the dialog is open (same open-gating idiom as CompareBranchCombobox).
@@ -181,7 +185,10 @@ export function BaseBranchCombobox({
       value={value}
       onValueChange={(name) => name && onValueChange(name, remoteSet.has(name))}
     >
-      <ComboboxTrigger className="flex w-full items-center justify-between gap-1.5 rounded-none border border-input bg-transparent py-2 pr-2 pl-2.5 text-xs whitespace-nowrap transition-colors outline-none select-none focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring/50 data-placeholder:text-muted-foreground dark:bg-input/30 dark:hover:bg-input/50">
+      <ComboboxTrigger
+        id={triggerId}
+        className="flex w-full items-center justify-between gap-1.5 rounded-none border border-input bg-transparent py-2 pr-2 pl-2.5 text-xs whitespace-nowrap transition-colors outline-none select-none focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring/50 data-placeholder:text-muted-foreground dark:bg-input/30 dark:hover:bg-input/50"
+      >
         {/* Clamp a long branch value so it truncates and the caret stays put. */}
         <span className="min-w-0 flex-1 truncate text-left">
           <ComboboxValue />

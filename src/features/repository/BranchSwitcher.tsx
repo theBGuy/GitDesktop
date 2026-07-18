@@ -121,6 +121,23 @@ const PR_STATE_LABEL: Record<PrState, string> = {
   closed: "Closed",
 };
 
+/** The remote a branch's upstream lives on, by LONGEST-prefix match against the
+ *  repo's actual remotes — remote names may contain slashes, so `split("/")[0]`
+ *  is wrong and the remotes list is the ground truth. Returns null when the
+ *  upstream matches no configured remote (e.g. a stale tracking ref). */
+function upstreamRemoteOf(upstream: string, remotes: string[]): string | null {
+  let best: string | null = null;
+  for (const r of remotes) {
+    if (
+      upstream.startsWith(`${r}/`) &&
+      (best === null || r.length > best.length)
+    ) {
+      best = r;
+    }
+  }
+  return best;
+}
+
 function MenuRow({
   disabled,
   onClick,
@@ -441,9 +458,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // this branch, so switching would strand the in-progress amend and leave its
   // banner up. Lock the switcher until the user finishes or stops amending.
   const amending = amendingHash !== null;
-  // Origin presence gates the per-row push/publish items (mirrors SyncControls):
-  // a repo with no `origin` can't push a branch there.
-  const hasOrigin = remotes.isSuccess && remotes.data.includes("origin");
+  // The repo's configured remotes — ground truth for resolving a branch's
+  // upstream remote and for the per-remote Publish choices.
+  const remoteNames = remotes.data ?? [];
 
   const onError = (e: unknown) => toastError(e);
 
@@ -693,19 +710,21 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     );
   }
 
-  // Push a branch's ref to origin without checking it out — the outbound
-  // counterpart of doUpdateFromUpstream. Whether this publishes (-u) or plain
-  // pushes is decided backend-side from the branch's tracking state.
-  function doPushBranch(branch: Branch) {
+  // Push a branch's ref without checking it out — the outbound counterpart of
+  // doUpdateFromUpstream. Whether this publishes (-u) or plain pushes is decided
+  // backend-side from the branch's tracking state. The publish arms pass an
+  // explicit `remote` (the chosen destination); a tracked push passes none and
+  // the backend resolves to the branch's own upstream remote.
+  function doPushBranch(branch: Branch, remote?: string) {
     const publishing = !branch.upstream || branch.upstreamGone;
     setOpen(false);
     push.mutate(
-      { setUpstream: false, branch: branch.name },
+      { setUpstream: false, branch: branch.name, remote },
       {
         onSuccess: () =>
           toast.success(
             publishing
-              ? `Published ${branch.name} to origin`
+              ? `Published ${branch.name} to ${remote ?? "origin"}`
               : `Pushed ${branch.name} to ${branch.upstream}`,
           ),
         onError,
@@ -848,14 +867,25 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     const canUpdate = Boolean(defaultName) && branch.name !== defaultName;
     const deletionBlocked = isDeletionBlocked(rulesConfig, branch.name);
     const inWorktree = worktreeByBranch.has(branch.name);
-    // Outbound sync gating. `pushable` = tracked on origin and ahead → offer a
-    // plain push (disabled with "(diverged)" when also behind). `publishable` =
-    // untracked or gone → offer Publish. Both need origin. Hidden (not disabled)
-    // when in-sync / no origin / tracked on a non-origin remote.
-    const trackedOnOrigin =
-      Boolean(branch.upstream?.startsWith("origin/")) && !branch.upstreamGone;
-    const pushable = hasOrigin && trackedOnOrigin && branch.upstreamAhead > 0;
-    const publishable = hasOrigin && (!branch.upstream || branch.upstreamGone);
+    // Outbound sync gating. `pushable` = tracked on a KNOWN remote and ahead →
+    // offer a plain push to that remote (disabled with "(diverged)" when also
+    // behind); the backend resolves to the branch's own upstream remote.
+    // `publishable` = untracked or gone AND at least one remote exists → offer
+    // Publish (one item per remote on a multi-remote repo). Hidden (not disabled)
+    // when in-sync, or tracked on a remote that no longer exists.
+    const upstreamRemote =
+      branch.upstream && !branch.upstreamGone
+        ? upstreamRemoteOf(branch.upstream, remoteNames)
+        : null;
+    const pushable = Boolean(upstreamRemote) && branch.upstreamAhead > 0;
+    const publishable =
+      (!branch.upstream || branch.upstreamGone) && remoteNames.length > 0;
+    // Publish destinations: origin first, then the rest alphabetical.
+    const publishRemotes = publishable
+      ? [...remoteNames].sort((a, b) =>
+          a === "origin" ? -1 : b === "origin" ? 1 : a.localeCompare(b),
+        )
+      : [];
     return (
       <ContextMenu key={branch.name}>
         <ContextMenuTrigger
@@ -1014,13 +1044,31 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                     : `Push to ${branch.upstream}`}
                 </ContextMenuItem>
               )}
-              {publishable && (
+              {/* Publish an unpushed / upstream-deleted branch. One remote →
+                  a single item (the classic "Publish branch" when it's origin,
+                  else "Publish to {remote}"); multiple remotes → one flat item
+                  per remote (origin first, then alphabetical), each passing its
+                  explicit destination. Always-visible flat rows — keyboard nav is
+                  inherited from the menu. */}
+              {publishRemotes.length === 1 ? (
                 <ContextMenuItem
                   disabled={busy}
-                  onClick={() => doPushBranch(branch)}
+                  onClick={() => doPushBranch(branch, publishRemotes[0])}
                 >
-                  Publish branch
+                  {publishRemotes[0] === "origin"
+                    ? "Publish branch"
+                    : `Publish to ${publishRemotes[0]}`}
                 </ContextMenuItem>
+              ) : (
+                publishRemotes.map((r) => (
+                  <ContextMenuItem
+                    key={r}
+                    disabled={busy}
+                    onClick={() => doPushBranch(branch, r)}
+                  >
+                    Publish to {r}
+                  </ContextMenuItem>
+                ))
               )}
               <ContextMenuSeparator />
             </>

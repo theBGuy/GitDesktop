@@ -1,7 +1,7 @@
 import { SparkleIcon, XIcon } from "@phosphor-icons/react";
 import { useSelector } from "@tanstack/react-store";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffect, useEffectEvent, useMemo, useState } from "react";
+import { useEffect, useEffectEvent, useId, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -66,6 +66,7 @@ export function CreateJiraIssueDialog({
     [types.data],
   );
   const [issueTypeId, setIssueTypeId] = useState<string>("");
+  const issueTypeSelectId = useId();
   // A Jira validation error the create command surfaced (field-level messages
   // the Rust side joins readably) — shown inline under the form, not a toast.
   const [createError, setCreateError] = useState<string | null>(null);
@@ -166,7 +167,7 @@ export function CreateJiraIssueDialog({
             </form.AppField>
 
             <div className="space-y-2">
-              <Label>Issue type</Label>
+              <Label htmlFor={issueTypeSelectId}>Issue type</Label>
               {types.isError ? (
                 <div className="flex items-center gap-2 border px-3 py-2 text-xs text-muted-foreground">
                   <span className="flex-1">
@@ -195,7 +196,7 @@ export function CreateJiraIssueDialog({
                   }}
                   disabled={types.isPending}
                 >
-                  <SelectTrigger className="w-full">
+                  <SelectTrigger id={issueTypeSelectId} className="w-full">
                     <SelectValue
                       placeholder={
                         types.isPending ? "Loading types…" : "Select a type"

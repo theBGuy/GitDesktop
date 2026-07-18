@@ -118,7 +118,10 @@ export function CompareBranchCombobox({
       open={open}
       onOpenChange={setOpen}
     >
-      <ComboboxTrigger className="flex w-full items-center justify-between gap-1.5 rounded-none border border-input bg-transparent py-2 pr-2 pl-2.5 text-xs whitespace-nowrap transition-colors outline-none select-none focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring/50 data-placeholder:text-muted-foreground dark:bg-input/30 dark:hover:bg-input/50">
+      <ComboboxTrigger
+        aria-label="Compare with branch"
+        className="flex w-full items-center justify-between gap-1.5 rounded-none border border-input bg-transparent py-2 pr-2 pl-2.5 text-xs whitespace-nowrap transition-colors outline-none select-none focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring/50 data-placeholder:text-muted-foreground dark:bg-input/30 dark:hover:bg-input/50"
+      >
         {/* Clamp the selected branch name (the vendored SelectTrigger's
             line-clamp idiom) so a long name truncates and the caret stays put in
             the narrow Compare sidebar. */}

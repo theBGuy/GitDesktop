@@ -4,7 +4,7 @@ import {
   LightningIcon,
   WarningIcon,
 } from "@phosphor-icons/react";
-import { useEffect, useEffectEvent, useState } from "react";
+import { useEffect, useEffectEvent, useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -71,6 +71,8 @@ export function BranchMergePickerDialog({
   currentLabel: string;
 }) {
   const [pickerBranch, setPickerBranch] = useState("");
+  const branchSelectId = useId();
+  const conflictSelectId = useId();
   // Advanced merge options (merge mode only).
   const [mergeNoFf, setMergeNoFf] = useState(false);
   const [mergeStrategy, setMergeStrategy] =
@@ -183,7 +185,7 @@ export function BranchMergePickerDialog({
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-2">
-          <Label>Branch</Label>
+          <Label htmlFor={branchSelectId}>Branch</Label>
           <Select
             items={Object.fromEntries(
               otherBranches.map((b) => [b.name, b.name]),
@@ -191,7 +193,7 @@ export function BranchMergePickerDialog({
             value={pickerBranch || null}
             onValueChange={(v) => v && setPickerBranch(v)}
           >
-            <SelectTrigger className="w-full">
+            <SelectTrigger id={branchSelectId} className="w-full">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -214,7 +216,9 @@ export function BranchMergePickerDialog({
               Always create a merge commit
             </label>
             <div className="space-y-1.5">
-              <Label className="text-xs">On conflict</Label>
+              <Label htmlFor={conflictSelectId} className="text-xs">
+                On conflict
+              </Label>
               <Select
                 items={{
                   none: "Stop and let me resolve",
@@ -226,7 +230,7 @@ export function BranchMergePickerDialog({
                   v && setMergeStrategy(v as MergeConflictStrategy)
                 }
               >
-                <SelectTrigger className="w-full">
+                <SelectTrigger id={conflictSelectId} className="w-full">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>

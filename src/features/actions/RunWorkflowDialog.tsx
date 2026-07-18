@@ -219,9 +219,13 @@ export function RunWorkflowDialog({
             />
           </div>
 
-          <div className="space-y-2">
+          <div
+            className="space-y-2"
+            role="group"
+            aria-labelledby="wf-inputs-label"
+          >
             <div className="flex items-center justify-between">
-              <Label>
+              <Label id="wf-inputs-label">
                 {isPipelineProvider ? "Variables" : "Inputs"}{" "}
                 <span className="font-normal text-muted-foreground">
                   (optional)
