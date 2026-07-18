@@ -869,6 +869,124 @@ mod tests {
         std::fs::remove_file(&tmp).ok();
     }
 
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn live_websocket_monitor_is_severed_by_the_cut_signal() {
+        // End-to-end: bind a REAL listener, connect a REAL WebSocket to the
+        // `/api/reviews/{id}/stream` route as a paired device, prove the pump is
+        // live (one event → one Text frame), then fire the lifecycle cut and prove
+        // the socket is closed (next frame is a Close). This exercises the exact
+        // production path the in-memory `oneshot` tests can't reach — the upgraded
+        // socket and `forward_stream`'s monitor-cut `select!` branch.
+        use futures_util::StreamExt;
+        use tokio::time::{timeout, Duration};
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let _lock = auth::store_test_lock();
+        let tmp = temp_store();
+        let prev = auth::set_store_path_for_test(Some(tmp.clone()));
+
+        // The shared arcs a real server needs — built directly (not via a whole
+        // `LanState`) so we can inject an event and fire the cut ourselves. The
+        // active repo and the stream's `repo_path` match, so the stream is in scope.
+        let repo = "C:/repo".to_string();
+        let active_repo = Arc::new(Mutex::new(Some(repo.clone())));
+        let pairing = Arc::new(Mutex::new(None));
+        let rate_limit = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let streams: Arc<Mutex<std::collections::HashMap<String, crate::state::StreamInfo>>> =
+            Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let monitor_cut = tokio::sync::broadcast::channel::<()>(4).0;
+
+        // A live "review" stream on the shared repo; keep the sender to emit events.
+        let (ev_tx, _ev_rx) = tokio::sync::broadcast::channel::<crate::agent::ReviewEvent>(16);
+        streams.lock().unwrap().insert(
+            "rev-e2e".to_string(),
+            crate::state::StreamInfo {
+                tx: ev_tx.clone(),
+                kind: "review".to_string(),
+                started_at: "2026-07-17T00:00:00.000Z".to_string(),
+                repo_path: repo.clone(),
+            },
+        );
+
+        // Seed a paired device and keep its raw bearer for the WS handshake.
+        let (device, bearer, token_hash) = auth::mint_device("E2E Phone");
+        auth::persist_device(&device, &token_hash).unwrap();
+
+        // Bind a real listener in loopback mode (the port scan handles a busy
+        // default port). `server::start` spawns its serve task on the tauri
+        // async runtime, which self-initializes here.
+        let (handle, _urls, _hosts) = server::start(
+            false,
+            active_repo.clone(),
+            pairing,
+            rate_limit,
+            streams.clone(),
+            monitor_cut.clone(),
+        )
+        .await
+        .unwrap();
+        let port = handle.port;
+
+        // Connect a REAL WebSocket. Build the handshake request from the URI (which
+        // fills in the mandatory `Upgrade`/`Sec-WebSocket-*` headers and a `Host` of
+        // `127.0.0.1:{port}`, which is in the bound-hosts allowlist), then add the
+        // per-device bearer the way a paired phone would.
+        let url = format!("ws://127.0.0.1:{port}/api/reviews/rev-e2e/stream");
+        let mut req = url.into_client_request().unwrap();
+        req.headers_mut().insert(
+            "authorization",
+            format!("Bearer {bearer}").parse().unwrap(),
+        );
+        let (mut ws, _resp) = timeout(Duration::from_secs(5), tokio_tungstenite::connect_async(req))
+            .await
+            .expect("WebSocket connect timed out")
+            .expect("WebSocket handshake failed (auth/host/upgrade)");
+
+        // (1) The pump is live: one event through the registry tx arrives as one
+        // Text frame carrying the ReviewEvent's own JSON.
+        ev_tx
+            .send(crate::agent::ReviewEvent::Delta {
+                text: "hello phone".to_string(),
+            })
+            .unwrap();
+        let frame = timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("timed out waiting for the forwarded event")
+            .expect("stream ended before the event")
+            .expect("websocket error waiting for the event");
+        match frame {
+            Message::Text(t) => assert!(
+                t.contains("hello phone"),
+                "forwarded frame should carry the event JSON: {t}"
+            ),
+            other => panic!("expected a Text frame, got {other:?}"),
+        }
+
+        // (2) Fire the lifecycle cut (what `lan_disable` / repo-switch / revoke do).
+        // The pump's `select!` cut branch must break and close the socket.
+        monitor_cut.send(()).unwrap();
+
+        // The next frame the client sees is a Close (the pump's best-effort
+        // graceful close). Some stacks surface the close as the stream ending
+        // (`None`) right after; accept either as "severed", but never another Text.
+        let next = timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("timed out waiting for the socket to be severed");
+        match next {
+            Some(Ok(Message::Close(_))) | None => { /* severed, as required */ }
+            Some(Ok(other)) => panic!("expected the socket to be cut, got {other:?}"),
+            Some(Err(_)) => { /* an abrupt transport close is still a severed socket */ }
+        }
+
+        // Best-effort client-side close, then tear the server down and clean up.
+        let _ = ws.close(None).await;
+        handle.shutdown().await;
+        auth::set_store_path_for_test(prev);
+        std::fs::remove_file(&tmp).ok();
+    }
+
     // NOTE on the `stream` route's 409/404 branches: `WebSocketUpgrade` is an
     // extractor, and axum runs it during extraction — a plain (non-upgrade) GET is
     // rejected with `400 Bad Request` by the extractor BEFORE the handler body runs,
@@ -882,13 +1000,13 @@ mod tests {
     // distinguishing them. Asserting the route-level 404/409 would need a live
     // socket, out of scope for these in-memory router tests.
     //
-    // NOTE on `forward_stream`'s monitor-cut `select!` branch: for the same reason
-    // the WS route can't be driven via `tower::oneshot` (the `WebSocketUpgrade`
-    // extractor rejects a non-upgrade GET during extraction, before the handler
-    // runs), the cut branch inside the pump can't be exercised here either — it
-    // only runs on an upgraded socket. What IS testable — and is tested above — is
-    // that the desktop FIRES the cut at each lifecycle point
-    // (`set_active_repo_cuts_monitors_only_on_change`,
-    // `revoke_device_cuts_monitors_on_success`); the pump's reaction (break + Close
-    // frame on any `cut_rx.recv()` result) is verified by inspection.
+    // NOTE on `forward_stream`'s monitor-cut `select!` branch: a `tower::oneshot`
+    // can't drive it (the `WebSocketUpgrade` extractor rejects a non-upgrade GET
+    // during extraction, before the handler runs), so the cut branch only runs on a
+    // real upgraded socket. It is now covered end-to-end by
+    // `live_websocket_monitor_is_severed_by_the_cut_signal` above, which binds a
+    // real listener, connects a real WebSocket, and asserts the socket is closed
+    // when the cut fires. The fire points are separately covered by
+    // `set_active_repo_cuts_monitors_only_on_change` and
+    // `revoke_device_cuts_monitors_on_success`.
 }

@@ -94,4 +94,6 @@ portable-pty = { path = "vendor/portable-pty" }
 # `tower::ServiceExt::oneshot` drives the LAN router in unit tests without opening
 # a socket (auth/host/allowlist assertions in src/lan/).
 [dev-dependencies]
+futures-util = "0.3.32"
+tokio-tungstenite = "0.30.0"
 tower = { version = "0.5.3", features = ["util"] }

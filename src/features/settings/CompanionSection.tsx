@@ -9,6 +9,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -162,7 +163,11 @@ export function CompanionSection() {
         </span>
       </div>
 
-      {deviceList.length === 0 ? (
+      {devices.isPending ? (
+        // First fetch: paired devices may exist, so don't flash the empty-state
+        // copy — show a placeholder of roughly list-row height instead.
+        <Skeleton className="h-16 w-full" />
+      ) : deviceList.length === 0 ? (
         <p className="text-xs text-muted-foreground">
           {enabled
             ? "No devices paired yet. Choose “Pair a device” to add your phone."
