@@ -19,7 +19,9 @@ pub mod auth;
 pub mod routes;
 pub mod server;
 pub mod static_serve;
+pub mod tls;
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use tauri::{AppHandle, State};
@@ -28,11 +30,34 @@ use crate::error::{AppError, AppResult};
 use auth::{LanDevice, PairingSession, RateLimitMap};
 use server::ServerHandle;
 
+/// A repo registered in the LAN companion's repo registry, keyed by an opaque
+/// stable id (see [`LanState::set_active_repo`]). Carries the on-disk `path` the
+/// read handlers operate on and a display `name` (last path component) for the
+/// `/api/repos` listing. The `path` is NEVER placed on the wire — only the id +
+/// name are — so a filesystem path can't leak through the registered-repos API.
+#[derive(Debug, Clone)]
+pub struct RegisteredRepo {
+    pub path: String,
+    pub name: String,
+}
+
+/// The shared repo registry: opaque-id → [`RegisteredRepo`]. Shared (per-field
+/// `Arc`) with the router state so the scoped `/api/repos/{repoId}/…` routes can
+/// resolve an id to its path. Registry v1 mirrors the active repo exactly (the map
+/// holds at most the one active entry); a future browse-all-repos direction fills
+/// it with more.
+pub type RepoRegistry = Arc<Mutex<HashMap<String, RegisteredRepo>>>;
+
 /// The Tauri-managed state for the LAN companion.
 pub struct LanState {
     /// The active repo path the read routes operate on. Shared (per-field `Arc`)
     /// with the router state so `lan_set_active_repo` updates it live.
     active_repo: Arc<Mutex<Option<String>>>,
+    /// The repo registry (opaque-id → [`RegisteredRepo`]), shared with the router
+    /// state so the scoped `/api/repos/{repoId}/…` routes can resolve an id to its
+    /// path. Registry v1 mirrors the active repo exactly (see
+    /// [`LanState::set_active_repo`]).
+    repos: RepoRegistry,
     /// The running server handle (bound port + shutdown signal + task), or `None`
     /// when disabled. Guarded so enable/disable are serialized.
     running: Mutex<Option<RunningServer>>,
@@ -40,13 +65,14 @@ pub struct LanState {
     pairing: Arc<Mutex<Option<PairingSession>>>,
     /// Per-IP failure windows for rate-limiting, shared with the router state.
     rate_limit: RateLimitMap,
-    /// Fires a cut signal to every live WebSocket monitor (see
-    /// [`routes::reviews::forward_stream`]). Sent on `lan_disable`, on a
-    /// mode-switch rebind, when the active repo actually changes, and on a
-    /// device revoke — each closes in-flight sockets so a phone must reconnect
-    /// and re-authorize against the new state. The `Sender` is shared (cloned)
+    /// Fires a cut signal to every live SSE monitor (see
+    /// [`routes::reviews::stream`]). Sent on `lan_disable`, on a mode-switch
+    /// rebind, when the active repo actually changes, and on a device revoke —
+    /// each ends in-flight event streams so a phone must reconnect and
+    /// re-authorize against the new state (its EventSource auto-reconnect then
+    /// hits a 401/404 and closes permanently). The `Sender` is shared (cloned)
     /// into the router state; only the send half is ever needed there (each
-    /// socket subscribes its own receiver).
+    /// stream subscribes its own receiver).
     monitor_cut: tokio::sync::broadcast::Sender<()>,
     /// Serializes the WHOLE enable/disable lifecycle transition (an async-aware
     /// `Mutex`, held across the bind/shutdown `.await`s). Without it, two
@@ -59,17 +85,21 @@ pub struct LanState {
 }
 
 /// The bits we track for a running server: its handle, the mode it was started
-/// in, and the advertised urls (for `lan_status` without re-enumerating).
+/// in, the advertised urls (for `lan_status` without re-enumerating), and the
+/// self-signed cert's SHA-256 fingerprint (surfaced in status + pairing for the
+/// TOFU ceremony).
 struct RunningServer {
     handle: ServerHandle,
     bind_lan: bool,
     urls: Vec<String>,
+    fingerprint: String,
 }
 
 impl Default for LanState {
     fn default() -> Self {
         Self {
             active_repo: Arc::new(Mutex::new(None)),
+            repos: Arc::new(Mutex::new(HashMap::new())),
             running: Mutex::new(None),
             pairing: Arc::new(Mutex::new(None)),
             rate_limit: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -87,16 +117,52 @@ impl LanState {
     /// repo actually changed. Returns whether it changed (the cut fired). Split
     /// out from the [`lan_set_active_repo`] command so the change-detection +
     /// cut-fire behavior is unit-testable without a Tauri `State`.
-    fn set_active_repo(&self, repo_path: Option<String>) -> bool {
+    ///
+    /// Also refreshes the repo registry so the scoped `/api/repos/{repoId}/…`
+    /// routes can resolve an id. Registry v1 mirrors the active repo EXACTLY:
+    /// `Some(path)` clears the map and inserts a single entry under an opaque,
+    /// worktree-stable id; `None` clears the map. The id is the lowercase hex of
+    /// the first 8 bytes of `sha256(repo_identity(path))` — opaque and stable,
+    /// never leaking a filesystem path (only the id + display name reach the wire).
+    /// `repo_identity` is the one shared worktree-stable resolver (common git dir,
+    /// falling back to the raw path for a non-repo, which keeps tests
+    /// deterministic).
+    ///
+    /// Change-detection and the monitor cut stay keyed on the PATH exactly as
+    /// before: a same-value set is a no-op that must NOT cut (the App effect
+    /// re-pushes the same repoPath on every render).
+    ///
+    /// The registry install is guarded against a concurrent-call interleave: the
+    /// opaque id resolves via a git subprocess (an `.await`), so two rapid calls
+    /// A→B could race — A's slower resolve could otherwise install `{id_A → A}`
+    /// AFTER B's install, leaving the scoped registry pointing at A while
+    /// `active_repo == B`. So the post-await install ([`install_active_repo`]) only
+    /// clears+inserts when `active_repo` STILL equals the path this call resolved;
+    /// if a later call has already moved it on, this call skips the install (the
+    /// later call owns the registry). No `std::Mutex` is held across the await, and
+    /// the locks are never nested (each install takes `active_repo`, compares, drops
+    /// it, then takes `repos`).
+    async fn set_active_repo(&self, repo_path: Option<String>) -> bool {
         let changed = {
             let mut guard = self.active_repo.lock().unwrap_or_else(|p| p.into_inner());
             if *guard == repo_path {
                 false
             } else {
-                *guard = repo_path;
+                *guard = repo_path.clone();
                 true
             }
         };
+        // Resolve the opaque id OUTSIDE any lock (it awaits git), then guarded-install
+        // it — the install no-ops if `active_repo` has since moved past this path.
+        let entry = match repo_path {
+            Some(ref path) => {
+                let id = repo_id_for(path).await;
+                let name = repo_basename(path);
+                Some((id, RegisteredRepo { path: path.clone(), name }))
+            }
+            None => None,
+        };
+        self.install_active_repo(repo_path.as_deref(), entry);
         // Only cut live monitors when the shared repo ACTUALLY changed. The App
         // effect re-pushes on every repoPath render, so a same-value set is a
         // no-op and must not sever a healthy stream; a real switch/clear must,
@@ -106,6 +172,35 @@ impl LanState {
             let _ = self.monitor_cut.send(());
         }
         changed
+    }
+
+    /// Guarded registry install: mirror the active repo into the registry — clear
+    /// the map and insert `entry` — ONLY IF `active_repo` still equals `resolved`
+    /// (the path whose id `entry` was computed for). If a later `set_active_repo`
+    /// has already moved `active_repo` on, skip entirely: that later call owns the
+    /// registry, and clobbering it here would install a stale entry (the A-after-B
+    /// interleave). Sync + `&self` so it's unit-testable without racing real git.
+    ///
+    /// Lock discipline: read `active_repo` under its own lock and drop the guard
+    /// BEFORE taking the `repos` lock — the two are never held nested, and no
+    /// `std::Mutex` is held across an `.await` (this fn has none).
+    fn install_active_repo(
+        &self,
+        resolved: Option<&str>,
+        entry: Option<(String, RegisteredRepo)>,
+    ) {
+        let still_current = {
+            let guard = self.active_repo.lock().unwrap_or_else(|p| p.into_inner());
+            guard.as_deref() == resolved
+        };
+        if !still_current {
+            return; // a later call moved active_repo on — it owns the registry now.
+        }
+        let mut repos = self.repos.lock().unwrap_or_else(|p| p.into_inner());
+        repos.clear();
+        if let Some((id, repo)) = entry {
+            repos.insert(id, repo);
+        }
     }
 
     /// Revoke a paired device, then cut live monitors on success. Split out from
@@ -149,6 +244,7 @@ impl LanState {
                 active_repo,
                 device_count: auth::device_count(),
                 pairing_active,
+                cert_fingerprint: Some(rs.fingerprint.clone()),
             },
             None => LanStatus {
                 enabled: false,
@@ -162,6 +258,8 @@ impl LanState {
                 // `lan_status` poll off-disk for the (default) disabled case.
                 device_count: 0,
                 pairing_active,
+                // No cert while disabled — there's no running server to key it to.
+                cert_fingerprint: None,
             },
         }
     }
@@ -181,6 +279,9 @@ pub struct LanStatus {
     pub active_repo: Option<String>,
     pub device_count: u32,
     pub pairing_active: bool,
+    /// The running server's self-signed cert SHA-256 fingerprint (colon-separated
+    /// uppercase hex) for the TOFU display — `Some` exactly when enabled/running.
+    pub cert_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -190,6 +291,9 @@ pub struct LanPairing {
     pub qr_svg: String,
     pub pin: String,
     pub expires_at: String,
+    /// The self-signed cert SHA-256 fingerprint (colon-separated uppercase hex) the
+    /// user confirms against what the phone shows on first connect (TOFU).
+    pub cert_fingerprint: String,
 }
 
 // --------------------------------------------------------------------------
@@ -243,9 +347,10 @@ pub async fn lan_enable(
         }
     }
 
-    let (handle, urls, _hosts) = server::start(
+    let (handle, urls, _hosts, fingerprint) = server::start(
         bind_lan,
         state.active_repo.clone(),
+        state.repos.clone(),
         state.pairing.clone(),
         state.rate_limit.clone(),
         // The SAME stream registry `AppState` owns — so a review/session running
@@ -260,6 +365,7 @@ pub async fn lan_enable(
             handle,
             bind_lan,
             urls,
+            fingerprint,
         });
     }
     // Keep the tray truthful about whether we're sharing.
@@ -298,13 +404,16 @@ pub async fn lan_disable(app: AppHandle, state: State<'_, LanState>) -> AppResul
 
 /// Point the read routes at `repo_path` (the desktop's currently-open repo).
 /// `None` clears the active repo (the desktop closed its repo), after which the
-/// read routes 409 via `repo_or_409!` — paired devices stop seeing the last repo.
+/// alias read routes 409 — paired devices stop seeing the last repo. Also refreshes
+/// the repo registry that backs the scoped `/api/repos/{repoId}/…` routes (see
+/// [`LanState::set_active_repo`]). Async because computing the registry id resolves
+/// the repo's worktree-stable identity via git.
 #[tauri::command]
-pub fn lan_set_active_repo(
+pub async fn lan_set_active_repo(
     state: State<'_, LanState>,
     repo_path: Option<String>,
 ) -> AppResult<()> {
-    state.set_active_repo(repo_path);
+    state.set_active_repo(repo_path).await;
     Ok(())
 }
 
@@ -313,12 +422,13 @@ pub fn lan_set_active_repo(
 /// isn't enabled (there's no url to pair against yet).
 #[tauri::command]
 pub fn lan_pairing_start(state: State<'_, LanState>) -> AppResult<LanPairing> {
-    // The pair url is the FIRST advertised url + "/#pair".
-    let first_url = {
+    // The pair url is the FIRST advertised url + "/#pair", and the fingerprint is
+    // the running server's cert fingerprint — read both under the one lock.
+    let (first_url, fingerprint) = {
         let running = state.running.lock().unwrap_or_else(|p| p.into_inner());
         running
             .as_ref()
-            .and_then(|rs| rs.urls.first().cloned())
+            .and_then(|rs| rs.urls.first().cloned().map(|u| (u, rs.fingerprint.clone())))
             .ok_or_else(|| {
                 AppError::Command(
                     "enable the phone companion before starting pairing".to_string(),
@@ -335,6 +445,7 @@ pub fn lan_pairing_start(state: State<'_, LanState>) -> AppResult<LanPairing> {
         qr_svg,
         pin: session.pin.clone(),
         expires_at: session.expires_at_iso.clone(),
+        cert_fingerprint: fingerprint,
     };
     {
         let mut guard = state.pairing.lock().unwrap_or_else(|p| p.into_inner());
@@ -361,6 +472,26 @@ pub fn lan_devices_list(_state: State<'_, LanState>) -> AppResult<Vec<LanDevice>
 #[tauri::command]
 pub fn lan_device_revoke(state: State<'_, LanState>, device_id: String) -> AppResult<()> {
     state.revoke_device(&device_id)
+}
+
+/// The opaque, worktree-stable registry id for `repo_path`: the lowercase hex of
+/// the FIRST 8 BYTES of `sha256(repo_identity(path))` (16 hex chars). Opaque and
+/// stable across worktrees of the same repo (keyed on the common git dir), and
+/// never a filesystem path — so the id can go on the wire without leaking one.
+async fn repo_id_for(repo_path: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let identity = crate::git::repo::repo_identity(repo_path).await;
+    let digest = Sha256::digest(identity.as_bytes());
+    auth::hex_encode(&digest[..8])
+}
+
+/// The display name for a registered repo: the last path component of `repo_path`,
+/// falling back to the whole string when there isn't one (a bare root or empty).
+fn repo_basename(repo_path: &str) -> String {
+    std::path::Path::new(repo_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| repo_path.to_string())
 }
 
 /// Render `data` as an SVG QR code (string). Uses medium error correction and a
@@ -395,17 +526,34 @@ mod tests {
         ))
     }
 
-    /// A router wired to the given active repo + a fresh (empty) device store.
-    /// Host allowlist is `testhost` so the `Host` header is deterministic.
+    /// A router wired to the given active repo + a fresh (empty) device store and an
+    /// empty repo registry. Host allowlist is `testhost` so the `Host` header is
+    /// deterministic. Tests that exercise the scoped `/api/repos/{repoId}/…` surface
+    /// pre-register an entry via [`register_repo`].
     fn test_router(active: Option<String>) -> auth::RouterState {
         auth::RouterState {
             active_repo: Arc::new(Mutex::new(active)),
+            repos: Arc::new(Mutex::new(std::collections::HashMap::new())),
             pairing: Arc::new(Mutex::new(None)),
             rate_limit: Arc::new(Mutex::new(std::collections::HashMap::new())),
             bound_hosts: Arc::new(vec!["testhost".to_string()]),
             streams: Arc::new(Mutex::new(std::collections::HashMap::new())),
             monitor_cut: tokio::sync::broadcast::channel(4).0,
         }
+    }
+
+    /// Pre-register a repo entry in a test router's registry (opaque-id → path), so
+    /// the scoped `/api/repos/{repoId}/…` routes resolve `repo_id` to `repo_path`.
+    /// Returns the id for convenience.
+    fn register_repo(state: &auth::RouterState, repo_id: &str, repo_path: &str) -> String {
+        state.repos.lock().unwrap().insert(
+            repo_id.to_string(),
+            RegisteredRepo {
+                path: repo_path.to_string(),
+                name: repo_basename(repo_path),
+            },
+        );
+        repo_id.to_string()
     }
 
     fn get(path: &str) -> Request<Body> {
@@ -433,30 +581,114 @@ mod tests {
         assert_eq!(state.status().active_repo, None);
     }
 
-    #[test]
-    fn set_active_repo_cuts_monitors_only_on_change() {
+    #[tokio::test]
+    async fn set_active_repo_cuts_monitors_only_on_change() {
         // The monitor-cut signal fires when the shared repo actually changes, and
         // NOT on a same-value set (the App effect re-pushes the same repoPath on
-        // every render — cutting on those would sever healthy phone streams).
+        // every render — cutting on those would sever healthy phone streams). Now
+        // async (it resolves the registry id via git), but the cut-on-real-change
+        // contract is unchanged.
         let state = LanState::default();
         let mut cut_rx = state.monitor_cut.subscribe();
 
         // (1) None → Some(repo) is a change → fires.
-        assert!(state.set_active_repo(Some("C:/repo".to_string())));
+        assert!(state.set_active_repo(Some("C:/repo".to_string())).await);
         assert!(cut_rx.try_recv().is_ok());
 
         // (2) Setting the SAME value again is a no-op → no fire.
-        assert!(!state.set_active_repo(Some("C:/repo".to_string())));
+        assert!(!state.set_active_repo(Some("C:/repo".to_string())).await);
         assert!(matches!(
             cut_rx.try_recv(),
             Err(tokio::sync::broadcast::error::TryRecvError::Empty)
         ));
 
         // (3) A real switch (and a clear) each fire.
-        assert!(state.set_active_repo(Some("C:/other".to_string())));
+        assert!(state.set_active_repo(Some("C:/other".to_string())).await);
         assert!(cut_rx.try_recv().is_ok());
-        assert!(state.set_active_repo(None));
+        assert!(state.set_active_repo(None).await);
         assert!(cut_rx.try_recv().is_ok());
+    }
+
+    #[tokio::test]
+    async fn set_active_repo_mirrors_the_registry() {
+        // Registry v1 mirrors the active repo: a set registers exactly one entry
+        // under a 16-hex opaque id whose path is the set path; a clear empties it.
+        // The id never IS the path (opacity), and a same-value set keeps the entry.
+        let state = LanState::default();
+
+        state.set_active_repo(Some("C:/repo".to_string())).await;
+        let (id, path) = {
+            let repos = state.repos.lock().unwrap();
+            assert_eq!(repos.len(), 1, "one registered repo after a set");
+            let (id, repo) = repos.iter().next().unwrap();
+            (id.clone(), repo.path.clone())
+        };
+        assert_eq!(path, "C:/repo");
+        assert_eq!(id.len(), 16, "opaque id is 16 hex chars: {id}");
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()), "id is hex: {id}");
+        assert_ne!(id, "C:/repo", "id must not leak the path");
+
+        // A switch replaces the entry (still exactly one).
+        state.set_active_repo(Some("C:/other".to_string())).await;
+        {
+            let repos = state.repos.lock().unwrap();
+            assert_eq!(repos.len(), 1);
+            assert_eq!(repos.values().next().unwrap().path, "C:/other");
+        }
+
+        // A clear empties the registry.
+        state.set_active_repo(None).await;
+        assert!(state.repos.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn install_active_repo_skips_a_stale_install() {
+        // The concurrent-call guard: a slow resolve (call A) whose install lands
+        // AFTER a later call (B) already moved active_repo on must NOT clobber the
+        // registry. `install_active_repo` no-ops unless `active_repo` still equals
+        // the path the entry was resolved for. Driven synchronously (no real git
+        // race) by setting active_repo to B and calling A's install with A's path.
+        let state = LanState::default();
+
+        // B is the winning, current active repo, with B's entry already installed.
+        {
+            *state.active_repo.lock().unwrap() = Some("C:/repo-B".to_string());
+        }
+        let entry_b = ("bbbbbbbbbbbbbbbb".to_string(), RegisteredRepo {
+            path: "C:/repo-B".to_string(),
+            name: "repo-B".to_string(),
+        });
+        state.install_active_repo(Some("C:/repo-B"), Some(entry_b));
+        assert_eq!(
+            state.repos.lock().unwrap().get("bbbbbbbbbbbbbbbb").map(|r| r.path.clone()),
+            Some("C:/repo-B".to_string()),
+            "B's install lands while B is current"
+        );
+
+        // A is a STALE resolve for a path active_repo no longer equals → skipped.
+        let entry_a = ("aaaaaaaaaaaaaaaa".to_string(), RegisteredRepo {
+            path: "C:/repo-A".to_string(),
+            name: "repo-A".to_string(),
+        });
+        state.install_active_repo(Some("C:/repo-A"), Some(entry_a));
+        {
+            let repos = state.repos.lock().unwrap();
+            assert_eq!(repos.len(), 1, "stale install must not add A's entry");
+            assert!(repos.contains_key("bbbbbbbbbbbbbbbb"), "B's entry survives");
+            assert!(!repos.contains_key("aaaaaaaaaaaaaaaa"), "A's stale entry rejected");
+        }
+
+        // A matching install (active_repo == resolved) still applies normally.
+        let entry_b2 = ("cccccccccccccccc".to_string(), RegisteredRepo {
+            path: "C:/repo-B".to_string(),
+            name: "repo-B".to_string(),
+        });
+        state.install_active_repo(Some("C:/repo-B"), Some(entry_b2));
+        {
+            let repos = state.repos.lock().unwrap();
+            assert_eq!(repos.len(), 1, "a matching install clears+inserts");
+            assert!(repos.contains_key("cccccccccccccccc"), "B's fresh entry installed");
+        }
     }
 
     #[test]
@@ -500,10 +732,10 @@ mod tests {
     async fn review_routes_are_bearer_gated() {
         // The live-monitoring routes live under the same authed subtree as the git
         // routes, so an unauthenticated request 401s BEFORE reaching the handler —
-        // for both the enumeration route and the WebSocket-upgrade route (an
-        // upgrade is a plain GET until the handler accepts it, so `require_auth`
-        // runs first). This is the middleware-layering guarantee the WS route
-        // relies on for its no-approve/no-stdin read-only contract.
+        // for both the enumeration route and the SSE stream route. The SSE stream is
+        // an ordinary GET (no upgrade step), so `require_auth` runs ahead of the
+        // handler exactly like every other read route — the middleware-layering
+        // guarantee the stream route relies on for its one-way, read-only contract.
         let router = server::build_router(test_router(Some("C:/repo".to_string())));
         let list = router.clone().oneshot(get("/api/reviews")).await.unwrap();
         assert_eq!(list.status(), StatusCode::UNAUTHORIZED);
@@ -966,8 +1198,9 @@ mod tests {
         assert!(set_cookie.contains("SameSite=Strict"), "SameSite=Strict: {set_cookie}");
         assert!(set_cookie.contains("Path=/"), "Path=/: {set_cookie}");
         assert!(set_cookie.contains("Max-Age=31536000"), "Max-Age: {set_cookie}");
-        // No Secure — plain HTTP on the LAN by design.
-        assert!(!set_cookie.contains("Secure"), "must NOT be Secure: {set_cookie}");
+        // Secure is now present AND load-bearing: the companion serves HTTPS, so the
+        // bearer cookie must never ride a plaintext downgrade.
+        assert!(set_cookie.contains("Secure"), "must be Secure: {set_cookie}");
 
         // The JSON body is unchanged — the token is still returned for API clients.
         let bytes = axum::body::to_bytes(pair_resp.into_body(), 64 * 1024)
@@ -975,8 +1208,8 @@ mod tests {
             .unwrap();
         let minted: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let token = minted["token"].as_str().unwrap();
-        // The cookie value equals the raw bearer.
-        assert_eq!(set_cookie, format!("gd_lan={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000"));
+        // The cookie value equals the raw bearer, with the exact frozen attributes.
+        assert_eq!(set_cookie, format!("gd_lan={token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=31536000"));
 
         auth::set_store_path_for_test(prev);
         std::fs::remove_file(&tmp).ok();
@@ -1251,144 +1484,459 @@ mod tests {
         std::fs::remove_file(&tmp).ok();
     }
 
+    /// Read the next SSE `data:` payload from a live response body within `timeout`,
+    /// or `None` if the stream ended first. SSE is one-way, so unlike a WebSocket we
+    /// can drain the body incrementally with `into_data_stream` + `StreamExt::next`
+    /// — `axum::body::to_bytes` would hang forever on a stream that never completes.
+    /// Concatenates chunks until a full `data:` line is seen, so a payload split
+    /// across chunks (or preceded by keep-alive `:ka` comments) is handled.
+    async fn next_sse_data(
+        body: &mut axum::body::BodyDataStream,
+        timeout: std::time::Duration,
+    ) -> Option<String> {
+        use futures_util::StreamExt;
+        let mut buf = String::new();
+        loop {
+            let chunk = tokio::time::timeout(timeout, body.next()).await.ok()??;
+            let bytes = chunk.ok()?;
+            buf.push_str(&String::from_utf8_lossy(&bytes));
+            // An SSE event is terminated by a blank line; a `data:` field carries the
+            // payload. Scan for a complete `data:` line.
+            for line in buf.lines() {
+                if let Some(rest) = line.strip_prefix("data:") {
+                    return Some(rest.trim().to_string());
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn live_websocket_monitor_is_severed_by_the_cut_signal() {
-        // End-to-end: bind a REAL listener, connect a REAL WebSocket to the
-        // `/api/reviews/{id}/stream` route as a paired device, prove the pump is
-        // live (one event → one Text frame), then fire the lifecycle cut and prove
-        // the socket is closed (next frame is a Close). This exercises the exact
-        // production path the in-memory `oneshot` tests can't reach — the upgraded
-        // socket and `forward_stream`'s monitor-cut `select!` branch.
-        use futures_util::StreamExt;
-        use tokio::time::{timeout, Duration};
-        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-        use tokio_tungstenite::tungstenite::Message;
+    async fn sse_monitor_forwards_then_is_severed_by_the_cut_signal() {
+        // Router-level (no socket): request the `/api/reviews/{id}/stream` SSE stream
+        // with a valid bearer via `oneshot`, read the body INCREMENTALLY, assert a
+        // broadcast event arrives as a `data:` frame, fire the lifecycle cut, and
+        // assert the stream ENDS (next read → None within the timeout). This covers
+        // `forward_stream`'s forward path and its biased monitor-cut branch.
+        use tokio::time::Duration;
 
         let _lock = auth::store_test_lock();
         let tmp = temp_store();
         let prev = auth::set_store_path_for_test(Some(tmp.clone()));
 
-        // The shared arcs a real server needs — built directly (not via a whole
-        // `LanState`) so we can inject an event and fire the cut ourselves. The
-        // active repo and the stream's `repo_path` match, so the stream is in scope.
         let repo = "C:/repo".to_string();
-        let active_repo = Arc::new(Mutex::new(Some(repo.clone())));
-        let pairing = Arc::new(Mutex::new(None));
-        let rate_limit = Arc::new(Mutex::new(std::collections::HashMap::new()));
-        let streams: Arc<Mutex<std::collections::HashMap<String, crate::state::StreamInfo>>> =
-            Arc::new(Mutex::new(std::collections::HashMap::new()));
-        let monitor_cut = tokio::sync::broadcast::channel::<()>(4).0;
-
+        let state = test_router(Some(repo.clone()));
+        let monitor_cut = state.monitor_cut.clone();
         // A live "review" stream on the shared repo; keep the sender to emit events.
-        let (ev_tx, _ev_rx) = tokio::sync::broadcast::channel::<crate::agent::ReviewEvent>(16);
-        streams.lock().unwrap().insert(
-            "rev-e2e".to_string(),
-            crate::state::StreamInfo {
-                tx: ev_tx.clone(),
-                kind: "review".to_string(),
-                started_at: "2026-07-17T00:00:00.000Z".to_string(),
-                repo_path: repo.clone(),
-            },
-        );
+        let ev_tx = insert_stream(&state, "rev-sse", "review", &repo);
 
-        // Seed a paired device and keep its raw bearer for the WS handshake.
-        let (device, bearer, token_hash) = auth::mint_device("E2E Phone");
+        let (device, bearer, token_hash) = auth::mint_device("SSE Phone");
         auth::persist_device(&device, &token_hash).unwrap();
 
-        // Bind a real listener in loopback mode (the port scan handles a busy
-        // default port). `server::start` spawns its serve task on the tauri
-        // async runtime, which self-initializes here.
-        let (handle, _urls, _hosts) = server::start(
-            false,
-            active_repo.clone(),
-            pairing,
-            rate_limit,
-            streams.clone(),
-            monitor_cut.clone(),
-        )
-        .await
-        .unwrap();
-        let port = handle.port;
-
-        // Connect a REAL WebSocket. Build the handshake request from the URI (which
-        // fills in the mandatory `Upgrade`/`Sec-WebSocket-*` headers and a `Host` of
-        // `127.0.0.1:{port}`, which is in the bound-hosts allowlist), then add the
-        // per-device bearer the way a paired phone would.
-        let url = format!("ws://127.0.0.1:{port}/api/reviews/rev-e2e/stream");
-        let mut req = url.into_client_request().unwrap();
-        req.headers_mut().insert(
-            "authorization",
-            format!("Bearer {bearer}").parse().unwrap(),
-        );
-        let (mut ws, _resp) = timeout(Duration::from_secs(5), tokio_tungstenite::connect_async(req))
+        let router = server::build_router(state);
+        let resp = router
+            .oneshot(authed_get("/api/reviews/rev-sse/stream", &bearer))
             .await
-            .expect("WebSocket connect timed out")
-            .expect("WebSocket handshake failed (auth/host/upgrade)");
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "text/event-stream"
+        );
+        let mut body = resp.into_body().into_data_stream();
 
-        // (1) The pump is live: one event through the registry tx arrives as one
-        // Text frame carrying the ReviewEvent's own JSON.
+        // (1) One event through the registry tx arrives as one `data:` frame.
         ev_tx
             .send(crate::agent::ReviewEvent::Delta {
                 text: "hello phone".to_string(),
             })
             .unwrap();
-        let frame = timeout(Duration::from_secs(5), ws.next())
+        let data = next_sse_data(&mut body, Duration::from_secs(5))
             .await
-            .expect("timed out waiting for the forwarded event")
-            .expect("stream ended before the event")
-            .expect("websocket error waiting for the event");
-        match frame {
-            Message::Text(t) => assert!(
-                t.contains("hello phone"),
-                "forwarded frame should carry the event JSON: {t}"
-            ),
-            other => panic!("expected a Text frame, got {other:?}"),
-        }
+            .expect("timed out / stream ended before the event");
+        assert!(
+            data.contains("hello phone"),
+            "forwarded frame should carry the event JSON: {data}"
+        );
 
-        // (2) Fire the lifecycle cut (what `lan_disable` / repo-switch / revoke do).
-        // The pump's `select!` cut branch must break and close the socket.
+        // (2) Fire the lifecycle cut (what disable / repo-switch / revoke do). The
+        // stream's biased cut branch must end it: the next read is None (end).
         monitor_cut.send(()).unwrap();
+        let next = next_sse_data(&mut body, Duration::from_secs(5)).await;
+        assert!(next.is_none(), "the stream must end on the cut, got {next:?}");
 
-        // The next frame the client sees is a Close (the pump's best-effort
-        // graceful close). Some stacks surface the close as the stream ending
-        // (`None`) right after; accept either as "severed", but never another Text.
-        let next = timeout(Duration::from_secs(5), ws.next())
-            .await
-            .expect("timed out waiting for the socket to be severed");
-        match next {
-            Some(Ok(Message::Close(_))) | None => { /* severed, as required */ }
-            Some(Ok(other)) => panic!("expected the socket to be cut, got {other:?}"),
-            Some(Err(_)) => { /* an abrupt transport close is still a severed socket */ }
-        }
-
-        // Best-effort client-side close, then tear the server down and clean up.
-        let _ = ws.close(None).await;
-        handle.shutdown().await;
         auth::set_store_path_for_test(prev);
         std::fs::remove_file(&tmp).ok();
     }
 
-    // NOTE on the `stream` route's 409/404 branches: `WebSocketUpgrade` is an
-    // extractor, and axum runs it during extraction — a plain (non-upgrade) GET is
-    // rejected with `400 Bad Request` by the extractor BEFORE the handler body runs,
-    // so a `tower::oneshot` (which can't perform a real WS upgrade) can never reach
-    // the body's `repo_or_409!` (409) or its scoped-`subscribe_in_for` 404. The
-    // pre-existing `review_routes_are_bearer_gated` test likewise only reaches the
-    // 401 because that's middleware, ahead of extraction. The scoping logic these
-    // branches call is unit-tested directly in `state::tests`
-    // (`scoped_snapshot_and_subscribe_filter_by_repo`): matching repo → `Some`,
-    // out-of-scope id and unknown id → `None` (the 404 source), with no oracle
-    // distinguishing them. Asserting the route-level 404/409 would need a live
-    // socket, out of scope for these in-memory router tests.
-    //
-    // NOTE on `forward_stream`'s monitor-cut `select!` branch: a `tower::oneshot`
-    // can't drive it (the `WebSocketUpgrade` extractor rejects a non-upgrade GET
-    // during extraction, before the handler runs), so the cut branch only runs on a
-    // real upgraded socket. It is now covered end-to-end by
-    // `live_websocket_monitor_is_severed_by_the_cut_signal` above, which binds a
-    // real listener, connects a real WebSocket, and asserts the socket is closed
-    // when the cut fires. The fire points are separately covered by
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn sse_monitor_ends_on_a_terminal_done_event() {
+        // A terminal `Done` event is forwarded, then the stream ENDS on the next poll
+        // (the "yield then end" contract). Read the Done frame, then assert the next
+        // read is None.
+        use tokio::time::Duration;
+
+        let _lock = auth::store_test_lock();
+        let tmp = temp_store();
+        let prev = auth::set_store_path_for_test(Some(tmp.clone()));
+
+        let repo = "C:/repo".to_string();
+        let state = test_router(Some(repo.clone()));
+        // Hold a `monitor_cut` Sender clone for the whole test. In production
+        // `LanState` owns this Sender for the server's lifetime; under `oneshot` the
+        // router (and its Sender) is dropped once the response is produced, and a
+        // dropped last Sender makes `cut_rx.recv()` return `Closed` — which the
+        // stream's biased cut arm treats as a sever, ending it before any event.
+        let _monitor_cut = state.monitor_cut.clone();
+        let ev_tx = insert_stream(&state, "rev-done", "review", &repo);
+
+        let (device, bearer, token_hash) = auth::mint_device("Done Phone");
+        auth::persist_device(&device, &token_hash).unwrap();
+
+        let router = server::build_router(state);
+        let resp = router
+            .oneshot(authed_get("/api/reviews/rev-done/stream", &bearer))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let mut body = resp.into_body().into_data_stream();
+
+        // A terminal Done event is forwarded as a `data:` frame...
+        ev_tx
+            .send(crate::agent::ReviewEvent::Done {
+                text: "all done".to_string(),
+                is_error: false,
+                cost_usd: None,
+            })
+            .unwrap();
+        let data = next_sse_data(&mut body, Duration::from_secs(5))
+            .await
+            .expect("timed out / stream ended before the Done event");
+        assert!(data.contains("done"), "the Done event's JSON: {data}");
+
+        // ...then the stream ends (yield-then-end).
+        let next = next_sse_data(&mut body, Duration::from_secs(5)).await;
+        assert!(next.is_none(), "stream must end after Done, got {next:?}");
+
+        auth::set_store_path_for_test(prev);
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn sse_monitor_unknown_id_404s_before_the_stream_starts() {
+        // An unknown (or out-of-scope) stream id 404s with `noSuchStream` BEFORE any
+        // stream is opened — the no-oracle property. Unlike the old WS route (whose
+        // extractor rejected a non-upgrade GET before the handler), the SSE handler
+        // runs on a plain GET, so this is now assertable at the router level.
+        let _lock = auth::store_test_lock();
+        let tmp = temp_store();
+        let prev = auth::set_store_path_for_test(Some(tmp.clone()));
+
+        let state = test_router(Some("C:/repo".to_string()));
+        let (device, bearer, token_hash) = auth::mint_device("Unknown Phone");
+        auth::persist_device(&device, &token_hash).unwrap();
+        let router = server::build_router(state);
+
+        let resp = router
+            .oneshot(authed_get("/api/reviews/does-not-exist/stream", &bearer))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["kind"], "noSuchStream");
+
+        auth::set_store_path_for_test(prev);
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn list_repos_lists_the_registered_repo_and_is_empty_when_none() {
+        // `GET /api/repos` returns the registered repos as `[{ id, name }]` with a
+        // 16-hex id + basename name, and `[]` when none is registered. No path is on
+        // the wire.
+        let _lock = auth::store_test_lock();
+        let tmp = temp_store();
+        let prev = auth::set_store_path_for_test(Some(tmp.clone()));
+        let (device, bearer, token_hash) = auth::mint_device("Repos Phone");
+        auth::persist_device(&device, &token_hash).unwrap();
+
+        // (1) One registered repo → one entry with a 16-hex id + basename.
+        let state = test_router(Some("C:/repo".to_string()));
+        register_repo(&state, "abcdef0123456789", "C:/work/my-repo");
+        let router = server::build_router(state);
+        let resp = router
+            .oneshot(authed_get("/api/repos", &bearer))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let arr: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let arr = arr.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["id"], "abcdef0123456789");
+        assert_eq!(arr[0]["name"], "my-repo");
+        assert!(
+            arr[0].get("path").is_none() && arr[0].get("repoPath").is_none(),
+            "no filesystem path on the wire: {arr:?}"
+        );
+
+        // (2) No registered repo → [].
+        let empty_state = test_router(None);
+        let empty_router = server::build_router(empty_state);
+        let resp = empty_router
+            .oneshot(authed_get("/api/repos", &bearer))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let arr: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(arr.as_array().unwrap().len(), 0);
+
+        auth::set_store_path_for_test(prev);
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn scoped_route_reaches_the_same_handler_as_the_alias() {
+        // A scoped `/api/repos/{repoId}/status` request resolves the id to the repo
+        // and reaches the SAME handler as the alias `/api/repo/status`. With a fake
+        // path it fails at the git layer exactly like the alias does (past auth +
+        // resolution, NOT 401/404/409).
+        let _lock = auth::store_test_lock();
+        let tmp = temp_store();
+        let prev = auth::set_store_path_for_test(Some(tmp.clone()));
+        let (device, bearer, token_hash) = auth::mint_device("Scoped Phone");
+        auth::persist_device(&device, &token_hash).unwrap();
+
+        let state = test_router(Some("C:/repo".to_string()));
+        register_repo(&state, "cafebabecafebabe", "C:/repo");
+        let router = server::build_router(state);
+
+        let resp = router
+            .oneshot(authed_get("/api/repos/cafebabecafebabe/status", &bearer))
+            .await
+            .unwrap();
+        // Reached the handler: not an auth/resolution rejection.
+        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_ne!(resp.status(), StatusCode::NOT_FOUND);
+        assert_ne!(resp.status(), StatusCode::CONFLICT);
+
+        auth::set_store_path_for_test(prev);
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn scoped_route_unknown_repo_id_404s_nosuchrepo() {
+        // An unknown/unshared `{repoId}` 404s with `noSuchRepo` (404 not 403 — an
+        // unknown id and an unshared repo are indistinguishable).
+        let _lock = auth::store_test_lock();
+        let tmp = temp_store();
+        let prev = auth::set_store_path_for_test(Some(tmp.clone()));
+        let (device, bearer, token_hash) = auth::mint_device("NoRepo Scoped Phone");
+        auth::persist_device(&device, &token_hash).unwrap();
+
+        // Registry is empty (no register_repo call).
+        let state = test_router(Some("C:/repo".to_string()));
+        let router = server::build_router(state);
+
+        let resp = router
+            .oneshot(authed_get("/api/repos/deadbeefdeadbeef/status", &bearer))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["kind"], "noSuchRepo");
+
+        auth::set_store_path_for_test(prev);
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn alias_route_with_no_active_repo_409s_noactiverepo() {
+        // The alias surface still 409s `noActiveRepo` when no repo is shared — the
+        // frozen contract the shipped companion relies on (its body moved from the
+        // old per-handler macro into the alias resolver).
+        let _lock = auth::store_test_lock();
+        let tmp = temp_store();
+        let prev = auth::set_store_path_for_test(Some(tmp.clone()));
+        let (device, bearer, token_hash) = auth::mint_device("NoActive Phone");
+        auth::persist_device(&device, &token_hash).unwrap();
+
+        let state = test_router(None);
+        let router = server::build_router(state);
+
+        let resp = router
+            .oneshot(authed_get("/api/repo/status", &bearer))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["kind"], "noActiveRepo");
+
+        auth::set_store_path_for_test(prev);
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn scoped_reviews_stream_works_with_the_registered_id() {
+        // The scoped `/api/repos/{repoId}/reviews/{id}/stream` reaches the SSE
+        // handler and forwards an event, proving the two-path-param extraction
+        // (`repoId` + `id`) and the shared handler work under the scoped mount.
+        use tokio::time::Duration;
+
+        let _lock = auth::store_test_lock();
+        let tmp = temp_store();
+        let prev = auth::set_store_path_for_test(Some(tmp.clone()));
+
+        let repo = "C:/repo".to_string();
+        let state = test_router(Some(repo.clone()));
+        // See `sse_monitor_ends_on_a_terminal_done_event`: hold the cut Sender so the
+        // stream isn't severed by `Closed` when `oneshot` drops the router.
+        let _monitor_cut = state.monitor_cut.clone();
+        register_repo(&state, "0011223344556677", &repo);
+        let ev_tx = insert_stream(&state, "rev-scoped", "review", &repo);
+
+        let (device, bearer, token_hash) = auth::mint_device("Scoped Stream Phone");
+        auth::persist_device(&device, &token_hash).unwrap();
+
+        let router = server::build_router(state);
+        let resp = router
+            .oneshot(authed_get(
+                "/api/repos/0011223344556677/reviews/rev-scoped/stream",
+                &bearer,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let mut body = resp.into_body().into_data_stream();
+
+        ev_tx
+            .send(crate::agent::ReviewEvent::Delta {
+                text: "scoped hello".to_string(),
+            })
+            .unwrap();
+        let data = next_sse_data(&mut body, Duration::from_secs(5))
+            .await
+            .expect("timed out / stream ended before the event");
+        assert!(data.contains("scoped hello"), "scoped stream frame: {data}");
+
+        auth::set_store_path_for_test(prev);
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    // NOTE: the `stream` route's 404 (`noSuchStream`) and the alias 409
+    // (`noActiveRepo`) / scoped 404 (`noSuchRepo`) branches are now directly
+    // assertable at the router level (see the tests above) because the SSE handler
+    // runs on a plain GET — unlike the old `WebSocketUpgrade` extractor, which
+    // rejected a non-upgrade `oneshot` GET before the handler body ran. The
+    // monitor-cut branch is covered by `sse_monitor_forwards_then_is_severed_by_the_cut_signal`
+    // at the router level; its fire points are separately covered by
     // `set_active_repo_cuts_monitors_only_on_change` and
-    // `revoke_device_cuts_monitors_on_success`.
+    // `revoke_device_cuts_monitors_on_success`. The scoping logic the 404 calls
+    // (`subscribe_in_for`) is additionally unit-tested in `state::tests`.
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)]
+    // Multi-thread flavor: the client request and the server's accept/serve loop
+    // (spawned on Tauri's runtime) run concurrently over a real socket.
+    async fn real_socket_tls_serves_and_shuts_down() {
+        // The one end-to-end test that goes over a REAL TLS socket (the oneshot
+        // router tests are transport-agnostic). Starting the server in loopback mode
+        // then GETting `https://127.0.0.1:{port}/api/repo/status` with a cert-
+        // ignoring client proves the whole stack is live over TLS: the rustls
+        // handshake completes, the serve loop accepts, and the host guard + auth
+        // chain run (an unauthenticated read → 401). Then a graceful shutdown must
+        // stop accepting, so a second request errors.
+        let _lock = auth::store_test_lock();
+        let store_tmp = temp_store();
+        let store_prev = auth::set_store_path_for_test(Some(store_tmp.clone()));
+        let tls_dir = std::env::temp_dir().join(format!(
+            "gd-lan-tls-smoke-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let tls_prev = tls::set_tls_dir_for_test(Some(tls_dir.clone()));
+
+        let (handle, urls, _hosts, fingerprint) = server::start(
+            false, // loopback
+            Arc::new(Mutex::new(Some("C:/repo".to_string()))),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
+            Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
+            tokio::sync::broadcast::channel(4).0,
+        )
+        .await
+        .expect("server should start over TLS");
+
+        // The advertised url is https and the fingerprint has the frozen shape.
+        assert!(urls[0].starts_with("https://"), "https url: {}", urls[0]);
+        assert_eq!(fingerprint.split(':').count(), 32, "fingerprint: {fingerprint}");
+        let port = handle.port;
+
+        let url = format!("https://127.0.0.1:{port}/api/repo/status");
+        {
+            // Scope the client so it's DROPPED (closing its connection) before we
+            // shut down — a lingering pooled keep-alive connection would make
+            // `graceful_shutdown` wait out its full 5s deadline for nothing.
+            // `pool_max_idle_per_host(0)` also refuses to keep the socket idle, and a
+            // short request `timeout` guarantees no reqwest call can stall the suite.
+            let client = reqwest::Client::builder()
+                .danger_accept_invalid_certs(true)
+                .pool_max_idle_per_host(0)
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap();
+            let resp = client
+                .get(&url)
+                .send()
+                .await
+                .expect("TLS GET should reach the server");
+            // Host guard passes (127.0.0.1:{port} is a bound host) → auth chain runs →
+            // 401 for the missing bearer. That single status proves the whole path.
+            assert_eq!(
+                resp.status(),
+                reqwest::StatusCode::UNAUTHORIZED,
+                "unauthenticated read over TLS must be 401"
+            );
+        }
+
+        // Graceful shutdown, then a fresh connection must fail (port released).
+        handle.shutdown().await;
+        let after = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .pool_max_idle_per_host(0)
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap()
+            .get(&url)
+            .send()
+            .await;
+        assert!(after.is_err(), "post-shutdown request must error, got {after:?}");
+
+        tls::set_tls_dir_for_test(tls_prev);
+        std::fs::remove_dir_all(&tls_dir).ok();
+        auth::set_store_path_for_test(store_prev);
+        std::fs::remove_file(&store_tmp).ok();
+    }
 }

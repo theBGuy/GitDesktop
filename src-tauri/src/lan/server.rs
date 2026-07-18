@@ -2,27 +2,33 @@
 //! shutdown for the LAN companion server.
 //!
 //! The router mounts EXACTLY the pairing routes plus the read-only routes
-//! (structural allowlist — see [`crate::lan::routes`]): the 13 git/forge routes
-//! plus the two live-monitoring routes (`/api/reviews` and the
-//! `/api/reviews/{id}/stream` WebSocket); anything else 404s. Two middleware
-//! layers wrap everything: [`crate::lan::auth::host_guard`] (runs on every
-//! request — DNS-rebind defense + hardening headers) and, on the protected
-//! subtree only, [`crate::lan::auth::require_auth`] (per-device bearer). The
-//! WebSocket upgrade lives inside that protected subtree, so it is bearer-gated
-//! and host-guarded like every other read route.
+//! (structural allowlist — see [`crate::lan::routes`]): the 15 read handlers,
+//! mounted TWICE — once as the frozen active-repo ALIAS surface (`/api/repo/…`,
+//! `/api/forge/…`, `/api/reviews…`) and once under the SCOPED
+//! `/api/repos/{repoId}/…` surface — plus `GET /api/repos`; anything else 404s.
+//! Each mount carries a resolver middleware that resolves the request's repo and
+//! inserts an `Extension<ScopedRepo>` (alias → the active repo; scoped → a
+//! `{repoId}` registry lookup) so the shared handlers are identical under either.
+//! Two outer middleware layers wrap everything: [`crate::lan::auth::host_guard`]
+//! (runs on every request — DNS-rebind defense + hardening headers) and, on the
+//! protected subtree only, [`crate::lan::auth::require_auth`] (per-device bearer).
+//! The `/api/reviews/{id}/stream` SSE stream lives inside that protected subtree,
+//! so it is bearer-gated and host-guarded like every other read route.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::routing::{get, post};
 use axum::Router;
-use tokio::net::TcpListener;
-use tokio::sync::Notify;
+use axum_server::tls_rustls::RustlsConfig;
+use axum_server::Handle;
 
 use crate::error::{AppError, AppResult};
 use crate::lan::auth::{self, RouterState};
-use crate::lan::routes::{forge, git, reviews};
+use crate::lan::routes::{self, forge, git, reviews};
 use crate::lan::static_serve;
+use crate::lan::tls;
 
 /// The default port the server tries first — a fixed value in the IANA dynamic /
 /// private range (49152–65535 is the strict private range, but the 38400s are
@@ -33,26 +39,29 @@ pub const DEFAULT_PORT: u16 = 38473;
 /// the first is already in use.
 const PORT_SCAN: u16 = 4;
 
-/// A bound, running server: the port it landed on, a shutdown signal, and the
-/// task handle. Dropping the handle does not stop the server — call
-/// [`ServerHandle::shutdown`].
+/// A bound, running server: the port it landed on, the axum-server shutdown
+/// handle, and the task handle. Dropping the handle does not stop the server —
+/// call [`ServerHandle::shutdown`].
 pub struct ServerHandle {
     pub port: u16,
-    shutdown: Arc<Notify>,
+    handle: Handle<SocketAddr>,
     task: tauri::async_runtime::JoinHandle<()>,
 }
 
 impl ServerHandle {
     /// Signal graceful shutdown and await the serve task's exit.
     pub async fn shutdown(self) {
-        // `notify_one` (NOT `notify_waiters`): the serve task registers its
-        // `notified()` waiter only on its first poll, and a rapid enable→disable
-        // can call shutdown before that. `notify_one` stores a permit so a
-        // pre-registration signal is still consumed; `notify_waiters` would be
-        // lost, leaving `task.await` pending forever with the lifecycle lock held.
-        self.shutdown.notify_one();
-        // The serve future observes the notify and returns; join to be sure the
-        // listener is released before we (possibly) rebind on a mode change.
+        // axum-server's `Handle` stores the shutdown signal internally, so the
+        // pre-registration race the old `Notify` had (the serve task registered its
+        // `notified()` waiter only on its first poll, so a rapid enable→disable could
+        // signal before that and hang) is gone: a `graceful_shutdown` before the
+        // serve loop's first accept is still honored. The 5s cap bounds the worst
+        // case — SSE monitors are LIVE connections, but `monitor_cut` fires before
+        // shutdown in every path (disable/rebind), so they close fast; the cap only
+        // guards a stream that somehow didn't get the cut.
+        self.handle.graceful_shutdown(Some(Duration::from_secs(5)));
+        // Join to be sure the listener is released before we (possibly) rebind on a
+        // mode change.
         let _ = self.task.await;
     }
 }
@@ -60,8 +69,10 @@ impl ServerHandle {
 /// Build the axum router for the given state. Separated from binding so tests can
 /// drive it via `tower::ServiceExt::oneshot` without opening a socket.
 pub fn build_router(state: RouterState) -> Router {
-    // The protected read-only subtree: bearer-auth required.
-    let api = Router::new()
+    // The frozen ALIAS surface — the shipped companion consumes these paths
+    // verbatim. Its resolver scopes every request to the desktop's ACTIVE repo (a
+    // `None` active repo → 409 `noActiveRepo`).
+    let alias = Router::new()
         .route("/api/repo/status", get(git::status))
         .route("/api/repo/branches", get(git::branches))
         .route("/api/repo/log", get(git::log))
@@ -75,12 +86,51 @@ pub fn build_router(state: RouterState) -> Router {
         .route("/api/forge/issues/{number}", get(forge::issue_view))
         .route("/api/forge/ci/runs", get(forge::ci_run_list))
         .route("/api/forge/ci/runs/{id}", get(forge::ci_run_view))
-        // Live-monitoring: enumerate active agent streams + watch one over a
-        // WebSocket. Mounted INSIDE this subtree so the upgrade is bearer-gated by
-        // `require_auth` below (and host-guarded by the outer layer) exactly like
-        // every other read route.
+        // Live-monitoring: enumerate active agent streams + watch one over SSE.
         .route("/api/reviews", get(reviews::list))
         .route("/api/reviews/{id}/stream", get(reviews::stream))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            routes::resolve_active_repo,
+        ));
+
+    // The SCOPED surface under `/api/repos/{repoId}/…` with FLAT paths (the alias's
+    // `repo`/`forge` grouping segments drop out) — the same handler set. Its
+    // resolver looks `{repoId}` up in the registry (miss → 404 `noSuchRepo`).
+    let scoped = Router::new()
+        .route("/api/repos/{repoId}/status", get(git::status))
+        .route("/api/repos/{repoId}/branches", get(git::branches))
+        .route("/api/repos/{repoId}/log", get(git::log))
+        .route("/api/repos/{repoId}/commits/{hash}", get(git::commit_details))
+        .route(
+            "/api/repos/{repoId}/commits/{hash}/diff",
+            get(git::commit_diff),
+        )
+        .route("/api/repos/{repoId}/diff/working", get(git::diff_working))
+        .route("/api/repos/{repoId}/diff/file", get(git::diff_file))
+        .route("/api/repos/{repoId}/prs", get(forge::pr_list))
+        .route("/api/repos/{repoId}/prs/{number}", get(forge::pr_view))
+        .route("/api/repos/{repoId}/issues", get(forge::issue_list))
+        .route("/api/repos/{repoId}/issues/{number}", get(forge::issue_view))
+        .route("/api/repos/{repoId}/ci/runs", get(forge::ci_run_list))
+        .route("/api/repos/{repoId}/ci/runs/{id}", get(forge::ci_run_view))
+        .route("/api/repos/{repoId}/reviews", get(reviews::list))
+        .route(
+            "/api/repos/{repoId}/reviews/{id}/stream",
+            get(reviews::stream),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            routes::resolve_scoped_repo,
+        ));
+
+    // The protected read-only subtree: bearer-auth required. `GET /api/repos`
+    // (the registered-repo listing) is authed but goes through NEITHER repo
+    // resolver — it reads the registry directly.
+    let api = Router::new()
+        .route("/api/repos", get(routes::list_repos))
+        .merge(alias)
+        .merge(scoped)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,
@@ -232,9 +282,13 @@ fn rank_ips(ifaces: Vec<(String, Ipv4Addr)>) -> Vec<Ipv4Addr> {
     out
 }
 
-/// The `http://<ip>:<port>` urls for the advertised addresses.
+/// The `https://<ip>:<port>` urls for the advertised addresses. HTTPS: the
+/// companion serves the phone browser a self-signed cert (see [`crate::lan::tls`])
+/// so the origin is a secure context.
 pub fn urls_for(ips: &[Ipv4Addr], port: u16) -> Vec<String> {
-    ips.iter().map(|ip| format!("http://{ip}:{port}")).collect()
+    ips.iter()
+        .map(|ip| format!("https://{ip}:{port}"))
+        .collect()
 }
 
 /// The `<ip>:<port>` host strings we accept in a `Host`/`Origin` header. Always
@@ -254,15 +308,27 @@ pub fn bound_hosts_for(ips: &[Ipv4Addr], port: u16) -> Vec<String> {
     hosts
 }
 
-/// Bind a `TcpListener`, scanning DEFAULT_PORT..=DEFAULT_PORT+PORT_SCAN when the
-/// preferred port is already in use. Returns the listener and the port it landed
-/// on. A non-`AddrInUse` error (e.g. permission) fails immediately.
-async fn bind_listener(bind_ip: IpAddr) -> AppResult<(TcpListener, u16)> {
+/// Bind a `std::net::TcpListener`, scanning DEFAULT_PORT..=DEFAULT_PORT+PORT_SCAN
+/// when the preferred port is already in use. Returns the listener and the port it
+/// landed on. A non-`AddrInUse` error (e.g. permission) fails immediately. A sync
+/// bind is fine here — it's fast and runs under the lifecycle lock — and
+/// `axum_server::from_tcp_rustls` takes a `std::net::TcpListener` directly.
+///
+/// The listener is set NON-BLOCKING: `axum_server` hands it to
+/// `tokio::net::TcpListener::from_std`, which requires a non-blocking socket — a
+/// blocking one leaves the async accept loop unable to see readiness, so
+/// connections TCP-connect but their TLS handshake never runs (they hang).
+fn bind_listener(bind_ip: IpAddr) -> AppResult<(std::net::TcpListener, u16)> {
     let mut last_err: Option<std::io::Error> = None;
     for port in DEFAULT_PORT..=DEFAULT_PORT.saturating_add(PORT_SCAN) {
         let addr = SocketAddr::new(bind_ip, port);
-        match TcpListener::bind(addr).await {
-            Ok(listener) => return Ok((listener, port)),
+        match std::net::TcpListener::bind(addr) {
+            Ok(listener) => {
+                listener
+                    .set_nonblocking(true)
+                    .map_err(|e| bind_error(bind_ip, &e))?;
+                return Ok((listener, port));
+            }
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
                 last_err = Some(e);
                 continue;
@@ -290,25 +356,32 @@ fn bind_error(bind_ip: IpAddr, e: &std::io::Error) -> AppError {
     ))
 }
 
-/// Start the server: resolve addresses, bind, spawn the serve task with graceful
-/// shutdown wired to a `Notify`, and return the handle plus the advertised urls
-/// and the bound-host allowlist. The `RouterState` is built here so the host
-/// guard sees the exact hosts we bound.
+/// Start the server: resolve addresses, ensure the TLS material, bind, spawn the
+/// TLS serve task with graceful shutdown wired to an `axum_server::Handle`, and
+/// return the handle plus the advertised urls, the bound-host allowlist, and the
+/// certificate fingerprint (for the TOFU pairing display). The `RouterState` is
+/// built here so the host guard sees the exact hosts we bound.
 pub async fn start(
     bind_lan: bool,
     active_repo: Arc<std::sync::Mutex<Option<String>>>,
+    repos: crate::lan::RepoRegistry,
     pairing: Arc<std::sync::Mutex<Option<auth::PairingSession>>>,
     rate_limit: auth::RateLimitMap,
     streams: Arc<std::sync::Mutex<std::collections::HashMap<String, crate::state::StreamInfo>>>,
     monitor_cut: tokio::sync::broadcast::Sender<()>,
-) -> AppResult<(ServerHandle, Vec<String>, Vec<String>)> {
+) -> AppResult<(ServerHandle, Vec<String>, Vec<String>, String)> {
     let (bind_ip, ips) = resolve_ips(bind_lan);
-    let (listener, port) = bind_listener(bind_ip).await?;
+    // Ensure a self-signed cert covering the addresses we're about to advertise
+    // (reused across IP churn so the fingerprint — the TOFU anchor — stays stable).
+    let material = tls::ensure_tls(&ips)?;
+    let fingerprint = material.fingerprint.clone();
+    let (listener, port) = bind_listener(bind_ip)?;
     let urls = urls_for(&ips, port);
     let bound_hosts = bound_hosts_for(&ips, port);
 
     let state = RouterState {
         active_repo,
+        repos,
         pairing,
         rate_limit,
         bound_hosts: Arc::new(bound_hosts.clone()),
@@ -317,22 +390,27 @@ pub async fn start(
     };
     let router = build_router(state);
 
-    let shutdown = Arc::new(Notify::new());
-    let shutdown_signal = shutdown.clone();
+    let handle = Handle::new();
+    let serve_handle = handle.clone();
+    let tls_config = RustlsConfig::from_config(material.config);
     // Quit-time teardown is IMPLICIT: `app.exit(0)` from the tray kills the
     // process, which drops the listener — so there's no exit-site hook to add.
-    // A user-driven `lan_disable` calls `ServerHandle::shutdown`, which notifies
-    // this signal for a graceful drain. (Sleep auto-off is a known later-slice
-    // gap — not handled here.)
+    // A user-driven `lan_disable` calls `ServerHandle::shutdown`, which drives this
+    // handle's graceful shutdown. (Sleep auto-off is a known later-slice gap — not
+    // handled here.)
     let task = tauri::async_runtime::spawn(async move {
-        let serve = axum::serve(
-            listener,
-            router.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(async move {
-            shutdown_signal.notified().await;
-        });
-        if let Err(e) = serve.await {
+        let server = match axum_server::from_tcp_rustls(listener, tls_config) {
+            Ok(server) => server,
+            Err(e) => {
+                eprintln!("lan companion server could not start over TLS: {e}");
+                return;
+            }
+        };
+        if let Err(e) = server
+            .handle(serve_handle)
+            .serve(router.into_make_service_with_connect_info::<SocketAddr>())
+            .await
+        {
             // The listener died unexpectedly (not a graceful shutdown). Nothing to
             // recover to here; log to stderr so a dev sees it.
             eprintln!("lan companion server exited with error: {e}");
@@ -340,13 +418,10 @@ pub async fn start(
     });
 
     Ok((
-        ServerHandle {
-            port,
-            shutdown,
-            task,
-        },
+        ServerHandle { port, handle, task },
         urls,
         bound_hosts,
+        fingerprint,
     ))
 }
 
@@ -359,7 +434,7 @@ mod tests {
         let (bind_ip, ips) = resolve_ips(false);
         assert_eq!(bind_ip, IpAddr::V4(Ipv4Addr::LOCALHOST));
         assert_eq!(ips, vec![Ipv4Addr::LOCALHOST]);
-        assert_eq!(urls_for(&ips, 38473), vec!["http://127.0.0.1:38473"]);
+        assert_eq!(urls_for(&ips, 38473), vec!["https://127.0.0.1:38473"]);
     }
 
     #[test]
