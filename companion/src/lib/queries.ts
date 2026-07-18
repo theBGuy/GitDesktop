@@ -27,12 +27,17 @@ export const queryClient = new QueryClient({
 const POLL_MS = 15_000;
 const poll = (active: boolean) => (active ? POLL_MS : (false as const));
 
-/** The shared repo's status. `active` gates polling to the visible screen. */
-export function useStatus(active: boolean) {
+/** The shared repo's status. `active` gates polling to the visible screen;
+ *  `enabled` (default true) gates the query entirely — the shell passes false
+ *  while the phone sits on `#pair`, so an unpaired page never fires authed
+ *  requests (each would 401, and pre-pair traffic was how the shell once banked
+ *  rate-limit failures before the user ever typed a PIN). */
+export function useStatus(active: boolean, enabled = true) {
   return useQuery({
     queryKey: ["status"],
     queryFn: fetchStatus,
-    refetchInterval: poll(active),
+    enabled,
+    refetchInterval: enabled ? poll(active) : false,
   });
 }
 

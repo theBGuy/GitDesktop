@@ -814,6 +814,105 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
+    async fn no_credential_probes_never_lock_out_and_leave_pairing_working() {
+        // The companion shell's status probe hits a protected route with NO
+        // credential while the phone sits on #pair (no cookie yet). A request with no
+        // credential at all carries zero guessing info, so it must NOT bank a failure
+        // — otherwise these probes reintroduce the self-lockout. Fire well past the
+        // threshold: every probe 401s, never 429, and a correct pairing flow AFTER
+        // them still succeeds (the budget was never spent).
+        let _lock = auth::store_test_lock();
+        let tmp = temp_store();
+        let prev = auth::set_store_path_for_test(Some(tmp.clone()));
+
+        let session = auth::new_pairing_session("http://testhost/#pair".to_string());
+        let pin = session.pin.clone();
+        let state = test_router(Some("C:/repo".to_string()));
+        *state.pairing.lock().unwrap() = Some(session);
+        let router = server::build_router(state);
+
+        // Many no-credential probes → always 401, never 429.
+        for _ in 0..(auth::RATE_LIMIT_MAX_FAILURES_FOR_TEST + 5) {
+            let resp = router
+                .clone()
+                .oneshot(get("/api/repo/status"))
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "a no-credential probe must 401, never lock out"
+            );
+        }
+
+        // A correct pairing flow after the probes still works (budget untouched).
+        let chal = router
+            .clone()
+            .oneshot(post("/api/pair/challenge", None))
+            .await
+            .unwrap();
+        assert_eq!(chal.status(), StatusCode::OK);
+        let chal_bytes = axum::body::to_bytes(chal.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let chal: serde_json::Value = serde_json::from_slice(&chal_bytes).unwrap();
+        let challenge = chal["challenge"].as_str().unwrap().to_string();
+        let salt = chal["salt"].as_str().unwrap().to_string();
+        let proof = auth::compute_proof(&pin, &salt, &challenge);
+        let pair = serde_json::json!({ "deviceName": "Late Pair", "proof": proof }).to_string();
+        let pair_resp = router
+            .oneshot(post("/api/pair", Some(&pair)))
+            .await
+            .unwrap();
+        assert_eq!(
+            pair_resp.status(),
+            StatusCode::OK,
+            "pairing must still succeed after no-credential probes"
+        );
+
+        auth::set_store_path_for_test(prev);
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn invalid_bearer_probes_still_lock_out_after_the_threshold() {
+        // A PRESENT-but-invalid bearer IS a guessing event (token brute force), so it
+        // must still count toward the lockout budget: N invalid-bearer requests trip
+        // the 429 at the threshold. The brute-force defense stays intact.
+        let _lock = auth::store_test_lock();
+        let tmp = temp_store();
+        let prev = auth::set_store_path_for_test(Some(tmp.clone()));
+
+        // An empty store (no devices) — every bearer here is invalid.
+        let router = server::build_router(test_router(Some("C:/repo".to_string())));
+
+        // Invalid bearers up to the threshold → each 401.
+        for _ in 0..auth::RATE_LIMIT_MAX_FAILURES_FOR_TEST {
+            let resp = router
+                .clone()
+                .oneshot(authed_get("/api/repo/status", "deadbeefdeadbeef"))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "an invalid bearer is a 401");
+        }
+        // Threshold reached → the next attempt is rate-limited.
+        let locked = router
+            .oneshot(authed_get("/api/repo/status", "deadbeefdeadbeef"))
+            .await
+            .unwrap();
+        assert_eq!(
+            locked.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "invalid-bearer brute force must still lock out at the threshold"
+        );
+
+        auth::set_store_path_for_test(prev);
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn pair_submit_sets_the_auth_cookie() {
         // A successful pair returns the auth cookie with the exact frozen attributes
         // (in ADDITION to the unchanged JSON body), so a phone browser is

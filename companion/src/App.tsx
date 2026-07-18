@@ -25,7 +25,11 @@ export default function App() {
   // auth signal. Only poll it while Status is the visible tab (other tabs run
   // their own polling query); elsewhere it still fetches once on mount/route
   // change for the header + 401 check.
-  const statusQuery = useStatus(route.tab === "status" && !route.isPairing);
+  const statusQuery = useStatus(
+    route.tab === "status" && !route.isPairing,
+    // No authed traffic while unpaired: an unpaired page 401s on every probe.
+    !route.isPairing,
+  );
   const statusErr = asApiError(statusQuery.error);
 
   // Global 401 → the device isn't paired (or was revoked). Bounce to #pair —

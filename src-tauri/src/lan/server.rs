@@ -148,18 +148,36 @@ fn resolve_ips(bind_lan: bool) -> (IpAddr, Vec<Ipv4Addr>) {
 /// Interface-name substrings that mark a virtual / tunnel / VPN adapter whose IPv4
 /// we'd rather NOT lead the advertised-url list with (a phone can't reach a WSL,
 /// Docker, or Hyper-V virtual switch address). Case-insensitive substring match.
+/// `tap` is NOT here — it's too short to substring-match safely (it would flag
+/// "laptop"); it's handled token-aware by [`name_has_tap_token`].
 const VIRTUAL_IFACE_MARKERS: &[&str] = &[
     "vethernet",
     "wsl",
     "docker",
     "tailscale",
     "zerotier",
-    "tap",
     "npcap",
     "hyper-v",
     "virtual",
     "loopback",
 ];
+
+/// Whether `lower` (an already-lowercased interface name) contains a "tap" adapter
+/// TOKEN — the VPN/TAP virtual-adapter marker — without over-matching words that
+/// merely embed the letters (e.g. "laptop"). Split on non-alphanumeric boundaries
+/// and match a token that is exactly "tap" or "tap" followed by digits (e.g.
+/// "tap0"). So "TAP-Windows Adapter V9" and "OpenVPN TAP" match; "Laptop Dock
+/// Ethernet" does not.
+fn name_has_tap_token(lower: &str) -> bool {
+    lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|tok| {
+            let Some(rest) = tok.strip_prefix("tap") else {
+                return false;
+            };
+            rest.is_empty() || rest.chars().all(|c| c.is_ascii_digit())
+        })
+}
 
 /// Rank enumerated `(interface_name, IPv4)` pairs so the most likely
 /// phone-reachable address leads — the QR/URL list uses `first()`, and a VPN 10.x
@@ -167,10 +185,11 @@ const VIRTUAL_IFACE_MARKERS: &[&str] = &[
 ///
 /// Score (lower = better): a private-class base by prefix — 192.168.0.0/16 → 0,
 /// 10.0.0.0/8 → 1, 172.16.0.0/12 → 2, anything else → 3, link-local 169.254.0.0/16
-/// → 9 (last) — plus a +10 penalty when the interface NAME contains any
-/// [`VIRTUAL_IFACE_MARKERS`] substring (case-insensitive), which demotes a virtual
-/// adapter below every physical one in its own class. A STABLE sort preserves
-/// enumeration order within a score, and we dedup keeping the first occurrence.
+/// → 9 (last) — plus a +10 penalty when the interface NAME looks virtual: it
+/// contains any [`VIRTUAL_IFACE_MARKERS`] substring (case-insensitive) or a "tap"
+/// adapter token (see [`name_has_tap_token`]). That demotes a virtual adapter below
+/// every physical one in its own class. A STABLE sort preserves enumeration order
+/// within a score, and we dedup keeping the first occurrence.
 fn rank_ips(ifaces: Vec<(String, Ipv4Addr)>) -> Vec<Ipv4Addr> {
     fn class_score(ip: &Ipv4Addr) -> u32 {
         let o = ip.octets();
@@ -188,7 +207,11 @@ fn rank_ips(ifaces: Vec<(String, Ipv4Addr)>) -> Vec<Ipv4Addr> {
     }
     fn name_penalty(name: &str) -> u32 {
         let lower = name.to_ascii_lowercase();
-        if VIRTUAL_IFACE_MARKERS.iter().any(|m| lower.contains(m)) {
+        // Plain substrings for the long markers; token-aware for the short "tap" so
+        // it doesn't flag "laptop".
+        let is_virtual =
+            VIRTUAL_IFACE_MARKERS.iter().any(|m| lower.contains(m)) || name_has_tap_token(&lower);
+        if is_virtual {
             10
         } else {
             0
@@ -408,5 +431,28 @@ mod tests {
     #[test]
     fn rank_ips_empty_input() {
         assert!(rank_ips(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn tap_token_matches_adapters_not_laptop() {
+        // The three named cases: TAP virtual adapters match; "laptop" (which merely
+        // embeds the letters) does NOT.
+        assert!(name_has_tap_token("tap-windows adapter v9"));
+        assert!(name_has_tap_token("openvpn tap"));
+        assert!(!name_has_tap_token("laptop dock ethernet"));
+        // A numbered tap adapter (tap0) still matches; a bare physical name doesn't.
+        assert!(name_has_tap_token("tap0"));
+        assert!(!name_has_tap_token("wi-fi"));
+    }
+
+    #[test]
+    fn rank_ips_does_not_demote_a_laptop_named_adapter() {
+        // A physical adapter whose name contains "laptop" must NOT be demoted by the
+        // tap marker — it should lead a genuinely virtual TAP adapter in the same class.
+        let ranked = rank_ips(vec![
+            ("TAP-Windows Adapter V9".to_string(), Ipv4Addr::new(192, 168, 1, 8)),
+            ("Laptop Dock Ethernet".to_string(), Ipv4Addr::new(192, 168, 1, 4)),
+        ]);
+        assert_eq!(ranked.first(), Some(&Ipv4Addr::new(192, 168, 1, 4)));
     }
 }

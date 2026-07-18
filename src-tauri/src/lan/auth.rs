@@ -746,7 +746,12 @@ pub async fn require_auth(
         .filter(|s| !s.is_empty());
 
     let Some(bearer) = bearer else {
-        record_failure(&state.rate_limit, ip);
+        // NO rate-limit penalty for a request with NO credential at all. The lockout
+        // budget is the secret-guess budget, and a missing bearer/cookie carries zero
+        // guessing information — the companion shell's status probe fires while the
+        // phone sits on #pair with no cookie yet, so penalizing it banked failures
+        // into the same per-IP budget as wrong PINs and re-leaked the self-lockout
+        // this PR fixed on the pairing routes. Just 401.
         return unauthorized();
     };
     match authenticate_bearer(&bearer) {
@@ -755,6 +760,9 @@ pub async fn require_auth(
             next.run(req).await
         }
         None => {
+            // KEEP: a PRESENT-but-invalid bearer/cookie IS a guessing event — a token
+            // brute-force attempt — so it counts toward the lockout budget exactly
+            // like a wrong pairing proof does.
             record_failure(&state.rate_limit, ip);
             unauthorized()
         }
