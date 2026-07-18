@@ -1,3 +1,4 @@
+import { DeviceMobileIcon } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -21,7 +22,7 @@ import { useRepoDrop } from "@/features/welcome/useRepoDrop";
 import { WelcomeScreen } from "@/features/welcome/WelcomeScreen";
 import { syncAnalytics, track } from "@/lib/analytics";
 import { useBackgroundPrSync } from "@/lib/automations/useBackgroundPrSync";
-import { useGitInstalled } from "@/lib/git/queries";
+import { useGitInstalled, useLanStatus } from "@/lib/git/queries";
 import { useHotkeyAction, useHotkeysListener } from "@/lib/hotkeys/hotkeys";
 import { reloadLocalPrs } from "@/lib/pulls/local";
 import { reloadReviewNotes } from "@/lib/review-notes/store";
@@ -42,7 +43,11 @@ function App() {
   const openHelp = useUiStore((s) => s.openHelp);
   const openExplore = useUiStore((s) => s.openExplore);
   const toggleActivity = useUiStore((s) => s.toggleActivity);
+  const repoPath = useUiStore((s) => s.repoPath);
   const gitInstalled = useGitInstalled();
+  // Kept mounted app-wide so the LAN "Sharing ON" banner and the companion
+  // settings panel share one 5s poller.
+  const lanStatus = useLanStatus();
   const queryClient = useQueryClient();
   const settings = useSettings();
   const saveSettings = useSaveSettings();
@@ -117,6 +122,15 @@ function App() {
     );
   }, [closeToTray]);
 
+  // The LAN companion server serves whichever repo is open, so push the active
+  // repo to the backend whenever it changes. Closing the repo pushes null, which
+  // clears it so paired devices stop seeing the last repo (routes 409).
+  useEffect(() => {
+    invoke("lan_set_active_repo", { repoPath: repoPath ?? null }).catch(
+      () => undefined,
+    );
+  }, [repoPath]);
+
   // Drop a repo folder anywhere on the window to open it.
   useRepoDrop();
 
@@ -136,6 +150,7 @@ function App() {
     !settings.data?.hideAi,
   );
   useHotkeyAction("browse-mcp-registry", openMcpBrowse, !settings.data?.hideAi);
+  useHotkeyAction("open-companion-settings", () => openSettings("companion"));
   useHotkeyAction("show-help", openHelp);
   useHotkeyAction("open-explore", openExplore);
   useHotkeyAction("toggle-notifications", toggleActivity);
@@ -200,6 +215,23 @@ function App() {
   return (
     <>
       <div className="flex h-screen flex-col">
+        {/* A calm, layout-integrated banner while the LAN companion is sharing:
+            a slim full-width strip in normal flow (shrink-0), above every screen,
+            so it pushes content down and can't collide with header chrome. The
+            screen container below is flex-1/min-h-0, so the app still fits the
+            viewport without a page scrollbar. Text-labeled (never color alone);
+            click to manage. */}
+        {lanStatus.data?.enabled && (
+          <button
+            type="button"
+            onClick={() => openSettings("companion")}
+            title="Phone companion is sharing this repo on your local network — click to manage"
+            className="flex h-6 shrink-0 items-center justify-center gap-1.5 border-b border-info/40 bg-info/10 text-[11px] font-medium text-info transition-colors hover:bg-info/20"
+          >
+            <DeviceMobileIcon className="size-3.5" />
+            Sharing on
+          </button>
+        )}
         {view === "welcome" && <WelcomeScreen />}
         {view === "repo" && <RepositoryView />}
         {view === "settings" && <SettingsScreen />}

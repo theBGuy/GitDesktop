@@ -33,7 +33,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service"] }
 trash = "5"
-tokio = { version = "1", features = ["process", "time", "macros", "sync", "rt-multi-thread", "io-std"] }
+tokio = { version = "1", features = ["process", "time", "macros", "sync", "rt-multi-thread", "io-std", "net"] }
 thiserror = "2"
 base64 = "0.22.1"
 tauri-plugin-notification = "2.3.3"
@@ -62,6 +62,17 @@ sha1 = "0.10"
 # would silently un-ignore a file. Test fixtures use it as RAII temp dirs too, so
 # a killed or panicking run leaks nothing.
 tempfile = "3"
+# LAN phone-companion server (src/lan/): an embedded, default-OFF axum HTTP server
+# that lets a paired phone read the active repo over the LAN. `ws` is enabled now
+# (slice 2 needs it; cheaper to land the feature up front). `sha2`/`rand` back the
+# pairing challenge/response + bearer tokens; `qrcode` renders the pairing QR as an
+# inline SVG (svg-only — no `image` default feature); `local-ip-address` enumerates
+# the machine's LAN IPv4s for the advertised urls.
+axum = { version = "0.8.9", features = ["ws"] }
+sha2 = "0.11.0"
+rand = "0.10.2"
+qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
+local-ip-address = "0.6.13"
 
 # Desktop-only: the updater plugin doesn't build for mobile.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
@@ -86,3 +97,12 @@ windows-sys = { version = "0.61", features = [
 # vendor/portable-pty/src/win/psuedocon.rs. Drop this when fixed upstream (wezterm).
 [patch.crates-io]
 portable-pty = { path = "vendor/portable-pty" }
+
+[dev-dependencies]
+# RAII temp dirs for tests: a killed or panicking run must not leak fixtures
+# into the system temp dir — TempDir removes the directory on Drop.
+# Already in the dependency graph transitively, so near-zero cost.
+tempfile = "3"
+# `tower::ServiceExt::oneshot` drives the LAN router in unit tests without opening
+# a socket (auth/host/allowlist assertions in src/lan/).
+tower = { version = "0.5.3", features = ["util"] }

@@ -290,6 +290,10 @@ pub async fn git_diff_file(
         // means "differences found" for --no-index.
         // `--no-index` takes FILESYSTEM paths, not pathspecs — `:(literal)` here
         // fails with "could not access" (measured), so this half stays raw.
+        // INVARIANT: it is also NOT repo-confined — it can read any file the
+        // process can open, so an untrusted `file_path` (the LAN companion route)
+        // MUST be validated for repo containment first (see
+        // `crate::lan::routes::git::diff_file`).
         let out = run_git_raw(
             Some(&repo_path),
             &["diff", "--no-index", "--", "/dev/null", &file_path],

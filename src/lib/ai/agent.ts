@@ -223,6 +223,12 @@ export interface AgentSessionArgs {
   /** The directory the agent runs in — a throwaway worktree for a write session,
    *  or the live repo for a read-only Plan conversation. */
   worktreePath: string;
+  /** The open repo this session was spawned from. For a write session this is the
+   *  parent repo of the `gd/session/*` `worktreePath`; for a read-only Plan/Research
+   *  session it's the live repo (same value as `worktreePath`). The LAN monitor
+   *  scopes stream visibility to the SHARED repo, which is this value — so a session
+   *  spawned from the shared repo stays watchable on a paired phone. */
+  originRepoPath: string;
   /** The session's stable uuid (sets `--session-id` on turn 1, `--resume` after);
    *  also the cancel key for `cancelAgentSession`. */
   sessionId: string;
@@ -276,6 +282,7 @@ export async function runAgentSession(args: AgentSessionArgs): Promise<void> {
     systemPrompt: args.systemPrompt,
     userPrompt: args.userPrompt,
     worktreePath: args.worktreePath,
+    originRepoPath: args.originRepoPath,
     sessionId: args.sessionId,
     resume: args.resume,
     fork: args.fork ?? false,

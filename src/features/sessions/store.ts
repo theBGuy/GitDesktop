@@ -290,6 +290,7 @@ async function runTurn(
   const {
     claudeSessionId,
     worktreePath,
+    repoPath,
     model,
     effort,
     isolation,
@@ -381,6 +382,11 @@ async function runTurn(
       systemPrompt: SYSTEM_PROMPT,
       userPrompt: prompt,
       worktreePath,
+      // The repo this session was spawned from (the worktree's parent). The LAN
+      // monitor scopes stream visibility to the SHARED repo, so registering under
+      // the origin keeps a session watchable on a paired phone even though it runs
+      // in a `gd/session/*` worktree.
+      originRepoPath: repoPath,
       sessionId: claudeSessionId,
       resume,
       readOnly: false,

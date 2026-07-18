@@ -81,6 +81,12 @@ export const ACTIONS = [
     category: "Application",
     defaultBinding: null,
   },
+  {
+    id: "open-companion-settings",
+    label: "Phone companion settings",
+    category: "Application",
+    defaultBinding: null,
+  },
 
   // Navigation
   {

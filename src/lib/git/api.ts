@@ -82,6 +82,9 @@ import type {
   IssueRelation,
   IssueRelations,
   IssueType,
+  LanDevice,
+  LanPairing,
+  LanStatus,
   MergePreview,
   Milestone,
   OpLogEntry,
@@ -3174,3 +3177,25 @@ export const mcpSecretExists = (serverId: string, key: string) =>
   COLD_START
     ? Promise.resolve(coldStartGetSecret(mcpRef(serverId, key)) !== null)
     : invoke<boolean>("mcp_secret_exists", { serverId, key });
+
+// LAN phone companion (experimental) — controls the local-network server that
+// exposes read-only API access to the open repo to paired phones. All state is
+// runtime (not persisted settings); see queries.ts for the hooks + polling.
+export const lanStatus = () => invoke<LanStatus>("lan_status");
+
+export const lanEnable = (bindLan: boolean) =>
+  invoke<LanStatus>("lan_enable", { bindLan });
+
+export const lanDisable = () => invoke<LanStatus>("lan_disable");
+
+export const lanSetActiveRepo = (repoPath: string | null) =>
+  invoke<void>("lan_set_active_repo", { repoPath });
+
+export const lanPairingStart = () => invoke<LanPairing>("lan_pairing_start");
+
+export const lanPairingCancel = () => invoke<void>("lan_pairing_cancel");
+
+export const lanDevicesList = () => invoke<LanDevice[]>("lan_devices_list");
+
+export const lanDeviceRevoke = (deviceId: string) =>
+  invoke<void>("lan_device_revoke", { deviceId });
