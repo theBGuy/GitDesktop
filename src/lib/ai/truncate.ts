@@ -1,3 +1,5 @@
+import type { ContextBudgetProfile } from "./context-budget";
+
 /** Character budget for the staged diff inside the AI prompt. */
 export const DIFF_CHAR_BUDGET = 80_000;
 /** Cap applied to each individual file section once over budget. */
@@ -35,11 +37,14 @@ function splitIntoFileSections(diffText: string): FileSection[] {
  *
  * KEEP IN SYNC: src-tauri/src/mcp_server/generate.rs (`budget_diff`,
  * `is_low_value_path`, `split_into_file_sections`, `DIFF_CHAR_BUDGET`,
- * `PER_FILE_CAP`) mirrors this for the MCP recipe tools.
+ * `PER_FILE_CAP`) mirrors this for the MCP recipe tools — with the DEFAULT
+ * `budget`/`perFileCap`; the review path scales them per model (see
+ * context-budget.ts) while the recipe tools keep the constants.
  */
 export function budgetDiff(
   diffText: string,
   budget: number = DIFF_CHAR_BUDGET,
+  perFileCap: number = PER_FILE_CAP,
 ): BudgetedDiff {
   if (diffText.length <= budget) {
     return { text: diffText, truncated: false, omittedFiles: [] };
@@ -59,10 +64,10 @@ export function budgetDiff(
   let total = kept.reduce((sum, s) => sum + s.text.length, 0);
   if (total > budget) {
     kept = kept.map((s) =>
-      s.text.length > PER_FILE_CAP
+      s.text.length > perFileCap
         ? {
             ...s,
-            text: `${s.text.slice(0, PER_FILE_CAP)}\n[... rest of ${s.path} truncated]\n`,
+            text: `${s.text.slice(0, perFileCap)}\n[... rest of ${s.path} truncated]\n`,
           }
         : s,
     );
@@ -109,7 +114,9 @@ export interface ReviewExtras {
   prior: { text: string; truncated: boolean };
   /** Prior findings dropped entirely for budget. */
   priorDropped: boolean;
-  /** Budgeted (head-truncated) GitDesktop's-own prior PR comments. */
+  /** Budgeted GitDesktop's-own prior PR comments — a contiguous NEWEST-first
+   *  suffix of the comment blocks, rendered back in oldest-first order.
+   *  `truncated` when any block was excluded or the newest was head-sliced. */
   own: { text: string; truncated: boolean };
   /** Own comments dropped entirely for budget. */
   ownDropped: boolean;
@@ -127,29 +134,45 @@ export interface ReviewExtras {
  * comments take what's left, third-party reviewer findings get the rest — so
  * under pressure external drops first, then our comments, then prior, then the
  * delta, never the diff. `diffLen` is the length of the already-budgeted main diff.
+ *
+ * Our own comments (`ownItems`) fit RECENCY-FIRST rather than head-first: the
+ * newest, highest-signal follow-ups are kept and the oldest drop when the cap
+ * bites (the reverse of prior/external, which head-slice a single blob).
  */
 export function budgetReviewExtras(input: {
   diffLen: number;
   deltaText?: string;
   priorText?: string;
-  ownText?: string;
+  ownItems?: string[];
   externalText?: string;
+  /** Per-model scaled caps. When absent, the module constants are used, so the
+   *  default path is byte-identical to before the profile support. */
+  profile?: ContextBudgetProfile;
 }): ReviewExtras {
+  // Fall back to the module constants when no profile is supplied — this keeps
+  // the default path byte-for-byte identical to the pre-profile behavior.
+  const promptBudget = input.profile?.promptCharBudget ?? PROMPT_CHAR_BUDGET;
+  const deltaBudget = input.profile?.deltaCharBudget ?? DELTA_DIFF_CHAR_BUDGET;
+  const priorBudget =
+    input.profile?.priorCharBudget ?? PRIOR_FINDINGS_CHAR_BUDGET;
+  const ownBudget = input.profile?.ownCharBudget ?? OWN_COMMENTS_CHAR_BUDGET;
+  const externalBudget =
+    input.profile?.externalCharBudget ?? EXTERNAL_FINDINGS_CHAR_BUDGET;
   const emptyDiff: BudgetedDiff = {
     text: "",
     truncated: false,
     omittedFiles: [],
   };
-  let remaining = Math.max(0, PROMPT_CHAR_BUDGET - input.diffLen);
+  let remaining = Math.max(0, promptBudget - input.diffLen);
 
   let delta = emptyDiff;
   let deltaDropped = false;
   if (input.deltaText?.trim()) {
-    const cap = Math.min(remaining, DELTA_DIFF_CHAR_BUDGET);
+    const cap = Math.min(remaining, deltaBudget);
     if (cap <= 0) {
       deltaDropped = true;
     } else {
-      delta = budgetDiff(input.deltaText, cap);
+      delta = budgetDiff(input.deltaText, cap, input.profile?.perFileCap);
       remaining -= delta.text.length;
     }
   }
@@ -168,9 +191,47 @@ export function budgetReviewExtras(input: {
     return { result, dropped: false };
   };
 
-  const priorFit = fit(input.priorText, PRIOR_FINDINGS_CHAR_BUDGET);
-  const ownFit = fit(input.ownText, OWN_COMMENTS_CHAR_BUDGET);
-  const externalFit = fit(input.externalText, EXTERNAL_FINDINGS_CHAR_BUDGET);
+  // Our own comments fit recency-first: walk from the NEWEST block (array end)
+  // backwards, accumulating each block's length plus a 2-char "\n\n" joiner for
+  // every block after the first, and keep a CONTIGUOUS newest suffix while it fits
+  // the cap — stopping at the first block that doesn't (no skip-and-continue). If
+  // not even the newest block fits, the newest alone is head-sliced to the cap.
+  // The kept blocks render in ORIGINAL oldest-first order.
+  const fitOwn = (items: string[] | undefined, max: number) => {
+    const present = items?.filter((t) => t.trim()) ?? [];
+    if (present.length === 0)
+      return { result: { text: "", truncated: false }, dropped: false };
+    const cap = Math.min(remaining, max);
+    if (cap <= 0)
+      return { result: { text: "", truncated: false }, dropped: true };
+
+    let keptCount = 0;
+    let running = 0;
+    for (let i = present.length - 1; i >= 0; i--) {
+      const cost = present[i].length + (keptCount > 0 ? 2 : 0);
+      if (running + cost > cap) break;
+      running += cost;
+      keptCount++;
+    }
+
+    let text: string;
+    let truncated: boolean;
+    if (keptCount === 0) {
+      // Not even the newest block fits — include it alone, head-sliced.
+      text = present[present.length - 1].slice(0, cap);
+      truncated = true;
+    } else {
+      const selected = present.slice(present.length - keptCount);
+      text = selected.join("\n\n");
+      truncated = keptCount < present.length;
+    }
+    remaining -= text.length;
+    return { result: { text, truncated }, dropped: false };
+  };
+
+  const priorFit = fit(input.priorText, priorBudget);
+  const ownFit = fitOwn(input.ownItems, ownBudget);
+  const externalFit = fit(input.externalText, externalBudget);
 
   return {
     delta,

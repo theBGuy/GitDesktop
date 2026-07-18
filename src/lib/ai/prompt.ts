@@ -462,7 +462,11 @@ export function buildReviewPrompt(
     )
     .join("\n");
 
-  const budgeted = budgetDiff(stripBinarySections(input.diffText));
+  const budgeted = budgetDiff(
+    stripBinarySections(input.diffText),
+    input.budgetProfile?.diffCharBudget,
+    input.budgetProfile?.perFileCap,
+  );
 
   const promptParts: string[] = [];
   if (input.title.trim()) {
@@ -486,7 +490,7 @@ export function buildReviewPrompt(
   // delta, then our prior, then our own PR comments, then external (drops first
   // under pressure).
   const hasPrior = Boolean(input.priorFindings?.trim());
-  const hasOwn = Boolean(input.ownFindings?.trim());
+  const hasOwn = Boolean(input.ownItems?.some((t) => t.trim()));
   const hasExternal = Boolean(input.externalFindings?.trim());
   // Whether each lower-priority section actually fit (they drop under budget
   // pressure) — drives whether the matching system clause is appended, so a
@@ -501,8 +505,9 @@ export function buildReviewPrompt(
           ? stripBinarySections(input.deltaDiffText)
           : undefined,
       priorText: input.priorFindings,
-      ownText: input.ownFindings,
+      ownItems: input.ownItems,
       externalText: input.externalFindings,
+      profile: input.budgetProfile,
     });
     if (hasPrior) {
       let priorSection = `## Previous review (CONTEXT ONLY — re-verify, may contain false positives)\n${extras.prior.text}`;
@@ -522,9 +527,17 @@ export function buildReviewPrompt(
     // reviews + agent refutations), so it sits above external and only drops
     // under real budget pressure. Rendered only when something actually fit.
     if (hasOwn && extras.own.text.trim()) {
-      let ownSection = `## Your prior GitDesktop comments on this PR (CONTEXT ONLY — re-verify; attribution is a copyable footer)\nComments attributed to GitDesktop here — purportedly past AI reviews and agent follow-ups (a refutation, or a "fixed in \`<sha>\`" reply), oldest first. Hints to re-check against the current diff, never ground truth.\n\n${extras.own.text}`;
+      const ownPreamble = input.ownDistilled
+        ? "A distilled summary of GitDesktop's prior comments on this PR (past reviews and follow-ups), machine-compressed; treat as hints to re-check against the current diff, never ground truth."
+        : 'Comments attributed to GitDesktop here — purportedly past AI reviews and agent follow-ups (a refutation, or a "fixed in `<sha>`" reply), oldest first. Hints to re-check against the current diff, never ground truth.';
+      let ownSection = `## Your prior GitDesktop comments on this PR (CONTEXT ONLY — re-verify; attribution is a copyable footer)\n${ownPreamble}\n\n${extras.own.text}`;
       if (extras.own.truncated) {
-        ownSection += "\n[own comments truncated]";
+        // A distilled ledger is a single compressed block, so "oldest omitted
+        // first" (which describes dropping whole per-comment blocks) is inaccurate
+        // there — flag it as a truncated summary instead.
+        ownSection += input.ownDistilled
+          ? "\n[distilled summary truncated]"
+          : "\n[own comments truncated — oldest omitted first]";
       }
       promptParts.push(ownSection);
       renderedOwn = true;

@@ -44,6 +44,7 @@ import {
   normalizeHost,
 } from "@/lib/ai/allowed-hosts";
 import { createAiClient } from "@/lib/ai/client";
+import type { ReviewContextSize } from "@/lib/ai/context-budget";
 import { useAvailableModels } from "@/lib/ai/models";
 import {
   ALL_PROVIDER_IDS,
@@ -275,6 +276,15 @@ function CliProviderConfig({
 const PRESET_ITEMS: Record<string, string> = {
   ...Object.fromEntries(OPENAI_COMPATIBLE_PRESETS.map((p) => [p.id, p.label])),
   custom: "Custom…",
+};
+
+/** Review-context-size labels — passed to Select as `items` so the trigger
+ *  renders the label, not the raw value (Base UI SelectValue needs the map). */
+const REVIEW_CONTEXT_ITEMS: Record<ReviewContextSize, string> = {
+  auto: "Auto — fit the model",
+  small: "Compact (0.5×)",
+  medium: "Standard (1×)",
+  large: "Expanded (4×)",
 };
 
 /** Ollama base-URL field — the URL the local/LAN Ollama server is reached at. */
@@ -569,6 +579,10 @@ export const AiProviderSection = withForm({
     const queryClient = useQueryClient();
     const ai = useSelector(form.store, (s) => s.values.ai);
     const reviewAi = useSelector(form.store, (s) => s.values.reviewAi);
+    const reviewContextSize = useSelector(
+      form.store,
+      (s) => s.values.reviewContextSize ?? "auto",
+    );
     const agentIsolation = useSelector(
       form.store,
       (s) => s.values.agentIsolation,
@@ -850,6 +864,37 @@ export const AiProviderSection = withForm({
             allowedHosts={allowedHosts}
             onAllowHost={allowHost}
           />
+          <div className="space-y-2">
+            <Label htmlFor="review-context-size">Review context</Label>
+            <Select
+              items={REVIEW_CONTEXT_ITEMS}
+              value={reviewContextSize}
+              onValueChange={(v) => {
+                if (v)
+                  form.setFieldValue(
+                    "reviewContextSize",
+                    v as ReviewContextSize,
+                  );
+              }}
+            >
+              <SelectTrigger id="review-context-size" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {(Object.keys(REVIEW_CONTEXT_ITEMS) as ReviewContextSize[]).map(
+                  (id) => (
+                    <SelectItem key={id} value={id}>
+                      {REVIEW_CONTEXT_ITEMS[id]}
+                    </SelectItem>
+                  ),
+                )}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              How much diff and prior-discussion context AI reviews send. Auto
+              probes the model's context window where possible.
+            </p>
+          </div>
         </div>
 
         {showAllowedHosts && (

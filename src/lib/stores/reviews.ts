@@ -2,6 +2,7 @@ import { useCallback, useMemo } from "react";
 import { toast } from "sonner";
 import { create } from "zustand";
 import { cancelAgentReview, providerKind } from "@/lib/ai/agent";
+import { resolveBudgetProfile } from "@/lib/ai/context-budget";
 import {
   type ExternalContext,
   resolveExternalContext,
@@ -377,6 +378,23 @@ export async function startReview(
         );
     if (control.cancelled) return;
     patch({ deltaState: prior.deltaState });
+    // Scale the prompt's character budgets to the reviewing model (per the user's
+    // Review-context knob) — best-effort, never throws, never blocks. Resolved
+    // BEFORE the own/external harvest so the own-comments distillation trigger +
+    // ledger cap key off the SAME scaled budget as the rest of the prompt; reused
+    // verbatim at buildReviewPrompt below (single resolution, used twice).
+    const budgetProfile = await resolveBudgetProfile(
+      ai,
+      (await loadSettings()).reviewContextSize,
+    );
+    if (control.cancelled) return;
+    // Own-comments distillation runs a generation-model call that can outlast a
+    // dock Cancel; the CLI/HTTP review stream only gets an abort handle later (via
+    // `onAbort` at streamAi). Wire an AbortController in NOW so `cancelReview`'s
+    // `control.abort?.abort()` reaches the distill immediately — `control.abort` is
+    // null at this point, and streamAi reassigns it once the stream opens.
+    const preAbort = new AbortController();
+    control.abort = preAbort;
     // Third-party AI-reviewer findings AND GitDesktop's own prior comments on the
     // remote PR — both best-effort, remote-only soft context. Resolved
     // concurrently (independent harvests of the PR's review activity); kept
@@ -397,6 +415,11 @@ export async function startReview(
           target.kind,
           target.ref,
           context.provider,
+          {
+            distill: true,
+            signal: preAbort.signal,
+            ownBudgetChars: budgetProfile.ownCharBudget,
+          },
         ),
       ]);
     if (control.cancelled) return;
@@ -446,6 +469,7 @@ export async function startReview(
           isBinary: f.isBinary,
         })),
         provider: context.provider,
+        budgetProfile,
         agentic,
         ...prior,
         ...own,
