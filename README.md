@@ -372,7 +372,7 @@ commit that hasn't been pushed yet.
 
 Plus tag and submodule management.
 
-**Syncing** — push / pull / fetch, with the ahead/behind counts shown right on
+**Syncing** — fetch / pull / push, with the ahead/behind counts shown right on
 the Push and Pull buttons; pull is
 `--ff-only`, and divergence routes to a guarded force push with
 `--force-with-lease`. When a repo has an `upstream` remote, the Pull menu adds

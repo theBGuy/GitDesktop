@@ -18,12 +18,17 @@ import {
   useDefaultBranch,
   useRepoStatus,
 } from "@/lib/git/queries";
+import { formatBinding } from "@/lib/hotkeys/binding";
 import { useCreateLocalPr } from "@/lib/pulls/queries";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { useBranchPickerOptions } from "./useBranchPickerOptions";
 import { useGeneratePrDescription } from "./useGeneratePrDescription";
+
+/** Platform-correct submit hint (Cmd+Enter on macOS, Ctrl+Enter else) — never a
+ *  literal modifier (house platform-mod-key rule). */
+const SUBMIT_HINT = formatBinding("mod+enter");
 
 // Rendered exactly ONCE, hoisted in RepositoryView — never render it inside a tab
 // panel. Its success handler's `setRepoTab("pulls")` would hide a panel host's
@@ -129,7 +134,25 @@ export function CreateLocalPrDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex max-h-[85vh] flex-col sm:max-w-2xl">
+      <DialogContent
+        className="flex max-h-[85vh] flex-col sm:max-w-2xl"
+        // mod+enter submits from anywhere in the dialog. It's captured on
+        // DialogContent (the Popup), not the <form>: this dialog is hoisted in
+        // RepositoryView and can sit open over the Changes tab, where the global
+        // `commit` action (also mod+enter) has a live handler, and the X close
+        // button renders as a SIBLING of the form inside the Popup — a chord
+        // pressed with focus on the X would otherwise bypass a form-level
+        // handler and commit behind the dialog. Capturing on the Popup covers
+        // the X and every field, so the UNCONDITIONAL preventDefault here is
+        // what actually contains the chord. Submit only when the SubmitButton
+        // would be enabled (handleSubmit still enforces the field validators).
+        onKeyDown={(e) => {
+          if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+            e.preventDefault();
+            if (!generating) form.handleSubmit();
+          }
+        }}
+      >
         <form
           className="flex min-h-0 min-w-0 flex-col gap-4"
           onSubmit={(e) => {
@@ -260,7 +283,7 @@ export function CreateLocalPrDialog({
               Cancel
             </Button>
             <form.AppForm>
-              <form.SubmitButton disabled={generating}>
+              <form.SubmitButton disabled={generating} title={SUBMIT_HINT}>
                 Create local PR
               </form.SubmitButton>
             </form.AppForm>

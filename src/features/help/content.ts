@@ -391,6 +391,11 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   upstream-deleted branch offers **Publish**; on a repo with several remotes you pick the
   destination (one **Publish to _…_** item per remote). Neither checks the branch out or
   touches your working tree, so it works even for a branch checked out in another worktree.
+  {{kbd:push-to-origin}} is the keyboard shortcut for pushing to **origin** specifically:
+  with the **branches** list open it targets the **highlighted** branch, otherwise the
+  **current** one, and pushes or publishes it to origin. A branch that tracks a different
+  remote, has diverged, or has nothing to push says so in a short message — for those, use
+  the branch's right-click menu.
 - The **Remote** section lists branches on your remotes you haven't checked out locally
   yet — click one to check it out (creating a local tracking branch), or right-click to
   **Delete on _origin_…**, a server-side delete that removes the branch from the remote for
@@ -486,16 +491,16 @@ Worktrees that AI agent sessions use internally are hidden here.{{/ai}}`,
   {
     id: "syncing",
     label: "Syncing & conflicts",
-    body: `# Push, pull, fetch & conflicts
+    body: `# Fetch, pull, push & conflicts
 
-The header shows **Push / Pull / Fetch**, with the number of commits to push or pull shown
+The header shows **Fetch / Pull / Push**, with the number of commits to push or pull shown
 right on the **Push** and **Pull** buttons.
 
-- **Push** ({{kbd:push}}) sends your commits. For a branch with no upstream yet, you'll
-  see **Publish branch** instead.
+- **Fetch** ({{kbd:fetch}}) updates your view of the remote without changing your branch.
 - **Pull** ({{kbd:pull}}) is fast-forward only by design — it won't create surprise merge
   commits.
-- **Fetch** ({{kbd:fetch}}) updates your view of the remote without changing your branch.
+- **Push** ({{kbd:push}}) sends your commits. For a branch with no upstream yet, you'll
+  see **Publish branch** instead.
 
 ## Update a fork from upstream
 
@@ -703,7 +708,7 @@ from the branch diff and commit subjects — which additionally **proposes label
 only from the repository's existing labels and added to whatever you've already picked
 (never invented). The same **Generate** button is on the **Edit** dialog too, so you can
 write or regenerate an existing PR's title and description at any time — including for pull
-requests from forks{{/ai}}.
+requests from forks{{/ai}}. Press {{key:mod+enter}} from any field to submit the dialog.
 
 ## GitLab merge requests
 
@@ -1547,7 +1552,8 @@ bindings (formatted for your platform) — rebind any of them in **Settings → 
 
 ## Doing things
 
-- **Repository:** {{kbd:push}} push · {{kbd:pull}} pull · {{kbd:fetch}} fetch ·
+- **Repository:** {{kbd:fetch}} fetch · {{kbd:pull}} pull · {{kbd:push}} push ·
+  {{kbd:push-to-origin}} push to origin ·
   {{kbd:open-in-terminal}} terminal · {{kbd:show-in-explorer}} file manager ·
   {{kbd:open-in-editor}} editor · {{kbd:view-on-github}} GitHub · {{kbd:new-repository}}
   new repo · {{kbd:add-local-repository}} add local · {{kbd:clone-repository}} clone.

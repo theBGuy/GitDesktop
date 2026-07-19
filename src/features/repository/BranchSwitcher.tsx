@@ -729,6 +729,74 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // Hotkey handlers reuse the menu's own flows, so every gate (clean tree,
   // stash count, picker availability) and confirm dialog applies equally.
   useHotkeyAction("show-branches", () => setOpen(true), !amending);
+  // Push-to-origin: one open-aware handler drives both shapes so the chord
+  // behaves identically regardless of where focus sits (the popup is non-modal,
+  // so a two-handler split let a focus-outside-popup press act on the wrong
+  // branch). The action is ORIGIN-scoped everywhere — its palette label, help
+  // text, and name all say "origin", so it must never push somewhere the user
+  // can't predict. Enabled whenever the repo has an origin (plus a resolvable
+  // target); a non-actionable invocation gives an honest info toast rather than
+  // silence, which is what makes the help text true. The window listener's
+  // `e.repeat` guard covers key-repeat for free.
+  const currentBranch = branches.data?.find((b) => b.isCurrent);
+  useHotkeyAction(
+    "push-to-origin",
+    () => {
+      // Target: the highlighted row when the list is open, else the current
+      // branch. An open list with a highlight that resolves to no local branch
+      // (remote-only row / worktree path) is a real miss, not a fallback.
+      let branch: Branch | undefined;
+      if (open && activeBranch) {
+        branch = branches.data?.find((b) => b.name === activeBranch);
+        if (!branch) {
+          toast.info("Only local branches can be pushed from here");
+          return;
+        }
+      } else {
+        branch = currentBranch;
+      }
+      if (!branch) {
+        toast.info("No branch to push");
+        return;
+      }
+      const tracksOrigin =
+        branch.upstreamRemote === "origin" && !branch.upstreamGone;
+      const tracksOtherKnownRemote =
+        !!branch.upstream &&
+        !branch.upstreamGone &&
+        !!branch.upstreamRemote &&
+        branch.upstreamRemote !== "origin" &&
+        remoteNames.includes(branch.upstreamRemote);
+      if (
+        tracksOrigin &&
+        branch.upstreamAhead > 0 &&
+        branch.upstreamBehind === 0
+      ) {
+        doPushBranch(branch);
+      } else if (!branch.upstream || branch.upstreamGone) {
+        // `enabled` guarantees origin exists, so this publish destination is safe.
+        doPushBranch(branch, "origin");
+      } else if (tracksOrigin && branch.upstreamBehind > 0) {
+        toast.info(
+          `${branch.name} has diverged — update it from its upstream first`,
+        );
+      } else if (tracksOrigin && branch.upstreamAhead === 0) {
+        toast.info(`${branch.name} has nothing to push`);
+      } else if (tracksOtherKnownRemote) {
+        toast.info(
+          `${branch.name} tracks ${branch.upstreamRemote} — push it from its context menu`,
+        );
+      } else {
+        // Tracked, but the upstream's remote is no longer configured (only
+        // reachable when that is actually true).
+        toast.info(
+          `${branch.name} tracks a remote that's no longer configured`,
+        );
+      }
+    },
+    !busy && remoteNames.includes("origin") && (open || !!currentBranch),
+  );
+
   useHotkeyAction("new-branch", openCreate);
   useHotkeyAction(
     "rename-branch",

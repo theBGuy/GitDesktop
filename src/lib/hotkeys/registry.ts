@@ -181,6 +181,12 @@ export const ACTIONS = [
   },
   { id: "fetch", label: "Fetch", category: "Repository", defaultBinding: "f5" },
   {
+    id: "push-to-origin",
+    label: "Push to origin",
+    category: "Repository",
+    defaultBinding: "mod+alt+p",
+  },
+  {
     id: "update-from-upstream",
     label: "Update from upstream",
     category: "Repository",
@@ -683,7 +689,7 @@ export const BUILT_IN_KEYS: {
   { keys: "Esc", what: "Close dialogs, menus, and settings" },
   {
     keys: "Ctrl+Enter",
-    what: "Submit a PR comment from its text box",
+    what: "Submit a comment or the Create PR dialog from its text box",
     binding: "mod+enter",
   },
 ];

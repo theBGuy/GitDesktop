@@ -43,6 +43,7 @@ import {
   providerLabel,
   type RemoteLens,
 } from "@/lib/git/types";
+import { formatBinding } from "@/lib/hotkeys/binding";
 import {
   useLensGate,
   useRemoteSlug,
@@ -53,6 +54,10 @@ import { toastError } from "@/lib/toast";
 import { ReviewersPopover } from "./ReviewersPopover";
 import { useBranchPickerOptions } from "./useBranchPickerOptions";
 import { useGeneratePrDescription } from "./useGeneratePrDescription";
+
+/** Platform-correct submit hint (Cmd+Enter on macOS, Ctrl+Enter else) — never a
+ *  literal modifier (house platform-mod-key rule). */
+const SUBMIT_HINT = formatBinding("mod+enter");
 
 export function CreatePrDialog({
   repoPath,
@@ -423,7 +428,32 @@ export function CreatePrDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex max-h-[85vh] flex-col sm:max-w-2xl">
+      <DialogContent
+        className="flex max-h-[85vh] flex-col sm:max-w-2xl"
+        // mod+enter submits from anywhere in the dialog. It's captured on
+        // DialogContent (the Popup), not the <form>, because the X close button
+        // renders as a SIBLING of the form inside the Popup — a chord pressed
+        // with focus on the X would otherwise bypass a form-level handler and
+        // reach the global mod+enter action. ALWAYS swallow the chord here; only
+        // submit when the same gates as the SubmitButton allow (handleSubmit
+        // then enforces the field validators — title, same-branch — so an
+        // invalid form stays inert).
+        onKeyDown={(e) => {
+          if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+            e.preventDefault();
+            if (
+              !(
+                generating ||
+                nothingToMerge ||
+                baseLoading ||
+                Boolean(existingPr)
+              )
+            ) {
+              form.handleSubmit();
+            }
+          }
+        }}
+      >
         <form
           className="flex min-h-0 min-w-0 flex-col gap-4"
           onSubmit={(e) => {
@@ -790,6 +820,7 @@ export function CreatePrDialog({
                       baseLoading ||
                       Boolean(existingPr)
                     }
+                    title={SUBMIT_HINT}
                   >
                     {draft ? "Create draft" : `Create ${prNoun}`}
                   </form.SubmitButton>

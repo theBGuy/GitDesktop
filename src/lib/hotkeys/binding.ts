@@ -28,9 +28,25 @@ export const isWindows =
 export function eventToBinding(
   e: KeyboardEvent | React.KeyboardEvent,
 ): string | null {
+  // AltGr (right-Alt on many layouts) is character input, not a chord: it
+  // reports ctrlKey+altKey, which would otherwise masquerade as a `mod+alt+…`
+  // binding and swallow the character being typed. Left-Ctrl+Alt still works —
+  // only the AltGraph composition path is excluded.
+  if (e.getModifierState?.("AltGraph")) return null;
   const raw = e.key.toLowerCase();
   if (MODIFIER_KEYS.has(raw)) return null;
-  const key = KEY_NAMES[raw] ?? raw;
+  // Option/Alt composes a glyph on macOS (Option+P → "π"), so `e.key` is the
+  // composed character, not the physical key — the chord would never match its
+  // canonical `mod+alt+p`. When Alt is held and the key is a single character
+  // that ISN'T a plain ascii letter/digit, recover the physical key from
+  // `e.code` (KeyP → "p", Digit1 → "1"); anything else keeps `e.key`.
+  let key = KEY_NAMES[raw] ?? raw;
+  if (e.altKey && raw.length === 1 && !/^[a-z0-9]$/.test(raw)) {
+    const letter = /^Key([A-Za-z])$/.exec(e.code);
+    const digit = /^Digit([0-9])$/.exec(e.code);
+    if (letter) key = letter[1].toLowerCase();
+    else if (digit) key = digit[1];
+  }
   const parts: string[] = [];
   if (e.ctrlKey || e.metaKey) parts.push("mod");
   if (e.altKey) parts.push("alt");
@@ -64,6 +80,28 @@ export function formatBinding(binding: string): string {
       if (named) return named;
       if (/^f\d{1,2}$/.test(part)) return part.toUpperCase();
       return part.length === 1 ? part.toUpperCase() : part;
+    })
+    .join("+");
+}
+
+/**
+ * A canonical binding as an ARIA `aria-keyshortcuts` token string, e.g.
+ * "mod+p" → "Control+P" (Windows/Linux) or "Meta+P" (macOS), "f5" → "F5".
+ * The vocabulary is intentionally minimal — it only needs to cover the keys
+ * that appear in real bindings (see KEY_NAMES/DISPLAY_NAMES above).
+ */
+export function bindingToAriaKeyshortcuts(binding: string): string {
+  return binding
+    .split("+")
+    .map((part) => {
+      if (part === "mod") return isMac ? "Meta" : "Control";
+      if (part === "alt") return "Alt";
+      if (part === "shift") return "Shift";
+      if (/^f\d{1,2}$/.test(part)) return part.toUpperCase();
+      // Single letters uppercase; named keys (enter, space, …) capitalize.
+      return part.length === 1
+        ? part.toUpperCase()
+        : part.charAt(0).toUpperCase() + part.slice(1);
     })
     .join("+");
 }

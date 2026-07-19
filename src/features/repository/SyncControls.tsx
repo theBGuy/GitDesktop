@@ -39,7 +39,11 @@ import {
   useRepoStatus,
   useUpdateFromUpstream,
 } from "@/lib/git/queries";
-import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
+import {
+  bindingToAriaKeyshortcuts,
+  formatBinding,
+} from "@/lib/hotkeys/binding";
+import { useEffectiveBindings, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useSettings } from "@/lib/settings/queries";
 import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
@@ -55,6 +59,11 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   const updateUpstream = useUpdateFromUpstream(repoPath);
   const markFetched = useFetchStatusStore((s) => s.markFetched);
   const lastFetchedAt = useLastFetchedAt(repoPath);
+  // Effective bindings drive the discoverability hints on the sync buttons:
+  // the formatted combo is appended to each button's tooltip, and its ARIA
+  // form goes on `aria-keyshortcuts`. `null` = user explicitly unbound → no
+  // hint. These respect Settings → Keyboard rebindings for free.
+  const bindings = useEffectiveBindings();
   const [forceConfirmOpen, setForceConfirmOpen] = useState(false);
 
   // A repo with no `origin` (e.g. created locally in GitDesktop) can't push;
@@ -168,6 +177,35 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           ? "Pull — no upstream branch to pull from yet; publish the branch first"
           : behindLabel;
 
+  // Tooltip = the button's description (or its bare label when synced +
+  // undefined) with the effective shortcut appended, e.g. "Push (Ctrl+P)".
+  // When the action is explicitly unbound (null), the title stays exactly
+  // today's value — the raw description, possibly undefined. `aria-keyshortcuts`
+  // carries the shortcut on the proper ARIA channel so it stays OUT of the
+  // accessible name (which remains the description alone), and is omitted when
+  // unbound.
+  const pushBinding = bindings.get("push") ?? null;
+  const pullBinding = bindings.get("pull") ?? null;
+  const fetchBinding = bindings.get("fetch") ?? null;
+  const pushTitle =
+    pushBinding === null
+      ? pushDescription
+      : `${pushDescription ?? pushLabel} (${formatBinding(pushBinding)})`;
+  const pullTitle =
+    pullBinding === null
+      ? pullDescription
+      : `${pullDescription ?? "Pull"} (${formatBinding(pullBinding)})`;
+  const fetchHintTitle =
+    fetchBinding === null
+      ? fetchTitle
+      : `${fetchTitle} (${formatBinding(fetchBinding)})`;
+  const pushKeyshortcuts =
+    pushBinding === null ? undefined : bindingToAriaKeyshortcuts(pushBinding);
+  const pullKeyshortcuts =
+    pullBinding === null ? undefined : bindingToAriaKeyshortcuts(pullBinding);
+  const fetchKeyshortcuts =
+    fetchBinding === null ? undefined : bindingToAriaKeyshortcuts(fetchBinding);
+
   function doPull(mode: PullMode) {
     pull.mutate(mode, {
       onSuccess: () => {
@@ -265,45 +303,30 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           `*:focus-visible:z-10` also can't reach the Buttons through the spans,
           so each Button carries `focus-visible:relative focus-visible:z-10`. */}
       <ButtonGroup>
-        <span className="inline-flex" title={pushDescription}>
+        <span className="inline-flex" title={fetchHintTitle}>
           <Button
             variant="outline"
             size="sm"
-            disabled={busy || detached}
-            aria-label={pushDescription}
+            disabled={busy}
+            aria-keyshortcuts={fetchKeyshortcuts}
             className="focus-visible:relative focus-visible:z-10"
-            onClick={() => {
-              if (diverged) {
-                setForceConfirmOpen(true);
-              } else {
-                doPush(false);
-              }
-            }}
+            onClick={() => doFetch(false)}
           >
-            {push.isPending ? (
+            {fetchRemote.isPending ? (
               <Spinner data-icon="inline-start" />
-            ) : diverged ? (
-              <WarningIcon data-icon="inline-start" />
             ) : (
-              <ArrowUpIcon data-icon="inline-start" />
+              <ArrowsClockwiseIcon data-icon="inline-start" />
             )}
-            {pushLabel}
-            {aheadCount > 0 && (
-              <span
-                aria-hidden="true"
-                className="text-muted-foreground tabular-nums"
-              >
-                {aheadCount}
-              </span>
-            )}
+            Fetch
           </Button>
         </span>
-        <span className="inline-flex" title={pullDescription}>
+        <span className="inline-flex" title={pullTitle}>
           <Button
             variant="outline"
             size="sm"
             disabled={busy || !hasUpstream || diverged}
             aria-label={pullDescription}
+            aria-keyshortcuts={pullKeyshortcuts}
             className="border-l-0 focus-visible:relative focus-visible:z-10"
             onClick={() => doPull("ffOnly")}
           >
@@ -364,20 +387,38 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
             </DropdownMenuContent>
           </DropdownMenu>
         </span>
-        <span className="inline-flex" title={fetchTitle}>
+        <span className="inline-flex" title={pushTitle}>
           <Button
             variant="outline"
             size="sm"
-            disabled={busy}
+            disabled={busy || detached}
+            aria-label={pushDescription}
+            aria-keyshortcuts={pushKeyshortcuts}
             className="border-l-0 focus-visible:relative focus-visible:z-10"
-            onClick={() => doFetch(false)}
+            onClick={() => {
+              if (diverged) {
+                setForceConfirmOpen(true);
+              } else {
+                doPush(false);
+              }
+            }}
           >
-            {fetchRemote.isPending ? (
+            {push.isPending ? (
               <Spinner data-icon="inline-start" />
+            ) : diverged ? (
+              <WarningIcon data-icon="inline-start" />
             ) : (
-              <ArrowsClockwiseIcon data-icon="inline-start" />
+              <ArrowUpIcon data-icon="inline-start" />
             )}
-            Fetch
+            {pushLabel}
+            {aheadCount > 0 && (
+              <span
+                aria-hidden="true"
+                className="text-muted-foreground tabular-nums"
+              >
+                {aheadCount}
+              </span>
+            )}
           </Button>
         </span>
       </ButtonGroup>
