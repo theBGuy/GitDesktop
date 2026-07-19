@@ -608,6 +608,13 @@ pub struct RouterState {
     /// The currently-active repo path the alias read routes operate on. `None` →
     /// 409. The alias resolver middleware reads this and inserts a `ScopedRepo`.
     pub active_repo: Arc<Mutex<Option<String>>>,
+    /// The opaque id of the currently-active registry entry, or `None`. The SAME
+    /// `Arc` [`crate::lan::LanState`] owns (kept in sync as the desktop switches
+    /// repos), so `/api/repos` can flag the active entry BY ID — the id-based identity
+    /// the whole feature dedups on, correct even when a repo is shared under one
+    /// worktree path while the desktop is open on another (both map to one id, a path
+    /// compare would miss). Read only by [`crate::lan::routes::list_repos`].
+    pub active_repo_id: Arc<Mutex<Option<String>>>,
     /// The repo registry (opaque-id → [`crate::lan::RegisteredRepo`]) backing the
     /// scoped `/api/repos/{repoId}/…` routes. The SAME `Arc` [`crate::lan::LanState`]
     /// owns, so `lan_set_active_repo` refreshes it live. The scoped resolver looks a
@@ -621,11 +628,12 @@ pub struct RouterState {
     pub bound_hosts: Arc<Vec<String>>,
     /// Cut signal for live SSE monitors. The `stream` handler (a plain GET, no
     /// upgrade) subscribes a receiver from this before returning its `Sse` response;
-    /// the desktop fires `()` on it when sharing is disabled, the shared repo
-    /// changes, or a device is revoked, so in-flight event streams end and the phone
-    /// must reconnect and re-authorize (its EventSource auto-reconnect then hits a
-    /// 401/404 and closes permanently).
-    pub monitor_cut: tokio::sync::broadcast::Sender<()>,
+    /// the desktop fires a [`crate::lan::MonitorCut`] on it when sharing is disabled
+    /// or a device is revoked ([`crate::lan::MonitorCut::All`]) or when a single repo
+    /// leaves the registry ([`crate::lan::MonitorCut::Repo`]), so the affected
+    /// in-flight event streams end and those phones reconnect and re-authorize (their
+    /// EventSource auto-reconnect then hits a 401/404 and closes permanently).
+    pub monitor_cut: tokio::sync::broadcast::Sender<crate::lan::MonitorCut>,
     /// The live agent-stream registry — the SAME `Arc` [`crate::state::AppState`]
     /// holds, so a review/session registered there is watchable from the LAN
     /// review routes without any further plumbing.

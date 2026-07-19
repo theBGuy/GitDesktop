@@ -80,6 +80,7 @@ import type {
   IssueType,
   LanDevice,
   LanPairing,
+  LanSharedRepo,
   LanStatus,
   MergePreview,
   Milestone,
@@ -3135,3 +3136,16 @@ export const lanDevicesList = () => invoke<LanDevice[]>("lan_devices_list");
 
 export const lanDeviceRevoke = (deviceId: string) =>
   invoke<void>("lan_device_revoke", { deviceId });
+
+// The set of repos the user has explicitly shared with phones (persisted). The
+// registry phones can browse is this set plus the currently open repo, so these
+// stay reachable while you work in a different repo. Share/unshare return the
+// updated list so callers can refresh without waiting for the status poll.
+export const lanSharedReposList = () =>
+  invoke<LanSharedRepo[]>("lan_shared_repos_list");
+
+export const lanShareRepo = (repoPath: string) =>
+  invoke<LanSharedRepo[]>("lan_share_repo", { repoPath });
+
+export const lanUnshareRepo = (repoPath: string) =>
+  invoke<LanSharedRepo[]>("lan_unshare_repo", { repoPath });

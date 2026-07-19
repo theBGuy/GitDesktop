@@ -17,10 +17,14 @@ import {
   useLanDevices,
   useLanDisable,
   useLanEnable,
+  useLanSharedRepos,
+  useLanShareRepo,
   useLanStatus,
+  useLanUnshareRepo,
 } from "@/lib/git/queries";
-import type { LanDevice } from "@/lib/git/types";
+import type { LanDevice, LanSharedRepo } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { useUiStore } from "@/lib/stores/ui";
 import { errorMessage } from "@/lib/tauri/invoke";
 import { formatRelativeTime } from "@/lib/time";
 import { PairDeviceDialog } from "./PairDeviceDialog";
@@ -31,6 +35,10 @@ export function CompanionSection() {
   const disable = useLanDisable();
   const revoke = useLanDeviceRevoke();
 
+  // The repo currently open on the desktop — the one "Share current repository"
+  // adds, and the one that's always reachable without being in the shared list.
+  const repoPath = useUiStore((s) => s.repoPath);
+
   const enabled = status.data?.enabled ?? false;
   // Always read the device list, even while sharing is off: a paired device's
   // token persists across sharing being toggled, so the user must be able to see
@@ -38,11 +46,20 @@ export function CompanionSection() {
   const devices = useLanDevices({ enabled: true });
   const deviceList = devices.data ?? [];
 
+  // Shared repos are read the same way as devices — always, even while sharing
+  // is off, since the shared set persists across toggling sharing.
+  const sharedRepos = useLanSharedRepos({ enabled: true });
+  const sharedList = sharedRepos.data ?? [];
+  const share = useLanShareRepo();
+  const unshare = useLanUnshareRepo();
+
   const [pairOpen, setPairOpen] = useState(false);
   const [confirmRevoke, setConfirmRevoke] = useState<LanDevice | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [activeIndex, setActiveIndex] = useState(-1);
   const listRef = useRef<HTMLDivElement>(null);
+  const [sharedActiveIndex, setSharedActiveIndex] = useState(-1);
+  const sharedListRef = useRef<HTMLDivElement>(null);
 
   function toggle(next: boolean) {
     setError(null);
@@ -65,6 +82,35 @@ export function CompanionSection() {
     rowAttr: "data-device-row",
   });
 
+  // Same roving-focus pattern for the shared-repos list, keyed by path.
+  const safeSharedActive =
+    sharedActiveIndex >= sharedList.length
+      ? sharedList.length - 1
+      : sharedActiveIndex;
+  const onSharedKeyDown = listKeyboardNav<LanSharedRepo>({
+    items: sharedList,
+    activeIndex: safeSharedActive,
+    onActivate: (_r, to) => setSharedActiveIndex(to),
+    rowKey: (r) => r.path,
+    rowAttr: "data-shared-repo-row",
+  });
+
+  // "Share current repository" is available only when a repo is open and it
+  // isn't already shared — surface each reason so the disabled button explains
+  // itself (house rule: no silent disabled controls).
+  const alreadyShared =
+    repoPath !== null && sharedList.some((r) => r.path === repoPath);
+  const shareDisabledReason = !repoPath
+    ? "Open a repository first, then share it with your phone."
+    : alreadyShared
+      ? "This repository is already shared."
+      : null;
+
+  function shareCurrentRepo() {
+    if (!repoPath) return;
+    share.mutate(repoPath, { onError: (e) => setError(errorMessage(e)) });
+  }
+
   const toggleBusy = enable.isPending || disable.isPending;
   const pairDisabledReason = enabled
     ? null
@@ -80,10 +126,11 @@ export function CompanionSection() {
           </span>
         </h2>
         <p className="text-xs text-muted-foreground">
-          Share the open repository with your phone over your local network.
-          Scanning the pairing code opens the companion app in your phone's
-          browser — <strong className="font-medium">read-only</strong> Status,
-          pull requests, and CI. Early preview.
+          Share the open repository — and any repositories you add below — with
+          your phone over your local network. Scanning the pairing code opens
+          the companion app in your phone's browser —{" "}
+          <strong className="font-medium">read-only</strong> Status, pull
+          requests, and CI. Early preview.
         </p>
       </div>
 
@@ -156,6 +203,97 @@ export function CompanionSection() {
               </span>
             </p>
           )}
+        </div>
+      )}
+
+      {/* Shared repositories — repos that stay reachable even when a different
+          repo is open on the desktop. The open repo is always reachable on its
+          own; sharing keeps others live while you work elsewhere. */}
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h3 className="text-xs font-medium">Shared repositories</h3>
+          <p className="text-[11px] text-muted-foreground">
+            Keep repositories reachable from your phone even when they're not
+            the one open here.
+          </p>
+        </div>
+        {/* Disabled buttons don't show a native `title`, so wrap it. */}
+        <span title={shareDisabledReason ?? undefined} className="inline-flex">
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={shareDisabledReason !== null || share.isPending}
+            onClick={shareCurrentRepo}
+          >
+            {share.isPending && <Spinner data-icon="inline-start" />}
+            Share current repository
+          </Button>
+        </span>
+      </div>
+
+      {sharedRepos.isPending ? (
+        // First fetch: shared repos may exist, so show a placeholder rather than
+        // flashing the empty-state copy.
+        <Skeleton className="h-16 w-full" />
+      ) : sharedRepos.isError ? (
+        <p className="text-xs text-muted-foreground">
+          Couldn't load shared repositories.
+        </p>
+      ) : sharedList.length === 0 ? (
+        <p className="text-xs text-muted-foreground">
+          Only the repository open on this desktop is visible to phones. Share
+          repositories to keep them reachable while you work elsewhere.
+        </p>
+      ) : (
+        // A roving-focus list (arrow keys move between rows).
+        <div
+          ref={sharedListRef}
+          onKeyDown={onSharedKeyDown}
+          className="space-y-2"
+        >
+          {sharedList.map((repo, i) => (
+            <div
+              key={repo.path}
+              data-shared-repo-row={repo.path}
+              aria-label={`Shared repository ${repo.name}, ${repo.path}`}
+              tabIndex={
+                i === safeSharedActive || (safeSharedActive === -1 && i === 0)
+                  ? 0
+                  : -1
+              }
+              onFocus={() => setSharedActiveIndex(i)}
+              className="flex items-center gap-2 rounded border px-3 py-2 outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              <div className="min-w-0">
+                <p className="truncate text-xs font-medium">{repo.name}</p>
+                {/* Truncate from the START so the meaningful tail of the path
+                    stays visible: an RTL block places the ellipsis at the left,
+                    and a bdi/ltr child keeps the path's own characters in
+                    left-to-right order. */}
+                <p
+                  dir="rtl"
+                  className="truncate font-mono text-[11px] text-muted-foreground"
+                  title={repo.path}
+                >
+                  <bdi dir="ltr">{repo.path}</bdi>
+                </p>
+              </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="ml-auto shrink-0"
+                disabled={unshare.isPending}
+                onClick={() =>
+                  unshare.mutate(repo.path, {
+                    onError: (e) => setError(errorMessage(e)),
+                  })
+                }
+                aria-label={`Unshare ${repo.name}`}
+              >
+                Unshare
+              </Button>
+            </div>
+          ))}
         </div>
       )}
 

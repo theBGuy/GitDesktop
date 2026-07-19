@@ -187,6 +187,18 @@ export const ACTIONS = [
 
   // Repository
   {
+    id: "lan-share-current-repo",
+    label: "Share current repository with phone",
+    category: "Repository",
+    defaultBinding: null,
+  },
+  {
+    id: "lan-unshare-current-repo",
+    label: "Unshare current repository from phone",
+    category: "Repository",
+    defaultBinding: null,
+  },
+  {
     id: "push",
     label: "Push",
     category: "Repository",

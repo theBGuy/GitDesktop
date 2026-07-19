@@ -86,6 +86,18 @@ export class ApiError extends Error {
   get isNoRemote(): boolean {
     return this.kind === "noRemote";
   }
+  /**
+   * The `{repoId}` in a scoped route is not (or no longer) a shared repository —
+   * the server mints `404 { kind: "noSuchRepo", … }` for an unknown OR unshared
+   * id (deliberately indistinguishable). On a screen this means "the repo you had
+   * selected stopped being shared from the desktop"; the device is still paired,
+   * so the calm teaching state offers "Choose repository" (NEVER a bounce to
+   * `#pair`). Both the status AND the 404-kind must match so an unrelated 404
+   * (e.g. a PR number that doesn't exist) never reads as a gone repo.
+   */
+  get isNoSuchRepo(): boolean {
+    return this.status === 404 && this.kind === "noSuchRepo";
+  }
 }
 
 interface ErrorBody {
@@ -137,46 +149,71 @@ async function toApiError(res: Response): Promise<ApiError> {
   );
 }
 
-// ── Read routes ──────────────────────────────────────────────────────────────
+// ── Repo picker ───────────────────────────────────────────────────────────────
 
-export const fetchStatus = () => getJson<RepoStatus>("/api/repo/status");
+/** One shared repository the desktop is exposing over the LAN. `id` is 16
+ *  lowercase hex chars; `active` marks the one currently open on the desktop. */
+export interface RepoSummary {
+  id: string;
+  name: string;
+  active: boolean;
+}
 
-export const fetchPrs = (state = "open", limit = 30) =>
+/** The repositories shared from the desktop. Bearer-authed, NOT repo-scoped (no
+ *  resolver) — may return 0, 1, or N. Order is unspecified; callers sort. */
+export const fetchRepos = () => getJson<RepoSummary[]>("/api/repos");
+
+// ── Read routes (repo-scoped) ─────────────────────────────────────────────────
+// Every data fetcher is scoped to a `repoId` (slice 4): the path is
+// `/api/repos/{repoId}/…` and an unknown/unshared id 404s with `noSuchRepo`. The
+// legacy alias routes (`/api/repo/…`, `/api/forge/…`) still exist server-side but
+// the companion no longer uses them for data.
+
+/** Base for a repo's scoped routes. The id is already grammar-validated by the
+ *  router before it reaches here, but encode it anyway (defense in depth). */
+const scope = (repoId: string) => `/api/repos/${encodeURIComponent(repoId)}`;
+
+export const fetchStatus = (repoId: string) =>
+  getJson<RepoStatus>(`${scope(repoId)}/status`);
+
+export const fetchPrs = (repoId: string, state = "open", limit = 30) =>
   getJson<PrInfo[]>(
-    `/api/forge/prs?state=${encodeURIComponent(state)}&limit=${limit}`,
+    `${scope(repoId)}/prs?state=${encodeURIComponent(state)}&limit=${limit}`,
   );
 
-export const fetchPr = (number: number) =>
-  getJson<PrDetails>(`/api/forge/prs/${number}`);
+export const fetchPr = (repoId: string, number: number) =>
+  getJson<PrDetails>(`${scope(repoId)}/prs/${number}`);
 
-export const fetchCiRuns = (limit = 20) =>
-  getJson<WorkflowRun[]>(`/api/forge/ci/runs?limit=${limit}`);
+export const fetchCiRuns = (repoId: string, limit = 20) =>
+  getJson<WorkflowRun[]>(`${scope(repoId)}/ci/runs?limit=${limit}`);
 
-export const fetchCiRun = (id: number) =>
-  getJson<RunDetail>(`/api/forge/ci/runs/${id}`);
+export const fetchCiRun = (repoId: string, id: number) =>
+  getJson<RunDetail>(`${scope(repoId)}/ci/runs/${id}`);
 
 /** A PR's activity timeline (force-pushes, label changes, review requests, state
  *  changes, approvals). Same neutral shape the desktop's `forgePrTimeline` returns. */
-export const fetchPrTimeline = (number: number) =>
-  getJson<PrTimelineEvent[]>(`/api/forge/prs/${number}/timeline`);
+export const fetchPrTimeline = (repoId: string, number: number) =>
+  getJson<PrTimelineEvent[]>(`${scope(repoId)}/prs/${number}/timeline`);
 
 /** A PR's file:line-anchored review threads with their comment chains. Same
  *  neutral shape the desktop's `forgePrReviewThreads` returns. */
-export const fetchPrThreads = (number: number) =>
-  getJson<ReviewThreadOut[]>(`/api/forge/prs/${number}/threads`);
+export const fetchPrThreads = (repoId: string, number: number) =>
+  getJson<ReviewThreadOut[]>(`${scope(repoId)}/prs/${number}/threads`);
 
 // ── Agent streams (live AI review / agent sessions) ───────────────────────────
 
 /** One shareable agent stream — an AI PR review (`review`) or an agent session
  *  (`session`). `id` is a UUID-like STRING (never a number). `startedAt` is
- *  ISO-8601. The live event stream is at `/api/reviews/{id}/stream` (SSE). */
+ *  ISO-8601. The live event stream is at `/api/repos/{repoId}/reviews/{id}/stream`
+ *  (SSE). */
 export interface ReviewInfo {
   id: string;
   kind: "review" | "session";
   startedAt: string;
 }
 
-export const fetchReviews = () => getJson<ReviewInfo[]>("/api/reviews");
+export const fetchReviews = (repoId: string) =>
+  getJson<ReviewInfo[]>(`${scope(repoId)}/reviews`);
 
 // ── Pairing ──────────────────────────────────────────────────────────────────
 

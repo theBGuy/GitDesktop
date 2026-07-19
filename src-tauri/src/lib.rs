@@ -680,6 +680,9 @@ pub fn run() {
             lan::lan_pairing_cancel,
             lan::lan_devices_list,
             lan::lan_device_revoke,
+            lan::lan_shared_repos_list,
+            lan::lan_share_repo,
+            lan::lan_unshare_repo,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

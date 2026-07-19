@@ -4,7 +4,13 @@ import {
   GitBranchIcon,
 } from "@phosphor-icons/react";
 import type { FileEntry } from "@/lib/git/types";
-import { ErrorState, SkeletonRows, StaleBanner } from "../components/states";
+import {
+  ErrorState,
+  isRepoGoneError,
+  RepoGoneState,
+  SkeletonRows,
+  StaleBanner,
+} from "../components/states";
 import { useStatus } from "../lib/queries";
 
 // Status is a calm glanceable column (not a dashboard): current branch, its
@@ -28,8 +34,19 @@ function changeCounts(entries: FileEntry[]) {
  *  error) rather than blanking to a full-screen error — the phone-on-flaky-wifi
  *  case is the normal case. Full-screen `ErrorState` only when there's no data at
  *  all; skeleton only while pending. */
-export function StatusBody({ active }: { active: boolean }) {
-  const { data, isError, error, refetch } = useStatus(active);
+export function StatusBody({
+  repoId,
+  active,
+}: {
+  repoId: string;
+  active: boolean;
+}) {
+  const { data, isError, error, refetch } = useStatus(repoId, active);
+
+  // Definitive gone WINS over stale data: a `noSuchRepo` 404 means the repo is no
+  // longer shared, so the teaching state must render even when a cached snapshot
+  // exists (otherwise the poll's 404 would sit silently behind stale content).
+  if (isRepoGoneError(error)) return <RepoGoneState />;
 
   if (!data) {
     if (isError) return <ErrorState error={error} onRetry={() => refetch()} />;
