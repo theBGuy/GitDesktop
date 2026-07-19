@@ -156,7 +156,14 @@ export function ConversationFilterPopover({
   // no input for the popup to focus, so a plain <p> could go unannounced.
   if (groups.length === 0) {
     return (
-      <ComboboxPrimitive.Root items={[]} open={open} onOpenChange={setOpen}>
+      <ComboboxPrimitive.Root
+        items={[]}
+        open={open}
+        // handleOpenChange (not bare setOpen): closing from THIS branch must
+        // still reset the query, or a stale search pre-filters the list when
+        // options return (review-caught).
+        onOpenChange={handleOpenChange}
+      >
         {trigger}
         <ComboboxContent align="end" className="w-64 p-2">
           <ComboboxPrimitive.Status className="px-1 py-1 text-xs text-muted-foreground">

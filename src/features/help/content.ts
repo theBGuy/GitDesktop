@@ -588,6 +588,10 @@ for **approved**, an X for **requested changes**, a speech bubble for **commente
 shape plus the word, never color alone) — so a finished review (including Copilot's) stays
 visible after the reviewer leaves the pending-request list.
 
+The list toolbar's **funnel** filters the list by **author or label** — type in its search
+box to narrow both groups at once, toggle any number of options (each shows its match
+count), and long author lists scroll inside the popup.
+
 The Conversation tab is a single **date-sorted activity feed** — reviews, comments,
 pushed commits, and events all interleaved oldest-to-newest. Every entry carries a
 **relative timestamp** (e.g. *2 days ago*), and hovering it reveals the exact local
@@ -835,7 +839,8 @@ GitLab actions are available.)
 ## GitHub issues
 
 Browse, filter, and open issues in a full view: body, comments, labels, assignees,
-milestone, and reactions. **Create** an issue, comment with the Markdown editor, edit,
+milestone, and reactions. The **funnel** filter is the same searchable author/label
+popup as the PR list. **Create** an issue, comment with the Markdown editor, edit,
 add labels, **close / reopen**, **lock**, and **transfer** an issue to another repo.
 
 - **Sub-issues** — break an issue into a parent/child checklist with completion tracking.

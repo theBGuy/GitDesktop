@@ -118,12 +118,17 @@ export function useLocalRemoteFilter<
   const activeFilterCount = activeAuthorFilter.size + activeLabelFilter.size;
 
   function toggle(which: "author" | "label", value: string, on: boolean) {
-    const set = which === "author" ? authorFilter : labelFilter;
     const update = which === "author" ? setAuthorFilter : setLabelFilter;
-    const next = new Set(set);
-    if (on) next.add(value);
-    else next.delete(value);
-    update(next);
+    // Functional update: several toggles fired in one event batch must each
+    // build on the previous one — cloning the render-time Set here would
+    // silently drop all but the last (latent until a "clear all"-style
+    // affordance emits multi-toggle batches).
+    update((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(value);
+      else next.delete(value);
+      return next;
+    });
   }
 
   const authorCount = (a: string) =>
