@@ -376,9 +376,16 @@ fn bind_error(bind_ip: IpAddr, e: &std::io::Error) -> AppError {
 /// return the handle plus the advertised urls, the bound-host allowlist, and the
 /// certificate fingerprint (for the TOFU pairing display). The `RouterState` is
 /// built here so the host guard sees the exact hosts we bound.
+// The params are the individual per-field `Arc`s the router state needs (mirroring
+// how `AppState` shares individual fields rather than one `Arc<Whole>`); passing them
+// explicitly keeps the caller (`lan_enable`) the single owner of the `LanState`
+// fields. Bundling them into a struct just to satisfy the arg-count lint would add a
+// parallel type with no behavioral gain, so the lint is allowed here by design.
+#[allow(clippy::too_many_arguments)]
 pub async fn start(
     bind_lan: bool,
     active_repo: Arc<std::sync::Mutex<Option<String>>>,
+    active_repo_id: Arc<std::sync::Mutex<Option<String>>>,
     repos: crate::lan::RepoRegistry,
     pairing: Arc<std::sync::Mutex<Option<auth::PairingSession>>>,
     rate_limit: auth::RateLimitMap,
@@ -396,6 +403,7 @@ pub async fn start(
 
     let state = RouterState {
         active_repo,
+        active_repo_id,
         repos,
         pairing,
         rate_limit,

@@ -608,6 +608,13 @@ pub struct RouterState {
     /// The currently-active repo path the alias read routes operate on. `None` →
     /// 409. The alias resolver middleware reads this and inserts a `ScopedRepo`.
     pub active_repo: Arc<Mutex<Option<String>>>,
+    /// The opaque id of the currently-active registry entry, or `None`. The SAME
+    /// `Arc` [`crate::lan::LanState`] owns (kept in sync as the desktop switches
+    /// repos), so `/api/repos` can flag the active entry BY ID — the id-based identity
+    /// the whole feature dedups on, correct even when a repo is shared under one
+    /// worktree path while the desktop is open on another (both map to one id, a path
+    /// compare would miss). Read only by [`crate::lan::routes::list_repos`].
+    pub active_repo_id: Arc<Mutex<Option<String>>>,
     /// The repo registry (opaque-id → [`crate::lan::RegisteredRepo`]) backing the
     /// scoped `/api/repos/{repoId}/…` routes. The SAME `Arc` [`crate::lan::LanState`]
     /// owns, so `lan_set_active_repo` refreshes it live. The scoped resolver looks a

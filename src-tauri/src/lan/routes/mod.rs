@@ -206,10 +206,19 @@ fn no_such_repo() -> Response {
 
 /// GET /api/repos — the registered repos as `[{ id, name, active }]` (camelCase):
 /// the desktop's ACTIVE repo ∪ the persisted SHARED set. `active` is `true` for the
-/// entry whose path matches the desktop's current active repo (per
-/// [`crate::state::repo_paths_match`]) — at most one, and none when no repo is
-/// active. Only the opaque id + display name + `active` flag reach the wire — never
-/// a filesystem path.
+/// entry whose opaque id equals the desktop's current active id — at most one, and
+/// none when no repo is active. Flagging BY ID (not by path) matches the id-based
+/// identity the registry dedups on: a repo shared under one worktree path while the
+/// desktop is open on another occupies one entry (same id) whose stored path may
+/// differ from the active path, so a path compare would wrongly report `active:
+/// false`. Only the opaque id + display name + `active` flag reach the wire — never a
+/// filesystem path. (An id compare also avoids a filesystem `canonicalize` under the
+/// `repos` lock.)
+///
+/// The active id and the entries are read under separate short locks (never nested).
+/// Any transient skew between `active_repo_id` and the registry during a slow install
+/// is the same eventual-consistency of a UI bool that exists across the feature — a
+/// switch settles it within one install; nothing keys correctness on the flag.
 pub(crate) async fn list_repos(
     axum::extract::State(state): axum::extract::State<crate::lan::auth::RouterState>,
 ) -> Response {
@@ -218,10 +227,10 @@ pub(crate) async fn list_repos(
     use axum::Json;
     use serde_json::json;
 
-    // Snapshot the active path once (drop its lock before locking `repos`, never
-    // nested) so every entry's `active` flag is computed against one consistent value.
-    let active = state
-        .active_repo
+    // Snapshot the active id once under its own lock (dropped before locking `repos`,
+    // never nested) so every entry's `active` flag is computed against one value.
+    let active_id = state
+        .active_repo_id
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .clone();
@@ -231,9 +240,7 @@ pub(crate) async fn list_repos(
         .unwrap_or_else(|p| p.into_inner())
         .iter()
         .map(|(id, repo)| {
-            let is_active = active
-                .as_deref()
-                .is_some_and(|a| crate::state::repo_paths_match(&repo.path, a));
+            let is_active = active_id.as_deref() == Some(id.as_str());
             json!({ "id": id, "name": repo.name, "active": is_active })
         })
         .collect();

@@ -60,11 +60,23 @@ const poll = (active: boolean) => (active ? POLL_MS : (false as const));
  *  so when the user brings the phone back to foreground we want a current list —
  *  a repo that stopped being shared should drop out promptly. Device-level (not
  *  repo-scoped): safe to fetch on any authed screen, and a 401 still routes
- *  through the central QueryCache → `#pair`. */
-export function useRepos() {
+ *  through the central QueryCache → `#pair`.
+ *
+ *  `enabled` (default true) gates the query entirely — the shell passes false
+ *  while the phone sits on `#pair` so an unpaired (or revoked-but-still-cookied)
+ *  page fires ZERO authed traffic. This is load-bearing, not hygiene: a device
+ *  that paired then got revoked still holds the `gd_lan` cookie, and the server
+ *  deliberately penalizes a PRESENT-but-invalid credential (the PR-75 lockout
+ *  budget). The phone backgrounds/foregrounds repeatedly during the pairing
+ *  dance; with the query enabled, each foreground's focus-refetch would bank a
+ *  rate-limit failure until the device locks itself out of RE-pairing. A disabled
+ *  query neither mount-fetches nor focus-refetches, so `refetchOnWindowFocus` is
+ *  safe to leave on for the enabled state. */
+export function useRepos(enabled = true) {
   return useQuery({
     queryKey: ["repos"],
     queryFn: fetchRepos,
+    enabled,
     staleTime: 30_000,
     refetchOnWindowFocus: true,
   });

@@ -94,11 +94,18 @@ pub struct LanState {
     /// so the coarse serialization is cheap. Never held across a NESTED `.await` that
     /// could deadlock (only the id resolve, which touches no other LanState lock).
     shared_index: tokio::sync::Mutex<HashMap<String, String>>,
-    /// The opaque id of the currently-installed ACTIVE registry entry, if any. Lets
-    /// an active switch remove the PREVIOUS active entry iff its id isn't also in the
-    /// shared set (a repo that's both active and shared keeps its single entry when
-    /// it leaves only the active role). A `std::Mutex` — short, sync accesses only.
-    active_repo_id: Mutex<Option<String>>,
+    /// The opaque id of the currently-installed ACTIVE registry entry, if any. Two
+    /// jobs: (1) an active switch removes the PREVIOUS active entry iff its id isn't
+    /// also in the shared set (a repo that's both active and shared keeps its single
+    /// entry when it leaves only the active role); (2) it is the SOURCE OF TRUTH for
+    /// the `/api/repos` `active` flag — shared (per-field `Arc`) with the router state
+    /// so `list_repos` can flag the active entry BY ID, matching the id-based identity
+    /// the whole feature dedups on. Flagging by id (not by path) is load-bearing for
+    /// the two-worktree case: a repo shared under worktree path A while the desktop is
+    /// open on worktree path B occupies ONE registry entry (same id) whose stored path
+    /// may be A; a path compare against active path B would wrongly report `active:
+    /// false`, but the id matches. A `std::Mutex` — short, sync accesses only.
+    active_repo_id: Arc<Mutex<Option<String>>>,
     /// The running server handle (bound port + shutdown signal + task), or `None`
     /// when disabled. Guarded so enable/disable are serialized.
     running: Mutex<Option<RunningServer>>,
@@ -150,7 +157,7 @@ impl Default for LanState {
             active_repo: Arc::new(Mutex::new(None)),
             repos: Arc::new(Mutex::new(HashMap::new())),
             shared_index: tokio::sync::Mutex::new(HashMap::new()),
-            active_repo_id: Mutex::new(None),
+            active_repo_id: Arc::new(Mutex::new(None)),
             running: Mutex::new(None),
             pairing: Arc::new(Mutex::new(None)),
             rate_limit: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -612,6 +619,7 @@ pub async fn lan_enable(
     let (handle, urls, _hosts, fingerprint) = server::start(
         bind_lan,
         state.active_repo.clone(),
+        state.active_repo_id.clone(),
         state.repos.clone(),
         state.pairing.clone(),
         state.rate_limit.clone(),
@@ -831,6 +839,7 @@ mod tests {
     fn test_router(active: Option<String>) -> auth::RouterState {
         auth::RouterState {
             active_repo: Arc::new(Mutex::new(active)),
+            active_repo_id: Arc::new(Mutex::new(None)),
             repos: Arc::new(Mutex::new(std::collections::HashMap::new())),
             pairing: Arc::new(Mutex::new(None)),
             rate_limit: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -838,6 +847,13 @@ mod tests {
             streams: Arc::new(Mutex::new(std::collections::HashMap::new())),
             monitor_cut: tokio::sync::broadcast::channel(4).0,
         }
+    }
+
+    /// Set a test router's active-repo id (the source of truth for the `/api/repos`
+    /// `active` flag). Pairs with [`register_repo`] so a wire-shape test can register
+    /// an entry and mark it active BY ID — the same identity `list_repos` flags on.
+    fn set_active_id(state: &auth::RouterState, repo_id: &str) {
+        *state.active_repo_id.lock().unwrap() = Some(repo_id.to_string());
     }
 
     /// Pre-register a repo entry in a test router's registry (opaque-id → path), so
@@ -2303,11 +2319,13 @@ mod tests {
         auth::persist_device(&device, &token_hash).unwrap();
 
         // (1) Two registered repos, ONE of them the active repo: the active flag is
-        // exactly true for the entry whose path matches the active repo, false for the
+        // exactly true for the entry whose ID equals the active id, false for the
         // other. Pin every wire key (id/name/active present + camelCase; no path).
+        // The flag is BY ID — set the active id, not just the active path.
         let state = test_router(Some("C:/work/my-repo".to_string()));
         register_repo(&state, "abcdef0123456789", "C:/work/my-repo");
         register_repo(&state, "0123456789abcdef", "C:/work/other-repo");
+        set_active_id(&state, "abcdef0123456789");
         let router = server::build_router(state);
         let resp = router
             .oneshot(authed_get("/api/repos", &bearer))
@@ -2338,6 +2356,33 @@ mod tests {
         assert_eq!(active_entry["active"], true, "the active repo's flag is true");
         let other_entry = arr.iter().find(|e| e["id"] == "0123456789abcdef").unwrap();
         assert_eq!(other_entry["active"], false, "a non-active repo's flag is false");
+
+        // (1b) The two-worktree case the ID mechanism exists for: a repo shared under
+        // one worktree path while the desktop is open on a DIFFERENT worktree path.
+        // The single registry entry's stored path is the SHARED path A ("C:/work/repo"),
+        // the active PATH is B ("…/worktrees/feature") — they never path-match — but the
+        // active ID equals the entry's id → `active: true`. A path compare would have
+        // wrongly reported false here.
+        let wt_state = test_router(Some("C:/work/repo/worktrees/feature".to_string()));
+        register_repo(&wt_state, "feedfacecafebeef", "C:/work/repo"); // shared under path A
+        set_active_id(&wt_state, "feedfacecafebeef"); // active on path B, SAME id
+        let wt_router = server::build_router(wt_state);
+        let resp = wt_router
+            .oneshot(authed_get("/api/repos", &bearer))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let arr: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let arr = arr.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["id"], "feedfacecafebeef");
+        assert_eq!(
+            arr[0]["active"], true,
+            "shared-under-path-A + active-on-path-B still flags active by id"
+        );
 
         // (2) No registered repo → [].
         let empty_state = test_router(None);
@@ -2602,6 +2647,7 @@ mod tests {
         let (handle, urls, _hosts, fingerprint) = server::start(
             false, // loopback
             Arc::new(Mutex::new(Some("C:/repo".to_string()))),
+            Arc::new(Mutex::new(None)), // active_repo_id
             Arc::new(Mutex::new(std::collections::HashMap::new())),
             Arc::new(Mutex::new(None)),
             Arc::new(Mutex::new(std::collections::HashMap::new())),

@@ -51,7 +51,9 @@ export function ReposBody({
   currentRepoId: string | null;
   currentTab: Tab | null;
 }) {
-  const { data, isError, error, refetch } = useRepos();
+  // Always enabled: the picker can never mount on `#pair` (Pair early-returns in
+  // App before Shell), so its repos fetch is always safe.
+  const { data, isError, error, refetch } = useRepos(true);
   const { register, onKeyDown } = useRovingList();
 
   const repos = useMemo(() => (data ? sortRepos(data) : []), [data]);

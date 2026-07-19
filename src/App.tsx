@@ -160,6 +160,10 @@ function App() {
   // gating them on `alreadyShared` shows exactly one at a time (Share when the
   // open repo isn't shared, Unshare when it is). The compare is verbatim path
   // equality, matching CompanionSection (the stored-path-verbatim contract).
+  // Both twins wait for the shared list to LOAD (`sharedLoaded`) — before that,
+  // `alreadyShared` would read false for an actually-shared repo and offer the
+  // wrong twin for a moment.
+  const sharedLoaded = sharedRepos.data !== undefined;
   const sharedMatch =
     repoPath !== null
       ? (sharedRepos.data?.find((r) => r.path === repoPath) ?? null)
@@ -178,7 +182,7 @@ function App() {
         onError: (e) => toast.error(errorMessage(e)),
       });
     },
-    Boolean(repoPath) && !alreadyShared,
+    sharedLoaded && Boolean(repoPath) && !alreadyShared,
   );
   // Unshare the twin: pass the matched entry's stored path verbatim (the frozen
   // contract). The unshared repo is by definition the OPEN one, so it stays
@@ -196,7 +200,7 @@ function App() {
         onError: (e) => toast.error(errorMessage(e)),
       });
     },
-    Boolean(repoPath) && alreadyShared,
+    sharedLoaded && Boolean(repoPath) && alreadyShared,
   );
   useHotkeyAction("show-help", openHelp);
   useHotkeyAction("toggle-notifications", toggleActivity);

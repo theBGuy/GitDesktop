@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { BottomNav, TopBar } from "./components/Chrome";
 import { ErrorState } from "./components/states";
 import type { RepoSummary } from "./lib/api";
@@ -10,6 +10,7 @@ import {
   type Route,
   replace,
   repoHash,
+  type Tab,
   useRoute,
 } from "./lib/router";
 import { AgentsBody, AgentWatch } from "./screens/Agents";
@@ -38,9 +39,24 @@ export default function App() {
 
   // The shared repos list — device-level (no repo scope), so it's our always-
   // available authenticated probe AND the source of truth for the picker/title.
-  const reposQuery = useRepos();
+  // Gated OFF while pairing: a revoked-but-still-cookied device would otherwise
+  // bank rate-limit failures on every foreground during the pairing dance (the
+  // PR-75 lockout budget). See `useRepos`.
+  const reposQuery = useRepos(!route.isPairing);
   const reposErr = asApiError(reposQuery.error);
   const repos = reposQuery.data;
+
+  // Remember the last SCOPED route context (which repo + tab the user was on) so
+  // the picker — reached via `#repos`, whose hash carries NO repo segment — can
+  // still highlight the current repo and preserve the tab on a switch. In-memory
+  // only: a reload landing directly on `#repos` degrades to no-highlight/status,
+  // which is acceptable. Updated in an effect so the render stays pure.
+  const lastScoped = useRef<{ repoId: string; tab: Tab } | null>(null);
+  useEffect(() => {
+    if (route.repoId != null) {
+      lastScoped.current = { repoId: route.repoId, tab: route.tab };
+    }
+  }, [route.repoId, route.tab]);
 
   // Global 401 → the device isn't paired (or was revoked). Bounce to #pair — but
   // ONLY on a FRESH 401 (newer than the last successful pair), and never while a
@@ -104,6 +120,18 @@ export default function App() {
     : (selectedRepo?.name ?? "GitDesktop");
   const connected = reposQuery.isSuccess;
 
+  // The repo context the chrome should reflect. On a scoped route it's the route
+  // itself; on the picker (`#repos`, no repo in the hash) it's the remembered
+  // last-scoped context so the picker highlights the current repo, preserves the
+  // tab on a switch, and the bottom tabs still point somewhere coherent. Null on a
+  // cold entry directly on `#repos` (nothing remembered) — then the picker shows no
+  // highlight and the bottom nav is hidden (no repo to point its tabs at).
+  const chromeContext = route.isRepos
+    ? lastScoped.current
+    : route.repoId != null
+      ? { repoId: route.repoId, tab: route.tab }
+      : null;
+
   return (
     <div className="mx-auto flex min-h-dvh max-w-md flex-col">
       <TopBar
@@ -120,12 +148,19 @@ export default function App() {
           route={route}
           repos={repos}
           selectedRepo={selectedRepo}
+          pickerContext={chromeContext}
           reposError={reposQuery.error}
           onReposRetry={() => reposQuery.refetch()}
         />
       </main>
 
-      <BottomNav repoId={route.repoId} />
+      {/* Hide the bottom nav on the picker when there's no remembered repo — its
+          tabs would point at legacy hashes that just bounce back to #repos. With a
+          remembered repo they navigate to that repo's tabs (a real leave-the-picker
+          affordance). Off the picker it always shows, scoped to the live repo. */}
+      {route.isRepos && !chromeContext ? null : (
+        <BottomNav repoId={chromeContext?.repoId ?? null} />
+      )}
     </div>
   );
 }
@@ -166,17 +201,26 @@ function Shell({
   route,
   repos,
   selectedRepo,
+  pickerContext,
   reposError,
   onReposRetry,
 }: {
   route: Route;
   repos: RepoSummary[] | undefined;
   selectedRepo: RepoSummary | null;
+  pickerContext: { repoId: string; tab: Tab } | null;
   reposError: unknown;
   onReposRetry: () => void;
 }) {
   if (route.isRepos) {
-    return <ReposBody currentRepoId={route.repoId} currentTab={null} />;
+    // `#repos` carries no repo in the hash, so use the remembered scoped context
+    // (if any) to highlight the current repo and preserve its tab on a switch.
+    return (
+      <ReposBody
+        currentRepoId={pickerContext?.repoId ?? null}
+        currentTab={pickerContext?.tab ?? null}
+      />
+    );
   }
 
   // Repo-less route (bare entry, a legacy bookmark, or the post-pair
