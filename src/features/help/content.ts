@@ -74,8 +74,8 @@ From the welcome screen (or the repo switcher in the header):
 ## Finding your way around
 
 Once a repo is open you land on the **Changes** tab. The header's tab rail holds the
-four primary views — **Changes**, **History**, **Compare**, and **Pull Requests** —
-and a **More ▾** menu holds the rest: {{ai}}**Agent**, {{/ai}}**Issues**,
+three primary views — **Changes**, **History**, and **Pull Requests** — and a
+**More ▾** menu holds the rest: **Compare**, {{ai}}**Agent**, {{/ai}}**Issues**,
 **Discussions**, **Actions**, **Tags**, and **Insights**. The More button shows the
 active secondary tab's name, so the rail always says where you are.
 
@@ -424,8 +424,8 @@ dismiss the notice.
 
 ## Compare
 
-The **Compare** tab ({{kbd:tab-compare}}) lets you pick any base branch and see what the
-current branch adds: the commits ahead and behind, and the full three-dot diff a PR would
+The **Compare** tab — in the **More ▾** menu, or {{kbd:tab-compare}} — lets you pick any
+base branch and see what the current branch adds: the commits ahead and behind, and the full three-dot diff a PR would
 show. The base-branch picker is searchable — type to filter — hides archived branches, and
 shows which branches live in other worktrees plus, when a branch has diverged, how far it
 is ahead of and behind your current branch. From here you can merge, rebase, or jump

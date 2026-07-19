@@ -108,10 +108,13 @@ const DiffViewer = lazy(() =>
   })),
 );
 
-// Secondary surfaces live behind a "More ▾" overflow so the four primary tabs
+// Secondary surfaces live behind a "More ▾" overflow so the three primary tabs
 // keep their full labels in the fixed-width rail. The trigger shows the active
 // secondary tab's name (e.g. "Issues ▾") so the rail still says where you are.
+// Compare keeps its `mod+3` shortcut here — the number keys bind per-tab, not by
+// rail position, so it stays reachable exactly like the other secondary tabs.
 const SECONDARY_TABS: { tab: RepoTab; label: string; ai?: boolean }[] = [
+  { tab: "compare", label: "Compare" },
   { tab: "agent", label: "Agent", ai: true },
   { tab: "issues", label: "Issues" },
   { tab: "code-todos", label: "Code TODOs" },
@@ -353,9 +356,6 @@ export function RepositoryView() {
               </TabsTrigger>
               <TabsTrigger value="history" className="min-w-0 flex-1">
                 History
-              </TabsTrigger>
-              <TabsTrigger value="compare" className="min-w-0 flex-1">
-                Compare
               </TabsTrigger>
               <TabsTrigger value="pulls" className="min-w-0 flex-1">
                 PRs
