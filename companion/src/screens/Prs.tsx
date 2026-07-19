@@ -355,8 +355,11 @@ function ActivitySection({
   );
 
   // Definitive gone WINS: if this sub-section's poll is the first to see the 404
-  // (before the parent detail's own poll), take over the whole screen with the
-  // teaching state rather than showing a small inline section error.
+  // (before the parent detail's own poll), render the teaching state IN PLACE of
+  // this section (not full-screen — the parent still renders around it). The
+  // parent's own poll 404s within one cycle and takes the whole detail over; the
+  // brief in-place card (or two, if both sub-sections race) is the transitional
+  // state, not the destination.
   if (isRepoGoneError(error)) return <RepoGoneState />;
 
   return (
@@ -445,8 +448,8 @@ function ThreadsSection({
     number,
   );
 
-  // Definitive gone WINS (see ActivitySection): a first-seen 404 here takes over
-  // the whole screen with the teaching state.
+  // Definitive gone WINS (see ActivitySection): a first-seen 404 renders the
+  // teaching state in place of this section; the parent's next poll finishes it.
   if (isRepoGoneError(error)) return <RepoGoneState />;
 
   return (

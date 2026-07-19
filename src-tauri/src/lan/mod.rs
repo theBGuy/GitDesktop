@@ -334,6 +334,21 @@ impl LanState {
                 // needed to record `active_repo_id` (done above). Insert only when the
                 // active repo isn't (also) shared.
                 if !shared.contains_key(&id) {
+                    // If a non-shared entry for this id already exists under a DIFFERENT
+                    // path (a same-repo, different-worktree active switch A→B: same id,
+                    // no removal cut above), the entry's SERVED path is about to change.
+                    // A live stream captured the OLD path at connect and scoped cuts
+                    // match by that path, so overwriting silently would strand it: fire
+                    // Repo(<old path>) so streams on A are severed and the phone
+                    // re-resolves against the now-served path B. (A run registered under
+                    // A then won't appear in lists scoped to B — that's the same
+                    // containment behavior the pre-cut-scoping unconditional cut had, not
+                    // new.) `cut` is None here (the `still_new` branch skipped removal).
+                    if let Some(existing) = repos.get(&id) {
+                        if existing.path != repo.path {
+                            cut = Some(MonitorCut::Repo(existing.path.clone()));
+                        }
+                    }
                     repos.insert(id, repo);
                 }
             }
@@ -420,6 +435,8 @@ impl LanState {
     /// open on worktree B) installs the SHARED path (A) into the entry, overwriting the
     /// active-mirror path — "you shared A, the phone sees A" even while the desktop is
     /// active in B. From then on [`install_active_repo`] leaves that shared path alone.
+    /// When that overwrite CHANGES the served path (active in B, sharing A), a
+    /// [`MonitorCut::Repo`] on the OLD path fires so a stream that captured B is severed.
     ///
     /// Race guard (mirrors [`install_active_repo`]'s stale-install guard): the id
     /// resolves via git (an `.await`) BEFORE the `shared_index` lock is taken, so a
@@ -438,11 +455,19 @@ impl LanState {
         }
         // Persist first (verbatim-dedup); on a store error we install nothing.
         let list = shared_repos::add_path(repo_path)?;
-        {
+        let cut = {
             let mut shared = shared;
             let mut repos = self.repos.lock().unwrap_or_else(|p| p.into_inner());
             // Insert (or overwrite an active-mirror entry with) the SHARED path — from
-            // here the shared path is authoritative for this id.
+            // here the shared path is authoritative for this id. If an active-mirror
+            // entry already held a DIFFERENT worktree path (active in B, now sharing A),
+            // the served path CHANGES while the entry stays registered — so fire
+            // Repo(<old active path>) to sever a stream that captured B. (Same
+            // containment behavior the pre-scoping unconditional cut had.) No prior
+            // entry, or an identical path → no cut.
+            let path_cut = repos.get(&id).and_then(|e| {
+                (e.path != repo_path).then(|| MonitorCut::Repo(e.path.clone()))
+            });
             repos.insert(
                 id.clone(),
                 RegisteredRepo {
@@ -451,6 +476,10 @@ impl LanState {
                 },
             );
             shared.insert(id, repo_path.to_string());
+            path_cut
+        };
+        if let Some(cut) = cut {
+            let _ = self.monitor_cut.send(cut);
         }
         Ok(list
             .into_iter()
@@ -476,7 +505,9 @@ impl LanState {
     /// RE-POINTED to the current active path: while shared, the entry held the shared
     /// worktree's path (shared-path-authoritative); once it's purely active, the scoped
     /// surface must serve the active worktree, so we refresh `path`/`name` to
-    /// `active_repo`. No cut fires (the repo is still shared over the active surface).
+    /// `active_repo`. If that path actually CHANGES (shared worktree ≠ active worktree)
+    /// a [`MonitorCut::Repo`] on the OLD path fires so a stream that captured it is
+    /// severed; when the paths are identical, no cut fires.
     async fn unshare_repo(&self, repo_path: &str) -> AppResult<Vec<LanSharedRepo>> {
         let list = shared_repos::remove_path(repo_path)?;
         let cut = {
@@ -505,15 +536,26 @@ impl LanState {
                             .lock()
                             .unwrap_or_else(|p| p.into_inner())
                             .clone();
+                        let mut path_cut = None;
                         if let Some(path) = active_path {
                             let name = repo_basename(&path);
                             let mut repos = self.repos.lock().unwrap_or_else(|p| p.into_inner());
                             if let Some(e) = repos.get_mut(&id) {
+                                // The served path CHANGES (shared → active worktree) while
+                                // the entry stays registered. A live stream captured the
+                                // OLD (shared) path and scoped cuts match by path, so fire
+                                // Repo(<old shared path>) to sever it — else it would watch
+                                // a run on a path the entry no longer serves. (Same
+                                // containment behavior the pre-scoping unconditional cut
+                                // had.) No change, no cut (identical worktree path).
+                                if e.path != path {
+                                    path_cut = Some(MonitorCut::Repo(e.path.clone()));
+                                }
                                 e.path = path;
                                 e.name = name;
                             }
                         }
-                        None
+                        path_cut
                     } else {
                         let mut repos = self.repos.lock().unwrap_or_else(|p| p.into_inner());
                         repos
@@ -1326,7 +1368,14 @@ mod tests {
         );
 
         // Now share worktree A of the same repo → path becomes A (shared authoritative).
+        // The served path CHANGES (B→A), so a scoped Repo(B) cut fires to sever a stream
+        // that captured B.
+        let mut cut_rx = state.monitor_cut.subscribe();
         state.share_repo(&main_wt).await.unwrap();
+        match cut_rx.try_recv() {
+            Ok(MonitorCut::Repo(p)) => assert_eq!(p, linked_wt, "cut carries the OLD active path B"),
+            other => panic!("expected Repo(<old active path B>), got {other:?}"),
+        }
         assert_eq!(
             state.repos.lock().unwrap().get(&id).unwrap().path,
             main_wt,
@@ -1354,8 +1403,8 @@ mod tests {
         // Unsharing a repo that is ALSO the active repo (under a different worktree)
         // keeps the entry but re-points its path from the shared worktree A to the
         // active worktree B — the scoped surface must serve the active worktree once
-        // the repo is only active. No cut fires.
-        use tokio::sync::broadcast::error::TryRecvError;
+        // the repo is only active. Because the served path CHANGES (A→B), a scoped
+        // Repo(A) cut fires so a stream that captured A is severed.
         let _lock = auth::store_test_lock();
         let tmp = temp_shared_store();
         let prev = shared_repos::set_store_path_for_test(Some(tmp.clone()));
@@ -1374,8 +1423,11 @@ mod tests {
         let mut cut_rx = state.monitor_cut.subscribe();
         let list = state.unshare_repo(&main_wt).await.unwrap();
         assert!(list.is_empty(), "A removed from the shared list");
-        // No cut (still active over the alias surface).
-        assert!(matches!(cut_rx.try_recv(), Err(TryRecvError::Empty)));
+        // The served path changed A→B → a scoped Repo(A) cut severs a stream on A.
+        match cut_rx.try_recv() {
+            Ok(MonitorCut::Repo(p)) => assert_eq!(p, main_wt, "cut carries the OLD shared path A"),
+            other => panic!("expected Repo(<old shared path A>), got {other:?}"),
+        }
         // The entry survives, now re-pointed to the ACTIVE worktree B.
         {
             let repos = state.repos.lock().unwrap();
@@ -1391,6 +1443,93 @@ mod tests {
             .output()
             .ok();
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn same_id_active_worktree_switch_cuts_the_old_worktree_path() {
+        // The round-3 finding's exact repro at the state level: active on NON-shared
+        // worktree A, then switch to a linked worktree B of the SAME repo (same id).
+        // The entry's served path changes A→B while it stays registered; a stream
+        // captured A and scoped cuts match by path, so a Repo(A) cut MUST fire — else
+        // the stream on A is never severed (it wouldn't match a later Repo(B) removal).
+        let _lock = auth::store_test_lock();
+        let tmp = temp_shared_store();
+        let prev = shared_repos::set_store_path_for_test(Some(tmp.clone()));
+        let (base, main_wt, linked_wt) = temp_repo_with_worktree();
+
+        let state = LanState::default();
+        // Active on worktree A (not shared).
+        state.set_active_repo(Some(main_wt.clone())).await;
+        let id = state.repos.lock().unwrap().keys().next().unwrap().clone();
+        let mut cut_rx = state.monitor_cut.subscribe();
+
+        // Switch to linked worktree B (same id, still not shared) → path A→B changes.
+        state.set_active_repo(Some(linked_wt.clone())).await;
+        match cut_rx.try_recv() {
+            Ok(MonitorCut::Repo(p)) => assert_eq!(p, main_wt, "cut carries the OLD worktree path A"),
+            other => panic!("expected Repo(<old worktree A>), got {other:?}"),
+        }
+        // Still one entry, now serving B, active id unchanged (same repo identity).
+        {
+            let repos = state.repos.lock().unwrap();
+            assert_eq!(repos.len(), 1);
+            assert_eq!(repos.get(&id).unwrap().path, linked_wt, "entry now serves B");
+        }
+        assert_eq!(state.active_repo_id.lock().unwrap().as_deref(), Some(id.as_str()));
+
+        shared_repos::set_store_path_for_test(prev);
+        std::fs::remove_file(&tmp).ok();
+        std::process::Command::new("git")
+            .args(["worktree", "prune"])
+            .current_dir(base.join("main"))
+            .output()
+            .ok();
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn same_id_reactivation_with_identical_path_fires_no_cut() {
+        // The no-regression guard: re-activating the SAME repo under the SAME path is a
+        // no-op set (the change-detection returns early) — no cut, no path change. And a
+        // re-share of an already-shared repo is a by-id no-op — also no cut. This proves
+        // the round-3 path-change cut fires ONLY on a real path change, not on adds or
+        // identical re-installs.
+        use tokio::sync::broadcast::error::TryRecvError;
+        let _lock = auth::store_test_lock();
+        let tmp = temp_shared_store();
+        let prev = shared_repos::set_store_path_for_test(Some(tmp.clone()));
+
+        let state = LanState::default();
+        // First activation is an ADD (no prior entry) → no cut.
+        state.set_active_repo(Some("C:/repo-A".to_string())).await;
+        let mut cut_rx = state.monitor_cut.subscribe();
+
+        // Same-value re-activation → change-detection returns early, no cut.
+        assert!(!state.set_active_repo(Some("C:/repo-A".to_string())).await);
+        assert!(
+            matches!(cut_rx.try_recv(), Err(TryRecvError::Empty)),
+            "identical re-activation fires no cut"
+        );
+
+        // Share A, then re-share A (by-id no-op) → no cut.
+        state.share_repo("C:/repo-A").await.unwrap();
+        // Draining any cut the share might have produced (path B→A change): here the
+        // active entry already held A (same path), so sharing A does NOT change the path
+        // → no cut. Assert that.
+        assert!(
+            matches!(cut_rx.try_recv(), Err(TryRecvError::Empty)),
+            "sharing a repo already served under the same path fires no cut"
+        );
+        state.share_repo("C:/repo-A").await.unwrap(); // by-id no-op
+        assert!(
+            matches!(cut_rx.try_recv(), Err(TryRecvError::Empty)),
+            "re-sharing an already-shared repo fires no cut"
+        );
+
+        shared_repos::set_store_path_for_test(prev);
+        std::fs::remove_file(&tmp).ok();
     }
 
     #[tokio::test]
