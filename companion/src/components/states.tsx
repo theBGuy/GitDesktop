@@ -1,11 +1,23 @@
 import {
   ArrowClockwiseIcon,
+  FolderOpenIcon,
   PlugsIcon,
   WarningCircleIcon,
 } from "@phosphor-icons/react";
-import type { ReactNode } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { type ReactNode, useEffect } from "react";
 import { ApiError } from "../lib/api";
 import { navigate } from "../lib/router";
+
+/** Whether a query error is the DEFINITIVE "this repo is no longer shared" 404
+ *  (`noSuchRepo`). Screens check this to let the repo-gone state WIN over the
+ *  stale-data-preference branch: a transient error keeps showing cached data with
+ *  a StaleBanner, but a definitive gone must kick the user to the teaching state
+ *  even when a cached list is still on hand. Uses the `ApiError` getter — no
+ *  string matching. */
+export function isRepoGoneError(error: unknown): boolean {
+  return error instanceof ApiError && error.isNoSuchRepo;
+}
 
 // The shared data-screen states. Every list/detail screen routes its hook's
 // status through these so loading/empty/error/no-repo/unreachable look identical
@@ -58,6 +70,52 @@ export function EmptyState({ title, hint }: { title: string; hint?: string }) {
   return <CenteredState title={title}>{hint}</CenteredState>;
 }
 
+/** A primary-action button that navigates to the repo picker. Used by the
+ *  repo-gone teaching state — the device is still paired, so the way forward is to
+ *  pick another shared repo, never to re-pair. */
+function ChooseRepoButton() {
+  return (
+    <button
+      type="button"
+      onClick={() => navigate("#repos")}
+      className="mt-2 inline-flex min-h-11 items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground"
+    >
+      <FolderOpenIcon size={16} weight="bold" />
+      Choose repository
+    </button>
+  );
+}
+
+/**
+ * The repository this screen was scoped to is no longer shared from the desktop
+ * (the server 404'd `noSuchRepo`). A calm teaching state, modeled on the
+ * noRemote/GoneState patterns — NOT an error, and NEVER a bounce to `#pair`: the
+ * phone is still paired, it just needs a different repo. Reusable so any screen
+ * (and the agent watch) renders the same thing.
+ */
+export function RepoGoneState() {
+  // Invalidate the shared-repos list on mount so the picker the user is about to
+  // land on is fresh. Without this, `useRepos`'s 30s staleTime can still list the
+  // just-unshared repo, and tapping it loops straight back to this gone state.
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    queryClient.invalidateQueries({ queryKey: ["repos"] });
+  }, [queryClient]);
+
+  return (
+    <CenteredState
+      icon={<FolderOpenIcon size={32} className="text-muted-foreground" />}
+      title="This repository is no longer shared from the desktop."
+    >
+      Choose another shared repository, or share this one again in GitDesktop on
+      your desktop.
+      <span className="mt-3 block">
+        <ChooseRepoButton />
+      </span>
+    </CenteredState>
+  );
+}
+
 /** A retry button matching the primary-action styling. */
 function RetryButton({ onRetry }: { onRetry: () => void }) {
   return (
@@ -103,6 +161,13 @@ export function ErrorState({
         </button>
       </CenteredState>
     );
+  }
+
+  if (api?.isNoSuchRepo) {
+    // The scoped repo stopped being shared (or never was). A teaching state with a
+    // "Choose repository" path — the device stays paired, so we never bounce to
+    // `#pair`. See {@link RepoGoneState}.
+    return <RepoGoneState />;
   }
 
   if (api?.isNoRemote) {

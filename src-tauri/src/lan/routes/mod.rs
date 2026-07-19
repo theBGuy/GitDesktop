@@ -40,7 +40,8 @@
 //! | `/api/reviews`                        | `reviews`                             |
 //! | `/api/reviews/{id}/stream`            | `reviews/{id}/stream`                 |
 //!
-//! Plus `GET /api/repos` (protected) → the registered repos as `[{ id, name }]`.
+//! Plus `GET /api/repos` (protected) → the registered repos (active ∪ shared) as
+//! `[{ id, name, active }]`.
 //!
 //! ## The shared-handler extraction trap
 //!
@@ -203,9 +204,21 @@ fn no_such_repo() -> Response {
         .into_response()
 }
 
-/// GET /api/repos — the registered repos as `[{ id, name }]` (camelCase). Today
-/// that's the desktop's active repo (or empty when none is shared). Only the
-/// opaque id + display name reach the wire — never a filesystem path.
+/// GET /api/repos — the registered repos as `[{ id, name, active }]` (camelCase):
+/// the desktop's ACTIVE repo ∪ the persisted SHARED set. `active` is `true` for the
+/// entry whose opaque id equals the desktop's current active id — at most one, and
+/// none when no repo is active. Flagging BY ID (not by path) matches the id-based
+/// identity the registry dedups on: a repo shared under one worktree path while the
+/// desktop is open on another occupies one entry (same id) whose stored path may
+/// differ from the active path, so a path compare would wrongly report `active:
+/// false`. Only the opaque id + display name + `active` flag reach the wire — never a
+/// filesystem path. (An id compare also avoids a filesystem `canonicalize` under the
+/// `repos` lock.)
+///
+/// The active id and the entries are read under separate short locks (never nested).
+/// Any transient skew between `active_repo_id` and the registry during a slow install
+/// is the same eventual-consistency of a UI bool that exists across the feature — a
+/// switch settles it within one install; nothing keys correctness on the flag.
 pub(crate) async fn list_repos(
     axum::extract::State(state): axum::extract::State<crate::lan::auth::RouterState>,
 ) -> Response {
@@ -214,12 +227,22 @@ pub(crate) async fn list_repos(
     use axum::Json;
     use serde_json::json;
 
+    // Snapshot the active id once under its own lock (dropped before locking `repos`,
+    // never nested) so every entry's `active` flag is computed against one value.
+    let active_id = state
+        .active_repo_id
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
     let items: Vec<_> = state
         .repos
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .iter()
-        .map(|(id, repo)| json!({ "id": id, "name": repo.name }))
+        .map(|(id, repo)| {
+            let is_active = active_id.as_deref() == Some(id.as_str());
+            json!({ "id": id, "name": repo.name, "active": is_active })
+        })
         .collect();
     (StatusCode::OK, Json(items)).into_response()
 }

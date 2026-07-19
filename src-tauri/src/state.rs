@@ -63,7 +63,11 @@ pub fn subscribe_in(registry: &StreamRegistry, id: &str) -> Option<broadcast::Re
 /// frontend `repoPath`), OR if both canonicalize successfully to the same path
 /// (hardens against `/` vs `\` and drive-letter case on Windows). Canonicalization
 /// touches the filesystem, so it's the fallback, not the primary check.
-fn repo_paths_match(a: &str, b: &str) -> bool {
+///
+/// `pub(crate)` so the LAN scoped-cut path ([`crate::lan::routes::reviews`]) and the
+/// `/api/repos` `active`-flag computation share this exact equality — a repo's
+/// active-vs-shared identity, its stream-scoping, and its cut-scoping must all agree.
+pub(crate) fn repo_paths_match(a: &str, b: &str) -> bool {
     if a == b {
         return true;
     }
