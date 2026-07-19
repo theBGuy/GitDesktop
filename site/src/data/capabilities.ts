@@ -96,7 +96,7 @@ export const capabilities: Capability[] = [
 
   // — CI, tags & releases —
   { group: "CI, tags & releases", label: "GitHub Actions — runs, jobs, steps, re-run, cancel & dispatch", highlight: true },
-  { group: "CI, tags & releases", label: "CI checks rollup — pass/fail/pending, peeks a failing job's log inline" },
+  { group: "CI, tags & releases", label: "CI checks rollup — pass/fail/pending/skipped, live step progress on running Actions checks" },
   { group: "CI, tags & releases", label: "Tags, releases & cross-platform assets" },
   { group: "CI, tags & releases", label: "Insights graphs — commit activity, churn & more, computed locally" },
 

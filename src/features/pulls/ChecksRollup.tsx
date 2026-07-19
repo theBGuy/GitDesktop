@@ -22,6 +22,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { StatusIcon } from "@/features/actions/status";
 import type { ForgeProvider, PrCheckOut } from "@/lib/git/types";
 import {
+  isRunActive,
   type RunJob,
   useJobLogs,
   useRunDetail,
@@ -67,7 +68,10 @@ function checkPresentation(status: string): {
     return {
       tone: "text-muted-foreground",
       Icon: MinusCircleIcon,
-      label: "skipped",
+      // The three share a bucket/icon/tone, but the accessible label is each
+      // status's own word ("skipped" / "neutral" / "stale") so a screen reader
+      // announces the actual result. The summary segment still says "skipped".
+      label: s.toLowerCase(),
       bucket: "skipped",
     };
   }
@@ -83,14 +87,23 @@ function checkPresentation(status: string): {
 }
 
 /** A GitHub Actions check that hasn't finished yet — it has a parsed run id, the
- *  repo is GitHub, and no `completedAt`. Only these fetch run detail for the live
- *  step checklist; GitLab checks also carry run/job ids (pipeline/job ids) but have
- *  no steps, so gating on the provider avoids wasted `forge_ci_run_view` spawns. */
+ *  repo is GitHub, no `completedAt`, AND its status still reads as pending. The
+ *  bucket check guards against a StatusContext whose `targetUrl` is coincidentally
+ *  an Actions-run URL (so a runId parses) but whose state is already SUCCESS/
+ *  FAILURE and carries no timestamps — without it, such a check would read as
+ *  "running". Only these fetch run detail for the live step checklist; GitLab
+ *  checks also carry run/job ids (pipeline/job ids) but have no steps, so gating on
+ *  the provider avoids wasted `forge_ci_run_view` spawns. */
 function isRunningActionsCheck(
   check: PrCheckOut,
   provider: ForgeProvider,
 ): boolean {
-  return provider === "github" && Boolean(check.runId) && !check.completedAt;
+  return (
+    provider === "github" &&
+    Boolean(check.runId) &&
+    !check.completedAt &&
+    checkPresentation(check.status).bucket === "pending"
+  );
 }
 
 /** The run's job for a check: by job id first (the reliable key), falling back to
@@ -593,13 +606,21 @@ export function ChecksRollup({
               const runJob = running
                 ? jobForCheck(c, c.runId ? jobsByRun[c.runId] : undefined)
                 : undefined;
+              // `useRunDetail` polls at 5s but usePrDetails only refetches on
+              // focus, so when a run finishes the check's `completedAt` stays
+              // stale (→ `running` true) until a focus event. Treat the resolved
+              // job as authoritative: once it reports a non-active status, drop
+              // the live UI immediately, reverting the row to the log tail before
+              // the PR payload catches up.
+              const jobDone = runJob ? !isRunActive(runJob.status) : false;
+              const live = running && !jobDone;
               return (
                 <CheckRow
                   key={rowId(i)}
                   rowId={rowId(i)}
                   repoPath={repoPath}
                   check={c}
-                  isRunning={running}
+                  isRunning={live}
                   runJob={runJob}
                 />
               );

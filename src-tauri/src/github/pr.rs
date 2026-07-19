@@ -1750,6 +1750,15 @@ fn parse_actions_run_job(url: &str) -> (Option<String>, Option<String>) {
     (Some(run_id), job_id)
 }
 
+/// Whether a CheckRun timestamp string is a real time worth keeping. `gh`
+/// serializes a null GraphQL timestamp as Go's zero value
+/// (`"0001-01-01T00:00:00Z"`), so a still-running check "has" a `completedAt`
+/// unless that sentinel is dropped along with the empty string. Dropping both is
+/// what lets the frontend tell a finished check from an in-progress one.
+fn real_check_time(s: &str) -> bool {
+    !s.is_empty() && !s.starts_with("0001-01-01")
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawPr {
@@ -2335,18 +2344,16 @@ pub async fn gh_pr_view(
                     .as_deref()
                     .map(parse_actions_run_job)
                     .unwrap_or((None, None));
-                // gh serializes a null GraphQL timestamp as Go's zero value
-                // ("0001-01-01T00:00:00Z"), so an in-progress check "has" a
-                // completedAt unless the sentinel is dropped along with "".
-                let real_time = |s: &String| !s.is_empty() && !s.starts_with("0001-01-01");
+                // Drop empty AND Go-zero-value sentinel timestamps (see
+                // `real_check_time`) so a still-running check reads as unfinished.
                 PrCheckOut {
                     name,
                     status,
                     details_url,
                     run_id,
                     job_id,
-                    started_at: c.started_at.filter(real_time),
-                    completed_at: c.completed_at.filter(real_time),
+                    started_at: c.started_at.filter(|s| real_check_time(s)),
+                    completed_at: c.completed_at.filter(|s| real_check_time(s)),
                 }
             })
             .collect(),
@@ -4496,7 +4503,7 @@ fn scrape_pr_ref(stdout: &str) -> (u64, String) {
 mod tests {
     use super::{
         external_items_from_thread_nodes, host_from_url, is_diff_too_large, map_timeline_node,
-        parse_actions_run_job,
+        parse_actions_run_job, real_check_time,
         parse_auth_accounts, parse_pr_url_repo, reconstruct_pr_diff,
         reject_upstream_create_metadata, rest_comment_to_out, rest_commit_to_out,
         rest_pull_to_pr_info, rest_review_to_out, rollup_state_to_ci, scrape_pr_ref,
@@ -4884,6 +4891,17 @@ github.acme.com
             parse_actions_run_job("https://github.com/o/r/actions/runs/"),
             (None, None)
         );
+    }
+
+    #[test]
+    fn real_check_time_drops_empty_and_go_zero_value() {
+        // An absent timestamp arrives as "" and must be dropped.
+        assert!(!real_check_time(""));
+        // gh serializes a null GraphQL time as Go's zero value — dropping it is
+        // what lets a still-running check read as unfinished (no completedAt).
+        assert!(!real_check_time("0001-01-01T00:00:00Z"));
+        // A real ISO timestamp is kept.
+        assert!(real_check_time("2026-07-18T12:34:56Z"));
     }
 
     #[test]

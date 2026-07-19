@@ -595,8 +595,8 @@ each one reports.
 
 CI checks appear as a **rollup summary** — **✓ N passed · ✕ M failed · ● K pending ·
 ⊖ K skipped**, each count with its own icon and word so status never rides on color
-alone. Skipped (and neutral) checks show as their own muted segment rather than
-masquerading as pending. It auto-expands whenever something has failed. Expanding lists
+alone. Skipped checks (plus neutral or stale ones) show as their own muted segment rather
+than masquerading as pending. It auto-expands whenever something has failed. Expanding lists
 the checks failures-first (arrow-navigable). A **GitHub Actions** check that's still
 **running** shows its **current step** right in the row and, when expanded, a **live step
 checklist** that updates as the run progresses; a finished Actions check **peeks its job
