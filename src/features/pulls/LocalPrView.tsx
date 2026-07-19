@@ -58,6 +58,7 @@ import {
   useUpdateBranchFrom,
 } from "@/lib/git/queries";
 import { formatBinding } from "@/lib/hotkeys/binding";
+import { useEffectiveBindings } from "@/lib/hotkeys/hotkeys";
 import { useLocalPrs, useUpdateLocalPr } from "@/lib/pulls/queries";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
@@ -149,6 +150,13 @@ export function LocalPrView({
     },
   });
   const prGen = useGeneratePrDescription(repoPath);
+  // Context-sensitive reuse of the generate-commit-message binding (mod+g by
+  // default) for the Edit dialog's chord + button hint — a rebinding drives both.
+  const generateBinding =
+    useEffectiveBindings().get("generate-commit-message") ?? null;
+  const generateHint = generateBinding
+    ? ` (${formatBinding(generateBinding)})`
+    : "";
 
   const comparison = useCompareBranches(
     repoPath,
@@ -193,6 +201,24 @@ export function LocalPrView({
   // Commits on `base` that `head` lacks — i.e. how far the PR's head branch has
   // fallen behind base. Non-empty ⇒ offer GitHub's "Update branch".
   const behind = comparison.data?.behind ?? [];
+
+  // AI title+description generation — shared by the Edit dialog's Generate button
+  // and its mod+g chord. Verbatim the button's prior onClick body. `pr` is aliased
+  // to a narrowed const so the (hoisted) function body sees it as defined.
+  const prForGen = pr;
+  function runGenerate() {
+    // Local PRs have real local branches — the base..head branch-diff path works,
+    // and (like create) keeps base GitHub prompt wording.
+    prGen.generate(
+      prForGen.base,
+      prForGen.head,
+      ahead.map((c) => c.subject),
+      (d) => {
+        edit.form.setFieldValue("title", d.title);
+        edit.form.setFieldValue("body", d.body);
+      },
+    );
+  }
   const fileCount = diffFiles.data?.length;
   // Shared JiraRefRow sources for both header branches (conflict-takeover +
   // normal) so the two can't diverge. Branch name LAST so title/description
@@ -969,6 +995,9 @@ export function LocalPrView({
         description="Updates the title and description of this local pull request."
         contentClassName={undefined}
         bodyTextareaClassName="max-h-72"
+        onGenerate={aiEnabled ? runGenerate : undefined}
+        generating={prGen.generating}
+        generateDisabled={ahead.length === 0}
         bodyActions={
           !aiEnabled ? undefined : prGen.generating ? (
             <Button
@@ -986,20 +1015,8 @@ export function LocalPrView({
               variant="outline"
               size="xs"
               disabled={ahead.length === 0}
-              onClick={() =>
-                // Local PRs have real local branches — the base..head branch-diff
-                // path works, and (like create) keeps base GitHub prompt wording.
-                prGen.generate(
-                  pr.base,
-                  pr.head,
-                  ahead.map((c) => c.subject),
-                  (d) => {
-                    edit.form.setFieldValue("title", d.title);
-                    edit.form.setFieldValue("body", d.body);
-                  },
-                )
-              }
-              title="Generate the title and description with AI"
+              onClick={runGenerate}
+              title={`Generate the title and description with AI${generateHint}`}
             >
               <SparkleIcon data-icon="inline-start" />
               Generate

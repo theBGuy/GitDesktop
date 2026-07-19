@@ -120,7 +120,8 @@ import {
   providerLabel,
   type ReviewThreadOut,
 } from "@/lib/git/types";
-import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
+import { formatBinding } from "@/lib/hotkeys/binding";
+import { useEffectiveBindings, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import {
   useClearReviewDrafts,
   useReviewDrafts,
@@ -397,6 +398,13 @@ export function RemotePrView({
   });
   const prGen = useGeneratePrDescription(repoPath);
   const composerRef = useRef<MarkdownEditorHandle>(null);
+  // Context-sensitive reuse of the generate-commit-message binding (mod+g by
+  // default) for the Edit dialog's chord + button hint — a rebinding drives both.
+  const generateBinding =
+    useEffectiveBindings().get("generate-commit-message") ?? null;
+  const generateHint = generateBinding
+    ? ` (${formatBinding(generateBinding)})`
+    : "";
 
   const onError = (e: unknown) => toastError(e);
 
@@ -746,6 +754,40 @@ export function RemotePrView({
           ) : undefined
         }
       />
+    );
+  }
+
+  // AI title+description generation — shared by the Edit dialog's Generate button
+  // and its mod+g chord. Verbatim the button's prior onClick body. `pr` is aliased
+  // to a narrowed const so the (hoisted) function body sees it as defined.
+  const prForGen = pr;
+  function runGenerate() {
+    prGen.generateFromDiff(
+      // Reuse the diff already cached by usePrDiff — and, crucially,
+      // resolve it from the PR's own diff (not local base..head refs),
+      // so this works for fork PRs / unfetched head branches.
+      () =>
+        queryClient
+          .ensureQueryData(prDiffOptions(repoPath, number, lens))
+          .then((text) => ({
+            text,
+            truncated: false,
+            files: prForGen.files.map((f) => ({
+              path: f.path,
+              added: f.additions,
+              deleted: f.deletions,
+              isBinary: false,
+            })),
+          })),
+      prForGen.baseRefName,
+      prForGen.headRefName,
+      prForGen.commits.map((c) => c.headline),
+      (d) => {
+        edit.form.setFieldValue("title", d.title);
+        edit.form.setFieldValue("body", d.body);
+      },
+      // Provider-aware prompt copy; null host → base GitHub wording.
+      provider ?? undefined,
     );
   }
 
@@ -2116,6 +2158,8 @@ export function RemotePrView({
         description={`Updates the title and description of #${number} on ${remoteLabel}.`}
         contentClassName="sm:max-w-lg"
         bodyTextareaClassName="max-h-72 min-h-24 resize-y font-mono"
+        onGenerate={aiEnabled ? runGenerate : undefined}
+        generating={prGen.generating}
         bodyActions={
           !aiEnabled ? undefined : prGen.generating ? (
             <Button
@@ -2132,36 +2176,8 @@ export function RemotePrView({
               type="button"
               variant="outline"
               size="xs"
-              onClick={() =>
-                prGen.generateFromDiff(
-                  // Reuse the diff already cached by usePrDiff — and, crucially,
-                  // resolve it from the PR's own diff (not local base..head refs),
-                  // so this works for fork PRs / unfetched head branches.
-                  () =>
-                    queryClient
-                      .ensureQueryData(prDiffOptions(repoPath, number, lens))
-                      .then((text) => ({
-                        text,
-                        truncated: false,
-                        files: pr.files.map((f) => ({
-                          path: f.path,
-                          added: f.additions,
-                          deleted: f.deletions,
-                          isBinary: false,
-                        })),
-                      })),
-                  pr.baseRefName,
-                  pr.headRefName,
-                  pr.commits.map((c) => c.headline),
-                  (d) => {
-                    edit.form.setFieldValue("title", d.title);
-                    edit.form.setFieldValue("body", d.body);
-                  },
-                  // Provider-aware prompt copy; null host → base GitHub wording.
-                  provider ?? undefined,
-                )
-              }
-              title="Generate the title and description with AI"
+              onClick={runGenerate}
+              title={`Generate the title and description with AI${generateHint}`}
             >
               <SparkleIcon data-icon="inline-start" />
               Generate

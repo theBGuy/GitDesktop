@@ -11,7 +11,13 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { required, useAppForm, withForm } from "@/lib/form";
+import { eventToBinding, formatBinding } from "@/lib/hotkeys/binding";
+import { useEffectiveBindings } from "@/lib/hotkeys/hotkeys";
 import { toastError } from "@/lib/toast";
+
+/** Platform-correct submit hint (Cmd+Enter on macOS, Ctrl+Enter else) — never a
+ *  literal modifier (house platform-mod-key rule). Mirrors CreateLocalPrDialog. */
+const SUBMIT_HINT = formatBinding("mod+enter");
 
 /** Shared form shape so the hook's `useAppForm` and the `withForm` dialog agree. */
 export const editTitleBodyFormOpts = formOptions({
@@ -67,6 +73,17 @@ interface EditTitleBodyDialogProps {
   /** Optional actions rendered in the description field header (e.g. an AI
    *  "Generate" button). Absent ⇒ the field renders exactly as before. */
   bodyActions?: ReactNode;
+  /** Runs the consumer's AI Generate. Present ONLY when the consumer has a live
+   *  Generate surface (AI enabled); its presence is the gate for intercepting the
+   *  generate chord. The issue views omit it (no Generate), so the chord falls
+   *  through there untouched. */
+  onGenerate?: () => void;
+  /** True while a generation is in flight (undefined ⇒ false): the generate chord
+   *  swallows without re-triggering, and mod+enter swallows without submitting. */
+  generating?: boolean;
+  /** Mirrors the Generate button's disabled state (undefined ⇒ false): the chord
+   *  still swallows but doesn't run. */
+  generateDisabled?: boolean;
 }
 
 export const EditTitleBodyDialog = withForm({
@@ -81,6 +98,9 @@ export const EditTitleBodyDialog = withForm({
     contentClassName: undefined as string | undefined,
     bodyTextareaClassName: "max-h-72",
     bodyActions: undefined as ReactNode,
+    onGenerate: undefined as (() => void) | undefined,
+    generating: undefined as boolean | undefined,
+    generateDisabled: undefined as boolean | undefined,
   } as EditTitleBodyDialogProps,
   render: function EditTitleBodyDialogRender({
     form,
@@ -91,10 +111,56 @@ export const EditTitleBodyDialog = withForm({
     contentClassName,
     bodyTextareaClassName,
     bodyActions,
+    onGenerate,
+    generating,
+    generateDisabled,
   }) {
+    // Context-sensitive reuse of the `generate-commit-message` binding (mod+g by
+    // default) while this dialog is open — never a hardcoded chord, so a
+    // Settings → Keyboard rebinding drives it. null = explicitly unbound.
+    const generateBinding =
+      useEffectiveBindings().get("generate-commit-message") ?? null;
     return (
       <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className={contentClassName}>
+        <DialogContent
+          className={contentClassName}
+          // mod+enter submits from anywhere in the dialog, and (when the consumer
+          // has a Generate surface) the generate-commit-message chord runs its
+          // Generate — parity with the create dialogs (CreateLocalPrDialog). It's
+          // captured on DialogContent (the Popup), not the <form>: the X close
+          // button renders as a form SIBLING inside the Popup, so a form-level
+          // handler misses a chord pressed with focus on the X, which would then
+          // leak to the global commit / generate-commit-message actions behind the
+          // dialog. Capturing on the Popup covers the X and every field, so the
+          // UNCONDITIONAL preventDefault is what actually contains each chord.
+          //
+          // This dialog is shared with the ISSUE views, which pass no `onGenerate`
+          // (they have no Generate) — so the generate chord only arms when a
+          // consumer opts in, and otherwise falls through untouched.
+          onKeyDown={(e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+              e.preventDefault();
+              // While generating, swallow but don't submit — matches the create
+              // dialogs. Field validators still gate an invalid submit.
+              if (!generating) form.handleSubmit();
+              return;
+            }
+            // Run this consumer's Generate only when it has a Generate surface and
+            // the chord is bound. ALWAYS swallow it then: without this the chord
+            // would fire the global generate-commit-message action behind the
+            // dialog. Run Generate only when its button would be enabled; while
+            // generating we swallow but DON'T cancel (an accidental repeat must not
+            // abort a running generation).
+            if (
+              onGenerate &&
+              generateBinding !== null &&
+              eventToBinding(e) === generateBinding
+            ) {
+              e.preventDefault();
+              if (!generating && !generateDisabled) onGenerate();
+            }
+          }}
+        >
           {/* min-w-0: DialogContent is a grid; without this the form's content
               (long titles, code in the editor) can't shrink and overflows. */}
           <form
@@ -133,7 +199,7 @@ export const EditTitleBodyDialog = withForm({
                 Cancel
               </Button>
               <form.AppForm>
-                <form.SubmitButton>Save</form.SubmitButton>
+                <form.SubmitButton title={SUBMIT_HINT}>Save</form.SubmitButton>
               </form.AppForm>
             </DialogFooter>
           </form>

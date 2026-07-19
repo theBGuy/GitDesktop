@@ -708,8 +708,9 @@ from the branch diff and commit subjects — which additionally **proposes label
 only from the repository's existing labels and added to whatever you've already picked
 (never invented). The same **Generate** button is on the **Edit** dialog too, so you can
 write or regenerate an existing PR's title and description at any time — including for pull
-requests from forks{{/ai}}. Press {{key:mod+enter}} from any field to submit the dialog.{{ai}}
-While the dialog is open, {{kbd:generate-commit-message}} runs its **Generate** for you.{{/ai}}
+requests from forks{{/ai}}. Press {{key:mod+enter}} from any field to submit either the
+**Create** or the **Edit** dialog.{{ai}} While a PR dialog is open, {{kbd:generate-commit-message}}
+runs its **Generate** for you.{{/ai}}
 
 ## GitLab merge requests
 
