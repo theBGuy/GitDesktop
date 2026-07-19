@@ -123,6 +123,9 @@ export async function runCliStream({
         systemPrompt: system,
         userPrompt: prompt,
         repoPath: cwd,
+        // `cwd` may be a throwaway review worktree; the origin repo is `repoPath`, so
+        // scope the LAN stream by that to keep the review visible to a paired phone.
+        originRepoPath: repoPath,
         repoAware: Boolean(ai.cliRepoAware),
         mcpSelf: Boolean(mcpSelf),
         timeoutSecs: timeoutSecs ?? null,

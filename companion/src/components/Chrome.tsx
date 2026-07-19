@@ -2,6 +2,7 @@ import {
   GitBranchIcon,
   GitPullRequestIcon,
   PlayCircleIcon,
+  RobotIcon,
 } from "@phosphor-icons/react";
 import type { ReactNode } from "react";
 import { navigate, type Tab, useRoute } from "../lib/router";
@@ -58,6 +59,12 @@ const TABS: { tab: Tab; label: string; icon: ReactNode; hash: string }[] = [
     hash: "#prs",
   },
   { tab: "ci", label: "CI", icon: <PlayCircleIcon size={22} />, hash: "#ci" },
+  {
+    tab: "agents",
+    label: "Agents",
+    icon: <RobotIcon size={22} />,
+    hash: "#agents",
+  },
 ];
 
 /** Bottom tab nav. Each tab is a real link (Tab-focusable); the active tab is
@@ -78,7 +85,7 @@ export function BottomNav() {
 
   return (
     <nav
-      className="sticky bottom-0 z-10 grid grid-cols-3 border-t border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80 pb-[env(safe-area-inset-bottom)]"
+      className="sticky bottom-0 z-10 grid grid-cols-4 border-t border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80 pb-[env(safe-area-inset-bottom)]"
       aria-label="Sections"
     >
       {TABS.map((t, i) => {

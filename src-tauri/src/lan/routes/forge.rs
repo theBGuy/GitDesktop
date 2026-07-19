@@ -55,6 +55,30 @@ pub async fn pr_view(
     respond(crate::forge::forge_pr_view(repo, number, None).await)
 }
 
+/// GET PR activity timeline (alias: `/api/forge/prs/{number}/timeline`).
+pub async fn pr_timeline(
+    Extension(ScopedRepo(repo)): Extension<ScopedRepo>,
+    Path(params): Path<HashMap<String, String>>,
+) -> Response {
+    let number = match u64_param(&params, "number") {
+        Ok(n) => n,
+        Err(resp) => return *resp,
+    };
+    respond(crate::forge::forge_pr_timeline(repo, number, None).await)
+}
+
+/// GET PR review threads (alias: `/api/forge/prs/{number}/threads`).
+pub async fn pr_threads(
+    Extension(ScopedRepo(repo)): Extension<ScopedRepo>,
+    Path(params): Path<HashMap<String, String>>,
+) -> Response {
+    let number = match u64_param(&params, "number") {
+        Ok(n) => n,
+        Err(resp) => return *resp,
+    };
+    respond(crate::forge::forge_pr_review_threads(repo, number, None).await)
+}
+
 /// GET issue list (alias: `/api/forge/issues?state&limit`).
 pub async fn issue_list(
     Extension(ScopedRepo(repo)): Extension<ScopedRepo>,

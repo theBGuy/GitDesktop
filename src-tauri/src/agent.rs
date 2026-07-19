@@ -136,7 +136,7 @@ pub struct AgentInfo {
 
 /// Streaming events sent to the frontend over the review channel.
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ReviewEvent {
     /// A chunk of assistant text to append to the rendered review.
     Delta { text: String },
@@ -1793,6 +1793,12 @@ pub async fn agent_review(
     system_prompt: String,
     user_prompt: String,
     repo_path: String,
+    // A repo-aware PR-head review runs in a throwaway DETACHED worktree pinned at the
+    // PR head, so `repo_path` is that worktree. The LAN monitor scopes streams by the
+    // ORIGIN repo (the shared one), so pass it here to keep such a review visible to a
+    // paired phone; `None` (the default / a non-worktree review) falls back to
+    // `repo_path`. Mirror of `agent_session`'s `origin_repo_path`.
+    origin_repo_path: Option<String>,
     repo_aware: bool,
     // Attach GitDesktop ITSELF as a read-only MCP server (`gitdesktop mcp --repo
     // <repo_path>`) so the review agent can pull the full PR diff / read files at
@@ -1908,7 +1914,11 @@ pub async fn agent_review(
     // it, fanning events out to the LAN broadcast alongside the desktop channel.
     // The guard clears the entry on every exit path (registered lifetime ==
     // streaming lifetime); the desktop leg stays byte-for-byte unchanged.
-    let tx = state.register_stream(&review_id, "review", &repo_path);
+    let tx = state.register_stream(
+        &review_id,
+        "review",
+        origin_repo_path.as_deref().unwrap_or(&repo_path),
+    );
     let _stream_guard = StreamGuard {
         state: &state,
         id: review_id.clone(),
@@ -2409,6 +2419,25 @@ pub async fn agent_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn done_event_serializes_multi_word_fields_as_camel_case() {
+        // The struct-variant FIELDS must hit the wire camelCase (`isError`/`costUsd`),
+        // which every desktop consumer + the phone monitor read. `rename_all` on the
+        // enum renames variants only; `rename_all_fields` is what renames the fields.
+        let json = serde_json::to_value(ReviewEvent::Done {
+            text: "all done".to_string(),
+            is_error: true,
+            cost_usd: Some(0.42),
+        })
+        .unwrap();
+        assert_eq!(json["kind"], "done");
+        assert_eq!(json["isError"], true);
+        assert_eq!(json["costUsd"], 0.42);
+        // The snake_case field names must NOT appear on the wire.
+        assert!(json.get("is_error").is_none());
+        assert!(json.get("cost_usd").is_none());
+    }
 
     // Real opencode `run --format json` lines (captured 2026-06-23, v1.17.9).
     const STEP_START: &str = r#"{"type":"step_start","sessionID":"ses_abc","part":{"type":"step-start"}}"#;

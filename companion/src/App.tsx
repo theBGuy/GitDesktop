@@ -4,6 +4,7 @@ import { ErrorState } from "./components/states";
 import { lastPairedAt } from "./lib/pairing-signal";
 import { asApiError, useStatus } from "./lib/queries";
 import { navigate, useRoute } from "./lib/router";
+import { AgentsBody, AgentWatch } from "./screens/Agents";
 import { CiBody, CiDetail } from "./screens/Ci";
 import { Pair } from "./screens/Pair";
 import { PrDetail, PrsBody } from "./screens/Prs";
@@ -111,6 +112,16 @@ function Screen({ route }: { route: ReturnType<typeof useRoute> }) {
       <CiDetail id={route.detailId} />
     ) : (
       <CiBody active />
+    );
+  }
+  if (route.tab === "agents") {
+    // The ternary UNMOUNTS the list while a watch is open, so the list's polling
+    // query stops on its own — the list is only mounted (and thus polling) in the
+    // else-arm, where it's always the active view.
+    return route.streamId != null ? (
+      <AgentWatch id={route.streamId} />
+    ) : (
+      <AgentsBody active />
     );
   }
   return <StatusBody active />;
