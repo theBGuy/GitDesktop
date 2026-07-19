@@ -199,7 +199,12 @@ export const EditTitleBodyDialog = withForm({
                 Cancel
               </Button>
               <form.AppForm>
-                <form.SubmitButton title={SUBMIT_HINT}>Save</form.SubmitButton>
+                {/* disabled while generating: the mouse path must match the chord
+                    path's !generating gate, or a click could persist a
+                    half-streamed title/body (create dialogs do the same). */}
+                <form.SubmitButton disabled={generating} title={SUBMIT_HINT}>
+                  Save
+                </form.SubmitButton>
               </form.AppForm>
             </DialogFooter>
           </form>
