@@ -1,5 +1,5 @@
 import { useEffect, useReducer } from "react";
-import { fetchReviews } from "./api";
+import { ApiError, fetchReviews } from "./api";
 import { queryClient } from "./queries";
 
 // Live agent-stream watch over Server-Sent Events. The desktop broadcasts an AI
@@ -64,9 +64,13 @@ export type Terminal =
  *  - `live` — receiving events; the run is in progress.
  *  - `ended` — the stream finished (a terminal event arrived, OR it closed and the
  *    run is still shared but no longer streaming).
- *  - `gone` — the stream closed with no terminal and the id is no longer shared
- *    (run ended / sharing off / repo switched / device revoked). */
-export type Phase = "connecting" | "live" | "ended" | "gone";
+ *  - `gone` — the stream closed with no terminal and the STREAM id is no longer
+ *    shared (run ended / sharing off / device revoked), but the REPO still is.
+ *  - `repoGone` — the stream closed with no terminal AND the scoped reviews probe
+ *    itself 404'd `noSuchRepo`: the whole repository stopped being shared from the
+ *    desktop. Distinct from `gone` because the teaching state differs — the watch
+ *    offers "Choose repository" (→ `#repos`), not just "Back to agents". */
+export type Phase = "connecting" | "live" | "ended" | "gone" | "repoGone";
 
 export interface StreamState {
   segments: Segment[];
@@ -81,7 +85,8 @@ type Action =
   | { type: "opened" }
   | { type: "event"; event: ReviewEvent }
   | { type: "closed" }
-  | { type: "gone" };
+  | { type: "gone" }
+  | { type: "repoGone" };
 
 const initialState: StreamState = {
   segments: [],
@@ -104,6 +109,8 @@ function reducer(state: StreamState, action: Action): StreamState {
       return state.terminal ? state : { ...state, phase: "ended" };
     case "gone":
       return { ...state, phase: "gone" };
+    case "repoGone":
+      return { ...state, phase: "repoGone" };
     case "event": {
       const ev = action.event;
       switch (ev.kind) {
@@ -217,11 +224,12 @@ function parseEvent(raw: string): ReviewEvent | null {
   }
 }
 
-/** Watch a live agent stream by id. Opens an EventSource (relative same-origin URL
- *  — the `gd_lan` cookie rides automatically; the page CSP `connect-src 'self'`
- *  covers it) and folds events into transcript state. Idempotent under StrictMode's
- *  double-mount: the effect closes its own EventSource on cleanup. */
-export function useReviewStream(id: string): StreamState {
+/** Watch a live agent stream by id, scoped to `repoId`. Opens an EventSource
+ *  (relative same-origin URL — the `gd_lan` cookie rides automatically; the page
+ *  CSP `connect-src 'self'` covers it) and folds events into transcript state.
+ *  Idempotent under StrictMode's double-mount: the effect closes its own
+ *  EventSource on cleanup, and re-subscribes if `repoId`/`id` change. */
+export function useReviewStream(repoId: string, id: string): StreamState {
   const [state, dispatch] = useReducer(reducer, initialState);
 
   useEffect(() => {
@@ -232,7 +240,9 @@ export function useReviewStream(id: string): StreamState {
     // before firing the probe, so a `closed` check there would always short-circuit.
     let closed = false;
     let cancelled = false;
-    const es = new EventSource(`/api/reviews/${encodeURIComponent(id)}/stream`);
+    const es = new EventSource(
+      `/api/repos/${encodeURIComponent(repoId)}/reviews/${encodeURIComponent(id)}/stream`,
+    );
 
     es.onopen = () => {
       // Connection established. Leave the connecting skeleton even before the first
@@ -270,11 +280,13 @@ export function useReviewStream(id: string): StreamState {
       //    run ending within ~10s of the list rendering would never be observed (no
       //    401 reaches the handler, the stale list still holds the id, `gone` never
       //    fires, and the screen froze on "ended"). The probe deliberately bypasses
-      //    freshness so a revoke/end is always seen.
+      //    freshness so a revoke/end is always seen. The key is repo-scoped
+      //    (`["reviews", repoId]`) so it round-trips the SAME scoped route the list
+      //    uses — a shared cache across repos would misclassify.
       queryClient
         .fetchQuery({
-          queryKey: ["reviews"],
-          queryFn: fetchReviews,
+          queryKey: ["reviews", repoId],
+          queryFn: () => fetchReviews(repoId),
           staleTime: 0,
         })
         .then((reviews) => {
@@ -283,10 +295,16 @@ export function useReviewStream(id: string): StreamState {
             dispatch({ type: "gone" });
           }
         })
-        .catch(() => {
+        .catch((err) => {
           if (cancelled) return;
-          // A 401 already redirected via the QueryCache; any other probe failure
+          // The probe itself 404'd `noSuchRepo` → the whole repo stopped being
+          // shared. Classify as `repoGone` (distinct from a stream-only `gone`) so
+          // the watch offers "Choose repository" rather than "Back to agents". A
+          // 401 already redirected via the QueryCache; any OTHER probe failure
           // leaves the calmer `ended` state in place (we can't prove it's gone).
+          if (err instanceof ApiError && err.isNoSuchRepo) {
+            dispatch({ type: "repoGone" });
+          }
         });
     };
 
@@ -295,7 +313,7 @@ export function useReviewStream(id: string): StreamState {
       cancelled = true;
       es.close();
     };
-  }, [id]);
+  }, [repoId, id]);
 
   return state;
 }

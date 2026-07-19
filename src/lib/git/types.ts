@@ -2001,3 +2001,15 @@ export interface LanDevice {
   /** ISO-8601 instant the device last made a request. */
   lastSeenAt: string;
 }
+
+/** A repository the user has explicitly shared with paired phones, so it stays
+ *  reachable even while a different repo is open on the desktop. The registry
+ *  phones can browse is this shared set plus whichever repo is currently open;
+ *  the list persists across app restarts and while sharing is off. */
+export interface LanSharedRepo {
+  /** Absolute path of the shared repo root (the stored path — pass it verbatim
+   *  to unshare). */
+  path: string;
+  /** Last path segment of the repo root, for display. */
+  name: string;
+}

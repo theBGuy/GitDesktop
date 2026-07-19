@@ -39,6 +39,7 @@ import type {
   IssueReactions,
   IssueRelation,
   IssueType,
+  LanSharedRepo,
   LanStatus,
   PrDetails,
   PrInfo,
@@ -5570,6 +5571,7 @@ export function useCreatePr(repo: string) {
 
 const LAN_STATUS_KEY = ["lan", "status"] as const;
 const LAN_DEVICES_KEY = ["lan", "devices"] as const;
+const LAN_SHARED_REPOS_KEY = ["lan", "sharedRepos"] as const;
 
 /** The companion server's runtime status, polled every 5s. Kept mounted at the
  *  App level (the "Sharing ON" banner subscribes to it), so the panel and the
@@ -5654,5 +5656,47 @@ export function useLanDeviceRevoke() {
   return useMutation({
     mutationFn: (deviceId: string) => api.lanDeviceRevoke(deviceId),
     onSettled: () => sync(),
+  });
+}
+
+/** The repos the user has explicitly shared with phones. Read even while sharing
+ *  is off (same rationale as devices — the shared set persists across sharing
+ *  being toggled, so the manager must always show it). Not polled: it only
+ *  changes through the share/unshare mutations below, which prime the cache. */
+export function useLanSharedRepos(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: LAN_SHARED_REPOS_KEY,
+    queryFn: api.lanSharedReposList,
+    enabled: options?.enabled ?? true,
+  });
+}
+
+/** Prime the shared-repos cache with the list a mutation returned, then
+ *  invalidate so any other reader re-syncs (no wait for the status poll). */
+function useSyncLanSharedRepos() {
+  const queryClient = useQueryClient();
+  return (repos: LanSharedRepo[]) => {
+    queryClient.setQueryData(LAN_SHARED_REPOS_KEY, repos);
+    void queryClient.invalidateQueries({ queryKey: LAN_SHARED_REPOS_KEY });
+  };
+}
+
+/** Share a repo (by absolute path) so phones can reach it alongside the open
+ *  repo. Idempotent server-side; returns the updated list. */
+export function useLanShareRepo() {
+  const sync = useSyncLanSharedRepos();
+  return useMutation({
+    mutationFn: (repoPath: string) => api.lanShareRepo(repoPath),
+    onSuccess: (repos) => sync(repos),
+  });
+}
+
+/** Stop sharing a repo (pass the stored path verbatim). Cuts only that repo's
+ *  live phone watches; returns the updated list. */
+export function useLanUnshareRepo() {
+  const sync = useSyncLanSharedRepos();
+  return useMutation({
+    mutationFn: (repoPath: string) => api.lanUnshareRepo(repoPath),
+    onSuccess: (repos) => sync(repos),
   });
 }

@@ -1578,11 +1578,13 @@ there's an equivalent.`,
     label: "Phone companion",
     body: `# Phone companion (experimental)
 
-The **Phone companion** lets you share the repository that's currently open with your
-phone over your **local network**. Open it in **Settings → Phone companion**.
+The **Phone companion** lets you browse your repositories from your phone over your
+**local network**. Your phone can always see the repository that's **currently open** on
+this desktop, plus any repositories you've explicitly **shared** so they stay reachable
+while you work elsewhere. Open it in **Settings → Phone companion**.
 
 This is an **early preview**. Once paired, your phone opens a slim companion web app in
-its browser that shows the open repo's **Status**, **pull requests**, **CI**{{ai}}, and
+its browser that shows a repository's **Status**, **pull requests**, **CI**{{ai}}, and
 live **agent** runs{{/ai}} — all **read-only**. It's **off by default**.
 
 ## Turning it on
@@ -1612,7 +1614,7 @@ and **Agents**{{/ai}}, each read-only.
 
 ## What you can see on your phone
 
-- **Status** — the shared repo's current branch and connection.
+- **Status** — the current branch and connection for the repository you're viewing.
 - **PRs** — the open pull-request list; open one for its **overview** (title,
   description, branches, diff totals), its **activity** timeline (force-pushes, label
   changes, review requests, and open/close/merge events), and its **review threads**
@@ -1625,8 +1627,10 @@ and **Agents**{{/ai}}, each read-only.
   as it happens. When the run finishes you get its final answer (and its cost, when
   reported). Watching is **live only**: you see activity from the moment you open it — there's
   no replay — and the screen keeps itself pinned to the newest output unless you scroll up,
-  with a **Jump to latest** button to return. Stopping sharing, switching repos, or revoking
-  the device ends the watch and tells you the run is no longer shared.{{/ai}}
+  with a **Jump to latest** button to return. Stopping sharing or revoking the device ends
+  the watch and tells you the run is no longer shared; switching the desktop to a different
+  repository only ends it when the run's repository **isn't shared** (a shared repo keeps
+  its watches alive after you move on).{{/ai}}
 
 Because the connection uses a **self-signed certificate** GitDesktop generates, your
 phone shows a **certificate warning on first connect** — that's expected; tap through to
@@ -1646,9 +1650,29 @@ and was last seen. The list stays visible **even while sharing is off** — pair
 persist across sharing sessions, so you can always see (and revoke) which devices could
 connect the next time you turn sharing on. Every device holds its **own token**, and you
 can **Revoke** any of them at any time — a revoked device immediately loses access and
-has to pair again to reconnect. Stopping sharing, switching repos, or revoking a device
-also **disconnects any phone that's watching live** right away. Arrow keys move between
-devices in the list.
+has to pair again to reconnect. Stopping sharing or revoking a device also **disconnects
+any phone that's watching live** right away; switching the desktop to a different
+repository only cuts a phone that's watching a repository you **haven't shared**. Arrow
+keys move between devices in the list.
+
+## Sharing more than the open repository
+
+By default your phone can only reach the repository that's **open on this desktop**, so
+switching repositories moves what the phone sees with you. To keep other repositories
+reachable while you work elsewhere, **share** them:
+
+- In **Settings → Phone companion**, the **Shared repositories** list shows everything
+  you've shared. Choose **Share current repository** to add the repo that's currently
+  open, or run **Share current repository with phone** from the command palette
+  ({{kbd:command-palette}}). Once it's shared, the palette offers its twin —
+  **Unshare current repository from phone** — instead.
+- Shared repositories stay reachable from your phone even after you open a different repo
+  here — the phone always sees the open repo **plus** everything in this list.
+- Choose **Unshare** on any row to stop sharing it; that cuts only **that** repository's
+  live phone connections, and leaves the rest untouched. Arrow keys move between rows.
+- The list **persists across restarts** and stays visible **even while sharing is off**,
+  just like paired devices — turning sharing back on makes the whole shared set reachable
+  again.
 
 ## Security — please read
 
@@ -1697,8 +1721,9 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   update is never a missed moment. Open it from the command palette
   ({{kbd:command-palette}} → *Activity & notifications*), click an entry to jump to it,
   arrow-key through the list, and clear items or mark all read.
-- **Phone companion** — *experimental.* Share the open repo (read-only) with your phone
-  over your local network. Off by default; see **Phone companion** above.
+- **Phone companion** — *experimental.* Share repositories (read-only) with your phone
+  over your local network — the open repo, plus any you explicitly share. Off by default;
+  see **Phone companion** above.
 - **Keyboard** — rebind any shortcut, with live key-capture.
 - **Accounts** — your **GitHub** and **GitLab** sign-ins and your **Bitbucket**
   connection. **Sign in to GitHub…** and **Sign in to gitlab.com…** run the CLI's

@@ -11,12 +11,14 @@ import { Markdown } from "../components/markdown";
 import {
   EmptyState,
   ErrorState,
+  isRepoGoneError,
+  RepoGoneState,
   SkeletonRows,
   StaleBanner,
 } from "../components/states";
 import { timeAgo } from "../lib/format";
 import { useReviews } from "../lib/queries";
-import { navigate } from "../lib/router";
+import { navigate, repoHash } from "../lib/router";
 import {
   type Segment,
   type StreamState,
@@ -29,10 +31,22 @@ import { useRovingList } from "../lib/use-roving-list";
 // desktop is broadcasting), and a live watch screen over SSE — the epic's phone
 // killer feature. Read-only by design: no approve/deny/write affordances here.
 
-/** The agent-stream list. `active` gates polling (false while a watch is open). */
-export function AgentsBody({ active }: { active: boolean }) {
-  const { data, isError, error, refetch } = useReviews(active);
+/** The agent-stream list. `repoId` scopes the query; `active` gates polling (false
+ *  while a watch is open). */
+export function AgentsBody({
+  repoId,
+  active,
+}: {
+  repoId: string;
+  active: boolean;
+}) {
+  const { data, isError, error, refetch } = useReviews(repoId, active);
   const { register, onKeyDown } = useRovingList();
+
+  // Definitive gone WINS over stale data: a `noSuchRepo` 404 kicks to the teaching
+  // state even when a cached list is on hand (see isRepoGoneError). The watch
+  // screen has its own repoGone path (the SSE probe), so this covers the list only.
+  if (isRepoGoneError(error)) return <RepoGoneState />;
 
   // Prefer stale data: keep the last-known list on screen even on error, with a
   // StaleBanner above it. Full-screen ErrorState only when there's nothing to
@@ -59,7 +73,7 @@ export function AgentsBody({ active }: { active: boolean }) {
                 type="button"
                 ref={register(i)}
                 onKeyDown={onKeyDown}
-                onClick={() => navigate(`#agents/${r.id}`)}
+                onClick={() => navigate(repoHash(repoId, `agents/${r.id}`))}
                 className="flex w-full min-h-14 items-center gap-3 px-4 py-3 text-left"
               >
                 <div className="min-w-0 flex-1">
@@ -97,28 +111,34 @@ function prefersReducedMotion(): boolean {
   );
 }
 
-/** The live watch screen for one agent stream. */
-export function AgentWatch({ id }: { id: string }) {
-  const stream = useReviewStream(id);
+/** The live watch screen for one agent stream, scoped to `repoId`. */
+export function AgentWatch({ repoId, id }: { repoId: string; id: string }) {
+  const stream = useReviewStream(repoId, id);
 
   return (
     <div className="flex flex-col">
       <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-border bg-background/95 px-2 py-2 backdrop-blur">
         <button
           type="button"
-          onClick={() => navigate("#agents")}
+          onClick={() => navigate(repoHash(repoId, "agents"))}
           className="inline-flex min-h-11 items-center gap-1 rounded px-2 text-sm font-medium text-primary"
         >
           <ArrowLeftIcon size={16} />
           Agents
         </button>
       </div>
-      <WatchBody stream={stream} />
+      <WatchBody stream={stream} repoId={repoId} />
     </div>
   );
 }
 
-function WatchBody({ stream }: { stream: StreamState }) {
+function WatchBody({
+  stream,
+  repoId,
+}: {
+  stream: StreamState;
+  repoId: string;
+}) {
   const { segments, statusText, terminal, phase } = stream;
 
   // Auto-follow: keep pinned to newest content while the user is at the bottom; if
@@ -203,9 +223,13 @@ function WatchBody({ stream }: { stream: StreamState }) {
             ) : null}
             {/* Closed without a terminal event but still shared (`ended`, no
                 terminal): otherwise the transcript would silently freeze with no
-                cue to tell "stopped" from "paused". `gone` has its own state. */}
+                cue to tell "stopped" from "paused". `gone`/`repoGone` own their
+                own states. */}
             {phase === "ended" && !terminal ? <EndedNote /> : null}
-            {phase === "gone" ? <GoneState /> : null}
+            {phase === "gone" ? <GoneState repoId={repoId} /> : null}
+            {/* The whole repo stopped being shared — a distinct teaching state
+                that routes to the picker, not back to this repo's agents list. */}
+            {phase === "repoGone" ? <RepoGoneState /> : null}
           </>
         )}
       </div>
@@ -273,9 +297,10 @@ function EmptyTranscript() {
   );
 }
 
-/** The stream closed and the run is no longer shared (ended / sharing off / repo
- *  switched / device revoked). */
-function GoneState() {
+/** The stream closed and the RUN is no longer shared (ended / sharing off /
+ *  device revoked) — but the repo is still shared, so "Back to agents" returns to
+ *  this repo's list. (The whole-repo case is `RepoGoneState`, routed separately.) */
+function GoneState({ repoId }: { repoId: string }) {
   return (
     <div className="flex flex-col items-start gap-3 rounded-md border border-border bg-muted/40 px-4 py-4">
       <p className="text-sm font-medium text-foreground">
@@ -283,7 +308,7 @@ function GoneState() {
       </p>
       <button
         type="button"
-        onClick={() => navigate("#agents")}
+        onClick={() => navigate(repoHash(repoId, "agents"))}
         className="inline-flex min-h-9 items-center gap-1 rounded px-2 text-sm font-medium text-primary"
       >
         <ArrowLeftIcon size={14} />

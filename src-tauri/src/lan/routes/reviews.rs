@@ -142,8 +142,9 @@ pub async fn stream(
     let cut_rx = state.monitor_cut.subscribe();
     // A 15s keep-alive comment defeats phone-side idle timeouts. The LAN has no
     // buffering proxies, so the keep-alive exists purely to keep the connection
-    // warm through mobile-OS background timers.
-    Sse::new(forward_stream(rx, cut_rx))
+    // warm through mobile-OS background timers. `repo` scopes a `MonitorCut::Repo`:
+    // only a cut naming THIS stream's repo (or a coarse `All`) ends it.
+    Sse::new(forward_stream(rx, cut_rx, repo))
         .keep_alive(
             KeepAlive::new()
                 .interval(Duration::from_secs(15))
@@ -154,22 +155,32 @@ pub async fn stream(
 
 /// The per-connection event stream: forward each broadcast [`ReviewEvent`] as one
 /// SSE `data:` payload, translate lag/close, and end on the terminal `Done`/`Error`
-/// event, on the stream ending (`Closed`), or on a lifecycle cut. There is NO
-/// inbound arm — SSE is one-way, which is the point (see the module docs).
+/// event, on the stream ending (`Closed`), or on a lifecycle cut that applies to
+/// this stream's `repo`. There is NO inbound arm — SSE is one-way, which is the
+/// point (see the module docs).
 ///
-/// A hand-rolled [`futures_util::stream::unfold`] over `(rx, cut_rx,
+/// A hand-rolled [`futures_util::stream::unfold`] over `(rx, cut_rx, repo,
 /// terminal_seen)` with a biased inner `select!`, dependency-free (`futures-util`
 /// is already a dep; `async-stream` is deliberately not in the tree). The
 /// `terminal_seen` flag makes the terminal event's "yield then END on the next
 /// poll" explicit: the poll that forwards `Done`/`Error` sets the flag, and the
 /// next poll returns `None` to end the stream.
+///
+/// Cut scoping: a [`crate::lan::MonitorCut::All`] ends the stream unconditionally; a
+/// [`crate::lan::MonitorCut::Repo`] ends it ONLY when the named repo matches this
+/// stream's `repo` (per [`crate::state::repo_paths_match`]) — otherwise the select is
+/// re-armed and forwarding continues, so a repo B stream survives a `Repo(A)` cut.
+/// `Lagged` is treated as `All` (fail-safe: we can't know which cut we missed);
+/// `Closed` ends it (defensive — can't occur while `LanState` holds the Sender).
 fn forward_stream(
     rx: tokio::sync::broadcast::Receiver<ReviewEvent>,
-    cut_rx: tokio::sync::broadcast::Receiver<()>,
+    cut_rx: tokio::sync::broadcast::Receiver<crate::lan::MonitorCut>,
+    repo: String,
 ) -> impl futures_util::Stream<Item = Result<Event, Infallible>> {
+    use crate::lan::MonitorCut;
     futures_util::stream::unfold(
-        (rx, cut_rx, false),
-        |(mut rx, mut cut_rx, terminal_seen)| async move {
+        (rx, cut_rx, repo, false),
+        |(mut rx, mut cut_rx, repo, terminal_seen)| async move {
             // A terminal event was forwarded on the previous poll — end the stream
             // now (yield then END, exactly as the WS impl did).
             if terminal_seen {
@@ -180,13 +191,24 @@ fn forward_stream(
                 // cut wins — a just-revoked/disabled stream never forwards one more
                 // buffered frame before it honors the cut.
                 biased;
-                // Lifecycle cut: sharing was disabled, the shared repo changed, or a
-                // device was revoked — end this stream unconditionally so the phone
-                // must reconnect and re-authorize against the new state. ANY result
-                // ends it: Ok is a real cut; Lagged means we missed one but a cut
-                // still happened; Closed can't occur while `LanState` holds the
-                // Sender, but we match it defensively and treat it the same (end).
-                _cut = cut_rx.recv() => None,
+                // Lifecycle cut: sharing was disabled, a device was revoked (All), or
+                // a single repo left the registry (Repo). An `All` cut always ends
+                // this stream; a `Repo(p)` cut ends it only when `p` names THIS
+                // stream's repo — otherwise re-arm the select and keep forwarding, so
+                // a still-registered repo's stream survives another repo's removal.
+                // `Lagged` = an All cut (fail-safe); `Closed` (defensive) ends it.
+                cut = cut_rx.recv() => match cut {
+                    Ok(MonitorCut::All) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => None,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
+                    Ok(MonitorCut::Repo(p)) => {
+                        if crate::state::repo_paths_match(&p, &repo) {
+                            None
+                        } else {
+                            // Not our repo — keep forwarding (re-arm the unfold).
+                            Some((Ok(Event::default().comment("")), (rx, cut_rx, repo, false)))
+                        }
+                    }
+                },
                 // Broadcast side: forward events to the client.
                 recv = rx.recv() => match recv {
                     Ok(ev) => {
@@ -201,7 +223,7 @@ fn forward_stream(
                         match serde_json::to_string(&ev) {
                             Ok(text) => Some((
                                 Ok(Event::default().data(text)),
-                                (rx, cut_rx, terminal),
+                                (rx, cut_rx, repo, terminal),
                             )),
                             // A ReviewEvent that won't serialize is a bug, not a
                             // client-recoverable state; end the stream.
@@ -217,7 +239,7 @@ fn forward_stream(
                             "text": format!("…skipped {n} events")
                         })
                         .to_string();
-                        Some((Ok(Event::default().data(notice)), (rx, cut_rx, false)))
+                        Some((Ok(Event::default().data(notice)), (rx, cut_rx, repo, false)))
                     }
                     // The stream ended and its registry entry (and sender) dropped.
                     Err(RecvError::Closed) => None,
