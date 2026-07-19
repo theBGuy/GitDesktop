@@ -82,6 +82,8 @@ pub fn build_router(state: RouterState) -> Router {
         .route("/api/repo/diff/file", get(git::diff_file))
         .route("/api/forge/prs", get(forge::pr_list))
         .route("/api/forge/prs/{number}", get(forge::pr_view))
+        .route("/api/forge/prs/{number}/timeline", get(forge::pr_timeline))
+        .route("/api/forge/prs/{number}/threads", get(forge::pr_threads))
         .route("/api/forge/issues", get(forge::issue_list))
         .route("/api/forge/issues/{number}", get(forge::issue_view))
         .route("/api/forge/ci/runs", get(forge::ci_run_list))
@@ -110,6 +112,14 @@ pub fn build_router(state: RouterState) -> Router {
         .route("/api/repos/{repoId}/diff/file", get(git::diff_file))
         .route("/api/repos/{repoId}/prs", get(forge::pr_list))
         .route("/api/repos/{repoId}/prs/{number}", get(forge::pr_view))
+        .route(
+            "/api/repos/{repoId}/prs/{number}/timeline",
+            get(forge::pr_timeline),
+        )
+        .route(
+            "/api/repos/{repoId}/prs/{number}/threads",
+            get(forge::pr_threads),
+        )
         .route("/api/repos/{repoId}/issues", get(forge::issue_list))
         .route("/api/repos/{repoId}/issues/{number}", get(forge::issue_view))
         .route("/api/repos/{repoId}/ci/runs", get(forge::ci_run_list))

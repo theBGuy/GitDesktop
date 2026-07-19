@@ -109,8 +109,8 @@ export function ErrorState({
     // A local-only repo (no `origin` remote — the desktop shows "Publish
     // repository…"). PRs/CI live on a forge, so there's nothing to fetch yet.
     // This is a teaching state, not an error: calm empty-state treatment, and NO
-    // retry (retrying can't conjure a remote). See `ApiError.isNoRemote` for why
-    // the detection is a display-only heuristic.
+    // retry (retrying can't conjure a remote). Detection is the server-minted
+    // `noRemote` error kind (see `ApiError.isNoRemote`).
     return (
       <CenteredState title="No remote yet">
         PRs and CI live on a forge like GitHub. Publish this repository from

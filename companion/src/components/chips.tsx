@@ -5,7 +5,9 @@ import {
   ClockIcon,
   GitMergeIcon,
   GitPullRequestIcon,
+  MagnifyingGlassIcon,
   ProhibitIcon,
+  RobotIcon,
   XCircleIcon,
 } from "@phosphor-icons/react";
 import type { ReactNode } from "react";
@@ -75,6 +77,27 @@ export function PrStateChip({
       icon={<GitPullRequestIcon size={14} />}
       label="Open"
       className="bg-success/15 text-success"
+    />
+  );
+}
+
+/** An agent stream's kind chip — an AI PR **review** or an agent **session**.
+ *  Icon + text so the distinction never rests on color alone (WCAG 1.4.1). */
+export function ReviewKindChip({ kind }: { kind: "review" | "session" }) {
+  if (kind === "review") {
+    return (
+      <Chip
+        icon={<MagnifyingGlassIcon size={14} />}
+        label="Review"
+        className="bg-info/15 text-info"
+      />
+    );
+  }
+  return (
+    <Chip
+      icon={<RobotIcon size={14} />}
+      label="Session"
+      className="bg-primary/15 text-primary"
     />
   );
 }

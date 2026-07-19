@@ -8,7 +8,13 @@
 // Authorization header anywhere here — `credentials: "same-origin"` is the whole
 // auth story. A 401 means the cookie is missing/revoked (→ re-pair).
 
-import type { PrDetails, PrInfo, RepoStatus } from "@/lib/git/types";
+import type {
+  PrDetails,
+  PrInfo,
+  PrTimelineEvent,
+  RepoStatus,
+  ReviewThreadOut,
+} from "@/lib/git/types";
 import type { RunDetail, WorkflowRun } from "@/lib/github/actions";
 
 /** A failed API call. `status` is the HTTP status (0 = the server was
@@ -69,17 +75,13 @@ export class ApiError extends Error {
    * fetched. NOT a failure to report as an error; the screens render a calm
    * teaching state instead.
    *
-   * The server surfaces this as `AppError::Git` (`kind: "git"`) whose message is
-   * the raw git stderr — `error: No such remote 'origin'` (confirmed by running
-   * `git remote get-url origin` on a remoteless repo). `kind: "git"` is shared by
-   * every git failure, so it can't distinguish this case; a case-insensitive
-   * substring on the message is the only signal. This is a DISPLAY-ONLY
-   * heuristic: if git's wording ever changes and the match misses, the screen
-   * simply falls back to the generic error-with-retry state — no correctness or
-   * data risk, just a less-tailored message.
+   * The server now mints a dedicated `400 { kind: "noRemote", … }` for this case,
+   * so detection is an exact `kind` match — no message-substring heuristic. (It
+   * previously sniffed the raw git stderr of a shared `kind: "git"` error, which
+   * would silently miss if git's wording changed.)
    */
   get isNoRemote(): boolean {
-    return this.kind === "git" && /no such remote/i.test(this.message);
+    return this.kind === "noRemote";
   }
 }
 
@@ -149,6 +151,29 @@ export const fetchCiRuns = (limit = 20) =>
 
 export const fetchCiRun = (id: number) =>
   getJson<RunDetail>(`/api/forge/ci/runs/${id}`);
+
+/** A PR's activity timeline (force-pushes, label changes, review requests, state
+ *  changes, approvals). Same neutral shape the desktop's `forgePrTimeline` returns. */
+export const fetchPrTimeline = (number: number) =>
+  getJson<PrTimelineEvent[]>(`/api/forge/prs/${number}/timeline`);
+
+/** A PR's file:line-anchored review threads with their comment chains. Same
+ *  neutral shape the desktop's `forgePrReviewThreads` returns. */
+export const fetchPrThreads = (number: number) =>
+  getJson<ReviewThreadOut[]>(`/api/forge/prs/${number}/threads`);
+
+// ── Agent streams (live AI review / agent sessions) ───────────────────────────
+
+/** One shareable agent stream — an AI PR review (`review`) or an agent session
+ *  (`session`). `id` is a UUID-like STRING (never a number). `startedAt` is
+ *  ISO-8601. The live event stream is at `/api/reviews/{id}/stream` (SSE). */
+export interface ReviewInfo {
+  id: string;
+  kind: "review" | "session";
+  startedAt: string;
+}
+
+export const fetchReviews = () => getJson<ReviewInfo[]>("/api/reviews");
 
 // ── Pairing ──────────────────────────────────────────────────────────────────
 
