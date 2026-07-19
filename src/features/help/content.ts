@@ -583,7 +583,9 @@ shape plus the word, never color alone) — so a finished review (including Copi
 visible after the reviewer leaves the pending-request list.
 
 The Conversation tab is a single **date-sorted activity feed** — reviews, comments,
-pushed commits, and events all interleaved oldest-to-newest. A run of pushes collapses
+pushed commits, and events all interleaved oldest-to-newest. Every entry carries a
+**relative timestamp** (e.g. *2 days ago*), and hovering it reveals the exact local
+date and time. A run of pushes collapses
 into one **pushed N commits** row that expands to the commits (arrow-navigable), and each
 commit's short SHA is clickable — it jumps to that commit's detail. On GitHub, events show
 up as calm one-line entries: force-pushes, label added/removed, review requested, marked

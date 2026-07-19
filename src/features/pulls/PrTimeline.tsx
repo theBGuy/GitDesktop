@@ -14,10 +14,10 @@ import {
   XCircleIcon,
 } from "@phosphor-icons/react";
 import { type KeyboardEvent, type MouseEvent, useState } from "react";
+import { RelativeTime } from "@/components/relative-time";
 import type { CommitRow } from "@/features/conversations/CommitsList";
 import type { PrTimelineEvent } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
-import { formatRelativeTime } from "@/lib/time";
 import { cn } from "@/lib/utils";
 
 /** A merged timeline entry: the keys the feed sorts by, plus EITHER a ready
@@ -186,7 +186,7 @@ export function TimelineEventRow({ event }: { event: PrTimelineEvent }) {
         </span>
         {event.date && (
           <span className="shrink-0 text-muted-foreground/80">
-            · {formatRelativeTime(event.date)}
+            · <RelativeTime date={event.date} />
           </span>
         )}
       </div>
@@ -209,6 +209,9 @@ export function PushedCommitsRow({
 }) {
   const [open, setOpen] = useState(false);
   const n = commits.length;
+  // The feed is sorted oldest→newest and the run preserves that order, so the
+  // newest commit (the run's timestamp) is the last one.
+  const headerDate = commits[n - 1]?.date;
 
   // Arrow keys walk the sublist; Enter/Space activate the focused row — both
   // route through `onSelectCommit`. Wired only when the list is interactive.
@@ -240,19 +243,26 @@ export function PushedCommitsRow({
         label={`pushed ${n} commit${n === 1 ? "" : "s"}`}
       />
       <div className="min-w-0 flex-1 py-0.5">
-        <button
-          type="button"
-          onClick={() => setOpen((v) => !v)}
-          aria-expanded={open}
-          className="flex cursor-pointer items-center gap-1 text-muted-foreground hover:text-foreground"
-        >
-          {open ? (
-            <CaretDownIcon className="size-3 shrink-0" />
-          ) : (
-            <CaretRightIcon className="size-3 shrink-0" />
+        <div className="flex items-center gap-x-1.5">
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            aria-expanded={open}
+            className="flex cursor-pointer items-center gap-1 text-muted-foreground hover:text-foreground"
+          >
+            {open ? (
+              <CaretDownIcon className="size-3 shrink-0" />
+            ) : (
+              <CaretRightIcon className="size-3 shrink-0" />
+            )}
+            pushed {n} commit{n === 1 ? "" : "s"}
+          </button>
+          {headerDate && (
+            <span className="shrink-0 text-muted-foreground/80">
+              · <RelativeTime date={headerDate} />
+            </span>
           )}
-          pushed {n} commit{n === 1 ? "" : "s"}
-        </button>
+        </div>
         {open && (
           <ul className="mt-1 space-y-0.5 border-l pl-2" onKeyDown={onKeyDown}>
             {commits.map((c) =>
@@ -277,6 +287,11 @@ export function PushedCommitsRow({
                     <span className="shrink-0 font-mono text-[11px] text-primary underline-offset-2 group-hover:underline">
                       {c.shortSha}
                     </span>
+                    {c.date && (
+                      <span className="shrink-0 text-[11px] text-muted-foreground/80">
+                        · <RelativeTime date={c.date} />
+                      </span>
+                    )}
                   </button>
                 </li>
               ) : (
@@ -291,6 +306,11 @@ export function PushedCommitsRow({
                     <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
                       {c.shortSha}
                     </span>
+                    {c.date && (
+                      <span className="shrink-0 text-[11px] text-muted-foreground/80">
+                        · <RelativeTime date={c.date} />
+                      </span>
+                    )}
                   </div>
                 </li>
               ),

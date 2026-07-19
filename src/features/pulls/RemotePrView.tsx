@@ -24,6 +24,7 @@ import {
   MarkdownEditor,
   type MarkdownEditorHandle,
 } from "@/components/markdown-editor";
+import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -1347,6 +1348,11 @@ export function RemotePrView({
                               >
                                 View thread
                               </button>
+                            )}
+                            {r.date && (
+                              <span className="shrink-0 text-muted-foreground/80">
+                                · <RelativeTime date={r.date} />
+                              </span>
                             )}
                           </div>
                         </div>
