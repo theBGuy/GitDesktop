@@ -488,7 +488,8 @@ Worktrees that AI agent sessions use internally are hidden here.{{/ai}}`,
     label: "Syncing & conflicts",
     body: `# Fetch, pull, push & conflicts
 
-The header shows **Fetch / Pull / Push** with ahead/behind indicators.
+The header shows **Push / Pull / Fetch**, with the number of commits to push or pull shown
+right on the **Push** and **Pull** buttons.
 
 - **Fetch** ({{kbd:fetch}}) updates your view of the remote without changing your branch.
 - **Pull** ({{kbd:pull}}) is fast-forward only by design — it won't create surprise merge

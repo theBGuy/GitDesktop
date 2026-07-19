@@ -961,7 +961,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                 )}
                 {/* Two distinct indicators per row: (1) the sync indicator
                     below shows the branch's OWN upstream push/pull state in the
-                    arrow vocabulary (matching the header's Push/Pull badges), so
+                    arrow vocabulary (matching the counts on the header's
+                    Push/Pull buttons), so
                     "Update from {upstream}" / "Push to {upstream}" stay
                     discoverable on every branch; (2) the divergence indicator
                     further down shows how far the branch has drifted from the
