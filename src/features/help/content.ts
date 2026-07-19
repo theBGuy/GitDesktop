@@ -594,7 +594,7 @@ MRs**, **Bitbucket PRs**, and **local PRs** too — see their sections below for
 each one reports.
 
 CI checks appear as a **rollup summary** — **✓ N passed · ✕ M failed · ● K pending ·
-⊖ K skipped**, each count with its own icon and word so status never rides on color
+⊖ J skipped**, each count with its own icon and word so status never rides on color
 alone. Skipped checks (plus neutral or stale ones) show as their own muted segment rather
 than masquerading as pending. It auto-expands whenever something has failed. Expanding lists
 the checks failures-first (arrow-navigable). A **GitHub Actions** check that's still
