@@ -18,7 +18,8 @@ import {
   useDefaultBranch,
   useRepoStatus,
 } from "@/lib/git/queries";
-import { formatBinding } from "@/lib/hotkeys/binding";
+import { eventToBinding, formatBinding } from "@/lib/hotkeys/binding";
+import { useEffectiveBindings } from "@/lib/hotkeys/hotkeys";
 import { useCreateLocalPr } from "@/lib/pulls/queries";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
@@ -132,6 +133,28 @@ export function CreateLocalPrDialog({
   const ahead = comparison.data?.ahead ?? [];
   const sameBranch = base === head;
 
+  // AI title+description generation — shared by the Generate button's onClick and
+  // the dialog-local generate chord below. Verbatim the button's prior body.
+  function runGenerate() {
+    generate(
+      base,
+      head,
+      ahead.map((c) => c.subject),
+      (d) => {
+        form.setFieldValue("title", d.title);
+        form.setFieldValue("body", d.body);
+      },
+    );
+  }
+  // Context-sensitive reuse of the `generate-commit-message` binding (mod+g by
+  // default) while this dialog is open — never a hardcoded chord, so a
+  // Settings → Keyboard rebinding drives it. null = explicitly unbound.
+  const generateBinding =
+    useEffectiveBindings().get("generate-commit-message") ?? null;
+  const generateHint = generateBinding
+    ? ` (${formatBinding(generateBinding)})`
+    : "";
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
@@ -150,6 +173,25 @@ export function CreateLocalPrDialog({
           if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
             e.preventDefault();
             if (!generating) form.handleSubmit();
+            return;
+          }
+          // The generate-commit-message chord (mod+g by default) runs this
+          // dialog's own Generate while it's open. Only when AI is on (no
+          // Generate surface otherwise) and the chord is bound. ALWAYS swallow
+          // it: this dialog is hoisted over the Changes tab, where the global
+          // generate-commit-message action has a live handler — without this the
+          // chord would generate a COMMIT MESSAGE behind the dialog. Run Generate
+          // only when its button would be enabled; while generating we swallow
+          // but DON'T cancel (an accidental repeat must not abort a running one).
+          if (
+            aiEnabled &&
+            generateBinding !== null &&
+            eventToBinding(e) === generateBinding
+          ) {
+            e.preventDefault();
+            if (!generating && !(sameBranch || ahead.length === 0)) {
+              runGenerate();
+            }
           }
         }}
       >
@@ -251,18 +293,8 @@ export function CreateLocalPrDialog({
                         variant="outline"
                         size="xs"
                         disabled={sameBranch || ahead.length === 0}
-                        onClick={() =>
-                          generate(
-                            base,
-                            head,
-                            ahead.map((c) => c.subject),
-                            (d) => {
-                              form.setFieldValue("title", d.title);
-                              form.setFieldValue("body", d.body);
-                            },
-                          )
-                        }
-                        title="Generate the title and description with AI"
+                        onClick={runGenerate}
+                        title={`Generate the title and description with AI${generateHint}`}
                       >
                         <SparkleIcon data-icon="inline-start" />
                         Generate
