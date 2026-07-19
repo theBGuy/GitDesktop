@@ -10,6 +10,7 @@ import { ActivityStrip } from "@/features/activity/ActivityDock";
 import { AutomationResultDialog } from "@/features/automations/AutomationResultDialog";
 import { HelpScreen } from "@/features/help/HelpScreen";
 import { RepositoryView } from "@/features/repository/RepositoryView";
+import { repoBasename } from "@/features/settings/mcp/shared";
 import { SettingsScreen } from "@/features/settings/SettingsScreen";
 import { CommandPalette } from "@/features/shortcuts/CommandPalette";
 import { ShortcutsDialog } from "@/features/shortcuts/ShortcutsDialog";
@@ -20,11 +21,18 @@ import { useRepoDrop } from "@/features/welcome/useRepoDrop";
 import { WelcomeScreen } from "@/features/welcome/WelcomeScreen";
 import { syncAnalytics, track } from "@/lib/analytics";
 import { useBackgroundPrSync } from "@/lib/automations/useBackgroundPrSync";
-import { useGitInstalled, useLanStatus } from "@/lib/git/queries";
+import {
+  useGitInstalled,
+  useLanSharedRepos,
+  useLanShareRepo,
+  useLanStatus,
+  useLanUnshareRepo,
+} from "@/lib/git/queries";
 import { useHotkeyAction, useHotkeysListener } from "@/lib/hotkeys/hotkeys";
 import { reloadLocalPrs } from "@/lib/pulls/local";
 import { useSaveSettings, useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
+import { errorMessage } from "@/lib/tauri/invoke";
 import { COLD_START } from "@/lib/test-mode";
 import { useLatestRef } from "@/lib/use-latest-ref";
 
@@ -35,10 +43,16 @@ function App() {
   const openHelp = useUiStore((s) => s.openHelp);
   const toggleActivity = useUiStore((s) => s.toggleActivity);
   const repoPath = useUiStore((s) => s.repoPath);
+  const repoName = useUiStore((s) => s.repoName);
   const gitInstalled = useGitInstalled();
   // Kept mounted app-wide so the LAN "Sharing ON" banner and the companion
   // settings panel share one 5s poller.
   const lanStatus = useLanStatus();
+  const shareRepo = useLanShareRepo();
+  const unshareRepo = useLanUnshareRepo();
+  // Read even while sharing is off (same as the panel) so the share/unshare
+  // palette twins gate correctly — exactly one is offered for the open repo.
+  const sharedRepos = useLanSharedRepos({ enabled: true });
   const queryClient = useQueryClient();
   const settings = useSettings();
   const saveSettings = useSaveSettings();
@@ -141,6 +155,49 @@ function App() {
   );
   useHotkeyAction("browse-mcp-registry", openMcpBrowse, !settings.data?.hideAi);
   useHotkeyAction("open-companion-settings", () => openSettings("companion"));
+  // Share/unshare the open repo with paired phones. These are complementary
+  // palette twins: the palette only lists actions with an enabled handler, so
+  // gating them on `alreadyShared` shows exactly one at a time (Share when the
+  // open repo isn't shared, Unshare when it is). The compare is verbatim path
+  // equality, matching CompanionSection (the stored-path-verbatim contract).
+  const sharedMatch =
+    repoPath !== null
+      ? (sharedRepos.data?.find((r) => r.path === repoPath) ?? null)
+      : null;
+  const alreadyShared = sharedMatch !== null;
+  // Share adds the open repo so it stays reachable even after you switch away.
+  // A short success/error toast is the right feedback here (a terminal result,
+  // not long-running state).
+  useHotkeyAction(
+    "lan-share-current-repo",
+    () => {
+      if (!repoPath) return;
+      const name = repoName ?? repoBasename(repoPath);
+      shareRepo.mutate(repoPath, {
+        onSuccess: () => toast.success(`Shared ${name} with paired phones`),
+        onError: (e) => toast.error(errorMessage(e)),
+      });
+    },
+    Boolean(repoPath) && !alreadyShared,
+  );
+  // Unshare the twin: pass the matched entry's stored path verbatim (the frozen
+  // contract). The unshared repo is by definition the OPEN one, so it stays
+  // reachable until the user switches away — say so honestly.
+  useHotkeyAction(
+    "lan-unshare-current-repo",
+    () => {
+      if (!sharedMatch) return;
+      const name = repoName ?? repoBasename(sharedMatch.path);
+      unshareRepo.mutate(sharedMatch.path, {
+        onSuccess: () =>
+          toast.success(
+            `Unshared ${name} — phones lose it when you switch repos.`,
+          ),
+        onError: (e) => toast.error(errorMessage(e)),
+      });
+    },
+    Boolean(repoPath) && alreadyShared,
+  );
   useHotkeyAction("show-help", openHelp);
   useHotkeyAction("toggle-notifications", toggleActivity);
   useHotkeyAction("show-shortcuts", () => setShortcutsOpen(true));

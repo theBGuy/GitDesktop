@@ -1,134 +1,243 @@
 import { useEffect } from "react";
 import { BottomNav, TopBar } from "./components/Chrome";
 import { ErrorState } from "./components/states";
+import type { RepoSummary } from "./lib/api";
 import { lastPairedAt } from "./lib/pairing-signal";
-import { asApiError, useStatus } from "./lib/queries";
-import { navigate, useRoute } from "./lib/router";
+import { asApiError, useRepos } from "./lib/queries";
+import {
+  isRepoId,
+  navigate,
+  type Route,
+  replace,
+  repoHash,
+  useRoute,
+} from "./lib/router";
 import { AgentsBody, AgentWatch } from "./screens/Agents";
 import { CiBody, CiDetail } from "./screens/Ci";
 import { Pair } from "./screens/Pair";
 import { PrDetail, PrsBody } from "./screens/Prs";
+import { ReposBody } from "./screens/Repos";
 import { StatusBody } from "./screens/Status";
 
 // The app shell. It owns the cross-cutting states so every screen inherits them:
 //   • 401 anywhere → route to #pair (token revoked / never paired)
-//   • 409 no-repo → a central teaching state
+//   • the selected repository (from the URL) + the shared-repos list
 //   • the sticky TopBar (repo name + connection) + BottomNav
 // Degraded/unreachable presentation is NOT here: each body renders its own
-// StaleBanner keyed on its OWN query (see the round-4 finding in states.tsx). A
-// shell-level banner derived from the status query doubled the message on the
-// Status tab and never fired on PRs/CI — so it was removed.
-// The Status query doubles as the shell's connection probe: it drives the
-// TopBar's live/offline dot and the global 401 redirect.
+// StaleBanner keyed on its OWN query (see the round-4 finding in states.tsx).
+//
+// The selected repo is a first-class, URL-persisted concept (slice 4). The
+// canonical routes are scoped (`#r/{repoId}/…`); the shell resolves a repo-less
+// route (a legacy bookmark, or the bare app entry) into a scoped one — or the
+// picker — once it knows the shared set. The `["repos"]` query doubles as the
+// device-level connection + auth signal (a 401 on it routes through the central
+// QueryCache → #pair, same as any other query).
 
 export default function App() {
   const route = useRoute();
 
-  // Probe the shared repo's status regardless of the active tab — it's the
-  // cheapest always-available authenticated call, so it's our connection +
-  // auth signal. Only poll it while Status is the visible tab (other tabs run
-  // their own polling query); elsewhere it still fetches once on mount/route
-  // change for the header + 401 check.
-  const statusQuery = useStatus(
-    route.tab === "status" && !route.isPairing,
-    // No authed traffic while unpaired: an unpaired page 401s on every probe.
-    !route.isPairing,
-  );
-  const statusErr = asApiError(statusQuery.error);
+  // The shared repos list — device-level (no repo scope), so it's our always-
+  // available authenticated probe AND the source of truth for the picker/title.
+  const reposQuery = useRepos();
+  const reposErr = asApiError(reposQuery.error);
+  const repos = reposQuery.data;
 
-  // Global 401 → the device isn't paired (or was revoked). Bounce to #pair —
-  // but ONLY on a FRESH 401.
+  // Global 401 → the device isn't paired (or was revoked). Bounce to #pair — but
+  // ONLY on a FRESH 401 (newer than the last successful pair), and never while a
+  // refetch is in flight (the settled result may be a 200). This mirrors the
+  // original status-probe guard, now driven by the device-level repos query so it
+  // holds on every route (including #repos, which has no repo to probe).
   //
   // LIVE-FOUND RACE (post-pair bounce): while the user sat on #pair, this probe
-  // cached a 401 (no cookie yet). Without the guards below, pairing → navigate
-  // to #status → this effect reads the STALE cached 401 → bounces the freshly-
-  // paired user straight back to the PIN screen (Back then lands on #status,
-  // authed). Two guards make a pre-pair 401 un-bounceable:
-  //   • `!isFetching` — never act while a refetch is in flight (the settled
-  //     result may be a 200);
-  //   • `errorUpdatedAt > lastPairedAt()` — the 401 must be NEWER than the last
-  //     successful pair. Pair.tsx stamps `markPaired()` and awaits a status
-  //     refetch before navigating, so a genuine post-pair revoke still bounces,
-  //     but the pre-pair 401 (older timestamp) never does.
+  // could cache a 401 (no cookie yet); without these guards, pairing → navigate
+  // would read the STALE 401 and bounce the freshly-paired user back to the PIN
+  // screen. `errorUpdatedAt > lastPairedAt()` + `!isFetching` make a pre-pair 401
+  // un-bounceable; a genuine post-pair revoke (newer timestamp) still bounces.
+  // (The central QueryCache onError also redirects on 401; this guarded effect is
+  // the belt-and-braces that survives the post-pair race.)
   useEffect(() => {
     if (
-      statusErr?.isUnauthorized &&
+      reposErr?.isUnauthorized &&
       !route.isPairing &&
-      !statusQuery.isFetching &&
-      statusQuery.errorUpdatedAt > lastPairedAt()
+      !reposQuery.isFetching &&
+      reposQuery.errorUpdatedAt > lastPairedAt()
     ) {
       navigate("#pair");
     }
   }, [
-    statusErr,
+    reposErr,
     route.isPairing,
-    statusQuery.isFetching,
-    statusQuery.errorUpdatedAt,
+    reposQuery.isFetching,
+    reposQuery.errorUpdatedAt,
   ]);
+
+  // Bootstrap/redirect: a repo-less route that isn't #pair/#repos needs resolving
+  // once the shared set is known. Exactly one repo, or an active repo → REPLACE to
+  // its scoped equivalent (preserving the tab tail). Anything else — multiple repos
+  // with none active, OR zero shared repos — sends to the picker, which owns both
+  // the choose-one and the nothing-shared teaching states. REPLACE (not push) so
+  // Back doesn't bounce onto the bare legacy hash that would just redirect again.
+  useEffect(() => {
+    if (route.isPairing || route.isRepos || route.repoId != null) return;
+    if (!repos) return; // wait for the list
+    const target = resolveRepo(repos);
+    if (target) {
+      replace(repoHash(target, tabTail(route)));
+    } else {
+      replace("#repos");
+    }
+  }, [route, repos]);
 
   if (route.isPairing) {
     return <Pair />;
   }
 
-  const repoName = deriveRepoName(statusQuery.data?.branch.name ?? null);
-  const connected = statusQuery.isSuccess;
-  // A no-repo (409) is a whole-app state — show it centrally, not per tab.
-  const noRepo = statusErr?.isNoActiveRepo ?? false;
+  const selectedRepo =
+    route.repoId != null
+      ? (repos?.find((r) => r.id === route.repoId) ?? null)
+      : null;
+  // The title: the selected repo's name, a neutral label on the picker, or a
+  // fallback while the list loads / mid-redirect. `connected` is the device-level
+  // reachability of the repos probe.
+  const title = route.isRepos
+    ? "Choose repository"
+    : (selectedRepo?.name ?? "GitDesktop");
+  const connected = reposQuery.isSuccess;
 
   return (
     <div className="mx-auto flex min-h-dvh max-w-md flex-col">
       <TopBar
-        title={repoName}
-        subtitle={statusQuery.data?.branch.name ?? undefined}
+        title={title}
+        // The title is a tappable "switch repository" trigger EXCEPT on the picker
+        // itself (nowhere to switch to) — the shell passes the handler only when a
+        // repo context exists.
+        onSwitchRepo={route.isRepos ? undefined : () => navigate("#repos")}
         connected={connected}
       />
 
       <main className="flex-1">
-        {noRepo ? (
-          <ErrorState
-            error={statusQuery.error}
-            onRetry={() => statusQuery.refetch()}
-          />
-        ) : (
-          <Screen route={route} />
-        )}
+        <Shell
+          route={route}
+          repos={repos}
+          selectedRepo={selectedRepo}
+          reposError={reposQuery.error}
+          onReposRetry={() => reposQuery.refetch()}
+        />
       </main>
 
-      <BottomNav />
+      <BottomNav repoId={route.repoId} />
     </div>
   );
 }
 
-function Screen({ route }: { route: ReturnType<typeof useRoute> }) {
+/** Pick the repo to auto-select for a repo-less route: the single shared repo, or
+ *  the active one (open on the desktop). Returns its id, or null when the choice
+ *  is ambiguous (multiple repos, none active) or empty.
+ *
+ *  Defense-in-depth: ignore any repo whose id fails the router's grammar. A
+ *  redirect to `#r/{bad}/…` would parse back to `repoId: null`, re-fire the
+ *  bootstrap effect, and loop; degrading a malformed id to the picker (or the
+ *  next valid candidate) is the safe failure. */
+function resolveRepo(repos: RepoSummary[]): string | null {
+  const valid = repos.filter((r) => isRepoId(r.id));
+  if (valid.length === 1) return valid[0].id;
+  const active = valid.find((r) => r.active);
+  return active ? active.id : null;
+}
+
+/** The `{tab}[/{detail}]` tail of the current route, for preserving context across
+ *  a redirect. A legacy `#prs/4` becomes `prs/4`; a bare `#status` becomes
+ *  `status`. */
+function tabTail(route: Route): string {
+  if (route.tab === "prs" && route.detailId != null)
+    return `prs/${route.detailId}`;
+  if (route.tab === "ci" && route.detailId != null)
+    return `ci/${route.detailId}`;
+  if (route.tab === "agents" && route.streamId != null)
+    return `agents/${route.streamId}`;
+  return route.tab;
+}
+
+/** Route to the right body. The picker (`#repos`) is handled here; a repo-less
+ *  route normally renders nothing (a redirect is pending — see the bootstrap
+ *  effect) but shows the repos error state when the list can't load; a scoped
+ *  route whose repo isn't in the shared set falls back to the picker. */
+function Shell({
+  route,
+  repos,
+  selectedRepo,
+  reposError,
+  onReposRetry,
+}: {
+  route: Route;
+  repos: RepoSummary[] | undefined;
+  selectedRepo: RepoSummary | null;
+  reposError: unknown;
+  onReposRetry: () => void;
+}) {
+  if (route.isRepos) {
+    return <ReposBody currentRepoId={route.repoId} currentTab={null} />;
+  }
+
+  // Repo-less route (bare entry, a legacy bookmark, or the post-pair
+  // `navigate("#status")`): the bootstrap effect redirects to a scoped route or
+  // the picker ONCE the list loads. But if the list itself can't load (desktop
+  // unreachable / 5xx — a 401 already bounced to #pair), there's no repo to
+  // redirect to and no tab to fall back on, so render the repos error state with a
+  // Retry rather than a permanent blank main area. (`ErrorState` owns the
+  // unreachable/generic branches; `noSuchRepo` can't occur on the un-scoped repos
+  // route.)
+  if (route.repoId == null) {
+    if (!repos && reposError != null) {
+      return <ErrorState error={reposError} onRetry={onReposRetry} />;
+    }
+    // Still loading, or a redirect is pending — render nothing to avoid a flash.
+    return null;
+  }
+
+  // A scoped route whose repoId isn't in the loaded shared set — it just stopped
+  // being shared, or the URL was hand-crafted. Route through the picker (with the
+  // current tab preserved) rather than firing scoped queries that would 404. While
+  // the list is still loading (`repos` undefined) we let the screen mount — its own
+  // query surfaces a `noSuchRepo` teaching state if the id is genuinely gone.
+  if (repos && !selectedRepo) {
+    return <ReposBody currentRepoId={route.repoId} currentTab={route.tab} />;
+  }
+
+  return <Screen route={route} repoId={route.repoId} />;
+}
+
+function Screen({ route, repoId }: { route: Route; repoId: string }) {
   if (route.tab === "prs") {
     return route.detailId != null ? (
-      <PrDetail number={route.detailId} />
+      <PrDetail repoId={repoId} number={route.detailId} />
     ) : (
-      <PrsBody active />
+      <PrsBody repoId={repoId} active />
     );
   }
   if (route.tab === "ci") {
     return route.detailId != null ? (
-      <CiDetail id={route.detailId} />
+      <CiDetail repoId={repoId} id={route.detailId} />
     ) : (
-      <CiBody active />
+      <CiBody repoId={repoId} active />
     );
   }
   if (route.tab === "agents") {
     // The ternary UNMOUNTS the list while a watch is open, so the list's polling
     // query stops on its own — the list is only mounted (and thus polling) in the
-    // else-arm, where it's always the active view.
+    // else-arm, where it's always the active view. Key the watch by `repoId:id` so
+    // a change of either forces a fresh mount (resetting the SSE reducer state) —
+    // no current path swaps them under a mounted watch, but keying makes that a
+    // non-footgun rather than relying on it never happening.
     return route.streamId != null ? (
-      <AgentWatch id={route.streamId} />
+      <AgentWatch
+        key={`${repoId}:${route.streamId}`}
+        repoId={repoId}
+        id={route.streamId}
+      />
     ) : (
-      <AgentsBody active />
+      <AgentsBody repoId={repoId} active />
     );
   }
-  return <StatusBody active />;
-}
-
-/** A short repo label. The status API exposes the branch, not the repo name, so
- *  fall back to a neutral title until a richer field exists (a later slice). */
-function deriveRepoName(_branch: string | null): string {
-  return "GitDesktop";
+  return <StatusBody repoId={repoId} active />;
 }

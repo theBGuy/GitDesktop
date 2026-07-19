@@ -40,7 +40,8 @@
 //! | `/api/reviews`                        | `reviews`                             |
 //! | `/api/reviews/{id}/stream`            | `reviews/{id}/stream`                 |
 //!
-//! Plus `GET /api/repos` (protected) → the registered repos as `[{ id, name }]`.
+//! Plus `GET /api/repos` (protected) → the registered repos (active ∪ shared) as
+//! `[{ id, name, active }]`.
 //!
 //! ## The shared-handler extraction trap
 //!
@@ -203,9 +204,12 @@ fn no_such_repo() -> Response {
         .into_response()
 }
 
-/// GET /api/repos — the registered repos as `[{ id, name }]` (camelCase). Today
-/// that's the desktop's active repo (or empty when none is shared). Only the
-/// opaque id + display name reach the wire — never a filesystem path.
+/// GET /api/repos — the registered repos as `[{ id, name, active }]` (camelCase):
+/// the desktop's ACTIVE repo ∪ the persisted SHARED set. `active` is `true` for the
+/// entry whose path matches the desktop's current active repo (per
+/// [`crate::state::repo_paths_match`]) — at most one, and none when no repo is
+/// active. Only the opaque id + display name + `active` flag reach the wire — never
+/// a filesystem path.
 pub(crate) async fn list_repos(
     axum::extract::State(state): axum::extract::State<crate::lan::auth::RouterState>,
 ) -> Response {
@@ -214,12 +218,24 @@ pub(crate) async fn list_repos(
     use axum::Json;
     use serde_json::json;
 
+    // Snapshot the active path once (drop its lock before locking `repos`, never
+    // nested) so every entry's `active` flag is computed against one consistent value.
+    let active = state
+        .active_repo
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
     let items: Vec<_> = state
         .repos
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .iter()
-        .map(|(id, repo)| json!({ "id": id, "name": repo.name }))
+        .map(|(id, repo)| {
+            let is_active = active
+                .as_deref()
+                .is_some_and(|a| crate::state::repo_paths_match(&repo.path, a));
+            json!({ "id": id, "name": repo.name, "active": is_active })
+        })
         .collect();
     (StatusCode::OK, Json(items)).into_response()
 }

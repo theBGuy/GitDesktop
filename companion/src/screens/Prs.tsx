@@ -19,18 +19,30 @@ import { Markdown } from "../components/markdown";
 import {
   EmptyState,
   ErrorState,
+  isRepoGoneError,
+  RepoGoneState,
   SkeletonRows,
   StaleBanner,
 } from "../components/states";
 import { timeAgo } from "../lib/format";
 import { usePr, usePrs, usePrThreads, usePrTimeline } from "../lib/queries";
-import { navigate } from "../lib/router";
+import { navigate, repoHash } from "../lib/router";
 import { useRovingList } from "../lib/use-roving-list";
 
-/** The PR list. `active` gates polling. */
-export function PrsBody({ active }: { active: boolean }) {
-  const { data, isError, error, refetch } = usePrs(active);
+/** The PR list. `repoId` scopes the query; `active` gates polling. */
+export function PrsBody({
+  repoId,
+  active,
+}: {
+  repoId: string;
+  active: boolean;
+}) {
+  const { data, isError, error, refetch } = usePrs(repoId, active);
   const { register, onKeyDown } = useRovingList();
+
+  // Definitive gone WINS over stale data: a `noSuchRepo` 404 kicks to the teaching
+  // state even when a cached list is on hand (see isRepoGoneError).
+  if (isRepoGoneError(error)) return <RepoGoneState />;
 
   // Prefer stale data: keep the last-known list on screen even on error, with a
   // StaleBanner above it. Full-screen ErrorState only when there's nothing to
@@ -57,7 +69,7 @@ export function PrsBody({ active }: { active: boolean }) {
                 type="button"
                 ref={register(i)}
                 onKeyDown={onKeyDown}
-                onClick={() => navigate(`#prs/${pr.number}`)}
+                onClick={() => navigate(repoHash(repoId, `prs/${pr.number}`))}
                 className="flex w-full min-h-14 items-center gap-3 px-4 py-3 text-left"
               >
                 <PrRow pr={pr} />
@@ -93,15 +105,27 @@ function PrRow({ pr }: { pr: PrInfo }) {
 }
 
 /** A read-only PR detail. */
-export function PrDetail({ number }: { number: number }) {
-  const { data, isPending, isError, error, refetch } = usePr(number);
+export function PrDetail({
+  repoId,
+  number,
+}: {
+  repoId: string;
+  number: number;
+}) {
+  const { data, isPending, isError, error, refetch } = usePr(repoId, number);
+
+  // Definitive gone WINS: the whole detail (back-bar included) is replaced by the
+  // teaching state — "Choose repository" is the only sensible action once the repo
+  // is unshared. (ErrorState also routes noSuchRepo here, but making it explicit
+  // keeps it robust if the error handling below is ever reordered.)
+  if (isRepoGoneError(error)) return <RepoGoneState />;
 
   return (
     <div className="flex flex-col">
       <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-border bg-background/95 px-2 py-2 backdrop-blur">
         <button
           type="button"
-          onClick={() => navigate("#prs")}
+          onClick={() => navigate(repoHash(repoId, "prs"))}
           className="inline-flex min-h-11 items-center gap-1 rounded px-2 text-sm font-medium text-primary"
         >
           <ArrowLeftIcon size={16} />
@@ -145,8 +169,8 @@ export function PrDetail({ number }: { number: number }) {
           )}
 
           <ConversationSection detail={data} />
-          <ActivitySection number={number} />
-          <ThreadsSection number={number} />
+          <ActivitySection repoId={repoId} number={number} />
+          <ThreadsSection repoId={repoId} number={number} />
         </article>
       )}
     </div>
@@ -318,8 +342,22 @@ function ReviewStateBadge({ state }: { state: string }) {
 
 /** The PR's activity timeline (force-pushes, labels, review requests, state
  *  changes). Polls while the detail is open; a failure shows an inline retry. */
-function ActivitySection({ number }: { number: number }) {
-  const { data, isPending, isError, refetch } = usePrTimeline(number);
+function ActivitySection({
+  repoId,
+  number,
+}: {
+  repoId: string;
+  number: number;
+}) {
+  const { data, isPending, isError, error, refetch } = usePrTimeline(
+    repoId,
+    number,
+  );
+
+  // Definitive gone WINS: if this sub-section's poll is the first to see the 404
+  // (before the parent detail's own poll), take over the whole screen with the
+  // teaching state rather than showing a small inline section error.
+  if (isRepoGoneError(error)) return <RepoGoneState />;
 
   return (
     <section className="flex flex-col gap-2">
@@ -395,8 +433,21 @@ function short(oid: string): string {
 /** The PR's file:line-anchored review threads with their comments. Polls while the
  *  detail is open; a failure shows an inline retry. The diff hunk is deliberately
  *  omitted (too wide for the phone). */
-function ThreadsSection({ number }: { number: number }) {
-  const { data, isPending, isError, refetch } = usePrThreads(number);
+function ThreadsSection({
+  repoId,
+  number,
+}: {
+  repoId: string;
+  number: number;
+}) {
+  const { data, isPending, isError, error, refetch } = usePrThreads(
+    repoId,
+    number,
+  );
+
+  // Definitive gone WINS (see ActivitySection): a first-seen 404 here takes over
+  // the whole screen with the teaching state.
+  if (isRepoGoneError(error)) return <RepoGoneState />;
 
   return (
     <section className="flex flex-col gap-2">

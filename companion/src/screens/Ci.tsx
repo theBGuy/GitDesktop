@@ -8,18 +8,30 @@ import { CiStatusChip } from "../components/chips";
 import {
   EmptyState,
   ErrorState,
+  isRepoGoneError,
+  RepoGoneState,
   SkeletonRows,
   StaleBanner,
 } from "../components/states";
 import { timeAgo } from "../lib/format";
 import { useCiRun, useCiRuns } from "../lib/queries";
-import { navigate } from "../lib/router";
+import { navigate, repoHash } from "../lib/router";
 import { useRovingList } from "../lib/use-roving-list";
 
-/** The CI run list. `active` gates polling. */
-export function CiBody({ active }: { active: boolean }) {
-  const { data, isError, error, refetch } = useCiRuns(active);
+/** The CI run list. `repoId` scopes the query; `active` gates polling. */
+export function CiBody({
+  repoId,
+  active,
+}: {
+  repoId: string;
+  active: boolean;
+}) {
+  const { data, isError, error, refetch } = useCiRuns(repoId, active);
   const { register, onKeyDown } = useRovingList();
+
+  // Definitive gone WINS over stale data: a `noSuchRepo` 404 kicks to the teaching
+  // state even when cached runs are on hand (see isRepoGoneError).
+  if (isRepoGoneError(error)) return <RepoGoneState />;
 
   // Prefer stale data: keep the last-known runs on screen even on error, with a
   // StaleBanner above. Full-screen ErrorState only when there's nothing to show;
@@ -45,7 +57,7 @@ export function CiBody({ active }: { active: boolean }) {
                 type="button"
                 ref={register(i)}
                 onKeyDown={onKeyDown}
-                onClick={() => navigate(`#ci/${run.id}`)}
+                onClick={() => navigate(repoHash(repoId, `ci/${run.id}`))}
                 className="flex w-full min-h-14 items-center gap-3 px-4 py-3 text-left"
               >
                 <CiRow run={run} />
@@ -82,15 +94,20 @@ function CiRow({ run }: { run: WorkflowRun }) {
 }
 
 /** A read-only CI run detail with its jobs. */
-export function CiDetail({ id }: { id: number }) {
-  const { data, isPending, isError, error, refetch } = useCiRun(id);
+export function CiDetail({ repoId, id }: { repoId: string; id: number }) {
+  const { data, isPending, isError, error, refetch } = useCiRun(repoId, id);
+
+  // Definitive gone WINS: replace the whole detail with the teaching state (see
+  // PrDetail). ErrorState also routes noSuchRepo, but the explicit check keeps it
+  // robust against reordering.
+  if (isRepoGoneError(error)) return <RepoGoneState />;
 
   return (
     <div className="flex flex-col">
       <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-border bg-background/95 px-2 py-2 backdrop-blur">
         <button
           type="button"
-          onClick={() => navigate("#ci")}
+          onClick={() => navigate(repoHash(repoId, "ci"))}
           className="inline-flex min-h-11 items-center gap-1 rounded px-2 text-sm font-medium text-primary"
         >
           <ArrowLeftIcon size={16} />

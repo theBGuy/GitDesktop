@@ -7,6 +7,7 @@ import {
   fetchPrs,
   fetchPrThreads,
   fetchPrTimeline,
+  fetchRepos,
   fetchReviews,
   fetchStatus,
 } from "./api";
@@ -32,13 +33,15 @@ export const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       staleTime: 10_000,
-      // One retry for transient failures — but never for a 401/409: both are
-      // definitive, and a retried 401 re-sends the dead cookie, double-billing
-      // the per-IP lockout budget on every poll cycle.
+      // One retry for transient failures — but never for a definitive error: a
+      // 401 (re-sending the dead cookie double-bills the per-IP lockout budget on
+      // every poll cycle), a 409 noActiveRepo, or a 404 noSuchRepo (the scoped
+      // repo is gone — a retry can't conjure it back and only delays the
+      // repo-gone state).
       retry: (failureCount, err) =>
         !(
           err instanceof ApiError &&
-          (err.isUnauthorized || err.isNoActiveRepo)
+          (err.isUnauthorized || err.isNoActiveRepo || err.isNoSuchRepo)
         ) && failureCount < 1,
       refetchOnWindowFocus: false,
     },
@@ -51,84 +54,114 @@ export const queryClient = new QueryClient({
 const POLL_MS = 15_000;
 const poll = (active: boolean) => (active ? POLL_MS : (false as const));
 
-/** The shared repo's status. `active` gates polling to the visible screen;
- *  `enabled` (default true) gates the query entirely — the shell passes false
- *  while the phone sits on `#pair`, so an unpaired page never fires authed
- *  requests (each would 401, and pre-pair traffic was how the shell once banked
- *  rate-limit failures before the user ever typed a PIN). */
-export function useStatus(active: boolean, enabled = true) {
+/** The repositories shared from the desktop, for the picker + TopBar title.
+ *  A modest freshness window plus refetch-on-focus (the ONE exception to the
+ *  companion's no-focus-refetch default): the shared set changes on the DESKTOP,
+ *  so when the user brings the phone back to foreground we want a current list —
+ *  a repo that stopped being shared should drop out promptly. Device-level (not
+ *  repo-scoped): safe to fetch on any authed screen, and a 401 still routes
+ *  through the central QueryCache → `#pair`. */
+export function useRepos() {
   return useQuery({
-    queryKey: ["status"],
-    queryFn: fetchStatus,
-    enabled,
-    refetchInterval: enabled ? poll(active) : false,
+    queryKey: ["repos"],
+    queryFn: fetchRepos,
+    staleTime: 30_000,
+    refetchOnWindowFocus: true,
   });
 }
 
-export function usePrs(active: boolean) {
+/** The selected repo's status. `repoId` scopes the query + cache key; `active`
+ *  gates polling to the visible screen; `enabled` (default true) gates the query
+ *  entirely — the shell passes false while the phone sits on `#pair`, so an
+ *  unpaired page never fires authed requests (each would 401, and pre-pair
+ *  traffic was how the shell once banked rate-limit failures before the user ever
+ *  typed a PIN). A null `repoId` also disables it (no repo selected yet). */
+export function useStatus(
+  repoId: string | null,
+  active: boolean,
+  enabled = true,
+) {
+  const on = enabled && repoId != null;
   return useQuery({
-    queryKey: ["prs", "open"],
-    queryFn: () => fetchPrs("open"),
-    refetchInterval: poll(active),
+    queryKey: ["status", repoId],
+    queryFn: () => fetchStatus(repoId as string),
+    enabled: on,
+    refetchInterval: on ? poll(active) : false,
   });
 }
 
-export function usePr(number: number | null) {
+export function usePrs(repoId: string | null, active: boolean) {
   return useQuery({
-    queryKey: ["pr", number],
-    queryFn: () => fetchPr(number as number),
-    enabled: number != null,
+    queryKey: ["prs", repoId, "open"],
+    queryFn: () => fetchPrs(repoId as string, "open"),
+    enabled: repoId != null,
+    refetchInterval: repoId != null ? poll(active) : false,
+  });
+}
+
+export function usePr(repoId: string | null, number: number | null) {
+  const on = repoId != null && number != null;
+  return useQuery({
+    queryKey: ["pr", repoId, number],
+    queryFn: () => fetchPr(repoId as string, number as number),
+    enabled: on,
     // A detail view is a deliberate drill-in; poll it while it's open.
-    refetchInterval: number != null ? POLL_MS : (false as const),
+    refetchInterval: on ? POLL_MS : (false as const),
   });
 }
 
-export function useCiRuns(active: boolean) {
+export function useCiRuns(repoId: string | null, active: boolean) {
   return useQuery({
-    queryKey: ["ci", "runs"],
-    queryFn: () => fetchCiRuns(),
-    refetchInterval: poll(active),
+    queryKey: ["ci", "runs", repoId],
+    queryFn: () => fetchCiRuns(repoId as string),
+    enabled: repoId != null,
+    refetchInterval: repoId != null ? poll(active) : false,
   });
 }
 
-export function useCiRun(id: number | null) {
+export function useCiRun(repoId: string | null, id: number | null) {
+  const on = repoId != null && id != null;
   return useQuery({
-    queryKey: ["ci", "run", id],
-    queryFn: () => fetchCiRun(id as number),
-    enabled: id != null,
-    refetchInterval: id != null ? POLL_MS : (false as const),
+    queryKey: ["ci", "run", repoId, id],
+    queryFn: () => fetchCiRun(repoId as string, id as number),
+    enabled: on,
+    refetchInterval: on ? POLL_MS : (false as const),
   });
 }
 
-/** The live agent streams (AI reviews + agent sessions) to watch. `active` gates
- *  polling — pass false while a watch screen is open so the list doesn't poll
- *  behind it. The watch screen also refetches THIS query to classify a stream that
- *  closed without a terminal event (present → still live, gone → ended/unshared),
- *  which is why it lives here (a react-query refetch routes a 401 through the
- *  central QueryCache → `#pair`, unlike a raw fetch). */
-export function useReviews(active: boolean) {
+/** The live agent streams (AI reviews + agent sessions) to watch. `repoId` scopes
+ *  the query + cache key; `active` gates polling — pass false while a watch screen
+ *  is open so the list doesn't poll behind it. The watch screen also refetches
+ *  THIS query to classify a stream that closed without a terminal event (present →
+ *  still live, gone → ended/unshared), which is why it lives here (a react-query
+ *  refetch routes a 401 through the central QueryCache → `#pair`, unlike a raw
+ *  fetch). */
+export function useReviews(repoId: string | null, active: boolean) {
   return useQuery({
-    queryKey: ["reviews"],
-    queryFn: fetchReviews,
-    refetchInterval: poll(active),
+    queryKey: ["reviews", repoId],
+    queryFn: () => fetchReviews(repoId as string),
+    enabled: repoId != null,
+    refetchInterval: repoId != null ? poll(active) : false,
   });
 }
 
-export function usePrTimeline(number: number | null) {
+export function usePrTimeline(repoId: string | null, number: number | null) {
+  const on = repoId != null && number != null;
   return useQuery({
-    queryKey: ["pr", number, "timeline"],
-    queryFn: () => fetchPrTimeline(number as number),
-    enabled: number != null,
-    refetchInterval: number != null ? POLL_MS : (false as const),
+    queryKey: ["pr", repoId, number, "timeline"],
+    queryFn: () => fetchPrTimeline(repoId as string, number as number),
+    enabled: on,
+    refetchInterval: on ? POLL_MS : (false as const),
   });
 }
 
-export function usePrThreads(number: number | null) {
+export function usePrThreads(repoId: string | null, number: number | null) {
+  const on = repoId != null && number != null;
   return useQuery({
-    queryKey: ["pr", number, "threads"],
-    queryFn: () => fetchPrThreads(number as number),
-    enabled: number != null,
-    refetchInterval: number != null ? POLL_MS : (false as const),
+    queryKey: ["pr", repoId, number, "threads"],
+    queryFn: () => fetchPrThreads(repoId as string, number as number),
+    enabled: on,
+    refetchInterval: on ? POLL_MS : (false as const),
   });
 }
 

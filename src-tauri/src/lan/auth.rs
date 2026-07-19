@@ -621,11 +621,12 @@ pub struct RouterState {
     pub bound_hosts: Arc<Vec<String>>,
     /// Cut signal for live SSE monitors. The `stream` handler (a plain GET, no
     /// upgrade) subscribes a receiver from this before returning its `Sse` response;
-    /// the desktop fires `()` on it when sharing is disabled, the shared repo
-    /// changes, or a device is revoked, so in-flight event streams end and the phone
-    /// must reconnect and re-authorize (its EventSource auto-reconnect then hits a
-    /// 401/404 and closes permanently).
-    pub monitor_cut: tokio::sync::broadcast::Sender<()>,
+    /// the desktop fires a [`crate::lan::MonitorCut`] on it when sharing is disabled
+    /// or a device is revoked ([`crate::lan::MonitorCut::All`]) or when a single repo
+    /// leaves the registry ([`crate::lan::MonitorCut::Repo`]), so the affected
+    /// in-flight event streams end and those phones reconnect and re-authorize (their
+    /// EventSource auto-reconnect then hits a 401/404 and closes permanently).
+    pub monitor_cut: tokio::sync::broadcast::Sender<crate::lan::MonitorCut>,
     /// The live agent-stream registry — the SAME `Arc` [`crate::state::AppState`]
     /// holds, so a review/session registered there is watchable from the LAN
     /// review routes without any further plumbing.

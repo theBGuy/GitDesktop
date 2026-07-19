@@ -2,7 +2,7 @@
 //! shutdown for the LAN companion server.
 //!
 //! The router mounts EXACTLY the pairing routes plus the read-only routes
-//! (structural allowlist — see [`crate::lan::routes`]): the 15 read handlers,
+//! (structural allowlist — see [`crate::lan::routes`]): the 17 read handlers,
 //! mounted TWICE — once as the frozen active-repo ALIAS surface (`/api/repo/…`,
 //! `/api/forge/…`, `/api/reviews…`) and once under the SCOPED
 //! `/api/repos/{repoId}/…` surface — plus `GET /api/repos`; anything else 404s.
@@ -383,7 +383,7 @@ pub async fn start(
     pairing: Arc<std::sync::Mutex<Option<auth::PairingSession>>>,
     rate_limit: auth::RateLimitMap,
     streams: Arc<std::sync::Mutex<std::collections::HashMap<String, crate::state::StreamInfo>>>,
-    monitor_cut: tokio::sync::broadcast::Sender<()>,
+    monitor_cut: tokio::sync::broadcast::Sender<crate::lan::MonitorCut>,
 ) -> AppResult<(ServerHandle, Vec<String>, Vec<String>, String)> {
     let (bind_ip, ips) = resolve_ips(bind_lan);
     // Ensure a self-signed cert covering the addresses we're about to advertise
