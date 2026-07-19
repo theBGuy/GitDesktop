@@ -163,6 +163,11 @@ export interface AgentReviewArgs {
   /** The diff-bearing prompt, fed to the CLI on stdin. */
   userPrompt: string;
   repoPath: string;
+  /** The ORIGIN repo a repo-aware PR-head review was spawned from. `repoPath` may be
+   *  a throwaway detached worktree pinned at the PR head; the LAN monitor scopes
+   *  streams by origin repo, so pass it to keep the review visible to a paired phone.
+   *  Omit for a non-worktree review (the backend falls back to `repoPath`). */
+  originRepoPath?: string;
   /** Tier 2: allow the agent read-only access to the repo for context. */
   repoAware: boolean;
   /** Attach GitDesktop's own read-only MCP server (`gitdesktop` tools) to the run
@@ -189,6 +194,7 @@ export async function runAgentReview(args: AgentReviewArgs): Promise<void> {
     systemPrompt: args.systemPrompt,
     userPrompt: args.userPrompt,
     repoPath: args.repoPath,
+    originRepoPath: args.originRepoPath ?? null,
     repoAware: args.repoAware,
     mcpSelf: Boolean(args.mcpSelf),
     reviewId: args.reviewId,

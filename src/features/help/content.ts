@@ -1648,8 +1648,8 @@ The **Phone companion** lets you share the repository that's currently open with
 phone over your **local network**. Open it in **Settings → Phone companion**.
 
 This is an **early preview**. Once paired, your phone opens a slim companion web app in
-its browser that shows the open repo's **Status**, **pull requests**, and **CI** — all
-**read-only**. It's **off by default**.
+its browser that shows the open repo's **Status**, **pull requests**, **CI**{{ai}}, and
+live **agent** runs{{/ai}} — all **read-only**. It's **off by default**.
 
 ## Turning it on
 
@@ -1658,6 +1658,10 @@ to your machine's LAN address and shows the address(es) and port it's reachable 
 While sharing is on, a **Sharing on** banner runs across the top of the window
 (click it to jump back here). If the port can't be opened, the reason appears
 right in the panel.
+
+While sharing is on, GitDesktop keeps your computer awake so a phone can keep watching
+unattended — the display may still sleep, and normal sleep resumes as soon as you stop
+sharing.
 
 ## Pairing a phone
 
@@ -1669,8 +1673,26 @@ Choose **Pair a device** (available once sharing is on). A dialog shows:
 
 Scanning the code (or opening the URL) loads the companion's **pairing page** in your
 phone's browser. Type the PIN there; once it matches, the phone is paired and drops
-straight into the companion app — a bottom tab bar with **Status**, **PRs**, and **CI**,
-each read-only.
+straight into the companion app — a bottom tab bar with **Status**, **PRs**, **CI**{{ai}},
+and **Agents**{{/ai}}, each read-only.
+
+## What you can see on your phone
+
+- **Status** — the shared repo's current branch and connection.
+- **PRs** — the open pull-request list; open one for its **overview** (title,
+  description, branches, diff totals), its **activity** timeline (force-pushes, label
+  changes, review requests, and open/close/merge events), and its **review threads**
+  (each file:line comment chain, with resolved/outdated markers). It's read-only — a
+  place to catch up on a PR's conversation from your phone, not to reply.
+- **CI** — recent workflow runs and their jobs.
+{{ai}}- **Agents** — everything your desktop is currently broadcasting: **AI PR reviews**
+  and **agent sessions**. Open one to **watch it live** — the assistant's prose streams in
+  as it's written, and each tool step (files read or edited, commands run, searches) shows
+  as it happens. When the run finishes you get its final answer (and its cost, when
+  reported). Watching is **live only**: you see activity from the moment you open it — there's
+  no replay — and the screen keeps itself pinned to the newest output unless you scroll up,
+  with a **Jump to latest** button to return. Stopping sharing, switching repos, or revoking
+  the device ends the watch and tells you the run is no longer shared.{{/ai}}
 
 Because the connection uses a **self-signed certificate** GitDesktop generates, your
 phone shows a **certificate warning on first connect** — that's expected; tap through to

@@ -5,6 +5,9 @@ import {
   fetchCiRuns,
   fetchPr,
   fetchPrs,
+  fetchPrThreads,
+  fetchPrTimeline,
+  fetchReviews,
   fetchStatus,
 } from "./api";
 import { navigate } from "./router";
@@ -94,6 +97,38 @@ export function useCiRun(id: number | null) {
     queryFn: () => fetchCiRun(id as number),
     enabled: id != null,
     refetchInterval: id != null ? POLL_MS : (false as const),
+  });
+}
+
+/** The live agent streams (AI reviews + agent sessions) to watch. `active` gates
+ *  polling — pass false while a watch screen is open so the list doesn't poll
+ *  behind it. The watch screen also refetches THIS query to classify a stream that
+ *  closed without a terminal event (present → still live, gone → ended/unshared),
+ *  which is why it lives here (a react-query refetch routes a 401 through the
+ *  central QueryCache → `#pair`, unlike a raw fetch). */
+export function useReviews(active: boolean) {
+  return useQuery({
+    queryKey: ["reviews"],
+    queryFn: fetchReviews,
+    refetchInterval: poll(active),
+  });
+}
+
+export function usePrTimeline(number: number | null) {
+  return useQuery({
+    queryKey: ["pr", number, "timeline"],
+    queryFn: () => fetchPrTimeline(number as number),
+    enabled: number != null,
+    refetchInterval: number != null ? POLL_MS : (false as const),
+  });
+}
+
+export function usePrThreads(number: number | null) {
+  return useQuery({
+    queryKey: ["pr", number, "threads"],
+    queryFn: () => fetchPrThreads(number as number),
+    enabled: number != null,
+    refetchInterval: number != null ? POLL_MS : (false as const),
   });
 }
 

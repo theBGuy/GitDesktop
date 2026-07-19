@@ -377,13 +377,15 @@ fn restrict_key_file_perms(_key_path: &Path) {}
 mod tests {
     use super::*;
 
-    /// A fresh temp dir for a test's TLS material, unique per test invocation.
-    fn temp_dir() -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "gd-lan-tls-test-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ))
+    /// A fresh temp dir for a test's TLS material, removed on `Drop` (RAII) so a
+    /// killed or panicking run can't leak private-key material into the system temp
+    /// dir. Callers keep the returned `TempDir` alive for the test and pass
+    /// `dir.path()` to the TLS-dir override.
+    fn temp_dir() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("gd-lan-tls-test-")
+            .tempdir()
+            .expect("create temp dir for TLS test")
     }
 
     /// The frozen fingerprint format: 32 uppercase-hex byte pairs joined by colons.
@@ -401,13 +403,13 @@ mod tests {
     fn fresh_gen_writes_files_and_valid_fingerprint() {
         let _lock = crate::lan::auth::store_test_lock();
         let dir = temp_dir();
-        let prev = set_tls_dir_for_test(Some(dir.clone()));
+        let prev = set_tls_dir_for_test(Some(dir.path().to_path_buf()));
 
         let material = ensure_tls(&[Ipv4Addr::new(192, 168, 1, 5)]).unwrap();
 
-        assert!(dir.join(CERT_FILE).exists(), "cert PEM written");
-        assert!(dir.join(KEY_FILE).exists(), "key PEM written");
-        assert!(dir.join(META_FILE).exists(), "meta json written");
+        assert!(dir.path().join(CERT_FILE).exists(), "cert PEM written");
+        assert!(dir.path().join(KEY_FILE).exists(), "key PEM written");
+        assert!(dir.path().join(META_FILE).exists(), "meta json written");
         assert!(
             is_fingerprint(&material.fingerprint),
             "fingerprint format: {}",
@@ -415,14 +417,13 @@ mod tests {
         );
 
         set_tls_dir_for_test(prev);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn covered_ips_reuse_the_same_cert() {
         let _lock = crate::lan::auth::store_test_lock();
         let dir = temp_dir();
-        let prev = set_tls_dir_for_test(Some(dir.clone()));
+        let prev = set_tls_dir_for_test(Some(dir.path().to_path_buf()));
 
         let first = ensure_tls(&[Ipv4Addr::new(192, 168, 1, 5)]).unwrap();
         // A second call whose required IPs are a SUBSET of the recorded set (here the
@@ -434,14 +435,13 @@ mod tests {
         assert_eq!(first.fingerprint, third.fingerprint, "loopback-only reuses");
 
         set_tls_dir_for_test(prev);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn new_ip_regenerates_and_unions_sans() {
         let _lock = crate::lan::auth::store_test_lock();
         let dir = temp_dir();
-        let prev = set_tls_dir_for_test(Some(dir.clone()));
+        let prev = set_tls_dir_for_test(Some(dir.path().to_path_buf()));
 
         let first = ensure_tls(&[Ipv4Addr::new(192, 168, 1, 5)]).unwrap();
         // A NEW, uncovered IP forces a regen → different fingerprint.
@@ -449,7 +449,7 @@ mod tests {
         assert_ne!(first.fingerprint, second.fingerprint, "new ip regenerates");
 
         // The regenerated meta's SANs are the UNION: loopback + both IPs.
-        let meta = read_meta(&dir.join(META_FILE)).unwrap();
+        let meta = read_meta(&dir.path().join(META_FILE)).unwrap();
         assert!(meta.san_ips.contains(&Ipv4Addr::LOCALHOST));
         assert!(meta.san_ips.contains(&Ipv4Addr::new(192, 168, 1, 5)));
         assert!(meta.san_ips.contains(&Ipv4Addr::new(10, 0, 0, 9)));
@@ -460,18 +460,17 @@ mod tests {
         assert_eq!(second.fingerprint, third.fingerprint, "A→B→A stays stable");
 
         set_tls_dir_for_test(prev);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn corrupt_cert_regenerates_instead_of_erroring() {
         let _lock = crate::lan::auth::store_test_lock();
         let dir = temp_dir();
-        let prev = set_tls_dir_for_test(Some(dir.clone()));
+        let prev = set_tls_dir_for_test(Some(dir.path().to_path_buf()));
 
         let _first = ensure_tls(&[Ipv4Addr::new(192, 168, 1, 5)]).unwrap();
         // Corrupt the cert PEM on disk.
-        std::fs::write(dir.join(CERT_FILE), b"not a real certificate").unwrap();
+        std::fs::write(dir.path().join(CERT_FILE), b"not a real certificate").unwrap();
         // ensure_tls must recover by regenerating (returning a valid cert), not error
         // out of enabling the server.
         let second = ensure_tls(&[Ipv4Addr::new(192, 168, 1, 5)]).unwrap();
@@ -481,7 +480,6 @@ mod tests {
         assert_eq!(second.fingerprint, reloaded.fingerprint, "post-regen reuse");
 
         set_tls_dir_for_test(prev);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[cfg(unix)]
@@ -492,10 +490,10 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let _lock = crate::lan::auth::store_test_lock();
         let dir = temp_dir();
-        let prev = set_tls_dir_for_test(Some(dir.clone()));
+        let prev = set_tls_dir_for_test(Some(dir.path().to_path_buf()));
 
         ensure_tls(&[Ipv4Addr::new(192, 168, 1, 5)]).unwrap();
-        let mode = std::fs::metadata(dir.join(KEY_FILE))
+        let mode = std::fs::metadata(dir.path().join(KEY_FILE))
             .unwrap()
             .permissions()
             .mode();
@@ -503,6 +501,5 @@ mod tests {
         assert_eq!(mode & 0o777, 0o600, "key file mode: {:o}", mode & 0o777);
 
         set_tls_dir_for_test(prev);
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -122,6 +122,13 @@ export function CompanionSection() {
         on trusted networks only, and turn sharing off when you're done.
       </p>
 
+      {/* Keep-awake is always-on while sharing (no toggle) — disclose it so the
+          behavior isn't a surprise. */}
+      <p className="text-xs text-muted-foreground">
+        While sharing is on, your computer won't go to sleep (the display still
+        can).
+      </p>
+
       {enabled && status.data && (
         <div className="space-y-1 text-xs text-muted-foreground">
           {status.data.urls.length > 0 ? (

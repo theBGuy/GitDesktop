@@ -991,10 +991,23 @@ fn bad_request(msg: &str) -> Response {
 }
 
 /// Map an [`AppError`] to an HTTP response for the route handlers: `NotARepo` and
-/// `InvalidArgument` → 400; everything else → 502. The body reuses the app's own
-/// `{ kind, message }` serialization so a phone client sees the same shape the
-/// desktop frontend does.
+/// `InvalidArgument` → 400; a "no such remote" git failure → a dedicated 400
+/// `noRemote` (see [`no_remote_response`]); everything else → 502. The body reuses
+/// the app's own `{ kind, message }` serialization so a phone client sees the same
+/// shape the desktop frontend does.
 pub fn app_error_response(err: &AppError) -> Response {
+    // A remoteless repo surfaces as a `Git` failure whose stderr is `error: No such
+    // remote 'origin'` (chain: gh_lens_slug → git_remote_url). Its raw serialization
+    // leaks a `git`-kind 502 with `code`/`stderr`, which the companion can't classify.
+    // Re-map it to a clean 400 `noRemote` so the phone shows an actionable notice. The
+    // `AppError` enum stays untouched — this mapping lives only at the LAN boundary.
+    if let AppError::Git { stderr, .. } = err {
+        if stderr.to_ascii_lowercase().contains("no such remote")
+            || err.to_string().to_ascii_lowercase().contains("no such remote")
+        {
+            return no_remote_response();
+        }
+    }
     let status = match err {
         AppError::NotARepo(_) | AppError::InvalidArgument(_) => StatusCode::BAD_REQUEST,
         _ => StatusCode::BAD_GATEWAY,
@@ -1005,9 +1018,58 @@ pub fn app_error_response(err: &AppError) -> Response {
     (status, Json(body)).into_response()
 }
 
+/// The 400 returned when a forge route hits a repo with no `origin` remote. NOT 409
+/// (the companion reads any 409 as `noActiveRepo` by status alone) and NOT 401/429
+/// (auth / rate-limit semantics); 400 is the frozen choice. The body omits the
+/// `code`/`stderr` the raw `Git` serialization would carry.
+fn no_remote_response() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "kind": "noRemote",
+            "message": "This repository has no 'origin' remote."
+        })),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn no_such_remote_git_error_maps_to_400_no_remote() {
+        // A remoteless repo surfaces as a `Git` error whose stderr is
+        // `error: No such remote 'origin'`. `app_error_response` must re-map it to a
+        // clean 400 `noRemote` (NOT the raw `git`-kind 502), with no code/stderr.
+        let err = AppError::Git {
+            code: 128,
+            stderr: "error: No such remote 'origin'".to_string(),
+        };
+        let resp = app_error_response(&err);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["kind"], "noRemote");
+        assert_eq!(body["message"], "This repository has no 'origin' remote.");
+        assert!(body.get("code").is_none());
+        assert!(body.get("stderr").is_none());
+
+        // A control: an unrelated git error still passes through as a 502 `git`.
+        let other = AppError::Git {
+            code: 1,
+            stderr: "fatal: some other failure".to_string(),
+        };
+        let resp = app_error_response(&other);
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["kind"], "git");
+    }
 
     #[test]
     fn proof_round_trips_both_directions() {
