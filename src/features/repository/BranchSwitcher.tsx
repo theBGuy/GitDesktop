@@ -776,12 +776,29 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       } else if (!branch.upstream || branch.upstreamGone) {
         // `enabled` guarantees origin exists, so this publish destination is safe.
         doPushBranch(branch, "origin");
-      } else if (tracksOrigin && branch.upstreamBehind > 0) {
+      } else if (
+        tracksOrigin &&
+        branch.upstreamAhead > 0 &&
+        branch.upstreamBehind > 0
+      ) {
+        // Genuinely diverged: commits on BOTH sides. Behind-only is not
+        // divergence — it gets its own arm below (review-caught mislabel).
         toast.info(
           `${branch.name} has diverged — update it from its upstream first`,
         );
-      } else if (tracksOrigin && branch.upstreamAhead === 0) {
+      } else if (tracksOrigin && branch.upstreamBehind > 0) {
+        // Behind only: nothing local to push; the remedy is a pull, so say so.
+        toast.info(`${branch.name} is behind ${branch.upstream} — pull first`);
+      } else if (tracksOrigin) {
         toast.info(`${branch.name} has nothing to push`);
+      } else if (branch.upstream && !branch.upstreamRemote) {
+        // Tracks a LOCAL branch (`git branch --track x main`):
+        // `%(upstream:remotename)` is empty → null upstreamRemote. There's
+        // nothing remote-related to say — and the context menu is the same
+        // authority (it offers neither Push nor Publish for these).
+        toast.info(
+          `${branch.name} tracks a local branch (${branch.upstream}), not a remote`,
+        );
       } else if (tracksOtherKnownRemote) {
         toast.info(
           `${branch.name} tracks ${branch.upstreamRemote} — push it from its context menu`,

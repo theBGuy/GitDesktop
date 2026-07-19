@@ -181,9 +181,11 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // undefined) with the effective shortcut appended, e.g. "Push (Ctrl+P)".
   // When the action is explicitly unbound (null), the title stays exactly
   // today's value — the raw description, possibly undefined. `aria-keyshortcuts`
-  // carries the shortcut on the proper ARIA channel so it stays OUT of the
-  // accessible name (which remains the description alone), and is omitted when
-  // unbound.
+  // carries the shortcut on the proper ARIA channel so it stays OUT of each
+  // button's accessible name — for Push/Pull that name is the description-only
+  // `aria-label`; Fetch sets none, so its name is the visible "Fetch" label
+  // (deliberate: its description is the volatile "Last fetched …" string, which
+  // must stay tooltip-only, never a name). Omitted when unbound.
   const pushBinding = bindings.get("push") ?? null;
   const pullBinding = bindings.get("pull") ?? null;
   const fetchBinding = bindings.get("fetch") ?? null;

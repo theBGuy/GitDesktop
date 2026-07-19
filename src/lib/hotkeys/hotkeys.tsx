@@ -138,9 +138,10 @@ export function useHotkeysListener() {
     if (!binding) return;
     if (isEditableTarget(e.target) && !firesInEditable(binding)) return;
     const id = byBinding.get(binding);
-    // Registered-vs-unregistered rule. A chord an on-screen surface OWNS (has
-    // at least one live handler, even if currently disabled) must never leak to
-    // the webview's browser accelerators — Ctrl+P → print, F5/Ctrl+R → reload —
+    // Registered-vs-unregistered rule. A chord OWNED by an on-screen surface —
+    // an action with at least one live handler, even a disabled one — must
+    // never leak to the webview's browser accelerators (Ctrl+P → print,
+    // F5/Ctrl+R → reload) —
     // so we preventDefault whenever the action is registered, dispatching only
     // if an enabled handler exists. But a chord that NOTHING on screen owns
     // (the action exists in the registry but no component registered it — e.g.

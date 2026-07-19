@@ -689,7 +689,7 @@ export const BUILT_IN_KEYS: {
   { keys: "Esc", what: "Close dialogs, menus, and settings" },
   {
     keys: "Ctrl+Enter",
-    what: "Submit a comment or the Create PR dialog from its text box",
+    what: "Submit a comment from its text box, or a Create PR dialog from any field",
     binding: "mod+enter",
   },
 ];

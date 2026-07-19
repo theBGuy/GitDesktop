@@ -90,6 +90,15 @@ export function formatBinding(binding: string): string {
  * The vocabulary is intentionally minimal — it only needs to cover the keys
  * that appear in real bindings (see KEY_NAMES/DISPLAY_NAMES above).
  */
+/** Canonical binding tokens whose ARIA (UI Events) key value isn't just a
+ *  capitalization — see `KEY_NAMES`, which shortens these on the way in. */
+const ARIA_KEY_NAMES: Record<string, string> = {
+  up: "ArrowUp",
+  down: "ArrowDown",
+  left: "ArrowLeft",
+  right: "ArrowRight",
+};
+
 export function bindingToAriaKeyshortcuts(binding: string): string {
   return binding
     .split("+")
@@ -97,6 +106,11 @@ export function bindingToAriaKeyshortcuts(binding: string): string {
       if (part === "mod") return isMac ? "Meta" : "Control";
       if (part === "alt") return "Alt";
       if (part === "shift") return "Shift";
+      // ARIA wants UI Events key values: our canonical arrow tokens ("up",
+      // from KEY_NAMES) must map back to "ArrowUp" etc., or AT ignores them
+      // (review-caught; reachable via user-recorded arrow chords).
+      const arrow = ARIA_KEY_NAMES[part];
+      if (arrow) return arrow;
       if (/^f\d{1,2}$/.test(part)) return part.toUpperCase();
       // Single letters uppercase; named keys (enter, space, …) capitalize.
       return part.length === 1
