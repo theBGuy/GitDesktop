@@ -58,6 +58,18 @@ export function useLocalRemoteFilter<
 
   const query = filterText.trim().toLowerCase();
 
+  // Intersect the persisted filter Sets with the CURRENT option lists at every
+  // consumption point below. State switches (Open↔Closed, Fork↔Upstream) change
+  // which authors/labels exist without pruning the Sets, so a Set can hold an
+  // entry absent from `authors`/`labels`; left live it would filter the list and
+  // inflate the badge with no checkable row to clear it. Intersection makes such
+  // out-of-scope entries INERT while leaving the state Set intact — an author who
+  // vanishes on Open→Closed and returns on switching back is still selected.
+  const activeAuthorFilter = new Set(
+    authors.filter((a) => authorFilter.has(a)),
+  );
+  const activeLabelFilter = new Set(labels.filter((l) => labelFilter.has(l)));
+
   function matchesLocal(l: L): boolean {
     if (
       query &&
@@ -67,8 +79,11 @@ export function useLocalRemoteFilter<
       return false;
     }
     // Local items have no GitHub author — an author filter excludes them.
-    if (authorFilter.size > 0) return false;
-    if (labelFilter.size > 0 && !l.labels.some((x) => labelFilter.has(x))) {
+    if (activeAuthorFilter.size > 0) return false;
+    if (
+      activeLabelFilter.size > 0 &&
+      !l.labels.some((x) => activeLabelFilter.has(x))
+    ) {
       return false;
     }
     return true;
@@ -89,17 +104,18 @@ export function useLocalRemoteFilter<
     ) {
       return false;
     }
-    if (authorFilter.size > 0 && !authorFilter.has(author)) return false;
+    if (activeAuthorFilter.size > 0 && !activeAuthorFilter.has(author))
+      return false;
     if (
-      labelFilter.size > 0 &&
-      !r.labels.some((l) => labelFilter.has(l.name))
+      activeLabelFilter.size > 0 &&
+      !r.labels.some((l) => activeLabelFilter.has(l.name))
     ) {
       return false;
     }
     return true;
   });
 
-  const activeFilterCount = authorFilter.size + labelFilter.size;
+  const activeFilterCount = activeAuthorFilter.size + activeLabelFilter.size;
 
   function toggle(which: "author" | "label", value: string, on: boolean) {
     const set = which === "author" ? authorFilter : labelFilter;
