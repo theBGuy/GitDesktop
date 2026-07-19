@@ -41,11 +41,12 @@ const getNow = () => now;
 export function RelativeTime({ date }: { date: string }) {
   const nowMs = useSyncExternalStore(subscribe, getNow);
   const parsed = new Date(date);
-  const absolute = Number.isNaN(parsed.getTime())
-    ? undefined
-    : parsed.toLocaleString();
+  // An unparseable date renders nothing rather than "in NaN years"
+  // (formatRelativeTime's unit walk emits the year unit for NaN) — this is a
+  // shared primitive, so don't lean on callers' `date &&` guards alone.
+  if (Number.isNaN(parsed.getTime())) return null;
   return (
-    <time dateTime={date} title={absolute}>
+    <time dateTime={date} title={parsed.toLocaleString()}>
       {formatRelativeTime(date, nowMs)}
     </time>
   );

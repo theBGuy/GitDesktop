@@ -40,7 +40,8 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
   browser. Set **labels and assignees** right when you **open** a PR/MR (GitHub &
   GitLab); request reviewers across GitHub, GitLab & Bitbucket.
   - **Activity feed** — a PR's Conversation is a **date-sorted timeline** of reviews,
-    comments, grouped **pushed commits** (each SHA clickable), and events, with an
+    comments, grouped **pushed commits** (each SHA clickable), and events, every entry
+    **timestamped** (hover for the exact time), with an
     **approval marked stale** once later commits land — on GitHub, GitLab, Bitbucket,
     and local PRs (GitLab has no force-push/draft events, Bitbucket no labels or
     review-requests).
@@ -415,7 +416,8 @@ workflow against any two branches with no remote at all).
   Bitbucket). The same commit comments are available from the **History tab** on any
   pushed commit (an unpushed one shows a push hint).
 - **Activity feed** — the Conversation is a **date-sorted timeline** of reviews,
-  comments, grouped pushed commits (each SHA clickable), and events, marking an approval
+  comments, grouped pushed commits (each SHA clickable), and events, every entry carrying
+  a relative **timestamp** (hover for the exact local time), marking an approval
   or changes-request **stale** once later commits land. GitHub carries the full event set
   (force-push, label add/remove, review request, ready-for-review, convert-to-draft,
   close, reopen, merge, rename); **GitLab MRs** add commits, label changes,

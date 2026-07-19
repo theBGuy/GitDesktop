@@ -75,7 +75,7 @@ export const capabilities: Capability[] = [
   { group: "Pull requests & review", label: "Inline review comments — reply, resolve, apply suggestions locally", highlight: true },
   { group: "Pull requests & review", label: "Compose a review from the diff — batch drafts, submit with a verdict" },
   { group: "Pull requests & review", label: "Drill into a PR's commits — per-file diffs, whole-commit & line comments" },
-  { group: "Pull requests & review", label: "PR activity feed — reviews, comments, grouped commits, stale-approval marks" },
+  { group: "Pull requests & review", label: "PR activity feed — reviews, comments, grouped commits, stale-approval marks, all timestamped" },
   { group: "Pull requests & review", label: "Comment on commits from History — whole-commit or line-anchored" },
   { group: "Pull requests & review", label: "Fork · Upstream lens — browse & work a fork's PRs and issues or the parent's" },
 
