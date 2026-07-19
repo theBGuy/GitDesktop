@@ -84,12 +84,6 @@ export function formatBinding(binding: string): string {
     .join("+");
 }
 
-/**
- * A canonical binding as an ARIA `aria-keyshortcuts` token string, e.g.
- * "mod+p" → "Control+P" (Windows/Linux) or "Meta+P" (macOS), "f5" → "F5".
- * The vocabulary is intentionally minimal — it only needs to cover the keys
- * that appear in real bindings (see KEY_NAMES/DISPLAY_NAMES above).
- */
 /** Canonical binding tokens whose ARIA (UI Events) key value isn't just a
  *  capitalization — see `KEY_NAMES`, which shortens these on the way in. */
 const ARIA_KEY_NAMES: Record<string, string> = {
@@ -99,6 +93,12 @@ const ARIA_KEY_NAMES: Record<string, string> = {
   right: "ArrowRight",
 };
 
+/**
+ * A canonical binding as an ARIA `aria-keyshortcuts` token string, e.g.
+ * "mod+p" → "Control+P" (Windows/Linux) or "Meta+P" (macOS), "f5" → "F5".
+ * The vocabulary is intentionally minimal — it only needs to cover the keys
+ * that appear in real bindings (see KEY_NAMES/DISPLAY_NAMES above).
+ */
 export function bindingToAriaKeyshortcuts(binding: string): string {
   return binding
     .split("+")
