@@ -73,6 +73,15 @@ pub struct RegisteredRepo {
 /// [`lan_share_repo`] / [`lan_unshare_repo`]. Deduped by opaque id, so a repo that
 /// is both active AND shared occupies exactly one entry — its removal from one role
 /// leaves the entry while the other role still holds it.
+///
+/// Single-entry path ownership is SHARED-PATH-AUTHORITATIVE: when an id is in the
+/// shared set, the entry's `path` is the explicitly shared worktree's path and the
+/// active mirror must not overwrite it (see [`LanState::install_active_repo`]). This
+/// matters because linked worktrees of one repo share an id: the phone browsing a
+/// shared repo must keep seeing the worktree the user shared, not whichever worktree
+/// the desktop later opens. Consequence: while a shared repo is also active under a
+/// DIFFERENT worktree, the scoped `/api/repos/{id}/…` surface serves the shared
+/// worktree while the alias `/api/repo/…` surface serves the active one (`active_repo`).
 pub type RepoRegistry = Arc<Mutex<HashMap<String, RegisteredRepo>>>;
 
 /// The Tauri-managed state for the LAN companion.
@@ -88,7 +97,9 @@ pub struct LanState {
     /// The resolved shared set: opaque-id → the stored path each shared repo was
     /// shared under (the verbatim path in `lan-shared-repos.json`). The registry
     /// bookkeeping consults this to know whether a repo LEAVING the active role is
-    /// still held by the shared role (so it stays in `repos`) or should be removed.
+    /// still held by the shared role (so it stays in `repos`) or should be removed,
+    /// AND whether an id is shared (so the active mirror must not overwrite the shared
+    /// entry's path — shared-path-authoritative; see [`LanState::install_active_repo`]).
     /// An `async` mutex because share/unshare/seed resolve ids via git (`.await`)
     /// and must serialize the resolve→re-verify→install sequence; rare + user-driven,
     /// so the coarse serialization is cheap. Never held across a NESTED `.await` that
@@ -255,6 +266,22 @@ impl LanState {
     /// entirely: that later call owns the registry, and clobbering it here would
     /// install a stale entry (the A-after-B interleave).
     ///
+    /// **Shared-path-authoritative install.** When the new active id is ALREADY in the
+    /// shared set, the entry's `path`/`name` are NOT overwritten — the explicitly
+    /// shared worktree owns the registry entry. This is load-bearing for the
+    /// linked-worktree case: a repo shared under worktree path A then opened as a
+    /// DIFFERENT linked worktree B resolves to the SAME id (git identity is the common
+    /// dir), so an unconditional insert would overwrite `repos[id].path` with B and the
+    /// scoped surface — which serves `repos[id].path` verbatim — would serve B's
+    /// branch/status to a phone that asked for the repo it was told is shared (A),
+    /// indefinitely (the switch-away `still_shared` branch would keep the clobbered B
+    /// path). So we still record `active_repo_id` (the `/api/repos` `active` flag is
+    /// id-based and unaffected) but leave the shared entry's path alone. A non-shared
+    /// active id installs its entry normally. (Divergence by design: while a shared
+    /// repo is also active under a different worktree, the SCOPED surface serves the
+    /// shared worktree; the ALIAS surface still serves the active path via
+    /// `active_repo`.)
+    ///
     /// Returns the [`MonitorCut`] to fire, if any: a [`MonitorCut::Repo`] on the
     /// PREVIOUS active repo's path when that repo leaves the registry (its id isn't
     /// the new entry's id and isn't in the shared set), else `None` (the old repo is
@@ -301,7 +328,14 @@ impl LanState {
                 }
             }
             if let Some((id, repo)) = entry {
-                repos.insert(id, repo);
+                // Shared-path-authoritative: don't clobber a shared entry's path/name
+                // with an active worktree's path. If the id is shared, the shared entry
+                // already exists (share/seed installed it) and owns its path; we only
+                // needed to record `active_repo_id` (done above). Insert only when the
+                // active repo isn't (also) shared.
+                if !shared.contains_key(&id) {
+                    repos.insert(id, repo);
+                }
             }
         }
         cut
@@ -340,6 +374,13 @@ impl LanState {
     /// registry Arcs persist across enable/disable within a process, so re-seeding
     /// just re-affirms the same entries. Serialized through the `shared_index` async
     /// mutex against concurrent share/unshare.
+    ///
+    /// Shared-path-authoritative: if a repo was made active (its entry pre-installed by
+    /// [`install_active_repo`]) under worktree B before enable, seeding it as shared
+    /// under stored path A overwrites the entry with A — the shared path wins, exactly
+    /// as [`share_repo`] does. From then on `install_active_repo` won't re-point it. So
+    /// the seed's unconditional insert is the intended order (shared last, shared wins);
+    /// `active_repo_id` is untouched here, so the `active` flag stays correct by id.
     async fn seed_shared(&self) -> AppResult<()> {
         let stored = shared_repos::list_paths()?;
         // Resolve ids for the on-disk survivors OUTSIDE the shared-index lock (each
@@ -355,6 +396,8 @@ impl LanState {
         let mut repos = self.repos.lock().unwrap_or_else(|p| p.into_inner());
         for (id, path) in resolved {
             let name = repo_basename(&path);
+            // Shared path is authoritative — install it even over a pre-existing
+            // active-mirror entry for the same id.
             repos.insert(
                 id.clone(),
                 RegisteredRepo {
@@ -372,6 +415,12 @@ impl LanState {
     /// under a different worktree path — they collide on id by design) is a no-op
     /// returning the current list. Returns the updated shared list.
     ///
+    /// Shared-path-authoritative: sharing a repo whose registry entry currently exists
+    /// only from the active mirror (id not yet in `shared_index`, e.g. the desktop is
+    /// open on worktree B) installs the SHARED path (A) into the entry, overwriting the
+    /// active-mirror path — "you shared A, the phone sees A" even while the desktop is
+    /// active in B. From then on [`install_active_repo`] leaves that shared path alone.
+    ///
     /// Race guard (mirrors [`install_active_repo`]'s stale-install guard): the id
     /// resolves via git (an `.await`) BEFORE the `shared_index` lock is taken, so a
     /// concurrent unshare could remove this repo in between. After the resolve we
@@ -381,7 +430,8 @@ impl LanState {
         let id = repo_id_for(repo_path).await;
         let name = repo_basename(repo_path);
         let shared = self.shared_index.lock().await;
-        // Already shared by id → no-op (persist nothing, registry already holds it).
+        // Already shared by id → no-op (persist nothing, registry already holds the
+        // shared entry, which owns its path — do not re-point it).
         if shared.contains_key(&id) {
             drop(shared);
             return self.shared_repos_list();
@@ -391,6 +441,8 @@ impl LanState {
         {
             let mut shared = shared;
             let mut repos = self.repos.lock().unwrap_or_else(|p| p.into_inner());
+            // Insert (or overwrite an active-mirror entry with) the SHARED path — from
+            // here the shared path is authoritative for this id.
             repos.insert(
                 id.clone(),
                 RegisteredRepo {
@@ -419,6 +471,12 @@ impl LanState {
     /// The registry key is the resolved id (looked up in `shared_index` by matching
     /// the stored path), so an entry shared under one worktree path unshared by that
     /// same stored path removes the right id.
+    ///
+    /// When the unshared repo is ALSO the active repo, its entry stays but is
+    /// RE-POINTED to the current active path: while shared, the entry held the shared
+    /// worktree's path (shared-path-authoritative); once it's purely active, the scoped
+    /// surface must serve the active worktree, so we refresh `path`/`name` to
+    /// `active_repo`. No cut fires (the repo is still shared over the active surface).
     async fn unshare_repo(&self, repo_path: &str) -> AppResult<Vec<LanSharedRepo>> {
         let list = shared_repos::remove_path(repo_path)?;
         let cut = {
@@ -431,14 +489,30 @@ impl LanState {
             match id {
                 Some(id) => {
                     shared.remove(&id);
-                    // Remove from the registry unless it's still the active entry.
-                    let is_active = self
+                    // Is this id the active entry? Snapshot both id + active path under
+                    // their own short locks (never nested with `repos`).
+                    let active_id = self
                         .active_repo_id
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())
-                        .as_deref()
-                        == Some(id.as_str());
+                        .clone();
+                    let is_active = active_id.as_deref() == Some(id.as_str());
                     if is_active {
+                        // Keep the entry but re-point it to the ACTIVE worktree's path,
+                        // since the (possibly different) shared path no longer owns it.
+                        let active_path = self
+                            .active_repo
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .clone();
+                        if let Some(path) = active_path {
+                            let name = repo_basename(&path);
+                            let mut repos = self.repos.lock().unwrap_or_else(|p| p.into_inner());
+                            if let Some(e) = repos.get_mut(&id) {
+                                e.path = path;
+                                e.name = name;
+                            }
+                        }
                         None
                     } else {
                         let mut repos = self.repos.lock().unwrap_or_else(|p| p.into_inner());
@@ -1135,6 +1209,188 @@ mod tests {
 
         shared_repos::set_store_path_for_test(prev);
         std::fs::remove_file(&tmp).ok();
+    }
+
+    /// Create a temp git repo `main/` + a linked worktree `linked/` of it, returning
+    /// `(base_dir, main_path, linked_path)`. Both paths resolve to the SAME
+    /// `repo_identity` (the common `.git` dir) → the SAME registry id, which is the
+    /// collision the shared-path-authoritative rule guards. Caller removes `base_dir`.
+    fn temp_repo_with_worktree() -> (std::path::PathBuf, String, String) {
+        let base = std::env::temp_dir().join(format!(
+            "gd-lan-wt-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let main = base.join("main");
+        let linked = base.join("linked");
+        std::fs::create_dir_all(&main).unwrap();
+        let run = |args: &[&str], cwd: &std::path::Path| {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(cwd)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success(),
+                "git {args:?} failed"
+            );
+        };
+        run(&["init", "-q"], &main);
+        run(&["config", "user.email", "t@t.t"], &main);
+        run(&["config", "user.name", "t"], &main);
+        run(&["commit", "-q", "--allow-empty", "-m", "init"], &main);
+        run(
+            &["worktree", "add", "-q", linked.to_str().unwrap(), "-b", "feature"],
+            &main,
+        );
+        (
+            base.clone(),
+            main.to_string_lossy().to_string(),
+            linked.to_string_lossy().to_string(),
+        )
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn shared_worktree_path_survives_active_open_of_a_linked_worktree() {
+        // The reviewer's exact repro (real git worktrees, one identity). Share the repo
+        // under worktree path A (`main`), then open a DIFFERENT linked worktree B
+        // (`linked`) of the same repo as the active repo — same id. The shared entry's
+        // path must stay A while active AND after switching away; the scoped surface
+        // serves `repos[id].path`, so a clobber to B would serve the wrong worktree.
+        let _lock = auth::store_test_lock();
+        let tmp = temp_shared_store();
+        let prev = shared_repos::set_store_path_for_test(Some(tmp.clone()));
+        let (base, main_wt, linked_wt) = temp_repo_with_worktree();
+
+        let state = LanState::default();
+        // Share under worktree A (main).
+        state.share_repo(&main_wt).await.unwrap();
+        let shared_id = state.repos.lock().unwrap().keys().next().unwrap().clone();
+
+        // Open linked worktree B as the active repo — SAME id (linked worktree).
+        state.set_active_repo(Some(linked_wt.clone())).await;
+
+        // One entry (deduped by id), still holding the SHARED path A — NOT clobbered to B.
+        {
+            let repos = state.repos.lock().unwrap();
+            assert_eq!(repos.len(), 1, "one entry (shared A == active B by id)");
+            let entry = repos.get(&shared_id).expect("shared id present");
+            assert_eq!(entry.path, main_wt, "shared worktree path A owns the entry, not B");
+        }
+        // The active flag is id-based → true (the active id equals the shared id).
+        assert_eq!(
+            state.active_repo_id.lock().unwrap().as_deref(),
+            Some(shared_id.as_str()),
+            "active id equals the shared id"
+        );
+
+        // Switch the desktop away to a different repo → the shared entry stays, STILL A.
+        state.set_active_repo(Some("C:/some/other/repo".to_string())).await;
+        {
+            let repos = state.repos.lock().unwrap();
+            let entry = repos.get(&shared_id).expect("shared entry survives switch-away");
+            assert_eq!(entry.path, main_wt, "shared path A survives the switch-away, not B");
+        }
+
+        shared_repos::set_store_path_for_test(prev);
+        std::fs::remove_file(&tmp).ok();
+        std::process::Command::new("git")
+            .args(["worktree", "prune"])
+            .current_dir(base.join("main"))
+            .output()
+            .ok();
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn active_first_then_share_makes_the_shared_path_authoritative() {
+        // Test-case (2): the desktop is active on linked worktree B FIRST (its entry
+        // holds B), then the user shares worktree A of the same repo → the entry's path
+        // becomes A (shared wins), even while the desktop stays active in B.
+        let _lock = auth::store_test_lock();
+        let tmp = temp_shared_store();
+        let prev = shared_repos::set_store_path_for_test(Some(tmp.clone()));
+        let (base, main_wt, linked_wt) = temp_repo_with_worktree();
+
+        let state = LanState::default();
+        // Active on B first (main mirror installs B).
+        state.set_active_repo(Some(linked_wt.clone())).await;
+        let id = state.repos.lock().unwrap().keys().next().unwrap().clone();
+        assert_eq!(
+            state.repos.lock().unwrap().get(&id).unwrap().path,
+            linked_wt,
+            "active-mirror entry initially holds B"
+        );
+
+        // Now share worktree A of the same repo → path becomes A (shared authoritative).
+        state.share_repo(&main_wt).await.unwrap();
+        assert_eq!(
+            state.repos.lock().unwrap().get(&id).unwrap().path,
+            main_wt,
+            "sharing A re-points the entry to A even while active in B"
+        );
+        // Active flag still true (id unchanged; the desktop is still active on this id).
+        assert_eq!(
+            state.active_repo_id.lock().unwrap().as_deref(),
+            Some(id.as_str())
+        );
+
+        shared_repos::set_store_path_for_test(prev);
+        std::fs::remove_file(&tmp).ok();
+        std::process::Command::new("git")
+            .args(["worktree", "prune"])
+            .current_dir(base.join("main"))
+            .output()
+            .ok();
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn unshare_active_repo_repoints_the_entry_to_the_active_worktree() {
+        // Unsharing a repo that is ALSO the active repo (under a different worktree)
+        // keeps the entry but re-points its path from the shared worktree A to the
+        // active worktree B — the scoped surface must serve the active worktree once
+        // the repo is only active. No cut fires.
+        use tokio::sync::broadcast::error::TryRecvError;
+        let _lock = auth::store_test_lock();
+        let tmp = temp_shared_store();
+        let prev = shared_repos::set_store_path_for_test(Some(tmp.clone()));
+        let (base, main_wt, linked_wt) = temp_repo_with_worktree();
+
+        let state = LanState::default();
+        state.share_repo(&main_wt).await.unwrap(); // shared under A
+        state.set_active_repo(Some(linked_wt.clone())).await; // active under B, same id
+        let id = state.repos.lock().unwrap().keys().next().unwrap().clone();
+        assert_eq!(
+            state.repos.lock().unwrap().get(&id).unwrap().path,
+            main_wt,
+            "while shared, the entry holds the shared worktree A"
+        );
+
+        let mut cut_rx = state.monitor_cut.subscribe();
+        let list = state.unshare_repo(&main_wt).await.unwrap();
+        assert!(list.is_empty(), "A removed from the shared list");
+        // No cut (still active over the alias surface).
+        assert!(matches!(cut_rx.try_recv(), Err(TryRecvError::Empty)));
+        // The entry survives, now re-pointed to the ACTIVE worktree B.
+        {
+            let repos = state.repos.lock().unwrap();
+            let entry = repos.get(&id).expect("entry survives (still active)");
+            assert_eq!(entry.path, linked_wt, "unshare re-points to the active worktree B");
+        }
+
+        shared_repos::set_store_path_for_test(prev);
+        std::fs::remove_file(&tmp).ok();
+        std::process::Command::new("git")
+            .args(["worktree", "prune"])
+            .current_dir(base.join("main"))
+            .output()
+            .ok();
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[tokio::test]
