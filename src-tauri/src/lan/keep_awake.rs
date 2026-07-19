@@ -30,6 +30,15 @@
 
 use std::sync::mpsc;
 use std::thread;
+use std::time::Duration;
+
+/// How long [`KeepAwakeHold::acquire`] waits for the holder thread to report that
+/// the OS keep-awake request built, before returning anyway. Bounds the worst-case
+/// stall a blocking `keepawake::Builder::create()` (a synchronous D-Bus round trip
+/// on Linux) can impose on the async `lan_enable` — a hung session bus can't hang
+/// enable. 2s is generously above a healthy build (sub-millisecond on Windows/macOS,
+/// a fast IPC on Linux) yet short enough to feel instant if the bus is wedged.
+const ACQUIRE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A system-stays-awake hold, owned for its `Drop`. Held on a dedicated OS thread
 /// so acquire and release happen on the same thread (`SetThreadExecutionState` is
@@ -50,10 +59,15 @@ impl KeepAwakeHold {
     /// (after a stderr warning) if the request could not be built — keep-awake is
     /// best-effort and must never fail `lan_enable`.
     ///
-    /// The `ready` handshake makes acquisition synchronous only up to "did the
-    /// guard build": we block on it just long enough to learn success/failure,
-    /// then return. The guard then lives on the holder thread until this hold is
-    /// dropped.
+    /// The `ready` handshake makes acquisition bounded to ~2s worst case: we block
+    /// on it only long enough to learn success/failure, then return. Building the
+    /// OS request can BLOCK — on Linux `keepawake` makes a synchronous zbus/D-Bus
+    /// round trip to the session bus, and a slow or hung bus would otherwise stall
+    /// the tokio worker `lan_enable` runs on indefinitely (the D-Bus client's own
+    /// timeout isn't ours to rely on). So we cap the wait at
+    /// [`ACQUIRE_HANDSHAKE_TIMEOUT`]; see the timeout arm below for why that's still
+    /// leak-free and honors the best-effort contract. The guard then lives on the
+    /// holder thread until this hold is dropped.
     pub fn acquire() -> Option<KeepAwakeHold> {
         Self::acquire_inner().map(|(hold, _exited)| hold)
     }
@@ -103,11 +117,32 @@ impl KeepAwakeHold {
             })
             .ok()?;
 
-        // Block until the holder thread reports whether the guard built. A dropped
-        // sender (thread panicked before signalling) reads as failure.
-        match ready_rx.recv() {
+        // Wait — but only up to the timeout — for the holder thread to report
+        // whether the guard built. Three outcomes:
+        //   Ok(true)      → guard built: hold it.
+        //   Ok(false)     → guard build FAILED (the thread already exited after its
+        //                   stderr warning): nothing to hold → None.
+        //   Disconnected  → the sender dropped without signalling (the thread
+        //                   panicked before either send): treat as failure → None.
+        //   Timeout       → the build is still in flight (e.g. a wedged D-Bus). We
+        //                   return `Some(hold)` ANYWAY rather than stall enable: the
+        //                   hold owns `stop_tx`, so the holder thread stays governed
+        //                   by the channel exactly as in the fast path. If the build
+        //                   eventually succeeds, the guard releases on this hold's
+        //                   Drop; if it eventually FAILS, that thread just exits — so
+        //                   this cannot leak a hold, and keep-awake stays best-effort.
+        match ready_rx.recv_timeout(ACQUIRE_HANDSHAKE_TIMEOUT) {
             Ok(true) => Some((KeepAwakeHold { stop: stop_tx }, exited_rx)),
-            _ => None,
+            Ok(false) => None,
+            Err(mpsc::RecvTimeoutError::Disconnected) => None,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                eprintln!(
+                    "lan companion keep-awake is still initializing after {}s; \
+                     proceeding without waiting (it will apply once ready, or exit)",
+                    ACQUIRE_HANDSHAKE_TIMEOUT.as_secs()
+                );
+                Some((KeepAwakeHold { stop: stop_tx }, exited_rx))
+            }
         }
     }
 }
@@ -118,7 +153,6 @@ impl KeepAwakeHold {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     #[test]
     fn acquire_then_drop_exits_the_holder_thread() {

@@ -192,9 +192,20 @@ type ConversationEntry = { comment: PrThreadOut; isReview: boolean };
  *  the EXISTING `usePr` detail (no new query), so there's no separate loading/error
  *  state — the surrounding PrDetail already owns those. */
 function ConversationSection({ detail }: { detail: PrDetails }) {
+  // Drop GitHub's thread-reply wrapper reviews: replying to a review thread outside
+  // a batched review makes GitHub auto-wrap the reply in a new empty-body COMMENTED
+  // review (state delivered uppercase verbatim). Rendered here it's a contentless
+  // "Reviewed · No comment" card duplicating the reply already shown under Review
+  // threads. Matches the desktop's filter (RemotePrView.tsx) at its "body blank AND
+  // COMMENTED" core; the accepted tradeoff is that a genuinely empty COMMENTED review
+  // is also hidden (GitHub's reply-wrapping is by far the dominant producer). A
+  // bodyless APPROVED / CHANGES_REQUESTED still renders — its verdict carries meaning.
+  const visibleReviews = detail.reviews.filter(
+    (r) => r.body.trim().length > 0 || r.state.toUpperCase() !== "COMMENTED",
+  );
   const entries: ConversationEntry[] = [
     ...detail.comments.map((c) => ({ comment: c, isReview: false })),
-    ...detail.reviews.map((c) => ({ comment: c, isReview: true })),
+    ...visibleReviews.map((c) => ({ comment: c, isReview: true })),
   ].sort((a, b) => dateOrder(a.comment.date) - dateOrder(b.comment.date));
 
   return (

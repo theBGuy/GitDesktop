@@ -78,6 +78,7 @@ export interface StreamState {
 }
 
 type Action =
+  | { type: "opened" }
   | { type: "event"; event: ReviewEvent }
   | { type: "closed" }
   | { type: "gone" };
@@ -91,6 +92,12 @@ const initialState: StreamState = {
 
 function reducer(state: StreamState, action: Action): StreamState {
   switch (action.type) {
+    case "opened":
+      // The SSE connection is open. Move connecting → live so the UI leaves the
+      // skeleton even before the first event (keep-alive comments never surface
+      // through EventSource). ONLY from connecting — never resurrect a terminal
+      // (`ended`/`gone`) state if `onopen` somehow fires after a close.
+      return state.phase === "connecting" ? { ...state, phase: "live" } : state;
     case "closed":
       // A terminal event already settled the outcome → keep `ended`; otherwise the
       // probe (dispatched by the effect) will refine `ended`↔`gone`.
@@ -219,8 +226,20 @@ export function useReviewStream(id: string): StreamState {
 
   useEffect(() => {
     let terminalSeen = false;
+    // `closed` guards `onerror` against double-handling the permanent close.
+    // `cancelled` is a separate teardown flag flipped ONLY by the cleanup below —
+    // `closed` can't serve for the async probe guard because `onerror` sets it true
+    // before firing the probe, so a `closed` check there would always short-circuit.
     let closed = false;
+    let cancelled = false;
     const es = new EventSource(`/api/reviews/${encodeURIComponent(id)}/stream`);
+
+    es.onopen = () => {
+      // Connection established. Leave the connecting skeleton even before the first
+      // event (keep-alive comments don't surface through EventSource). The reducer
+      // only advances connecting → live, so this never resurrects a closed state.
+      if (!cancelled) dispatch({ type: "opened" });
+    };
 
     es.onmessage = (e) => {
       const event = parseEvent(e.data);
@@ -259,11 +278,13 @@ export function useReviewStream(id: string): StreamState {
           staleTime: 0,
         })
         .then((reviews) => {
+          if (cancelled) return; // unmounted / superseded — don't dispatch
           if (!reviews.some((r) => r.id === id)) {
             dispatch({ type: "gone" });
           }
         })
         .catch(() => {
+          if (cancelled) return;
           // A 401 already redirected via the QueryCache; any other probe failure
           // leaves the calmer `ended` state in place (we can't prove it's gone).
         });
@@ -271,6 +292,7 @@ export function useReviewStream(id: string): StreamState {
 
     return () => {
       closed = true;
+      cancelled = true;
       es.close();
     };
   }, [id]);

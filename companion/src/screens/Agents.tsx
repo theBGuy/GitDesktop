@@ -127,6 +127,16 @@ function WatchBody({ stream }: { stream: StreamState }) {
   // `showJump` is the small piece of derived state the button needs.
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const following = useRef(true);
+  // Last observed scrollTop, to read scroll DIRECTION. This is the fix for the
+  // auto-follow self-cancel: a smooth `scrollToBottom` emits intermediate `scroll`
+  // events whose positions momentarily read not-at-bottom. A position-only test would
+  // flip `following` false mid-animation and spuriously show "Jump to latest" though
+  // the user never scrolled. Direction sidesteps it entirely — a programmatic scroll
+  // only ever moves DOWN toward the bottom, so it never trips the "scrolled up" branch,
+  // and it re-arms following when it lands at the bottom. No guard flag / timeout, and
+  // no window where a genuine user scroll is ignored. (Reduced-motion "auto" jumps
+  // straight to bottom → an atBottom event → following stays true, unchanged.)
+  const lastScrollTop = useRef(0);
   const [showJump, setShowJump] = useState(false);
 
   const scrollToBottom = useCallback((smooth: boolean) => {
@@ -143,8 +153,13 @@ function WatchBody({ stream }: { stream: StreamState }) {
     if (!el) return;
     // A small tolerance so sub-pixel rounding never reads as "scrolled up".
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
-    following.current = atBottom;
-    setShowJump(!atBottom);
+    const scrolledUp = el.scrollTop < lastScrollTop.current - 1;
+    lastScrollTop.current = el.scrollTop;
+    // Stop following only on a deliberate UP scroll; re-arm at the bottom. A
+    // programmatic down-scroll never trips the up-branch, so it can't self-cancel.
+    if (atBottom) following.current = true;
+    else if (scrolledUp) following.current = false;
+    setShowJump(!following.current);
   }, []);
 
   // A primitive that changes on every new content frame — the last segment's text
@@ -176,7 +191,9 @@ function WatchBody({ stream }: { stream: StreamState }) {
         ) : (
           <>
             {phase === "live" ? <LiveNote /> : null}
-            {empty && phase !== "live" ? <EmptyTranscript /> : null}
+            {/* Live but nothing has streamed yet (or a Codex-style run whose only
+                output is its terminal). ended/gone own their own states below. */}
+            {empty && phase === "live" ? <EmptyTranscript /> : null}
             {segments.map((seg, i) => (
               <SegmentRow key={i} seg={seg} />
             ))}
