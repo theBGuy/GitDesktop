@@ -16,6 +16,7 @@
 //! per-field `Arc`s, mirroring how `AppState` shares individual fields.
 
 pub mod auth;
+pub mod keep_awake;
 pub mod routes;
 pub mod server;
 pub mod static_serve;
@@ -28,6 +29,7 @@ use tauri::{AppHandle, State};
 
 use crate::error::{AppError, AppResult};
 use auth::{LanDevice, PairingSession, RateLimitMap};
+use keep_awake::KeepAwakeHold;
 use server::ServerHandle;
 
 /// A repo registered in the LAN companion's repo registry, keyed by an opaque
@@ -93,6 +95,13 @@ struct RunningServer {
     bind_lan: bool,
     urls: Vec<String>,
     fingerprint: String,
+    /// A keep-awake hold, kept alive for the server's lifetime so the desktop
+    /// doesn't sleep mid-watch (the display may still sleep). Held ONLY for its
+    /// `Drop`: every teardown path (disable, mode-switch restart) drops this
+    /// `RunningServer`, which releases the hold on the holder thread — no explicit
+    /// release needed. `None` when the OS request couldn't be acquired (best-effort;
+    /// see [`keep_awake`]). Underscore-named: never read, only dropped.
+    _keep_awake: Option<KeepAwakeHold>,
 }
 
 impl Default for LanState {
@@ -365,6 +374,10 @@ pub async fn lan_enable(
         state.monitor_cut.clone(),
     )
     .await?;
+    // Keep the machine awake while sharing (best-effort — a failure to acquire
+    // logs a warning inside `acquire` and yields `None`, never failing enable).
+    // Held on the RunningServer, so every teardown path releases it via Drop.
+    let keep_awake = KeepAwakeHold::acquire();
     {
         let mut running = state.running.lock().unwrap_or_else(|p| p.into_inner());
         *running = Some(RunningServer {
@@ -372,6 +385,7 @@ pub async fn lan_enable(
             bind_lan,
             urls,
             fingerprint,
+            _keep_awake: keep_awake,
         });
     }
     // Keep the tray truthful about whether we're sharing.
@@ -1818,6 +1832,74 @@ mod tests {
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["kind"], "noActiveRepo");
+
+        auth::set_store_path_for_test(prev);
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn alias_pr_timeline_and_threads_409_with_no_active_repo() {
+        // The alias PR-conversation routes 409 `noActiveRepo` when no repo is shared —
+        // the resolver rejects before the handler, so no git/gh subprocess runs.
+        let _lock = auth::store_test_lock();
+        let tmp = temp_store();
+        let prev = auth::set_store_path_for_test(Some(tmp.clone()));
+        let (device, bearer, token_hash) = auth::mint_device("NoActive Convo Phone");
+        auth::persist_device(&device, &token_hash).unwrap();
+
+        let state = test_router(None);
+        let router = server::build_router(state);
+
+        for path in ["/api/forge/prs/1/timeline", "/api/forge/prs/1/threads"] {
+            let resp = router
+                .clone()
+                .oneshot(authed_get(path, &bearer))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CONFLICT, "path: {path}");
+            let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["kind"], "noActiveRepo", "path: {path}");
+        }
+
+        auth::set_store_path_for_test(prev);
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn scoped_pr_timeline_and_threads_404_for_unknown_repo_id() {
+        // An unknown `{repoId}` 404s `noSuchRepo` (resolver rejects before the
+        // handler, so no git/gh subprocess runs).
+        let _lock = auth::store_test_lock();
+        let tmp = temp_store();
+        let prev = auth::set_store_path_for_test(Some(tmp.clone()));
+        let (device, bearer, token_hash) = auth::mint_device("NoRepo Convo Phone");
+        auth::persist_device(&device, &token_hash).unwrap();
+
+        // Registry is empty (no register_repo call).
+        let state = test_router(Some("C:/repo".to_string()));
+        let router = server::build_router(state);
+
+        for path in [
+            "/api/repos/deadbeefdeadbeef/prs/1/timeline",
+            "/api/repos/deadbeefdeadbeef/prs/1/threads",
+        ] {
+            let resp = router
+                .clone()
+                .oneshot(authed_get(path, &bearer))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "path: {path}");
+            let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["kind"], "noSuchRepo", "path: {path}");
+        }
 
         auth::set_store_path_for_test(prev);
         std::fs::remove_file(&tmp).ok();

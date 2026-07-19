@@ -94,6 +94,14 @@ rustls-pki-types = { version = "1", features = ["std"] }
 # from disk at request time (no rebuild needed to pick up a fresh frontend build) — that
 # IS the dev loop; RELEASE builds bake the files in.
 rust-embed = { version = "8.12.0", features = ["mime-guess"] }
+# Keep the desktop awake while the LAN companion is sharing (src/lan/keep_awake.rs):
+# the phone's value is unattended monitoring, so the machine must not sleep mid-watch.
+# `keepawake` requests a system-stays-awake hold (display may still sleep) via the OS
+# power API — `SetThreadExecutionState` on Windows (drags a pure-Rust `windows` crate,
+# Win32_System_Power only), IOKit on macOS, org.freedesktop inhibit (zbus) on Linux —
+# all pure-Rust, no aws-lc/NASM, 3-OS CI-safe. RAII guard released on Drop; held on a
+# dedicated thread because the Windows API is thread-affine (see keep_awake.rs).
+keepawake = "0.6"
 
 # Desktop-only: the updater plugin doesn't build for mobile.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
@@ -131,3 +139,7 @@ tower = { version = "0.5.3", features = ["util"] }
 # is already in the graph via tauri-plugin-http, so this is near-zero extra compile;
 # `rustls-tls` (no default features) keeps it off the native-TLS / aws-lc path.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# RAII temp dirs for the TLS-material tests (src/lan/tls.rs): a killed or panicking
+# test run must not leak private-key material into the system temp dir — `TempDir`
+# removes the directory on Drop. Already in the graph transitively, so near-zero cost.
+tempfile = "3"
