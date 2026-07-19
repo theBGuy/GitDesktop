@@ -2335,14 +2335,18 @@ pub async fn gh_pr_view(
                     .as_deref()
                     .map(parse_actions_run_job)
                     .unwrap_or((None, None));
+                // gh serializes a null GraphQL timestamp as Go's zero value
+                // ("0001-01-01T00:00:00Z"), so an in-progress check "has" a
+                // completedAt unless the sentinel is dropped along with "".
+                let real_time = |s: &String| !s.is_empty() && !s.starts_with("0001-01-01");
                 PrCheckOut {
                     name,
                     status,
                     details_url,
                     run_id,
                     job_id,
-                    started_at: c.started_at.filter(|s| !s.is_empty()),
-                    completed_at: c.completed_at.filter(|s| !s.is_empty()),
+                    started_at: c.started_at.filter(real_time),
+                    completed_at: c.completed_at.filter(real_time),
                 }
             })
             .collect(),

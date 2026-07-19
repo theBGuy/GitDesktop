@@ -4,20 +4,29 @@ import {
   CaretRightIcon,
   CheckCircleIcon,
   CircleIcon,
+  MinusCircleIcon,
   XCircleIcon,
 } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
+  type Dispatch,
   type KeyboardEvent,
   type MouseEvent,
+  type SetStateAction,
   useEffect,
   useRef,
   useState,
 } from "react";
 import { LogBlock } from "@/components/LogBlock";
 import { Skeleton } from "@/components/ui/skeleton";
-import type { PrCheckOut } from "@/lib/git/types";
-import { useJobLogs, useRunFailedLogs } from "@/lib/github/actions";
+import { StatusIcon } from "@/features/actions/status";
+import type { ForgeProvider, PrCheckOut } from "@/lib/git/types";
+import {
+  type RunJob,
+  useJobLogs,
+  useRunDetail,
+  useRunFailedLogs,
+} from "@/lib/github/actions";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { cn } from "@/lib/utils";
 
@@ -31,7 +40,7 @@ function checkPresentation(status: string): {
   Icon: typeof CheckCircleIcon;
   label: string;
   /** Coarse bucket for the rollup summary + failures-first sort. */
-  bucket: "passed" | "failed" | "pending";
+  bucket: "passed" | "failed" | "pending" | "skipped";
 } {
   const s = status.toUpperCase();
   if (s === "SUCCESS") {
@@ -42,7 +51,11 @@ function checkPresentation(status: string): {
       bucket: "passed",
     };
   }
-  if (["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT"].includes(s)) {
+  if (
+    ["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "STARTUP_FAILURE"].includes(
+      s,
+    )
+  ) {
     return {
       tone: "text-destructive",
       Icon: XCircleIcon,
@@ -50,12 +63,55 @@ function checkPresentation(status: string): {
       bucket: "failed",
     };
   }
+  if (["SKIPPED", "NEUTRAL", "STALE"].includes(s)) {
+    return {
+      tone: "text-muted-foreground",
+      Icon: MinusCircleIcon,
+      label: "skipped",
+      bucket: "skipped",
+    };
+  }
+  // Everything still in flight — IN_PROGRESS/QUEUED/PENDING — plus
+  // ACTION_REQUIRED (deliberately here: it awaits a human, so the amber warning
+  // tone fits) falls through to the pending bucket.
   return {
     tone: "text-warning",
     Icon: CircleIcon,
     label: "pending",
     bucket: "pending",
   };
+}
+
+/** A GitHub Actions check that hasn't finished yet — it has a parsed run id, the
+ *  repo is GitHub, and no `completedAt`. Only these fetch run detail for the live
+ *  step checklist; GitLab checks also carry run/job ids (pipeline/job ids) but have
+ *  no steps, so gating on the provider avoids wasted `forge_ci_run_view` spawns. */
+function isRunningActionsCheck(
+  check: PrCheckOut,
+  provider: ForgeProvider,
+): boolean {
+  return provider === "github" && Boolean(check.runId) && !check.completedAt;
+}
+
+/** The run's job for a check: by job id first (the reliable key), falling back to
+ *  matching the job name when the check carries no job id. */
+function jobForCheck(
+  check: PrCheckOut,
+  jobs: RunJob[] | undefined,
+): RunJob | undefined {
+  if (!jobs) return undefined;
+  if (check.jobId) {
+    const id = Number(check.jobId);
+    const byId = jobs.find((j) => j.id === id);
+    if (byId) return byId;
+  }
+  return jobs.find((j) => j.name === check.name);
+}
+
+/** The step a running job is currently executing (first `in_progress` step), or
+ *  null when none has started yet (still "queued"). */
+function currentStep(job: RunJob | undefined) {
+  return job?.steps.find((s) => s.status === "in_progress") ?? null;
 }
 
 /** "1m 12s" elapsed between two ISO timestamps (mirrors RunDetailView's helper).
@@ -144,19 +200,65 @@ function CheckLogTail({
   );
 }
 
+/** The live step checklist for a running GitHub Actions check: one compact row
+ *  per step (status glyph + name + duration), shown in the expanded panel instead
+ *  of the (mid-run useless) log tail. Real rows render as data arrives — no spinner. */
+function RunSteps({ job }: { job: RunJob }) {
+  return (
+    <div className="mt-1.5 space-y-0.5">
+      {job.steps.map((step) => {
+        const elapsed = duration(step.startedAt, step.completedAt);
+        return (
+          <div
+            key={step.number}
+            className="flex items-center gap-2 text-[11px]"
+          >
+            <StatusIcon
+              status={step.status}
+              conclusion={step.conclusion}
+              className="size-3.5"
+            />
+            <span
+              className="min-w-0 flex-1 truncate"
+              onMouseEnter={clipTitle(step.name)}
+            >
+              {step.name}
+            </span>
+            {elapsed && (
+              <span className="shrink-0 text-muted-foreground tabular-nums">
+                {elapsed}
+              </span>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 /** One check row: state icon + name + duration + trailing affordance. GitHub
  *  Actions checks (a parsed run id) peek their log inline; external checks link
- *  out; URL-less checks show just name + status. */
+ *  out; URL-less checks show just name + status. A running Actions check surfaces
+ *  its current step inline and its live step checklist when expanded. */
 function CheckRow({
   repoPath,
   check,
   rowId,
+  runJob,
+  isRunning,
 }: {
   repoPath: string;
   check: PrCheckOut;
   /** Unique row identity (the sorted index) for `data-row` + roving focus —
    *  GitHub allows two checks with the same `name`, so name can't be the id. */
   rowId: string;
+  /** The resolved run job for a running Actions check (from the rollup's shared
+   *  run-detail queries); undefined until the run detail resolves, or for a
+   *  non-running / non-Actions check. */
+  runJob: RunJob | undefined;
+  /** Whether this is a still-running GitHub Actions check (drives the inline
+   *  current-step peek + the expanded step checklist). */
+  isRunning: boolean;
 }) {
   const { tone, Icon, label } = checkPresentation(check.status);
   const elapsed = duration(check.startedAt, check.completedAt);
@@ -164,6 +266,15 @@ function CheckRow({
   // one job's log; a run id without a job falls back to the run's failed logs.
   const isActionsCheck = Boolean(check.runId);
   const [logsOpen, setLogsOpen] = useState(false);
+
+  // Running Actions check: the current step's name, shown inline after the check
+  // name. `undefined` while run detail hasn't resolved (render nothing — no jump);
+  // "queued" once resolved but no step is in progress yet.
+  const stepPeek = isRunning
+    ? runJob
+      ? (currentStep(runJob)?.name ?? "queued")
+      : undefined
+    : undefined;
 
   // The row's shared inner content (icon + name + duration). Rendered inside a
   // focusable button for interactive rows (Actions → toggles logs; else the
@@ -187,6 +298,16 @@ function CheckRow({
       >
         {check.name}
       </span>
+      {stepPeek !== undefined && (
+        // The running check's current step, after the name — muted + truncated so
+        // a long step name can't push the row wide (name keeps its flex share).
+        <span
+          className="min-w-0 max-w-[45%] shrink truncate text-muted-foreground"
+          onMouseEnter={clipTitle(stepPeek)}
+        >
+          · {stepPeek}
+        </span>
+      )}
       {elapsed && (
         <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
           {elapsed}
@@ -245,11 +366,41 @@ function CheckRow({
       </div>
       {isActionsCheck && logsOpen && (
         <div className="px-3 pb-2 pl-10">
-          <CheckLogTail repoPath={repoPath} check={check} />
+          {/* A running Actions check shows its live step checklist (logs are
+              useless mid-run); if its job can't be resolved yet or it has no
+              steps, and for every completed check, fall back to the log tail. */}
+          {isRunning && runJob && runJob.steps.length > 0 ? (
+            <RunSteps job={runJob} />
+          ) : (
+            <CheckLogTail repoPath={repoPath} check={check} />
+          )}
         </div>
       )}
     </div>
   );
+}
+
+/** A headless per-run fetcher: mounts one `useRunDetail` query for a running
+ *  Actions run and lifts its jobs to the parent so each row can resolve its own
+ *  job (React Query dedupes by run-id key, so N rows sharing a run cost one fetch).
+ *  Mounted only while the rollup is open; `useRunDetail` refetches every 5s while
+ *  the run stays active. Renders nothing. */
+function RunDetailFetcher({
+  repoPath,
+  runId,
+  setJobs,
+}: {
+  repoPath: string;
+  runId: string;
+  /** The parent's `setJobsByRun` state updater (stable across renders). */
+  setJobs: Dispatch<SetStateAction<Record<string, RunJob[]>>>;
+}) {
+  const detail = useRunDetail(repoPath, Number(runId), true);
+  const jobs = detail.data?.jobs;
+  useEffect(() => {
+    if (jobs) setJobs((prev) => ({ ...prev, [runId]: jobs }));
+  }, [jobs, runId, setJobs]);
+  return null;
 }
 
 /**
@@ -266,9 +417,13 @@ function CheckRow({
 export function ChecksRollup({
   checks,
   repoPath,
+  provider,
 }: {
   checks: PrCheckOut[];
   repoPath: string;
+  /** The repo's forge provider — gates the running-Actions live-steps fetch to
+   *  GitHub (GitLab checks also carry run/job ids but have no steps). */
+  provider: ForgeProvider;
 }) {
   const passed = checks.filter(
     (c) => checkPresentation(c.status).bucket === "passed",
@@ -279,10 +434,17 @@ export function ChecksRollup({
   const pending = checks.filter(
     (c) => checkPresentation(c.status).bucket === "pending",
   ).length;
+  const skipped = checks.filter(
+    (c) => checkPresentation(c.status).bucket === "skipped",
+  ).length;
 
   // Auto-expand on any failure — a failing PR should show what failed without a
   // click. Otherwise collapsed by default.
   const [open, setOpen] = useState(failed > 0);
+  // The jobs of each running Actions run, keyed by run id. Populated by the
+  // headless `RunDetailFetcher`s mounted while the rollup is open (one per distinct
+  // run id); each row resolves its own job from here. Empty until run detail lands.
+  const [jobsByRun, setJobsByRun] = useState<Record<string, RunJob[]>>({});
   // …and re-open when failures FIRST appear after mount: usePrDetails refetches
   // on window focus (no remount), so a PR opened while CI is pending would
   // otherwise stay collapsed when a check later fails. Fire only on the 0→>0
@@ -293,13 +455,25 @@ export function ChecksRollup({
     prevFailed.current = failed;
   }, [failed]);
 
-  // Failures first, then pending, then passed; stable within a bucket.
-  const bucketRank = { failed: 0, pending: 1, passed: 2 } as const;
+  // Failures first, then pending, then passed, then skipped (least interesting);
+  // stable within a bucket.
+  const bucketRank = { failed: 0, pending: 1, passed: 2, skipped: 3 } as const;
   const sorted = [...checks].sort(
     (a, b) =>
       bucketRank[checkPresentation(a.status).bucket] -
       bucketRank[checkPresentation(b.status).bucket],
   );
+
+  // The distinct run ids of the still-running GitHub Actions checks — one
+  // run-detail query mounts per id below (React Query dedupes rows sharing a run),
+  // and only while the rollup is OPEN, so a collapsed rollup fires nothing.
+  const runningRunIds = [
+    ...new Set(
+      checks
+        .filter((c) => isRunningActionsCheck(c, provider))
+        .map((c) => c.runId as string),
+    ),
+  ];
 
   // Roving focus: the "active" row is whichever row element currently holds DOM
   // focus, keyed by `data-row` = the row's sorted index (a check `name` isn't
@@ -356,6 +530,13 @@ export function ChecksRollup({
       tone: "text-warning",
       word: "pending",
     },
+    {
+      key: "skipped",
+      count: skipped,
+      Icon: MinusCircleIcon,
+      tone: "text-muted-foreground",
+      word: "skipped",
+    },
   ].filter((s) => s.count > 0);
 
   return (
@@ -388,22 +569,43 @@ export function ChecksRollup({
         </span>
       </button>
       {open && (
-        <div
-          className="mt-1.5 max-h-64 overflow-y-auto border"
-          onKeyDown={onKeyDown}
-        >
-          {sorted.map((c, i) => (
-            // Key + data-row on the sorted index — `c.name` isn't unique (GitHub
-            // allows two checks with the same name), which would collide keys and
-            // make the second row unfocusable.
-            <CheckRow
-              key={rowId(i)}
-              rowId={rowId(i)}
+        <>
+          {/* One run-detail query per distinct running Actions run, mounted only
+              while the rollup is open (collapsed → no fetch). Headless — they lift
+              jobs into `jobsByRun` for the rows to read. */}
+          {runningRunIds.map((id) => (
+            <RunDetailFetcher
+              key={id}
               repoPath={repoPath}
-              check={c}
+              runId={id}
+              setJobs={setJobsByRun}
             />
           ))}
-        </div>
+          <div
+            className="mt-1.5 max-h-64 overflow-y-auto border"
+            onKeyDown={onKeyDown}
+          >
+            {sorted.map((c, i) => {
+              // Key + data-row on the sorted index — `c.name` isn't unique (GitHub
+              // allows two checks with the same name), which would collide keys and
+              // make the second row unfocusable.
+              const running = isRunningActionsCheck(c, provider);
+              const runJob = running
+                ? jobForCheck(c, c.runId ? jobsByRun[c.runId] : undefined)
+                : undefined;
+              return (
+                <CheckRow
+                  key={rowId(i)}
+                  rowId={rowId(i)}
+                  repoPath={repoPath}
+                  check={c}
+                  isRunning={running}
+                  runJob={runJob}
+                />
+              );
+            })}
+          </div>
+        </>
       )}
     </div>
   );

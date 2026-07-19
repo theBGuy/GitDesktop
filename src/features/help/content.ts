@@ -593,12 +593,15 @@ since**), so an out-of-date verdict never reads as current. The feed works for *
 MRs**, **Bitbucket PRs**, and **local PRs** too — see their sections below for the events
 each one reports.
 
-CI checks appear as a **rollup summary** — **✓ N passed · ✕ M failed · ● K pending**,
-each count with its own icon and word so status never rides on color alone. It
-auto-expands whenever something has failed. Expanding lists the checks failures-first
-(arrow-navigable). A failing **GitHub Actions** check **peeks its job log inline**,
-without leaving the PR — **copy** the log with the button in its top-right corner — with
-an **Open full run** link; an external check (Vercel and the
+CI checks appear as a **rollup summary** — **✓ N passed · ✕ M failed · ● K pending ·
+⊖ K skipped**, each count with its own icon and word so status never rides on color
+alone. Skipped (and neutral) checks show as their own muted segment rather than
+masquerading as pending. It auto-expands whenever something has failed. Expanding lists
+the checks failures-first (arrow-navigable). A **GitHub Actions** check that's still
+**running** shows its **current step** right in the row and, when expanded, a **live step
+checklist** that updates as the run progresses; a finished Actions check **peeks its job
+log inline** instead — without leaving the PR — **copy** the log with the button in its
+top-right corner — with an **Open full run** link. An external check (Vercel and the
 like) links straight out to its details. **GitLab MRs** get the same rollup from the MR's
 pipeline jobs, with the same **inline log peek**; **Bitbucket PRs** get it from the PR's
 commit build statuses, but those **link out only** (name, state, and URL — Bitbucket

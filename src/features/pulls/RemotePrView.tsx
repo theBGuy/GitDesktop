@@ -1111,7 +1111,11 @@ export function RemotePrView({
             }}
           />
         )}
-        <ChecksRollup checks={pr.checks} repoPath={repoPath} />
+        <ChecksRollup
+          checks={pr.checks}
+          repoPath={repoPath}
+          provider={providerKey}
+        />
         <div className="flex gap-1 pt-1">
           {/* The AI Review tab needs only the diff (forge-neutral) and a way to
               post the result as a comment — so it follows canComment, which
