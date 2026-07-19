@@ -160,9 +160,13 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     ? `Pull — branch has diverged (${behindCount} commit${behindCount === 1 ? "" : "s"} behind ${head?.upstream}); use Pull with rebase or merge from the menu`
     : detached
       ? "Pull — you're on a detached HEAD; check out a branch to pull"
-      : !hasUpstream
-        ? "Pull — no upstream branch to pull from yet; publish the branch first"
-        : behindLabel;
+      : head?.upstreamGone
+        ? // A gone upstream is configured-but-dead (branch deleted on the
+          // remote, e.g. after a merge) — not never-published; say so.
+          `Pull — upstream ${head?.upstream} was deleted on the remote (likely merged); use Publish branch to recreate it`
+        : !hasUpstream
+          ? "Pull — no upstream branch to pull from yet; publish the branch first"
+          : behindLabel;
 
   function doPull(mode: PullMode) {
     pull.mutate(mode, {
@@ -253,8 +257,9 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           ButtonGroup's border-collapse/rounding child selectors
           (`*:data-slot:rounded-r-none` + `[&>[data-slot]~[data-slot]]`) — the
           primitive then contributes only layout + `role="group"`, and THIS call
-          site owns the seams explicitly on the Buttons (rounded outer caps,
-          `rounded-none border-l-0` on the inner joins). Keep it that way: a
+          site owns the seams explicitly on the Buttons. The vendored Button is
+          square (`rounded-none` in its cva root and `sm` variant), so the only
+          load-bearing seam class is `border-l-0` on the joins. Keep it that way: a
           future reorder must set these classes, not lean on the primitive's
           adjacency magic (it has now misfired on two arrangements). The group's
           `*:focus-visible:z-10` also can't reach the Buttons through the spans,
@@ -266,7 +271,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
             size="sm"
             disabled={busy || detached}
             aria-label={pushDescription}
-            className="rounded-r-none focus-visible:relative focus-visible:z-10"
+            className="focus-visible:relative focus-visible:z-10"
             onClick={() => {
               if (diverged) {
                 setForceConfirmOpen(true);
@@ -299,7 +304,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
             size="sm"
             disabled={busy || !hasUpstream || diverged}
             aria-label={pullDescription}
-            className="rounded-none border-l-0 focus-visible:relative focus-visible:z-10"
+            className="border-l-0 focus-visible:relative focus-visible:z-10"
             onClick={() => doPull("ffOnly")}
           >
             {pull.isPending ? (
@@ -330,7 +335,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
                   // reconcile options (need a tracking upstream) or "Update from
                   // upstream" (needs the fork's upstream remote).
                   disabled={busy || (!hasUpstream && !canUpdateUpstream)}
-                  className="rounded-none border-l-0 px-1.5 focus-visible:relative focus-visible:z-10"
+                  className="border-l-0 px-1.5 focus-visible:relative focus-visible:z-10"
                 >
                   <CaretDownIcon />
                 </Button>
@@ -364,7 +369,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
             variant="outline"
             size="sm"
             disabled={busy}
-            className="rounded-l-none border-l-0 focus-visible:relative focus-visible:z-10"
+            className="border-l-0 focus-visible:relative focus-visible:z-10"
             onClick={() => doFetch(false)}
           >
             {fetchRemote.isPending ? (

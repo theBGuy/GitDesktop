@@ -486,16 +486,16 @@ Worktrees that AI agent sessions use internally are hidden here.{{/ai}}`,
   {
     id: "syncing",
     label: "Syncing & conflicts",
-    body: `# Fetch, pull, push & conflicts
+    body: `# Push, pull, fetch & conflicts
 
 The header shows **Push / Pull / Fetch**, with the number of commits to push or pull shown
 right on the **Push** and **Pull** buttons.
 
-- **Fetch** ({{kbd:fetch}}) updates your view of the remote without changing your branch.
-- **Pull** ({{kbd:pull}}) is fast-forward only by design — it won't create surprise merge
-  commits.
 - **Push** ({{kbd:push}}) sends your commits. For a branch with no upstream yet, you'll
   see **Publish branch** instead.
+- **Pull** ({{kbd:pull}}) is fast-forward only by design — it won't create surprise merge
+  commits.
+- **Fetch** ({{kbd:fetch}}) updates your view of the remote without changing your branch.
 
 ## Update a fork from upstream
 
