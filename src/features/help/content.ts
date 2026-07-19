@@ -351,8 +351,9 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
 - Branches are sorted by most recent commit, with the default branch pinned on top. Each
   row shows two distinct indicators: the branch's own **push/pull state** vs. its upstream
   (↑ commits to push, ↓ commits to pull, plus a marker for a never-published branch and one
-  for a branch whose upstream was deleted on the remote), and its **+/− divergence vs. the
-  default branch**, written \`+N −M\` and labeled with the default branch's name.
+  for a branch whose upstream was deleted on the remote — or whose tracked remote is no
+  longer configured), and its **+/− divergence vs. the default branch**, written \`+N −M\`
+  and labeled with the default branch's name.
 - **Create** a branch ({{kbd:new-branch}}), **rename** ({{kbd:rename-branch}}), **delete**
   ({{kbd:delete-branch}}), or **archive** it — archiving hides a branch without deleting
   it, collapsing it into an "Archived" section. When creating, the **Base it on** picker is

@@ -970,6 +970,33 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                     remoteless repo (there's no push story). */}
                 {remoteNames.length > 0 &&
                   (() => {
+                    // A branch tracking a remote that's since been removed (while
+                    // other remotes remain) offers neither Push nor Publish in the
+                    // context menu — arrows here would imply a push/pull action the
+                    // menu can't honor, so render the muted local-only marker with a
+                    // NO-action title. `upstreamRemote` is null for a branch tracking
+                    // a LOCAL upstream (git's `%(upstream:remotename)` is empty →
+                    // None on the Rust side); the `branch.upstreamRemote &&` conjunct
+                    // keeps such a branch OUT of this case so its truthful vs-local
+                    // arrows still show below.
+                    if (
+                      branch.upstream &&
+                      !branch.upstreamGone &&
+                      branch.upstreamRemote &&
+                      !remoteNames.includes(branch.upstreamRemote)
+                    ) {
+                      const label = `Tracks ${branch.upstream}, but that remote is no longer configured.`;
+                      return (
+                        <span
+                          role="img"
+                          aria-label={label}
+                          className="flex shrink-0 items-center text-muted-foreground"
+                          title={label}
+                        >
+                          <CloudSlashIcon className="size-3" />
+                        </span>
+                      );
+                    }
                     if (branch.upstream && !branch.upstreamGone) {
                       if (
                         branch.upstreamAhead === 0 &&
@@ -983,13 +1010,16 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                         parts.push(`${branch.upstreamAhead} to push`);
                       if (branch.upstreamBehind > 0)
                         parts.push(`${branch.upstreamBehind} to pull`);
+                      const label = `${parts.join(", ")} — vs ${branch.upstream}`;
                       return (
                         <span
                           // No text color: inherits the row foreground (a step
                           // stronger than the muted divergence) and follows the
-                          // hover accent-foreground automatically.
+                          // hover accent-foreground automatically. The arrow SVGs are
+                          // aria-hidden, so the span carries the name for readers.
+                          aria-label={label}
                           className="flex shrink-0 items-center gap-1 text-[11px] tabular-nums"
-                          title={`${parts.join(", ")} — vs ${branch.upstream}`}
+                          title={label}
                         >
                           {branch.upstreamAhead > 0 && (
                             <span className="flex items-center gap-0.5">
@@ -1007,10 +1037,13 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                       );
                     }
                     if (branch.upstreamGone) {
+                      const label = `Upstream ${branch.upstream} was deleted on the remote — likely merged. Right-click to publish again or delete.`;
                       return (
                         <span
+                          role="img"
+                          aria-label={label}
                           className="flex shrink-0 items-center text-muted-foreground"
-                          title={`Upstream ${branch.upstream} was deleted on the remote — likely merged. Right-click to publish again or delete.`}
+                          title={label}
                         >
                           <CloudXIcon className="size-3" />
                         </span>
@@ -1019,6 +1052,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                     // !branch.upstream
                     return (
                       <span
+                        role="img"
+                        aria-label="Local only — never published. Right-click to publish."
                         className="flex shrink-0 items-center text-muted-foreground"
                         title="Local only — never published. Right-click to publish."
                       >
@@ -1026,16 +1061,31 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                       </span>
                     );
                   })()}
-                {div && (div.ahead > 0 || div.behind > 0) && (
-                  <span
-                    className="flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground tabular-nums"
-                    title={`${div.ahead} commits ahead of ${defaultName}, ${div.behind} behind`}
-                  >
-                    {div.ahead > 0 && <span>+{div.ahead}</span>}
-                    {div.behind > 0 && <span>{`−${div.behind}`}</span>}
-                    <span>{defaultName}</span>
-                  </span>
-                )}
+                {div &&
+                  (div.ahead > 0 || div.behind > 0) &&
+                  (() => {
+                    const parts: string[] = [];
+                    if (div.ahead > 0)
+                      parts.push(
+                        `${div.ahead} commit${div.ahead === 1 ? "" : "s"} ahead of ${defaultName}`,
+                      );
+                    if (div.behind > 0)
+                      parts.push(
+                        `${div.behind} commit${div.behind === 1 ? "" : "s"} behind`,
+                      );
+                    const label = parts.join(", ");
+                    return (
+                      <span
+                        aria-label={label}
+                        className="flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground tabular-nums"
+                        title={label}
+                      >
+                        {div.ahead > 0 && <span>+{div.ahead}</span>}
+                        {div.behind > 0 && <span>{`−${div.behind}`}</span>}
+                        <span>{defaultName}</span>
+                      </span>
+                    );
+                  })()}
                 {branch.lastCommitDate && (
                   <span className="ml-auto shrink-0 text-[11px] text-muted-foreground">
                     {formatRelativeTime(branch.lastCommitDate)}
