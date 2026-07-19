@@ -312,8 +312,10 @@ discarding a whole untracked file goes to the recycle bin. Commit with title + b
 co-authors suggested from history, amend, undo, reset, and revert.
 
 **Branches** — switch (bring-changes / stash prompt), create, rename, delete, and
-**archive** (hide from the switcher without deleting). Per-branch ahead/behind vs. the
-default branch and a PR badge show in the switcher.
+**archive** (hide from the switcher without deleting). Each switcher row shows a branch's
+own **push/pull state** vs. its upstream (↑ to push / ↓ to pull, plus markers for
+never-published and upstream-deleted branches) and its **+/− divergence vs. the default
+branch**, labeled with the default's name — plus a PR badge.
 
 - **Clean up branches** ⭐ — a bulk sweep that archives or deletes every stale branch
   (merged into the default branch, or with no commits in a chosen window) in one

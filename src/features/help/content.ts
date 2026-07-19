@@ -348,8 +348,11 @@ tracked file and blames the one you choose as it is now.
 
 The branch name in the header opens the **branch switcher** ({{kbd:show-branches}}).
 
-- Branches are sorted by most recent commit, with the default branch pinned on top and
-  each branch's ahead/behind counts vs. the default.
+- Branches are sorted by most recent commit, with the default branch pinned on top. Each
+  row shows two distinct indicators: the branch's own **push/pull state** vs. its upstream
+  (↑ commits to push, ↓ commits to pull, plus a marker for a never-published branch and one
+  for a branch whose upstream was deleted on the remote), and its **+/− divergence vs. the
+  default branch**, written \`+N −M\` and labeled with the default branch's name.
 - **Create** a branch ({{kbd:new-branch}}), **rename** ({{kbd:rename-branch}}), **delete**
   ({{kbd:delete-branch}}), or **archive** it — archiving hides a branch without deleting
   it, collapsing it into an "Archived" section. When creating, the **Base it on** picker is
@@ -378,8 +381,9 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
 - **Update a branch from its own upstream** without switching to it: when a branch is
   behind the remote it tracks, its right-click menu offers **Update from _origin/…_**. This
   is the "just merged a PR — bring the default branch current before I switch back" flow;
-  the default branch's row shows how far behind its upstream it is after a fetch, and
-  *Update default branch from its remote* is available from the command palette too.
+  every branch's row shows its own push/pull state (↑/↓ vs. its upstream) after a fetch, so
+  the branches with commits to pull are visible at a glance, and *Update default branch from
+  its remote* is available from the command palette too.
 - **Push a branch without switching to it** — the outbound counterpart: a branch ahead
   of the remote it tracks offers **Push to _its remote/…_** in its right-click menu — so a
   branch tracking a fork's _upstream_ is pushed there, not to origin. An unpushed or
