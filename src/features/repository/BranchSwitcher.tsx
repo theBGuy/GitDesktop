@@ -1073,8 +1073,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                         `${div.ahead} commit${div.ahead === 1 ? "" : "s"} ahead of ${defaultName}`,
                       );
                     if (div.behind > 0)
+                      // Behind-only must still name the base: role="img" hides the
+                      // visible {defaultName} child from AT, so the label is all
+                      // a reader gets. Skipped when the ahead part named it already.
                       parts.push(
-                        `${div.behind} commit${div.behind === 1 ? "" : "s"} behind`,
+                        `${div.behind} commit${div.behind === 1 ? "" : "s"} behind${div.ahead > 0 ? "" : ` ${defaultName}`}`,
                       );
                     const label = parts.join(", ");
                     return (
