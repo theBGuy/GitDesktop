@@ -76,9 +76,12 @@ export class ApiError extends Error {
    * teaching state instead.
    *
    * The server now mints a dedicated `400 { kind: "noRemote", … }` for this case,
-   * so detection is an exact `kind` match — no message-substring heuristic. (It
-   * previously sniffed the raw git stderr of a shared `kind: "git"` error, which
-   * would silently miss if git's wording changed.)
+   * so detection here is an exact `kind` match — no message-substring heuristic
+   * on this side. (This getter previously sniffed the raw git stderr of a shared
+   * `kind: "git"` error.) The wording-fragility didn't vanish, it moved: the LAN
+   * boundary (`lan/auth.rs`) still substring-matches git's "no such remote" to
+   * mint the kind — but now in exactly one server-side place, and a missed match
+   * degrades to the generic error-with-retry state, not a crash.
    */
   get isNoRemote(): boolean {
     return this.kind === "noRemote";
