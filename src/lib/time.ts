@@ -24,9 +24,16 @@ const UNITS: {
 
 const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "always" });
 
-/** "8 months ago", "2 hours ago", "just now". */
-export function formatRelativeTime(isoDate: string): string {
-  const seconds = (Date.now() - new Date(isoDate).getTime()) / 1000;
+/** "8 months ago", "2 hours ago", "just now". `now` defaults to the current
+ *  time; callers that render many timestamps together (RelativeTime) pass one
+ *  shared snapshot so simultaneously-mounted rows never disagree about the same
+ *  date — and passing it explicitly keeps the React Compiler's memo key aware of
+ *  the clock (a bare `Date.now()` read is invisible to it, freezing the output). */
+export function formatRelativeTime(
+  isoDate: string,
+  now: number = Date.now(),
+): string {
+  const seconds = (now - new Date(isoDate).getTime()) / 1000;
   // Largest-first: pick the first unit the elapsed time reaches.
   for (let i = 0; i < UNITS.length; i++) {
     const { unit, seconds: unitSeconds, rollupAt } = UNITS[i];

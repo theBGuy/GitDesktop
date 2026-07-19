@@ -583,7 +583,9 @@ shape plus the word, never color alone) — so a finished review (including Copi
 visible after the reviewer leaves the pending-request list.
 
 The Conversation tab is a single **date-sorted activity feed** — reviews, comments,
-pushed commits, and events all interleaved oldest-to-newest. A run of pushes collapses
+pushed commits, and events all interleaved oldest-to-newest. Every entry carries a
+**relative timestamp** (e.g. *2 days ago*), and hovering it reveals the exact local
+date and time. A run of pushes collapses
 into one **pushed N commits** row that expands to the commits (arrow-navigable), and each
 commit's short SHA is clickable — it jumps to that commit's detail. On GitHub, events show
 up as calm one-line entries: force-pushes, label added/removed, review requested, marked
@@ -593,12 +595,15 @@ since**), so an out-of-date verdict never reads as current. The feed works for *
 MRs**, **Bitbucket PRs**, and **local PRs** too — see their sections below for the events
 each one reports.
 
-CI checks appear as a **rollup summary** — **✓ N passed · ✕ M failed · ● K pending**,
-each count with its own icon and word so status never rides on color alone. It
-auto-expands whenever something has failed. Expanding lists the checks failures-first
-(arrow-navigable). A failing **GitHub Actions** check **peeks its job log inline**,
-without leaving the PR — **copy** the log with the button in its top-right corner — with
-an **Open full run** link; an external check (Vercel and the
+CI checks appear as a **rollup summary** — **✓ N passed · ✕ M failed · ● K pending ·
+⊖ J skipped**, each count with its own icon and word so status never rides on color
+alone. Skipped checks (plus neutral or stale ones) show as their own muted segment rather
+than masquerading as pending. It auto-expands whenever something has failed. Expanding lists
+the checks failures-first (arrow-navigable). A **GitHub Actions** check that's still
+**running** shows its **current step** right in the row and, when expanded, a **live step
+checklist** that updates as the run progresses; a finished Actions check **peeks its job
+log inline** instead — without leaving the PR — **copy** the log with the button in its
+top-right corner — with an **Open full run** link. An external check (Vercel and the
 like) links straight out to its details. **GitLab MRs** get the same rollup from the MR's
 pipeline jobs, with the same **inline log peek**; **Bitbucket PRs** get it from the PR's
 commit build statuses, but those **link out only** (name, state, and URL — Bitbucket

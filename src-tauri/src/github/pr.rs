@@ -1750,6 +1750,25 @@ fn parse_actions_run_job(url: &str) -> (Option<String>, Option<String>) {
     (Some(run_id), job_id)
 }
 
+/// Whether a timestamp string is a real time worth keeping. `gh` serializes a
+/// null GraphQL timestamp as Go's zero value (`"0001-01-01T00:00:00Z"`), so a
+/// still-running check "has" a `completedAt` — and a PENDING review "has" a
+/// `submittedAt` — unless that sentinel is dropped along with the empty string.
+/// Dropping both is what lets the frontend tell a finished check from an
+/// in-progress one, and skip rendering a pending review's absent submit time
+/// (its `date &&` guard treats `""` as absent) instead of a year-0001 date.
+fn real_check_time(s: &str) -> bool {
+    !s.is_empty() && !s.starts_with("0001-01-01")
+}
+
+/// A timeline date from the `gh pr view` Go-serialized path, cleared to `""`
+/// when it's absent or the Go-zero sentinel (see `real_check_time`), so the
+/// frontend's `date &&` guards skip rendering it rather than showing a
+/// year-0001 date.
+fn real_time_or_empty(s: String) -> String {
+    if real_check_time(&s) { s } else { String::new() }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawPr {
@@ -2173,7 +2192,7 @@ pub async fn gh_pr_view(
                         oid: c.oid,
                         headline: c.message_headline,
                         message_body: c.message_body,
-                        date: c.authored_date,
+                        date: real_time_or_empty(c.authored_date),
                         author,
                     }
                 })
@@ -2193,7 +2212,7 @@ pub async fn gh_pr_view(
                     oid: c.oid,
                     headline: c.message_headline,
                     message_body: c.message_body,
-                    date: c.authored_date,
+                    date: real_time_or_empty(c.authored_date),
                     author,
                 }
             })
@@ -2211,7 +2230,7 @@ pub async fn gh_pr_view(
                     author_avatar_url: String::new(),
                     state: r.state,
                     body: r.body,
-                    date: r.submitted_at,
+                    date: real_time_or_empty(r.submitted_at),
                     id: r.id,
                     url: String::new(),
                     viewer_did_author: false,
@@ -2231,7 +2250,7 @@ pub async fn gh_pr_view(
                 author_avatar_url: String::new(),
                 state: r.state,
                 body: r.body,
-                date: r.submitted_at,
+                date: real_time_or_empty(r.submitted_at),
                 id: r.id,
                 url: String::new(),
                 viewer_did_author: false,
@@ -2255,7 +2274,7 @@ pub async fn gh_pr_view(
                     author_avatar_url: String::new(),
                     state: String::new(),
                     body: c.body,
-                    date: c.created_at,
+                    date: real_time_or_empty(c.created_at),
                     id: c.id,
                     url: c.url,
                     viewer_did_author: c.viewer_did_author,
@@ -2274,7 +2293,7 @@ pub async fn gh_pr_view(
                 author_avatar_url: String::new(),
                 state: String::new(),
                 body: c.body,
-                date: c.created_at,
+                date: real_time_or_empty(c.created_at),
                 id: c.id,
                 url: c.url,
                 viewer_did_author: c.viewer_did_author,
@@ -2335,14 +2354,16 @@ pub async fn gh_pr_view(
                     .as_deref()
                     .map(parse_actions_run_job)
                     .unwrap_or((None, None));
+                // Drop empty AND Go-zero-value sentinel timestamps (see
+                // `real_check_time`) so a still-running check reads as unfinished.
                 PrCheckOut {
                     name,
                     status,
                     details_url,
                     run_id,
                     job_id,
-                    started_at: c.started_at.filter(|s| !s.is_empty()),
-                    completed_at: c.completed_at.filter(|s| !s.is_empty()),
+                    started_at: c.started_at.filter(|s| real_check_time(s)),
+                    completed_at: c.completed_at.filter(|s| real_check_time(s)),
                 }
             })
             .collect(),
@@ -3306,8 +3327,11 @@ struct GhPrRestReview {
     state: String,
     #[serde(default)]
     body: String,
+    /// A PENDING review has no submit time, and GitHub REST spells that as literal
+    /// JSON `null` — `#[serde(default)]` only fills an ABSENT key, so an explicit
+    /// `null` needs `Option` to avoid failing the whole paginated deserialization.
     #[serde(default)]
-    submitted_at: String,
+    submitted_at: Option<String>,
 }
 
 /// One entry from `repos/{owner}/{repo}/issues/<n>/comments` — the PR's
@@ -3378,7 +3402,7 @@ fn rest_review_to_out(r: GhPrRestReview) -> PrThreadOut {
         author_avatar_url: String::new(),
         state: r.state,
         body: r.body,
-        date: r.submitted_at,
+        date: r.submitted_at.unwrap_or_default(),
         id: r.node_id,
         url: String::new(),
         viewer_did_author: false,
@@ -4492,7 +4516,7 @@ fn scrape_pr_ref(stdout: &str) -> (u64, String) {
 mod tests {
     use super::{
         external_items_from_thread_nodes, host_from_url, is_diff_too_large, map_timeline_node,
-        parse_actions_run_job,
+        parse_actions_run_job, real_check_time, real_time_or_empty,
         parse_auth_accounts, parse_pr_url_repo, reconstruct_pr_diff,
         reject_upstream_create_metadata, rest_comment_to_out, rest_commit_to_out,
         rest_pull_to_pr_info, rest_review_to_out, rollup_state_to_ci, scrape_pr_ref,
@@ -4644,7 +4668,7 @@ mod tests {
             }),
             state: "CHANGES_REQUESTED".to_string(),
             body: "Please fix".to_string(),
-            submitted_at: "2026-02-03T00:00:00Z".to_string(),
+            submitted_at: Some("2026-02-03T00:00:00Z".to_string()),
         });
         assert_eq!(out.author, "reviewer");
         assert_eq!(out.state, "CHANGES_REQUESTED");
@@ -4661,7 +4685,7 @@ mod tests {
             user: None,
             state: "COMMENTED".to_string(),
             body: String::new(),
-            submitted_at: String::new(),
+            submitted_at: None,
         });
         assert_eq!(anon.author, "");
         assert_eq!(anon.id, "PRR_x");
@@ -4880,6 +4904,59 @@ github.acme.com
             parse_actions_run_job("https://github.com/o/r/actions/runs/"),
             (None, None)
         );
+    }
+
+    #[test]
+    fn real_check_time_drops_empty_and_go_zero_value() {
+        // An absent timestamp arrives as "" and must be dropped.
+        assert!(!real_check_time(""));
+        // gh serializes a null GraphQL time as Go's zero value — dropping it is
+        // what lets a still-running check read as unfinished (no completedAt).
+        assert!(!real_check_time("0001-01-01T00:00:00Z"));
+        // A real ISO timestamp is kept.
+        assert!(real_check_time("2026-07-18T12:34:56Z"));
+    }
+
+    #[test]
+    fn real_time_or_empty_clears_go_zero_and_passes_real() {
+        // A Go-zero sentinel (a pending review's null submittedAt through gh) and
+        // an empty string both clear to "" so the frontend's `date &&` guard skips
+        // rendering rather than showing a year-0001 date.
+        assert_eq!(real_time_or_empty("0001-01-01T00:00:00Z".into()), "");
+        assert_eq!(real_time_or_empty(String::new()), "");
+        // A real ISO timestamp passes through untouched.
+        assert_eq!(
+            real_time_or_empty("2026-07-18T12:34:56Z".into()),
+            "2026-07-18T12:34:56Z"
+        );
+    }
+
+    #[test]
+    fn rest_review_null_submitted_at_deserializes_to_empty_date() {
+        // GitHub REST spells a PENDING review's submit time as literal JSON null;
+        // `submitted_at: Option<String>` must accept it (a plain String field would
+        // fail the whole paginated deserialization) and map to an empty date.
+        let r: GhPrRestReview = serde_json::from_value(serde_json::json!({
+            "node_id": "PRR_1",
+            "user": {"login": "alice"},
+            "state": "PENDING",
+            "body": "",
+            "submitted_at": null,
+        }))
+        .expect("null submitted_at must deserialize");
+        assert_eq!(r.submitted_at, None);
+        assert_eq!(rest_review_to_out(r).date, "");
+
+        // A submitted review's real timestamp still passes straight through.
+        let r2: GhPrRestReview = serde_json::from_value(serde_json::json!({
+            "node_id": "PRR_2",
+            "user": {"login": "bob"},
+            "state": "APPROVED",
+            "body": "lgtm",
+            "submitted_at": "2026-07-18T12:34:56Z",
+        }))
+        .expect("real submitted_at must deserialize");
+        assert_eq!(rest_review_to_out(r2).date, "2026-07-18T12:34:56Z");
     }
 
     #[test]

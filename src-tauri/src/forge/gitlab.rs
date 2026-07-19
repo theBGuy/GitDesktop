@@ -4953,17 +4953,20 @@ fn map_ci_status(s: &str) -> (String, String) {
 }
 
 /// Map a GitLab job `status` onto the check-status vocabulary the PR-view rollup
-/// keys on (`ChecksRollup.checkPresentation`, matched uppercased): only `SUCCESS`
-/// reads as passed, `FAILURE`/`CANCELLED` (+ ERROR/TIMED_OUT) as failed, and
-/// everything else — running/pending/manual/skipped/created — as the pending bucket.
-/// Pure (unit-tested).
+/// keys on (`ChecksRollup.checkPresentation`, matched uppercased): `SUCCESS`
+/// reads as passed, `FAILURE`/`CANCELLED` (+ ERROR/TIMED_OUT) as failed,
+/// `SKIPPED` as its own muted bucket, and everything else —
+/// running/pending/manual/created — as the pending bucket. `manual` stays
+/// pending because it's blocked on a human (not skipped). Pure (unit-tested).
 fn map_job_check_status(status: &str) -> String {
     match status {
         "success" => "SUCCESS",
         "failed" => "FAILURE",
         "canceled" | "cancelled" => "CANCELLED",
-        // running / pending / manual / skipped / created / preparing / scheduled /
-        // waiting_for_resource / any new state → the frontend's pending bucket.
+        "skipped" => "SKIPPED",
+        // running / pending / manual / created / preparing / scheduled /
+        // waiting_for_resource / any new state → the frontend's pending bucket
+        // (`manual` is blocked on a human, not skipped).
         _ => "PENDING",
     }
     .to_string()
@@ -7324,15 +7327,11 @@ mod tests {
         assert_eq!(map_job_check_status("failed"), "FAILURE");
         assert_eq!(map_job_check_status("canceled"), "CANCELLED");
         assert_eq!(map_job_check_status("cancelled"), "CANCELLED");
-        // Everything else (in-flight, skipped, manual, unknown) → pending bucket.
-        for s in [
-            "running",
-            "pending",
-            "manual",
-            "skipped",
-            "created",
-            "weird_new_state",
-        ] {
+        // Skipped jobs read as their own muted bucket, not pending.
+        assert_eq!(map_job_check_status("skipped"), "SKIPPED");
+        // Everything else (in-flight, manual, unknown) → pending bucket. `manual`
+        // stays pending — it's blocked on a human, not skipped.
+        for s in ["running", "pending", "manual", "created", "weird_new_state"] {
             assert_eq!(map_job_check_status(s), "PENDING", "status {s}");
         }
     }

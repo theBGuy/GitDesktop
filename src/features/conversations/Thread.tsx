@@ -3,6 +3,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { type ReactNode, useState } from "react";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { MarkdownEditor } from "@/components/markdown-editor";
+import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -20,7 +21,6 @@ import type { MinimizeReason } from "@/lib/git/api";
 import { displayLogin } from "@/lib/git/bot-login";
 import { useActiveForgeGhHost, useActiveGhHost } from "@/lib/git/host";
 import type { PrThreadOut, Reaction, RepoLabel } from "@/lib/git/types";
-import { formatRelativeTime } from "@/lib/time";
 import { ReactionBar } from "./ReactionBar";
 
 /**
@@ -140,7 +140,7 @@ export function Thread({
           <Badge variant="secondary">{thread.state.toLowerCase()}</Badge>
         )}
         <span className="text-muted-foreground">
-          {thread.date && formatRelativeTime(thread.date)}
+          {thread.date && <RelativeTime date={thread.date} />}
         </span>
         {minimized && (
           <span className="text-[11px] text-muted-foreground italic">

@@ -30,6 +30,10 @@ don't wait to be asked:**
    one file per change keeps parallel branches conflict-free. Preview with
    `pnpm changelog:preview`; conventions live in `changelog.d/README.md`.
 
+When a change alters **existing** behavior, grep README / site / help for the old
+wording (e.g. the feature's old phrase) rather than updating spots from memory — stale
+copies of the same claim hide across all three surfaces.
+
 If a feature is too minor for the README / site / guide, it's fine to add only the
 capability line + changelog fragment — but make the call deliberately, don't skip silently.
 

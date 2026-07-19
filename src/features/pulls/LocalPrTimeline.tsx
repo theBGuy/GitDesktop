@@ -5,7 +5,7 @@ import {
   GitMergeIcon,
   XCircleIcon,
 } from "@phosphor-icons/react";
-import { formatRelativeTime } from "@/lib/time";
+import { RelativeTime } from "@/components/relative-time";
 import { cn } from "@/lib/utils";
 
 /** The lifecycle events a local PR emits — no CI/remote activity, just the
@@ -74,7 +74,7 @@ export function LocalPrLifecycleRow({
         <span className="min-w-0">{label}</span>
         {date && (
           <span className="shrink-0 text-muted-foreground/80">
-            · {formatRelativeTime(date)}
+            · <RelativeTime date={date} />
           </span>
         )}
       </div>

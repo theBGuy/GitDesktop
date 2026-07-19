@@ -40,13 +40,15 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
   browser. Set **labels and assignees** right when you **open** a PR/MR (GitHub &
   GitLab); request reviewers across GitHub, GitLab & Bitbucket.
   - **Activity feed** — a PR's Conversation is a **date-sorted timeline** of reviews,
-    comments, grouped **pushed commits** (each SHA clickable), and events, with an
+    comments, grouped **pushed commits** (each SHA clickable), and events, every entry
+    **timestamped** (hover for the exact time), with an
     **approval marked stale** once later commits land — on GitHub, GitLab, Bitbucket,
     and local PRs (GitLab has no force-push/draft events, Bitbucket no labels or
     review-requests).
-  - **CI rollup** — checks fold into a **pass/fail/pending** summary that peeks a
-    failing **GitHub Actions** or **GitLab pipeline** job's log inline; **Bitbucket**
-    build statuses link out (name/state/URL, no fetchable logs).
+  - **CI rollup** — checks fold into a **pass/fail/pending/skipped** summary; a
+    running **GitHub Actions** check shows its current step live, a finished one peeks
+    its (or a **GitLab pipeline** job's) log inline; **Bitbucket** build statuses link
+    out (name/state/URL, no fetchable logs).
   - **Local PRs** — the same loop against any two branches with **no remote**,
     promotable to a real GitHub PR (comments and all) in one click. A merge
     **pre-shows conflicts** and lets you resolve them in an **in-app editor** — in an
@@ -414,7 +416,8 @@ workflow against any two branches with no remote at all).
   Bitbucket). The same commit comments are available from the **History tab** on any
   pushed commit (an unpushed one shows a push hint).
 - **Activity feed** — the Conversation is a **date-sorted timeline** of reviews,
-  comments, grouped pushed commits (each SHA clickable), and events, marking an approval
+  comments, grouped pushed commits (each SHA clickable), and events, every entry carrying
+  a relative **timestamp** (hover for the exact local time), marking an approval
   or changes-request **stale** once later commits land. GitHub carries the full event set
   (force-push, label add/remove, review request, ready-for-review, convert-to-draft,
   close, reopen, merge, rename); **GitLab MRs** add commits, label changes,
@@ -422,10 +425,11 @@ workflow against any two branches with no remote at all).
   — but no force-push/draft events; **Bitbucket PRs** add
   commits, merge/close, and approved / changes-requested (no labels or review-requests);
   **local PRs** get created → commits → comments → merged/closed.
-- **CI rollup** — checks collapse into a **✓ passed · ✕ failed · ● pending** summary
-  (auto-expanding on failure); failing **GitHub Actions** and **GitLab pipeline** jobs
-  peek their log inline, while **Bitbucket** and other external checks link out
-  (name/state/URL, no fetchable logs).
+- **CI rollup** — checks collapse into a **✓ passed · ✕ failed · ● pending · ⊖ skipped**
+  summary (auto-expanding on failure); a running **GitHub Actions** check shows its
+  current step inline and a live step checklist when expanded, while finished **GitHub
+  Actions** and **GitLab pipeline** jobs peek their log inline and **Bitbucket** and
+  other external checks link out (name/state/URL, no fetchable logs).
 - **Record management** — right-click a local PR in the list to **Archive / Unarchive**
   or **Delete** it (Delete confirms; the branches are untouched), also from the command
   palette.

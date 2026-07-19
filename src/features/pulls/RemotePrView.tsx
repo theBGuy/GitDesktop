@@ -24,6 +24,7 @@ import {
   MarkdownEditor,
   type MarkdownEditorHandle,
 } from "@/components/markdown-editor";
+import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -1111,7 +1112,11 @@ export function RemotePrView({
             }}
           />
         )}
-        <ChecksRollup checks={pr.checks} repoPath={repoPath} />
+        <ChecksRollup
+          checks={pr.checks}
+          repoPath={repoPath}
+          provider={providerKey}
+        />
         <div className="flex gap-1 pt-1">
           {/* The AI Review tab needs only the diff (forge-neutral) and a way to
               post the result as a comment — so it follows canComment, which
@@ -1343,6 +1348,11 @@ export function RemotePrView({
                               >
                                 View thread
                               </button>
+                            )}
+                            {r.date && (
+                              <span className="shrink-0 text-muted-foreground/80">
+                                · <RelativeTime date={r.date} />
+                              </span>
                             )}
                           </div>
                         </div>
