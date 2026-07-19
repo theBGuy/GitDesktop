@@ -1016,7 +1016,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                           // No text color: inherits the row foreground (a step
                           // stronger than the muted divergence) and follows the
                           // hover accent-foreground automatically. The arrow SVGs are
-                          // aria-hidden, so the span carries the name for readers.
+                          // aria-hidden, so the span carries the name for readers —
+                          // role="img" because aria-label is not valid (nor reliably
+                          // announced) on a generic span.
+                          role="img"
                           aria-label={label}
                           className="flex shrink-0 items-center gap-1 text-[11px] tabular-nums"
                           title={label}
@@ -1076,6 +1079,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                     const label = parts.join(", ");
                     return (
                       <span
+                        role="img"
                         aria-label={label}
                         className="flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground tabular-nums"
                         title={label}
