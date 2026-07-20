@@ -73,9 +73,13 @@ const TABS: { tab: Tab; label: string; icon: ReactNode }[] = [
 
 /** Build a tab's hash for the current repo scope. With a repoId the tabs are
  *  scoped (`#r/{repoId}/{tab}`); without one (picker / mid-redirect) they fall
- *  back to the legacy hash, which the shell resolves to a scoped route. */
+ *  back to the legacy hash, which the shell resolves to a scoped route. Issues is
+ *  scoped-only (it has NO legacy grammar — an unknown legacy head parses as
+ *  status), so pre-scope it degrades to `#status` explicitly: the landing state
+ *  is identical either way, but the transient hash stays honest. */
 function tabHash(tab: Tab, repoId: string | null): string {
-  return repoId ? repoHash(repoId, tab) : `#${tab}`;
+  if (repoId) return repoHash(repoId, tab);
+  return tab === "issues" ? "#status" : `#${tab}`;
 }
 
 /** Bottom tab nav. Each tab is a real link (Tab-focusable) scoped to the selected

@@ -9,6 +9,7 @@ import {
   InfoIcon,
   LockIcon,
 } from "@phosphor-icons/react";
+import { useState } from "react";
 import { IssueStateChip } from "../components/chips";
 import { Markdown } from "../components/markdown";
 import {
@@ -65,6 +66,11 @@ function TrackerUnavailableState({ message }: { message?: string }) {
   );
 }
 
+// A single GROWING query pages the list: "Load more" bumps `limit` (the server
+// re-serves the whole prefix), mirroring HistoryBody. 30 to match the fetcher's
+// default page size.
+const PAGE = 30;
+
 /** The issues list. `repoId` scopes the query; `active` gates polling. */
 export function IssuesBody({
   repoId,
@@ -73,7 +79,13 @@ export function IssuesBody({
   repoId: string;
   active: boolean;
 }) {
-  const { data, isError, error, refetch } = useIssues(repoId, active);
+  const [limit, setLimit] = useState(PAGE);
+  const { data, isError, error, refetch } = useIssues(
+    repoId,
+    active,
+    "open",
+    limit,
+  );
   const { register, onKeyDown } = useRovingList();
 
   // Definitive gone WINS over stale data: a `noSuchRepo` 404 kicks to the teaching
@@ -94,6 +106,10 @@ export function IssuesBody({
     return <SkeletonRows />;
   }
 
+  // The last page came back short (fewer issues than we asked for) → there's nothing
+  // more to load. Hide the button then. Mirrors HistoryBody.
+  const hasMore = data.length >= limit;
+
   return (
     <div className="flex flex-col">
       {isError ? <StaleBanner error={error} onRetry={() => refetch()} /> : null}
@@ -103,27 +119,38 @@ export function IssuesBody({
           hint="Open issues on this repository will show up here."
         />
       ) : (
-        <ul className="flex flex-col divide-y divide-border">
-          {data.map((issue, i) => (
-            <li key={issue.number}>
-              <button
-                type="button"
-                ref={register(i)}
-                onKeyDown={onKeyDown}
-                onClick={() =>
-                  navigate(repoHash(repoId, `issues/${issue.number}`))
-                }
-                className="flex w-full min-h-14 items-center gap-3 px-4 py-3 text-left"
-              >
-                <IssueRow issue={issue} />
-                <CaretRightIcon
-                  size={16}
-                  className="shrink-0 text-muted-foreground"
-                />
-              </button>
-            </li>
-          ))}
-        </ul>
+        <>
+          <ul className="flex flex-col divide-y divide-border">
+            {data.map((issue, i) => (
+              <li key={issue.number}>
+                <button
+                  type="button"
+                  ref={register(i)}
+                  onKeyDown={onKeyDown}
+                  onClick={() =>
+                    navigate(repoHash(repoId, `issues/${issue.number}`))
+                  }
+                  className="flex w-full min-h-14 items-center gap-3 px-4 py-3 text-left"
+                >
+                  <IssueRow issue={issue} />
+                  <CaretRightIcon
+                    size={16}
+                    className="shrink-0 text-muted-foreground"
+                  />
+                </button>
+              </li>
+            ))}
+          </ul>
+          {hasMore ? (
+            <button
+              type="button"
+              onClick={() => setLimit((n) => n + PAGE)}
+              className="min-h-11 border-t border-border px-4 py-3 text-sm font-medium text-primary"
+            >
+              Load more
+            </button>
+          ) : null}
+        </>
       )}
     </div>
   );

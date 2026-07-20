@@ -6,6 +6,7 @@ import {
   ArrowLeftIcon,
   CaretRightIcon,
   GitMergeIcon,
+  WarningCircleIcon,
 } from "@phosphor-icons/react";
 import { useState } from "react";
 import { DiffText, splitCommitDiff } from "../components/DiffText";
@@ -297,9 +298,19 @@ function CommitFileStat({ file }: { file: DiffStatEntry }) {
 }
 
 /** One file's diff within a commit. Slices the commit's multi-file diff by path via
- *  `splitCommitDiff`. A file with no chunk is either a binary/stat-only file (git
- *  emits no textual hunk → the binary note) or a pure rename with no content change
- *  (the stat entry is non-binary → a "No content changes." note). */
+ *  `splitCommitDiff` and renders the file's chunk in DiffText.
+ *
+ *  A file can have NO chunk for three distinct reasons, disambiguated below in
+ *  priority order:
+ *   1. The commit diff was TRUNCATED at the server's 1MB cap. Crucially the
+ *      `files[]` stat list is computed from a SEPARATE, uncapped numstat — so a file
+ *      whose diff block fell beyond the cut still has a (non-binary) stat entry but no
+ *      chunk. It is NOT "no content changes"; show the truncation notice.
+ *   2. The file is BINARY (git emits no textual hunk) — the binary note.
+ *   3. Genuinely no textual hunk on a non-binary, non-truncated file — a rare
+ *      metadata-only change such as a mode (permission) change. (A pure RENAME is NOT
+ *      this case: git emits a `diff --git` + `rename from/to` chunk for it, which
+ *      renders as meta lines through DiffText.) The "No content changes." note. */
 export function CommitFileBody({
   repoId,
   sha,
@@ -333,21 +344,33 @@ export function CommitFileBody({
         <ErrorState error={error} onRetry={() => refetch()} />
       ) : isPending || !data ? (
         <SkeletonRows count={4} />
-      ) : chunk === undefined && fileStat?.isBinary === false ? (
-        // A non-binary file with no diff chunk is a pure rename (100% similarity, no
-        // content change) — git emits stat/rename metadata but no textual hunk. Say
-        // so plainly rather than falling through to the misleading binary note.
+      ) : chunk !== undefined ? (
+        // The normal path: this file has a diff chunk. Honor the stat entry's binary
+        // flag (a binary file with a chunk still renders as the binary note).
+        <DiffText
+          text={chunk}
+          truncated={data.truncated}
+          isBinary={fileStat?.isBinary ?? false}
+        />
+      ) : data.truncated ? (
+        // No chunk because the diff was cut at the cap and this file's block fell
+        // beyond it — the stat entry (from the uncapped numstat) survived but the text
+        // didn't. Point at the desktop, NOT the misleading "no content changes".
+        <p className="flex items-center gap-2 border-b border-border bg-warning/15 px-4 py-2 text-xs text-foreground">
+          <WarningCircleIcon size={14} className="shrink-0 text-warning" />
+          Diff truncated — view the full diff on the desktop.
+        </p>
+      ) : fileStat?.isBinary ? (
+        // A binary file with no textual hunk.
+        <p className="px-4 py-8 text-center text-sm text-muted-foreground">
+          Binary file — no text diff.
+        </p>
+      ) : (
+        // A non-binary, non-truncated file with no hunk — a rare metadata-only change
+        // (e.g. a file-mode change). NOT a rename (which emits a chunk).
         <p className="px-4 py-8 text-center text-sm text-muted-foreground">
           No content changes.
         </p>
-      ) : (
-        <DiffText
-          text={chunk ?? ""}
-          truncated={data.truncated}
-          // A file with no textual chunk is binary/stat-only (git emits no hunk) —
-          // render the binary note. Otherwise honor the stat entry's flag.
-          isBinary={fileStat?.isBinary ?? chunk === undefined}
-        />
       )}
     </div>
   );

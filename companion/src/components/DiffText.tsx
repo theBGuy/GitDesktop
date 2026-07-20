@@ -22,9 +22,12 @@ interface DiffLine {
 }
 
 // Multi-char META prefixes — the file/index/rename headers of a unified diff. These
-// MUST be checked before the 1-char +/- classes: `+++`/`---` (the file markers)
-// start with the same char as an added/removed line, so a naive `startsWith("+")`
-// would miscolor the `+++ b/…` header as an added line.
+// are matched ONLY in the header section of a file (before its first `@@` hunk).
+// Inside a hunk we classify by FIRST CHAR ONLY — a removed line whose CONTENT begins
+// with `--` reads as `---…` and an added line whose content begins with `++` reads
+// as `++…`, which would false-match the `---`/`+++` file markers if META_PREFIXES
+// were applied unconditionally. The state machine in `classifyLines` (header mode vs.
+// hunk mode) is what keeps content lines from being mistaken for headers.
 const META_PREFIXES = [
   "+++",
   "---",
@@ -36,17 +39,35 @@ const META_PREFIXES = [
   "similarity",
 ];
 
-/** Classify one diff line by its leading token. Order matters: multi-char meta
- *  prefixes first (`+++`/`---` collide with the +/- classes), then hunk headers,
- *  then the single-char add/remove markers, else context. */
-function classify(line: string): LineKind {
-  for (const p of META_PREFIXES) {
-    if (line.startsWith(p)) return "meta";
-  }
-  if (line.startsWith("@@")) return "hunk";
-  if (line.startsWith("+")) return "add";
-  if (line.startsWith("-")) return "del";
-  return "context";
+/** Classify every diff line with a running mode. A `diff --git` line starts a new
+ *  file's HEADER section; a `@@` line enters that file's HUNK section (and is itself
+ *  the hunk class). In header mode a line is meta if it matches a META_PREFIXES entry
+ *  (else context). In hunk mode we classify by first char ONLY — `+`→add, `-`→del,
+ *  else context (a `\ No newline at end of file` marker lands context, which is
+ *  fine) — so a content line beginning `--`/`++` is never mistaken for a file marker. */
+function classifyLines(text: string): DiffLine[] {
+  let inHunk = false;
+  return text.split("\n").map((line) => {
+    if (line.startsWith("diff --git")) {
+      inHunk = false; // a new file's header begins
+      return { kind: "meta", text: line };
+    }
+    if (line.startsWith("@@")) {
+      inHunk = true; // this file's hunks begin
+      return { kind: "hunk", text: line };
+    }
+    if (inHunk) {
+      const kind: LineKind = line.startsWith("+")
+        ? "add"
+        : line.startsWith("-")
+          ? "del"
+          : "context";
+      return { kind, text: line };
+    }
+    // Header section (before the first hunk): only the known header prefixes are meta.
+    const isMeta = META_PREFIXES.some((p) => line.startsWith(p));
+    return { kind: isMeta ? "meta" : "context", text: line };
+  });
 }
 
 // Per-kind line styling. The +/- backgrounds are a low-alpha token tint (subtle
@@ -77,7 +98,7 @@ export function DiffText({
   // binary file (no lines to render).
   const lines = useMemo<DiffLine[]>(() => {
     if (isBinary) return [];
-    return text.split("\n").map((t) => ({ kind: classify(t), text: t }));
+    return classifyLines(text);
   }, [text, isBinary]);
 
   if (isBinary) {

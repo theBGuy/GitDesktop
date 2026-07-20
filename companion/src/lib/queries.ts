@@ -276,15 +276,18 @@ export function useFileDiff(
 }
 
 /** The repo's issues. `active` gates polling; `state` ("open"/"closed") is part of
- *  the cache key so switching filters caches independently. */
+ *  the cache key so switching filters caches independently. `limit` grows the page
+ *  (the "Load more" affordance) — like `useLog`, it's a single GROWING query keyed on
+ *  the limit (the server re-serves the whole prefix), NOT a stitched pages array. */
 export function useIssues(
   repoId: string | null,
   active: boolean,
   state = "open",
+  limit = 30,
 ) {
   return useQuery({
-    queryKey: ["issues", repoId, state],
-    queryFn: () => fetchIssues(repoId as string, state),
+    queryKey: ["issues", repoId, state, limit],
+    queryFn: () => fetchIssues(repoId as string, state, limit),
     enabled: repoId != null,
     refetchInterval: repoId != null ? poll(active) : false,
   });
