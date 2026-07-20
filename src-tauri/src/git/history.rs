@@ -413,17 +413,13 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    fn temp_repo(tag: &str) -> String {
-        let dir = std::env::temp_dir().join(format!(
-            "gd-blame-test-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir.to_string_lossy().into_owned()
+    fn temp_repo(tag: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("gd-blame-test-{tag}-"))
+            .tempdir()
+            .expect("create temp dir");
+        let repo = dir.path().to_string_lossy().into_owned();
+        (dir, repo)
     }
 
     async fn git(repo: &str, args: &[&str]) {
@@ -433,8 +429,8 @@ mod tests {
     /// Builds a repo where `file.txt` gets two commits: line one is written in the
     /// first commit and a second line is appended in the second. Returns the repo
     /// path plus the two commit shas (first, second).
-    async fn two_commit_repo(tag: &str) -> (String, String, String) {
-        let repo = temp_repo(tag);
+    async fn two_commit_repo(tag: &str) -> (tempfile::TempDir, String, String, String) {
+        let (dir, repo) = temp_repo(tag);
         git(&repo, &["init"]).await;
         git(&repo, &["config", "user.email", "t@t"]).await;
         git(&repo, &["config", "user.name", "t"]).await;
@@ -456,12 +452,12 @@ mod tests {
             .stdout_lossy()
             .trim()
             .to_string();
-        (repo, first, second)
+        (dir, repo, first, second)
     }
 
     #[tokio::test]
     async fn blame_at_rev_shows_that_revs_content() {
-        let (repo, first, second) = two_commit_repo("at-rev").await;
+        let (_dir, repo, first, second) = two_commit_repo("at-rev").await;
 
         // At the first commit, the file has only one line, all attributed to `first`.
         let at_first = git_blame(repo.clone(), "file.txt".into(), Some(first.clone()))
@@ -479,13 +475,11 @@ mod tests {
         assert_eq!(at_worktree[0].hash, first);
         assert_eq!(at_worktree[1].content, "second");
         assert_eq!(at_worktree[1].hash, second);
-
-        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[tokio::test]
     async fn blame_unborn_head_errors() {
-        let repo = temp_repo("unborn");
+        let (_dir, repo) = temp_repo("unborn");
         git(&repo, &["init"]).await;
         git(&repo, &["config", "user.email", "t@t"]).await;
         git(&repo, &["config", "user.name", "t"]).await;
@@ -499,19 +493,15 @@ mod tests {
             }
             other => panic!("expected InvalidArgument, got {other:?}"),
         }
-
-        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[tokio::test]
     async fn blame_dash_prefixed_rev_rejected() {
-        let (repo, _first, _second) = two_commit_repo("dash-rev").await;
+        let (_dir, repo, _first, _second) = two_commit_repo("dash-rev").await;
 
         let err = git_blame(repo.clone(), "file.txt".into(), Some("-HEAD".into()))
             .await
             .unwrap_err();
         assert!(matches!(err, crate::error::AppError::InvalidArgument(_)));
-
-        let _ = std::fs::remove_dir_all(&repo);
     }
 }

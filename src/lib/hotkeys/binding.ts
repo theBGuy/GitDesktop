@@ -22,6 +22,16 @@ export const isWindows =
   typeof navigator !== "undefined" && /win/i.test(navigator.platform);
 
 /**
+ * The word for the secondary (context-menu) click, derived from the platform.
+ * "right-click" is wrong for swapped-button (left-handed) mice, Mac trackpads,
+ * and touch, so — like the mod key — the phrase can't be hardcoded. Context
+ * menus themselves key off the `contextmenu` event and work for everyone; only
+ * the label needs to follow the platform. The macOS value is already
+ * capitalized, so uppercasing this value's first letter is idempotent there.
+ */
+export const secondaryClickLabel = isMac ? "Control-click" : "right-click";
+
+/**
  * The canonical binding a keyboard event represents, or null when the event
  * is a bare modifier or carries no usable key.
  */

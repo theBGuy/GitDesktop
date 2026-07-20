@@ -172,19 +172,18 @@ mod tests {
         })
     }
 
-    fn tmp_store() -> PathBuf {
-        let mut p = std::env::temp_dir();
-        p.push(format!(
-            "gd-jira-links-test-{}-{}.json",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        p
+    fn tmp_store() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-jira-links-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let path = dir.path().join("store.json");
+        (dir, path)
     }
 
     #[test]
     fn read_missing_file_is_empty_object() {
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         let store = read_store(&path).unwrap();
         assert!(store.is_empty());
     }
@@ -192,19 +191,19 @@ mod tests {
     #[test]
     fn read_missing_file_yields_no_link() {
         // The end-to-end "no store file" case: read_store → empty map → lookup None.
-        let store = read_store(&tmp_store()).unwrap();
+        let (_tmp, path) = tmp_store();
+        let store = read_store(&path).unwrap();
         assert_eq!(lookup(&store, "C:/repo/.git", r"C:\repo"), None);
     }
 
     #[test]
     fn malformed_store_is_an_error_not_a_clobber() {
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         std::fs::write(&path, b"{ this is not json").unwrap();
         let err = read_store(&path).unwrap_err();
         assert!(err.to_string().contains("not valid JSON"));
         // The bad file is left intact (read-only).
         assert_eq!(std::fs::read(&path).unwrap(), b"{ this is not json");
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
@@ -293,7 +292,7 @@ mod tests {
 
     #[test]
     fn read_and_lookup_end_to_end_via_temp_file() {
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         let identity = "C:/repo/reads/.git";
         let mut store = Map::new();
         store.insert(identity.to_string(), link_json());
@@ -302,6 +301,5 @@ mod tests {
         let back = read_store(&path).unwrap();
         let link = lookup(&back, identity, "C:/repo/reads").unwrap();
         assert_eq!(link.project_key, "PROJ");
-        std::fs::remove_file(&path).ok();
     }
 }

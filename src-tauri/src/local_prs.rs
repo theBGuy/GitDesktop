@@ -365,14 +365,13 @@ mod tests {
     // against a temp file, bypassing `store_path()` so they never touch the real
     // app-data store. The public fns wrap this same logic + the fixed path.
 
-    fn tmp_store() -> PathBuf {
-        let mut p = std::env::temp_dir();
-        p.push(format!(
-            "gd-local-prs-test-{}-{}.json",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        p
+    fn tmp_store() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-local-prs-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let path = dir.path().join("store.json");
+        (dir, path)
     }
 
     #[test]
@@ -390,31 +389,29 @@ mod tests {
 
     #[test]
     fn read_missing_file_is_empty_object() {
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         let store = read_store(&path).unwrap();
         assert!(store.is_empty());
     }
 
     #[test]
     fn malformed_store_is_an_error_not_a_clobber() {
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         std::fs::write(&path, b"{ this is not json").unwrap();
         let err = read_store(&path).unwrap_err();
         assert!(err.to_string().contains("not valid JSON"));
         // The bad file is left intact.
         assert_eq!(std::fs::read(&path).unwrap(), b"{ this is not json");
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn atomic_write_round_trips() {
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         let mut store = Map::new();
         store.insert("repo".into(), json!([{ "id": "a" }]));
         write_store(&path, &store).unwrap();
         let back = read_store(&path).unwrap();
         assert_eq!(back["repo"][0]["id"], "a");
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
@@ -422,7 +419,7 @@ mod tests {
         // A record carrying a field this Rust code has never heard of must survive a
         // mutation byte-meaningfully (the acceptance criterion for never dropping
         // unknown fields a future GUI adds).
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         let repo = r"C:\repo\one";
         let mut store = Map::new();
         store.insert(
@@ -466,7 +463,6 @@ mod tests {
         assert_eq!(pr["comments"][0]["body"], "hi");
         // Known fields unchanged.
         assert_eq!(pr["status"], "open");
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
@@ -557,7 +553,7 @@ mod tests {
 
     #[test]
     fn list_and_get_read_records_tolerantly() {
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         // Bypass store_path() by exercising the same read logic the public fns use.
         let repo = r"C:\repo\reads";
         let mut store = Map::new();
@@ -578,6 +574,5 @@ mod tests {
             .iter()
             .find(|pr| pr.get("id").and_then(Value::as_str) == Some("pr-2"));
         assert_eq!(found.unwrap()["title"], "B");
-        std::fs::remove_file(&path).ok();
     }
 }

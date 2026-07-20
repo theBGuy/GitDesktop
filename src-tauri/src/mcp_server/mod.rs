@@ -138,16 +138,100 @@ pub(super) struct NumberArg {
     pub(super) number: u64,
 }
 
+/// A CI run/job id. It rides GitHub/GitLab APIs as an unsigned integer that can
+/// exceed JS's safe-integer range, so clients that thread it through JSON often
+/// carry it as a *string*. `CiId` accepts either form on the wire — a JSON number
+/// or a numeric string — and hands handlers the underlying `u64`. Existing MCP
+/// clients that send a plain number keep working unchanged.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct CiId(pub u64);
+
+impl CiId {
+    /// The id as the string form the forge dispatchers (`forge_ci_*`) now take.
+    pub(super) fn as_string(self) -> String {
+        self.0.to_string()
+    }
+
+    /// The underlying `u64`, for handlers that call forge fns still taking a number.
+    pub(super) fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for CiId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for CiId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct CiIdVisitor;
+        impl serde::de::Visitor<'_> for CiIdVisitor {
+            type Value = CiId;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a CI id as an unsigned integer or a numeric string")
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<CiId, E> {
+                Ok(CiId(v))
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<CiId, E> {
+                u64::try_from(v)
+                    .map(CiId)
+                    .map_err(|_| E::custom(format!("CI id out of range: {v}")))
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<CiId, E> {
+                v.parse::<u64>()
+                    .map(CiId)
+                    .map_err(|_| E::custom(format!("invalid CI id: {v:?}")))
+            }
+        }
+        // Any JSON scalar reaches the matching visit_* method; a number lands on
+        // visit_u64/visit_i64, a string on visit_str, and everything else errors.
+        deserializer.deserialize_any(CiIdVisitor)
+    }
+}
+
+impl schemars::JsonSchema for CiId {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "CiId".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        // Advertise BOTH accepted wire forms so a client sending a number and one
+        // sending a numeric string both validate against the tool's input schema.
+        schemars::json_schema!({
+            "description": "A CI run/job id — an unsigned integer, or a numeric string for ids beyond JS's safe-integer range.",
+            "oneOf": [
+                { "type": "integer", "minimum": 0 },
+                { "type": "string", "pattern": "^[0-9]+$" }
+            ]
+        })
+    }
+}
+
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub(super) struct RunIdArg {
-    /// The GitHub Actions workflow run id.
-    pub(super) run_id: u64,
+    /// The GitHub Actions workflow run id — a number or a numeric string.
+    pub(super) run_id: CiId,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub(super) struct JobIdArg {
-    /// A CI job id, taken from a run's `jobs[].id` (see get_workflow_run).
-    pub(super) job_id: u64,
+    /// A CI job id, taken from a run's `jobs[].id` (see get_workflow_run) — a
+    /// number or a numeric string.
+    pub(super) job_id: CiId,
 }
 
 impl GitDesktopMcp {
@@ -907,6 +991,61 @@ mod tests {
         assert!(err.contains("MYT"), "err: {err}");
         // A key with no derivable project (no `-`) is refused.
         assert!(ensure_key_in_project("NODASH", &link).is_err());
+    }
+
+    /// `CiId` accepts a CI run/job id as EITHER a JSON number or a numeric string
+    /// (so existing clients sending numbers keep working, while string-carrying
+    /// clients avoid the 2^53 precision cliff), and rejects non-numeric input.
+    #[test]
+    fn ci_id_accepts_number_or_numeric_string() {
+        // A bare number deserializes.
+        let from_num: CiId = serde_json::from_value(serde_json::json!(123)).unwrap();
+        assert_eq!(from_num.as_u64(), 123);
+
+        // A numeric string deserializes to the same id.
+        let from_str: CiId = serde_json::from_value(serde_json::json!("123")).unwrap();
+        assert_eq!(from_str.as_u64(), 123);
+
+        // Beyond 2^53 survives as a string (the whole point).
+        let big: CiId = serde_json::from_value(serde_json::json!("9007199254740993")).unwrap();
+        assert_eq!(big.as_u64(), 9_007_199_254_740_993);
+
+        // Non-numeric string is rejected.
+        assert!(serde_json::from_value::<CiId>(serde_json::json!("abc")).is_err());
+        // A negative number is out of range for u64.
+        assert!(serde_json::from_value::<CiId>(serde_json::json!(-1)).is_err());
+        // A float is not an integer id.
+        assert!(serde_json::from_value::<CiId>(serde_json::json!(1.5)).is_err());
+    }
+
+    /// The wrapping arg structs deserialize with the id as a number OR a string —
+    /// the compat property the MCP tool schema must preserve.
+    #[test]
+    fn run_id_arg_accepts_number_or_string() {
+        let n: RunIdArg = serde_json::from_value(serde_json::json!({ "run_id": 123 })).unwrap();
+        assert_eq!(n.run_id.as_u64(), 123);
+        let s: RunIdArg = serde_json::from_value(serde_json::json!({ "run_id": "123" })).unwrap();
+        assert_eq!(s.run_id.as_u64(), 123);
+    }
+
+    /// The generated JSON Schema for `CiId` must advertise BOTH the integer and the
+    /// string wire forms, so a client validating either against the tool's input
+    /// schema passes. (Guards against the schema silently dropping the number form.)
+    #[test]
+    fn ci_id_schema_advertises_both_forms() {
+        let mut generator = schemars::SchemaGenerator::default();
+        let schema = <CiId as schemars::JsonSchema>::json_schema(&mut generator);
+        let json = serde_json::to_value(&schema).unwrap();
+        let variants = json
+            .get("oneOf")
+            .and_then(|v| v.as_array())
+            .expect("CiId schema should be a oneOf");
+        let types: Vec<&str> = variants
+            .iter()
+            .filter_map(|v| v.get("type").and_then(|t| t.as_str()))
+            .collect();
+        assert!(types.contains(&"integer"), "schema: {json}");
+        assert!(types.contains(&"string"), "schema: {json}");
     }
 
     /// The prompt router (separate from the tool router — prompts are NOT tools, so

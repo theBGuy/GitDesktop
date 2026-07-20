@@ -508,14 +508,13 @@ mod tests {
     // SAME read/mutate/write helpers the public fns use but with an explicit path,
     // so they never touch the real app-data store.
 
-    fn tmp_store() -> PathBuf {
-        let mut p = std::env::temp_dir();
-        p.push(format!(
-            "gd-opslog-test-{}-{}.json",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        p
+    fn tmp_store() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-opslog-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let path = dir.path().join("store.json");
+        (dir, path)
     }
 
     #[test]
@@ -620,7 +619,7 @@ mod tests {
 
     #[test]
     fn begin_then_list_yields_a_pending_entry() {
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         let repo = r"C:\repo\one";
         // Simulate begin's insert against our temp file.
         let mut store = Map::new();
@@ -640,12 +639,11 @@ mod tests {
         assert_eq!(parsed[0].id, "op-1");
         assert_eq!(parsed[0].status, "pending");
         assert!(parsed[0].finished_at.is_none());
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn finish_flips_to_done_and_failed_with_finished_at() {
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         let repo = r"C:\repo\one";
         let mut store = Map::new();
         store.insert(
@@ -692,14 +690,13 @@ mod tests {
         assert_eq!(failed["status"], "failed");
         assert_eq!(failed["error"], "boom");
         assert_eq!(failed["finishedAt"], "2026-01-03T00:00:00.000Z");
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn unknown_fields_survive_a_begin_finish_round_trip() {
         // A record carrying a field this Rust code has never heard of must survive a
         // status mutation untouched (never drop unknown fields a future GUI adds).
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         let repo = r"C:\repo\one";
         let mut store = Map::new();
         let mut rec = pending_record("op-1", "2026-01-01T00:00:00.000Z");
@@ -730,7 +727,6 @@ mod tests {
         assert_eq!(entry["futureField"], 42);
         assert_eq!(entry["nested"]["keep"], json!(["me", 2, true]));
         assert_eq!(entry["status"], "done");
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
@@ -762,7 +758,7 @@ mod tests {
 
     #[test]
     fn dismiss_sets_dismissed_status() {
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         let repo = r"C:\repo\one";
         let mut store = Map::new();
         store.insert(
@@ -787,12 +783,11 @@ mod tests {
 
         let back = read_store(&path).unwrap();
         assert_eq!(back[repo][0]["status"], "dismissed");
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn missing_repo_key_lists_empty() {
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         let store = read_store(&path).unwrap();
         let entries = repo_entries(&store, r"C:\nope");
         assert!(entries.is_empty());

@@ -442,16 +442,12 @@ mod tests {
             .stdout_lossy()
     }
 
-    async fn seed_repo(tag: &str) -> (std::path::PathBuf, String) {
-        let base = std::env::temp_dir().join(format!(
-            "gd-{tag}-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let repo = base.join("repo");
+    async fn seed_repo(tag: &str) -> (tempfile::TempDir, String) {
+        let base = tempfile::Builder::new()
+            .prefix(&format!("gd-{tag}-test-"))
+            .tempdir()
+            .expect("create temp dir");
+        let repo = base.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let repo_s = repo.to_string_lossy().into_owned();
         run(&repo_s, &["init", "-q"]).await;
@@ -472,7 +468,7 @@ mod tests {
 
     #[tokio::test]
     async fn scans_a_real_repo() {
-        let (base, repo) = seed_repo("todo-scan").await;
+        let (_base, repo) = seed_repo("todo-scan").await;
 
         // Fixture content is assembled with `concat!` so the comment opener and
         // the real marker word never sit adjacent in THIS source file (which
@@ -518,13 +514,11 @@ mod tests {
             .expect("untracked file hit");
         assert_eq!(b.marker, "FIXME");
         assert_eq!(b.text, "(me): later");
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[tokio::test]
     async fn no_match_is_empty_not_error() {
-        let (base, repo) = seed_repo("todo-nomatch").await;
+        let (_base, repo) = seed_repo("todo-nomatch").await;
         std::fs::write(std::path::Path::new(&repo).join("a.rs"), "fn main() {}\n").unwrap();
         run(&repo, &["add", "-A"]).await;
         run(&repo, &["commit", "-qm", "seed"]).await;
@@ -532,29 +526,25 @@ mod tests {
         let scan = git_todo_scan(repo, markers(), None).await.unwrap();
         assert!(scan.items.is_empty());
         assert!(!scan.truncated);
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[tokio::test]
     async fn unborn_repo_is_empty_not_error() {
         // git init, nothing committed: git grep exits 1 → clean empty result.
-        let (base, repo) = seed_repo("todo-unborn").await;
+        let (_base, repo) = seed_repo("todo-unborn").await;
         let scan = git_todo_scan(repo, markers(), None).await.unwrap();
         assert!(scan.items.is_empty());
         assert!(!scan.truncated);
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[tokio::test]
     async fn empty_markers_rejected() {
-        let (base, repo) = seed_repo("todo-badmarker").await;
+        let (_base, repo) = seed_repo("todo-badmarker").await;
         let err = git_todo_scan(repo.clone(), vec![], None).await.unwrap_err();
         assert!(matches!(err, AppError::InvalidArgument(_)));
         let err = git_todo_scan(repo, vec!["TO DO".into()], None)
             .await
             .unwrap_err();
         assert!(matches!(err, AppError::InvalidArgument(_)));
-        let _ = std::fs::remove_dir_all(&base);
     }
 }

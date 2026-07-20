@@ -347,13 +347,13 @@ pub async fn mcp_launcher_path(app: tauri::AppHandle) -> AppResult<String> {
 mod tests {
     use super::*;
 
-    fn scratch_dir(tag: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "gd-mcp-launcher-test-{}-{}-{}",
-            tag,
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ))
+    fn scratch_dir(tag: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("gd-mcp-launcher-test-{tag}-"))
+            .tempdir()
+            .expect("create temp dir");
+        let path = dir.path().to_path_buf();
+        (dir, path)
     }
 
     #[test]
@@ -374,73 +374,65 @@ mod tests {
 
     /// Set up a temp bin dir with a copied launcher + marker and return
     /// (dir, dest, source, base_marker).
-    fn seeded() -> (PathBuf, PathBuf, PathBuf, Marker) {
-        let dir = scratch_dir("seed");
-        std::fs::create_dir_all(&dir).unwrap();
+    fn seeded() -> (tempfile::TempDir, PathBuf, PathBuf, Marker) {
+        let (guard, dir) = scratch_dir("seed");
         let dest = dir.join(LAUNCHER_FILE);
         // Copy the test binary itself as the "source" exe — a real file.
         let source = current_exe().unwrap();
         let want = marker_for(&source, "9.9.9").unwrap();
         ensure_in_dir(&source, &dest, &want).unwrap();
-        (dir, dest, source, want)
+        (guard, dest, source, want)
     }
 
     #[test]
     fn stale_when_marker_missing() {
-        let dir = scratch_dir("nomarker");
-        std::fs::create_dir_all(&dir).unwrap();
+        let (_dir, dir) = scratch_dir("nomarker");
         let dest = dir.join(LAUNCHER_FILE);
         // exe present but no marker file at all.
         std::fs::write(&dest, b"exe").unwrap();
         let want = marker_for(&current_exe().unwrap(), "1.0.0").unwrap();
         assert!(is_stale(&dest, &want));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn fresh_when_all_fields_match() {
-        let (dir, dest, _source, want) = seeded();
+        let (_dir, dest, _source, want) = seeded();
         assert!(!is_stale(&dest, &want), "just-copied should be fresh");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn stale_when_version_differs() {
-        let (dir, dest, _source, want) = seeded();
+        let (_dir, dest, _source, want) = seeded();
         let other = Marker {
             version: "0.0.1".into(),
             ..want
         };
         assert!(is_stale(&dest, &other));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn stale_when_source_len_differs() {
-        let (dir, dest, _source, want) = seeded();
+        let (_dir, dest, _source, want) = seeded();
         let other = Marker {
             source_len: want.source_len + 1,
             ..want.clone()
         };
         assert!(is_stale(&dest, &other));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn stale_when_source_mtime_differs() {
-        let (dir, dest, _source, want) = seeded();
+        let (_dir, dest, _source, want) = seeded();
         let other = Marker {
             source_mtime_ms: want.source_mtime_ms.wrapping_add(1),
             ..want.clone()
         };
         assert!(is_stale(&dest, &other));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn ensure_in_dir_creates_exe_and_marker() {
-        let dir = scratch_dir("create");
-        std::fs::create_dir_all(&dir).unwrap();
+        let (_dir, dir) = scratch_dir("create");
         let dest = dir.join(LAUNCHER_FILE);
         let source = current_exe().unwrap();
         let want = marker_for(&source, "3.1.4").unwrap();
@@ -463,8 +455,6 @@ mod tests {
         ensure_in_dir(&source, &dest, &want).unwrap();
         assert!(dest.exists());
         assert_eq!(read_marker(&dest).as_ref(), Some(&want));
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -472,8 +462,7 @@ mod tests {
         // Lazy: a never-copied launcher must not be materialized by a refresh.
         // Drive the real production core against a temp dir and assert NO
         // filesystem writes appear (neither the exe nor the marker).
-        let dir = scratch_dir("refresh-absent");
-        std::fs::create_dir_all(&dir).unwrap();
+        let (_dir, dir) = scratch_dir("refresh-absent");
         let dest = dir.join(LAUNCHER_FILE);
         let source = current_exe().unwrap();
         let want = marker_for(&source, "1.0.0").unwrap();
@@ -485,8 +474,6 @@ mod tests {
             !marker_path(&dest).exists(),
             "absent dest ⇒ no marker written"
         );
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -494,7 +481,7 @@ mod tests {
         // Seed a copy, then hand a DIFFERENT want marker (a bumped version) so
         // the present-but-stale branch fires. The refresh must re-copy and the
         // on-disk marker must now match the new want.
-        let (dir, dest, source, base) = seeded();
+        let (_dir, dest, source, base) = seeded();
         assert!(dest.exists());
         let bumped = Marker {
             version: "10.0.0".into(),
@@ -510,7 +497,5 @@ mod tests {
             "marker updated to the new want"
         );
         assert!(!is_stale(&dest, &bumped), "no longer stale after refresh");
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

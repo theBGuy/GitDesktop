@@ -106,14 +106,13 @@ mod tests {
     // These tests drive the pure parse/read logic against a temp file, bypassing
     // `store_path()` so they never touch the real app-data store.
 
-    fn tmp_store() -> PathBuf {
-        let mut p = std::env::temp_dir();
-        p.push(format!(
-            "gd-settings-test-{}-{}.json",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        p
+    fn tmp_store() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-settings-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let path = dir.path().join("store.json");
+        (dir, path)
     }
 
     /// The shared read+extract the public fn wraps (minus the fixed path), so a
@@ -128,29 +127,27 @@ mod tests {
 
     #[test]
     fn missing_file_yields_defaults() {
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         assert_eq!(read_from(&path), AiGenSettings::default());
     }
 
     #[test]
     fn malformed_json_yields_defaults_not_an_error() {
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         std::fs::write(&path, b"{ not json").unwrap();
         assert_eq!(read_from(&path), AiGenSettings::default());
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn missing_settings_key_yields_defaults() {
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         std::fs::write(&path, json!({ "other": 1 }).to_string()).unwrap();
         assert_eq!(read_from(&path), AiGenSettings::default());
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn well_formed_settings_are_parsed() {
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         std::fs::write(
             &path,
             json!({
@@ -167,12 +164,11 @@ mod tests {
         assert_eq!(got.global_instructions, "Be terse.");
         // Trimmed; blanks and `#` comments dropped; the rest kept in order.
         assert_eq!(got.ai_ignore_patterns, vec!["*.lock", "dist/"]);
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn wrong_typed_fields_default_per_field() {
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         std::fs::write(
             &path,
             json!({
@@ -187,12 +183,11 @@ mod tests {
         .unwrap();
         // Each wrong-typed field falls back to its own empty default.
         assert_eq!(read_from(&path), AiGenSettings::default());
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn one_wrong_field_does_not_poison_the_other() {
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         std::fs::write(
             &path,
             json!({
@@ -207,6 +202,5 @@ mod tests {
         let got = read_from(&path);
         assert_eq!(got.global_instructions, "Kept.");
         assert!(got.ai_ignore_patterns.is_empty());
-        std::fs::remove_file(&path).ok();
     }
 }

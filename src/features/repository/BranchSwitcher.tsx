@@ -59,6 +59,7 @@ import {
 } from "@/lib/git/queries";
 import type { Branch, RemoteBranch } from "@/lib/git/types";
 import { listUserWorktrees, type UserWorktree } from "@/lib/git/worktree";
+import { secondaryClickLabel } from "@/lib/hotkeys/binding";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useLocalPrs } from "@/lib/pulls/queries";
@@ -90,6 +91,11 @@ const normPath = (p: string) => p.replace(/\\/g, "/").toLowerCase();
 
 /** Last path segment (folder name), tolerating either separator. */
 const baseName = (p: string) => p.split(/[/\\]/).filter(Boolean).pop() ?? p;
+
+/** Sentence-initial form of the platform's secondary-click word — for
+ *  status-icon hints where the phrase leads a sentence. */
+const secondaryClickCapitalized =
+  secondaryClickLabel.charAt(0).toUpperCase() + secondaryClickLabel.slice(1);
 
 type PrState = "open" | "draft" | "merged" | "closed";
 
@@ -1126,7 +1132,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                       );
                     }
                     if (branch.upstreamGone) {
-                      const label = `Upstream ${branch.upstream} was deleted on the remote — likely merged. Right-click to publish again or delete.`;
+                      const label = `Upstream ${branch.upstream} was deleted on the remote — likely merged. ${secondaryClickCapitalized} to publish again or delete.`;
                       return (
                         <span
                           role="img"
@@ -1139,12 +1145,13 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                       );
                     }
                     // !branch.upstream
+                    const publishHint = `Local only — never published. ${secondaryClickCapitalized} to publish.`;
                     return (
                       <span
                         role="img"
-                        aria-label="Local only — never published. Right-click to publish."
+                        aria-label={publishHint}
                         className="flex shrink-0 items-center text-muted-foreground"
-                        title="Local only — never published. Right-click to publish."
+                        title={publishHint}
                       >
                         <CloudSlashIcon className="size-3" />
                       </span>

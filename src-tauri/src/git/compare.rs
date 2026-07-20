@@ -641,14 +641,11 @@ mod tests {
     /// NO remote configured (a fetch would fail), proving the network path was skipped.
     #[tokio::test]
     async fn fetch_objects_short_circuits_when_all_present() {
-        let base = std::env::temp_dir().join(format!(
-            "gd-fetchobj-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let _base = tempfile::Builder::new()
+            .prefix("gd-fetchobj-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let base = _base.path().to_path_buf();
         let repo = base.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let repo_s = repo.to_string_lossy().into_owned();
@@ -675,22 +672,16 @@ mod tests {
             .await
             .expect("a failed fetch is Ok(false), not an error");
         assert!(!ok, "an absent object falls through to the (failing) fetch");
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// Seeds a fresh repo and returns `(base_dir, repo_path)`. Caller removes
-    /// `base_dir`.
-    async fn seed_repo(tag: &str) -> (std::path::PathBuf, String) {
-        let base = std::env::temp_dir().join(format!(
-            "gd-{tag}-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let repo = base.join("repo");
+    /// Seeds a fresh repo and returns `(base_guard, repo_path)`. The `TempDir`
+    /// guard removes the base dir on Drop, so a panicking run cannot leak it.
+    async fn seed_repo(tag: &str) -> (tempfile::TempDir, String) {
+        let base = tempfile::Builder::new()
+            .prefix(&format!("gd-{tag}-test-"))
+            .tempdir()
+            .expect("create temp dir");
+        let repo = base.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let repo_s = repo.to_string_lossy().into_owned();
         run(&repo_s, &["init", "-q"]).await;
@@ -703,7 +694,7 @@ mod tests {
     /// no longer contain the needle — grep reads the rev's tree, not the checkout.
     #[tokio::test]
     async fn grep_at_ref_reads_the_rev_not_the_worktree() {
-        let (base, repo) = seed_repo("grep-rev").await;
+        let (_base, repo) = seed_repo("grep-rev").await;
 
         std::fs::write(
             std::path::Path::new(&repo).join("a.txt"),
@@ -737,15 +728,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(gone, "", "no match at HEAD → Ok(empty), not an error");
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// The `<ref>:` prefix git prepends when grepping a rev is stripped, while
     /// colons embedded in the path/content are preserved.
     #[tokio::test]
     async fn grep_at_ref_strips_only_the_ref_prefix() {
-        let (base, repo) = seed_repo("grep-prefix").await;
+        let (_base, repo) = seed_repo("grep-prefix").await;
 
         std::fs::write(
             std::path::Path::new(&repo).join("cfg.txt"),
@@ -760,8 +749,6 @@ mod tests {
             .unwrap();
         // Only the leading `HEAD:` is gone; every content colon survives.
         assert_eq!(hit, "cfg.txt:1:endpoint: http://host:8080/path FINDME");
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// More returned lines than `max_hits` → the kept lines plus a count-less
@@ -776,7 +763,7 @@ mod tests {
     /// out of git, which the caller's `take(2)` then trims — the realistic path.
     #[tokio::test]
     async fn grep_at_ref_caps_hits_with_marker() {
-        let (base, repo) = seed_repo("grep-cap").await;
+        let (_base, repo) = seed_repo("grep-cap").await;
 
         // 2 matching lines in each of 3 files (a.txt, b.txt, c.txt).
         for name in ["a.txt", "b.txt", "c.txt"] {
@@ -801,8 +788,6 @@ mod tests {
             lines[2], "[... additional matches truncated]",
             "count-less marker: -m makes the true total unknowable"
         );
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// The unknown-option matcher recognizes git's real phrasings (so a git < 2.38
@@ -826,7 +811,7 @@ mod tests {
     /// A ref that looks like an option is rejected before any git runs.
     #[tokio::test]
     async fn grep_at_ref_rejects_option_like_ref() {
-        let (base, repo) = seed_repo("grep-badref").await;
+        let (_base, repo) = seed_repo("grep-badref").await;
 
         let err = git_grep_at_ref(repo.clone(), "x".into(), "-oops".into(), None)
             .await
@@ -841,8 +826,6 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, AppError::InvalidArgument(_)));
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// The review-husk sweep removes only EMPTY `gd-review-*` dirs: a non-empty
@@ -850,15 +833,11 @@ mod tests {
     /// are both spared.
     #[test]
     fn sweep_review_husks_removes_only_empty_gd_review_dirs() {
-        let base = std::env::temp_dir().join(format!(
-            "gd-sweep-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&base).unwrap();
+        let _base = tempfile::Builder::new()
+            .prefix("gd-sweep-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let base = _base.path().to_path_buf();
 
         // An empty gd-review-* husk → removed.
         let empty_husk = base.join("gd-review-abc123-42");
@@ -876,8 +855,6 @@ mod tests {
         assert!(!empty_husk.exists(), "empty gd-review-* husk was removed");
         assert!(live.exists(), "non-empty gd-review-* (live review) is kept");
         assert!(other.exists(), "non-matching name is kept");
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// The `remove_dir_all` fallback guard admits only `gd-review-*` dirs directly

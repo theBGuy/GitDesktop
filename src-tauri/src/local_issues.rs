@@ -339,14 +339,13 @@ mod tests {
     // against a temp file, bypassing `store_path()` so they never touch the real
     // app-data store. The public fns wrap this same logic + the fixed path.
 
-    fn tmp_store() -> PathBuf {
-        let mut p = std::env::temp_dir();
-        p.push(format!(
-            "gd-local-issues-test-{}-{}.json",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        p
+    fn tmp_store() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-local-issues-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let path = dir.path().join("store.json");
+        (dir, path)
     }
 
     #[test]
@@ -376,30 +375,28 @@ mod tests {
 
     #[test]
     fn read_missing_file_is_empty_object() {
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         let store = read_store(&path).unwrap();
         assert!(store.is_empty());
     }
 
     #[test]
     fn malformed_store_is_an_error_not_a_clobber() {
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         std::fs::write(&path, b"{ this is not json").unwrap();
         let err = read_store(&path).unwrap_err();
         assert!(err.to_string().contains("not valid JSON"));
         assert_eq!(std::fs::read(&path).unwrap(), b"{ this is not json");
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn atomic_write_round_trips() {
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         let mut store = Map::new();
         store.insert("repo".into(), json!([{ "id": "a" }]));
         write_store(&path, &store).unwrap();
         let back = read_store(&path).unwrap();
         assert_eq!(back["repo"][0]["id"], "a");
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
@@ -407,7 +404,7 @@ mod tests {
         // A record carrying a field this Rust code has never heard of must survive a
         // mutation (the acceptance criterion for never dropping unknown fields a future
         // GUI adds — e.g. `archived`, `hidden` on comments, or anything newer).
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         let repo = r"C:\repo\one";
         let mut store = Map::new();
         store.insert(
@@ -450,7 +447,6 @@ mod tests {
         assert_eq!(iss["comments"][0]["body"], "hi");
         // Known fields unchanged.
         assert_eq!(iss["status"], "open");
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
@@ -518,7 +514,7 @@ mod tests {
     #[test]
     fn set_status_stamps_and_clears_closed_at() {
         // Drive the status mutation over a temp file to check the closedAt behavior.
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         let repo = r"C:\repo\stamp";
         let mut store = Map::new();
         store.insert(
@@ -554,7 +550,6 @@ mod tests {
         let back = read_store(&path).unwrap();
         assert_eq!(back[repo][0]["status"], "open");
         assert!(back[repo][0].get("closedAt").is_none());
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]

@@ -969,17 +969,15 @@ mod tests {
             .stdout_lossy()
     }
 
-    /// A unique temp base dir for a test, cleaned up by the caller.
-    fn temp_base(tag: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "gd-branches-{}-{}-{}",
-            tag,
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
+    /// A unique temp base dir for a test — the returned `TempDir` guard removes it
+    /// on Drop, so a panicking or killed run cannot leak the fixture.
+    fn temp_base(tag: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("gd-branches-{tag}-"))
+            .tempdir()
+            .expect("create temp dir");
+        let path = dir.path().to_path_buf();
+        (dir, path)
     }
 
     async fn init_repo(repo_s: &str, seed_file: &str) {
@@ -1001,7 +999,7 @@ mod tests {
     /// checkout arm shares the same `--no-track` placement per the argv table.
     #[tokio::test]
     async fn create_branch_honors_no_track_against_real_repo() {
-        let base = temp_base("no-track");
+        let (_base, base) = temp_base("no-track");
         let repo = base.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let repo_s = repo.to_string_lossy().into_owned();
@@ -1073,8 +1071,6 @@ mod tests {
             run(&repo_s, &["rev-parse", "origin/x"]).await.trim(),
             "z should start at origin/x"
         );
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// `git_branches` must surface git's authoritative `%(upstream:remotename)`
@@ -1083,7 +1079,7 @@ mod tests {
     /// re-deriving the remote from the upstream string.
     #[tokio::test]
     async fn git_branches_reports_upstream_remote() {
-        let base = temp_base("upstream-remote");
+        let (_base, base) = temp_base("upstream-remote");
         let repo = base.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let repo_s = repo.to_string_lossy().into_owned();
@@ -1140,7 +1136,5 @@ mod tests {
             solo.upstream_remote, None,
             "an untracked branch carries no upstream remote"
         );
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 }

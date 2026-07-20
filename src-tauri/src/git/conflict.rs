@@ -259,23 +259,19 @@ mod tests {
     use super::*;
     use crate::git::runner::run_git;
 
-    fn temp_repo(tag: &str) -> String {
-        let dir = std::env::temp_dir().join(format!(
-            "gd-conflict-test-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir.to_string_lossy().into_owned()
+    fn temp_repo(tag: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("gd-conflict-test-{tag}-"))
+            .tempdir()
+            .expect("create temp dir");
+        let repo = dir.path().to_string_lossy().into_owned();
+        (dir, repo)
     }
 
     /// Builds a real merge conflict on `file.txt` (base → "base", ours → "ours",
     /// theirs → "theirs") and leaves the repo mid-merge.
-    async fn conflicted_repo(tag: &str) -> String {
-        let repo = temp_repo(tag);
+    async fn conflicted_repo(tag: &str) -> (tempfile::TempDir, String) {
+        let (dir, repo) = temp_repo(tag);
         let git = |args: Vec<&'static str>| {
             let repo = repo.clone();
             async move { run_git(Some(&repo), &args, DEFAULT_TIMEOUT).await.unwrap() }
@@ -297,12 +293,12 @@ mod tests {
         run_git_raw(Some(&repo), &["merge", "feature"], DEFAULT_TIMEOUT)
             .await
             .unwrap();
-        repo
+        (dir, repo)
     }
 
     #[tokio::test]
     async fn sides_carry_each_stage_and_markers() {
-        let repo = conflicted_repo("sides").await;
+        let (_dir, repo) = conflicted_repo("sides").await;
         let sides = git_conflict_sides(repo.clone(), "file.txt".into(), vec![])
             .await
             .unwrap();
@@ -312,13 +308,12 @@ mod tests {
         assert_eq!(sides.ours.as_deref(), Some("ours\n"));
         assert_eq!(sides.theirs.as_deref(), Some("theirs\n"));
         assert!(!sides.ai_ignored);
-        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[tokio::test]
     async fn checkout_side_takes_one_side_and_clears() {
         // ours → the current branch's version, conflict cleared.
-        let repo = conflicted_repo("ours-side").await;
+        let (_dir, repo) = conflicted_repo("ours-side").await;
         run_git(Some(&repo), &["checkout", "--ours", "--", "file.txt"], DEFAULT_TIMEOUT)
             .await
             .unwrap();
@@ -338,10 +333,9 @@ mod tests {
             .stdout_lossy()
             .trim()
             .is_empty());
-        let _ = std::fs::remove_dir_all(&repo);
 
         // theirs → the incoming version.
-        let repo2 = conflicted_repo("theirs-side").await;
+        let (_dir2, repo2) = conflicted_repo("theirs-side").await;
         run_git(Some(&repo2), &["checkout", "--theirs", "--", "file.txt"], DEFAULT_TIMEOUT)
             .await
             .unwrap();
@@ -354,12 +348,11 @@ mod tests {
                 .replace("\r\n", "\n"),
             "theirs\n"
         );
-        let _ = std::fs::remove_dir_all(&repo2);
     }
 
     #[tokio::test]
     async fn ai_ignore_pattern_flags_the_path() {
-        let repo = conflicted_repo("ignore").await;
+        let (_dir, repo) = conflicted_repo("ignore").await;
         let hit = git_conflict_sides(repo.clone(), "file.txt".into(), vec!["*.txt".into()])
             .await
             .unwrap();
@@ -368,12 +361,11 @@ mod tests {
             .await
             .unwrap();
         assert!(!miss.ai_ignored);
-        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[tokio::test]
     async fn resolve_writes_and_clears_the_conflict() {
-        let repo = conflicted_repo("resolve").await;
+        let (_dir, repo) = conflicted_repo("resolve").await;
         // Before: the path is unmerged (`ls-files -u` lists it).
         let unmerged = run_git(Some(&repo), &["ls-files", "-u"], DEFAULT_TIMEOUT)
             .await
@@ -396,7 +388,6 @@ mod tests {
             .unwrap()
             .stdout_lossy();
         assert!(staged.contains("file.txt"));
-        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[tokio::test]

@@ -88,8 +88,10 @@ pub struct DetectedTerminal {
 /// Appends one or more ignore patterns to the repo root .gitignore (created if
 /// absent). Trims and de-duplicates the batch and skips any pattern already
 /// present as an exact line, so bulk-ignoring a selection can't add duplicates.
+/// Returns the number of patterns actually appended (0 when every pattern was
+/// empty or already present).
 #[tauri::command]
-pub async fn append_to_gitignore(repo_path: String, patterns: Vec<String>) -> AppResult<()> {
+pub async fn append_to_gitignore(repo_path: String, patterns: Vec<String>) -> AppResult<usize> {
     // Normalize + de-dupe within the batch (preserving order).
     let mut wanted: Vec<String> = Vec::new();
     for p in patterns {
@@ -99,7 +101,7 @@ pub async fn append_to_gitignore(repo_path: String, patterns: Vec<String>) -> Ap
         }
     }
     if wanted.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
 
     let path = Path::new(&repo_path).join(".gitignore");
@@ -120,8 +122,9 @@ pub async fn append_to_gitignore(repo_path: String, patterns: Vec<String>) -> Ap
             .collect()
     };
     if to_add.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
+    let added = to_add.len();
 
     if !content.is_empty() && !content.ends_with('\n') {
         content.push('\n');
@@ -130,7 +133,8 @@ pub async fn append_to_gitignore(repo_path: String, patterns: Vec<String>) -> Ap
         content.push_str(&p);
         content.push('\n');
     }
-    tokio::fs::write(&path, content).await.map_err(AppError::Io)
+    tokio::fs::write(&path, content).await.map_err(AppError::Io)?;
+    Ok(added)
 }
 
 /// Reads a small text file the user picked (e.g. a VSCode
@@ -511,4 +515,80 @@ pub async fn open_with_program(program: String, path: String) -> AppResult<()> {
     }
     cmd.spawn().map_err(AppError::Io)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gitignore_test_repo() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-gitignore-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let path = dir.path().to_path_buf();
+        (dir, path)
+    }
+
+    #[tokio::test]
+    async fn append_gitignore_creates_file_and_returns_full_count() {
+        let (_tmp, dir) = gitignore_test_repo();
+        let repo = dir.to_string_lossy().into_owned();
+
+        let added =
+            append_to_gitignore(repo, vec!["target/".to_string(), "*.log".to_string()])
+                .await
+                .unwrap();
+        // A fresh .gitignore: both patterns are appended.
+        assert_eq!(added, 2);
+
+        let path = dir.join(".gitignore");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("target/\n"));
+        assert!(text.contains("*.log\n"));
+    }
+
+    #[tokio::test]
+    async fn append_gitignore_skips_present_and_returns_partial_count() {
+        let (_tmp, dir) = gitignore_test_repo();
+        let repo = dir.to_string_lossy().into_owned();
+
+        let first = append_to_gitignore(repo.clone(), vec!["target/".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(first, 1);
+
+        // Re-add the same line plus a new one: only the new line counts.
+        let second =
+            append_to_gitignore(repo, vec!["target/".to_string(), "dist/".to_string()])
+                .await
+                .unwrap();
+        assert_eq!(second, 1);
+
+        let path = dir.join(".gitignore");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("target/\n").count(), 1);
+        assert!(text.contains("dist/\n"));
+    }
+
+    #[tokio::test]
+    async fn append_gitignore_all_duplicates_returns_zero_and_no_write() {
+        let (_tmp, dir) = gitignore_test_repo();
+        let repo = dir.to_string_lossy().into_owned();
+
+        append_to_gitignore(repo.clone(), vec!["target/".to_string(), "*.log".to_string()])
+            .await
+            .unwrap();
+        let path = dir.join(".gitignore");
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        // An all-duplicates batch appends nothing and leaves the file byte-identical.
+        let added =
+            append_to_gitignore(repo, vec!["target/".to_string(), "*.log".to_string()])
+                .await
+                .unwrap();
+        assert_eq!(added, 0);
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(before, after);
+    }
 }

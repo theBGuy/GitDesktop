@@ -951,10 +951,10 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<RunIdArg>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
-        crate::forge::forge_ci_run_rerun(self.repo.clone(), args.run_id, true)
+        crate::forge::forge_ci_run_rerun(self.repo.clone(), args.run_id.as_u64(), true)
             .await
             .map_err(app_err)?;
-        json_result(&serde_json::json!({ "run_id": args.run_id, "action": "rerun" }))
+        json_result(&serde_json::json!({ "run_id": args.run_id.as_u64(), "action": "rerun" }))
     }
 
     #[tool(
@@ -968,10 +968,10 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<RunIdArg>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
-        crate::forge::forge_ci_run_cancel(self.repo.clone(), args.run_id)
+        crate::forge::forge_ci_run_cancel(self.repo.clone(), args.run_id.as_u64())
             .await
             .map_err(app_err)?;
-        json_result(&serde_json::json!({ "run_id": args.run_id, "action": "cancelled" }))
+        json_result(&serde_json::json!({ "run_id": args.run_id.as_u64(), "action": "cancelled" }))
     }
 
     #[tool(
@@ -1464,6 +1464,7 @@ impl GitDesktopMcp {
 
 #[cfg(test)]
 mod tests {
+    use super::super::CiId;
     use super::*;
     use rmcp::handler::server::wrapper::Parameters;
 
@@ -1568,8 +1569,8 @@ mod tests {
             thread_id: "t".into(),
             resolved: true,
         })));
-        assert_gated!(h.rerun_workflow_run(Parameters(RunIdArg { run_id: 1 })));
-        assert_gated!(h.cancel_workflow_run(Parameters(RunIdArg { run_id: 1 })));
+        assert_gated!(h.rerun_workflow_run(Parameters(RunIdArg { run_id: CiId(1) })));
+        assert_gated!(h.cancel_workflow_run(Parameters(RunIdArg { run_id: CiId(1) })));
         assert_gated!(h.dispatch_workflow(Parameters(DispatchWorkflowArgs {
             workflow: "ci.yml".into(),
             git_ref: "main".into(),

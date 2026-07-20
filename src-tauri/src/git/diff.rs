@@ -648,15 +648,11 @@ mod tests {
     async fn partial_patch_stages_a_single_added_line() {
         use crate::git::runner::run_git_input;
 
-        let dir = std::env::temp_dir().join(format!(
-            "gd-partial-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let _tmp = tempfile::Builder::new()
+            .prefix("gd-partial-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let dir = _tmp.path().to_path_buf();
         let repo = dir.to_string_lossy().into_owned();
         let git = |args: Vec<&'static str>| {
             let repo = repo.clone();
@@ -692,8 +688,6 @@ mod tests {
         assert!(staged.contains("NEW A"));
         assert!(!staged.contains("NEW B"));
         assert!(unstaged.contains("NEW B"));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// End-to-end check of the hunk-staging plumbing: a single hunk cut out
@@ -704,15 +698,11 @@ mod tests {
     async fn apply_patch_stages_and_unstages_a_single_hunk() {
         use crate::git::runner::run_git_input;
 
-        let dir = std::env::temp_dir().join(format!(
-            "gd-apply-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let _tmp = tempfile::Builder::new()
+            .prefix("gd-apply-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let dir = _tmp.path().to_path_buf();
         let repo = dir.to_string_lossy().into_owned();
         let git = |args: Vec<&'static str>| {
             let repo = repo.clone();
@@ -765,8 +755,6 @@ mod tests {
         .unwrap();
         let staged = git(vec!["diff", "--cached", "--no-color"]).await.stdout_lossy();
         assert!(staged.trim().is_empty());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `git_session_file_diff` shows a file's CUMULATIVE change vs the session
@@ -775,15 +763,11 @@ mod tests {
     /// surfaces a brand-new untracked file as a full add via the fallback.
     #[tokio::test]
     async fn session_file_diff_is_cumulative_against_base() {
-        let dir = std::env::temp_dir().join(format!(
-            "gd-session-diff-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let _tmp = tempfile::Builder::new()
+            .prefix("gd-session-diff-")
+            .tempdir()
+            .expect("create temp dir");
+        let dir = _tmp.path().to_path_buf();
         let repo = dir.to_string_lossy().into_owned();
         let git = |args: Vec<&'static str>| {
             let repo = repo.clone();
@@ -823,7 +807,5 @@ mod tests {
             .unwrap();
         assert!(added.text.contains("+hello new file"), "{}", added.text);
         assert!(added.text.contains("new.txt"), "{}", added.text);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

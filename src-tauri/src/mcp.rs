@@ -1114,15 +1114,13 @@ mod tests {
 
     // --- mcp_json_write ------------------------------------------------------
 
-    fn tmp_dir() -> std::path::PathBuf {
-        let mut p = std::env::temp_dir();
-        p.push(format!(
-            "gd-mcp-json-test-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&p).unwrap();
-        p
+    fn tmp_dir() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-mcp-json-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let path = dir.path().to_path_buf();
+        (dir, path)
     }
 
     fn entry() -> Value {
@@ -1131,7 +1129,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_creates_file_when_missing() {
-        let dir = tmp_dir();
+        let (_tmp, dir) = tmp_dir();
         let res = mcp_json_write(dir.to_string_lossy().into_owned(), entry(), false)
             .await
             .unwrap();
@@ -1140,12 +1138,11 @@ mod tests {
         let doc: Value =
             serde_json::from_slice(&std::fs::read(dir.join(".mcp.json")).unwrap()).unwrap();
         assert_eq!(doc["mcpServers"]["gitdesktop"]["command"], "gitdesktop");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]
     async fn write_preserves_siblings_and_unknown_top_level_keys() {
-        let dir = tmp_dir();
+        let (_tmp, dir) = tmp_dir();
         let path = dir.join(".mcp.json");
         std::fs::write(
             &path,
@@ -1170,12 +1167,11 @@ mod tests {
         assert_eq!(doc["mcpServers"]["gitdesktop"]["command"], "gitdesktop");
         // Unknown top-level key preserved.
         assert_eq!(doc["someUnknownTopKey"]["keep"], true);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]
     async fn write_detects_existing_and_refuses_without_overwrite() {
-        let dir = tmp_dir();
+        let (_tmp, dir) = tmp_dir();
         let path = dir.join(".mcp.json");
         std::fs::write(
             &path,
@@ -1203,12 +1199,11 @@ mod tests {
         assert!(res.existed);
         let doc: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(doc["mcpServers"]["gitdesktop"]["command"], "gitdesktop");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]
     async fn write_errors_on_malformed_existing_file_without_clobber() {
-        let dir = tmp_dir();
+        let (_tmp, dir) = tmp_dir();
         let path = dir.join(".mcp.json");
         std::fs::write(&path, b"{ not valid json").unwrap();
         let err = mcp_json_write(dir.to_string_lossy().into_owned(), entry(), true)
@@ -1217,7 +1212,6 @@ mod tests {
         assert!(err.to_string().contains("not valid JSON"));
         // The bad file is untouched.
         assert_eq!(std::fs::read(&path).unwrap(), b"{ not valid json");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

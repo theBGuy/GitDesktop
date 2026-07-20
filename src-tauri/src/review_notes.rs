@@ -174,14 +174,13 @@ mod tests {
     // against a temp file, bypassing `store_path()` so they never touch the real
     // app-data store. `set` wraps this same logic + the fixed path.
 
-    fn tmp_store() -> PathBuf {
-        let mut p = std::env::temp_dir();
-        p.push(format!(
-            "gd-review-notes-test-{}-{}.json",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        p
+    fn tmp_store() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-review-notes-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let path = dir.path().join("store.json");
+        (dir, path)
     }
 
     #[test]
@@ -198,25 +197,24 @@ mod tests {
 
     #[test]
     fn read_missing_file_is_empty_object() {
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         let store = read_store(&path).unwrap();
         assert!(store.is_empty());
     }
 
     #[test]
     fn malformed_store_is_an_error_not_a_clobber() {
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         std::fs::write(&path, b"{ this is not json").unwrap();
         let err = read_store(&path).unwrap_err();
         assert!(err.to_string().contains("not valid JSON"));
         // The bad file is left intact.
         assert_eq!(std::fs::read(&path).unwrap(), b"{ this is not json");
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn set_upserts_body_and_stamps_saved_at() {
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         let repo = "C:/repo/one/.git";
         let saved = set_at(&path, repo, "feature", "please look at the migration").unwrap();
         assert!(saved);
@@ -227,12 +225,11 @@ mod tests {
         assert!(note["savedAt"].is_string());
         let ts = note["savedAt"].as_str().unwrap();
         assert!(ts.ends_with('Z'), "expected ISO Z suffix: {ts}");
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn set_overwrites_an_existing_branch_note() {
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         let repo = "C:/repo/one/.git";
         set_at(&path, repo, "feature", "first").unwrap();
         set_at(&path, repo, "feature", "second").unwrap();
@@ -241,12 +238,11 @@ mod tests {
         assert_eq!(back[repo]["feature"]["body"], "second");
         // Only one branch entry — an upsert, not an append.
         assert_eq!(back[repo].as_object().unwrap().len(), 1);
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn empty_body_clears_the_branch_but_keeps_siblings() {
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         let repo = "C:/repo/one/.git";
         set_at(&path, repo, "feature", "note A").unwrap();
         set_at(&path, repo, "other", "note B").unwrap();
@@ -259,12 +255,11 @@ mod tests {
         assert!(back[repo].get("feature").is_none());
         // The sibling branch is untouched.
         assert_eq!(back[repo]["other"]["body"], "note B");
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn clearing_last_branch_removes_the_repo_key() {
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         let repo = "C:/repo/one/.git";
         set_at(&path, repo, "feature", "note").unwrap();
         // Clearing the only branch drops the repo key entirely.
@@ -277,24 +272,22 @@ mod tests {
             "repo key should be gone: {back:?}"
         );
         assert!(back.is_empty());
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn clearing_a_missing_branch_is_a_harmless_noop() {
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         let repo = "C:/repo/one/.git";
         // No prior entry — clearing a never-set branch just writes an empty store.
         let saved = set_at(&path, repo, "ghost", "").unwrap();
         assert!(!saved);
         let back = read_store(&path).unwrap();
         assert!(back.is_empty());
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn upsert_preserves_sibling_repos_and_unknown_fields() {
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         let other_repo = "C:/repo/other/.git";
         let repo = "C:/repo/one/.git";
         // Seed a store with a sibling repo carrying a note that has an unknown field, plus
@@ -319,7 +312,6 @@ mod tests {
         // Our repo now has both the sibling branch and the new one.
         assert_eq!(back[repo]["sibling"]["body"], "sib");
         assert_eq!(back[repo]["feature"]["body"], "new note");
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]

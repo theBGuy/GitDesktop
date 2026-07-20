@@ -1,4 +1,4 @@
-﻿use std::path::Path;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -2915,21 +2915,16 @@ mod tests {
         git(repo, &["commit", "-m", msg]).await;
     }
 
-    async fn setup_repo(marker: &str) -> (std::path::PathBuf, String) {
-        let dir = std::env::temp_dir().join(format!(
-            "gd-rewrite-{marker}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let repo = dir.to_string_lossy().into_owned();
+    async fn setup_repo(marker: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("gd-rewrite-{marker}-"))
+            .tempdir()
+            .expect("create temp dir");
+        let repo = dir.path().to_string_lossy().into_owned();
         git(&repo, &["init"]).await;
         git(&repo, &["config", "user.email", "t@t"]).await;
         git(&repo, &["config", "user.name", "t"]).await;
-        commit_file(&repo, &dir, "a.txt", "v0\n", "base").await;
+        commit_file(&repo, dir.path(), "a.txt", "v0\n", "base").await;
         (dir, repo)
     }
 
@@ -2959,25 +2954,24 @@ mod tests {
         // Clean tree → Ok.
         assert!(ensure_clean_tree(&repo).await.is_ok());
         // Untracked file → still Ok (`reset --hard` never removes it).
-        std::fs::write(dir.join("scratch.txt"), "x\n").unwrap();
+        std::fs::write(dir.path().join("scratch.txt"), "x\n").unwrap();
         assert!(ensure_clean_tree(&repo).await.is_ok());
         // Unstaged tracked change → refused (this is the reset --hard loss surface).
-        std::fs::write(dir.join("a.txt"), "v1\n").unwrap();
+        std::fs::write(dir.path().join("a.txt"), "v1\n").unwrap();
         assert!(ensure_clean_tree(&repo).await.is_err());
         // Staged tracked change → refused (the exact incident state).
         git(&repo, &["add", "a.txt"]).await;
         assert!(ensure_clean_tree(&repo).await.is_err());
 
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn reorder_swaps_independent_commits() {
         let (dir, repo) = setup_repo("reorder").await;
         let base = rev(&repo, "HEAD").await;
-        commit_file(&repo, &dir, "b.txt", "b\n", "one").await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
         let c1 = rev(&repo, "HEAD").await;
-        commit_file(&repo, &dir, "c.txt", "c\n", "two").await;
+        commit_file(&repo, dir.path(), "c.txt", "c\n", "two").await;
         let c2 = rev(&repo, "HEAD").await;
 
         let state = AppState::default();
@@ -2987,16 +2981,15 @@ mod tests {
             .unwrap();
         assert_eq!(subjects(&repo).await, vec!["one", "two", "base"]);
 
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn squash_combines_commits() {
         let (dir, repo) = setup_repo("squash").await;
         let base = rev(&repo, "HEAD").await;
-        commit_file(&repo, &dir, "b.txt", "b\n", "one").await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
         let c1 = rev(&repo, "HEAD").await;
-        commit_file(&repo, &dir, "c.txt", "c\n", "two").await;
+        commit_file(&repo, dir.path(), "c.txt", "c\n", "two").await;
         let c2 = rev(&repo, "HEAD").await;
 
         let state = AppState::default();
@@ -3013,19 +3006,18 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(subjects(&repo).await, vec!["combined", "base"]);
-        assert!(dir.join("b.txt").exists());
-        assert!(dir.join("c.txt").exists());
+        assert!(dir.path().join("b.txt").exists());
+        assert!(dir.path().join("c.txt").exists());
 
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn fixup_keeps_leader_message() {
         let (dir, repo) = setup_repo("fixup").await;
         let base = rev(&repo, "HEAD").await;
-        commit_file(&repo, &dir, "b.txt", "b\n", "keep this message").await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "keep this message").await;
         let c1 = rev(&repo, "HEAD").await;
-        commit_file(&repo, &dir, "c.txt", "c\n", "discard me").await;
+        commit_file(&repo, dir.path(), "c.txt", "c\n", "discard me").await;
         let c2 = rev(&repo, "HEAD").await;
 
         let state = AppState::default();
@@ -3044,19 +3036,18 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(subjects(&repo).await, vec!["keep this message", "base"]);
-        assert!(dir.join("b.txt").exists());
-        assert!(dir.join("c.txt").exists());
+        assert!(dir.path().join("b.txt").exists());
+        assert!(dir.path().join("c.txt").exists());
 
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn conflicting_rewrite_rolls_back() {
         let (dir, repo) = setup_repo("conflict").await;
         let base = rev(&repo, "HEAD").await;
-        commit_file(&repo, &dir, "a.txt", "v1\n", "one").await;
+        commit_file(&repo, dir.path(), "a.txt", "v1\n", "one").await;
         let c1 = rev(&repo, "HEAD").await;
-        commit_file(&repo, &dir, "a.txt", "v2\n", "two").await;
+        commit_file(&repo, dir.path(), "a.txt", "v2\n", "two").await;
         let c2 = rev(&repo, "HEAD").await;
         let orig = rev(&repo, "HEAD").await;
 
@@ -3068,14 +3059,13 @@ mod tests {
         let status = git(&repo, &["status", "--porcelain"]).await;
         assert!(status.trim().is_empty(), "tree should be clean: {status}");
 
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn rebase_edit_refuses_a_concurrent_op() {
         let (dir, repo) = setup_repo("reentry").await;
         let base = rev(&repo, "HEAD").await;
-        commit_file(&repo, &dir, "x.txt", "x\n", "one").await;
+        commit_file(&repo, dir.path(), "x.txt", "x\n", "one").await;
         let c1 = rev(&repo, "HEAD").await;
         // Simulate an in-progress rebase via its marker dir.
         std::fs::create_dir_all(std::path::Path::new(&repo).join(".git/rebase-merge"))
@@ -3099,7 +3089,6 @@ mod tests {
             "scratch dir must not be touched when refused"
         );
 
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -3114,13 +3103,13 @@ mod tests {
             .trim()
             .to_string();
         git(&repo, &["checkout", "-b", "feature"]).await;
-        commit_file(&repo, &dir, "f.txt", "f\n", "feature one").await;
+        commit_file(&repo, dir.path(), "f.txt", "f\n", "feature one").await;
         git(&repo, &["checkout", "-b", "fix"]).await;
-        commit_file(&repo, &dir, "x.txt", "x\n", "fix one").await;
-        commit_file(&repo, &dir, "x.txt", "x2\n", "fix two").await;
+        commit_file(&repo, dir.path(), "x.txt", "x\n", "fix one").await;
+        commit_file(&repo, dir.path(), "x.txt", "x2\n", "fix two").await;
         // Advance the default branch so it diverges from feature.
         git(&repo, &["checkout", &main]).await;
-        commit_file(&repo, &dir, "a.txt", "v1\n", "main advance").await;
+        commit_file(&repo, dir.path(), "a.txt", "v1\n", "main advance").await;
         let main_tip = rev(&repo, "HEAD").await;
         git(&repo, &["checkout", "fix"]).await;
 
@@ -3140,7 +3129,6 @@ mod tests {
             "fix's commits sit directly on the new base's tip"
         );
 
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -3150,11 +3138,11 @@ mod tests {
             .await
             .trim()
             .to_string();
-        commit_file(&repo, &dir, "shared.txt", "base\n", "base shared").await;
+        commit_file(&repo, dir.path(), "shared.txt", "base\n", "base shared").await;
 
         // up-to-date: a branch pinned at an ancestor of HEAD.
         git(&repo, &["branch", "old"]).await;
-        commit_file(&repo, &dir, "shared.txt", "main2\n", "advance main").await;
+        commit_file(&repo, dir.path(), "shared.txt", "main2\n", "advance main").await;
         let up = git_merge_preview(repo.clone(), "old".to_string(), "none".to_string())
             .await
             .unwrap();
@@ -3162,7 +3150,7 @@ mod tests {
 
         // fast-forward: a branch strictly ahead of HEAD.
         git(&repo, &["checkout", "-b", "ahead"]).await;
-        commit_file(&repo, &dir, "ahead.txt", "a\n", "ahead only").await;
+        commit_file(&repo, dir.path(), "ahead.txt", "a\n", "ahead only").await;
         git(&repo, &["checkout", &main]).await;
         let ff = git_merge_preview(repo.clone(), "ahead".to_string(), "none".to_string())
             .await
@@ -3171,9 +3159,9 @@ mod tests {
 
         // conflict: divergent edits to shared.txt (needs git merge-tree, 2.38+).
         git(&repo, &["checkout", "-b", "feat"]).await;
-        commit_file(&repo, &dir, "shared.txt", "feat\n", "feat edit").await;
+        commit_file(&repo, dir.path(), "shared.txt", "feat\n", "feat edit").await;
         git(&repo, &["checkout", &main]).await;
-        commit_file(&repo, &dir, "shared.txt", "main3\n", "main edit").await;
+        commit_file(&repo, dir.path(), "shared.txt", "main3\n", "main edit").await;
         let cf = git_merge_preview(repo.clone(), "feat".to_string(), "none".to_string())
             .await
             .unwrap();
@@ -3192,7 +3180,6 @@ mod tests {
                 .unwrap();
         assert_eq!(resolved.status, "clean", "{:?}", resolved.conflicts);
 
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -3205,9 +3192,9 @@ mod tests {
 
         // A non-conflicting feature: touches a different file than base advances.
         git(&repo, &["checkout", "-b", "clean-feat"]).await;
-        commit_file(&repo, &dir, "feat.txt", "feat\n", "feat only").await;
+        commit_file(&repo, dir.path(), "feat.txt", "feat\n", "feat only").await;
         git(&repo, &["checkout", &main]).await;
-        commit_file(&repo, &dir, "base-only.txt", "b\n", "base only").await;
+        commit_file(&repo, dir.path(), "base-only.txt", "b\n", "base only").await;
         let clean = git_conflict_preview(repo.clone(), main.clone(), "clean-feat".to_string())
             .await
             .unwrap();
@@ -3215,9 +3202,9 @@ mod tests {
 
         // A conflicting feature: divergent edits to the same file as base.
         git(&repo, &["checkout", "-b", "bad-feat"]).await;
-        commit_file(&repo, &dir, "a.txt", "feat-edit\n", "feat edit a").await;
+        commit_file(&repo, dir.path(), "a.txt", "feat-edit\n", "feat edit a").await;
         git(&repo, &["checkout", &main]).await;
-        commit_file(&repo, &dir, "a.txt", "main-edit\n", "main edit a").await;
+        commit_file(&repo, dir.path(), "a.txt", "main-edit\n", "main edit a").await;
         let conflict = git_conflict_preview(repo.clone(), main.clone(), "bad-feat".to_string())
             .await
             .unwrap();
@@ -3232,7 +3219,6 @@ mod tests {
             conflict.conflicts
         );
 
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -3249,9 +3235,9 @@ mod tests {
 
         // Manufacture a real conflicted merge on `main`.
         git(&repo, &["checkout", "-b", "feat"]).await;
-        commit_file(&repo, &dir, "a.txt", "feat\n", "feat edit").await;
+        commit_file(&repo, dir.path(), "a.txt", "feat\n", "feat edit").await;
         git(&repo, &["checkout", &main]).await;
-        commit_file(&repo, &dir, "a.txt", "main\n", "main edit").await;
+        commit_file(&repo, dir.path(), "a.txt", "main\n", "main edit").await;
         // A conflicting merge exits non-zero and leaves unmerged paths in place.
         let merged = run_git_raw(
             Some(&repo),
@@ -3267,22 +3253,16 @@ mod tests {
             "expected a.txt among {paths:?}"
         );
 
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Makes a throwaway dir and writes `.gitignore` with the given raw bytes.
-    fn gitignore_dir(marker: &str, content: &str) -> (std::path::PathBuf, String) {
-        let dir = std::env::temp_dir().join(format!(
-            "gd-unignore-{marker}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(".gitignore"), content).unwrap();
-        let repo = dir.to_string_lossy().into_owned();
+    fn gitignore_dir(marker: &str, content: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("gd-unignore-{marker}-"))
+            .tempdir()
+            .expect("create temp dir");
+        std::fs::write(dir.path().join(".gitignore"), content).unwrap();
+        let repo = dir.path().to_string_lossy().into_owned();
         (dir, repo)
     }
 
@@ -3298,20 +3278,18 @@ mod tests {
         // A Windows .gitignore (CRLF) with a comment and two rules.
         let (dir, repo) = gitignore_dir("crlf", "# build artifacts\r\n*.log\r\nbuild/\r\n");
         git_unignore_rules(repo, vec![rule("*.log")]).await.unwrap();
-        let out = std::fs::read_to_string(dir.join(".gitignore")).unwrap();
+        let out = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
         // CRLF kept, comment + the untouched rule kept, trailing CRLF kept.
         assert_eq!(out, "# build artifacts\r\nbuild/\r\n");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn unignore_last_rule_keeps_trailing_newline() {
         let (dir, repo) = gitignore_dir("last", "*.log\n");
         git_unignore_rules(repo, vec![rule("*.log")]).await.unwrap();
-        let out = std::fs::read_to_string(dir.join(".gitignore")).unwrap();
+        let out = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
         // Removing the only rule leaves a single newline, not a 0-byte file.
         assert_eq!(out, "\n");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -3319,9 +3297,8 @@ mod tests {
         // A UTF-8 BOM ahead of the first (targeted) rule must not block the match.
         let (dir, repo) = gitignore_dir("bom", "\u{feff}*.log\nbuild/\n");
         git_unignore_rules(repo, vec![rule("*.log")]).await.unwrap();
-        let out = std::fs::read_to_string(dir.join(".gitignore")).unwrap();
+        let out = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
         assert_eq!(out, "\u{feff}build/\n");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn lines(v: &[&str]) -> Vec<String> {
@@ -3331,7 +3308,7 @@ mod tests {
     #[tokio::test]
     async fn replace_lines_clean_file_stages_exactly_the_edit() {
         let (dir, repo) = setup_repo("replace-clean").await;
-        commit_file(&repo, &dir, "src.txt", "a\nb\nc\n", "seed").await;
+        commit_file(&repo, dir.path(), "src.txt", "a\nb\nc\n", "seed").await;
 
         let state = AppState::default();
         let res = replace_file_lines(
@@ -3348,7 +3325,7 @@ mod tests {
         assert!(res.staged);
         assert!(!res.had_local_changes);
         assert_eq!(
-            std::fs::read_to_string(dir.join("src.txt")).unwrap(),
+            std::fs::read_to_string(dir.path().join("src.txt")).unwrap(),
             "a\nB1\nB2\nc\n"
         );
         // The index holds exactly this edit — the staged blob matches the file,
@@ -3356,15 +3333,14 @@ mod tests {
         let porcelain = git(&repo, &["status", "--porcelain", "--", "src.txt"]).await;
         assert_eq!(porcelain, "M  src.txt\n", "unexpected status: {porcelain:?}");
 
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn replace_lines_dirty_file_does_not_stage() {
         let (dir, repo) = setup_repo("replace-dirty").await;
-        commit_file(&repo, &dir, "src.txt", "a\nb\nc\n", "seed").await;
+        commit_file(&repo, dir.path(), "src.txt", "a\nb\nc\n", "seed").await;
         // A pre-existing unstaged edit elsewhere in the same file.
-        std::fs::write(dir.join("src.txt"), "a\nb\nCHANGED\n").unwrap();
+        std::fs::write(dir.path().join("src.txt"), "a\nb\nCHANGED\n").unwrap();
 
         let state = AppState::default();
         let res = replace_file_lines(
@@ -3381,21 +3357,20 @@ mod tests {
         assert!(!res.staged, "must not stage a file with pre-existing changes");
         assert!(res.had_local_changes);
         assert_eq!(
-            std::fs::read_to_string(dir.join("src.txt")).unwrap(),
+            std::fs::read_to_string(dir.path().join("src.txt")).unwrap(),
             "a\nB\nCHANGED\n"
         );
         // Nothing staged: the change is unstaged-only (" M").
         let porcelain = git(&repo, &["status", "--porcelain", "--", "src.txt"]).await;
         assert_eq!(porcelain, " M src.txt\n", "unexpected status: {porcelain:?}");
 
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn replace_lines_mismatch_leaves_file_untouched() {
         let (dir, repo) = setup_repo("replace-mismatch").await;
-        commit_file(&repo, &dir, "src.txt", "a\nb\nc\n", "seed").await;
-        let before = std::fs::read(dir.join("src.txt")).unwrap();
+        commit_file(&repo, dir.path(), "src.txt", "a\nb\nc\n", "seed").await;
+        let before = std::fs::read(dir.path().join("src.txt")).unwrap();
 
         let state = AppState::default();
         // Expected "X" at line 2 but the file has "b" — drift, must be refused.
@@ -3411,16 +3386,15 @@ mod tests {
         .await;
         assert!(res.is_err());
         // File is byte-identical to before the attempted apply.
-        assert_eq!(std::fs::read(dir.join("src.txt")).unwrap(), before);
+        assert_eq!(std::fs::read(dir.path().join("src.txt")).unwrap(), before);
 
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn replace_lines_beyond_eof_is_a_mismatch() {
         let (dir, repo) = setup_repo("replace-eof").await;
-        commit_file(&repo, &dir, "src.txt", "a\nb\n", "seed").await;
-        let before = std::fs::read(dir.join("src.txt")).unwrap();
+        commit_file(&repo, dir.path(), "src.txt", "a\nb\n", "seed").await;
+        let before = std::fs::read(dir.path().join("src.txt")).unwrap();
 
         let state = AppState::default();
         // start_line 2 with two expected lines runs past EOF → mismatch.
@@ -3435,15 +3409,14 @@ mod tests {
         )
         .await;
         assert!(res.is_err());
-        assert_eq!(std::fs::read(dir.join("src.txt")).unwrap(), before);
+        assert_eq!(std::fs::read(dir.path().join("src.txt")).unwrap(), before);
 
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn replace_lines_preserves_crlf() {
         let (dir, repo) = setup_repo("replace-crlf").await;
-        commit_file(&repo, &dir, "src.txt", "a\r\nb\r\nc\r\n", "seed").await;
+        commit_file(&repo, dir.path(), "src.txt", "a\r\nb\r\nc\r\n", "seed").await;
 
         let state = AppState::default();
         let res = replace_file_lines(
@@ -3460,17 +3433,16 @@ mod tests {
         assert!(!res.staged);
         // Read as bytes to prove the CRLF flavor survived (no LF conversion).
         assert_eq!(
-            std::fs::read(dir.join("src.txt")).unwrap(),
+            std::fs::read(dir.path().join("src.txt")).unwrap(),
             b"a\r\nB1\r\nB2\r\nc\r\n"
         );
 
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn replace_lines_pure_deletion_removes_the_range() {
         let (dir, repo) = setup_repo("replace-delete").await;
-        commit_file(&repo, &dir, "src.txt", "a\nb\nc\nd\n", "seed").await;
+        commit_file(&repo, dir.path(), "src.txt", "a\nb\nc\nd\n", "seed").await;
 
         let state = AppState::default();
         // Empty replacement = delete lines 2..3 ("b","c").
@@ -3487,18 +3459,17 @@ mod tests {
         .unwrap();
         assert!(!res.staged);
         assert_eq!(
-            std::fs::read_to_string(dir.join("src.txt")).unwrap(),
+            std::fs::read_to_string(dir.path().join("src.txt")).unwrap(),
             "a\nd\n"
         );
 
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn replace_lines_preserves_missing_trailing_newline() {
         let (dir, repo) = setup_repo("replace-notrail").await;
         // No trailing newline on the seed file.
-        commit_file(&repo, &dir, "src.txt", "a\nb\nc", "seed").await;
+        commit_file(&repo, dir.path(), "src.txt", "a\nb\nc", "seed").await;
 
         let state = AppState::default();
         let res = replace_file_lines(
@@ -3515,11 +3486,10 @@ mod tests {
         assert!(!res.staged);
         // Still no trailing newline after the edit.
         assert_eq!(
-            std::fs::read_to_string(dir.join("src.txt")).unwrap(),
+            std::fs::read_to_string(dir.path().join("src.txt")).unwrap(),
             "a\nb\nC"
         );
 
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -3528,7 +3498,7 @@ mod tests {
         // ranges of one file, each verifying against the other's post-edit state,
         // both succeed and both edits survive (a race would clobber the first).
         let (dir, repo) = setup_repo("replace-seq").await;
-        commit_file(&repo, &dir, "src.txt", "a\nb\nc\nd\n", "seed").await;
+        commit_file(&repo, dir.path(), "src.txt", "a\nb\nc\nd\n", "seed").await;
         let state = AppState::default();
 
         replace_file_lines(&state, &repo, "src.txt", 1, &lines(&["a"]), &lines(&["A"]), false)
@@ -3541,17 +3511,16 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            std::fs::read_to_string(dir.join("src.txt")).unwrap(),
+            std::fs::read_to_string(dir.path().join("src.txt")).unwrap(),
             "A\nb\nc\nD\n"
         );
 
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn replace_lines_rejects_invalid_arguments() {
         let (dir, repo) = setup_repo("replace-invalid").await;
-        commit_file(&repo, &dir, "src.txt", "a\nb\n", "seed").await;
+        commit_file(&repo, dir.path(), "src.txt", "a\nb\n", "seed").await;
         let state = AppState::default();
 
         // start_line 0 is not 1-based.
@@ -3579,15 +3548,14 @@ mod tests {
             .await
             .is_err());
 
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn orphaned_stashes_finds_a_dropped_stash() {
         let (dir, repo) = setup_repo("orphaned-stash").await;
         // Make a tracked change plus an untracked file, then stash both.
-        std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
-        std::fs::write(dir.join("new.txt"), "fresh\n").unwrap();
+        std::fs::write(dir.path().join("a.txt"), "changed\n").unwrap();
+        std::fs::write(dir.path().join("new.txt"), "fresh\n").unwrap();
         git(&repo, &["stash", "push", "-u", "-m", "rescue me"]).await;
         let sha = rev(&repo, "stash@{0}").await;
         // Drop it → the commit becomes dangling but still reachable by sha.
@@ -3606,7 +3574,7 @@ mod tests {
         assert!(entry.file_count > 0, "file_count was {}", entry.file_count);
 
         // A live stash must NOT be reported as orphaned.
-        std::fs::write(dir.join("a.txt"), "changed again\n").unwrap();
+        std::fs::write(dir.path().join("a.txt"), "changed again\n").unwrap();
         git(&repo, &["stash", "push", "-m", "still live"]).await;
         let live_sha = rev(&repo, "stash@{0}").await;
         let found2 = git_orphaned_stashes(repo.clone()).await.unwrap();
@@ -3615,7 +3583,6 @@ mod tests {
             "live stash should be excluded"
         );
 
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3722,21 +3689,18 @@ detached
         // return to base and DIRTY the tree + move onto another branch.
         git(&repo, &["branch", "feature"]).await;
         git(&repo, &["switch", "feature"]).await;
-        commit_file(&repo, &dir, "feat.txt", "feature\n", "feat commit").await;
+        commit_file(&repo, dir.path(), "feat.txt", "feature\n", "feat commit").await;
         git(&repo, &["switch", &base]).await;
         // Move the main tree OFF base onto `work`, and leave uncommitted changes.
         git(&repo, &["switch", "-c", "work"]).await;
-        std::fs::write(dir.join("wip.txt"), "uncommitted\n").unwrap();
-        std::fs::write(dir.join("a.txt"), "dirty\n").unwrap();
+        std::fs::write(dir.path().join("wip.txt"), "uncommitted\n").unwrap();
+        std::fs::write(dir.path().join("a.txt"), "dirty\n").unwrap();
 
-        let root = std::env::temp_dir().join(format!(
-            "gd-lpr-root-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        // The root dir is deliberately NOT pre-created here — production
+        // `merge_local_pr` is relied on to create it. The holder's TempDir is the
+        // dir ABOVE `root`, so `root` itself stays absent until the code makes it.
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
         let state = AppState::default();
         let outcome = merge_local_pr(
             &state,
@@ -3761,10 +3725,10 @@ detached
             "work"
         );
         assert_eq!(
-            std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
             "dirty\n"
         );
-        assert!(dir.join("wip.txt").exists(), "untracked WIP survives");
+        assert!(dir.path().join("wip.txt").exists(), "untracked WIP survives");
 
         // base advanced: it now contains feature's commit. `cat-file -e` exits 0
         // only when the blob is reachable; `git()` unwraps, so a missing file
@@ -3779,9 +3743,6 @@ detached
             !wts.contains("gd-resolve-"),
             "resolve worktree removed: {wts}"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A conflicting local-PR merge keeps the resolve worktree and reports the
@@ -3798,19 +3759,13 @@ detached
 
         // feature edits a.txt one way; base edits it another → conflict on merge.
         git(&repo, &["switch", "-c", "feature"]).await;
-        commit_file(&repo, &dir, "a.txt", "feature-side\n", "feat edit").await;
+        commit_file(&repo, dir.path(), "a.txt", "feature-side\n", "feat edit").await;
         git(&repo, &["switch", &base]).await;
-        commit_file(&repo, &dir, "a.txt", "base-side\n", "base edit").await;
+        commit_file(&repo, dir.path(), "a.txt", "base-side\n", "base edit").await;
         let base_before = rev(&repo, &base).await;
 
-        let root = std::env::temp_dir().join(format!(
-            "gd-lpr-croot-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
         std::fs::create_dir_all(&root).unwrap();
         let state = AppState::default();
         let outcome = merge_local_pr(
@@ -3848,8 +3803,5 @@ detached
             !std::path::Path::new(&wt_path).exists(),
             "worktree removed after abort"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(&root);
     }
 }

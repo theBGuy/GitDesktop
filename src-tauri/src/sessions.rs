@@ -686,14 +686,13 @@ pub async fn transcript_remove(app: AppHandle, id: String) -> AppResult<()> {
 mod tests {
     use super::*;
 
-    fn temp_dir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "gd-transcript-{tag}-{}-{}",
-            std::process::id(),
-            now_ms()
-        ));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn temp_dir(tag: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("gd-transcript-{tag}-"))
+            .tempdir()
+            .expect("create temp dir");
+        let path = dir.path().to_path_buf();
+        (dir, path)
     }
 
     fn header(id: &str, created: i64) -> Event {
@@ -836,7 +835,7 @@ mod tests {
 
     #[test]
     fn append_then_load_roundtrip_and_orders_by_creation() {
-        let dir = temp_dir("roundtrip");
+        let (_dir, dir) = temp_dir("roundtrip");
         // Two sessions written out of creation order on disk.
         append_to_dir(&dir, "bbb", &header("bbb", 200)).unwrap();
         append_to_dir(&dir, "aaa", &header("aaa", 100)).unwrap();
@@ -868,18 +867,17 @@ mod tests {
         .unwrap();
 
         let loaded = load_dir(&dir);
+
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].id, "aaa"); // created 100 sorts before 200
         assert_eq!(loaded[1].id, "bbb");
         assert_eq!(loaded[0].turns[0].narration, "hello");
         assert_eq!(loaded[0].head_hash, "c9");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn read_events_skips_a_torn_final_line() {
-        let dir = temp_dir("torn");
+        let (_dir, dir) = temp_dir("torn");
         append_to_dir(&dir, "t1", &header("t1", 1)).unwrap();
         // Simulate a crash mid-append: a partial trailing line.
         let path = dir.join("t1.jsonl");
@@ -892,6 +890,5 @@ mod tests {
         let events = read_events(&path);
         assert_eq!(events.len(), 1); // header survived, torn line dropped
         assert!(fold(&events).is_some());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

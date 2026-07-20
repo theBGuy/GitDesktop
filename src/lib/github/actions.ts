@@ -101,8 +101,8 @@ export const forgeCiRunList = (
     branch: branch?.trim() || null,
   });
 
-export const forgeCiRunView = (repoPath: string, runId: number) =>
-  invoke<RunDetail>("forge_ci_run_view", { repoPath, runId });
+export const forgeCiRunView = (repoPath: string, runId: number | string) =>
+  invoke<RunDetail>("forge_ci_run_view", { repoPath, runId: String(runId) });
 
 export const forgeCiRunRerun = (
   repoPath: string,
@@ -113,12 +113,18 @@ export const forgeCiRunRerun = (
 export const forgeCiRunCancel = (repoPath: string, runId: number) =>
   invoke<void>("forge_ci_run_cancel", { repoPath, runId });
 
-export const forgeCiRunFailedLogs = (repoPath: string, runId: number) =>
-  invoke<string>("forge_ci_run_failed_logs", { repoPath, runId });
+export const forgeCiRunFailedLogs = (
+  repoPath: string,
+  runId: number | string,
+) =>
+  invoke<string>("forge_ci_run_failed_logs", {
+    repoPath,
+    runId: String(runId),
+  });
 
 /** One job's failed-step logs (fallback: full job log), for AI debugging. */
-export const forgeCiJobLogs = (repoPath: string, jobId: number) =>
-  invoke<string>("forge_ci_job_logs", { repoPath, jobId });
+export const forgeCiJobLogs = (repoPath: string, jobId: number | string) =>
+  invoke<string>("forge_ci_job_logs", { repoPath, jobId: String(jobId) });
 
 /** A Bitbucket pipeline step's logs (cleaned/capped). Bitbucket jobs carry a
  *  `logRef` instead of a numeric job id, and `forge_ci_job_logs` errors for
@@ -131,7 +137,7 @@ export const forgeBbStepLogs = (repoPath: string, logRef: string) =>
  *  `forge_ci_job_logs`. */
 export const forgeJobLogs = (
   repoPath: string,
-  job: { id: number; logRef?: string },
+  job: { id: number | string; logRef?: string },
 ) =>
   job.logRef
     ? forgeBbStepLogs(repoPath, job.logRef)
@@ -186,11 +192,13 @@ export function useWorkflowRuns(
 
 export function useRunDetail(
   repo: string,
-  runId: number | null,
+  runId: number | string | null,
   active: boolean,
 ) {
   return useQuery({
-    queryKey: ["repo", repo, "actions", "run", runId ?? 0] as const,
+    // Normalize the id to a string in the key so number- and string-callers for
+    // the same run share one cache entry.
+    queryKey: ["repo", repo, "actions", "run", String(runId ?? 0)] as const,
     queryFn: () => forgeCiRunView(repo, runId ?? 0),
     enabled: runId !== null && active,
     refetchInterval: (query) =>
@@ -243,11 +251,19 @@ export function useBbCustomPipelines(repo: string, enabled: boolean) {
 /** Failed-step logs, fetched only when the user expands them. */
 export function useRunFailedLogs(
   repo: string,
-  runId: number | null,
+  runId: number | string | null,
   enabled: boolean,
 ) {
   return useQuery({
-    queryKey: ["repo", repo, "actions", "run", runId ?? 0, "logs"] as const,
+    // Normalize the id to a string in the key (see useRunDetail).
+    queryKey: [
+      "repo",
+      repo,
+      "actions",
+      "run",
+      String(runId ?? 0),
+      "logs",
+    ] as const,
     queryFn: () => forgeCiRunFailedLogs(repo, runId ?? 0),
     enabled: enabled && runId !== null,
     staleTime: 30_000,
@@ -260,7 +276,7 @@ export function useRunFailedLogs(
  *  The query key stays distinct per job either way. */
 export function useJobLogs(
   repo: string,
-  job: { id: number; logRef?: string } | null,
+  job: { id: number | string; logRef?: string } | null,
   enabled: boolean,
 ) {
   // Bitbucket steps are keyed by logRef (their numeric id can collide across a

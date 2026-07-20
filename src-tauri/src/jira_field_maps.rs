@@ -246,14 +246,13 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn tmp_store() -> PathBuf {
-        let mut p = std::env::temp_dir();
-        p.push(format!(
-            "gd-jira-field-maps-test-{}-{}.json",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        p
+    fn tmp_store() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-jira-field-maps-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let path = dir.path().join("store.json");
+        (dir, path)
     }
 
     #[test]
@@ -281,7 +280,7 @@ mod tests {
 
     #[test]
     fn read_store_round_trips_via_disk() {
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         let mut store = Map::new();
         store.insert(
             "team.atlassian.net".to_string(),
@@ -302,24 +301,22 @@ mod tests {
             Some("customfield_10016")
         );
         assert!(entry.sprint_field_id.is_none());
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn malformed_file_degrades_to_empty_map() {
         // A CACHE — a garbage file is not an error; it reads as empty (→ rediscovery).
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         std::fs::write(&path, b"{ this is not json").unwrap();
         assert!(read_store(&path).is_empty());
         // A JSON non-object also degrades to empty.
         std::fs::write(&path, b"[1, 2, 3]").unwrap();
         assert!(read_store(&path).is_empty());
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn missing_file_degrades_to_empty_map() {
-        let path = tmp_store();
+        let (_tmp, path) = tmp_store();
         assert!(read_store(&path).is_empty());
     }
 

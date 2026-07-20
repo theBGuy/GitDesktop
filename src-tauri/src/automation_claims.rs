@@ -214,20 +214,18 @@ pub async fn release_automation_claim(
 mod tests {
     use super::*;
 
-    fn tmp_dir() -> PathBuf {
-        let mut p = std::env::temp_dir();
-        p.push(format!(
-            "gd-automation-claims-test-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&p).unwrap();
-        p
+    fn tmp_dir() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-automation-claims-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let path = dir.path().to_path_buf();
+        (dir, path)
     }
 
     #[test]
     fn claim_release_reclaim_cycle() {
-        let dir = tmp_dir();
+        let (_tmp, dir) = tmp_dir();
         let key = composite_key(r"C:\repo\one", "42", "abc123", "review");
 
         // First claim wins; a second claim for the SAME key loses.
@@ -243,13 +241,11 @@ mod tests {
             claim_in_dir(&dir, &key).unwrap(),
             "claim after release should win again"
         );
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn different_action_or_head_are_independent_claims() {
-        let dir = tmp_dir();
+        let (_tmp, dir) = tmp_dir();
         let base = composite_key(r"C:\repo\one", "42", "abc123", "review");
         let other_action = composite_key(r"C:\repo\one", "42", "abc123", "security");
         let other_head = composite_key(r"C:\repo\one", "42", "def456", "review");
@@ -265,8 +261,6 @@ mod tests {
             claim_in_dir(&dir, &other_head).unwrap(),
             "a different head sha is an independent claim"
         );
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -321,7 +315,7 @@ mod tests {
 
     #[test]
     fn sweep_removes_old_claims_but_keeps_fresh_ones() {
-        let dir = tmp_dir();
+        let (_tmp, dir) = tmp_dir();
         let old_key = composite_key(r"C:\repo\one", "1", "oldhead", "review");
         let fresh_key = composite_key(r"C:\repo\one", "2", "freshhead", "review");
 
@@ -353,7 +347,5 @@ mod tests {
             dir.join(claim_filename(&fresh_key)).exists(),
             "a fresh claim must survive the sweep"
         );
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

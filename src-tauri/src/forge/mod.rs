@@ -1540,8 +1540,13 @@ pub async fn forge_ci_run_list(
 #[tauri::command]
 pub async fn forge_ci_run_view(
     repo_path: String,
-    run_id: u64,
+    run_id: String,
 ) -> AppResult<crate::github::actions::RunDetail> {
+    // Ids ride the wire as strings (they can exceed 2^53) but providers address
+    // them as u64 — parse once here, keep everything downstream numeric.
+    let run_id: u64 = run_id
+        .parse()
+        .map_err(|_| AppError::InvalidArgument(format!("Invalid run id: {run_id}")))?;
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::view_run(&repo_path, run_id).await,
         Some((Provider::Bitbucket, _)) => bitbucket::view_run(&repo_path, run_id).await,
@@ -1551,7 +1556,10 @@ pub async fn forge_ci_run_view(
 
 /// The failed jobs' logs for one CI run, behind the abstraction.
 #[tauri::command]
-pub async fn forge_ci_run_failed_logs(repo_path: String, run_id: u64) -> AppResult<String> {
+pub async fn forge_ci_run_failed_logs(repo_path: String, run_id: String) -> AppResult<String> {
+    let run_id: u64 = run_id
+        .parse()
+        .map_err(|_| AppError::InvalidArgument(format!("Invalid run id: {run_id}")))?;
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::run_failed_logs(&repo_path, run_id).await,
         Some((Provider::Bitbucket, _)) => bitbucket::run_failed_logs(&repo_path, run_id).await,
@@ -1561,7 +1569,10 @@ pub async fn forge_ci_run_failed_logs(repo_path: String, run_id: u64) -> AppResu
 
 /// One CI job's log, behind the abstraction.
 #[tauri::command]
-pub async fn forge_ci_job_logs(repo_path: String, job_id: u64) -> AppResult<String> {
+pub async fn forge_ci_job_logs(repo_path: String, job_id: String) -> AppResult<String> {
+    let job_id: u64 = job_id
+        .parse()
+        .map_err(|_| AppError::InvalidArgument(format!("Invalid job id: {job_id}")))?;
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::job_logs(&repo_path, job_id).await,
         // Bitbucket steps are addressed by braced UUID, not a numeric id — the

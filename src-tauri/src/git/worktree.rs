@@ -815,14 +815,11 @@ prunable gitdir file points to non-existent location
     /// remove + prune + delete its branch. Requires git on PATH (true for dev).
     #[tokio::test]
     async fn worktree_add_list_remove_roundtrip() {
-        let base = std::env::temp_dir().join(format!(
-            "gd-wt-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let _base = tempfile::Builder::new()
+            .prefix("gd-wt-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let base = _base.path().to_path_buf();
         let repo = base.join("repo");
         let wt = base.join("wt");
         std::fs::create_dir_all(&repo).unwrap();
@@ -858,8 +855,6 @@ prunable gitdir file points to non-existent location
             after.iter().all(|w| w.branch != "gd/session/test"),
             "session worktree is gone after remove"
         );
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Keep (remove worktree, retain branch) then Resume (re-add the worktree on
@@ -867,14 +862,11 @@ prunable gitdir file points to non-existent location
     /// kept work and the branch is back in the worktree list.
     #[tokio::test]
     async fn worktree_keep_then_resume_reattaches_branch() {
-        let base = std::env::temp_dir().join(format!(
-            "gd-wt-resume-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let _base = tempfile::Builder::new()
+            .prefix("gd-wt-resume-")
+            .tempdir()
+            .expect("create temp dir");
+        let base = _base.path().to_path_buf();
         let repo = base.join("repo");
         let wt = base.join("wt");
         std::fs::create_dir_all(&repo).unwrap();
@@ -915,8 +907,6 @@ prunable gitdir file points to non-existent location
             list.iter().any(|w| w.branch == "gd/session/keep"),
             "branch is checked out in a worktree again after resume"
         );
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// The safety gate for finishing a non-forced worktree removal ourselves:
@@ -926,14 +916,11 @@ prunable gitdir file points to non-existent location
     /// there's nothing left to protect.
     #[tokio::test]
     async fn worktree_has_uncommitted_changes_gates_on_real_work() {
-        let base = std::env::temp_dir().join(format!(
-            "gd-wt-dirty-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let _base = tempfile::Builder::new()
+            .prefix("gd-wt-dirty-")
+            .tempdir()
+            .expect("create temp dir");
+        let base = _base.path().to_path_buf();
         let repo = base.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let repo_s = repo.to_string_lossy().into_owned();
@@ -970,7 +957,5 @@ prunable gitdir file points to non-existent location
         let non_repo = base.join("not-a-repo");
         std::fs::create_dir_all(&non_repo).unwrap();
         assert!(!worktree_has_uncommitted_changes(&non_repo.to_string_lossy()).await);
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 }

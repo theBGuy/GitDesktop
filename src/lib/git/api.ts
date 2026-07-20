@@ -584,8 +584,11 @@ export const ghReleaseDownloadAsset = (
 ) =>
   invoke<void>("gh_release_download_asset", { repoPath, tag, assetName, dir });
 
+/** Appends ignore patterns to the repo root `.gitignore` (created if absent),
+ *  returning the number of patterns actually appended (already-present ones are
+ *  skipped). */
 export const appendToGitignore = (repoPath: string, patterns: string[]) =>
-  invoke<void>("append_to_gitignore", { repoPath, patterns });
+  invoke<number>("append_to_gitignore", { repoPath, patterns });
 
 export const gitUntrack = (
   repoPath: string,
@@ -2923,9 +2926,11 @@ export const readRepoInstructions = (repoPath: string) =>
 export const readRepoAiIgnore = (repoPath: string) =>
   invoke<string[]>("read_repo_ai_ignore", { repoPath });
 
-/** Appends AI-ignore patterns to `<repo>/.gitdesktop/aiignore` (created if absent). */
+/** Appends AI-ignore patterns to `<repo>/.gitdesktop/aiignore` (created if
+ *  absent), returning the number of patterns actually appended (already-present
+ *  ones are skipped). */
 export const appendRepoAiIgnore = (repoPath: string, patterns: string[]) =>
-  invoke<void>("append_repo_ai_ignore", { repoPath, patterns });
+  invoke<number>("append_repo_ai_ignore", { repoPath, patterns });
 
 /** Raw contents of `<repo>/.gitdesktop/branch-rules.json`, or null if absent. */
 export const readRepoBranchRules = (repoPath: string) =>

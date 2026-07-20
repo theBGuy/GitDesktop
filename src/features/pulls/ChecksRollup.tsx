@@ -114,8 +114,9 @@ function jobForCheck(
 ): RunJob | undefined {
   if (!jobs) return undefined;
   if (check.jobId) {
-    const id = Number(check.jobId);
-    const byId = jobs.find((j) => j.id === id);
+    // Compare as strings: `check.jobId` is a string (ids can exceed 2^53) while
+    // RunJob.id is still numeric — stringify the numeric side to match.
+    const byId = jobs.find((j) => String(j.id) === check.jobId);
     if (byId) return byId;
   }
   return jobs.find((j) => j.name === check.name);
@@ -160,16 +161,13 @@ function CheckLogTail({
   repoPath: string;
   check: PrCheckOut;
 }) {
-  // A job id gets the per-job log; a run without a parsed job id falls back to
-  // the run-wide failed-step logs (same as the Actions panel's failed-logs view).
-  // NOTE: run/job ids are kept as *strings* on PrCheckOut (they can exceed JS's
-  // safe-integer range), but the shared Actions log hooks (useJobLogs/
-  // useRunFailedLogs → forge_ci_*_logs) still take numeric ids, so we narrow here.
-  // Safe today — real GitHub/GitLab ids are ~1e10, far below 2^53 — but a
-  // follow-up should thread these as strings end-to-end through the Actions log
-  // path (commands + Actions panel + MCP callers) to make it precision-safe.
-  const jobId = check.jobId ? Number(check.jobId) : null;
-  const runId = check.runId ? Number(check.runId) : null;
+  // A job id gets the per-job log; a run without a job id falls back to the
+  // run-wide failed-step logs (same as the Actions panel's failed-logs view).
+  // Ids stay *strings* the whole way — they can exceed JS's safe-integer range,
+  // so the Actions log path (hooks → forge_ci_*_logs commands) threads them as
+  // strings end-to-end rather than narrowing through Number().
+  const jobId = check.jobId || null;
+  const runId = check.runId || null;
   const jobLogs = useJobLogs(
     repoPath,
     jobId !== null ? { id: jobId } : null,
@@ -408,7 +406,7 @@ function RunDetailFetcher({
   /** The parent's `setJobsByRun` state updater (stable across renders). */
   setJobs: Dispatch<SetStateAction<Record<string, RunJob[]>>>;
 }) {
-  const detail = useRunDetail(repoPath, Number(runId), true);
+  const detail = useRunDetail(repoPath, runId, true);
   const jobs = detail.data?.jobs;
   useEffect(() => {
     if (jobs) setJobs((prev) => ({ ...prev, [runId]: jobs }));

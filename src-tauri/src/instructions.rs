@@ -41,9 +41,10 @@ pub async fn read_repo_ai_ignore(repo_path: String) -> AppResult<Vec<String>> {
 /// consumed as git pathspecs via `:(exclude)<pattern>`, where a leading slash
 /// makes git treat it as an absolute path outside the repo — and a fresh file
 /// is seeded with a header comment (`parse_patterns` and the pathspec builders
-/// both skip `#` lines).
+/// both skip `#` lines). Returns the number of patterns actually appended (0
+/// when every pattern was empty or already present).
 #[tauri::command]
-pub async fn append_repo_ai_ignore(repo_path: String, patterns: Vec<String>) -> AppResult<()> {
+pub async fn append_repo_ai_ignore(repo_path: String, patterns: Vec<String>) -> AppResult<usize> {
     const HEADER: &str =
         "# Files excluded from AI context — gitignore-style patterns, one per line.";
 
@@ -57,7 +58,7 @@ pub async fn append_repo_ai_ignore(repo_path: String, patterns: Vec<String>) -> 
         }
     }
     if wanted.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
 
     let dir = Path::new(&repo_path).join(".gitdesktop");
@@ -78,8 +79,9 @@ pub async fn append_repo_ai_ignore(repo_path: String, patterns: Vec<String>) -> 
             .collect()
     };
     if to_add.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
+    let added = to_add.len();
 
     tokio::fs::create_dir_all(&dir).await.map_err(AppError::Io)?;
 
@@ -93,7 +95,8 @@ pub async fn append_repo_ai_ignore(repo_path: String, patterns: Vec<String>) -> 
         content.push_str(&p);
         content.push('\n');
     }
-    tokio::fs::write(&path, content).await.map_err(AppError::Io)
+    tokio::fs::write(&path, content).await.map_err(AppError::Io)?;
+    Ok(added)
 }
 
 /// Per-repo SHARED branch rules, read from `<repo>/.gitdesktop/branch-rules.json`.
@@ -474,24 +477,26 @@ mod tests {
         assert_eq!(meta.argument_hint, "<file>");
     }
 
-    fn ai_ignore_test_repo() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "gd-aiignore-test-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn ai_ignore_test_repo() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-aiignore-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let path = dir.path().to_path_buf();
+        (dir, path)
     }
 
     #[tokio::test]
     async fn append_ai_ignore_creates_file_with_header() {
-        let dir = ai_ignore_test_repo();
+        let (_tmp, dir) = ai_ignore_test_repo();
         let repo = dir.to_string_lossy().into_owned();
 
-        append_repo_ai_ignore(repo.clone(), vec!["src/foo.rs".to_string(), "*.log".to_string()])
-            .await
-            .unwrap();
+        let added =
+            append_repo_ai_ignore(repo.clone(), vec!["src/foo.rs".to_string(), "*.log".to_string()])
+                .await
+                .unwrap();
+        // A fresh file: both patterns are appended.
+        assert_eq!(added, 2);
 
         let path = dir.join(".gitdesktop").join("aiignore");
         let text = std::fs::read_to_string(&path).unwrap();
@@ -506,26 +511,28 @@ mod tests {
         // read_repo_ai_ignore / parse_patterns round-trips the patterns, header filtered.
         let parsed = read_repo_ai_ignore(repo).await.unwrap();
         assert_eq!(parsed, vec!["src/foo.rs".to_string(), "*.log".to_string()]);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn append_ai_ignore_appends_without_duplicating() {
-        let dir = ai_ignore_test_repo();
+        let (_tmp, dir) = ai_ignore_test_repo();
         let repo = dir.to_string_lossy().into_owned();
 
-        append_repo_ai_ignore(repo.clone(), vec!["a.txt".to_string()])
+        let added_first = append_repo_ai_ignore(repo.clone(), vec!["a.txt".to_string()])
             .await
             .unwrap();
+        assert_eq!(added_first, 1);
         let path = dir.join(".gitdesktop").join("aiignore");
         let after_first = std::fs::read_to_string(&path).unwrap();
 
         // Re-add the same line plus a new one: the existing line is not duplicated,
         // the new line is appended, existing content is preserved, no second header.
-        append_repo_ai_ignore(repo.clone(), vec!["a.txt".to_string(), "b.txt".to_string()])
-            .await
-            .unwrap();
+        let added_second =
+            append_repo_ai_ignore(repo.clone(), vec!["a.txt".to_string(), "b.txt".to_string()])
+                .await
+                .unwrap();
+        // Only the new line counts — the already-present one is skipped.
+        assert_eq!(added_second, 1);
         let after_second = std::fs::read_to_string(&path).unwrap();
 
         assert_eq!(after_second.matches("\na.txt\n").count(), 1);
@@ -538,17 +545,15 @@ mod tests {
                 .count(),
             1
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn append_ai_ignore_normalizes_patterns() {
-        let dir = ai_ignore_test_repo();
+        let (_tmp, dir) = ai_ignore_test_repo();
         let repo = dir.to_string_lossy().into_owned();
 
         // Leading slash stripped, whitespace-only skipped, in-batch dupes collapsed.
-        append_repo_ai_ignore(
+        let added = append_repo_ai_ignore(
             repo.clone(),
             vec![
                 "/foo".to_string(),
@@ -559,18 +564,19 @@ mod tests {
         )
         .await
         .unwrap();
+        // The whitespace-only entry and the in-batch dupe collapse: "foo" + "bar".
+        assert_eq!(added, 2);
         let parsed = read_repo_ai_ignore(repo.clone()).await.unwrap();
         assert_eq!(parsed, vec!["foo".to_string(), "bar".to_string()]);
 
-        // An all-duplicates batch leaves the file byte-identical.
+        // An all-duplicates batch leaves the file byte-identical and appends nothing.
         let path = dir.join(".gitdesktop").join("aiignore");
         let before = std::fs::read_to_string(&path).unwrap();
-        append_repo_ai_ignore(repo, vec!["/foo".to_string(), "bar".to_string()])
+        let added_dupe = append_repo_ai_ignore(repo, vec!["/foo".to_string(), "bar".to_string()])
             .await
             .unwrap();
+        assert_eq!(added_dupe, 0);
         let after = std::fs::read_to_string(&path).unwrap();
         assert_eq!(before, after);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

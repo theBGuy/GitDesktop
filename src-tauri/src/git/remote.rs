@@ -997,17 +997,16 @@ mod tests {
             .stdout_lossy()
     }
 
-    /// A unique temp base dir for a test, cleaned up by the caller.
-    fn temp_base(tag: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "gd-remote-{}-{}-{}",
-            tag,
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
+    /// A unique temp base dir for a test — the returned `TempDir` guard removes it
+    /// (and every subdir under it) on Drop, so a panicking or killed run cannot
+    /// leak the fixture.
+    fn temp_base(tag: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("gd-remote-{tag}-"))
+            .tempdir()
+            .expect("create temp dir");
+        let path = dir.path().to_path_buf();
+        (dir, path)
     }
 
     async fn init_repo(repo_s: &str, seed_file: &str) {
@@ -1025,7 +1024,7 @@ mod tests {
     /// `branch.<b>.remote` config is unset, and `refs/remotes/upstream/` is empty.
     #[tokio::test]
     async fn remove_drops_remote_tracking_and_branch_upstream() {
-        let base = temp_base("remove");
+        let (_base, base) = temp_base("remove");
         let repo = base.join("repo");
         let up = base.join("upstream");
         std::fs::create_dir_all(&repo).unwrap();
@@ -1100,15 +1099,13 @@ mod tests {
                 .is_empty(),
             "refs/remotes/upstream/ is empty after removal"
         );
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Removing a remote that doesn't exist is an honest `InvalidArgument`, not a
     /// raw git error — the `ensure_remote_exists` gate.
     #[tokio::test]
     async fn remove_nonexistent_remote_errors_invalid_argument() {
-        let base = temp_base("missing");
+        let (_base, base) = temp_base("missing");
         let repo = base.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let repo_s = repo.to_string_lossy().into_owned();
@@ -1124,15 +1121,13 @@ mod tests {
             }
             other => panic!("expected InvalidArgument, got {other:?}"),
         }
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// The real `for-each-ref` output shape feeding `parse_upstream_tracking` — the
     /// format assumption is otherwise only checked against hand-written strings.
     #[tokio::test]
     async fn parse_upstream_tracking_matches_real_for_each_ref_output() {
-        let base = temp_base("track");
+        let (_base, base) = temp_base("track");
         let origin = base.join("origin");
         let repo = base.join("repo");
         std::fs::create_dir_all(&origin).unwrap();
@@ -1201,7 +1196,5 @@ mod tests {
             matches!(g, Some((_, _, true))),
             "goner upstream should read gone: {g:?}"
         );
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 }

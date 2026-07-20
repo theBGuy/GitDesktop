@@ -255,7 +255,7 @@ The **Changes** tab ({{kbd:tab-changes}}) lists your modified files, split into
   Discard buttons.
 - **Line-level staging** — drag across the line-number gutter to select specific lines,
   then stage or discard just those.
-- Select multiple files ({{key:mod}}-click, or Shift-click for a range), then right-click
+- Select multiple files ({{key:mod}}-click, or Shift-click for a range), then {{secondaryclick}}
   for **Stage / Unstage / Discard / Stash** of the whole selection.
 - Filter the list by path, or by category (new / modified / deleted, included /
   excluded) with the funnel button.
@@ -295,7 +295,7 @@ selection to compare a range.
 
 ## Commit actions
 
-Right-click a commit (or use the commit detail view) for:
+{{Secondaryclick}} a commit (or use the commit detail view) for:
 
 - **Amend** the most recent commit (reword, or fold in staged changes).
 - **Revert** — create a new commit that undoes a commit's changes.
@@ -330,7 +330,7 @@ push hint instead, and a local-only repo shows no comment pane at all.
   keyboard-focus) a line's commit in the gutter to preview it; click or press
   Enter to jump straight to that commit in **History**.
 
-Right-click any file row to reach both: in the **Changes** list, in a commit's file
+{{Secondaryclick}} any file row to reach both: in the **Changes** list, in a commit's file
 list (in **History**, or a PR's **Commits** tab), in a PR's **Files** tab, or in a
 **Compare** / local-PR file list. On those historical surfaces **Blame** is pinned at
 that commit or branch — you see the file *as of* that revision, not your working copy.
@@ -371,7 +371,7 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   or renaming one.
 {{/ai}}- Switching with **uncommitted changes** prompts you to bring them along or stash
   and switch.
-- Right-click a branch to **merge**, **squash and merge**, **rebase**, or **update it
+- {{Secondaryclick}} a branch to **merge**, **squash and merge**, **rebase**, or **update it
   from the default branch** ({{kbd:update-from-default}}) — the last *without* checking it
   out.
 - **Change base…** — from the switcher's menu or the command palette — rebases the current
@@ -380,13 +380,13 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   commits move — the wrong base's commits are left behind. A preview lists exactly which
   commits will move before you run it, and any conflicts drop into the resolve flow below.
 - **Update a branch from its own upstream** without switching to it: when a branch is
-  behind the remote it tracks, its right-click menu offers **Update from _origin/…_**. This
+  behind the remote it tracks, its context menu offers **Update from _origin/…_**. This
   is the "just merged a PR — bring the default branch current before I switch back" flow;
   every branch's row shows its own push/pull state (↑/↓ vs. its upstream) after a fetch, so
   the branches with commits to pull are visible at a glance, and *Update default branch from
   its remote* is available from the command palette too.
 - **Push a branch without switching to it** — the outbound counterpart: a branch ahead
-  of the remote it tracks offers **Push to _its remote/…_** in its right-click menu — so a
+  of the remote it tracks offers **Push to _its remote/…_** in its context menu — so a
   branch tracking a fork's _upstream_ is pushed there, not to origin. An unpushed or
   upstream-deleted branch offers **Publish**; on a repo with several remotes you pick the
   destination (one **Publish to _…_** item per remote). Neither checks the branch out or
@@ -395,9 +395,9 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   with the **branches** list open it targets the **highlighted** branch, otherwise the
   **current** one, and pushes or publishes it to origin. A branch that tracks a different
   remote, has diverged, or has nothing to push says so in a short message — for those, use
-  the branch's right-click menu.
+  the branch's context menu.
 - The **Remote** section lists branches on your remotes you haven't checked out locally
-  yet — click one to check it out (creating a local tracking branch), or right-click to
+  yet — click one to check it out (creating a local tracking branch), or {{secondaryclick}} to
   **Delete on _origin_…**, a server-side delete that removes the branch from the remote for
   everyone (protected names are blocked, and it can't be undone from the app).
 - The **Merge** dialog previews the result before you commit to it — *fast-forward*, *clean
@@ -477,7 +477,7 @@ A branch can only be checked out in one worktree at a time, so the list excludes
 already in use. The **branch switcher** knows this too: a branch that's checked out in
 another worktree is badged, and choosing it offers to open that worktree instead of failing
 with a checkout error. You can also **Remove worktree…** straight from that badged branch's
-right-click menu — the branch stays, and its **Delete…** item un-disables once the worktree
+context menu — the branch stays, and its **Delete…** item un-disables once the worktree
 is gone. When you're in a linked worktree the switcher reminds you that a branch checkout
 lands *there* (not the main workspace) and offers a one-click **Open main workspace**, and its
 **Worktrees** section jumps you straight to any other worktree — no detour through a
@@ -543,7 +543,7 @@ stays disabled until every conflict is resolved.
 {{ai}}## Resolve conflicts with AI
 
 Select a conflicted file and click **Resolve with AI** in the conflict editor's header (also
-on the file's right-click menu, and via the command palette ({{kbd:command-palette}})). Your configured
+on the file's context menu, and via the command palette ({{kbd:command-palette}})). Your configured
 **Review** model (Settings → AI) merges the file's sides and streams a proposal; you review
 it as a diff against your side, flip to the proposed file or the *ours* / *theirs* / *base*
 versions, then **Accept & stage** to apply it — nothing is written until you accept.
@@ -795,7 +795,7 @@ conflicts*); once every conflict is resolved, **Finish merge** commits and marks
 merged, or **Abort** throws the merge away.
 
 **Managing the record** lives on the PR's list row, not the merge footer (which is just
-the merge decision): **right-click** a local PR to **Archive / Unarchive** it (archiving
+the merge decision): **{{Secondaryclick}}** a local PR to **Archive / Unarchive** it (archiving
 hides it and deselects the detail view) or **Delete** it — Delete confirms first and
 tells you how many comments go with it; the branches themselves are never touched. Both
 are also in the command palette ({{kbd:command-palette}}) as **Archive pull request** and
@@ -1217,7 +1217,7 @@ The **sidebar** lists your research, plans, and sessions. Each carries a stable 
 identifier, so an entry can point at what it became — a research run shows the **plan** it
 turned into (*Turned into plan #12*), and a plan shows the **session** that implemented it
 (*Implemented · Ready to review #10*). Each row also shows its **provider · model**;
-**right-click** for a row's actions — a plan's include opening its **session** or filing it as
+**{{Secondaryclick}}** for a row's actions — a plan's include opening its **session** or filing it as
 a **local issue**. The **step-by-step activity log** of each entry is kept across restarts.
 
 ## Research a topic (read-only)
@@ -1490,7 +1490,7 @@ notes**, and **repository descriptions**.
   takes precedence.
 - **AI-ignore patterns** keep sensitive or noisy files (lockfiles, vendored folders) out
   of the AI's context while still committing them normally — global in Settings, or
-  per-repo via \`.gitdesktop/aiignore\`. No need to hand-edit it: right-click a changed
+  per-repo via \`.gitdesktop/aiignore\`. No need to hand-edit it: {{secondaryclick}} a changed
   file → *Exclude from AI* (the file, its folder, or its file type — or a
   multi-selection) appends to \`.gitdesktop/aiignore\`, creating it if needed.
 - **Hide AI** (Settings → General) removes every AI surface from the app while keeping

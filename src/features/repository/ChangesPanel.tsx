@@ -64,6 +64,23 @@ function unstagePaths(entry: FileEntry): string[] {
   return entry.origPath ? [entry.path, entry.origPath] : [entry.path];
 }
 
+/**
+ * Toast copy for a bulk ignore / AI-exclude of `total` selected entries, where
+ * `added` came back from the Rust command as the count actually appended
+ * (already-present ones are skipped). Reports the honest end state: nothing new
+ * when everything was already covered, a partial when some were skipped.
+ */
+function ignoreToast(added: number, total: number, file: string): string {
+  const entries = (n: number) => `entr${n === 1 ? "y" : "ies"}`;
+  if (added === 0)
+    return total === 1
+      ? `Entry already in ${file}`
+      : `All ${total} ${entries(total)} already in ${file}`;
+  if (added < total)
+    return `Added ${added} of ${total} ${entries(total)} to ${file}`;
+  return `Added ${added} ${entries(added)} to ${file}`;
+}
+
 type FilterKind = "included" | "excluded" | "new" | "modified" | "deleted";
 
 function hasKind(entry: FileEntry, kinds: ChangeKind[]): boolean {
@@ -396,14 +413,23 @@ export function ChangesPanel({ repoPath }: { repoPath: string }) {
   // ignoreSelected / untrackSelected below.
   function ignoreOne(pattern: string) {
     appendIgnore.mutate([pattern], {
-      onSuccess: () => toast.success(`Added "${pattern}" to .gitignore`),
+      onSuccess: (added) =>
+        toast.success(
+          added === 0
+            ? `"${pattern}" is already in .gitignore`
+            : `Added "${pattern}" to .gitignore`,
+        ),
       onError,
     });
   }
   function aiExcludeOne(pattern: string) {
     appendAiIgnore.mutate([pattern], {
-      onSuccess: () =>
-        toast.success(`Added "${pattern}" to .gitdesktop/aiignore`),
+      onSuccess: (added) =>
+        toast.success(
+          added === 0
+            ? `"${pattern}" is already in .gitdesktop/aiignore`
+            : `Added "${pattern}" to .gitdesktop/aiignore`,
+        ),
       onError,
     });
   }
@@ -483,8 +509,8 @@ export function ChangesPanel({ repoPath }: { repoPath: string }) {
     if (selectionCount === 0) return;
     const patterns = selectedEntries.map((e) => `/${e.path}`);
     appendIgnore.mutate(patterns, {
-      onSuccess: () => {
-        toast.success(`Added ${patterns.length} entries to .gitignore`);
+      onSuccess: (added) => {
+        toast.success(ignoreToast(added, patterns.length, ".gitignore"));
         setSelectedKeys(new Set());
       },
       onError,
@@ -497,9 +523,9 @@ export function ChangesPanel({ repoPath }: { repoPath: string }) {
     if (selectionCount === 0) return;
     const patterns = selectedEntries.map((e) => e.path);
     appendAiIgnore.mutate(patterns, {
-      onSuccess: () => {
+      onSuccess: (added) => {
         toast.success(
-          `Added ${patterns.length} entries to .gitdesktop/aiignore`,
+          ignoreToast(added, patterns.length, ".gitdesktop/aiignore"),
         );
         setSelectedKeys(new Set());
       },

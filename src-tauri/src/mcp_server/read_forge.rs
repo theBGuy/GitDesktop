@@ -328,7 +328,7 @@ impl GitDesktopMcp {
         &self,
         Parameters(args): Parameters<RunIdArg>,
     ) -> Result<CallToolResult, McpError> {
-        let run = crate::forge::forge_ci_run_view(self.repo.clone(), args.run_id)
+        let run = crate::forge::forge_ci_run_view(self.repo.clone(), args.run_id.as_string())
             .await
             .map_err(app_err)?;
         json_result(&run)
@@ -344,7 +344,7 @@ impl GitDesktopMcp {
         &self,
         Parameters(args): Parameters<RunIdArg>,
     ) -> Result<CallToolResult, McpError> {
-        let logs = crate::forge::forge_ci_run_failed_logs(self.repo.clone(), args.run_id)
+        let logs = crate::forge::forge_ci_run_failed_logs(self.repo.clone(), args.run_id.as_string())
             .await
             .map_err(app_err)?;
         text_result_untrusted(cap_tail(logs, GH_TEXT_MAX_BYTES))
@@ -361,7 +361,7 @@ impl GitDesktopMcp {
         &self,
         Parameters(args): Parameters<JobIdArg>,
     ) -> Result<CallToolResult, McpError> {
-        let logs = crate::forge::forge_ci_job_logs(self.repo.clone(), args.job_id)
+        let logs = crate::forge::forge_ci_job_logs(self.repo.clone(), args.job_id.as_string())
             .await
             .map_err(app_err)?;
         text_result_untrusted(cap_tail(logs, GH_TEXT_MAX_BYTES))
