@@ -1,6 +1,6 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
 import type { ReviewContextSize } from "@/lib/ai/context-budget";
-import type { AiSettings } from "@/lib/ai/types";
+import type { AiSettings, ReviewMode } from "@/lib/ai/types";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import { storeName } from "@/lib/test-mode";
 
@@ -178,6 +178,10 @@ export interface AppSettings {
   ai: AiSettings;
   /** Provider/model for AI PR review (independent of the commit model). */
   reviewAi: AiSettings;
+  /** Optional dedicated provider/model for AI security audits; absent = security
+   *  audits use `reviewAi`. Not in DEFAULT_SETTINGS — its absence is the meaningful
+   *  default, so existing users keep byte-identical behavior until they opt in. */
+  securityReviewAi?: AiSettings;
   /** How much diff + prior-discussion context AI reviews send, scaled to the
    *  reviewing model. `"auto"` fits the model's context window (probing Ollama
    *  live); the others force a fixed multiple of the default budget. */
@@ -344,6 +348,21 @@ export const DEFAULT_SETTINGS: AppSettings = {
   bitbucketTokenExpiresAt: null,
 };
 
+/**
+ * The AI config a review should use for `mode`. Security audits use the dedicated
+ * `securityReviewAi` when the user configured one, falling back to `reviewAi`
+ * otherwise; every other mode always uses `reviewAi`. Centralizes the fallback so
+ * the automation runner and the manual review panel agree on which model runs.
+ */
+export function effectiveReviewAi(
+  settings: AppSettings,
+  mode: ReviewMode,
+): AiSettings {
+  return mode === "security"
+    ? (settings.securityReviewAi ?? settings.reviewAi)
+    : settings.reviewAi;
+}
+
 const MAX_RECENT_REPOS = 200;
 
 let storePromise: Promise<Store> | null = null;
@@ -364,6 +383,17 @@ export async function loadSettings(): Promise<AppSettings> {
     ...saved,
     ai: { ...DEFAULT_SETTINGS.ai, ...saved?.ai },
     reviewAi: { ...DEFAULT_SETTINGS.reviewAi, ...saved?.reviewAi },
+    // Nested-merge only when present so a partial saved object heals against the
+    // reviewAi defaults; an absent one stays absent (security audits then fall
+    // back to reviewAi via effectiveReviewAi).
+    ...(saved?.securityReviewAi
+      ? {
+          securityReviewAi: {
+            ...DEFAULT_SETTINGS.reviewAi,
+            ...saved.securityReviewAi,
+          },
+        }
+      : {}),
     notifications: {
       ...DEFAULT_SETTINGS.notifications,
       ...saved?.notifications,

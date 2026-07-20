@@ -16,7 +16,7 @@ import {
   useReviewHistory,
   useUpdateReviewText,
 } from "@/lib/pulls/queries";
-import { formatRelativeTime } from "@/lib/time";
+import { formatDuration, formatRelativeTime } from "@/lib/time";
 import { ThoughtsDisclosure } from "./ThoughtsDisclosure";
 
 /**
@@ -132,6 +132,16 @@ export function ReviewHistory({
           {records.map((r) => {
             const expanded = expandedId === r.id;
             const editing = editingId === r.id;
+            // Total run duration — only on records with both stamps and a
+            // positive span. Note: records saved before the runtime-display
+            // change stamped `startedAt` at enqueue (queue wait included);
+            // newer ones stamp at run start — historical durations mix the two.
+            const duration =
+              typeof r.startedAt === "number" &&
+              typeof r.finishedAt === "number" &&
+              r.finishedAt - r.startedAt > 0
+                ? formatDuration(r.finishedAt - r.startedAt)
+                : null;
             return (
               <div key={r.id} role="listitem" className="border">
                 <div className="flex items-center gap-2 px-2 py-1">
@@ -156,8 +166,18 @@ export function ReviewHistory({
                     <span className="truncate font-mono text-muted-foreground">
                       {r.model || "model"}
                     </span>
-                    <span className="ml-auto shrink-0 text-muted-foreground">
-                      {formatRelativeTime(new Date(r.finishedAt).toISOString())}
+                    <span className="ml-auto flex shrink-0 items-center gap-1 text-muted-foreground">
+                      {duration && (
+                        <>
+                          <span className="tabular-nums">{duration}</span>
+                          <span aria-hidden>·</span>
+                        </>
+                      )}
+                      <span>
+                        {formatRelativeTime(
+                          new Date(r.finishedAt).toISOString(),
+                        )}
+                      </span>
                     </span>
                   </button>
                   <button

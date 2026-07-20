@@ -24,6 +24,20 @@ const UNITS: {
 
 const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "always" });
 
+/** A duration as a compact human string: `< 60s` → `"42s"` (seconds floored,
+ *  minimum `"0s"`); `< 1h` → `"3m 12s"` (seconds unpadded); `>= 1h` → `"1h 2m"`.
+ *  Non-finite or negative input clamps to `"0s"`. Used for run elapsed/duration
+ *  where a coarse "how long" reads better than a precise timestamp. */
+export function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "0s";
+  const totalSeconds = Math.floor(ms / 1000);
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) return `${totalMinutes}m ${totalSeconds % 60}s`;
+  const hours = Math.floor(totalMinutes / 60);
+  return `${hours}h ${totalMinutes % 60}m`;
+}
+
 /** "8 months ago", "2 hours ago", "just now". `now` defaults to the current
  *  time; callers that render many timestamps together (RelativeTime) pass one
  *  shared snapshot so simultaneously-mounted rows never disagree about the same

@@ -88,6 +88,12 @@ export interface ReviewEntry {
   /** Monotonic start order — drives newest-first display and FIFO queue
    *  position exactly (a timestamp can collide within a millisecond). */
   seq: number;
+  /** Epoch ms stamped when the run actually enters "running" — the queue wait is
+   *  EXCLUDED, so the live elapsed measures real work time. Absent while queued. */
+  startedAt?: number;
+  /** Epoch ms stamped when the run reaches a terminal state (done/error/cancel).
+   *  With `startedAt` it yields the run's total duration. */
+  endedAt?: number;
   /** Failure message when `phase === "error"`. */
   error: string;
   /** When the run used prior-review context, how its "changes since" delta
@@ -375,11 +381,11 @@ export async function startReview(
     deltaState: undefined,
     truncatedCoverage: undefined,
     thoughts: undefined,
+    // Clear a prior run's stamps on this key so a re-run's live elapsed and
+    // persisted duration start fresh (stamped at the running transition below).
+    startedAt: undefined,
+    endedAt: undefined,
   });
-
-  // Wall-clock start for the persisted history record (the store itself orders
-  // by monotonic `seq`, not a timestamp).
-  const startedAtMs = Date.now();
 
   // Wait for a slot in this run's lane (immediate when under the cap). A cancel
   // while queued wakes this too — `control.cancelled` then short-circuits below.
@@ -387,7 +393,12 @@ export async function startReview(
 
   try {
     if (control.cancelled) return;
-    patch({ phase: "running" });
+    // Wall-clock start, stamped once the run leaves the queue and actually
+    // begins — the queue wait is excluded. One value feeds both the live entry
+    // (the dock's ticking elapsed) and the persisted history record below, so
+    // they measure the same span.
+    const startedAtMs = Date.now();
+    patch({ phase: "running", startedAt: startedAtMs });
     const diff = await context.loadDiff();
     if (control.cancelled) return;
     if (!diff.text.trim()) {
@@ -534,6 +545,7 @@ export async function startReview(
       phase: "done",
       status: "",
       truncatedCoverage: coverage.diffTruncated && !agenticRun,
+      endedAt: Date.now(),
     });
     void notifyReviewDone(title, mode, true, target);
     // Persist the finished review so the NEXT run can use it as soft context.
@@ -584,6 +596,7 @@ export async function startReview(
         // CLI failures reject with a plain AppError object (not an Error), so
         // `String(e)` would print "[object Object]" — use the shared extractor.
         error: errorMessage(e),
+        endedAt: Date.now(),
       });
       void notifyReviewDone(title, mode, false, target);
     }
@@ -625,7 +638,9 @@ export function cancelReview(key: string): void {
   // this patched "cancelled" phase and skips its own settle/remove for the row.
   // Both arms patch identically; the auto arm additionally caps retained stopped
   // rows so a long session can't accumulate them without bound.
-  useReviewStore.getState().patch(key, { phase: "cancelled", status: "" });
+  useReviewStore
+    .getState()
+    .patch(key, { phase: "cancelled", status: "", endedAt: Date.now() });
   if (key.startsWith("auto:")) enforceStoppedCap();
   controls.delete(key);
 }
@@ -688,6 +703,9 @@ export function registerAutomationRun(opts: {
     target: opts.target,
     seq,
     error: "",
+    // Automation rows are running from the moment they register — registration
+    // IS their start, so stamp it here (there's no queue wait to exclude).
+    startedAt: Date.now(),
     // Marks this as an automation row AND powers the stopped row's Re-run.
     rerun: opts.rerun,
   });
@@ -709,9 +727,12 @@ export function registerAutomationRun(opts: {
     // entry keeps its `rerun`) instead of removing it, then cap retained stopped
     // rows. Deletes only our own control, mirroring settle's own-control guard.
     fail(message) {
-      useReviewStore
-        .getState()
-        .patch(key, { phase: "error", error: message, status: "" });
+      useReviewStore.getState().patch(key, {
+        phase: "error",
+        error: message,
+        status: "",
+        endedAt: Date.now(),
+      });
       enforceStoppedCap();
       if (controls.get(key) === control) controls.delete(key);
     },
@@ -784,5 +805,11 @@ export function useReviewRun(target: ReviewTarget) {
     /** The finished agentic run's streamed narration — shown behind a collapsed
      *  "Thought process" disclosure. Empty on non-agentic / codex runs. */
     thoughts: entry.thoughts ?? "",
+    /** Epoch ms when the run entered "running" (queue wait excluded) — the anchor
+     *  for a live elapsed/duration surface. Absent while queued or idle. */
+    startedAt: entry.startedAt,
+    /** Epoch ms when the run reached a terminal state — with `startedAt` yields
+     *  the run's total duration. Absent while still running. */
+    endedAt: entry.endedAt,
   };
 }

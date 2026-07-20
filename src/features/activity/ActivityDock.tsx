@@ -15,6 +15,7 @@ import {
   XIcon,
 } from "@phosphor-icons/react";
 import { useRef, useState } from "react";
+import { ElapsedTime } from "@/components/elapsed-time";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { Button } from "@/components/ui/button";
 import {
@@ -42,7 +43,7 @@ import {
   useReviewTasks,
 } from "@/lib/stores/reviews";
 import { useUiStore } from "@/lib/stores/ui";
-import { formatRelativeTime } from "@/lib/time";
+import { formatDuration, formatRelativeTime } from "@/lib/time";
 import { cn } from "@/lib/utils";
 
 /**
@@ -338,11 +339,16 @@ function LiveTaskRow({
           {task.title || "Pull request"}
         </p>
         <p className="mt-0.5 flex items-center gap-1 text-[11px] text-muted-foreground">
-          <Spinner className="size-3 shrink-0" />
-          <span className="truncate">
-            {modeName} · {stateWord}
-            {crossRepo ? ` · ${task.target.repoName}` : ""}
+          <span className="flex min-w-0 items-center gap-1 truncate">
+            <Spinner className="size-3 shrink-0" />
+            <span className="truncate">
+              {modeName} · {stateWord}
+              {crossRepo ? ` · ${task.target.repoName}` : ""}
+            </span>
           </span>
+          {task.phase === "running" && task.startedAt && (
+            <ElapsedTime since={task.startedAt} className="ml-auto shrink-0" />
+          )}
         </p>
       </div>
       <Button
@@ -377,6 +383,12 @@ function StoppedTaskRow({
   const modeName = task.mode === "security" ? "Security audit" : "Review";
   const failed = task.phase === "error";
   const title = task.title || "Pull request";
+  // Static "ran for X" — only when both stamps exist and are ordered (a run
+  // cancelled while queued never entered "running", so it carries no start).
+  const ranFor =
+    task.startedAt && task.endedAt && task.endedAt > task.startedAt
+      ? formatDuration(task.endedAt - task.startedAt)
+      : null;
 
   return (
     <div className="flex items-start gap-2 px-3 py-2 not-last:border-b">
@@ -395,6 +407,7 @@ function StoppedTaskRow({
           ) : (
             "Cancelled"
           )}
+          {ranFor ? ` · ran ${ranFor}` : ""}
           {crossRepo ? ` · ${task.target.repoName}` : ""}
         </p>
       </div>

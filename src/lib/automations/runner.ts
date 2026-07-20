@@ -29,7 +29,7 @@ import { notifyIfUnfocused } from "@/lib/notify";
 import { listLocalPrs, updateLocalPr } from "@/lib/pulls/local";
 import { getLatestReview, saveReview } from "@/lib/pulls/reviews-history";
 import { queryClient } from "@/lib/query-client";
-import { loadSettings } from "@/lib/settings/api";
+import { effectiveReviewAi, loadSettings } from "@/lib/settings/api";
 import { pushNotification } from "@/lib/stores/notifications";
 import {
   type ReviewTarget,
@@ -311,6 +311,12 @@ async function run(
     };
 
     const label = modeLabel(action);
+    // The AI config this rule's mode runs under: security audits use the
+    // dedicated `securityReviewAi` when configured, else fall back to `reviewAi`
+    // (general reviews always use `reviewAi`). Resolved once so the lane pick,
+    // the review generation, the delivered comment's model label, and the
+    // persisted history model all agree.
+    const reviewCfg = effectiveReviewAi(settings, action);
     // Per-rule cancellation: HTTP providers stop via the AbortSignal; CLI
     // providers stop by killing the subprocess (`cancelAgentReview` once we know
     // its id). Both are driven by the shared reviews store: the run registers a
@@ -322,6 +328,10 @@ async function run(
     // Re-run that matches nothing can toast instead of dying silently).
     attempted++;
     const controller = new AbortController();
+    // Wall-clock run start, mirrored into the persisted history record so an
+    // automated review carries a real duration (registerAutomationRun stamps
+    // the live dock entry's own `startedAt` at the same moment).
+    const runStartedMs = Date.now();
     // Let-box so the rerun closure carries THIS run's own key (assigned right
     // after registration): a re-run of the fresh row must replace the fresh row,
     // not the stale one it grew from.
@@ -331,7 +341,7 @@ async function run(
       title: event.kind === "commit" ? event.hash.slice(0, 7) : event.title,
       mode: action,
       // Same provider-kind signal the manual panel path uses to pick its lane.
-      local: isLocalProvider(settings.reviewAi.provider),
+      local: isLocalProvider(reviewCfg.provider),
       target: automationTarget(event),
       abort: controller,
       // Re-fires THIS event + mode (closes over this iteration's action) when the
@@ -366,7 +376,7 @@ async function run(
     };
     try {
       const result = await generateReviewText(
-        settings.reviewAi,
+        reviewCfg,
         action,
         event,
         controller.signal,
@@ -393,7 +403,7 @@ async function run(
       // posted (buildAiCommentBody + deliver both take `text`).
       const body = buildAiCommentBody({
         kind: label,
-        model: settings.reviewAi.model,
+        model: reviewCfg.model,
         automated: true,
         text,
       });
@@ -407,8 +417,9 @@ async function run(
           event,
           action,
           text,
-          settings.reviewAi.model,
+          reviewCfg.model,
           thoughts,
+          runStartedMs,
         ).catch(() => undefined);
       }
       // Success: remove the dock row — a delivered review lands in Notifications.
@@ -862,6 +873,8 @@ async function persistReviewHistory(
   text: string,
   model: string,
   thoughts: string,
+  /** The run's wall-clock start — persisted so history shows a real duration. */
+  startedAtMs: number,
 ): Promise<void> {
   if (!text.trim()) return;
   const kind = event.target.type;
@@ -879,7 +892,7 @@ async function persistReviewHistory(
     // Display-only narration (omitted when empty; never fed to the next run).
     ...(thoughts.trim() ? { thoughts } : {}),
     headSha: event.headSha ?? "",
-    startedAt: now,
+    startedAt: startedAtMs,
     finishedAt: now,
   });
   await queryClient.invalidateQueries({

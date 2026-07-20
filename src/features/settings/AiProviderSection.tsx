@@ -37,6 +37,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
+import { Switch } from "@/components/ui/switch";
 import { detectAgentCli, providerKind } from "@/lib/ai/agent";
 import {
   entryMatchesUrl,
@@ -579,6 +580,12 @@ export const AiProviderSection = withForm({
     const queryClient = useQueryClient();
     const ai = useSelector(form.store, (s) => s.values.ai);
     const reviewAi = useSelector(form.store, (s) => s.values.reviewAi);
+    // Optional dedicated security-audit config. `undefined` = off (security
+    // audits use `reviewAi`); an object = the toggle is on and its trio shows.
+    const securityReviewAi = useSelector(
+      form.store,
+      (s) => s.values.securityReviewAi,
+    );
     const reviewContextSize = useSelector(
       form.store,
       (s) => s.values.reviewContextSize ?? "auto",
@@ -605,9 +612,11 @@ export const AiProviderSection = withForm({
     const keyPreview = useSecretPreview(provider);
     // The Allowed-hosts manager is only relevant to the providers that take a
     // custom URL; keep it out of the way for the cloud-only majority.
-    const showAllowedHosts = [ai.provider, reviewAi.provider].some(
-      (p) => p === "ollama" || p === "openai-compatible",
-    );
+    const showAllowedHosts = [
+      ai.provider,
+      reviewAi.provider,
+      securityReviewAi?.provider,
+    ].some((p) => p === "ollama" || p === "openai-compatible");
     // The URLs the selected custom-host providers point at — so a host that's
     // keeping one reachable shows an "in use" hint before it's removed.
     const activeProviderUrls = [
@@ -616,6 +625,9 @@ export const AiProviderSection = withForm({
       reviewAi.provider === "ollama" && reviewAi.ollamaBaseUrl,
       reviewAi.provider === "openai-compatible" &&
         reviewAi.openaiCompatibleBaseUrl,
+      securityReviewAi?.provider === "ollama" && securityReviewAi.ollamaBaseUrl,
+      securityReviewAi?.provider === "openai-compatible" &&
+        securityReviewAi.openaiCompatibleBaseUrl,
     ].filter((u): u is string => Boolean(u));
 
     const [confirmClear, setConfirmClear] = useState(false);
@@ -864,6 +876,65 @@ export const AiProviderSection = withForm({
             allowedHosts={allowedHosts}
             onAllowHost={allowHost}
           />
+          <div className="space-y-1.5">
+            <label className="flex cursor-pointer items-center gap-2 text-xs">
+              <Switch
+                checked={Boolean(securityReviewAi)}
+                onCheckedChange={(checked) =>
+                  form.setFieldValue(
+                    "securityReviewAi",
+                    // Seed from the CURRENT DRAFT review config so the audit
+                    // model starts where the review model is; clear to undefined
+                    // (not a stale object) so the field is truly absent when off.
+                    checked ? { ...reviewAi } : undefined,
+                  )
+                }
+              />
+              Use a different model for security audits
+            </label>
+            {!securityReviewAi && (
+              <p className="text-xs text-muted-foreground">
+                Security audits use the review model above.
+              </p>
+            )}
+          </div>
+          {securityReviewAi && (
+            <div className="space-y-4">
+              <ModelPicker
+                idPrefix="security-review"
+                value={securityReviewAi}
+                onChange={(next) =>
+                  form.setFieldValue("securityReviewAi", next)
+                }
+                providerIds={ALL_PROVIDER_IDS}
+                allowedHosts={allowedHosts}
+              />
+              {isCliProvider(securityReviewAi.provider) && (
+                <CliProviderConfig
+                  idPrefix="security-review"
+                  value={securityReviewAi}
+                  onChange={(next) =>
+                    form.setFieldValue("securityReviewAi", next)
+                  }
+                  description={
+                    <>
+                      Uses the CLI's own subscription login — no API key needed.
+                      Security audits run read-only.
+                    </>
+                  }
+                />
+              )}
+              <ProviderUrlConfig
+                idPrefix="security-review"
+                value={securityReviewAi}
+                onChange={(next) =>
+                  form.setFieldValue("securityReviewAi", next)
+                }
+                allowedHosts={allowedHosts}
+                onAllowHost={allowHost}
+              />
+            </div>
+          )}
           <div className="space-y-2">
             <Label htmlFor="review-context-size">Review context</Label>
             <Select

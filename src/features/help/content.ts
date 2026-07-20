@@ -1463,7 +1463,12 @@ Bring your own model:
   it's noticeably slower than an HTTP provider and draws on your plan's quota; the agent
   only completes the prepared prompt and never explores the repo on the generation path.
 
-You can set **separate models** for generation (commit/PR messages) versus review.
+You can set **separate models** for generation (commit/PR messages) versus review. Toggle
+**Use a different model for security audits** under the review model to give audits their own
+provider/model — e.g. a stronger model for audits and a faster one for general reviews.
+Left off, security audits use the review model. The choice applies to both automated audits
+and the **Security audit** button on a PR; picking a model in the PR panel still overrides
+both for that one run.
 
 **Custom & LAN servers — allowed hosts.** To reach an Ollama or OpenAI-compatible server
 that isn't \`localhost\` (a box on your network, or a self-hosted endpoint), enter its URL in
@@ -1499,8 +1504,8 @@ without you asking. It's a **lifecycle grid**: one section per moment — *On co
 request opened*, and *On new commits to a reviewed PR* — with **AI code review** and **AI
 security audit** as toggles under each. There's no "add a rule" — a given moment × action
 exists at most once, so you can't create conflicting duplicates. Reviews use the review model
-from the AI section; PR results are posted as a comment, commit results open from a
-notification. **Review draft PRs when created** (off by default) controls draft handling:
+from the AI section (security audits use the dedicated audit model when you've set one); PR
+results are posted as a comment, commit results open from a notification. **Review draft PRs when created** (off by default) controls draft handling:
 left off, a draft PR gets its automated first review when it's marked ready for review, not
 at creation — marking it ready **in GitDesktop** always fires that first review, while a
 draft readied elsewhere is picked up by the background catch-up poller within its window.
@@ -1616,11 +1621,13 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   persistent, click-to-open history (it survives a restart) so a finished review or a PR
   update is never a missed moment. Open it from the command palette
   ({{kbd:command-palette}} → *Activity & notifications*), click an entry to jump to it,
-  arrow-key through the list, and clear items or mark all read.{{ai}} When an
+  arrow-key through the list, and clear items or mark all read. A review still running
+  shows a live **elapsed timer** so you can see how long it's taken.{{ai}} When an
   **automated** review or security audit is cancelled or fails, it stays in the popover
   under a **Stopped** group with **Re-run** (re-fires exactly that run's mode) and
-  **Dismiss** — and a failed automated run also lands a *review failed* row in the inbox
-  (gated on the automations notification preference), matching manual-run failures.{{/ai}}
+  **Dismiss** — a stopped row notes how long it ran before it stopped — and a failed
+  automated run also lands a *review failed* row in the inbox (gated on the automations
+  notification preference), matching manual-run failures.{{/ai}}
 - **Keyboard** — rebind any shortcut, with live key-capture.
 - **Accounts** — your **GitHub** and **GitLab** sign-ins and your **Bitbucket**
   connection. **Sign in to GitHub…** and **Sign in to gitlab.com…** run the CLI's

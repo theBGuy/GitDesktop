@@ -406,7 +406,9 @@ workflow against any two branches with no remote at all).
   reviews and any "fixed in `<sha>`" / refutation replies) as soft, re-verifiable
   context, so an already-addressed finding isn't re-raised cold (the current diff is
   always the source of truth). Per PR, ignore the prior review, trim a false finding, or
-  opt out of external-bot folding. By default a **draft** PR waits for its first automated
+  opt out of external-bot folding. Pick a **review model** independent of the generation
+  model, and optionally a **separate model for security audits** (e.g. a stronger model
+  for audits, a faster one for general reviews). By default a **draft** PR waits for its first automated
   review until you mark it ready — flip **Review draft PRs when created** in Settings →
   Automations to review on creation instead.
 - **Line-anchored review comments** — from Copilot, CodeRabbit, or humans — render
