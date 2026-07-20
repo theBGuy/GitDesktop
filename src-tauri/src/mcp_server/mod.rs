@@ -158,12 +158,6 @@ impl CiId {
     }
 }
 
-impl std::fmt::Display for CiId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
 impl<'de> serde::Deserialize<'de> for CiId {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
