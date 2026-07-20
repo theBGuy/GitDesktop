@@ -14,6 +14,16 @@
 //! WebSocket impl drained and ignored all inbound client frames anyway, so nothing
 //! is lost by the switch.
 //!
+//! ## Hide AI is a preference, not a capability gate
+//!
+//! The desktop's "Hide AI features" setting is surfaced to the phone as `hideAi` on
+//! `/api/repos` (see [`crate::lan::routes::list_repos`]), and the companion hides its
+//! Agents tab + this watch screen when it's set. These `/api/reviews*` routes keep
+//! serving REGARDLESS — deliberately. Hide AI hides surfaces on the desktop too; it
+//! never disables the underlying capability. Blocking these routes server-side would
+//! make Hide AI a security boundary it was never meant to be, so the flag stays a
+//! UI-preference signal the client honors and the server does not enforce.
+//!
 //! ## Why SSE and not a WebSocket
 //!
 //! Serving over self-signed HTTPS (see [`crate::lan::tls`]) hits a load-bearing

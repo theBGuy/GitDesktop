@@ -44,7 +44,12 @@ export default function App() {
   // PR-75 lockout budget). See `useRepos`.
   const reposQuery = useRepos(!route.isPairing);
   const reposErr = asApiError(reposQuery.error);
-  const repos = reposQuery.data;
+  // `/api/repos` is now an envelope `{ repos, hideAi }`. Destructure the list (what
+  // every downstream consumer expects) and the desktop's "Hide AI features"
+  // preference. `hideAi` defaults false until the list loads — AI surfaces show by
+  // default and hide only once the desktop says so, matching the desktop's own gate.
+  const repos = reposQuery.data?.repos;
+  const hideAi = reposQuery.data?.hideAi ?? false;
 
   // Remember the last SCOPED route context (which repo + tab the user was on) so
   // the picker — reached via `#repos`, whose hash carries NO repo segment — can
@@ -104,6 +109,21 @@ export default function App() {
     }
   }, [route, repos]);
 
+  // Hide AI: when the desktop has "Hide AI features" on, the Agents tab and the
+  // agent-watch screen must be unreachable on the phone, matching the desktop. Any
+  // agents route (scoped `#r/{id}/agents[/streamId]` OR the legacy repo-less
+  // `#agents[/streamId]`) REPLACES to the status tab for the same scope. Gate
+  // strictly on the list having LOADED (`reposQuery.data !== undefined`) so we never
+  // redirect on the stale-undefined default and flicker the tab away mid-load. A flag
+  // flip mid-watch converges on the next poll (≤15s): this effect re-runs when
+  // `hideAi` turns true and unmounts the live stream — the intended behavior.
+  useEffect(() => {
+    if (reposQuery.data === undefined) return; // wait for the real value
+    if (!hideAi || route.tab !== "agents" || route.isPairing || route.isRepos)
+      return;
+    replace(route.repoId != null ? repoHash(route.repoId, "status") : "#status");
+  }, [reposQuery.data, hideAi, route]);
+
   if (route.isPairing) {
     return <Pair />;
   }
@@ -149,6 +169,7 @@ export default function App() {
           repos={repos}
           selectedRepo={selectedRepo}
           pickerContext={chromeContext}
+          hideAi={hideAi}
           reposError={reposQuery.error}
           onReposRetry={() => reposQuery.refetch()}
         />
@@ -159,7 +180,7 @@ export default function App() {
           remembered repo they navigate to that repo's tabs (a real leave-the-picker
           affordance). Off the picker it always shows, scoped to the live repo. */}
       {route.isRepos && !chromeContext ? null : (
-        <BottomNav repoId={chromeContext?.repoId ?? null} />
+        <BottomNav repoId={chromeContext?.repoId ?? null} hideAi={hideAi} />
       )}
     </div>
   );
@@ -202,6 +223,7 @@ function Shell({
   repos,
   selectedRepo,
   pickerContext,
+  hideAi,
   reposError,
   onReposRetry,
 }: {
@@ -209,6 +231,7 @@ function Shell({
   repos: RepoSummary[] | undefined;
   selectedRepo: RepoSummary | null;
   pickerContext: { repoId: string; tab: Tab } | null;
+  hideAi: boolean;
   reposError: unknown;
   onReposRetry: () => void;
 }) {
@@ -248,10 +271,18 @@ function Shell({
     return <ReposBody currentRepoId={route.repoId} currentTab={route.tab} />;
   }
 
-  return <Screen route={route} repoId={route.repoId} />;
+  return <Screen route={route} repoId={route.repoId} hideAi={hideAi} />;
 }
 
-function Screen({ route, repoId }: { route: Route; repoId: string }) {
+function Screen({
+  route,
+  repoId,
+  hideAi,
+}: {
+  route: Route;
+  repoId: string;
+  hideAi: boolean;
+}) {
   if (route.tab === "prs") {
     return route.detailId != null ? (
       <PrDetail repoId={repoId} number={route.detailId} />
@@ -273,14 +304,19 @@ function Screen({ route, repoId }: { route: Route; repoId: string }) {
     // a change of either forces a fresh mount (resetting the SSE reducer state) —
     // no current path swaps them under a mounted watch, but keying makes that a
     // non-footgun rather than relying on it never happening.
+    // `hideAi` is a defensive guard: the redirect effect in App already bounces any
+    // agents route to status when Hide AI is on, so this branch normally can't render
+    // hidden. It covers the one-frame race before that effect runs (both components
+    // render null when `hideAi`).
     return route.streamId != null ? (
       <AgentWatch
         key={`${repoId}:${route.streamId}`}
         repoId={repoId}
         id={route.streamId}
+        hideAi={hideAi}
       />
     ) : (
-      <AgentsBody repoId={repoId} active />
+      <AgentsBody repoId={repoId} active hideAi={hideAi} />
     );
   }
   return <StatusBody repoId={repoId} active />;

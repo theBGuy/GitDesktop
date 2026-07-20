@@ -32,16 +32,25 @@ import { useRovingList } from "../lib/use-roving-list";
 // killer feature. Read-only by design: no approve/deny/write affordances here.
 
 /** The agent-stream list. `repoId` scopes the query; `active` gates polling (false
- *  while a watch is open). */
+ *  while a watch is open). `hideAi` is a defensive guard: the desktop's "Hide AI
+ *  features" preference should have already redirected any agents route away (App's
+ *  redirect effect), so this render null only covers the one-frame race before that
+ *  effect runs. */
 export function AgentsBody({
   repoId,
   active,
+  hideAi,
 }: {
   repoId: string;
   active: boolean;
+  hideAi: boolean;
 }) {
   const { data, isError, error, refetch } = useReviews(repoId, active);
   const { register, onKeyDown } = useRovingList();
+
+  // Defensive: render nothing when AI is hidden (the redirect normally beats this).
+  // AFTER the hooks so the hook order stays stable across a mid-mount flag flip.
+  if (hideAi) return null;
 
   // Definitive gone WINS over stale data: a `noSuchRepo` 404 kicks to the teaching
   // state even when a cached list is on hand (see isRepoGoneError). The watch
@@ -111,9 +120,23 @@ function prefersReducedMotion(): boolean {
   );
 }
 
-/** The live watch screen for one agent stream, scoped to `repoId`. */
-export function AgentWatch({ repoId, id }: { repoId: string; id: string }) {
+/** The live watch screen for one agent stream, scoped to `repoId`. `hideAi` is the
+ *  same defensive guard as {@link AgentsBody}: normally the redirect effect has
+ *  already left this route, so this only covers the one-frame race. */
+export function AgentWatch({
+  repoId,
+  id,
+  hideAi,
+}: {
+  repoId: string;
+  id: string;
+  hideAi: boolean;
+}) {
   const stream = useReviewStream(repoId, id);
+
+  // AFTER the hook so hook order is stable across a mid-watch flag flip (the flip
+  // also converges via App's redirect on the next poll, unmounting this screen).
+  if (hideAi) return null;
 
   return (
     <div className="flex flex-col">

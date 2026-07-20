@@ -615,6 +615,14 @@ pub struct RouterState {
     /// worktree path while the desktop is open on another (both map to one id, a path
     /// compare would miss). Read only by [`crate::lan::routes::list_repos`].
     pub active_repo_id: Arc<Mutex<Option<String>>>,
+    /// The desktop's "Hide AI features" preference. The SAME `Arc`
+    /// [`crate::lan::LanState`] owns, pushed from the frontend via
+    /// [`crate::lan::lan_set_hide_ai`]. Read only by
+    /// [`crate::lan::routes::list_repos`], which surfaces it as `hideAi` on
+    /// `/api/repos` so the companion hides its AI surfaces to match. `Ordering::Relaxed`
+    /// everywhere (a UI-preference flag, no ordering dependency). A preference, NOT a
+    /// capability gate — the `/api/reviews*` routes keep serving regardless.
+    pub hide_ai: Arc<std::sync::atomic::AtomicBool>,
     /// The repo registry (opaque-id → [`crate::lan::RegisteredRepo`]) backing the
     /// scoped `/api/repos/{repoId}/…` routes. The SAME `Arc` [`crate::lan::LanState`]
     /// owns, so `lan_set_active_repo` refreshes it live. The scoped resolver looks a
