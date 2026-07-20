@@ -954,7 +954,7 @@ impl GitDesktopMcp {
         crate::forge::forge_ci_run_rerun(self.repo.clone(), args.run_id.as_u64(), true)
             .await
             .map_err(app_err)?;
-        json_result(&serde_json::json!({ "run_id": args.run_id.as_u64(), "action": "rerun" }))
+        json_result(&serde_json::json!({ "run_id": args.run_id.as_string(), "action": "rerun" }))
     }
 
     #[tool(
@@ -971,7 +971,7 @@ impl GitDesktopMcp {
         crate::forge::forge_ci_run_cancel(self.repo.clone(), args.run_id.as_u64())
             .await
             .map_err(app_err)?;
-        json_result(&serde_json::json!({ "run_id": args.run_id.as_u64(), "action": "cancelled" }))
+        json_result(&serde_json::json!({ "run_id": args.run_id.as_string(), "action": "cancelled" }))
     }
 
     #[tool(
