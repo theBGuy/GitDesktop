@@ -145,6 +145,17 @@ function App() {
     );
   }, [repoPath]);
 
+  // Mirror the "Hide AI features" preference to the LAN state so the phone
+  // companion hides its AI surfaces to match. The phone reads it off `/api/repos`
+  // (which it already polls), so a flip converges within one poll with no extra
+  // request. Skip until settings load — never push a guessed default that would
+  // briefly un-hide AI on the phone before the real value arrives.
+  const hideAi = settings.data?.hideAi;
+  useEffect(() => {
+    if (hideAi === undefined) return;
+    invoke("lan_set_hide_ai", { hideAi }).catch(() => undefined);
+  }, [hideAi]);
+
   // Drop a repo folder anywhere on the window to open it.
   useRepoDrop();
 

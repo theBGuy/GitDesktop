@@ -79,6 +79,11 @@ export function useRepos(enabled = true) {
     enabled,
     staleTime: 30_000,
     refetchOnWindowFocus: true,
+    // Poll at the screens' cadence: the envelope carries `hideAi` (and the shared
+    // set), and a phone left OPEN on a screen gets no focus event — without an
+    // interval a desktop toggle would never converge until a manual reload
+    // (live-caught in the slice-5 E2E).
+    refetchInterval: enabled ? poll(true) : false,
   });
 }
 

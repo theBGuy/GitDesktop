@@ -117,6 +117,15 @@ pub struct LanState {
     /// may be A; a path compare against active path B would wrongly report `active:
     /// false`, but the id matches. A `std::Mutex` — short, sync accesses only.
     active_repo_id: Arc<Mutex<Option<String>>>,
+    /// The desktop's "Hide AI features" preference, pushed from the frontend via
+    /// [`lan_set_hide_ai`] and surfaced on `/api/repos` so the phone companion hides
+    /// its AI surfaces (the Agents tab + agent-watch screen) to match. Shared
+    /// (per-field `Arc`) with the router state, and — like [`active_repo_id`] — it
+    /// outlives the server task, so a push works whether or not the server is running.
+    /// A UI-preference flag with no ordering dependency, so every access is
+    /// `Ordering::Relaxed`. This is a preference, NOT a capability gate: the
+    /// `/api/reviews*` routes keep serving regardless (see [`routes::reviews`]).
+    hide_ai: Arc<std::sync::atomic::AtomicBool>,
     /// The running server handle (bound port + shutdown signal + task), or `None`
     /// when disabled. Guarded so enable/disable are serialized.
     running: Mutex<Option<RunningServer>>,
@@ -169,6 +178,7 @@ impl Default for LanState {
             repos: Arc::new(Mutex::new(HashMap::new())),
             shared_index: tokio::sync::Mutex::new(HashMap::new()),
             active_repo_id: Arc::new(Mutex::new(None)),
+            hide_ai: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             running: Mutex::new(None),
             pairing: Arc::new(Mutex::new(None)),
             rate_limit: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -736,6 +746,7 @@ pub async fn lan_enable(
         bind_lan,
         state.active_repo.clone(),
         state.active_repo_id.clone(),
+        state.hide_ai.clone(),
         state.repos.clone(),
         state.pairing.clone(),
         state.rate_limit.clone(),
@@ -805,6 +816,22 @@ pub async fn lan_set_active_repo(
     repo_path: Option<String>,
 ) -> AppResult<()> {
     state.set_active_repo(repo_path).await;
+    Ok(())
+}
+
+/// Push the desktop's "Hide AI features" preference to the LAN state. The phone
+/// companion reads it off `GET /api/repos` (which it already polls) and hides its
+/// AI surfaces (the Agents tab + agent-watch screen) to match the desktop. Stores
+/// into the `hide_ai` Arc, which outlives the server task, so this works whether or
+/// not sharing is currently on — the flag is picked up the next time the server
+/// binds and is live for an already-running server. `Ordering::Relaxed`: a
+/// UI-preference flag with no ordering dependency. A preference, NOT a capability
+/// gate — the `/api/reviews*` routes keep serving either way.
+#[tauri::command]
+pub async fn lan_set_hide_ai(state: State<'_, LanState>, hide_ai: bool) -> AppResult<()> {
+    state
+        .hide_ai
+        .store(hide_ai, std::sync::atomic::Ordering::Relaxed);
     Ok(())
 }
 
@@ -956,6 +983,7 @@ mod tests {
         auth::RouterState {
             active_repo: Arc::new(Mutex::new(active)),
             active_repo_id: Arc::new(Mutex::new(None)),
+            hide_ai: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             repos: Arc::new(Mutex::new(std::collections::HashMap::new())),
             pairing: Arc::new(Mutex::new(None)),
             rate_limit: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -970,6 +998,14 @@ mod tests {
     /// an entry and mark it active BY ID — the same identity `list_repos` flags on.
     fn set_active_id(state: &auth::RouterState, repo_id: &str) {
         *state.active_repo_id.lock().unwrap() = Some(repo_id.to_string());
+    }
+
+    /// Set a test router's "Hide AI features" flag (the value `/api/repos` surfaces as
+    /// `hideAi`, which the companion reads to hide its AI surfaces).
+    fn set_hide_ai(state: &auth::RouterState, hide_ai: bool) {
+        state
+            .hide_ai
+            .store(hide_ai, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Pre-register a repo entry in a test router's registry (opaque-id → path), so
@@ -2703,10 +2739,11 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn list_repos_lists_the_registered_repo_and_is_empty_when_none() {
-        // `GET /api/repos` returns the registered repos as `[{ id, name, active }]`
-        // with a 16-hex id + basename name + a bool `active` flag (camelCase), and `[]`
-        // when none is registered. No path is on the wire. Wire-shape pin for the
-        // frozen contract the companion + desktop build against.
+        // `GET /api/repos` returns an envelope `{ "repos": [{ id, name, active }...],
+        // "hideAi": bool }` (camelCase): each entry has a 16-hex id + basename name + a
+        // bool `active` flag, and `repos` is `[]` when none is registered. No path is on
+        // the wire. Wire-shape pin for the frozen contract the companion + desktop build
+        // against (the companion is the only consumer and reads `data.repos`).
         let _lock = auth::store_test_lock();
         let tmp = temp_store();
         let prev = auth::set_store_path_for_test(Some(tmp.clone()));
@@ -2730,8 +2767,13 @@ mod tests {
         let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
             .await
             .unwrap();
-        let arr: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        let arr = arr.as_array().unwrap();
+        let envelope: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        // The envelope pins the two camelCase top-level keys; `hideAi` defaults false.
+        assert_eq!(
+            envelope["hideAi"], false,
+            "hideAi present + camelCase bool, false by default: {envelope}"
+        );
+        let arr = envelope["repos"].as_array().unwrap();
         assert_eq!(arr.len(), 2);
         for entry in arr {
             // Each entry pins the exact camelCase wire keys and NO path leak.
@@ -2770,8 +2812,8 @@ mod tests {
         let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
             .await
             .unwrap();
-        let arr: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        let arr = arr.as_array().unwrap();
+        let envelope: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let arr = envelope["repos"].as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["id"], "feedfacecafebeef");
         assert_eq!(
@@ -2779,7 +2821,7 @@ mod tests {
             "shared-under-path-A + active-on-path-B still flags active by id"
         );
 
-        // (2) No registered repo → [].
+        // (2) No registered repo → `repos: []` (still an envelope).
         let empty_state = test_router(None);
         let empty_router = server::build_router(empty_state);
         let resp = empty_router
@@ -2790,8 +2832,43 @@ mod tests {
         let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
             .await
             .unwrap();
-        let arr: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(arr.as_array().unwrap().len(), 0);
+        let envelope: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(envelope["repos"].as_array().unwrap().len(), 0);
+        assert_eq!(envelope["hideAi"], false);
+
+        auth::set_store_path_for_test(prev);
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn list_repos_reflects_the_hide_ai_flag() {
+        // The "Hide AI features" preference the desktop pushes (via `lan_set_hide_ai`)
+        // surfaces on `/api/repos` as `hideAi`. Set it true → the envelope reports true;
+        // the default (verified in the sibling test) is false. The companion reads this
+        // to hide its AI surfaces (Agents tab + agent-watch) to match the desktop.
+        let _lock = auth::store_test_lock();
+        let tmp = temp_store();
+        let prev = auth::set_store_path_for_test(Some(tmp.clone()));
+        let (device, bearer, token_hash) = auth::mint_device("HideAI Phone");
+        auth::persist_device(&device, &token_hash).unwrap();
+
+        let state = test_router(Some("C:/work/my-repo".to_string()));
+        register_repo(&state, "abcdef0123456789", "C:/work/my-repo");
+        set_hide_ai(&state, true);
+        let router = server::build_router(state);
+        let resp = router
+            .oneshot(authed_get("/api/repos", &bearer))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let envelope: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(envelope["hideAi"], true, "the pushed flag surfaces: {envelope}");
+        // The repos list is unaffected by the flag — the entry is still enumerated.
+        assert_eq!(envelope["repos"].as_array().unwrap().len(), 1);
 
         auth::set_store_path_for_test(prev);
         std::fs::remove_file(&tmp).ok();
@@ -3043,6 +3120,7 @@ mod tests {
             false, // loopback
             Arc::new(Mutex::new(Some("C:/repo".to_string()))),
             Arc::new(Mutex::new(None)), // active_repo_id
+            Arc::new(std::sync::atomic::AtomicBool::new(false)), // hide_ai
             Arc::new(Mutex::new(std::collections::HashMap::new())),
             Arc::new(Mutex::new(None)),
             Arc::new(Mutex::new(std::collections::HashMap::new())),
