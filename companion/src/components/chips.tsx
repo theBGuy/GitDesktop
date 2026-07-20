@@ -7,6 +7,7 @@ import {
   GitPullRequestIcon,
   MagnifyingGlassIcon,
   ProhibitIcon,
+  RecordIcon,
   RobotIcon,
   XCircleIcon,
 } from "@phosphor-icons/react";
@@ -81,8 +82,38 @@ export function PrStateChip({
   );
 }
 
-/** An agent stream's kind chip — an AI PR **review** or an agent **session**.
- *  Icon + text so the distinction never rests on color alone (WCAG 1.4.1). */
+/** An issue's state chip — open/closed with GitHub's state vocabulary. Icon + text
+ *  so the state never rests on color alone (WCAG 1.4.1). */
+export function IssueStateChip({ state }: { state: string }) {
+  const s = state.toLowerCase();
+  if (s === "closed") {
+    return (
+      <Chip
+        icon={<CheckCircleIcon size={14} />}
+        label="Closed"
+        className="bg-merged/15 text-merged"
+      />
+    );
+  }
+  if (s === "open") {
+    return (
+      <Chip
+        icon={<RecordIcon size={14} />}
+        label="Open"
+        className="bg-success/15 text-success"
+      />
+    );
+  }
+  // Any other provider string - show it verbatim with a neutral look.
+  return (
+    <Chip
+      icon={<CircleIcon size={14} />}
+      label={state || "Unknown"}
+      className="bg-muted text-muted-foreground"
+    />
+  );
+}
+
 export function ReviewKindChip({ kind }: { kind: "review" | "session" }) {
   if (kind === "review") {
     return (

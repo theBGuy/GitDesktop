@@ -129,8 +129,8 @@ export function CompanionSection() {
           Share the open repository — and any repositories you add below — with
           your phone over your local network. Scanning the pairing code opens
           the companion app in your phone's browser —{" "}
-          <strong className="font-medium">read-only</strong> Status, pull
-          requests, and CI. Early preview.
+          <strong className="font-medium">read-only</strong> status, changes,
+          history, branches, pull requests, issues, and CI. Early preview.
         </p>
       </div>
 

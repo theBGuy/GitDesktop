@@ -1,8 +1,15 @@
 import { QueryCache, QueryClient, useQuery } from "@tanstack/react-query";
 import {
   ApiError,
+  fetchBranches,
   fetchCiRun,
   fetchCiRuns,
+  fetchCommit,
+  fetchCommitDiff,
+  fetchFileDiff,
+  fetchIssue,
+  fetchIssues,
+  fetchLog,
   fetchPr,
   fetchPrs,
   fetchPrThreads,
@@ -10,6 +17,7 @@ import {
   fetchRepos,
   fetchReviews,
   fetchStatus,
+  fetchWorkingDiff,
 } from "./api";
 import { navigate } from "./router";
 
@@ -177,6 +185,118 @@ export function usePrThreads(repoId: string | null, number: number | null) {
   return useQuery({
     queryKey: ["pr", repoId, number, "threads"],
     queryFn: () => fetchPrThreads(repoId as string, number as number),
+    enabled: on,
+    refetchInterval: on ? POLL_MS : (false as const),
+  });
+}
+
+// ── Slice-6 hooks (Changes · History · Branches · Issues) ─────────────────────
+
+/** The repo's local branches. `active` gates polling to the visible screen. */
+export function useBranches(repoId: string | null, active: boolean) {
+  return useQuery({
+    queryKey: ["branches", repoId],
+    queryFn: () => fetchBranches(repoId as string),
+    enabled: repoId != null,
+    refetchInterval: repoId != null ? poll(active) : false,
+  });
+}
+
+/** A page of the commit history. `active` gates polling; `skip`/`limit` page the
+ *  log and are part of the cache key so each page caches independently. */
+export function useLog(
+  repoId: string | null,
+  active: boolean,
+  skip = 0,
+  limit = 50,
+) {
+  return useQuery({
+    queryKey: ["log", repoId, skip, limit],
+    queryFn: () => fetchLog(repoId as string, limit, skip),
+    enabled: repoId != null,
+    refetchInterval: repoId != null ? poll(active) : false,
+  });
+}
+
+/** One commit's details. A commit is IMMUTABLE, so there's no `refetchInterval` —
+ *  once fetched it never changes (no poll, and the default staleTime is irrelevant). */
+export function useCommit(repoId: string | null, hash: string | null) {
+  const on = repoId != null && hash != null;
+  return useQuery({
+    queryKey: ["commit", repoId, hash],
+    queryFn: () => fetchCommit(repoId as string, hash as string),
+    enabled: on,
+  });
+}
+
+/** One commit's unified diff. Immutable like the commit itself — no polling. */
+export function useCommitDiff(repoId: string | null, hash: string | null) {
+  const on = repoId != null && hash != null;
+  return useQuery({
+    queryKey: ["commitDiff", repoId, hash],
+    queryFn: () => fetchCommitDiff(repoId as string, hash as string),
+    enabled: on,
+  });
+}
+
+/** The working-tree diff (staged ∪ unstaged), with per-file stats. `active` gates
+ *  polling — the working tree changes on the desktop, so the LIST view polls it. */
+export function useWorkingDiff(repoId: string | null, active: boolean) {
+  return useQuery({
+    queryKey: ["workingDiff", repoId],
+    queryFn: () => fetchWorkingDiff(repoId as string),
+    enabled: repoId != null,
+    refetchInterval: repoId != null ? poll(active) : false,
+  });
+}
+
+/** One file's diff. Deliberately NOT polled: a file's content changing mid-read is
+ *  jarring on a detail view, and the Changes LIST screen's own poll is the freshness
+ *  mechanism (a re-visit refetches once the default staleTime lapses). `opts.staged`
+ *  / `opts.untracked` select the diff side and are part of the cache key (falling
+ *  back to their fetcher defaults so the key matches the request). */
+export function useFileDiff(
+  repoId: string | null,
+  path: string | null,
+  opts: { staged?: boolean; untracked?: boolean },
+) {
+  const on = repoId != null && path != null;
+  return useQuery({
+    queryKey: [
+      "fileDiff",
+      repoId,
+      path,
+      opts.staged ?? false,
+      opts.untracked ?? false,
+    ],
+    queryFn: () => fetchFileDiff(repoId as string, path as string, opts),
+    enabled: on,
+    refetchInterval: false,
+  });
+}
+
+/** The repo's issues. `active` gates polling; `state` ("open"/"closed") is part of
+ *  the cache key so switching filters caches independently. */
+export function useIssues(
+  repoId: string | null,
+  active: boolean,
+  state = "open",
+) {
+  return useQuery({
+    queryKey: ["issues", repoId, state],
+    queryFn: () => fetchIssues(repoId as string, state),
+    enabled: repoId != null,
+    refetchInterval: repoId != null ? poll(active) : false,
+  });
+}
+
+/** One issue's full read view. Polls while open (comments do change) — a detail view
+ *  is a deliberate drill-in, so keep it fresh at the standard cadence. */
+export function useIssue(repoId: string | null, number: number | null) {
+  const on = repoId != null && number != null;
+  return useQuery({
+    queryKey: ["issue", repoId, number],
+    queryFn: () => fetchIssue(repoId as string, number as number),
     enabled: on,
     refetchInterval: on ? POLL_MS : (false as const),
   });

@@ -1584,7 +1584,8 @@ this desktop, plus any repositories you've explicitly **shared** so they stay re
 while you work elsewhere. Open it in **Settings → Phone companion**.
 
 This is an **early preview**. Once paired, your phone opens a slim companion web app in
-its browser that shows a repository's **Status**, **pull requests**, **CI**{{ai}}, and
+its browser that shows a repository's **Status**, **pull requests**, **issues**,
+**working-tree changes**, **commit history**, **branches**, and **CI**{{ai}}, plus
 live **agent** runs{{/ai}} — all **read-only**. It's **off by default**.
 
 ## Turning it on
@@ -1609,17 +1610,27 @@ Choose **Pair a device** (available once sharing is on). A dialog shows:
 
 Scanning the code (or opening the URL) loads the companion's **pairing page** in your
 phone's browser. Type the PIN there; once it matches, the phone is paired and drops
-straight into the companion app — a bottom tab bar with **Status**, **PRs**, **CI**{{ai}},
-and **Agents**{{/ai}}, each read-only.
+straight into the companion app — a bottom tab bar with **Status**, **PRs**, **Issues**,
+**CI**{{ai}}, and **Agents**{{/ai}}, each read-only.
 
 ## What you can see on your phone
 
-- **Status** — the current branch and connection for the repository you're viewing.
+- **Status** — a hub for the repository you're viewing: the current branch with its
+  ahead/behind against its upstream, the working-tree change counts, and the latest few
+  commit subjects. Each group is tappable to drill into its fuller surface.
 - **PRs** — the open pull-request list; open one for its **overview** (title,
   description, branches, diff totals), its **activity** timeline (force-pushes, label
   changes, review requests, and open/close/merge events), and its **review threads**
   (each file:line comment chain, with resolved/outdated markers). It's read-only — a
   place to catch up on a PR's conversation from your phone, not to reply.
+- **Issues** — the open-issue list; open one for its description, labels, assignees, and
+  comment conversation, read-only.
+- **Changes** — the working tree's staged, changed, and untracked files; open a file for
+  its diff.
+- **History** — the commit log; open a commit for its message and diff, or drill into a
+  single file's changes.
+- **Branches** — the local branches, each with its upstream, ahead/behind divergence, and
+  last-commit time (the current branch first).
 - **CI** — recent workflow runs and their jobs.
 {{ai}}- **Agents** — everything your desktop is currently broadcasting: **AI PR reviews**
   and **agent sessions**. Open one to **watch it live** — the assistant's prose streams in

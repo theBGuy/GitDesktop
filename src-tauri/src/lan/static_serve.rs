@@ -50,7 +50,13 @@ struct Companion;
 /// same-origin SSE stream (`EventSource`) the reviews monitor uses — no WebSocket
 /// scheme-source is needed (the monitor moved from `wss:` to SSE, partly because
 /// iOS Safari won't extend a self-signed-cert exception to `wss://`).
-pub const PAGE_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+///
+/// `img-src` additionally allows `https:` (user-confirmed, parity slice): forge
+/// markdown (PR/issue bodies + comments) embeds externally hosted screenshots,
+/// and blocking them left broken images on the phone. Passive external image
+/// fetches are the norm for forge clients; scripts/styles/connect stay
+/// self-only, and plain `http:` images remain blocked.
+pub const PAGE_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 
 /// The 503 body shown when the companion bundle hasn't been built (CI, or a dev who
 /// skipped `pnpm build:companion`). Carries the literal `companion bundle not built`
