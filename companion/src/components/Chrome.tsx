@@ -79,19 +79,29 @@ function tabHash(tab: Tab, repoId: string | null): string {
 /** Bottom tab nav. Each tab is a real link (Tab-focusable) scoped to the selected
  *  repo; the active tab is marked with `aria-current`. Left/Right arrows move
  *  between tabs (roving). No tab is active on the picker (`#repos`) — it isn't a
- *  tab. */
-export function BottomNav({ repoId }: { repoId: string | null }) {
+ *  tab. When `hideAi` is set (the desktop's "Hide AI features" preference) the
+ *  Agents tab is dropped so the phone matches the desktop; the grid and the
+ *  arrow-key modulo both key off the FILTERED list so nav never lands on a hidden
+ *  tab and the remaining tabs fill the bar evenly. */
+export function BottomNav({
+  repoId,
+  hideAi,
+}: {
+  repoId: string | null;
+  hideAi: boolean;
+}) {
   const route = useRoute();
   // Only highlight a tab when a repo tab is actually showing — not on the picker
   // or the pairing takeover (both set `route.tab` to its default `status`).
   const tabActive = !route.isPairing && !route.isRepos;
+  const tabs = hideAi ? TABS.filter((t) => t.tab !== "agents") : TABS;
 
   function onKeyDown(e: React.KeyboardEvent, index: number) {
     if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
     e.preventDefault();
     const dir = e.key === "ArrowRight" ? 1 : -1;
-    const next = (index + dir + TABS.length) % TABS.length;
-    navigate(tabHash(TABS[next].tab, repoId));
+    const next = (index + dir + tabs.length) % tabs.length;
+    navigate(tabHash(tabs[next].tab, repoId));
     // Canonical roving-tablist behavior: DOM focus follows the arrow selection.
     const links = e.currentTarget.closest("nav")?.querySelectorAll("a");
     links?.[next]?.focus();
@@ -99,10 +109,12 @@ export function BottomNav({ repoId }: { repoId: string | null }) {
 
   return (
     <nav
-      className="sticky bottom-0 z-10 grid grid-cols-4 border-t border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80 pb-[env(safe-area-inset-bottom)]"
+      className={`sticky bottom-0 z-10 grid border-t border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80 pb-[env(safe-area-inset-bottom)] ${
+        tabs.length === 3 ? "grid-cols-3" : "grid-cols-4"
+      }`}
       aria-label="Sections"
     >
-      {TABS.map((t, i) => {
+      {tabs.map((t, i) => {
         const active = tabActive && route.tab === t.tab;
         return (
           <a

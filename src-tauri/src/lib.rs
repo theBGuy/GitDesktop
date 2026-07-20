@@ -672,6 +672,7 @@ pub fn run() {
             lan::lan_enable,
             lan::lan_disable,
             lan::lan_set_active_repo,
+            lan::lan_set_hide_ai,
             lan::lan_pairing_start,
             lan::lan_pairing_cancel,
             lan::lan_devices_list,

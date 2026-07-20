@@ -386,6 +386,7 @@ pub async fn start(
     bind_lan: bool,
     active_repo: Arc<std::sync::Mutex<Option<String>>>,
     active_repo_id: Arc<std::sync::Mutex<Option<String>>>,
+    hide_ai: Arc<std::sync::atomic::AtomicBool>,
     repos: crate::lan::RepoRegistry,
     pairing: Arc<std::sync::Mutex<Option<auth::PairingSession>>>,
     rate_limit: auth::RateLimitMap,
@@ -404,6 +405,7 @@ pub async fn start(
     let state = RouterState {
         active_repo,
         active_repo_id,
+        hide_ai,
         repos,
         pairing,
         rate_limit,
