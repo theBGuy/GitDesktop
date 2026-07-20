@@ -1,4 +1,9 @@
-import { QueryCache, QueryClient, useQuery } from "@tanstack/react-query";
+import {
+  keepPreviousData,
+  QueryCache,
+  QueryClient,
+  useQuery,
+} from "@tanstack/react-query";
 import {
   ApiError,
   fetchBranches,
@@ -215,6 +220,11 @@ export function useLog(
     queryFn: () => fetchLog(repoId as string, limit, skip),
     enabled: repoId != null,
     refetchInterval: repoId != null ? poll(active) : false,
+    // "Load more" grows `limit`, which is part of the key — without a placeholder
+    // the new key has NO cache and the mounted list collapses to skeletons on
+    // every tap (review r2). Keep the prior page visible while the grown page
+    // loads; the screen gates its button on `isPlaceholderData`.
+    placeholderData: keepPreviousData,
   });
 }
 
@@ -290,6 +300,9 @@ export function useIssues(
     queryFn: () => fetchIssues(repoId as string, state, limit),
     enabled: repoId != null,
     refetchInterval: repoId != null ? poll(active) : false,
+    // Same growing-limit key as useLog: keep the prior page visible while the
+    // grown page loads (review r2 — no placeholder = skeleton collapse on tap).
+    placeholderData: keepPreviousData,
   });
 }
 

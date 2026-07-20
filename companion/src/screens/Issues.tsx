@@ -80,7 +80,7 @@ export function IssuesBody({
   active: boolean;
 }) {
   const [limit, setLimit] = useState(PAGE);
-  const { data, isError, error, refetch } = useIssues(
+  const { data, isError, error, refetch, isPlaceholderData } = useIssues(
     repoId,
     active,
     "open",
@@ -107,8 +107,11 @@ export function IssuesBody({
   }
 
   // The last page came back short (fewer issues than we asked for) → there's nothing
-  // more to load. Hide the button then. Mirrors HistoryBody.
-  const hasMore = data.length >= limit;
+  // more to load. Hide the button then. While the grown page loads, `data` is the
+  // PRIOR page held as placeholder — short-looking against the new limit, so keep
+  // the button visible (loading-labeled) instead of flickering it off. Mirrors
+  // HistoryBody.
+  const hasMore = data.length >= limit || isPlaceholderData;
 
   return (
     <div className="flex flex-col">
@@ -145,9 +148,10 @@ export function IssuesBody({
             <button
               type="button"
               onClick={() => setLimit((n) => n + PAGE)}
-              className="min-h-11 border-t border-border px-4 py-3 text-sm font-medium text-primary"
+              disabled={isPlaceholderData}
+              className="min-h-11 border-t border-border px-4 py-3 text-sm font-medium text-primary disabled:text-muted-foreground"
             >
-              Load more
+              {isPlaceholderData ? "Loading…" : "Load more"}
             </button>
           ) : null}
         </>
