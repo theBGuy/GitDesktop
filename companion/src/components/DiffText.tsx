@@ -10,8 +10,8 @@
 // sideways. No line numbers: raw unified text carries none, and the `@@` hunk
 // headers already carry position.
 
-import { useMemo } from "react";
 import { WarningCircleIcon } from "@phosphor-icons/react";
+import { useMemo } from "react";
 
 /** One classified diff line. `kind` drives the per-line styling; `text` is the raw
  *  line (glyph included). */
