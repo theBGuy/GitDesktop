@@ -8,7 +8,7 @@ import {
   GitMergeIcon,
   WarningCircleIcon,
 } from "@phosphor-icons/react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { DiffText, splitCommitDiff } from "../components/DiffText";
 import {
   EmptyState,
@@ -332,6 +332,14 @@ export function CommitFileBody({
     repoId,
     sha,
   );
+  // Parse the multi-file commit text ONCE per commit (it can be up to the 1MB
+  // cap): navigating file-to-file within a commit changes only `filePath` while
+  // `data` stays cached, so the memo keys on `data`. ABOVE the early return —
+  // hooks must run unconditionally. (Review r3.)
+  const chunks = useMemo(
+    () => (data ? splitCommitDiff(data.text) : undefined),
+    [data],
+  );
 
   // Definitive gone WINS (mirrors PrDetail).
   if (isRepoGoneError(error)) return <RepoGoneState />;
@@ -339,7 +347,7 @@ export function CommitFileBody({
   // The matching file-stat entry (its `isBinary` flag), and the file's own diff
   // chunk sliced out of the commit's multi-file text.
   const fileStat = data?.files.find((f) => f.path === filePath);
-  const chunk = data ? splitCommitDiff(data.text).get(filePath) : undefined;
+  const chunk = chunks?.get(filePath);
 
   return (
     <div className="flex flex-col">
@@ -355,9 +363,12 @@ export function CommitFileBody({
       ) : chunk !== undefined ? (
         // The normal path: this file has a diff chunk. Honor the stat entry's binary
         // flag (a binary file with a chunk still renders as the binary note).
+        // `truncated` is COMMIT-wide (the 1MB cap), but the cut is a single point —
+        // only the chunk that is the TAIL of the text can be incomplete, so a fully
+        // present file doesn't carry a false truncation banner. (Review r3.)
         <DiffText
           text={chunk}
-          truncated={data.truncated}
+          truncated={data.truncated && data.text.endsWith(chunk)}
           isBinary={fileStat?.isBinary ?? false}
         />
       ) : data.truncated ? (
