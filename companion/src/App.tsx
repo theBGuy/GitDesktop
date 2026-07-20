@@ -121,7 +121,9 @@ export default function App() {
     if (reposQuery.data === undefined) return; // wait for the real value
     if (!hideAi || route.tab !== "agents" || route.isPairing || route.isRepos)
       return;
-    replace(route.repoId != null ? repoHash(route.repoId, "status") : "#status");
+    replace(
+      route.repoId != null ? repoHash(route.repoId, "status") : "#status",
+    );
   }, [reposQuery.data, hideAi, route]);
 
   if (route.isPairing) {
