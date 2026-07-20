@@ -85,6 +85,21 @@ export const GeneralSection = withForm({
           )}
         </div>
         <div className="space-y-1.5">
+          <form.AppField name="createPrsAsDraft">
+            {(field) => (
+              <field.CheckboxField
+                label="Create pull requests as drafts"
+                className="flex cursor-pointer items-center gap-2 text-xs"
+              />
+            )}
+          </form.AppField>
+          <p className="text-xs text-muted-foreground">
+            New pull requests start as drafts. Automated first reviews then wait
+            until a PR is marked ready for review (unless review of drafts is
+            enabled). You can still change the draft toggle per pull request.
+          </p>
+        </div>
+        <div className="space-y-1.5">
           <form.AppField name="analyticsEnabled">
             {(field) => (
               <field.CheckboxField

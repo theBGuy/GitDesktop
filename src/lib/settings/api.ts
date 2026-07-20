@@ -245,6 +245,12 @@ export interface AppSettings {
    *  Read undefined-safe (absent on settings stored before this field existed →
    *  `false`) via the DEFAULT_SETTINGS spread in loadSettings. */
   reviewDraftPrs: boolean;
+  /** Default new pull requests to draft: the Create-PR dialog's "Create as
+   *  draft" checkbox starts ticked. Off by default (unchanged behavior); the
+   *  user can still untick it per-dialog. Read undefined-safe (absent on
+   *  settings stored before this field existed → `false`) via the
+   *  DEFAULT_SETTINGS spread in loadSettings. */
+  createPrsAsDraft: boolean;
   /** First-run nudge toward the user guide; set once the user opens or dismisses it. */
   seenGuideNudge: boolean;
   /** Send anonymous usage events to PostHog. Default on (opt-out). */
@@ -322,6 +328,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   autoFetch: true,
   autoFetchInterval: "10",
   reviewDraftPrs: false,
+  createPrsAsDraft: false,
   seenGuideNudge: false,
   analyticsEnabled: true,
   recordReplay: false,

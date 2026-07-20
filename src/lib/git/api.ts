@@ -2032,13 +2032,16 @@ export const forgePrRequestChanges = (
 export const forgePrUnrequestChanges = (repoPath: string, number: number) =>
   invoke<void>("forge_pr_unrequest_changes", { repoPath, number });
 
-/** Toggle a PR's draft state — Bitbucket-only (both directions; GitHub keeps its
- *  one-way `gh pr ready` path). */
+/** Toggle a PR's draft state both ways, for all three providers. Bitbucket PUTs
+ *  `draft`; GitLab shells `glab mr update --ready|--draft`; GitHub shells
+ *  `gh pr ready [--undo]`. `lens` is GitHub-only (fork identity) — passed through
+ *  and ignored by the GitLab/Bitbucket arms. */
 export const forgePrSetDraft = (
   repoPath: string,
   number: number,
   draft: boolean,
-) => invoke<void>("forge_pr_set_draft", { repoPath, number, draft });
+  lens?: RemoteLens,
+) => invoke<void>("forge_pr_set_draft", { repoPath, number, draft, lens });
 
 /** Replace a PR's reviewer list (ids from `forgePrReviewerCandidates`) — all
  *  three providers (`implemented.mrReviewers`); create-time reviewers remain
@@ -2828,9 +2831,6 @@ export const fundingSet = (repoPath: string, content: string) =>
 
 export const fundingDelete = (repoPath: string) =>
   invoke<void>("funding_delete", { repoPath });
-
-export const ghPrReady = (repoPath: string, number: number, lens: RemoteLens) =>
-  invoke<void>("gh_pr_ready", { repoPath, number, lens });
 
 export const forgePrEdit = (
   repoPath: string,

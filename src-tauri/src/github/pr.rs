@@ -1043,18 +1043,33 @@ pub async fn gh_repo_fork(repo_path: String, contribute_to_parent: bool) -> AppR
     Ok(fork_url)
 }
 
-/// Marks a draft PR as ready for review.
+/// Marks a draft PR as ready for review (the one-way Tauri command; kept
+/// backward-compatible). Delegates to [`gh_pr_set_ready`] with `ready = true`.
 #[tauri::command]
 pub async fn gh_pr_ready(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
+    gh_pr_set_ready(&repo_path, number, true, lens.as_deref()).await
+}
+
+/// Sets a pull request's draft state via `gh pr ready`: `ready = true` marks a
+/// draft ready for review; `ready = false` appends `--undo` to convert an open PR
+/// back to a draft ("Convert a pull request to draft"). Lens-aware, so a fork's PR
+/// resolves against the chosen remote rather than the parent gh auto-detects. gh's
+/// own error for plans that don't support draft conversion ("If supported by your
+/// plan") passes through as the actionable message — deliberately not pre-gated.
+pub(crate) async fn gh_pr_set_ready(
+    repo_path: &str,
+    number: u64,
+    ready: bool,
+    lens: Option<&str>,
+) -> AppResult<()> {
     let n = number.to_string();
-    // Resolve the lens slug so the PR is marked ready on the chosen repo.
-    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
-    run_gh(
-        Some(&repo_path),
-        &["pr", "ready", &n, "--repo", &slug],
-        GH_NETWORK_TIMEOUT,
-    )
-    .await?;
+    // Resolve the lens slug so the state change lands on the chosen repo.
+    let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
+    let mut args = vec!["pr", "ready", &n, "--repo", &slug];
+    if !ready {
+        args.push("--undo");
+    }
+    run_gh(Some(repo_path), &args, GH_NETWORK_TIMEOUT).await?;
     Ok(())
 }
 

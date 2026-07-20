@@ -38,7 +38,9 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
 - **The whole PR lifecycle, in-app** — review, comment, label, **assign**, **request
   reviewers**, approve, edit, and merge (merge/squash/rebase) GitHub PRs without the
   browser. Set **labels and assignees** right when you **open** a PR/MR (GitHub &
-  GitLab); request reviewers across GitHub, GitLab & Bitbucket.
+  GitLab); request reviewers across GitHub, GitLab & Bitbucket. Flip a PR between
+  **draft and ready for review** either way — on GitHub, GitLab & Bitbucket — and
+  **create new PRs as drafts by default** (Settings → General).
   - **Activity feed** — a PR's Conversation is a **date-sorted timeline** of reviews,
     comments, grouped **pushed commits** (each SHA clickable), and events, every entry
     **timestamped** (hover for the exact time), with an
@@ -521,7 +523,9 @@ events (a finished review, checks passing/failing, a PR approved/commented/merge
 review requested from you, a completed CI run, or a finished agent / research / plan run) into a clickable,
 clearable history that survives a restart — so a review that finishes while you're away is
 never a missed click. Open it from the command palette; which events show follows your
-notification settings.
+notification settings. A cancelled or failed **automated** review also lingers in a
+**Stopped** group with one-click **Re-run** (re-firing exactly that run's mode) and
+**Dismiss**, so a stopped automation isn't a dead end.
 
 **Environment check** — a Settings → **About** panel reports your app/OS/Tauri
 versions and the status of every CLI GitDesktop uses (git, the GitHub & GitLab

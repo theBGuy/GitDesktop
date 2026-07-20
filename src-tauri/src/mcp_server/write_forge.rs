@@ -123,8 +123,8 @@ struct UpdatePullRequestArgs {
 struct SetPullRequestDraftArgs {
     /// The pull request number.
     number: u64,
-    /// True to mark it a draft, false to mark it ready. (Provider support varies —
-    /// Bitbucket toggles both ways; the forge layer surfaces the limitation otherwise.)
+    /// True to mark it a draft, false to mark it ready. Works both ways on all three
+    /// providers (Bitbucket PUT, GitLab `glab mr update`, GitHub `gh pr ready [--undo]`).
     draft: bool,
 }
 
@@ -621,9 +621,11 @@ impl GitDesktopMcp {
 
     #[tool(
         description = "Set a pull request's draft state (by number) in the bound repository's forge \
-                       (per its remote). Provider support varies — Bitbucket toggles both ways; on \
-                       GitHub/GitLab the forge layer returns an actionable error where this control \
-                       doesn't apply. Requires --allow-remote-write.",
+                       (GitHub, GitLab, or Bitbucket, per its remote). Works on all three: Bitbucket \
+                       toggles the `draft` field both ways; GitLab shells `glab mr update --ready|\
+                       --draft`; GitHub shells `gh pr ready` (and `gh pr ready --undo` to convert an \
+                       open PR back to a draft) under the authenticated CLI. Requires \
+                       --allow-remote-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn set_pull_request_draft(
@@ -631,7 +633,8 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<SetPullRequestDraftArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
-        crate::forge::forge_pr_set_draft(self.repo.clone(), args.number, args.draft)
+        // The MCP tool has no fork-lens concept — pass `None` (GitHub arm only reads it).
+        crate::forge::forge_pr_set_draft(self.repo.clone(), args.number, args.draft, None)
             .await
             .map_err(app_err)?;
         json_result(&serde_json::json!({ "pull_request": args.number, "draft": args.draft }))

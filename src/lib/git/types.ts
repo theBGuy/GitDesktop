@@ -755,6 +755,11 @@ export interface ForgeImplemented {
   /** Submitting a batch review (verdict + summary + staged draft comments) — a
    *  shared control (GitHub review submit, GitLab batch note post). */
   mrReviewSubmit: boolean;
+  /** Toggling a PR/MR's draft state both ways from the shared Ready /
+   *  Convert-to-draft control. GitLab (`glab mr update --ready|--draft`) and
+   *  Bitbucket (PUT `draft`) true; GitHub keeps its Ready/Convert path via
+   *  `gh pr ready [--undo]` gated on `canWrite`, so it stays false here. */
+  mrDraftToggle: boolean;
 }
 
 /** One pull-request task (Bitbucket's PR checklist). `id`/`commentId` are numeric

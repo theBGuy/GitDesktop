@@ -1306,19 +1306,27 @@ pub async fn forge_pr_unrequest_changes(repo_path: String, number: u64) -> AppRe
     }
 }
 
-/// Toggle a merge/pull request's draft state. Bitbucket-only: Bitbucket flips
-/// `draft` both ways; GitHub keeps its one-way `gh pr ready` path, and a GitLab
-/// draft is a title prefix (unwired here).
+/// Toggle a merge/pull request's draft state — wired for all three providers, each
+/// via its own mechanism: Bitbucket PUTs `draft` both ways; GitLab shells
+/// `glab mr update <iid> --ready|--draft` (a draft is a `Draft:` title prefix glab
+/// manages); GitHub shells `gh pr ready [--undo]` — `draft = true` appends `--undo`
+/// to convert an open PR back to a draft, `draft = false` marks a draft ready.
+/// `lens` is GitHub-only (see `forge_pr_list`): it resolves a fork's PR against the
+/// chosen remote; the Bitbucket/GitLab arms ignore it. gh's own error on plans that
+/// don't support draft conversion passes through as the actionable message.
 #[tauri::command]
-pub async fn forge_pr_set_draft(repo_path: String, number: u64, draft: bool) -> AppResult<()> {
+pub async fn forge_pr_set_draft(
+    repo_path: String,
+    number: u64,
+    draft: bool,
+    lens: Option<String>,
+) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
         Some((Provider::Bitbucket, _)) => bitbucket::set_pr_draft(&repo_path, number, draft).await,
-        Some((Provider::GitLab, _)) => Err(AppError::InvalidArgument(
-            "GitLab drafts aren't toggleable here yet.".into(),
-        )),
-        _ => Err(AppError::InvalidArgument(
-            "GitHub marks a pull request ready via its own control.".into(),
-        )),
+        Some((Provider::GitLab, _)) => gitlab::set_mr_draft(&repo_path, number, draft).await,
+        // `draft = true` → convert back to draft (`gh pr ready --undo`); `false` →
+        // mark ready. The GitHub arm maps draft-state to the gh `ready` flag.
+        _ => crate::github::pr::gh_pr_set_ready(&repo_path, number, !draft, lens.as_deref()).await,
     }
 }
 

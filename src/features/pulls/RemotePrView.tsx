@@ -99,7 +99,6 @@ import {
   usePrReactions,
   usePrReviewThreads,
   usePrTimeline,
-  useReadyPr,
   useReopenPr,
   useRepoStatus,
   useRequestChangesPr,
@@ -289,8 +288,7 @@ export function RemotePrView({
   const deleteReviewComment = useDeleteReviewComment(repoPath, lens);
   const minimizeComment = useMinimizeComment(repoPath);
   const unminimizeComment = useUnminimizeComment(repoPath);
-  const readyPr = useReadyPr(repoPath, lens);
-  const setDraft = useSetPrDraft(repoPath);
+  const setDraft = useSetPrDraft(repoPath, lens);
   const editPr = useEditPr(repoPath, lens);
   // File:line-anchored review threads (Copilot/CodeRabbit/human line comments).
   // The read serves both the Conversation block below and (later) the Files
@@ -375,6 +373,60 @@ export function RemotePrView({
     "discard-pending-review",
     () => setDiscardConfirmOpen(true),
     draftCount > 0,
+  );
+  // The shared Ready / Convert-to-draft pair is visible when a wired provider
+  // (GitLab/Bitbucket) flags `mrDraftToggle`, OR on GitHub via `canWrite` (its
+  // Ready/Convert routes through `gh pr ready [--undo]`, kept byte-identical). Used
+  // by both the footer buttons and the palette actions below.
+  const isGitHubProvider = providerKey === "github";
+  const draftPairVisible = canToggleDraft || (isGitHubProvider && canWrite);
+  // One in-flight PR mutation at a time: every footer/state control (and the
+  // palette twins below) disables while any of these runs. Declared here, above
+  // the palette wiring, so the actions can share the exact same gate.
+  const busy =
+    comment.isPending ||
+    mergePr.isPending ||
+    closePr.isPending ||
+    reopenPr.isPending ||
+    approvePr.isPending ||
+    unapprovePr.isPending ||
+    requestChangesPr.isPending ||
+    unrequestChangesPr.isPending ||
+    armAutoMerge.isPending ||
+    cancelAutoMerge.isPending ||
+    setDraft.isPending;
+  // Palette twins of the footer's draft controls (mounted here, so live only in an
+  // open remote-PR view with the applicable state). Each reuses the exact same
+  // `setDraft` mutation as its button — Ready fires the ready-review automation.
+  useHotkeyAction(
+    "pr-ready-for-review",
+    () =>
+      setDraft.mutate(
+        { number, draft: false },
+        {
+          onSuccess: () => {
+            toast.success("Marked ready for review");
+            void fireReadyReview();
+          },
+          onError,
+        },
+      ),
+    draftPairVisible && !!details.data?.isDraft && !busy,
+  );
+  useHotkeyAction(
+    "pr-convert-to-draft",
+    () =>
+      setDraft.mutate(
+        { number, draft: true },
+        {
+          onSuccess: () => toast.success("Converted to draft"),
+          onError,
+        },
+      ),
+    draftPairVisible &&
+      !details.data?.isDraft &&
+      details.data?.state === "OPEN" &&
+      !busy,
   );
 
   const [composeBody, setComposeBody] = useState("");
@@ -910,20 +962,6 @@ export function RemotePrView({
   // list filters these out to avoid a duplicate pending+completed chip. GitHub never
   // overlaps (its completed reviewers have already left `pr.reviewers`).
   const completedLogins = new Set(completedReviewers.map((c) => c.login));
-  const busy =
-    comment.isPending ||
-    mergePr.isPending ||
-    closePr.isPending ||
-    reopenPr.isPending ||
-    approvePr.isPending ||
-    unapprovePr.isPending ||
-    requestChangesPr.isPending ||
-    unrequestChangesPr.isPending ||
-    armAutoMerge.isPending ||
-    cancelAutoMerge.isPending ||
-    readyPr.isPending ||
-    setDraft.isPending;
-
   function saveCommentEdit(commentId: string, body: string) {
     editComment.mutate(
       { number, commentId, body },
@@ -1924,33 +1962,18 @@ export function RemotePrView({
         </div>
       )}
 
-      {/* The open-MR footer hosts Close + Merge (GitLab writes too) alongside Ready
-          (GitHub-only) — show it whenever any is available, and gate each control
-          individually. */}
+      {/* The open-MR footer hosts Close + Merge (GitLab writes too) alongside the
+          shared Ready / Convert-to-draft pair — show it whenever any is available,
+          and gate each control individually. */}
       {isOpen && (canChangeState || canMerge || canWrite) && (
         <div className="flex items-center gap-2 border-t p-3">
-          {canWrite && pr.isDraft && (
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={busy}
-              onClick={() =>
-                readyPr.mutate(number, {
-                  onSuccess: () => {
-                    toast.success("Marked ready for review");
-                    void fireReadyReview();
-                  },
-                  onError,
-                })
-              }
-            >
-              Ready for review
-            </Button>
-          )}
-          {/* Bitbucket toggles draft BOTH ways (GitHub's gh path above is
-              one-way): the same PUT flips it back, so a ready PR offers a
-              quieter Convert-to-draft alongside the primary Ready button. */}
-          {canToggleDraft && pr.isDraft && (
+          {/* One Ready / Convert-to-draft pair for all three providers. GitLab
+              (`glab mr update`) and Bitbucket (PUT `draft`) drive it off
+              `canToggleDraft`; GitHub folds in via `canWrite` and routes the same
+              `setDraft` mutation through `gh pr ready [--undo]`, so the Ready button
+              is byte-identical to before. Draft → primary Ready (fires the
+              ready-review automation); open → a quieter Convert-to-draft. */}
+          {draftPairVisible && pr.isDraft && (
             <Button
               variant="outline"
               size="sm"
@@ -1971,7 +1994,7 @@ export function RemotePrView({
               Ready for review
             </Button>
           )}
-          {canToggleDraft && !pr.isDraft && (
+          {draftPairVisible && !pr.isDraft && (
             <Button
               variant="ghost"
               size="sm"

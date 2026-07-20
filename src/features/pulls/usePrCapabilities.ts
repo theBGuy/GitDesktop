@@ -65,10 +65,13 @@ export function usePrCapabilities(
   // (GitHub diffs pending user requests via `gh pr edit`, GitLab PUTs
   // `reviewer_ids`, Bitbucket picks workspace members).
   const canEditReviewers = forgeFeatureReady(forgeData, "mrReviewers");
-  // Bitbucket toggles draft BOTH ways via the same edit surface (GitHub's
-  // one-way Ready button below stays on `canWrite` + `gh pr ready`).
-  const canToggleDraft =
-    provider === "bitbucket" && forgeFeatureReady(forgeData, "mrEdit");
+  // The shared draft toggle (both ways) for GitLab + Bitbucket, gated on the forge
+  // feature alone — never `canWrite || …`. GitHub is NOT in this flag: its
+  // Ready / Convert-to-draft path goes via `gh pr ready [--undo]` gated on
+  // `canWrite`, and the footer folds that in as `canToggleDraft || (isGitHub &&
+  // canWrite)`, so `mrDraftToggle` stays false for GitHub (see the forge-gating
+  // convention above).
+  const canToggleDraft = forgeFeatureReady(forgeData, "mrDraftToggle");
   // Time tracking is GitLab-only too (GitHub has no built-in time tracking).
   const canTrackTime = forgeFeatureReady(forgeData, "timeTracking");
   // PR tasks are a native Bitbucket concept (no GitHub/GitLab analogue wired), so

@@ -644,6 +644,18 @@ export const ACTIONS = [
     defaultBinding: null,
   },
   {
+    id: "pr-ready-for-review",
+    label: "Ready for review",
+    category: "Pull requests",
+    defaultBinding: null,
+  },
+  {
+    id: "pr-convert-to-draft",
+    label: "Convert to draft",
+    category: "Pull requests",
+    defaultBinding: null,
+  },
+  {
     id: "submit-review",
     label: "Submit review…",
     category: "Pull requests",

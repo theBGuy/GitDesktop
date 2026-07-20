@@ -2590,6 +2590,7 @@ const NO_FORGE_STATUS: ForgeStatus = {
     commitComments: false,
     mrThreadCreate: false,
     mrReviewSubmit: false,
+    mrDraftToggle: false,
   },
 };
 
@@ -3800,13 +3801,42 @@ export function useUnrequestChangesPr(repo: string) {
   );
 }
 
-/** Toggle a PR's draft state (Bitbucket-only — both directions, unlike GitHub's
- *  one-way `gh pr ready`). Invalidation via useRepoMutation refreshes the badge
- *  and the merge gate. */
-export function useSetPrDraft(repo: string) {
-  return useRepoMutation(repo, (args: { number: number; draft: boolean }) =>
-    api.forgePrSetDraft(repo, args.number, args.draft),
-  );
+/** Toggle a PR's draft state both ways, for all three providers (Bitbucket PUT,
+ *  GitLab `glab mr update`, GitHub `gh pr ready [--undo]`). `lens` threads the
+ *  fork identity through to the GitHub arm. Optimistically patches the PR detail's
+ *  `isDraft` with field-scoped rollback (mirroring `useSetPrAssignees`) so the
+ *  badge flips instantly; the repo-wide invalidate on settle reconciles server
+ *  truth and refreshes the merge gate. */
+export function useSetPrDraft(repo: string, lens: RemoteLens) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { number: number; draft: boolean }) =>
+      api.forgePrSetDraft(repo, args.number, args.draft, lens),
+    onMutate: async (args) => {
+      const key = ["repo", repo, "pr", lens, args.number] as const;
+      await queryClient.cancelQueries({ queryKey: key });
+      const prev = queryClient.getQueryData<PrDetails>(key);
+      queryClient.setQueryData<PrDetails>(key, (d) =>
+        d ? { ...d, isDraft: args.draft } : d,
+      );
+      // Field-scoped rollback: capture only the isDraft we flipped, not the whole
+      // PrDetails, so a failed draft-set doesn't revert a concurrent
+      // assignee/reviewer-set sharing this PR key.
+      return { key, prevIsDraft: prev?.isDraft };
+    },
+    onError: (_e, _args, ctx) => {
+      const prevIsDraft = ctx?.prevIsDraft;
+      const key = ctx?.key;
+      if (prevIsDraft === undefined || key === undefined) return;
+      queryClient.setQueryData<PrDetails>(key, (cur) =>
+        cur ? { ...cur, isDraft: prevIsDraft } : cur,
+      );
+    },
+    // Repo-wide reconcile (what useRepoMutation's default gave before this went
+    // optimistic) so the PR badge AND the merge gate both refresh on settle.
+    onSettled: () =>
+      queryClient.invalidateQueries({ queryKey: repoKeys.all(repo) }),
+  });
 }
 
 /** The reviewer picker's candidates (Bitbucket: workspace members minus the user the
@@ -5448,12 +5478,6 @@ export function useSetRulesetEnforcement(repo: string) {
     onSettled: () =>
       queryClient.invalidateQueries({ queryKey: rulesetsKey(repo) }),
   });
-}
-
-export function useReadyPr(repo: string, lens: RemoteLens) {
-  return useRepoMutation(repo, (number: number) =>
-    api.ghPrReady(repo, number, lens),
-  );
 }
 
 export function useEditPr(repo: string, lens: RemoteLens) {

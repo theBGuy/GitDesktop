@@ -586,7 +586,9 @@ Browse open/closed PRs and open one in a full in-app view: description, commits,
 files with diffs, and CI checks. From there you can **comment** (with quote-reply),
 **review** (approve / comment / request changes), **edit** the title and body, manage
 **labels**, **assignees**, and **reviewers** (request a review from a collaborator — the
-picker excludes the PR author, whom GitHub won't let you request), mark a draft **ready**,
+picker excludes the PR author, whom GitHub won't let you request), flip a PR between
+**draft** and **ready for review** in either direction (a footer **Ready for review** /
+**Convert to draft** pair, also reachable from the command palette),
 **merge** (merge commit, squash, or rebase, with optional branch deletion), and **close**.
 Reviewers who've already reviewed show as read-only chips carrying their verdict — a check
 for **approved**, an X for **requested changes**, a speech bubble for **commented** (icon
@@ -736,7 +738,9 @@ were dropped), track **time** on it (a clock summary in the
 header opens a popover to set an estimate and log spent time), and **merge**
 it — merge or squash, optionally deleting
 the source branch, guarded so it never merges a head you didn't see (GitLab applies the project's
-configured merge method, so there's no separate "rebase" option). While a pipeline is running the
+configured merge method, so there's no separate "rebase" option). You can also flip the MR
+between **draft** and **ready for review** in either direction — a footer **Ready for review** /
+**Convert to draft** pair, also in the command palette. While a pipeline is running the
 merge menu also offers **auto-merge** (merge when the pipeline succeeds) — GitLab merges it for
 you once the pipeline passes, and an **Auto-merge enabled** indicator in the footer lets you cancel
 it in place. Its **line-anchored review comments** render too — grouped by file in the
@@ -1596,7 +1600,10 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
 
 - **General** — hide AI features, keep running in the **system tray** on close (so
   background work continues; launching the app again while it's running —
-  tray-hidden or not — focuses the existing window), and privacy options.
+  tray-hidden or not — focuses the existing window), **create pull requests as drafts**
+  by default (off by default — pre-checks the Create-PR dialog's draft box, still
+  overridable per PR; pairs with *Review draft PRs when created* so a draft's automated
+  first review waits until it's marked ready), and privacy options.
 {{ai}}- **AI** — providers, models, keys, instructions, agent-session isolation
   (worktree / container), and the container image.
 - **Slash commands** — manage built-in and custom agent commands.
@@ -1609,7 +1616,11 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   persistent, click-to-open history (it survives a restart) so a finished review or a PR
   update is never a missed moment. Open it from the command palette
   ({{kbd:command-palette}} → *Activity & notifications*), click an entry to jump to it,
-  arrow-key through the list, and clear items or mark all read.
+  arrow-key through the list, and clear items or mark all read.{{ai}} When an
+  **automated** review or security audit is cancelled or fails, it stays in the popover
+  under a **Stopped** group with **Re-run** (re-fires exactly that run's mode) and
+  **Dismiss** — and a failed automated run also lands a *review failed* row in the inbox,
+  matching a manual run (both gated on the automations notification preference).{{/ai}}
 - **Keyboard** — rebind any shortcut, with live key-capture.
 - **Accounts** — your **GitHub** and **GitLab** sign-ins and your **Bitbucket**
   connection. **Sign in to GitHub…** and **Sign in to gitlab.com…** run the CLI's

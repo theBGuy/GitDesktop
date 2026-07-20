@@ -1892,6 +1892,24 @@ pub async fn reopen_mr(repo_path: &str, number: u64) -> AppResult<()> {
     set_mr_state(repo_path, number, "reopen").await
 }
 
+/// Set a merge request's draft state via `glab mr update <iid> --ready | --draft`.
+/// A GitLab draft is a `Draft:` title prefix; `glab mr update` handles adding and
+/// stripping that prefix for us (both flags validated live), which is why this
+/// shells the `mr` subcommand rather than PATCHing the title itself. The project is
+/// resolved from the repo directory context (`Some(repo_path)`), matching the iid's
+/// scope; `number` is a u64 (digits only) so it's safe to pass positionally.
+pub async fn set_mr_draft(repo_path: &str, number: u64, draft: bool) -> AppResult<()> {
+    let iid = number.to_string();
+    let flag = if draft { "--draft" } else { "--ready" };
+    run_glab(
+        Some(repo_path),
+        &["mr", "update", &iid, flag],
+        GLAB_NETWORK_TIMEOUT,
+    )
+    .await?;
+    Ok(())
+}
+
 /// Edit a merge request's title/description. Mirrors `gh_pr_edit` (empty-title
 /// guard; an empty body clears the description). Validated live: `-f` keeps
 /// multi-line/comma/`=`/`@`/leading-`-` values intact.

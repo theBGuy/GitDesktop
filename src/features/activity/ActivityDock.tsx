@@ -38,6 +38,7 @@ import {
 import {
   cancelReview,
   type ReviewTask,
+  resetReview,
   useReviewTasks,
 } from "@/lib/stores/reviews";
 import { useUiStore } from "@/lib/stores/ui";
@@ -74,7 +75,15 @@ export function ActivityStrip() {
   // reachable even with an empty inbox on the welcome/settings/help screens).
   if (view === "repo") return null;
   const live = liveTasks(tasks);
-  if (live.length === 0 && notifs.length === 0 && !activityOpen) return null;
+  const stopped = stoppedTasks(tasks);
+  if (
+    live.length === 0 &&
+    stopped.length === 0 &&
+    notifs.length === 0 &&
+    !activityOpen
+  ) {
+    return null;
+  }
   return (
     <div className="flex h-7 shrink-0 items-center border-t bg-background px-1.5">
       <ActivityBell variant="strip" />
@@ -86,6 +95,15 @@ function liveTasks(tasks: ReviewTask[]): ReviewTask[] {
   return tasks.filter((t) => t.phase === "running" || t.phase === "queued");
 }
 
+/** Stopped automation runs — cancelled or failed rows that carry a `rerun`. The
+ *  `rerun` presence is the discriminator: a manual panel run also reaches
+ *  "cancelled"/"error" but never carries one, so it's kept out of the dock. */
+function stoppedTasks(tasks: ReviewTask[]): ReviewTask[] {
+  return tasks.filter(
+    (t) => (t.phase === "cancelled" || t.phase === "error") && t.rerun,
+  );
+}
+
 function ActivityBell({ variant }: { variant: "header" | "strip" }) {
   const tasks = useReviewTasks();
   const unread = useUnreadCount();
@@ -94,10 +112,13 @@ function ActivityBell({ variant }: { variant: "header" | "strip" }) {
   const open = useUiStore((s) => s.activityOpen);
   const setOpen = useUiStore((s) => s.setActivityOpen);
   const live = liveTasks(tasks).length;
+  const stopped = stoppedTasks(tasks).length;
 
   const label = `Activity & notifications${
     unread > 0 ? ` · ${unread} unread` : ""
-  }${live > 0 ? ` · ${live} in progress` : ""}`;
+  }${live > 0 ? ` · ${live} in progress` : ""}${
+    stopped > 0 ? ` · ${stopped} stopped` : ""
+  }`;
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -144,6 +165,7 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
   const listRef = useRef<HTMLDivElement>(null);
 
   const live = liveTasks(tasks);
+  const stopped = stoppedTasks(tasks);
   // Queue position per lane (local + cloud run independently), FIFO by seq.
   const queuePos = new Map<string, number>();
   for (const isLocal of [true, false]) {
@@ -213,6 +235,26 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
                 queuePosition={
                   task.phase === "queued" ? (queuePos.get(task.key) ?? 0) : 0
                 }
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {stopped.length > 0 && (
+        <div className="border-b">
+          <div className="flex items-center justify-between px-3 py-2">
+            <span className="text-xs font-medium">Stopped</span>
+            <span className="text-[11px] text-muted-foreground tabular-nums">
+              {stopped.length}
+            </span>
+          </div>
+          <div className="max-h-44 overflow-y-auto">
+            {stopped.map((task) => (
+              <StoppedTaskRow
+                key={task.key}
+                task={task}
+                crossRepo={task.target.repoPath !== repoPath}
               />
             ))}
           </div>
@@ -310,6 +352,68 @@ function LiveTaskRow({
         onClick={() => cancelReview(task.key)}
       >
         Cancel
+      </Button>
+    </div>
+  );
+}
+
+/** A cancelled/failed automation run, kept in the dock (unlike a live row) with
+ *  Re-run + Dismiss. Failed rows carry the error in the subtitle's tooltip and
+ *  render "Failed" in the destructive token (word + color, never color alone). */
+function StoppedTaskRow({
+  task,
+  crossRepo,
+}: {
+  task: ReviewTask;
+  crossRepo: boolean;
+}) {
+  const ModeIcon = task.mode === "security" ? ShieldCheckIcon : SparkleIcon;
+  const modeName = task.mode === "security" ? "Security audit" : "Review";
+  const failed = task.phase === "error";
+  const title = task.title || "Pull request";
+
+  return (
+    <div className="flex items-start gap-2 px-3 py-2 not-last:border-b">
+      <ModeIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-xs font-medium" title={task.title}>
+          {title}
+        </p>
+        <p
+          className="mt-0.5 truncate text-[11px] text-muted-foreground"
+          title={failed ? task.error : undefined}
+        >
+          {modeName} ·{" "}
+          {failed ? (
+            <span className="text-destructive">Failed</span>
+          ) : (
+            "Cancelled"
+          )}
+          {crossRepo ? ` · ${task.target.repoName}` : ""}
+        </p>
+      </div>
+      <Button
+        variant="ghost"
+        size="xs"
+        className="shrink-0"
+        aria-label={`Re-run ${title}`}
+        onClick={() => {
+          // Remove the stopped row first; the re-fired run registers a fresh
+          // "Running…" row through the normal automation path.
+          resetReview(task.key);
+          task.rerun?.();
+        }}
+      >
+        Re-run
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon-xs"
+        className="shrink-0 self-start text-muted-foreground"
+        aria-label={`Dismiss "${title}"`}
+        onClick={() => resetReview(task.key)}
+      >
+        <XIcon />
       </Button>
     </div>
   );

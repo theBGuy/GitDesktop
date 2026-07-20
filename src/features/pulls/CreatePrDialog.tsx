@@ -233,7 +233,10 @@ export function CreatePrDialog({
       base: "",
       title: "",
       body: "",
-      draft: false,
+      // Seed from the setting so a user who defaults new PRs to draft opens the
+      // dialog pre-ticked; undefined-safe (settings pending / pre-field store →
+      // false). The reset() on open re-applies this so a stored change takes.
+      draft: settings.data?.createPrsAsDraft ?? false,
       notes: "",
     },
     validators: {
@@ -388,7 +391,10 @@ export function CreatePrDialog({
         base: defaultBase ?? fallbackBase,
         title: "",
         body: "",
-        draft: false,
+        // Seed each open from the setting (undefined-safe → false), so the draft
+        // default reflects the current preference without leaking a prior open's
+        // per-dialog toggle.
+        draft: settings.data?.createPrsAsDraft ?? false,
         // Cleared on open; ReviewerNotesField re-seeds from the head branch's
         // deposit (if any) once its query resolves.
         notes: "",

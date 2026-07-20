@@ -298,6 +298,13 @@ pub struct Implemented {
     /// request-changes verdict) in one action. All three providers wire it, so it's
     /// true for each.
     pub mr_review_submit: bool,
+    /// Toggling a merge/pull request's draft state BOTH ways from the shared
+    /// Ready / Convert-to-draft control. GitLab (`glab mr update --ready|--draft`)
+    /// and Bitbucket (PUT `draft`) drive that control off this flag. GitHub stays
+    /// `false`: its Ready/Convert path goes through `gh pr ready [--undo]` gated on
+    /// `canWrite` (the forge-gating convention for a shared control whose GitHub arm
+    /// has its own gate), so the frontend enables it there without this flag.
+    pub mr_draft_toggle: bool,
 }
 
 impl Implemented {
@@ -371,6 +378,9 @@ impl Implemented {
             commit_comments: true,
             mr_thread_create: true,
             mr_review_submit: true,
+            // GitHub's Ready / Convert-to-draft goes via `gh pr ready [--undo]`
+            // gated on `canWrite`, not this flag.
+            mr_draft_toggle: false,
         }
     }
 
@@ -428,6 +438,7 @@ impl Implemented {
             commit_comments: false,
             mr_thread_create: false,
             mr_review_submit: false,
+            mr_draft_toggle: false,
         }
     }
 
@@ -515,6 +526,8 @@ impl Implemented {
                 commit_comments: true,
                 mr_thread_create: true,
                 mr_review_submit: true,
+                // Draft toggle both ways via `glab mr update --ready|--draft`.
+                mr_draft_toggle: true,
             },
             // Bitbucket Cloud reads (Phase 3): PR list/view/diff, CI pipelines, and
             // repo View/URL are wired over direct HTTP. Phase 4 adds the WRITES: PR
@@ -569,6 +582,8 @@ impl Implemented {
                 commit_comments: true,
                 mr_thread_create: true,
                 mr_review_submit: true,
+                // Draft toggle both ways (PUT `draft`).
+                mr_draft_toggle: true,
                 ..Self::none()
             },
         }
@@ -736,6 +751,9 @@ mod tests {
         assert!(i.mr_review_threads && i.mr_thread_reply && i.mr_thread_resolve);
         // Commit comments, new-thread create, and batched review submit — all three.
         assert!(i.commit_comments && i.mr_thread_create && i.mr_review_submit);
+        // The draft toggle stays false for GitHub — its Ready/Convert path goes via
+        // `gh pr ready [--undo]` gated on canWrite, not this flag.
+        assert!(!i.mr_draft_toggle);
     }
 
     #[test]
@@ -785,6 +803,8 @@ mod tests {
         assert!(imp.mr_thread_comment_edit);
         // …plus commit comments, new-thread create, and batched review submit.
         assert!(imp.commit_comments && imp.mr_thread_create && imp.mr_review_submit);
+        // …and the draft toggle both ways (`glab mr update --ready|--draft`).
+        assert!(imp.mr_draft_toggle);
     }
 
     #[test]
@@ -837,5 +857,9 @@ mod tests {
         assert!(bb.mr_thread_comment_edit);
         // …plus commit comments, new-thread create, and batched review submit.
         assert!(bb.commit_comments && bb.mr_thread_create && bb.mr_review_submit);
+        // …and the draft toggle both ways (PUT `draft`).
+        assert!(bb.mr_draft_toggle);
+        // GitHub keeps the draft toggle off (its Ready/Convert path is gh-native).
+        assert!(!gh.mr_draft_toggle);
     }
 }

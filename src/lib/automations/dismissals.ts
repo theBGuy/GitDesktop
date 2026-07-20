@@ -77,3 +77,23 @@ export async function setDismissedHead(
   const all = (await store.get<DismissalMap>(key)) ?? {};
   await store.set(key, { ...all, [cellKey(kind, ref, mode)]: headSha });
 }
+
+/**
+ * Clears the dismissed-head watermark for a PR + mode. Called when a cancelled
+ * automation run is re-run: the cancel wrote a dismissed head, and without
+ * clearing it a subsequent pr-sync (or the re-run itself) silently no-ops at the
+ * runner's `sameSha(dismissedHead, headSha)` gate. Best-effort at the call site
+ * — a clear failure must not block the re-run.
+ */
+export async function clearDismissedHead(
+  repo: string,
+  kind: "remote" | "local",
+  ref: string,
+  mode: ReviewMode,
+): Promise<void> {
+  const store = await getStore();
+  const key = await keyFor(repo);
+  const all = (await store.get<DismissalMap>(key)) ?? {};
+  delete all[cellKey(kind, ref, mode)];
+  await store.set(key, all);
+}

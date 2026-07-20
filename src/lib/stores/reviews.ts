@@ -103,6 +103,12 @@ export interface ReviewEntry {
    *  a single patch, so it lives on the entry, not the per-token `texts` map). The
    *  panel shows it behind a "Thought process" disclosure; the dock ignores it. */
   thoughts?: string;
+  /** Re-fires this run through the automation pipeline — set ONLY on automation
+   *  rows (by {@link registerAutomationRun}). Its presence is the discriminator
+   *  that a stopped (cancelled/error) row belongs in the dock's Stopped group: a
+   *  manual panel run also reaches "cancelled"/"error" but never carries a rerun,
+   *  so it's kept out. */
+  rerun?: () => void;
 }
 
 /** A store entry tagged with its key — what the activity dock renders. */
@@ -191,6 +197,31 @@ const controls = new Map<string, RunControl>();
 
 /** Monotonic counter stamped on each run for exact start-order display. */
 let reviewSeq = 0;
+
+/** How many stopped (cancelled/error) automation rows the dock keeps at once. */
+const MAX_STOPPED_ROWS = 8;
+
+/**
+ * After a transition to a stopped state, cap the retained stopped automation
+ * rows — keep at most {@link MAX_STOPPED_ROWS} entries that are automation
+ * (`auto:` key) AND in a stopped phase (cancelled/error), evicting the oldest by
+ * `seq`. Manual panel runs and live/finished rows are never touched. Called from
+ * both terminal stopped paths (cancelReview's auto arm + a run handle's fail).
+ */
+function enforceStoppedCap(): void {
+  const { entries } = useReviewStore.getState();
+  const stopped = Object.entries(entries)
+    .filter(
+      ([key, e]) =>
+        key.startsWith("auto:") &&
+        (e.phase === "cancelled" || e.phase === "error"),
+    )
+    .sort((a, b) => a[1].seq - b[1].seq); // oldest first
+  const excess = stopped.length - MAX_STOPPED_ROWS;
+  for (let i = 0; i < excess; i++) {
+    useReviewStore.getState().remove(stopped[i][0]);
+  }
+}
 
 const clamp = (v: number, lo: number, hi: number) =>
   Math.min(hi, Math.max(lo, v));
@@ -588,15 +619,14 @@ export function cancelReview(key: string): void {
     if (i >= 0) control.lane.waiting.splice(i, 1);
     control.wakeQueued();
   }
-  // Automation rows (`auto:` keys) never persist a finished state — remove
-  // outright so the row can't flash a "Cancelled" state (with a live View
-  // button on a display-only target) before the runner's own settle() lands.
-  // Their cancel feedback is the runner's toast.
-  if (key.startsWith("auto:")) {
-    useReviewStore.getState().remove(key);
-  } else {
-    useReviewStore.getState().patch(key, { phase: "cancelled", status: "" });
-  }
+  // Automation rows (`auto:` keys) persist a "Cancelled" stopped row in the dock
+  // (keeping their `rerun`, so Re-run/Dismiss work) — that stopped row IS the
+  // cancel feedback now (the runner's toast still fires too). The runner sees
+  // this patched "cancelled" phase and skips its own settle/remove for the row.
+  // Both arms patch identically; the auto arm additionally caps retained stopped
+  // rows so a long session can't accumulate them without bound.
+  useReviewStore.getState().patch(key, { phase: "cancelled", status: "" });
+  if (key.startsWith("auto:")) enforceStoppedCap();
   controls.delete(key);
 }
 
@@ -627,11 +657,15 @@ export function registerAutomationRun(opts: {
   local: boolean;
   target: ReviewTarget;
   abort: AbortController;
+  /** Re-fires this exact run (event + mode) through the automation pipeline —
+   *  stored on the entry so a stopped row's Re-run button can invoke it. */
+  rerun: () => void;
 }): {
   key: string;
   setCliId(id: string): void;
   isCancelled(): boolean;
   settle(): void;
+  fail(message: string): void;
 } {
   const seq = ++reviewSeq;
   const key = `auto:${seq}`;
@@ -654,6 +688,8 @@ export function registerAutomationRun(opts: {
     target: opts.target,
     seq,
     error: "",
+    // Marks this as an automation row AND powers the stopped row's Re-run.
+    rerun: opts.rerun,
   });
   return {
     key,
@@ -667,6 +703,16 @@ export function registerAutomationRun(opts: {
     settle() {
       useReviewStore.getState().remove(key);
       // Only delete our own control — a dock Cancel may already have removed it.
+      if (controls.get(key) === control) controls.delete(key);
+    },
+    // A genuine failure (not a user cancel): persist a "Failed" stopped row (the
+    // entry keeps its `rerun`) instead of removing it, then cap retained stopped
+    // rows. Deletes only our own control, mirroring settle's own-control guard.
+    fail(message) {
+      useReviewStore
+        .getState()
+        .patch(key, { phase: "error", error: message, status: "" });
+      enforceStoppedCap();
       if (controls.get(key) === control) controls.delete(key);
     },
   };
