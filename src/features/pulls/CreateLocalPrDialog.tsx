@@ -1,4 +1,5 @@
 import { SparkleIcon, XIcon } from "@phosphor-icons/react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useSelector } from "@tanstack/react-store";
 import { useEffect, useEffectEvent } from "react";
 import { toast } from "sonner";
@@ -11,6 +12,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { REVIEWER_NOTES_MARKER } from "@/lib/ai/notes-context";
 import { triggerAutomations } from "@/lib/automations/runner";
 import { required, useAppForm } from "@/lib/form";
 import {
@@ -20,10 +22,13 @@ import {
 } from "@/lib/git/queries";
 import { eventToBinding, formatBinding } from "@/lib/hotkeys/binding";
 import { useEffectiveBindings } from "@/lib/hotkeys/hotkeys";
+import { updateLocalPr } from "@/lib/pulls/local";
 import { useCreateLocalPr } from "@/lib/pulls/queries";
+import { deleteReviewNote } from "@/lib/review-notes/store";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
+import { ReviewerNotesField } from "./ReviewerNotesField";
 import { useBranchPickerOptions } from "./useBranchPickerOptions";
 import { useGeneratePrDescription } from "./useGeneratePrDescription";
 
@@ -54,6 +59,7 @@ export function CreateLocalPrDialog({
   const aiEnabled = useAiEnabled();
   const selectPr = useUiStore((s) => s.selectPr);
   const setRepoTab = useUiStore((s) => s.setRepoTab);
+  const queryClient = useQueryClient();
 
   const currentName = status.data?.branch?.name ?? null;
   // Branch options with per-branch worktree chips; drops the app-internal
@@ -68,7 +74,7 @@ export function CreateLocalPrDialog({
   ]);
 
   const form = useAppForm({
-    defaultValues: { head: "", base: "", title: "", body: "" },
+    defaultValues: { head: "", base: "", title: "", body: "", notes: "" },
     validators: {
       // Same branch on both sides proposes nothing — gate the submit.
       onChange: ({ value }) =>
@@ -82,10 +88,50 @@ export function CreateLocalPrDialog({
           base: value.base,
           head: value.head,
         });
+        const notes = value.notes.trim();
+        // Reviewer notes are an AI-only surface (the field renders only when AI
+        // is enabled), so append + consume are gated on `aiEnabled` — Hide-AI
+        // adds no comment and consumes no deposit (no behavior change).
+        if (aiEnabled) {
+          // Append the author's reviewer notes as the local PR's first comment —
+          // the marker header + blank line + notes, matching the remote wire
+          // shape (notes-context.ts lifts them by that marker). Author-authored
+          // shape (no synthetic `author`, mirroring useLocalConversation
+          // .addComment), so it renders as the user's own comment. The
+          // `updateLocalPr` path reloads disk first, so a concurrent write is
+          // merged, not clobbered. For local PRs the event below is the ONLY
+          // notes carrier the review sees (the runner's marker-comment fetchers
+          // are remote-only), so this comment is for the user, not the AI.
+          if (notes) {
+            try {
+              await updateLocalPr(repoPath, pr.id, (cur) => ({
+                ...cur,
+                comments: [
+                  ...cur.comments,
+                  {
+                    id: crypto.randomUUID(),
+                    body: `${REVIEWER_NOTES_MARKER}\n\n${notes}`,
+                    createdAt: new Date().toISOString(),
+                  },
+                ],
+              }));
+              await queryClient.invalidateQueries({
+                queryKey: ["local-prs", repoPath],
+              });
+            } catch {
+              toast.error("Local PR created — adding reviewer notes failed.");
+            }
+          }
+          // Consume the deposit — the create consumed the note. Best-effort.
+          void deleteReviewNote(repoPath, value.head).catch(() => undefined);
+        }
         toast.success(`Created local PR: ${pr.title}`);
         setRepoTab("pulls");
         selectPr({ kind: "local", id: pr.id });
         onOpenChange(false);
+        // Local PRs have no draft concept — always fire. The event carries the
+        // notes (the runner's marker-comment fetchers are remote-only, so for a
+        // local PR this is the sole path the review sees them).
         triggerAutomations({
           kind: "pr-open",
           repoPath,
@@ -97,6 +143,7 @@ export function CreateLocalPrDialog({
           body: value.body,
           commitSubjects: ahead.map((c) => c.subject),
           target: { type: "local", id: pr.id },
+          reviewNotes: notes || undefined,
         });
       } catch (e) {
         toastError(e);
@@ -118,6 +165,9 @@ export function CreateLocalPrDialog({
         base: defaultBase ?? fallbackBase,
         title: "",
         body: "",
+        // Cleared on open; ReviewerNotesField re-seeds from the head branch's
+        // deposit (if any) once its query resolves.
+        notes: "",
       },
       { keepDefaultValues: true },
     );
@@ -129,6 +179,8 @@ export function CreateLocalPrDialog({
   // Live head/base drive the "N commits to merge" hint and AI generation.
   const head = useSelector(form.store, (s) => s.values.head);
   const base = useSelector(form.store, (s) => s.values.base);
+  // Live notes feed the AI-description prompt and the ReviewerNotesField seeding.
+  const notes = useSelector(form.store, (s) => s.values.notes);
   const comparison = useCompareBranches(repoPath, base || null, head || null);
   const ahead = comparison.data?.ahead ?? [];
   const sameBranch = base === head;
@@ -144,6 +196,12 @@ export function CreateLocalPrDialog({
         form.setFieldValue("title", d.title);
         form.setFieldValue("body", d.body);
       },
+      // Local PRs keep the base GitHub prompt wording (no provider) and propose
+      // no labels; the trailing arg is the author's reviewer notes, reflected
+      // into the generated description.
+      undefined,
+      [],
+      notes.trim() || undefined,
     );
   }
   // Context-sensitive reuse of the `generate-commit-message` binding (mod+g by
@@ -304,6 +362,21 @@ export function CreateLocalPrDialog({
                 />
               )}
             </form.AppField>
+
+            {/* Collapsed "Notes for reviewers": deposit-seeded author context,
+                appended as the local PR's first comment and fed to the AI
+                review via the event. AI-only. */}
+            {aiEnabled && (
+              <form.AppField name="notes">
+                {(field) => (
+                  <ReviewerNotesField
+                    repoPath={repoPath}
+                    head={head || null}
+                    field={field}
+                  />
+                )}
+              </form.AppField>
+            )}
           </div>
 
           <DialogFooter>

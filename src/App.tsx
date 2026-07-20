@@ -22,6 +22,7 @@ import { useBackgroundPrSync } from "@/lib/automations/useBackgroundPrSync";
 import { useGitInstalled } from "@/lib/git/queries";
 import { useHotkeyAction, useHotkeysListener } from "@/lib/hotkeys/hotkeys";
 import { reloadLocalPrs } from "@/lib/pulls/local";
+import { reloadReviewNotes } from "@/lib/review-notes/store";
 import { useSaveSettings, useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { COLD_START } from "@/lib/test-mode";
@@ -144,6 +145,16 @@ function App() {
           reloadLocalPrs()
             .then(() =>
               queryClient.invalidateQueries({ queryKey: ["local-prs"] }),
+            )
+            .catch(() => {
+              // Best-effort: a failed reload just leaves the last known state.
+            });
+          // Same story for review-notes.json — the MCP server can deposit a
+          // per-branch reviewer note while we're unfocused; reload the store
+          // from disk BEFORE invalidating so the refetch sees it.
+          reloadReviewNotes()
+            .then(() =>
+              queryClient.invalidateQueries({ queryKey: ["review-notes"] }),
             )
             .catch(() => {
               // Best-effort: a failed reload just leaves the last known state.

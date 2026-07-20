@@ -267,6 +267,7 @@ export function SettingsScreen() {
               )}
               {activePanel === "automations" && (
                 <AutomationsSection
+                  form={form}
                   onDirtyChange={setAutomationsDirty}
                   onRegisterSave={(fn) => {
                     saveAutomationsRef.current = fn;

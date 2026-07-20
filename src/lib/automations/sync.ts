@@ -125,15 +125,18 @@ export interface CatchUpCandidate {
  * through the untouched runner (claim dedup → review → post → record → toast).
  * Do NOT "simplify" this away: without it, externally-opened PRs get zero signal.
  *
- * Scope is deliberately narrow (user-locked): the viewer's OWN, non-draft, open,
- * recent PRs with no prior review (any mode) and no dismissed head. At most ONE
- * PR is caught up per call (the oldest), bounding burst token spend — the next
- * tick takes the next one.
+ * Scope is deliberately narrow (user-locked): the viewer's OWN, open, recent
+ * PRs with no prior review (any mode) and no dismissed head. Drafts are included
+ * only when `reviewDrafts` is set (the `reviewDraftPrs` setting); off (the
+ * default) they're skipped until marked ready for review. At most ONE PR is
+ * caught up per call (the oldest), bounding burst token spend — the next tick
+ * takes the next one.
  */
 export function maybeCatchUpMissedOpen(
   repoPath: string,
   candidates: CatchUpCandidate[],
   viewerLogin: string | null,
+  reviewDrafts: boolean,
 ): void {
   // A null login means we can't tell which PRs are the viewer's — never guess.
   if (!viewerLogin) return;
@@ -146,7 +149,9 @@ export function maybeCatchUpMissedOpen(
     .filter((c) => {
       if (!c.currentHeadSha) return false;
       if (c.author !== viewerLogin) return false;
-      if (c.isDraft) return false;
+      // Drafts are caught up only when the reviewDraftPrs setting is on;
+      // otherwise they wait until marked ready for review.
+      if (c.isDraft && !reviewDrafts) return false;
       const opened = Date.parse(c.createdAt);
       if (Number.isNaN(opened)) return false;
       if (now - opened > CATCH_UP_WINDOW_MS) return false;

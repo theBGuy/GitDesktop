@@ -6,6 +6,7 @@ import {
   type ExternalContext,
   resolveExternalContext,
 } from "@/lib/ai/external-context";
+import { resolveReviewerNotesContext } from "@/lib/ai/notes-context";
 import {
   type OwnCommentsContext,
   resolveOwnCommentsContext,
@@ -57,6 +58,11 @@ export type AutomationEvent =
       title: string;
       body: string;
       commitSubjects: string[];
+      /** The author's "Notes for reviewers", carried straight from the Create-PR
+       *  dialogs so the review that fires on open sees them without a comment
+       *  round-trip. Absent on catch-up / synthesized events (those recover the
+       *  notes from the marker comment via `resolveReviewerNotesContext`). */
+      reviewNotes?: string;
       target:
         | { type: "remote"; number: number }
         | { type: "local"; id: string };
@@ -446,8 +452,24 @@ async function generateReviewText(
   );
   if (signal.aborted) return null;
 
+  // The author's reviewer notes. Fresh pr-open events carry them straight from
+  // the create dialog (no round-trip); catch-up / pr-sync rounds have no such
+  // event, so fall back to lifting them from the marker comment the dialog posted
+  // (remote PRs only — the runner's comment fetchers are remote-only). The
+  // event-carried notes win when present.
+  const eventNotes =
+    event.kind === "pr-open" && event.reviewNotes?.trim()
+      ? { reviewNotes: event.reviewNotes }
+      : undefined;
+
   const isRemotePr = event.kind !== "commit" && event.target.type === "remote";
-  const [external, own]: [ExternalContext, OwnCommentsContext] = isRemotePr
+  // Resolve external + own + (when not event-carried) reviewer-notes context in
+  // parallel — all three are independent, best-effort remote harvests.
+  const [external, own, resolvedNotes]: [
+    ExternalContext,
+    OwnCommentsContext,
+    { reviewNotes?: string },
+  ] = isRemotePr
     ? await Promise.all([
         resolveExternalContext(
           event.repoPath,
@@ -468,9 +490,19 @@ async function generateReviewText(
             ownBudgetChars: budgetProfile.ownCharBudget,
           },
         ),
+        // Skip the fetch when the event already carries the notes.
+        eventNotes
+          ? Promise.resolve({})
+          : resolveReviewerNotesContext(
+              event.repoPath,
+              (event.target as { type: "remote"; number: number }).number,
+            ),
       ])
-    : [{}, {}];
+    : [{}, {}, {}];
   if (signal.aborted) return null;
+
+  // Event-carried notes take precedence over the lifted marker comment.
+  const notes = eventNotes ?? resolvedNotes;
 
   const { system, prompt } = buildReviewPrompt(
     {
@@ -490,6 +522,7 @@ async function generateReviewText(
       ...prior,
       ...own,
       ...external,
+      ...notes,
     },
     mode,
   );

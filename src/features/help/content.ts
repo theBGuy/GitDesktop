@@ -708,7 +708,14 @@ from the branch diff and commit subjects — which additionally **proposes label
 only from the repository's existing labels and added to whatever you've already picked
 (never invented). The same **Generate** button is on the **Edit** dialog too, so you can
 write or regenerate an existing PR's title and description at any time — including for pull
-requests from forks{{/ai}}. Press {{key:mod+enter}} from any field to submit either the
+requests from forks. The Create dialog also has an optional collapsed **Notes for
+reviewers** field below the description — it pre-fills from any notes an agent (or another
+MCP client with write access) deposited for the head branch via the GitDesktop MCP, and
+you can edit or clear it. When you create the PR, the notes post as its **first
+conversation comment** (under a *🗒️ Notes for reviewers* header, from your own account)
+before any automated review runs, and that review reads them as context — so a deliberate,
+documented decision isn't re-flagged. Notes present here also ground the **AI-generated**
+description{{/ai}}. Press {{key:mod+enter}} from any field to submit either the
 **Create** or the **Edit** dialog.{{ai}} While a PR dialog is open, {{kbd:generate-commit-message}}
 runs its **Generate** for you.{{/ai}}
 
@@ -798,7 +805,11 @@ using your chosen review model, and optionally post the result as a comment. A g
 review builds on **soft context** where it exists: your prior review of the PR, findings
 other AI reviewers (Copilot, CodeRabbit) left, and **GitDesktop's own earlier comments on
 the PR** — replies GitDesktop itself posted inside review threads included — so on a re-review it treats a finding
-it already refuted or marked fixed as resolved instead of raising it cold. When rounds
+it already refuted or marked fixed as resolved instead of raising it cold. It also reads
+any **Notes for reviewers** the author left — deposited per branch by an agent through the
+GitDesktop MCP, or typed into the Create PR dialog and posted as the PR's first comment —
+as first-class grounding context, so a deliberate, documented decision isn't re-flagged.
+When rounds
 accumulate past the prompt budget, the newest comments win, and the full history is
 **distilled into a compact decision ledger** (via your generation model) rather than cut
 off. See *AI & automations* to pick the review model. The **Review context** size there
@@ -1485,7 +1496,9 @@ request opened*, and *On new commits to a reviewed PR* — with **AI code review
 security audit** as toggles under each. There's no "add a rule" — a given moment × action
 exists at most once, so you can't create conflicting duplicates. Reviews use the review model
 from the AI section; PR results are posted as a comment, commit results open from a
-notification.
+notification. **Review draft PRs when created** (off by default) controls draft handling:
+left off, a draft PR gets its automated first review when you mark it ready for review, not
+at creation.
 
 - **Branch conditions.** Each enabled action can be scoped to branches: *only these branches*
   (include globs) and *except these* (exclude globs — an exclude always wins; an empty include

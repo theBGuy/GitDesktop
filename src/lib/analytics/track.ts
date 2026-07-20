@@ -22,7 +22,11 @@ export type AnalyticsEvent =
     }
   | {
       name: "pull_request_created";
-      properties: { is_draft: boolean; has_ai_description: boolean };
+      properties: {
+        is_draft: boolean;
+        has_ai_description: boolean;
+        has_review_notes: boolean;
+      };
     }
   | {
       name: "ai_review_triggered";

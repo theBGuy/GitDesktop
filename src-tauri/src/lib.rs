@@ -23,6 +23,7 @@ mod oplog;
 mod path_launcher;
 mod pty;
 mod research;
+mod review_notes;
 mod secrets;
 mod sessions;
 mod state;

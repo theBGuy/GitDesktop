@@ -140,6 +140,7 @@ export const capabilities: Capability[] = [
   { group: "AI · generate & review", ai: true, label: "AI issue drafting from your repo's templates" },
   { group: "AI · generate & review", ai: true, label: "AI repo descriptions & topics" },
   { group: "AI · generate & review", ai: true, label: "AI code review & security audit on any PR", highlight: true },
+  { group: "AI · generate & review", ai: true, label: "Hand review context to the AI reviewer — per-branch notes deposited by your agent, posted with the PR" },
   { group: "AI · generate & review", ai: true, label: "Agentic review — reads the full diff, files, search & history, read-only" },
   { group: "AI · generate & review", ai: true, label: "Reviews keep running in the background & finish in the tray" },
   { group: "AI · generate & review", ai: true, label: "Iterative reviews build on the last round & other bots' findings" },

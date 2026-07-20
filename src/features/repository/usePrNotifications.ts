@@ -135,7 +135,12 @@ export function usePrNotifications(repoPath: string) {
           createdAt: pr.createdAt,
           isDraft: pr.isDraft,
         }));
-      maybeCatchUpMissedOpen(repoPath, candidates, gh.data?.login ?? null);
+      maybeCatchUpMissedOpen(
+        repoPath,
+        candidates,
+        gh.data?.login ?? null,
+        settings.data?.reviewDraftPrs ?? false,
+      );
     }
 
     if (!before || !prefs) return;

@@ -122,7 +122,12 @@ export function useBackgroundPrSync(): void {
                 createdAt: pr.createdAt,
                 isDraft: pr.isDraft,
               }));
-            maybeCatchUpMissedOpen(path, candidates, status.login ?? null);
+            maybeCatchUpMissedOpen(
+              path,
+              candidates,
+              status.login ?? null,
+              settings.reviewDraftPrs,
+            );
           }
         } catch {
           // One bad repo (deleted/moved path, transient forge error) must not

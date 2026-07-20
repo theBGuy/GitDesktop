@@ -233,6 +233,15 @@ export function buildPrPrompt(input: PrPromptInput): {
   }
   promptParts.push(`## Files changed\n${fileSummary || "(none)"}`);
 
+  // Author's "Notes for reviewers" — reflect the recorded decisions in the
+  // description, don't paste them verbatim. Same trim + 8000-char slice guard as
+  // the review prompt's notes section.
+  if (input.reviewNotes?.trim()) {
+    promptParts.push(
+      `## Author's notes for reviewers (context — reflect the decisions, don't paste verbatim)\n${input.reviewNotes.trim().slice(0, 8000)}`,
+    );
+  }
+
   let diffSection = `## Combined diff\n${budgeted.text}`;
   if (budgeted.truncated || input.diffTruncated) {
     const omitted =
@@ -281,7 +290,7 @@ Write the review in GitHub-flavored Markdown:
   - the problem — and for **blocker**/**should-fix**, the concrete case that makes it real (the input, state, or code path that triggers it, not just an assertion);
   - a concrete suggested fix.
 - Cover real issues across correctness (bugs, logic errors, unhandled edge cases or errors), security smells, performance traps, clarity and naming, and missing or weak tests. Breadth is welcome — but only where each finding is genuinely useful.
-- Signal over volume: include a finding only if you are confident it is real; if you are unsure, leave it out. Prefer a few high-value findings over an exhaustive list, and keep nits few — never let them crowd out the real issues. Don't flag formatting a linter/formatter handles, don't restate the same nit across files, and don't flag missing tests for changes that introduce no new behavior (renames, reformatting, or pure reorganization). Before flagging a possible null/undefined or missing-value issue, check the typed contract: a field the types declare non-optional, or that every code path visibly always sets, is not a finding. If a finding claims a specific value flows into a specific parameter or limit (e.g. "X arrives as \`goal\`, then gets sliced to 6,000 chars"), you must trace that value INTO that parameter at a real call site shown in the diff or in code you have read — a same-named local variable or a mention in a doc comment is NOT a trace; if you cannot show the call-site mapping, omit the finding.
+- Signal over volume: include a finding only if you are confident it is real; if you are unsure, leave it out. Prefer a few high-value findings over an exhaustive list, and keep nits few — never let them crowd out the real issues. Don't flag formatting a linter/formatter handles, don't restate the same nit across files, and don't flag missing tests for changes that introduce no new behavior (renames, reformatting, or pure reorganization). Before flagging a convention, docs-sync, scope, or missing-hardening omission, check the author's description AND the "Author's notes for reviewers" section for an explicit deliberate-decision note covering it; if one is present, acknowledge the recorded decision in one line instead of re-flagging it as new. Before flagging a possible null/undefined or missing-value issue, check the typed contract: a field the types declare non-optional, or that every code path visibly always sets, is not a finding. If a finding claims a specific value flows into a specific parameter or limit (e.g. "X arrives as \`goal\`, then gets sliced to 6,000 chars"), you must trace that value INTO that parameter at a real call site shown in the diff or in code you have read — a same-named local variable or a mention in a doc comment is NOT a trace; if you cannot show the call-site mapping, omit the finding.
 - Be specific and grounded strictly in the diff — do not invent code, files, or behavior you cannot see. If the change looks solid, say so plainly in a line or two and stop.
 
 No filler: don't summarize what you reviewed, don't pad, don't add compliments — just the assessment and the findings. Do not wrap the whole review in a code fence. Do not restate the entire diff.`;
@@ -291,6 +300,7 @@ const SECURITY_REVIEW_SYSTEM = `You are a senior application security engineer p
 Guiding rules:
 - False positives are worse than misses. Flag an issue only when you can name a concrete attack path from attacker-controlled input to impact and are >80% confident it is real.
 - Before dismissing a risky sink as safe, name the specific guard that makes it safe (the sanitizer, the safe-by-default API, the trust boundary). If you cannot name it, investigate further — do not assume.
+- A documented, scoped accepted tradeoff in the author's description or the "Author's notes for reviewers" section is a disposition to verify against, not a fresh finding — treat it as the author's recorded risk decision. Still flag it if the note's claimed guard does not actually exist in the code you can see.
 
 Examine these categories where the diff touches them. The Non-Issues are NOT findings:
 - Injection (SQL/NoSQL, command, path traversal, XXE, template/SSTI, eval/dynamic code, unsafe deserialization). Issue: building queries/commands/markup from untrusted input by concatenation when a safe-by-default API exists, or insufficient/wrongly-ordered escaping. Non-issue: safe-by-default APIs that escape for you; inputs you cannot establish as untrusted.
@@ -474,6 +484,15 @@ export function buildReviewPrompt(
   }
   if (input.body.trim()) {
     promptParts.push(`## Author's description\n${input.body.trim()}`);
+  }
+  // Author's deliberate "Notes for reviewers" — author input like the description
+  // above, NOT bot soft-context, so it lives OUTSIDE `budgetReviewExtras` and is
+  // capped only by the 8000-char slice (same guard idiom as the plan-prompt
+  // issueBody slice below). Mode-agnostic: it feeds both general and security runs.
+  if (input.reviewNotes?.trim()) {
+    promptParts.push(
+      `## Author's notes for reviewers\n${input.reviewNotes.trim().slice(0, 8000)}`,
+    );
   }
   if (input.commitSubjects.length > 0) {
     promptParts.push(

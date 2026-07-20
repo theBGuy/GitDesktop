@@ -46,6 +46,8 @@ export function useGeneratePrDescription(repoPath: string) {
       }) => void,
       availableLabels: AvailableLabel[],
       provider?: PromptProvider,
+      /** Author's "Notes for reviewers" — reflected into the description. */
+      reviewNotes?: string,
     ) => {
       await run(
         async (settings) => {
@@ -66,6 +68,7 @@ export function useGeneratePrDescription(repoPath: string) {
             headBranch: head,
             repoInstructions,
             globalInstructions: settings.globalInstructions,
+            reviewNotes,
             availableLabels,
             provider,
           });
@@ -103,6 +106,8 @@ export function useGeneratePrDescription(repoPath: string) {
        *  no labels proposed. Invented labels the model returns are dropped by the
        *  parser (which validates on name only). */
       availableLabels: AvailableLabel[] = [],
+      /** Author's "Notes for reviewers" — reflected into the description. */
+      reviewNotes?: string,
     ) =>
       runFromDiff(
         () => gitBranchDiff(repoPath, base, head, RAW_DIFF_MAX_BYTES),
@@ -112,6 +117,7 @@ export function useGeneratePrDescription(repoPath: string) {
         onUpdate,
         availableLabels,
         provider,
+        reviewNotes,
       ),
     [repoPath, runFromDiff],
   );
@@ -135,6 +141,8 @@ export function useGeneratePrDescription(repoPath: string) {
        *  no labels proposed. Invented labels the model returns are dropped by the
        *  parser (which validates on name only). */
       availableLabels: AvailableLabel[] = [],
+      /** Author's "Notes for reviewers" — reflected into the description. */
+      reviewNotes?: string,
     ) =>
       runFromDiff(
         getDiff,
@@ -144,6 +152,7 @@ export function useGeneratePrDescription(repoPath: string) {
         onUpdate,
         availableLabels,
         provider,
+        reviewNotes,
       ),
     [runFromDiff],
   );

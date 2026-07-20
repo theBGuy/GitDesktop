@@ -251,6 +251,11 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
   - **Sized to your model** — a **Review context** setting scales the review's context
     budget to the reviewing model's window (Auto probes a local **Ollama** model's context
     length live), so a larger model sees more of the PR before agentic review is needed
+  - **Notes for reviewers** — hand the reviewer context up front: an agent deposits
+    per-branch notes via the GitDesktop MCP, or you type them in the Create PR dialog; on
+    create they post as the PR's first comment and reach the automated review as
+    first-class context (by default a draft's review waits until it's marked ready),
+    so a deliberate, documented decision isn't re-flagged
   - **Clearly machine-authored** — a branded header/footer and a robot-avatar
     "GitDesktop" bot on local PRs; with a GitLab project/group access token, posts as
     the real **GitLab project bot** rather than your own account
@@ -399,7 +404,9 @@ workflow against any two branches with no remote at all).
   reviews and any "fixed in `<sha>`" / refutation replies) as soft, re-verifiable
   context, so an already-addressed finding isn't re-raised cold (the current diff is
   always the source of truth). Per PR, ignore the prior review, trim a false finding, or
-  opt out of external-bot folding.
+  opt out of external-bot folding. By default a **draft** PR waits for its first automated
+  review until you mark it ready — flip **Review draft PRs when created** in Settings →
+  Automations to review on creation instead.
 - **Line-anchored review comments** — from Copilot, CodeRabbit, or humans — render
   grouped by file in the Conversation and at their exact line in the Files diff, with
   reply-in-thread, resolve/unresolve, and edit/delete of your own; a reviewer's

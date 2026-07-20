@@ -5,7 +5,7 @@ import {
   TagIcon,
   XIcon,
 } from "@phosphor-icons/react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSelector } from "@tanstack/react-store";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useEffectEvent, useId, useRef, useState } from "react";
@@ -23,6 +23,7 @@ import {
 import { Label } from "@/components/ui/label";
 import { LabelChip } from "@/features/conversations/Thread";
 import { AssigneesPopover } from "@/features/issues/IssueMetaPickers";
+import { REVIEWER_NOTES_MARKER } from "@/lib/ai/notes-context";
 import { track } from "@/lib/analytics";
 import { triggerAutomations } from "@/lib/automations/runner";
 import { required, useAppForm } from "@/lib/form";
@@ -50,8 +51,10 @@ import {
   useRemoteSlug,
   useSetRepoLens,
 } from "@/lib/repo-lens/queries";
+import { deleteReviewNote } from "@/lib/review-notes/store";
 import { useAiEnabled, useSettings } from "@/lib/settings/queries";
 import { toastError } from "@/lib/toast";
+import { ReviewerNotesField } from "./ReviewerNotesField";
 import { ReviewersPopover } from "./ReviewersPopover";
 import { useBranchPickerOptions } from "./useBranchPickerOptions";
 import { useGeneratePrDescription } from "./useGeneratePrDescription";
@@ -80,6 +83,7 @@ export function CreatePrDialog({
   const createPr = useCreatePr(repoPath);
   const setRepoLens = useSetRepoLens(repoPath);
   const forge = useForgeStatus(repoPath);
+  const queryClient = useQueryClient();
 
   // Fork PR-create: on a GitHub fork (upstream remote present) the dialog offers
   // an explicit "Create in" target — the parent (lens "upstream") or the fork
@@ -224,7 +228,14 @@ export function CreatePrDialog({
   const baseLoading = targetIsParent && parentBranches.isPending;
 
   const form = useAppForm({
-    defaultValues: { head: "", base: "", title: "", body: "", draft: false },
+    defaultValues: {
+      head: "",
+      base: "",
+      title: "",
+      body: "",
+      draft: false,
+      notes: "",
+    },
     validators: {
       // Same branch on both sides proposes nothing — gate the submit. On the
       // parent target the base is an `upstream/<name>` ref, so a local head that
@@ -265,13 +276,48 @@ export function CreatePrDialog({
             ? { assignees: assignees.map((a) => a.id) }
             : {}),
         });
+        const notes = value.notes.trim();
         track({
           name: "pull_request_created",
           properties: {
             is_draft: value.draft,
             has_ai_description: aiDescriptionRef.current,
+            has_review_notes: notes.length > 0,
           },
         });
+        // Reviewer notes are an AI-only surface (the field renders only when AI
+        // is enabled), so the whole post + consume is gated on `aiEnabled` —
+        // Hide-AI must post nothing and consume no deposit (no behavior change).
+        if (aiEnabled) {
+          // Post the author's reviewer notes as the FIRST comment, before the
+          // review fires — this is the whole point of the feature: the automated
+          // review reads the conversation, so the notes must land ahead of it.
+          // `asBot: false` — this is the user's own author content, not a
+          // GitDesktop-branded post. Its own try/catch: a failed post must not
+          // abort the create (the PR exists) — the review still gets the notes
+          // via the `reviewNotes` event below.
+          if (notes) {
+            try {
+              await api.forgePrComment(
+                repoPath,
+                number,
+                `${REVIEWER_NOTES_MARKER}\n\n${notes}`,
+                false,
+                createLens,
+              );
+              // Mirror runner.ts's post-comment invalidation: narrow to this
+              // PR's own key family under the lens it landed on.
+              await queryClient.invalidateQueries({
+                queryKey: ["repo", repoPath, "pr", createLens, number],
+              });
+            } catch {
+              toast.error("PR created — posting reviewer notes failed.");
+            }
+          }
+          // Consume the deposit regardless of whether the comment posted — the
+          // create itself consumed the note. Best-effort; app-data, not the PR.
+          void deleteReviewNote(repoPath, value.head).catch(() => undefined);
+        }
         // Creating on the parent means the new PR lives under the upstream lens —
         // flip the persisted lens so the PRs tab shows it (setter is a no-op when
         // already "upstream").
@@ -288,18 +334,26 @@ export function CreatePrDialog({
         // defer the close and strand the dialog). Want navigation? Hoist it to
         // RepositoryView first, like CreateLocalPrDialog.
         onOpenChange(false);
-        triggerAutomations({
-          kind: "pr-open",
-          repoPath,
-          base: value.base,
-          head: value.head,
-          // `ahead` (git log) is newest-first, so the head is the first entry.
-          headSha: ahead[0]?.hash,
-          title: value.title.trim(),
-          body: value.body,
-          commitSubjects: ahead.map((c) => c.subject),
-          target: { type: "remote", number },
-        });
+        // Draft gate: a draft PR fires no review unless the user opted into
+        // reviewing drafts. A gated-out draft is NOT a lost review — the
+        // background catch-up poller picks it up once the PR is marked ready
+        // (that path landed in wave 1), so don't "fix" this by dropping the gate.
+        const reviewDraftPrs = settings.data?.reviewDraftPrs ?? false;
+        if (!value.draft || reviewDraftPrs) {
+          triggerAutomations({
+            kind: "pr-open",
+            repoPath,
+            base: value.base,
+            head: value.head,
+            // `ahead` (git log) is newest-first, so the head is the first entry.
+            headSha: ahead[0]?.hash,
+            title: value.title.trim(),
+            body: value.body,
+            commitSubjects: ahead.map((c) => c.subject),
+            target: { type: "remote", number },
+            reviewNotes: notes || undefined,
+          });
+        }
       } catch (e) {
         toastError(e);
       }
@@ -334,6 +388,9 @@ export function CreatePrDialog({
         title: "",
         body: "",
         draft: false,
+        // Cleared on open; ReviewerNotesField re-seeds from the head branch's
+        // deposit (if any) once its query resolves.
+        notes: "",
       },
       { keepDefaultValues: true },
     );
@@ -345,6 +402,9 @@ export function CreatePrDialog({
   // Live head/base drive the "N commits" hint, AI generation, and submit gate.
   const head = useSelector(form.store, (s) => s.values.head);
   const base = useSelector(form.store, (s) => s.values.base);
+  // Live notes feed the AI-description prompt (so a generated description can
+  // reflect the reviewer notes) and the ReviewerNotesField's seeding provenance.
+  const notes = useSelector(form.store, (s) => s.values.notes);
 
   // Compute the fork-side fallback base (used both here and when reconciling back
   // from the parent target). Mirrors the seed logic: default branch, else the
@@ -451,6 +511,8 @@ export function CreatePrDialog({
         name: l.name,
         description: l.description,
       })) ?? [],
+      // Author's reviewer notes — reflected into the generated description.
+      notes.trim() || undefined,
     );
   }
   // Context-sensitive reuse of the `generate-commit-message` binding (mod+g by
@@ -819,6 +881,20 @@ export function CreatePrDialog({
                 />
               )}
             </form.AppField>
+
+            {/* Collapsed "Notes for reviewers": deposit-seeded author context,
+                posted as the PR's first comment and fed to the AI review. AI-only. */}
+            {aiEnabled && (
+              <form.AppField name="notes">
+                {(field) => (
+                  <ReviewerNotesField
+                    repoPath={repoPath}
+                    head={head || null}
+                    field={field}
+                  />
+                )}
+              </form.AppField>
+            )}
           </div>
 
           <DialogFooter className="sm:items-center">

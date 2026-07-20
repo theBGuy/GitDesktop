@@ -240,6 +240,11 @@ export interface AppSettings {
   autoFetch: boolean;
   /** How often the background fetch runs, in minutes. */
   autoFetchInterval: AutoFetchInterval;
+  /** Run the automated first review when a draft PR is created. Off by default:
+   *  the automated review then waits until the draft is marked ready for review.
+   *  Read undefined-safe (absent on settings stored before this field existed →
+   *  `false`) via the DEFAULT_SETTINGS spread in loadSettings. */
+  reviewDraftPrs: boolean;
   /** First-run nudge toward the user guide; set once the user opens or dismisses it. */
   seenGuideNudge: boolean;
   /** Send anonymous usage events to PostHog. Default on (opt-out). */
@@ -316,6 +321,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   autoCheckUpdates: true,
   autoFetch: true,
   autoFetchInterval: "10",
+  reviewDraftPrs: false,
   seenGuideNudge: false,
   analyticsEnabled: true,
   recordReplay: false,

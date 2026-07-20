@@ -81,6 +81,15 @@ struct SetLocalIssueStatusArgs {
     status: String,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct SetReviewNotesArgs {
+    /// The branch the note is for. Must exist as a local branch in the repo.
+    branch: String,
+    /// The reviewer-note body (markdown). An empty/whitespace-only body CLEARS the deposit
+    /// for this branch.
+    body: String,
+}
+
 /// An optional local-record status filter (the read tools accept it to narrow results).
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct LocalStatusFilterArgs {
@@ -226,6 +235,31 @@ impl GitDesktopMcp {
         let record =
             crate::local_issues::set_status(&repo, &args.id, &args.status).map_err(app_err)?;
         json_result(&record)
+    }
+
+    // ---- Reviewer notes: per-branch "Notes for reviewers" deposits ---------
+
+    #[tool(
+        description = "Deposit a per-branch \"Notes for reviewers\" note for the bound repository. \
+                       The note is stored LOCALLY in GitDesktop's app data — it is NEVER sent to \
+                       any forge by this tool. It seeds the Create-PR dialog's \"Notes for \
+                       reviewers\" field for that branch when a PR is opened from GitDesktop. \
+                       Verifies `branch` exists as a local branch first. An empty (or \
+                       whitespace-only) body CLEARS any existing deposit for the branch. Returns \
+                       `{ branch, saved }` where `saved` is false when an empty body cleared it.",
+        annotations(read_only_hint = false, destructive_hint = false)
+    )]
+    async fn set_review_notes(
+        &self,
+        Parameters(args): Parameters<SetReviewNotesArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_write()?;
+        // Pre-mutation guard FIRST: the branch must resolve as a local branch, else error
+        // naming it — before any app-data write.
+        verify_branch(&self.repo, &args.branch).await?;
+        let repo = crate::git::repo::repo_identity(&self.repo).await;
+        let saved = crate::review_notes::set(&repo, &args.branch, &args.body).map_err(app_err)?;
+        json_result(&serde_json::json!({ "branch": args.branch, "saved": saved }))
     }
 
     // ---- Local READ tools (ungated — the user's own app-data) --------------
@@ -419,6 +453,10 @@ mod tests {
                 status: "open".into(),
             }))
         );
+        assert_gated!(h.set_review_notes(Parameters(SetReviewNotesArgs {
+            branch: "feat".into(),
+            body: "b".into(),
+        })));
     }
 
     /// The local READ tools are UNGATED (the user's own app-data) — with all flags off

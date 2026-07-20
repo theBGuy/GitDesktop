@@ -72,6 +72,10 @@ export interface PrPromptInput {
   headBranch: string;
   repoInstructions: string | null;
   globalInstructions: string;
+  /** Author-provided "Notes for reviewers" — the deliberate calls behind the
+   *  change. Reflected into the generated description (never pasted verbatim) so
+   *  it captures the recorded decisions. Absent ⇒ the section is omitted. */
+  reviewNotes?: string;
   /** The repo's existing labels, each with its stated purpose (description) when
    *  it has one. When non-empty, the model is asked to end its output with a
    *  `Labels:` line choosing ONLY from these; the parser drops anything not in
@@ -115,6 +119,11 @@ export interface ReviewPromptInput {
   diffText: string;
   diffTruncated: boolean;
   files: { path: string; added: number; deleted: number; isBinary: boolean }[];
+  /** Author-provided "Notes for reviewers" — the author's deliberate calls behind
+   *  the change. Treated as author input like `body` (NOT soft bot context), so it
+   *  is fed to both review modes and never subject to the extras budget. Absent ⇒
+   *  the section is omitted; the prompt is byte-for-byte identical to before. */
+  reviewNotes?: string;
   /** Prior review's raw finding markdown — soft, re-verifiable context. When
    *  absent, the prompt is byte-for-byte identical to a first-ever review. */
   priorFindings?: string;
