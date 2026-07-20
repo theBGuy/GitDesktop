@@ -56,7 +56,8 @@ export function ReposBody({
   const { data, isError, error, refetch } = useRepos(true);
   const { register, onKeyDown } = useRovingList();
 
-  const repos = useMemo(() => (data ? sortRepos(data) : []), [data]);
+  // `/api/repos` is an envelope `{ repos, hideAi }`; the picker only needs the list.
+  const repos = useMemo(() => (data ? sortRepos(data.repos) : []), [data]);
 
   // Preserve the tab the user came from (if any) so a switch keeps context; the
   // bootstrap entry (no current tab) lands on Status.

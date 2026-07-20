@@ -7,7 +7,9 @@
   agent sessions** stream in as they happen. Your phone always sees the repository open
   on this desktop, and you can **share and unshare additional repositories** (from the
   panel or the command palette) to keep them reachable while you work in another —
-  switching repos no longer cuts a phone watching a shared repository. Off by default, with per-device tokens
+  switching repos no longer cuts a phone watching a shared repository. The companion honors
+  your **Hide AI features** setting — turn it on and the phone's Agents tab and live agent-run
+  watching disappear too, matching the desktop. Off by default, with per-device tokens
   you can review and revoke at any time (even while sharing is off), and connected
   phones are disconnected the moment you stop sharing, unshare a repository, or revoke their
   device. While sharing is on, GitDesktop keeps your computer awake so a phone can keep

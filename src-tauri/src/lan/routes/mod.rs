@@ -204,16 +204,23 @@ fn no_such_repo() -> Response {
         .into_response()
 }
 
-/// GET /api/repos — the registered repos as `[{ id, name, active }]` (camelCase):
-/// the desktop's ACTIVE repo ∪ the persisted SHARED set. `active` is `true` for the
-/// entry whose opaque id equals the desktop's current active id — at most one, and
-/// none when no repo is active. Flagging BY ID (not by path) matches the id-based
-/// identity the registry dedups on: a repo shared under one worktree path while the
-/// desktop is open on another occupies one entry (same id) whose stored path may
-/// differ from the active path, so a path compare would wrongly report `active:
-/// false`. Only the opaque id + display name + `active` flag reach the wire — never a
-/// filesystem path. (An id compare also avoids a filesystem `canonicalize` under the
-/// `repos` lock.)
+/// GET /api/repos — an envelope `{ "repos": [{ id, name, active }...], "hideAi": bool }`
+/// (camelCase). `repos` is the desktop's ACTIVE repo ∪ the persisted SHARED set;
+/// `active` is `true` for the entry whose opaque id equals the desktop's current active
+/// id — at most one, and none when no repo is active. Flagging BY ID (not by path)
+/// matches the id-based identity the registry dedups on: a repo shared under one
+/// worktree path while the desktop is open on another occupies one entry (same id) whose
+/// stored path may differ from the active path, so a path compare would wrongly report
+/// `active: false`. Only the opaque id + display name + `active` flag reach the wire —
+/// never a filesystem path. (An id compare also avoids a filesystem `canonicalize` under
+/// the `repos` lock.)
+///
+/// `hideAi` mirrors the desktop's "Hide AI features" preference (pushed via
+/// [`crate::lan::lan_set_hide_ai`]). The companion polls this endpoint, so surfacing the
+/// flag here lets a flip converge on the phone with no extra request — it hides its AI
+/// surfaces (Agents tab + agent-watch) to match. This is a UI-preference signal, NOT a
+/// capability gate: the `/api/reviews*` routes keep serving regardless (see
+/// [`crate::lan::routes::reviews`]).
 ///
 /// The active id and the entries are read under separate short locks (never nested).
 /// Any transient skew between `active_repo_id` and the registry during a slow install
@@ -244,7 +251,10 @@ pub(crate) async fn list_repos(
             json!({ "id": id, "name": repo.name, "active": is_active })
         })
         .collect();
-    (StatusCode::OK, Json(items)).into_response()
+    let hide_ai = state
+        .hide_ai
+        .load(std::sync::atomic::Ordering::Relaxed);
+    (StatusCode::OK, Json(json!({ "repos": items, "hideAi": hide_ai }))).into_response()
 }
 
 /// Wrap an `AppResult<T: Serialize>` into a JSON response or the mapped error.

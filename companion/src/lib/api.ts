@@ -159,9 +159,20 @@ export interface RepoSummary {
   active: boolean;
 }
 
-/** The repositories shared from the desktop. Bearer-authed, NOT repo-scoped (no
- *  resolver) — may return 0, 1, or N. Order is unspecified; callers sort. */
-export const fetchRepos = () => getJson<RepoSummary[]>("/api/repos");
+/** The `/api/repos` envelope: the shared-repos list plus the desktop's "Hide AI
+ *  features" preference. `hideAi` mirrors the desktop setting — when true the
+ *  companion hides its AI surfaces (the Agents tab + agent-watch screen) to match.
+ *  It rides this endpoint (rather than a dedicated one) because the companion
+ *  already polls it, so a desktop toggle converges here within one poll. */
+export interface ReposResponse {
+  repos: RepoSummary[];
+  hideAi: boolean;
+}
+
+/** The repositories shared from the desktop (plus the `hideAi` preference), as an
+ *  envelope. Bearer-authed, NOT repo-scoped (no resolver) — `repos` may hold 0, 1,
+ *  or N entries. Order is unspecified; callers sort. */
+export const fetchRepos = () => getJson<ReposResponse>("/api/repos");
 
 // ── Read routes (repo-scoped) ─────────────────────────────────────────────────
 // Every data fetcher is scoped to a `repoId` (slice 4): the path is
