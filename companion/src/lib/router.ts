@@ -43,10 +43,10 @@ const CHANGES_SECTIONS: readonly ChangesSection[] = [
   "untracked",
 ];
 
-// A commit sha segment: 7–40 hex chars. A tail that fails this guard is treated as
+// A commit sha segment: 7–64 hex chars (64 covers SHA-256 object-format repos). A tail that fails this guard is treated as
 // absent (`sha: null`) — the same "unknown detail → list" degradation the other
 // tabs use — so a malformed sha never reaches a scoped commit URL.
-const SHA_RE = /^[0-9a-f]{7,40}$/i;
+const SHA_RE = /^[0-9a-f]{7,64}$/i;
 
 // Agent-stream ids are opaque UUID-like STRINGS (not numbers like PR/CI ids), so
 // they parse into their own `streamId` field. A conservative charset guard keeps
@@ -166,7 +166,7 @@ function parseTab(
     }
     case "history": {
       if (!scoped) break; // scoped-only
-      // `history/{sha}[/{encodedFile}]`. A tail that isn't a 7–40 hex sha is an
+      // `history/{sha}[/{encodedFile}]`. A tail that isn't a 7–64 hex sha is an
       // unknown detail → the list (sha null); a valid sha may carry a file tail.
       const sha = tail && SHA_RE.test(tail) ? tail : null;
       const filePath = sha && extra ? decodeSegment(extra) : null;
