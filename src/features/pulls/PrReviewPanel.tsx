@@ -192,25 +192,41 @@ export function PrReviewPanel({
 
   // Readiness signaling for the DEDICATED security model. The Security-audit
   // button routes to `securityReviewAi` exactly when there's no in-panel override
-  // and one is configured (the same condition that shows the "Security audits use
-  // …" hint) — so when that config's provider needs a key / CLI the user hasn't
-  // set up, warn about IT specifically instead of letting the audit die into the
-  // generic error state. Skipped when the security provider matches the picker's:
-  // the picker's own warnings above already cover that case (no duplicate line).
-  // Hooks run every render (React rules); the render gate + query `enabled` keep
-  // them cheap when the security path doesn't apply.
-  const securityWarnApplies =
-    !reviewOverride &&
-    Boolean(securityReviewAi) &&
-    securityReviewAi?.provider !== provider;
+  // and one is configured (`securityPathActive` — the same condition that shows
+  // the "Security audits use …" hint) — so when that config needs a key / CLI the
+  // user hasn't set up, warn about IT specifically instead of letting the audit
+  // die into the generic error state. Two distinct trigger cases:
+  //  • `providerDiffers` — the security provider differs from the picker's active
+  //    one, so it may need its OWN key or CLI (all three warnings apply).
+  //  • `cliPathDiffers` — SAME provider (a CLI one) but a different `cliPath`, so
+  //    the audit could point at a missing/unauthed binary the picker's warnings
+  //    (keyed off the picker's path) never see (only the CLI warnings apply — a
+  //    shared provider shares its key, so no key warning here).
+  // When neither holds, the picker's own warnings above already cover the case, so
+  // nothing extra renders. Hooks run every render (React rules); the render gates +
+  // query `enabled` keep them cheap when the security path doesn't apply.
+  const securityPathActive = !reviewOverride && Boolean(securityReviewAi);
   const secProvider = securityReviewAi?.provider ?? "anthropic";
-  const secNeedsKey = PROVIDERS_REQUIRING_KEY.includes(secProvider);
-  const secKeyPreview = useSecretPreview(secProvider);
   const secCliKind = providerKind(secProvider);
+  const providerDiffers =
+    securityPathActive && securityReviewAi?.provider !== provider;
+  const cliPathDiffers =
+    securityPathActive &&
+    !providerDiffers &&
+    Boolean(secCliKind) &&
+    (securityReviewAi?.cliPath ?? "") !== (reviewAi?.cliPath ?? "");
+  const secNeedsKey = PROVIDERS_REQUIRING_KEY.includes(secProvider);
+  // Dedupes to the picker's own useSecretPreview(provider) at :174 when the
+  // security path doesn't apply or shares the provider (same provider-keyed cache
+  // entry, zero extra fetch); read only under `providerDiffers`, where the
+  // argument is `secProvider`.
+  const secKeyPreview = useSecretPreview(
+    providerDiffers ? secProvider : provider,
+  );
   const secCliDetect = useQuery({
     queryKey: ["agent-detect", secProvider, securityReviewAi?.cliPath ?? ""],
     queryFn: () => detectAgentCli(secCliKind!, securityReviewAi?.cliPath),
-    enabled: Boolean(secCliKind) && securityWarnApplies,
+    enabled: Boolean(secCliKind) && (providerDiffers || cliPathDiffers),
     staleTime: 60_000,
   });
 
@@ -370,13 +386,13 @@ export function PrReviewPanel({
               in a terminal.
             </p>
           )}
-        {securityWarnApplies && secNeedsKey && !secKeyPreview.data && (
+        {providerDiffers && secNeedsKey && !secKeyPreview.data && (
           <p className="text-xs text-warning">
             No {PROVIDER_LABELS[secProvider]} API key saved — add one in
             Settings to run a security audit.
           </p>
         )}
-        {securityWarnApplies &&
+        {(providerDiffers || cliPathDiffers) &&
           secCliKind &&
           secCliDetect.data &&
           !secCliDetect.data.found && (
@@ -385,7 +401,7 @@ export function PrReviewPanel({
               path in Settings; security audits use it.
             </p>
           )}
-        {securityWarnApplies &&
+        {(providerDiffers || cliPathDiffers) &&
           secCliKind &&
           secCliDetect.data?.found &&
           secCliDetect.data.authed === "notAuthed" && (
