@@ -3,8 +3,9 @@ import { repoIdentity } from "@/lib/git/repo-identity";
 import { storeName } from "@/lib/test-mode";
 
 /** A per-branch "Notes for reviewers" deposit, keyed by the repo's
- *  worktree-stable identity then the branch name. Written by the GUI's
- *  Create-PR dialogs and, out-of-process, by the MCP server. */
+ *  worktree-stable identity then the branch name. Written (out-of-process) by
+ *  the MCP server's `set_review_notes`; the GUI's Create-PR dialogs only read
+ *  (`getReviewNote`) and consume (`deleteReviewNote`) deposits. */
 export interface ReviewNote {
   body: string;
   savedAt: string;

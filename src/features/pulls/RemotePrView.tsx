@@ -60,6 +60,7 @@ import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import type { LineWidget } from "@/features/diff/DiffSurface";
 import { AssigneesPopover } from "@/features/issues/IssueMetaPickers";
 import { JiraRefRow } from "@/features/issues/JiraRefRow";
+import { triggerAutomations } from "@/lib/automations/runner";
 import {
   isDeletionBlocked,
   isMergeMethodAllowed,
@@ -591,6 +592,33 @@ export function RemotePrView({
   }
 
   const pr = details.data;
+  // A successful in-app Mark-ready fires a fresh pr-open review directly, so a
+  // draft created with `reviewDraftPrs: false` still gets its first review when
+  // the user readies it here — the catch-up poller only covers PRs within its
+  // 14-day window (sync.ts), so a long-lived draft readied in-app would
+  // otherwise slip through. No eligibility guard is needed: the runner's
+  // per-headSha claim dedup makes this safe — a review already DELIVERED for
+  // this head keeps its claim (a draft reviewed under `reviewDraftPrs: true`
+  // won't double-review), while a cancelled/failed run released it (so a re-fire
+  // proceeds). Mirrors the catch-up event shape (sync.ts); the marker-comment
+  // lift recovers any reviewer notes, so the event carries none.
+  function fireReadyReview() {
+    if (!pr) return;
+    triggerAutomations({
+      kind: "pr-open",
+      repoPath,
+      base: pr.baseRefName,
+      head: pr.headRefName,
+      // gh GraphQL returns commits oldest-first, so the head is the last.
+      headSha: pr.commits.at(-1)?.oid,
+      title: pr.title,
+      // No body/commit subjects on this path — the PR diff is the source of
+      // truth (catch-up + pr-sync fire them empty the same way).
+      body: "",
+      commitSubjects: [],
+      target: { type: "remote", number },
+    });
+  }
   // Each rendered review "claims" the line-comment threads it owns (GitHub
   // `reviewId`; always "" on GitLab/Bitbucket, which don't model reviews).
   // Claimed threads render inline under their review in the timeline; the rest
@@ -1902,7 +1930,10 @@ export function RemotePrView({
               disabled={busy}
               onClick={() =>
                 readyPr.mutate(number, {
-                  onSuccess: () => toast.success("Marked ready for review"),
+                  onSuccess: () => {
+                    toast.success("Marked ready for review");
+                    fireReadyReview();
+                  },
                   onError,
                 })
               }
@@ -1922,7 +1953,10 @@ export function RemotePrView({
                 setDraft.mutate(
                   { number, draft: false },
                   {
-                    onSuccess: () => toast.success("Marked ready for review"),
+                    onSuccess: () => {
+                      toast.success("Marked ready for review");
+                      fireReadyReview();
+                    },
                     onError,
                   },
                 )

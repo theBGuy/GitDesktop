@@ -335,9 +335,10 @@ export function CreatePrDialog({
         // RepositoryView first, like CreateLocalPrDialog.
         onOpenChange(false);
         // Draft gate: a draft PR fires no review unless the user opted into
-        // reviewing drafts. A gated-out draft is NOT a lost review — the
-        // background catch-up poller picks it up once the PR is marked ready
-        // (that path landed in wave 1), so don't "fix" this by dropping the gate.
+        // reviewing drafts. A gated-out draft is NOT a lost review — marking it
+        // ready gets it one: an in-app Mark-ready (RemotePrView) fires pr-open
+        // directly, while an EXTERNAL ready flip rides the background catch-up
+        // poller and its 14-day window. So don't "fix" this by dropping the gate.
         const reviewDraftPrs = settings.data?.reviewDraftPrs ?? false;
         if (!value.draft || reviewDraftPrs) {
           triggerAutomations({

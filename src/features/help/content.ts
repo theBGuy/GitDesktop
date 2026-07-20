@@ -1497,8 +1497,9 @@ security audit** as toggles under each. There's no "add a rule" — a given mome
 exists at most once, so you can't create conflicting duplicates. Reviews use the review model
 from the AI section; PR results are posted as a comment, commit results open from a
 notification. **Review draft PRs when created** (off by default) controls draft handling:
-left off, a draft PR gets its automated first review when you mark it ready for review, not
-at creation.
+left off, a draft PR gets its automated first review when it's marked ready for review, not
+at creation — marking it ready **in GitDesktop** always fires that first review, while a
+draft readied elsewhere is picked up by the background catch-up poller within its window.
 
 - **Branch conditions.** Each enabled action can be scoped to branches: *only these branches*
   (include globs) and *except these* (exclude globs — an exclude always wins; an empty include
