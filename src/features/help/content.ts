@@ -1619,8 +1619,8 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   arrow-key through the list, and clear items or mark all read.{{ai}} When an
   **automated** review or security audit is cancelled or fails, it stays in the popover
   under a **Stopped** group with **Re-run** (re-fires exactly that run's mode) and
-  **Dismiss** — and a failed automated run also lands a *review failed* row in the inbox,
-  matching a manual run (both gated on the automations notification preference).{{/ai}}
+  **Dismiss** — and a failed automated run also lands a *review failed* row in the inbox
+  (gated on the automations notification preference), matching manual-run failures.{{/ai}}
 - **Keyboard** — rebind any shortcut, with live key-capture.
 - **Accounts** — your **GitHub** and **GitLab** sign-ins and your **Bitbucket**
   connection. **Sign in to GitHub…** and **Sign in to gitlab.com…** run the CLI's

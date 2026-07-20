@@ -359,7 +359,13 @@ function LiveTaskRow({
 
 /** A cancelled/failed automation run, kept in the dock (unlike a live row) with
  *  Re-run + Dismiss. Failed rows carry the error in the subtitle's tooltip and
- *  render "Failed" in the destructive token (word + color, never color alone). */
+ *  render "Failed" in the destructive token (word + color, never color alone).
+ *
+ *  Re-run just fires `task.rerun()` — it does NOT remove the row here. The row is
+ *  removed inside the runner only once the replacement run actually registers, so
+ *  a re-run that can't start (rule disabled since, or a claim/watermark still held
+ *  by the canceled run unwinding) leaves the row in place as a retry target and
+ *  toasts why. Dismiss removes the row outright. */
 function StoppedTaskRow({
   task,
   crossRepo,
@@ -397,12 +403,7 @@ function StoppedTaskRow({
         size="xs"
         className="shrink-0"
         aria-label={`Re-run ${title}`}
-        onClick={() => {
-          // Remove the stopped row first; the re-fired run registers a fresh
-          // "Running…" row through the normal automation path.
-          resetReview(task.key);
-          task.rerun?.();
-        }}
+        onClick={() => task.rerun?.()}
       >
         Re-run
       </Button>

@@ -31,7 +31,11 @@ import { getLatestReview, saveReview } from "@/lib/pulls/reviews-history";
 import { queryClient } from "@/lib/query-client";
 import { loadSettings } from "@/lib/settings/api";
 import { pushNotification } from "@/lib/stores/notifications";
-import { type ReviewTarget, registerAutomationRun } from "@/lib/stores/reviews";
+import {
+  type ReviewTarget,
+  registerAutomationRun,
+  resetReview,
+} from "@/lib/stores/reviews";
 import { errorMessage, invoke } from "@/lib/tauri/invoke";
 import {
   clearDismissedHead,
@@ -164,19 +168,41 @@ export function triggerAutomations(event: AutomationEvent): void {
   void run(event).catch(() => undefined);
 }
 
+/** What a {@link run} pass did, so a re-run can tell the outcomes apart:
+ *  - `matched`: rules that exist AND apply to this event (past the `only` +
+ *    branch-condition gates). 0 means the rule genuinely no longer applies
+ *    (e.g. disabled since) — the honest "turned off" case.
+ *  - `attempted`: runs actually started (past every gate incl. sync watermark +
+ *    cross-instance claim). `matched > 0 && attempted === 0` means a rule applies
+ *    but a claim/watermark blocked it — a retryable "already covered" case. */
+interface RunOutcome {
+  matched: number;
+  attempted: number;
+}
+
 /**
  * Runs the automation rules matching `event`. When `only` is set (a re-run of a
  * single stopped row), every rule whose mode differs is skipped, so exactly that
- * one mode re-fires. Returns the number of actions actually attempted (past the
- * mode/branch/sync/claim gates) so a re-run can tell "nothing matched" (e.g. the
- * rule was disabled since) from a real run and surface an informative toast.
+ * one mode re-fires. `replacesKey` is the stopped row a re-run replaces — removed
+ * the instant its replacement run registers (see below), so the stopped row never
+ * lingers next to its fresh Running row and is kept when nothing registers.
+ * Returns a {@link RunOutcome} so a re-run can distinguish "rule gone" from
+ * "blocked but retryable" from "started".
  */
-async function run(event: AutomationEvent, only?: ReviewMode): Promise<number> {
+async function run(
+  event: AutomationEvent,
+  only?: ReviewMode,
+  replacesKey?: string,
+): Promise<RunOutcome> {
   const config = await loadAutomations();
   const repo = await repoAutomationsFor(config, event.repoPath);
   const actions = effectiveActions(config, repo, event.kind);
-  if (actions.length === 0) return 0;
+  if (actions.length === 0) return { matched: 0, attempted: 0 };
+  let matched = 0;
   let attempted = 0;
+  // Cleared once consumed so a second registering action can't double-remove
+  // (harmless — resetReview no-ops on a missing key — but keeps intent explicit).
+  let staleKey = replacesKey;
 
   // The branch(es) a branch-condition is tested against. Commit events carry the
   // committed branch; PR events carry head/base (added by the poll payload).
@@ -203,6 +229,10 @@ async function run(event: AutomationEvent, only?: ReviewMode): Promise<number> {
     ) {
       continue;
     }
+    // Past the mode + branch gates — this rule exists AND applies. Counted so a
+    // re-run can tell "rule genuinely gone" (matched 0) from "rule applies but a
+    // claim/watermark blocked it" (matched > 0, attempted 0 → retryable).
+    matched++;
     // pr-sync is opt-in per PR: re-review only a PR already reviewed in this
     // mode, and only once its head has advanced past the last-reviewed commit
     // (the persisted review's headSha is the per-mode watermark). This scopes
@@ -292,6 +322,10 @@ async function run(event: AutomationEvent, only?: ReviewMode): Promise<number> {
     // Re-run that matches nothing can toast instead of dying silently).
     attempted++;
     const controller = new AbortController();
+    // Let-box so the rerun closure carries THIS run's own key (assigned right
+    // after registration): a re-run of the fresh row must replace the fresh row,
+    // not the stale one it grew from.
+    let selfKey = "";
     const handle = registerAutomationRun({
       // TaskRow already prefixes the mode name, so pass the bare subject.
       title: event.kind === "commit" ? event.hash.slice(0, 7) : event.title,
@@ -301,9 +335,20 @@ async function run(event: AutomationEvent, only?: ReviewMode): Promise<number> {
       target: automationTarget(event),
       abort: controller,
       // Re-fires THIS event + mode (closes over this iteration's action) when the
-      // run's stopped row's Re-run is clicked.
-      rerun: () => rerunAutomation(event, action),
+      // run's stopped row's Re-run is clicked, passing its own row key so the
+      // fresh run removes THIS row when it registers.
+      rerun: () => rerunAutomation(event, action, selfKey),
     });
+    selfKey = handle.key;
+    // The replacement run has now registered its fresh Running row — remove the
+    // stopped row it replaces (a re-run only). Done here (not at the Re-run click)
+    // so the old row is kept whenever nothing registers (rule gone / blocked),
+    // giving the user a retry target. Cleared so a second registering action in
+    // the same pass can't re-trigger the removal.
+    if (staleKey) {
+      resetReview(staleKey);
+      staleKey = undefined;
+    }
     // On cancel, persist the dismissed PR head so a cancelled re-review doesn't
     // re-fire after an app relaunch (cancel advances no history watermark). PR
     // events with a headSha only; best-effort — a persistence failure must never
@@ -417,7 +462,7 @@ async function run(event: AutomationEvent, only?: ReviewMode): Promise<number> {
       handle.fail(message);
     }
   }
-  return attempted;
+  return { matched, attempted };
 }
 
 /**
@@ -436,26 +481,44 @@ async function run(event: AutomationEvent, only?: ReviewMode): Promise<number> {
 export function rerunAutomation(
   event: AutomationEvent,
   only: ReviewMode,
+  staleKey: string,
 ): void {
   const label = modeLabel(only);
-  const clear =
-    event.kind === "commit"
-      ? Promise.resolve()
-      : clearDismissedHead(
+  const noun = event.kind === "commit" ? "commit" : "pull request";
+  void (async () => {
+    try {
+      // Best-effort ONLY here: a cleared-dismissal failure must not block the
+      // re-run (it just means the pr-sync gate might skip; we then toast retryable).
+      if (event.kind !== "commit") {
+        await clearDismissedHead(
           event.repoPath,
           event.target.type,
           targetRef(event),
           only,
         ).catch(() => undefined);
-  void clear
-    .then(() => run(event, only))
-    .then((attempted) => {
-      if (attempted === 0) {
-        const noun = event.kind === "commit" ? "commit" : "pull request";
-        toast.info(`Automated ${label} for this ${noun} is turned off.`);
       }
-    })
-    .catch(() => undefined);
+      // The stopped row is removed inside run() the instant its replacement
+      // registers — so every non-registering outcome below keeps it as a retry
+      // target.
+      const { matched, attempted } = await run(event, only, staleKey);
+      if (matched === 0) {
+        // The rule genuinely no longer applies (disabled / conditions changed).
+        toast.info(`Automated ${label} for this ${noun} is turned off.`);
+      } else if (attempted === 0) {
+        // A rule applies, but a still-held claim or a sync watermark blocked the
+        // run (a canceled sibling still unwinding, or another instance covering
+        // this head). The stopped row is kept — retry once that clears.
+        toast.info(
+          `Couldn't re-run the ${label} — another run already covers this head (still finishing or ran elsewhere). The row is kept; try again in a moment.`,
+        );
+      }
+      // attempted > 0: the fresh Running row is the feedback — no toast.
+    } catch (e) {
+      // A throw anywhere (loadAutomations / store I/O before the loop, etc.) used
+      // to be swallowed, leaving no feedback. Surface it; the stopped row stays.
+      toast.error(`Couldn't re-run the ${label}: ${errorMessage(e)}`);
+    }
+  })();
 }
 
 /** A completed automated review: the final answer `text` plus any agentic
