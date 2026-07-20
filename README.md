@@ -368,7 +368,7 @@ commit that hasn't been pushed yet.
   parallel folders without stashing — with one-click jumps to the main workspace right
   from the branch switcher.
 - **Push or publish a branch without switching to it** — from the branch switcher's
-  right-click menu, push a branch that's ahead of the remote it tracks (its own remote,
+  context menu, push a branch that's ahead of the remote it tracks (its own remote,
   not just `origin`) or publish an unpushed one (choosing the remote when there's more
   than one), without checking it out; it works even when the branch is checked out
   in another worktree.
@@ -444,7 +444,7 @@ workflow against any two branches with no remote at all).
   current step inline and a live step checklist when expanded, while finished **GitHub
   Actions** and **GitLab pipeline** jobs peek their log inline and **Bitbucket** and
   other external checks link out (name/state/URL, no fetchable logs).
-- **Record management** — right-click a local PR in the list to **Archive / Unarchive**
+- **Record management** — open a local PR's context menu in the list to **Archive / Unarchive**
   or **Delete** it (Delete confirms; the branches are untouched), also from the command
   palette.
 - **Fork · Upstream lens** — on a GitHub fork (a repo with an `upstream` remote), a
@@ -558,8 +558,8 @@ display can't strand it off-screen.
 - **AI ignore patterns** (keep files out of AI context; they still commit
   normally), gitignore-style:
   - **Global** — Settings → Excluded files (one pattern per line).
-  - **Per-repo** — `.gitdesktop/aiignore` in the repo. Right-click a changed
-    file → **Exclude from AI** (file, folder, or file type — or a
+  - **Per-repo** — `.gitdesktop/aiignore` in the repo. A changed file's
+    context menu → **Exclude from AI** (file, folder, or file type — or a
     multi-selection) creates and updates this file for you.
 - **Keys** live in the OS keychain (Windows Credential Manager, macOS Keychain,
   libsecret). **Hide AI** (Settings → General) hides every AI surface while
