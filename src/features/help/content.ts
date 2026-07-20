@@ -1621,8 +1621,8 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   persistent, click-to-open history (it survives a restart) so a finished review or a PR
   update is never a missed moment. Open it from the command palette
   ({{kbd:command-palette}} → *Activity & notifications*), click an entry to jump to it,
-  arrow-key through the list, and clear items or mark all read. A review still running
-  shows a live **elapsed timer** so you can see how long it's taken.{{ai}} When an
+  arrow-key through the list, and clear items or mark all read.{{ai}} A review still
+  running shows a live **elapsed timer** so you can see how long it's taken. When an
   **automated** review or security audit is cancelled or fails, it stays in the popover
   under a **Stopped** group with **Re-run** (re-fires exactly that run's mode) and
   **Dismiss** — a stopped row notes how long it ran before it stopped — and a failed

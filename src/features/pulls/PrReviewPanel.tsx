@@ -190,6 +190,30 @@ export function PrReviewPanel({
   );
   const models = available.data?.models ?? [];
 
+  // Readiness signaling for the DEDICATED security model. The Security-audit
+  // button routes to `securityReviewAi` exactly when there's no in-panel override
+  // and one is configured (the same condition that shows the "Security audits use
+  // …" hint) — so when that config's provider needs a key / CLI the user hasn't
+  // set up, warn about IT specifically instead of letting the audit die into the
+  // generic error state. Skipped when the security provider matches the picker's:
+  // the picker's own warnings above already cover that case (no duplicate line).
+  // Hooks run every render (React rules); the render gate + query `enabled` keep
+  // them cheap when the security path doesn't apply.
+  const securityWarnApplies =
+    !reviewOverride &&
+    Boolean(securityReviewAi) &&
+    securityReviewAi?.provider !== provider;
+  const secProvider = securityReviewAi?.provider ?? "anthropic";
+  const secNeedsKey = PROVIDERS_REQUIRING_KEY.includes(secProvider);
+  const secKeyPreview = useSecretPreview(secProvider);
+  const secCliKind = providerKind(secProvider);
+  const secCliDetect = useQuery({
+    queryKey: ["agent-detect", secProvider, securityReviewAi?.cliPath ?? ""],
+    queryFn: () => detectAgentCli(secCliKind!, securityReviewAi?.cliPath),
+    enabled: Boolean(secCliKind) && securityWarnApplies,
+    staleTime: 60_000,
+  });
+
   function updateReview(patch: Partial<NonNullable<typeof reviewAi>>) {
     if (!reviewAi) return;
     setReviewOverride({ ...reviewAi, ...patch });
@@ -344,6 +368,40 @@ export function PrReviewPanel({
                       : "claude login"}
               </code>{" "}
               in a terminal.
+            </p>
+          )}
+        {securityWarnApplies && secNeedsKey && !secKeyPreview.data && (
+          <p className="text-xs text-warning">
+            No {PROVIDER_LABELS[secProvider]} API key saved — add one in
+            Settings to run a security audit.
+          </p>
+        )}
+        {securityWarnApplies &&
+          secCliKind &&
+          secCliDetect.data &&
+          !secCliDetect.data.found && (
+            <p className="text-xs text-warning">
+              {PROVIDER_LABELS[secProvider]} not found — install it or set its
+              path in Settings; security audits use it.
+            </p>
+          )}
+        {securityWarnApplies &&
+          secCliKind &&
+          secCliDetect.data?.found &&
+          secCliDetect.data.authed === "notAuthed" && (
+            <p className="text-xs text-warning">
+              {PROVIDER_LABELS[secProvider]} is installed but not signed in —
+              run{" "}
+              <code className="font-mono">
+                {secCliKind === "copilot"
+                  ? "copilot login"
+                  : secCliKind === "codex"
+                    ? "codex login"
+                    : secCliKind === "opencode"
+                      ? "opencode auth login"
+                      : "claude login"}
+              </code>{" "}
+              in a terminal to run a security audit.
             </p>
           )}
         <div className="flex flex-wrap items-center gap-2">
