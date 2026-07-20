@@ -61,6 +61,7 @@ import type { LineWidget } from "@/features/diff/DiffSurface";
 import { AssigneesPopover } from "@/features/issues/IssueMetaPickers";
 import { JiraRefRow } from "@/features/issues/JiraRefRow";
 import { triggerAutomations } from "@/lib/automations/runner";
+import { prOpenEligible } from "@/lib/automations/sync";
 import {
   isDeletionBlocked,
   isMergeMethodAllowed,
@@ -596,21 +597,26 @@ export function RemotePrView({
   // draft created with `reviewDraftPrs: false` still gets its first review when
   // the user readies it here — the catch-up poller only covers PRs within its
   // 14-day window (sync.ts), so a long-lived draft readied in-app would
-  // otherwise slip through. No eligibility guard is needed: the runner's
-  // per-headSha claim dedup makes this safe — a review already DELIVERED for
-  // this head keeps its claim (a draft reviewed under `reviewDraftPrs: true`
-  // won't double-review), while a cancelled/failed run released it (so a re-fire
-  // proceeds). Mirrors the catch-up event shape (sync.ts); the marker-comment
-  // lift recovers any reviewer notes, so the event carries none.
-  function fireReadyReview() {
+  // otherwise slip through. Gated by `prOpenEligible` — the SAME eligibility the
+  // external catch-up path enforces (no prior review in either mode, head not
+  // dismissed), so the two ready paths behave identically. This guard, not claim
+  // dedup, is what prevents a double review: a manual panel review saves via
+  // `saveReview` WITHOUT taking an automation claim, so claim dedup can't see it
+  // — only this prior-review check can (round-2 finding, PR #91). Mirrors the
+  // catch-up event shape (sync.ts); the marker-comment lift recovers any reviewer
+  // notes, so the event carries none.
+  async function fireReadyReview() {
     if (!pr) return;
+    const headSha = pr.commits.at(-1)?.oid;
+    if (!(await prOpenEligible(repoPath, String(number), headSha ?? "")))
+      return;
     triggerAutomations({
       kind: "pr-open",
       repoPath,
       base: pr.baseRefName,
       head: pr.headRefName,
       // gh GraphQL returns commits oldest-first, so the head is the last.
-      headSha: pr.commits.at(-1)?.oid,
+      headSha,
       title: pr.title,
       // No body/commit subjects on this path — the PR diff is the source of
       // truth (catch-up + pr-sync fire them empty the same way).
@@ -1932,7 +1938,7 @@ export function RemotePrView({
                 readyPr.mutate(number, {
                   onSuccess: () => {
                     toast.success("Marked ready for review");
-                    fireReadyReview();
+                    void fireReadyReview();
                   },
                   onError,
                 })
@@ -1955,7 +1961,7 @@ export function RemotePrView({
                   {
                     onSuccess: () => {
                       toast.success("Marked ready for review");
-                      fireReadyReview();
+                      void fireReadyReview();
                     },
                     onError,
                   },

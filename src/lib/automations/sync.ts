@@ -187,32 +187,45 @@ export function maybeCatchUpMissedOpen(
 }
 
 /**
- * Async eligibility for a catch-up: true only when NO review record exists for
- * this PR in EITHER mode (a manual OR automated review in general or security
- * counts as "the user knows this PR" and suppresses catch-up), and no dismissed
- * head matches the current head in either mode. Errors swallow to `false` — a
- * store hiccup must never fire a redundant review. Runs after the synchronous
+ * Async eligibility to fire a first `pr-open` review for a remote PR: true only
+ * when NO review record exists for it in EITHER mode (a manual OR automated
+ * review in general or security counts as "the user knows this PR" and
+ * suppresses it), and no dismissed head matches the current head in either mode.
+ * Errors swallow to `false` (fail-closed) — a store hiccup must never fire a
+ * redundant review.
+ *
+ * Shared by the catch-up poller (via {@link catchUpEligible}) and the in-app
+ * Mark-ready trigger (RemotePrView), so both ready paths stay behaviorally
+ * identical. It's the ONLY guard that covers a manual panel review: those save
+ * via `saveReview` without taking an automation claim, so the runner's
+ * per-headSha claim dedup can't see them — this prior-review check can.
+ */
+export async function prOpenEligible(
+  repoPath: string,
+  ref: string,
+  currentHeadSha: string,
+): Promise<boolean> {
+  try {
+    const modes = ["general", "security"] as const;
+    for (const mode of modes) {
+      const prior = await getLatestReview(repoPath, "remote", ref, mode);
+      if (prior) return false;
+      const dismissed = await getDismissedHead(repoPath, "remote", ref, mode);
+      if (dismissed && sameSha(dismissed, currentHeadSha)) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Catch-up wrapper over {@link prOpenEligible}. Runs after the synchronous
  * attempt-mark, so a failure here won't re-enter the same PR this session.
  */
 async function catchUpEligible(
   repoPath: string,
   pick: CatchUpCandidate,
 ): Promise<boolean> {
-  try {
-    const modes = ["general", "security"] as const;
-    for (const mode of modes) {
-      const prior = await getLatestReview(repoPath, "remote", pick.ref, mode);
-      if (prior) return false;
-      const dismissed = await getDismissedHead(
-        repoPath,
-        "remote",
-        pick.ref,
-        mode,
-      );
-      if (dismissed && sameSha(dismissed, pick.currentHeadSha)) return false;
-    }
-    return true;
-  } catch {
-    return false;
-  }
+  return prOpenEligible(repoPath, pick.ref, pick.currentHeadSha);
 }
