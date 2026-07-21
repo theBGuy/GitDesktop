@@ -14,6 +14,7 @@ export type RepoTab =
   | "tags"
   | "insights"
   | "code-todos"
+  | "tasks"
   | "agent";
 /** A create dialog the command palette / New menus can request from any tab. */
 export type CreateKind =

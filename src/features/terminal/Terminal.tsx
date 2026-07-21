@@ -22,9 +22,13 @@ function decodeBase64(b64: string): Uint8Array {
 /**
  * An xterm.js terminal wired to a Rust PTY: output streams in over a Channel,
  * keystrokes go back via `pty_write`, and the grid is kept in sync with the
- * element size (`pty_resize`). The parent keys this by session id, so each
- * instance is bound to one session+PTY for its whole life — hence the one-shot
- * setup effect. Unmounting kills the shell.
+ * element size (`pty_resize`). The parent keys this by session id (or a task
+ * run id), so each instance is bound to one PTY for its whole life — hence the
+ * one-shot setup effect. Unmounting kills the process.
+ *
+ * For a Tasks run (`kind: "task"`), pass the `interpreter` + `body` to run and an
+ * `onExit` to surface the exit code in the run header. `onExit` is read through a
+ * ref so a re-render can't stale-capture it in the mount-once effect.
  */
 export function Terminal({
   ptyId,
@@ -32,16 +36,28 @@ export function Terminal({
   cwd,
   ports,
   className,
+  interpreter,
+  body,
+  path,
+  args,
+  onExit,
 }: {
   ptyId: string;
   kind: PtyOpts["kind"];
   cwd: string;
   ports: string[];
   className?: string;
+  interpreter?: string;
+  body?: string;
+  path?: string;
+  args?: string[];
+  onExit?: (code: number | null) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
+  const onExitRef = useRef(onExit);
+  onExitRef.current = onExit;
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: mount-once; props are fixed per instance (parent keys by session)
+  // biome-ignore lint/correctness/useExhaustiveDependencies: mount-once; props are fixed per instance (parent keys by session / task run)
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
@@ -71,7 +87,14 @@ export function Terminal({
 
     ptyOpen(
       ptyId,
-      { kind, cwd, ports, cols: term.cols, rows: term.rows },
+      {
+        kind,
+        cwd,
+        ports,
+        cols: term.cols,
+        rows: term.rows,
+        ...(kind === "task" ? { interpreter, body, path, args } : {}),
+      },
       (e) => {
         if (e.type === "output") {
           term.write(decodeBase64(e.data));
@@ -79,10 +102,13 @@ export function Terminal({
           exited = true;
           const code = e.code != null ? ` (code ${e.code})` : "";
           term.write(`\r\n\x1b[2m[process exited${code}]\x1b[0m\r\n`);
+          onExitRef.current?.(e.code);
         }
       },
     ).catch((err) => {
       term.write(`\r\n\x1b[31m${String(err)}\x1b[0m\r\n`);
+      // A spawn failure (bad interpreter, missing binary) is a terminal exit too.
+      onExitRef.current?.(null);
     });
 
     // Refit + tell the PTY whenever the element resizes (dock drag, window, or

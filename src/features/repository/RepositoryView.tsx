@@ -51,6 +51,10 @@ import { PullRequestsPanel } from "@/features/pulls/PullRequestsPanel";
 import { RemotePrView } from "@/features/pulls/RemotePrView";
 import { useCleanupResolveWorktrees } from "@/features/pulls/useCleanupResolveWorktrees";
 import { useWatchPrHeads } from "@/features/pulls/useWatchPrHeads";
+import { RunTaskPicker } from "@/features/scripts/RunTaskPicker";
+import { TaskRunConfirm } from "@/features/scripts/TaskRunConfirm";
+import { TaskRunView } from "@/features/scripts/TaskRunView";
+import { TasksPanel } from "@/features/scripts/TasksPanel";
 import { TagDetailView } from "@/features/tags/TagDetailView";
 import { TagsPanel } from "@/features/tags/TagsPanel";
 import {
@@ -62,7 +66,9 @@ import {
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useJiraLink, useJiraPermissions } from "@/lib/jira/queries";
 import { useLensGate, useSetRepoLens } from "@/lib/repo-lens/queries";
+import { useScripts } from "@/lib/scripts/queries";
 import { useAiEnabled, useRepoAlias } from "@/lib/settings/queries";
+import { useTaskRunStore } from "@/lib/stores/taskRun";
 import { type RepoTab, useUiStore } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
 import { ChangesPanel } from "./ChangesPanel";
@@ -121,6 +127,7 @@ const SECONDARY_TABS: { tab: RepoTab; label: string; ai?: boolean }[] = [
   { tab: "discussions", label: "Discussions" },
   { tab: "actions", label: "Actions" },
   { tab: "tags", label: "Tags" },
+  { tab: "tasks", label: "Tasks" },
   { tab: "insights", label: "Insights" },
 ];
 
@@ -200,6 +207,16 @@ export function RepositoryView() {
   // the palette can reach it from any tab.
   const [blamePickerOpen, setBlamePickerOpen] = useState(false);
   const [blamePath, setBlamePath] = useState<string | null>(null);
+  // Palette "Run a task…": the picker's open state, kept here (always mounted) so
+  // the palette can reach it from any tab. Gated on tasks being enabled + present.
+  const [runTaskPickerOpen, setRunTaskPickerOpen] = useState(false);
+  const scripts = useScripts();
+  const tasksEnabled = scripts.data?.enabled ?? false;
+  const hasTasks = (scripts.data?.tasks.length ?? 0) > 0;
+  // A running task shows a dot on the "More" trigger when you're on another tab.
+  const taskRunning = useTaskRunStore(
+    (s) => s.activeRun?.status === "running",
+  );
 
   // OS notifications for PR/check and workflow-run events while this repo is open.
   usePrNotifications(repoPath ?? "");
@@ -228,9 +245,17 @@ export function RepositoryView() {
   useHotkeyAction("tab-tags", () => changeTab("tags"));
   useHotkeyAction("tab-insights", () => changeTab("insights"));
   useHotkeyAction("tab-code-todos", () => changeTab("code-todos"));
+  useHotkeyAction("tab-tasks", () => changeTab("tasks"));
   // The Agent tab only exists when AI features are shown (palette-only binding).
   useHotkeyAction("tab-agent", () => changeTab("agent"), aiEnabled);
   useHotkeyAction("back-to-repositories", closeRepo);
+  // Palette "Run a task…": open the picker from any tab (only when there are
+  // tasks to run and running is enabled).
+  useHotkeyAction(
+    "run-task",
+    () => setRunTaskPickerOpen(true),
+    tasksEnabled && hasTasks,
+  );
 
   // Create actions registered here (always mounted) so the command palette can
   // reach them from any tab: each switches to the owning tab and flags its panel
@@ -362,6 +387,11 @@ export function RepositoryView() {
               </TabsTrigger>
               <DropdownMenu>
                 <DropdownMenuTrigger
+                  title={
+                    taskRunning && repoTab !== "tasks"
+                      ? "A task is running"
+                      : undefined
+                  }
                   render={
                     <button
                       type="button"
@@ -374,6 +404,12 @@ export function RepositoryView() {
                     />
                   }
                 >
+                  {taskRunning && repoTab !== "tasks" && (
+                    <span
+                      className="size-1.5 shrink-0 rounded-full bg-primary"
+                      aria-hidden
+                    />
+                  )}
                   {activeSecondary?.label ?? "More"}
                   <CaretDownIcon data-icon="inline-end" />
                 </DropdownMenuTrigger>
@@ -429,6 +465,9 @@ export function RepositoryView() {
               repoPath={repoPath}
               active={repoTab === "code-todos"}
             />
+          </Activity>
+          <Activity mode={mode("tasks")}>
+            <TasksPanel />
           </Activity>
           {aiEnabled && (
             <Activity mode={mode("agent")}>
@@ -557,6 +596,9 @@ export function RepositoryView() {
               <DiffPlaceholder icon={ListChecksIcon} message="Select a TODO" />
             )}
           </Activity>
+          <Activity mode={mode("tasks")}>
+            <TaskRunView />
+          </Activity>
           <Activity mode={mode("insights")}>
             {insightsSeen && (
               <Suspense fallback={null}>
@@ -609,6 +651,13 @@ export function RepositoryView() {
           if (!o) closeLocalPrCreate();
         }}
       />
+      {/* Palette "Run a task…" picker + the shared run-confirmation dialog.
+          Hoisted here so both are reachable from any tab. */}
+      <RunTaskPicker
+        open={runTaskPickerOpen}
+        onOpenChange={setRunTaskPickerOpen}
+      />
+      <TaskRunConfirm />
     </div>
   );
 }

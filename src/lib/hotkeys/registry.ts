@@ -148,6 +148,13 @@ export const ACTIONS = [
     defaultBinding: null,
   },
   {
+    id: "tab-tasks",
+    label: "Tasks tab",
+    category: "Navigation",
+    // Palette-only by default: mod+1–9 are already taken by the other tabs.
+    defaultBinding: null,
+  },
+  {
     id: "show-repositories",
     label: "Show repositories",
     category: "Navigation",
@@ -323,6 +330,12 @@ export const ACTIONS = [
   {
     id: "git-hooks",
     label: "Git hooks",
+    category: "Repository",
+    defaultBinding: null,
+  },
+  {
+    id: "run-task",
+    label: "Run a task…",
     category: "Repository",
     defaultBinding: null,
   },

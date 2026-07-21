@@ -1,16 +1,27 @@
 import { Channel } from "@tauri-apps/api/core";
 import { invoke } from "@/lib/tauri/invoke";
 
-/** What a terminal runs: a host shell in the worktree, or a shell inside the
- *  worktree's Docker/Podman test container (publishing its dev-server ports). */
+/** What a terminal runs: a host shell in the worktree, a shell inside the
+ *  worktree's Docker/Podman test container (publishing its dev-server ports), or —
+ *  for the Tasks feature — a registered script (`interpreter` runs a temp file
+ *  holding `body`) in `cwd`. */
 export interface PtyOpts {
-  kind: "host" | "container";
-  /** The session worktree path (cwd for host; mount + container key for container). */
+  kind: "host" | "container" | "task";
+  /** The working directory (cwd for host/task; mount + container key for container). */
   cwd: string;
   /** Dev-server ports to publish (container only) — `"5173"` or `"5174:5173"`. */
   ports: string[];
   cols: number;
   rows: number;
+  /** Task only: interpreter key (`"powershell"` | `"bash"` | `"node"` | …). */
+  interpreter?: string;
+  /** Task only, inline source: the script body run by `interpreter` (temp file). */
+  body?: string;
+  /** Task only, file source: an existing script file to run in place (relative to
+   *  `cwd`, or absolute). Takes precedence over `body`. */
+  path?: string;
+  /** Task only: extra arguments after the script (already split to argv). */
+  args?: string[];
 }
 
 /** Streamed from a PTY. `output.data` is base64 (binary- and partial-UTF-8-safe);

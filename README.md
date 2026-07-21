@@ -516,6 +516,19 @@ commit as a different author in one repo without changing your global identity.
 **Git hooks** — view, edit, enable/disable, and template `.git/hooks`, with
 husky / pre-commit / lefthook detection and install integration.
 
+**Tasks** — save your own scripts (your release or build flow, say) and run them from
+a dedicated **Tasks** tab or the command palette ("**Run a task…**"), without dropping
+to a terminal. Point a task at an **existing script in the repo** — it runs the live file,
+so edits take effect next run — or write one **inline**; with an AI provider connected,
+**generate** an inline script from a plain description. Each runs in an **interactive**
+in-app terminal in the repo's folder, so scripts that prompt you (a version to release, a
+yes/no) work and keep their colour; **Stop** kills the run and its child processes,
+**Rerun** starts a fresh one. Pick the interpreter (PowerShell, cmd, bash/sh/zsh, Node, or
+Python) and pass any **arguments** (e.g. `--preview` — quoted values stay intact). Task
+definitions live in your app data — never read from repository content, so a cloned repo
+can't plant one — running is **off until you enable it**, and each task can **confirm
+before it runs**.
+
 **Automations** — a lifecycle grid (on commit / on PR opened / on new commits to a
 reviewed PR) that runs AI review or security audit automatically, with per-action
 branch conditions, Save/Discard drafts, global defaults, and per-repo overrides.

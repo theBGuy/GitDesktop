@@ -1,13 +1,16 @@
 //! In-app **terminal** backend: real PTYs streamed to the frontend's xterm.js.
 //!
 //! Each terminal is a pseudo-terminal (ConPTY on Windows via `portable-pty`)
-//! running either a **host shell** in the session worktree, or — for a container
-//! session — a shell *inside* the worktree's test container (reusing the exact
-//! run-or-exec + port-publish + cleanup logic the external "Test in container"
-//! launcher uses, see `agent_sandbox::container_shell_command`). Output is streamed
-//! to the UI over a Tauri `Channel` (base64 chunks, so binary + partial-UTF-8 are
-//! safe); input/resize/close come back as commands. PTYs are held in app state
-//! keyed by a frontend id and torn down on close (or when the shell exits).
+//! running either a **host shell** in the session worktree, a shell *inside* the
+//! worktree's test container (reusing the exact run-or-exec + port-publish +
+//! cleanup logic the external "Test in container" launcher uses, see
+//! `agent_sandbox::container_shell_command`), or — for the **Tasks** feature — a
+//! user-registered script: its body is written to a temp file and run by the
+//! chosen interpreter (argv-only; the body is never interpolated into a `-c`
+//! shell string). Output is streamed to the UI over a Tauri `Channel` (base64
+//! chunks, so binary + partial-UTF-8 are safe); input/resize/close come back as
+//! commands. PTYs are held in app state keyed by a frontend id and torn down on
+//! close (or when the process exits).
 //!
 //! **Windows dev caveat (known limitation, not a bug — do not re-chase):** the
 //! in-app terminal works in a RELEASE install but NOT under `pnpm tauri dev`. The
@@ -23,6 +26,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use base64::Engine;
@@ -31,6 +35,7 @@ use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use tauri::State;
 
+use crate::agent::resolve_named;
 use crate::agent_sandbox::container_shell_command;
 use crate::error::{AppError, AppResult};
 
@@ -47,22 +52,44 @@ struct PtyHandle {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn Child + Send + Sync>,
+    /// A temp script file to delete once the process exits (Tasks runs write the
+    /// script body to a temp file); `None` for host/container shells.
+    cleanup: Option<PathBuf>,
+    /// Kill the whole process tree on teardown. Tasks spawn their own children
+    /// (git, node, pnpm…) that a single-process kill would orphan; a shell's
+    /// children are reached by the PTY hangup, so this stays off for those.
+    tree_kill: bool,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PtyOpts {
     /// "host" — a shell in `cwd`; "container" — a shell in the worktree's test
-    /// container (publishing `ports`).
+    /// container (publishing `ports`); "task" — run `interpreter` on a temp file
+    /// holding `body`, in `cwd`.
     kind: String,
-    /// The session worktree path: the cwd for a host shell, and the mount + key
-    /// for a container shell.
+    /// The cwd: a host shell's / task's working directory, and (container) the
+    /// mount + key.
     cwd: String,
-    /// Dev-server ports to publish (container only; ignored for host).
+    /// Dev-server ports to publish (container only; ignored otherwise).
     #[serde(default)]
     ports: Vec<String>,
     cols: u16,
     rows: u16,
+    /// Task only: the interpreter key (see `task_interp`) to run the script with.
+    #[serde(default)]
+    interpreter: Option<String>,
+    /// Task only, inline source: the script body written to a temp file and run.
+    #[serde(default)]
+    body: Option<String>,
+    /// Task only, file source: an existing script file to run in place (relative
+    /// to `cwd`, or absolute). Takes precedence over `body` when set.
+    #[serde(default)]
+    path: Option<String>,
+    /// Task only: extra arguments passed to the script after its path. Argv form
+    /// (already split by the frontend), so no shell re-parsing happens here.
+    #[serde(default)]
+    args: Vec<String>,
 }
 
 /// Streamed to the frontend terminal. `Output` carries base64-encoded bytes.
@@ -70,8 +97,8 @@ pub struct PtyOpts {
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum PtyEvent {
     Output { data: String },
-    /// The shell process exited; `code` is its exit status when known (surfaced in
-    /// the UI so a silent/erroring exit is diagnosable, not just "exited").
+    /// The process exited; `code` is its exit status when known (surfaced in the
+    /// UI so a silent/erroring exit is diagnosable, not just "exited").
     Exit { code: Option<u32> },
 }
 
@@ -88,28 +115,192 @@ fn host_shell() -> String {
     }
 }
 
-/// Builds the PTY command for the requested kind. Returns the command plus an
-/// optional one-line tip to print first (the container port hint).
+/// Maps a Tasks interpreter key to the binary names to resolve, the temp-file
+/// extension, and the argv that runs the script *file*. Argv-only by design: the
+/// script body is executed as a file, never interpolated into a `-c` string (which
+/// is the one shell-injection class the rest of the app has zero instances of, and
+/// avoids the Windows `.cmd`-shim multi-line-argv rejection).
+///
+/// The frontend's interpreter dropdown mirrors these keys; an unknown key errors
+/// at run time rather than silently doing nothing.
+type TaskArgs = fn(&str) -> Vec<String>;
+fn task_interp(interpreter: &str) -> Option<(&'static [&'static str], &'static str, TaskArgs)> {
+    let ps: TaskArgs = |p| {
+        vec![
+            "-NoProfile".into(),
+            "-ExecutionPolicy".into(),
+            "Bypass".into(),
+            "-File".into(),
+            p.into(),
+        ]
+    };
+    let file_arg: TaskArgs = |p| vec![p.into()];
+    let cmd_c: TaskArgs = |p| vec!["/c".into(), p.into()];
+    match interpreter {
+        // Prefer PowerShell 7 (`pwsh`), fall back to Windows PowerShell 5.1.
+        "powershell" => Some((&["pwsh", "powershell"], "ps1", ps)),
+        "cmd" => Some((&["cmd"], "cmd", cmd_c)),
+        "bash" => Some((&["bash"], "sh", file_arg)),
+        "sh" => Some((&["sh"], "sh", file_arg)),
+        "zsh" => Some((&["zsh"], "sh", file_arg)),
+        "node" => Some((&["node"], "mjs", file_arg)),
+        "python" => Some((&["python3", "python"], "py", file_arg)),
+        _ => None,
+    }
+}
+
+/// The built PTY child plus teardown metadata.
+struct BuiltCommand {
+    cmd: CommandBuilder,
+    /// A dim first line to print (the container port hint), if any.
+    tip: Option<String>,
+    /// Temp script file to remove on teardown (task runs).
+    cleanup: Option<PathBuf>,
+    tree_kill: bool,
+}
+
+/// Builds the PTY command for the requested kind.
 ///
 /// `docker` is spawned directly as the PTY child: the vendored portable-pty patch
 /// (NULL std handles) makes the child attach to the pseudoconsole, so its TTY check
 /// passes and `-t` allocates a real container TTY.
-async fn build_command(opts: &PtyOpts) -> AppResult<(CommandBuilder, Option<String>)> {
+async fn build_command(opts: &PtyOpts, id: &str) -> AppResult<BuiltCommand> {
     if opts.kind == "container" {
         let (bin, args, tip) = container_shell_command(&opts.cwd, &opts.ports).await?;
         let mut cmd = CommandBuilder::new(bin);
         for a in args {
             cmd.arg(a);
         }
-        return Ok((cmd, Some(tip)));
+        return Ok(BuiltCommand {
+            cmd,
+            tip: Some(tip),
+            cleanup: None,
+            tree_kill: false,
+        });
     }
+
+    if opts.kind == "task" {
+        let interpreter = opts.interpreter.as_deref().unwrap_or_default();
+        let (names, ext, build_args) = task_interp(interpreter).ok_or_else(|| {
+            AppError::Command(format!("unknown task interpreter '{interpreter}'"))
+        })?;
+        let bin = resolve_named(names, None).await.ok_or_else(|| {
+            AppError::Command(format!(
+                "couldn't find the '{interpreter}' interpreter on your PATH — is it installed?"
+            ))
+        })?;
+
+        // File source: run an EXISTING script file in place — never written, never
+        // deleted (it's the user's own file, run live so edits take effect). Inline
+        // source: write the body to a temp file (unique per run) and run that.
+        let (script_path, cleanup) = match opts.path.as_deref().filter(|p| !p.is_empty()) {
+            Some(file) => {
+                let full = if std::path::Path::new(file).is_absolute() {
+                    std::path::PathBuf::from(file)
+                } else {
+                    std::path::Path::new(&opts.cwd).join(file)
+                };
+                if !full.exists() {
+                    return Err(AppError::Command(format!(
+                        "script file not found: {}",
+                        full.display()
+                    )));
+                }
+                (full.to_string_lossy().into_owned(), None)
+            }
+            None => {
+                let body = opts.body.as_deref().unwrap_or_default();
+                // Sanitize the (unique-per-run) id to safe filename chars.
+                let safe: String = id
+                    .chars()
+                    .map(|c| {
+                        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                            c
+                        } else {
+                            '-'
+                        }
+                    })
+                    .collect();
+                let tmp = std::env::temp_dir().join(format!("gd-task-{safe}.{ext}"));
+                std::fs::write(&tmp, body).map_err(AppError::Io)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Ok(meta) = std::fs::metadata(&tmp) {
+                        let mut perm = meta.permissions();
+                        perm.set_mode(0o755);
+                        let _ = std::fs::set_permissions(&tmp, perm);
+                    }
+                }
+                (tmp.to_string_lossy().into_owned(), Some(tmp))
+            }
+        };
+
+        let mut cmd = CommandBuilder::new(bin);
+        for a in build_args(&script_path) {
+            cmd.arg(a);
+        }
+        // The user's arguments, after the script path (argv, never shell-parsed).
+        for a in &opts.args {
+            cmd.arg(a);
+        }
+        cmd.cwd(&opts.cwd);
+        return Ok(BuiltCommand {
+            cmd,
+            tip: None,
+            cleanup,
+            tree_kill: true,
+        });
+    }
+
     let mut cmd = CommandBuilder::new(host_shell());
     cmd.cwd(&opts.cwd);
-    Ok((cmd, None))
+    Ok(BuiltCommand {
+        cmd,
+        tip: None,
+        cleanup: None,
+        tree_kill: false,
+    })
 }
 
 fn encode(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// Kills a PTY's child. Tasks tree-kill (Windows `taskkill /F /T`) so their git /
+/// node / pnpm descendants don't orphan; a shell relies on the PTY hangup reaching
+/// its foreground group, so `child.kill()` alone is enough there.
+fn kill_handle(h: &mut PtyHandle) {
+    if h.tree_kill {
+        kill_tree(&mut h.child);
+    }
+    let _ = h.child.kill();
+}
+
+/// Best-effort process-tree kill for a task run. On Windows `taskkill /T` reaches
+/// the whole tree (git/node/pnpm children a bare `TerminateProcess` would orphan).
+/// On Unix the PTY hangup (SIGHUP to the foreground group when the master drops)
+/// plus the caller's `child.kill()` already reach descendants, so there's nothing
+/// extra to do.
+fn kill_tree(child: &mut Box<dyn Child + Send + Sync>) {
+    #[cfg(windows)]
+    if let Some(pid) = child.process_id() {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn();
+    }
+    #[cfg(not(windows))]
+    let _ = child;
+}
+
+/// Deletes a task's temp script file (best-effort). No-op for shells.
+fn cleanup_handle(h: &mut PtyHandle) {
+    if let Some(p) = h.cleanup.take() {
+        let _ = std::fs::remove_file(p);
+    }
 }
 
 /// Opens a PTY, starts streaming its output to `on_event`, and registers it under
@@ -121,7 +312,12 @@ pub async fn pty_open(
     opts: PtyOpts,
     on_event: Channel<PtyEvent>,
 ) -> AppResult<()> {
-    let (mut cmd, tip) = build_command(&opts).await?;
+    let BuiltCommand {
+        mut cmd,
+        tip,
+        cleanup,
+        tree_kill,
+    } = build_command(&opts, &id).await?;
     // portable-pty's CommandBuilder already inherits the parent environment, so we
     // only advertise a capable terminal here (re-copying every var is redundant and
     // can introduce odd-cased duplicate Windows vars).
@@ -137,10 +333,13 @@ pub async fn pty_open(
         })
         .map_err(|e| AppError::Command(format!("failed to open a terminal: {e}")))?;
 
-    let child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| AppError::Command(format!("failed to start the shell: {e}")))?;
+    let child = pair.slave.spawn_command(cmd).map_err(|e| {
+        // The temp script file is orphaned if the spawn fails — clean it up.
+        if let Some(p) = &cleanup {
+            let _ = std::fs::remove_file(p);
+        }
+        AppError::Command(format!("failed to start the process: {e}"))
+    })?;
     // Drop the slave so the child owns the only handle to it (else close can hang).
     drop(pair.slave);
 
@@ -159,6 +358,8 @@ pub async fn pty_open(
             master: pair.master,
             writer,
             child,
+            cleanup,
+            tree_kill,
         },
     );
 
@@ -194,14 +395,17 @@ pub async fn pty_open(
         // the lock immediately), then a NON-blocking try_wait for the code. If the
         // child is still alive (the reader stopped early), kill it so it can't
         // orphan. (Holding the lock across a blocking wait() here froze the app.)
-        let mut handle = ptys.lock().unwrap().remove(&id);
-        let code = handle.as_mut().and_then(|h| match h.child.try_wait() {
-            Ok(Some(status)) => Some(status.exit_code()),
-            _ => {
-                let _ = h.child.kill();
-                None
+        // `pty_close` may have already removed + torn down the handle (Stop) — then
+        // this just reports the exit.
+        let handle = ptys.lock().unwrap().remove(&id);
+        let mut code = None;
+        if let Some(mut h) = handle {
+            match h.child.try_wait() {
+                Ok(Some(status)) => code = Some(status.exit_code()),
+                _ => kill_handle(&mut h),
             }
-        });
+            cleanup_handle(&mut h);
+        }
         let _ = on_event.send(PtyEvent::Exit { code });
     });
 
@@ -234,11 +438,246 @@ pub fn pty_resize(state: State<'_, PtyState>, id: String, cols: u16, rows: u16) 
     Ok(())
 }
 
-/// Kills the shell and drops the PTY (on terminal unmount / dock close). Idempotent.
+/// Kills the process and drops the PTY (on terminal unmount / dock close / task
+/// Stop). Tree-kills a task's descendants and removes its temp script. Idempotent.
 #[tauri::command]
 pub fn pty_close(state: State<'_, PtyState>, id: String) -> AppResult<()> {
-    if let Some(mut h) = state.ptys.lock().unwrap().remove(&id) {
-        let _ = h.child.kill();
+    let handle = state.ptys.lock().unwrap().remove(&id);
+    if let Some(mut h) = handle {
+        kill_handle(&mut h);
+        cleanup_handle(&mut h);
     }
     Ok(())
+}
+
+// ── Dev-only external-terminal fallback ─────────────────────────────────────
+// Runs a task in the user's OS terminal instead of the in-app PTY. This exists
+// ONLY for the Windows ConPTY-under-`pnpm tauri dev` limitation (see the module
+// header): the in-app terminal can't spawn in dev, so the frontend silently
+// routes Run here on Windows dev builds. **Compiled out of release binaries**
+// (`debug_assertions`) — a production build carries none of this; its frontend
+// gate is statically false there too, so nothing ever calls it. Structure
+// mirrors `agent_sandbox::launch_container_shell`.
+
+#[cfg(debug_assertions)]
+static TERM_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(all(unix, debug_assertions))]
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Windows: write a temp `.cmd` that cds to the repo, runs the (double-quoted)
+/// command, and pauses; `start` it so it gets a fresh, fully-wired console.
+#[cfg(all(windows, debug_assertions))]
+fn spawn_terminal(cwd: &str, bin: &str, argv: &[String]) -> AppResult<()> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut line = format!("\"{bin}\"");
+    for a in argv {
+        line.push_str(&format!(" \"{a}\""));
+    }
+    let script = format!(
+        "@echo off\r\ntitle GitDesktop task\r\ncd /d \"{cwd}\"\r\n{line}\r\necho.\r\necho (task exited) Press any key to close...\r\npause >nul\r\n"
+    );
+    let n = TERM_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path =
+        std::env::temp_dir().join(format!("gd-task-run-{}-{n}.cmd", std::process::id()));
+    std::fs::write(&path, script).map_err(AppError::Io)?;
+    let mut c = std::process::Command::new("cmd");
+    c.raw_arg(format!("/c start \"GitDesktop\" \"{}\"", path.display()));
+    c.creation_flags(CREATE_NO_WINDOW);
+    c.spawn().map(|_| ()).map_err(AppError::Io)
+}
+
+/// macOS: write a temp `.command` (Terminal.app runs it on `open`).
+#[cfg(all(target_os = "macos", debug_assertions))]
+fn spawn_terminal(cwd: &str, bin: &str, argv: &[String]) -> AppResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut line = sh_quote(bin);
+    for a in argv {
+        line.push(' ');
+        line.push_str(&sh_quote(a));
+    }
+    let script = format!(
+        "#!/bin/bash\ncd {}\n{line}\necho\necho '(task exited)'\n",
+        sh_quote(cwd)
+    );
+    let n = TERM_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path =
+        std::env::temp_dir().join(format!("gd-task-run-{}-{n}.command", std::process::id()));
+    std::fs::write(&path, script).map_err(AppError::Io)?;
+    let mut perm = std::fs::metadata(&path).map_err(AppError::Io)?.permissions();
+    perm.set_mode(0o755);
+    std::fs::set_permissions(&path, perm).map_err(AppError::Io)?;
+    std::process::Command::new("open")
+        .arg(&path)
+        .spawn()
+        .map(|_| ())
+        .map_err(AppError::Io)
+}
+
+/// Linux: run the command in the first available terminal emulator, dropping into a
+/// shell afterwards so the window stays open.
+#[cfg(all(unix, not(target_os = "macos"), debug_assertions))]
+fn spawn_terminal(cwd: &str, bin: &str, argv: &[String]) -> AppResult<()> {
+    let mut line = sh_quote(bin);
+    for a in argv {
+        line.push(' ');
+        line.push_str(&sh_quote(a));
+    }
+    let cmd = format!(
+        "cd {}; {line}; echo; echo '(task exited)'; exec bash",
+        sh_quote(cwd)
+    );
+    for term in ["x-terminal-emulator", "gnome-terminal", "konsole", "xterm"] {
+        if std::process::Command::new(term)
+            .args(["-e", "bash", "-c", &cmd])
+            .spawn()
+            .is_ok()
+        {
+            return Ok(());
+        }
+    }
+    Err(AppError::Command(
+        "no terminal emulator found".to_string(),
+    ))
+}
+
+/// Launches a task in the user's OS terminal (rather than the in-app PTY) — the
+/// automatic dev fallback for the Windows ConPTY-under-`tauri dev` limitation.
+/// Dev builds only: in release the implementation is compiled out and this
+/// answers with an error (nothing routes here in production — the frontend's
+/// dev gate is statically false in a production bundle).
+#[tauri::command]
+pub async fn task_open_terminal(
+    cwd: String,
+    interpreter: String,
+    body: Option<String>,
+    path: Option<String>,
+    args: Vec<String>,
+) -> AppResult<()> {
+    #[cfg(debug_assertions)]
+    {
+        task_open_terminal_impl(cwd, interpreter, body, path, args).await
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = (cwd, interpreter, body, path, args);
+        Err(AppError::Command(
+            "opening a task in an external terminal is a dev-only fallback".to_string(),
+        ))
+    }
+}
+
+/// The dev-only body of [`task_open_terminal`]: resolves the interpreter,
+/// materializes the script (an existing file, or a temp file for an inline body),
+/// and opens a terminal window running `<interpreter> <script> <args>` in the repo
+/// directory. Argv-only, like the in-app path.
+#[cfg(debug_assertions)]
+async fn task_open_terminal_impl(
+    cwd: String,
+    interpreter: String,
+    body: Option<String>,
+    path: Option<String>,
+    args: Vec<String>,
+) -> AppResult<()> {
+    let (names, ext, build_args) = task_interp(&interpreter).ok_or_else(|| {
+        AppError::Command(format!("unknown task interpreter '{interpreter}'"))
+    })?;
+    let bin = resolve_named(names, None).await.ok_or_else(|| {
+        AppError::Command(format!(
+            "couldn't find the '{interpreter}' interpreter on your PATH — is it installed?"
+        ))
+    })?;
+
+    let script_path = match path.as_deref().filter(|p| !p.is_empty()) {
+        Some(file) => {
+            let full = if std::path::Path::new(file).is_absolute() {
+                std::path::PathBuf::from(file)
+            } else {
+                std::path::Path::new(&cwd).join(file)
+            };
+            if !full.exists() {
+                return Err(AppError::Command(format!(
+                    "script file not found: {}",
+                    full.display()
+                )));
+            }
+            full.to_string_lossy().into_owned()
+        }
+        None => {
+            // Inline body → a temp script the external terminal reads after we
+            // return. Not cleaned up here (we'd race the terminal); the OS clears
+            // its temp dir.
+            let body = body.as_deref().unwrap_or_default();
+            let n = TERM_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let tmp = std::env::temp_dir()
+                .join(format!("gd-task-inline-{}-{n}.{ext}", std::process::id()));
+            std::fs::write(&tmp, body).map_err(AppError::Io)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(meta) = std::fs::metadata(&tmp) {
+                    let mut perm = meta.permissions();
+                    perm.set_mode(0o755);
+                    let _ = std::fs::set_permissions(&tmp, perm);
+                }
+            }
+            tmp.to_string_lossy().into_owned()
+        }
+    };
+
+    let mut argv = build_args(&script_path);
+    argv.extend(args);
+    let bin = bin.to_string_lossy().into_owned();
+    spawn_terminal(&cwd, &bin, &argv)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_interp_maps_every_known_key() {
+        for key in ["powershell", "cmd", "bash", "sh", "zsh", "node", "python"] {
+            assert!(task_interp(key).is_some(), "{key} should map to a command");
+        }
+    }
+
+    #[test]
+    fn task_interp_rejects_unknown_keys() {
+        // An unknown/empty interpreter must be rejected, not silently run something.
+        assert!(task_interp("ruby").is_none());
+        assert!(task_interp("").is_none());
+        assert!(task_interp("bash;rm").is_none());
+    }
+
+    #[test]
+    fn powershell_runs_the_script_file_not_a_command_string() {
+        let (_names, ext, build) = task_interp("powershell").unwrap();
+        assert_eq!(ext, "ps1");
+        let args = build("C:/tmp/gd-task-x.ps1");
+        // Argv form: the body is a FILE argument, never interpolated into `-Command`.
+        assert!(args.iter().any(|a| a == "-File"));
+        assert!(args.last().unwrap().ends_with("gd-task-x.ps1"));
+        assert!(!args.iter().any(|a| a == "-Command"));
+    }
+
+    #[test]
+    fn interpreters_pass_the_file_as_a_discrete_arg() {
+        for key in ["bash", "sh", "zsh", "node", "python"] {
+            let (_names, _ext, build) = task_interp(key).unwrap();
+            let path = "/tmp/gd-task-x";
+            let args = build(path);
+            assert!(
+                args.iter().any(|a| a == path),
+                "{key} should pass the script path as an argv element"
+            );
+        }
+        // cmd runs the file via `/c <file>`.
+        let (_n, ext, build) = task_interp("cmd").unwrap();
+        assert_eq!(ext, "cmd");
+        assert_eq!(build("x.cmd"), vec!["/c".to_string(), "x.cmd".to_string()]);
+    }
 }

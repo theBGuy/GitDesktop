@@ -1551,6 +1551,34 @@ the small programs Git runs at points like *before commit* or *before push*.
   for you.`,
   },
   {
+    id: "tasks",
+    label: "Tasks",
+    body: `# Tasks
+
+Save your own scripts — a release or build flow, say — and run them from inside
+GitDesktop, without dropping to a terminal. Open the **Tasks** tab from the **More ▾**
+tab menu, or from the command palette ({{kbd:command-palette}}).
+
+- **Turn it on first.** Running scripts is off until you enable it — the Tasks tab has an
+  **Enable task running** button. Your saved tasks live in GitDesktop's own data on this
+  machine and are **never read from a repository**, so opening or cloning a repo can never
+  add or run one.
+- **Add a task.** Give it a name and pick an interpreter — **PowerShell**, **cmd**,
+  **bash / sh / zsh**, **Node**, or **Python**. Then either **point it at an existing
+  script** in the repo (it runs the live file, so edits take effect on the next run) or
+  write one **inline** — a one-liner like \`node scripts/release.mjs\` or several lines with
+  pipes and \`&&\`.{{ai}} With an AI provider connected, **Generate** writes an inline script
+  from a short description.{{/ai}} You can also pass **arguments** (e.g. \`--preview\`; quote
+  values with spaces). Either way it runs in the open repository's folder.
+- **Run it.** Click a task, or use **Run a task…** from the command palette. Runs happen in
+  an **interactive** terminal, so a script that prompts you — the next version to release, a
+  yes/no — works, and output keeps its colour. **Stop** ends a run and the processes it
+  started; **Rerun** starts a fresh one.
+- **Confirm before running.** Each task can ask for confirmation first (on by default) —
+  turn it off per task once you trust it. Starting a task while another is still running
+  asks before it replaces it.`,
+  },
+  {
     id: "keyboard",
     label: "Keyboard & navigation",
     body: `# Keyboard & navigation

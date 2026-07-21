@@ -289,6 +289,12 @@ export const capabilities: Capability[] = [
     highlight: true,
   },
   { group: "Repository & workspace", label: "Submodule status & update" },
+  {
+    group: "Repository & workspace",
+    label:
+      "Tasks — register a repo script or write one inline, run it in an interactive terminal",
+    highlight: true,
+  },
   { group: "Repository & workspace", label: "Manage tracked & ignored files" },
   { group: "Repository & workspace", label: "--force-with-lease by default" },
   {
@@ -386,6 +392,11 @@ export const capabilities: Capability[] = [
     group: "AI · generate & review",
     ai: true,
     label: "AI repo descriptions & topics",
+  },
+  {
+    group: "AI · generate & review",
+    ai: true,
+    label: "Generate a task's script from a plain-English description",
   },
   {
     group: "AI · generate & review",
