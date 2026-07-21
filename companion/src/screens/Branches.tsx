@@ -3,6 +3,7 @@ import {
   ArrowUpIcon,
   GitBranchIcon,
 } from "@phosphor-icons/react";
+import { useState } from "react";
 import {
   EmptyState,
   ErrorState,
@@ -12,7 +13,6 @@ import {
   StaleBanner,
 } from "../components/states";
 import type { Branch } from "../lib/api";
-import { useState } from "react";
 import { timeAgo } from "../lib/format";
 import { useBranches } from "../lib/queries";
 import { useRovingList } from "../lib/use-roving-list";
@@ -35,10 +35,11 @@ export function BranchesBody({
   const { data, isError, error, refetch } = useBranches(repoId, active);
   const { register, onKeyDown } = useRovingList();
   // True roving tabindex: the tab stop follows the last-focused row (arrow nav or
-  // click), so Tab-ing away and back returns to it, not row 0. `onFocus` keeps it
-  // in sync with useRovingList's .focus() calls; clamped in case a poll shrinks
-  // the list under a remembered index. (Review r6.)
-  const [focusIdx, setFocusIdx] = useState(0);
+  // click), so Tab-ing away and back returns to it, not row 0. Keyed by branch
+  // NAME, not index — a poll can reorder the list under a remembered position,
+  // and identity keeps the stop on the same branch; an unknown/absent name falls
+  // back to row 0. `onFocus` syncs with useRovingList's .focus(). (Review r6+r7.)
+  const [focusName, setFocusName] = useState<string | null>(null);
 
   // Definitive gone WINS over stale data: a `noSuchRepo` 404 kicks to the teaching
   // state even when a cached list is on hand (see isRepoGoneError).
@@ -76,8 +77,17 @@ export function BranchesBody({
                   // A focusable, roving list row (repo convention: every list gets
                   // keyboard nav) — but NOT a control: there's no branch detail to
                   // open, so it's a plain row, not a button/link.
-                  tabIndex={i === Math.min(focusIdx, branches.length - 1) ? 0 : -1}
-                  onFocus={() => setFocusIdx(i)}
+                  tabIndex={
+                    (
+                      focusName != null &&
+                      branches.some((b) => b.name === focusName)
+                        ? branch.name === focusName
+                        : i === 0
+                    )
+                      ? 0
+                      : -1
+                  }
+                  onFocus={() => setFocusName(branch.name)}
                   className={`flex min-h-14 items-center gap-3 px-4 py-3 outline-none focus-visible:bg-muted/40 ${
                     branch.archived ? "opacity-60" : ""
                   }`}
