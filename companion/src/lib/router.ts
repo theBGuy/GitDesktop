@@ -91,7 +91,7 @@ export interface Route {
    *  `#…/history/{sha}/{file}`), already `decodeURIComponent`-decoded, else null. */
   filePath: string | null;
   /** A selected commit sha (`#…/history/{sha}[/…]`), else null. Only ever a
-   *  7–40 hex-char string or null — a malformed sha segment parses as null. */
+   *  7–64 hex-char string or null — a malformed sha segment parses as null. */
   sha: string | null;
   /** The raw normalized hash (without the leading `#`). */
   raw: string;

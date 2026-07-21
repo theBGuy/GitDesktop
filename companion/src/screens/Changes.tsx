@@ -84,7 +84,11 @@ export function ChangesBody({
   const workingDiff = useWorkingDiff(repoId, active);
   const { register, onKeyDown } = useRovingList();
 
-  // Index the working diff's per-file stats by path for an O(1) join. Memoized on
+  // Index the working diff's per-file stats by path for an O(1) join. The diff is
+  // ONE payload (staged ∪ unstaged), so a file changed in BOTH sections shows its
+  // COMBINED +n −n in each row — a documented best-effort: a true per-side stat
+  // would need a second diff request per poll for a corner case, and the drill-in
+  // diffs (which pass the real staged/untracked flags) are always exact. Memoized on
   // the diff data so the map is stable across renders (and cheap when it's absent).
   const stats = useMemo(() => {
     const map = new Map<string, DiffStatEntry>();
