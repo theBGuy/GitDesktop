@@ -309,7 +309,7 @@ export const capabilities: Capability[] = [
   },
   {
     group: "Repository & workspace",
-    label: "Themes — System, Light, Dark & a softer Dark Dimmed",
+    label: "Themes — System, Light, Dark & a softer Slate",
   },
 
   // — Admin & settings —

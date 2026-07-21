@@ -277,7 +277,7 @@ export interface AppSettings {
   mcpServers: McpServer[];
   recentRepos: RecentRepo[];
   /** Color theme (Settings → Appearance). "system" follows the OS scheme;
-   *  "light"/"dark" force it; "dark-dimmed" is a softer dark variant that lifts
+   *  "light"/"dark" force it; "slate" is a softer dark variant that lifts
    *  surfaces off pure black and ink off pure white to reduce eye strain. Absent
    *  on settings stored before this field existed → "system" via the
    *  DEFAULT_SETTINGS spread in loadSettings (byte-identical prior behavior).

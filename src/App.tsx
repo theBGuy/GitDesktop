@@ -135,7 +135,7 @@ function App() {
   useHotkeyAction("cycle-theme", () => {
     const current = settingsRef.current;
     if (!current) return;
-    // Step System → Light → Dark → Dark Dimmed. Apply-on-change like the picker:
+    // Step System → Light → Dark → Slate. Apply-on-change like the picker:
     // persist + toggle the class immediately (appearance prefs have no Save bar).
     const next = nextTheme(current.theme);
     saveSettings.mutate({ ...current, theme: next });

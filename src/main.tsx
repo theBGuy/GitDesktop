@@ -24,7 +24,7 @@ import "./App.css";
 // at build time instead (see vite.config.ts), so no layering is needed.
 import "@git-diff-view/react/styles/diff-view.css";
 
-// Apply the saved theme (System / Light / Dark / Dark Dimmed) before first paint,
+// Apply the saved theme (System / Light / Dark / Slate) before first paint,
 // reading a localStorage mirror synchronously so a saved override doesn't flash
 // through the OS default; the authoritative store value reconciles below.
 initTheme();

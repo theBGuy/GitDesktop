@@ -64,10 +64,9 @@ export function AppearanceSection() {
         <p className="text-xs text-muted-foreground">
           <span className="font-medium text-foreground">System</span> follows
           your operating system's light/dark setting.{" "}
-          <span className="font-medium text-foreground">Dark Dimmed</span> is a
-          softer dark theme — surfaces lift off pure black and text off pure
-          white — to ease eye strain on long sessions. You can also cycle themes
-          from the command palette.
+          <span className="font-medium text-foreground">Slate</span> is a softer
+          dark theme — a lifted, cool blue-gray canvas that eases eye strain on
+          long sessions. You can also cycle themes from the command palette.
         </p>
       </div>
     </section>

@@ -139,29 +139,47 @@
   --sidebar-ring: oklch(0.82 0.11 175);
 }
 
-/* "Dark Dimmed" — a softer dark variant (Settings → Appearance). It lifts the
-   surfaces off pure black and pulls body text off pure white to cut the
-   halation / eye-strain of the maximum-contrast default (foreground↔background
-   drops from ~19:1 to ~14:1), following Material + GitHub Primer guidance. It
-   overrides ONLY the neutral ramp — the mint brand accent, semantic state
-   colors, borders, and charts all inherit from `.dark`. Applied as `.dark.dimmed`
-   so every `.dark`-keyed style (shiki, recharts, the diff viewer, and `dark:`
-   utilities) keeps working; the `.dimmed` class is only ever set alongside
-   `.dark` (see theme.ts). */
-.dark.dimmed {
-  --background: oklch(0.17 0 0);
-  --foreground: oklch(0.9 0 0);
-  --card: oklch(0.235 0 0);
-  --card-foreground: oklch(0.9 0 0);
-  --popover: oklch(0.235 0 0);
-  --popover-foreground: oklch(0.9 0 0);
-  --secondary: oklch(0.285 0 0);
-  --secondary-foreground: oklch(0.9 0 0);
-  --muted: oklch(0.285 0 0);
-  --accent-foreground: oklch(0.9 0 0);
-  --sidebar: oklch(0.235 0 0);
-  --sidebar-foreground: oklch(0.9 0 0);
-  --sidebar-accent-foreground: oklch(0.9 0 0);
+/* "Slate" — a softer dark theme (Settings → Appearance) in the style of GitHub's
+   "Dark dimmed": a lifted, cool blue-gray canvas (hue ~257 — a NEUTRAL cool,
+   deliberately NOT the mint brand hue, so the chrome never reads as tinted toward
+   the brand) with cool off-white ink, plus accent colors desaturated so bright
+   status badges stop vibrating on the softer field. Foreground↔background lands
+   at ~11:1 (vs the default Dark's ~19:1), inside the dark-mode comfort band.
+   Applied as `.dark.slate` so every `.dark`-keyed style (shiki, recharts, the
+   diff viewer, and `dark:` utilities) keeps working; `.slate` is only ever set
+   alongside `.dark` (see theme.ts). Surface values are the resolved OKLCH of
+   #1c2128 / #22272e / #2d333b / #d1d7e0. */
+.dark.slate {
+  /* Cool, lifted neutral ramp (bg → card → muted). */
+  --background: oklch(0.245 0.015 257);
+  --card: oklch(0.285 0.015 257);
+  --popover: oklch(0.285 0.015 257);
+  --secondary: oklch(0.33 0.016 257);
+  --muted: oklch(0.33 0.016 257);
+  --sidebar: oklch(0.285 0.015 257);
+  /* Cool off-white ink + a legible cool-gray for secondary text. */
+  --foreground: oklch(0.877 0.014 258);
+  --card-foreground: oklch(0.877 0.014 258);
+  --popover-foreground: oklch(0.877 0.014 258);
+  --secondary-foreground: oklch(0.877 0.014 258);
+  --muted-foreground: oklch(0.69 0.02 255);
+  --sidebar-foreground: oklch(0.877 0.014 258);
+  --accent-foreground: oklch(0.877 0.014 258);
+  --sidebar-accent-foreground: oklch(0.877 0.014 258);
+  /* Selection / hover surfaces pick up the same cool tint. */
+  --accent: oklch(0.34 0.025 255);
+  --sidebar-accent: oklch(0.34 0.025 255);
+  /* Brand mint + focus ring, gently desaturated for the softer field. */
+  --primary: oklch(0.8 0.095 175);
+  --sidebar-primary: oklch(0.8 0.095 175);
+  --ring: oklch(0.8 0.095 175);
+  --sidebar-ring: oklch(0.8 0.095 175);
+  /* Semantic state colors, desaturated so they don't glow on the lighter field. */
+  --success: oklch(0.78 0.13 150);
+  --warning: oklch(0.8 0.12 75);
+  --info: oklch(0.72 0.115 250);
+  --merged: oklch(0.74 0.125 305);
+  --destructive: oklch(0.7 0.155 22);
 }
 
 @layer base {

@@ -2,30 +2,25 @@ import { darkQuery } from "@/lib/use-is-dark";
 
 /**
  * The user's theme preference (Settings → Appearance). `"system"` follows the OS
- * color scheme; `"light"` / `"dark"` force it; `"dark-dimmed"` is a softer dark
- * variant (surfaces lifted off pure black + off-white ink instead of pure white)
- * that reduces the halation/eye-strain of the maximum-contrast default. Persisted
- * in {@link AppSettings}; mirrored to `localStorage` so the very first paint on a
- * cold boot reflects a saved override with no flash before the async settings
- * store resolves.
+ * color scheme; `"light"` / `"dark"` force it; `"slate"` is a softer dark variant
+ * (a lifted, cool blue-gray canvas with off-white ink instead of near-black on
+ * near-white) that reduces the halation / eye-strain of the maximum-contrast
+ * default. Persisted in {@link AppSettings}; mirrored to `localStorage` so the
+ * very first paint on a cold boot reflects a saved override with no flash before
+ * the async settings store resolves.
  */
-export type ThemeSetting = "system" | "light" | "dark" | "dark-dimmed";
+export type ThemeSetting = "system" | "light" | "dark" | "slate";
 
 /** Human labels for the picker (also the source for the palette `items` map). */
 export const THEME_LABELS: Record<ThemeSetting, string> = {
   system: "System",
   light: "Light",
   dark: "Dark",
-  "dark-dimmed": "Dark Dimmed",
+  slate: "Slate",
 };
 
 /** Order the "Cycle theme" command steps through. */
-export const THEME_ORDER: ThemeSetting[] = [
-  "system",
-  "light",
-  "dark",
-  "dark-dimmed",
-];
+export const THEME_ORDER: ThemeSetting[] = ["system", "light", "dark", "slate"];
 
 /** The theme one step after `current` in {@link THEME_ORDER} (wraps around). */
 export function nextTheme(current: ThemeSetting): ThemeSetting {
@@ -40,7 +35,7 @@ function isTheme(value: unknown): value is ThemeSetting {
     value === "system" ||
     value === "light" ||
     value === "dark" ||
-    value === "dark-dimmed"
+    value === "slate"
   );
 }
 
@@ -51,13 +46,13 @@ let active: ThemeSetting = "system";
 function apply(): void {
   const dark =
     active === "dark" ||
-    active === "dark-dimmed" ||
+    active === "slate" ||
     (active === "system" && darkQuery.matches);
   const root = document.documentElement;
   root.classList.toggle("dark", dark);
-  // `dimmed` only ever rides alongside `dark` — "dark-dimmed" forces dark above,
-  // so the neutral-ramp override in App.css (`.dark.dimmed`) always has its base.
-  root.classList.toggle("dimmed", active === "dark-dimmed");
+  // `slate` only ever rides alongside `dark` (it forces dark above), so the
+  // cool-ramp override in App.css (`.dark.slate`) always has its base surface.
+  root.classList.toggle("slate", active === "slate");
 }
 
 /**
