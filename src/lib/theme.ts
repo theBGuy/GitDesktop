@@ -80,7 +80,14 @@ export function commitTheme(theme: ThemeSetting): void {
  * once it loads.
  */
 export function initTheme(): void {
-  const stored = localStorage.getItem(LS_KEY);
+  let stored: string | null = null;
+  try {
+    stored = localStorage.getItem(LS_KEY);
+  } catch {
+    // Some locked-down webviews throw on any localStorage access. initTheme runs
+    // before first paint, so an unguarded throw here would crash startup; fall
+    // back to "system" — the store still reconciles the real value via commitTheme.
+  }
   active = isTheme(stored) ? stored : "system";
   apply();
   darkQuery.addEventListener("change", apply);
