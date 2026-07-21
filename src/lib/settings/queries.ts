@@ -124,6 +124,13 @@ export function useApplyTheme() {
       commitTheme(next);
       saveSettings.mutate(updated, {
         onError: () => {
+          // Only roll back if this call's change is still the latest: otherwise a
+          // late-failing earlier write would stomp a newer successful one (two
+          // fast cycles where the first write rejects after the second lands).
+          const latest = queryClient.getQueryData<AppSettings>(
+            settingsKeys.settings,
+          );
+          if (latest?.theme !== next) return;
           queryClient.setQueryData(settingsKeys.settings, current);
           commitTheme(current.theme);
         },
