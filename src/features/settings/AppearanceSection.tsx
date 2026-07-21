@@ -1,4 +1,3 @@
-import { useQueryClient } from "@tanstack/react-query";
 import { useId } from "react";
 import {
   Select,
@@ -7,17 +6,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import {
-  settingsKeys,
-  useSaveSettings,
-  useSettings,
-} from "@/lib/settings/queries";
-import {
-  commitTheme,
-  THEME_LABELS,
-  THEME_ORDER,
-  type ThemeSetting,
-} from "@/lib/theme";
+import { useApplyTheme, useSettings } from "@/lib/settings/queries";
+import { THEME_LABELS, THEME_ORDER, type ThemeSetting } from "@/lib/theme";
 
 /**
  * Settings → Appearance. The theme picker is an apply-on-change preference owned
@@ -26,21 +16,12 @@ import {
  */
 export function AppearanceSection() {
   const settings = useSettings();
-  const saveSettings = useSaveSettings();
-  const queryClient = useQueryClient();
+  const applyTheme = useApplyTheme();
   const labelId = useId();
   const theme = settings.data?.theme ?? "system";
 
   function selectTheme(next: ThemeSetting) {
-    if (!settings.data || next === settings.data.theme) return;
-    const updated = { ...settings.data, theme: next };
-    // Optimistically patch the settings cache so the controlled <Select> reflects
-    // the pick immediately; the mutation's success-invalidate reconciles it.
-    // Without this the trigger briefly flickers back to the old value while the
-    // store write + refetch complete.
-    queryClient.setQueryData(settingsKeys.settings, updated);
-    saveSettings.mutate(updated);
-    commitTheme(next);
+    if (settings.data) applyTheme(settings.data, next);
   }
 
   return (

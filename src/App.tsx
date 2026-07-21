@@ -23,10 +23,14 @@ import { useGitInstalled } from "@/lib/git/queries";
 import { useHotkeyAction, useHotkeysListener } from "@/lib/hotkeys/hotkeys";
 import { reloadLocalPrs } from "@/lib/pulls/local";
 import { reloadReviewNotes } from "@/lib/review-notes/store";
-import { useSaveSettings, useSettings } from "@/lib/settings/queries";
+import {
+  useApplyTheme,
+  useSaveSettings,
+  useSettings,
+} from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { COLD_START } from "@/lib/test-mode";
-import { commitTheme, nextTheme, THEME_LABELS } from "@/lib/theme";
+import { nextTheme, THEME_LABELS } from "@/lib/theme";
 import { useLatestRef } from "@/lib/use-latest-ref";
 
 function App() {
@@ -39,6 +43,7 @@ function App() {
   const queryClient = useQueryClient();
   const settings = useSettings();
   const saveSettings = useSaveSettings();
+  const applyTheme = useApplyTheme();
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
 
@@ -135,11 +140,10 @@ function App() {
   useHotkeyAction("cycle-theme", () => {
     const current = settingsRef.current;
     if (!current) return;
-    // Step System → Light → Dark → Slate. Apply-on-change like the picker:
-    // persist + toggle the class immediately (appearance prefs have no Save bar).
+    // Step System → Light → Dark → Slate. Shares useApplyTheme with the
+    // Appearance picker so both paths apply optimistically + persist identically.
     const next = nextTheme(current.theme);
-    saveSettings.mutate({ ...current, theme: next });
-    commitTheme(next);
+    applyTheme(current, next);
     toast.success(`Theme: ${THEME_LABELS[next]}`);
   });
 
