@@ -8,6 +8,22 @@ import { useSyncExternalStore } from "react";
  */
 export const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
 
+// Stable subscribe/getSnapshot references so useSyncExternalStore subscribes once
+// per mount instead of tearing down and recreating the MutationObserver on every
+// render (useIsDark is read by the diff viewer and code editor).
+function subscribeToThemeClass(onChange: () => void): () => void {
+  const observer = new MutationObserver(onChange);
+  observer.observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ["class"],
+  });
+  return () => observer.disconnect();
+}
+
+function isDarkSnapshot(): boolean {
+  return document.documentElement.classList.contains("dark");
+}
+
 /**
  * Reactive "is the app in dark mode?" for components that theme themselves in JS
  * (the diff viewer, the code editor). Tracks the resolved theme — it reads the
@@ -17,15 +33,5 @@ export const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
  * so it correctly reads as dark here.)
  */
 export function useIsDark(): boolean {
-  return useSyncExternalStore(
-    (notify) => {
-      const observer = new MutationObserver(notify);
-      observer.observe(document.documentElement, {
-        attributes: true,
-        attributeFilter: ["class"],
-      });
-      return () => observer.disconnect();
-    },
-    () => document.documentElement.classList.contains("dark"),
-  );
+  return useSyncExternalStore(subscribeToThemeClass, isDarkSnapshot);
 }
