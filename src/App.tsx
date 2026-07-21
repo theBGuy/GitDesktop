@@ -26,6 +26,7 @@ import { reloadReviewNotes } from "@/lib/review-notes/store";
 import { useSaveSettings, useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { COLD_START } from "@/lib/test-mode";
+import { commitTheme, nextTheme, THEME_LABELS } from "@/lib/theme";
 import { useLatestRef } from "@/lib/use-latest-ref";
 
 function App() {
@@ -131,6 +132,16 @@ function App() {
   useHotkeyAction("toggle-notifications", toggleActivity);
   useHotkeyAction("show-shortcuts", () => setShortcutsOpen(true));
   useHotkeyAction("command-palette", () => setPaletteOpen(true));
+  useHotkeyAction("cycle-theme", () => {
+    const current = settingsRef.current;
+    if (!current) return;
+    // Step System → Light → Dark → Dark Dimmed. Apply-on-change like the picker:
+    // persist + toggle the class immediately (appearance prefs have no Save bar).
+    const next = nextTheme(current.theme);
+    saveSettings.mutate({ ...current, theme: next });
+    commitTheme(next);
+    toast.success(`Theme: ${THEME_LABELS[next]}`);
+  });
 
   // The webview stays "visible" when the window loses focus, so TanStack's
   // own focus refetch never fires in Tauri; bridge the native focus event.

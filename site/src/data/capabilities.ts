@@ -307,6 +307,10 @@ export const capabilities: Capability[] = [
     group: "Repository & workspace",
     label: "Remembers window size & position",
   },
+  {
+    group: "Repository & workspace",
+    label: "Themes — System, Light, Dark & a softer Dark Dimmed",
+  },
 
   // — Admin & settings —
   { group: "Admin & settings", label: "Repo settings & webhooks (admin)" },

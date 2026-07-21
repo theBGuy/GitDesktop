@@ -55,6 +55,9 @@ A few things worth knowing up front:
   API token** (created at id.atlassian.com, used with your Atlassian account email) —
   the token is stored in your OS keychain. Then browse & clone your repositories, and
   read and act on pull requests and Pipelines. (See **Bitbucket repositories** below.)
+- **Make it yours.** Pick a theme — **System**, **Light**, **Dark**, or a softer
+  **Dark Dimmed** that's easier on the eyes — in **Settings → Appearance**, or cycle
+  themes anytime from the command palette ({{kbd:command-palette}}).
 {{ai}}- **AI is optional.** Commit messages, PR descriptions, reviews, CI debugging, and
   agent sessions can use Anthropic, OpenAI, OpenRouter, Ollama (local or cloud), an
   OpenAI-compatible endpoint, or the Claude Code / Codex / GitHub Copilot / opencode

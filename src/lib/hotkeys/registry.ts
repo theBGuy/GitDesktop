@@ -69,6 +69,12 @@ export const ACTIONS = [
     category: "Application",
     defaultBinding: null,
   },
+  {
+    id: "cycle-theme",
+    label: "Cycle theme",
+    category: "Application",
+    defaultBinding: null,
+  },
 
   // Navigation
   {

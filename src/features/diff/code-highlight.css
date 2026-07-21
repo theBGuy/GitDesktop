@@ -1,6 +1,8 @@
 /* highlight.js token colors for read-only full-file code views (blame, the AI
    conflict-resolution side panes), scoped to .gd-code so they don't leak.
-   GitHub-ish palette; dark variant via the app's OS theme. */
+   GitHub-ish palette; the dark variant keys on the `.dark` class (set from the
+   resolved theme in theme.ts), so it follows a manual Light/Dark override — not
+   just the OS `prefers-color-scheme`. */
 .gd-code .hljs-comment,
 .gd-code .hljs-quote {
   color: #6e7781;
@@ -49,51 +51,49 @@
   color: #6e7781;
 }
 
-@media (prefers-color-scheme: dark) {
-  .gd-code .hljs-comment,
-  .gd-code .hljs-quote {
-    color: #8b949e;
-  }
-  .gd-code .hljs-keyword,
-  .gd-code .hljs-selector-tag,
-  .gd-code .hljs-doctag,
-  .gd-code .hljs-meta .hljs-keyword {
-    color: #ff7b72;
-  }
-  .gd-code .hljs-string,
-  .gd-code .hljs-regexp,
-  .gd-code .hljs-meta .hljs-string {
-    color: #a5d6ff;
-  }
-  .gd-code .hljs-number,
-  .gd-code .hljs-literal {
-    color: #79c0ff;
-  }
-  .gd-code .hljs-title,
-  .gd-code .hljs-title.function_,
-  .gd-code .hljs-section,
-  .gd-code .hljs-built_in {
-    color: #d2a8ff;
-  }
-  .gd-code .hljs-type,
-  .gd-code .hljs-class .hljs-title,
-  .gd-code .hljs-title.class_ {
-    color: #ffa657;
-  }
-  .gd-code .hljs-attr,
-  .gd-code .hljs-attribute,
-  .gd-code .hljs-property,
-  .gd-code .hljs-variable,
-  .gd-code .hljs-template-variable {
-    color: #79c0ff;
-  }
-  .gd-code .hljs-tag,
-  .gd-code .hljs-name,
-  .gd-code .hljs-symbol,
-  .gd-code .hljs-bullet {
-    color: #7ee787;
-  }
-  .gd-code .hljs-meta {
-    color: #8b949e;
-  }
+.dark .gd-code .hljs-comment,
+.dark .gd-code .hljs-quote {
+  color: #8b949e;
+}
+.dark .gd-code .hljs-keyword,
+.dark .gd-code .hljs-selector-tag,
+.dark .gd-code .hljs-doctag,
+.dark .gd-code .hljs-meta .hljs-keyword {
+  color: #ff7b72;
+}
+.dark .gd-code .hljs-string,
+.dark .gd-code .hljs-regexp,
+.dark .gd-code .hljs-meta .hljs-string {
+  color: #a5d6ff;
+}
+.dark .gd-code .hljs-number,
+.dark .gd-code .hljs-literal {
+  color: #79c0ff;
+}
+.dark .gd-code .hljs-title,
+.dark .gd-code .hljs-title.function_,
+.dark .gd-code .hljs-section,
+.dark .gd-code .hljs-built_in {
+  color: #d2a8ff;
+}
+.dark .gd-code .hljs-type,
+.dark .gd-code .hljs-class .hljs-title,
+.dark .gd-code .hljs-title.class_ {
+  color: #ffa657;
+}
+.dark .gd-code .hljs-attr,
+.dark .gd-code .hljs-attribute,
+.dark .gd-code .hljs-property,
+.dark .gd-code .hljs-variable,
+.dark .gd-code .hljs-template-variable {
+  color: #79c0ff;
+}
+.dark .gd-code .hljs-tag,
+.dark .gd-code .hljs-name,
+.dark .gd-code .hljs-symbol,
+.dark .gd-code .hljs-bullet {
+  color: #7ee787;
+}
+.dark .gd-code .hljs-meta {
+  color: #8b949e;
 }

@@ -3,6 +3,7 @@ import type { ReviewContextSize } from "@/lib/ai/context-budget";
 import type { AiSettings, ReviewMode } from "@/lib/ai/types";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import { storeName } from "@/lib/test-mode";
+import type { ThemeSetting } from "@/lib/theme";
 
 export interface RecentRepo {
   path: string;
@@ -275,6 +276,13 @@ export interface AppSettings {
   /** Managed MCP servers an agent session can opt into. Empty = MCP stays off. */
   mcpServers: McpServer[];
   recentRepos: RecentRepo[];
+  /** Color theme (Settings → Appearance). "system" follows the OS scheme;
+   *  "light"/"dark" force it; "dark-dimmed" is a softer dark variant that lifts
+   *  surfaces off pure black and ink off pure white to reduce eye strain. Absent
+   *  on settings stored before this field existed → "system" via the
+   *  DEFAULT_SETTINGS spread in loadSettings (byte-identical prior behavior).
+   *  Applied outside the bulk settings form (apply-on-change), like diffViewMode. */
+  theme: ThemeSetting;
   diffViewMode: "unified" | "split";
   /** Which conversation-list sections the user has collapsed, keyed
    *  `"<feature>:<kind>"` — `pulls:local`, `pulls:remote`, `issues:local`,
@@ -343,6 +351,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   customCommands: [],
   mcpServers: [],
   recentRepos: [],
+  theme: "system",
   diffViewMode: "unified",
   collapsedConversationSections: [],
   bitbucketTokenExpiresAt: null,

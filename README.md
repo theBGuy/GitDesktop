@@ -283,6 +283,9 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
 - **Keyboard-first** — rebindable shortcuts with GitHub-Desktop-compatible
   defaults, a generated cheat sheet (Ctrl+/), a command palette (Ctrl+K), and
   arrow-key navigation everywhere.
+- **Themes** — System, Light, Dark, and a softer **Dark Dimmed** that lifts
+  surfaces off pure black and text off pure white to ease eye strain; switch in
+  **Settings → Appearance** or cycle from the command palette.
 - **Self-updating** — signed, verified auto-updates from GitHub Releases, checked at
   launch and periodically in the background, with a persistent in-app indicator when
   one is ready — always installed on your consent.

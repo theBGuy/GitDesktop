@@ -13,7 +13,7 @@ import { initAnalytics, trackCaughtError } from "@/lib/analytics";
 import { calmTransition } from "@/lib/motion";
 import { queryClient } from "@/lib/query-client";
 import { loadSettings } from "@/lib/settings/api";
-import { darkQuery } from "@/lib/use-is-dark";
+import { commitTheme, initTheme } from "@/lib/theme";
 import App from "./App.tsx";
 import "./App.css";
 // Position is load-bearing: the vendored diff-view CSS must be imported plain
@@ -24,16 +24,19 @@ import "./App.css";
 // at build time instead (see vite.config.ts), so no layering is needed.
 import "@git-diff-view/react/styles/diff-view.css";
 
-// Follow the OS color scheme; the theme css switches on the .dark class.
-const applyTheme = () =>
-  document.documentElement.classList.toggle("dark", darkQuery.matches);
-darkQuery.addEventListener("change", applyTheme);
-applyTheme();
+// Apply the saved theme (System / Light / Dark / Dark Dimmed) before first paint,
+// reading a localStorage mirror synchronously so a saved override doesn't flash
+// through the OS default; the authoritative store value reconciles below.
+initTheme();
 
 // Boot analytics after settings load — never blocks the render. Session replay
 // stays off unless the user opted in (recordReplay).
 loadSettings()
-  .then((s) => initAnalytics(s.analyticsEnabled, s.recordReplay))
+  .then((s) => {
+    // Reconcile the flash-mirror against the authoritative persisted value.
+    commitTheme(s.theme);
+    initAnalytics(s.analyticsEnabled, s.recordReplay);
+  })
   .catch(() => {
     // Analytics is best-effort — never surface its failures.
   });

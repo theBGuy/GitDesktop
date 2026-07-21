@@ -23,6 +23,7 @@ import { useLatestRef } from "@/lib/use-latest-ref";
 import { AboutSection } from "./AboutSection";
 import { AccountsSection } from "./AccountsSection";
 import { AiProviderSection } from "./AiProviderSection";
+import { AppearanceSection } from "./AppearanceSection";
 import { CommandsSection } from "./CommandsSection";
 import { EditorSection } from "./EditorSection";
 import { GeneralSection } from "./GeneralSection";
@@ -54,6 +55,7 @@ const SyntaxSection = lazy(() =>
 
 const PANELS = [
   { id: "general", label: "General" },
+  { id: "appearance", label: "Appearance" },
   { id: "ai", label: "AI" },
   { id: "commands", label: "Slash commands" },
   { id: "mcp-servers", label: "MCP servers" },
@@ -255,6 +257,7 @@ export function SettingsScreen() {
           <ScrollArea className="min-h-0 flex-1 overflow-hidden">
             <main className="mx-auto w-full max-w-2xl space-y-8 p-6">
               {activePanel === "general" && <GeneralSection form={form} />}
+              {activePanel === "appearance" && <AppearanceSection />}
               {activePanel === "ai" && (
                 <>
                   <AiProviderSection form={form} />

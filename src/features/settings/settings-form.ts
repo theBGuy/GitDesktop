@@ -8,13 +8,15 @@ import { type AppSettings, DEFAULT_SETTINGS } from "@/lib/settings/api";
  */
 export type SettingsDraft = Omit<
   AppSettings,
-  "recentRepos" | "diffViewMode" | "defaultBranch"
+  "recentRepos" | "diffViewMode" | "defaultBranch" | "theme"
 >;
 
 export function toDraft(settings: AppSettings): SettingsDraft {
   // defaultBranch is dropped: it now lives in global git config, edited by its
-  // own form in GitSection, not the bulk Save bar.
-  const { recentRepos, diffViewMode, defaultBranch, ...draft } = settings;
+  // own form in GitSection, not the bulk Save bar. theme + diffViewMode are
+  // apply-on-change prefs owned by their own controls, not the bulk Save bar.
+  const { recentRepos, diffViewMode, defaultBranch, theme, ...draft } =
+    settings;
   return draft;
 }
 
