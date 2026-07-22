@@ -1,6 +1,7 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { storeName } from "@/lib/test-mode";
 import {
+  type ArgDoc,
   EMPTY_SCRIPTS,
   isInterpreter,
   type ScriptsConfig,
@@ -71,16 +72,35 @@ function normalizeSource(source: unknown, legacyBody: unknown): TaskSource {
   };
 }
 
+/** Type-checks an untrusted arg-docs list, dropping malformed entries. Also the
+ *  guard for AI-analyzed output before it reaches the editor. */
+export function normalizeArgDocs(v: unknown): ArgDoc[] {
+  if (!Array.isArray(v)) return [];
+  const out: ArgDoc[] = [];
+  for (const item of v) {
+    if (!item || typeof item !== "object") continue;
+    const doc = item as { arg?: unknown; description?: unknown };
+    if (typeof doc.arg !== "string" || doc.arg.trim() === "") continue;
+    out.push({
+      arg: doc.arg,
+      description: typeof doc.description === "string" ? doc.description : "",
+    });
+  }
+  return out;
+}
+
 /** Type-checks one untrusted task, dropping it (undefined) when unusable. */
 function normalizeTask(v: unknown): TaskDef | undefined {
   if (!v || typeof v !== "object") return undefined;
   const obj = v as {
     id?: unknown;
     name?: unknown;
+    description?: unknown;
     interpreter?: unknown;
     source?: unknown;
     body?: unknown;
     args?: unknown;
+    argDocs?: unknown;
     confirmBeforeRun?: unknown;
   };
   if (typeof obj.id !== "string" || obj.id === "") return undefined;
@@ -88,9 +108,11 @@ function normalizeTask(v: unknown): TaskDef | undefined {
   return {
     id: obj.id,
     name: typeof obj.name === "string" ? obj.name : "Untitled task",
+    description: typeof obj.description === "string" ? obj.description : "",
     interpreter: obj.interpreter,
     source: normalizeSource(obj.source, obj.body),
     args: typeof obj.args === "string" ? obj.args : "",
+    argDocs: normalizeArgDocs(obj.argDocs),
     // Absent (older) or non-boolean → confirm, the safe default.
     confirmBeforeRun: obj.confirmBeforeRun !== false,
   };

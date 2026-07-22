@@ -162,16 +162,36 @@ export function TasksPanel() {
                   onFocus={() => setActiveIndex(index)}
                   onClick={() => request(task)}
                   className={cn(
-                    "flex min-w-0 flex-1 items-center gap-2 rounded px-2 py-1.5 text-left text-xs",
+                    "flex min-w-0 flex-1 items-start gap-2 rounded px-2 py-1.5 text-left text-xs",
                     index === activeIndex
                       ? "bg-accent text-accent-foreground"
                       : "hover:bg-muted/60",
                   )}
                 >
-                  <PlayIcon className="size-3.5 shrink-0 text-muted-foreground" />
-                  <span className="min-w-0 flex-1 truncate">{task.name}</span>
-                  <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
-                    {INTERPRETER_LABELS[task.interpreter] ?? task.interpreter}
+                  <PlayIcon className="mt-px size-3.5 shrink-0 text-muted-foreground" />
+                  <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                    <span className="flex items-center gap-2">
+                      <span className="min-w-0 flex-1 truncate">
+                        {task.name}
+                      </span>
+                      {task.args !== "" && (
+                        <span
+                          className="min-w-0 max-w-32 truncate font-mono text-[10px] text-muted-foreground"
+                          title={task.args}
+                        >
+                          {task.args}
+                        </span>
+                      )}
+                      <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
+                        {INTERPRETER_LABELS[task.interpreter] ??
+                          task.interpreter}
+                      </span>
+                    </span>
+                    {task.description !== "" && (
+                      <span className="truncate text-[11px] text-muted-foreground">
+                        {task.description}
+                      </span>
+                    )}
                   </span>
                 </button>
                 <DropdownMenu>

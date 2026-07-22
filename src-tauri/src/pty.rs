@@ -59,7 +59,16 @@ struct PtyHandle {
     /// (git, node, pnpm…) that a single-process kill would orphan; a shell's
     /// children are reached by the PTY hangup, so this stays off for those.
     tree_kill: bool,
+    /// Registration generation — lets a reader thread prove the map entry under
+    /// its id is still ITS OWN before tearing it down. React StrictMode (dev)
+    /// double-mounts the terminal, firing two `pty_open`s for the same id; the
+    /// second insert clobbers the first, and without this guard the first
+    /// reader's exit teardown would kill the second's live process.
+    gen: u64,
 }
+
+/// Monotonic source for [`PtyHandle::gen`].
+static PTY_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -269,31 +278,39 @@ fn encode(bytes: &[u8]) -> String {
 
 /// Kills a PTY's child. Tasks tree-kill (Windows `taskkill /F /T`) so their git /
 /// node / pnpm descendants don't orphan; a shell relies on the PTY hangup reaching
-/// its foreground group, so `child.kill()` alone is enough there.
-fn kill_handle(h: &mut PtyHandle) {
-    if h.tree_kill {
-        kill_tree(&mut h.child);
-    }
+/// its foreground group, so `child.kill()` alone is enough there. Returns the
+/// still-running `taskkill` process (when one was spawned) so the caller can WAIT
+/// for it before deleting the temp script — deleting while a descendant still has
+/// the file open fails silently on Windows and leaks the file.
+fn kill_handle(h: &mut PtyHandle) -> Option<std::process::Child> {
+    let tk = if h.tree_kill {
+        kill_tree(&mut h.child)
+    } else {
+        None
+    };
     let _ = h.child.kill();
+    tk
 }
 
 /// Best-effort process-tree kill for a task run. On Windows `taskkill /T` reaches
-/// the whole tree (git/node/pnpm children a bare `TerminateProcess` would orphan).
-/// On Unix the PTY hangup (SIGHUP to the foreground group when the master drops)
-/// plus the caller's `child.kill()` already reach descendants, so there's nothing
-/// extra to do.
-fn kill_tree(child: &mut Box<dyn Child + Send + Sync>) {
+/// the whole tree (git/node/pnpm children a bare `TerminateProcess` would orphan);
+/// the spawned `taskkill` is returned for the caller to wait on. On Unix the PTY
+/// hangup (SIGHUP to the foreground group when the master drops) plus the caller's
+/// `child.kill()` already reach descendants, so there's nothing extra to do.
+fn kill_tree(child: &mut Box<dyn Child + Send + Sync>) -> Option<std::process::Child> {
     #[cfg(windows)]
     if let Some(pid) = child.process_id() {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let _ = std::process::Command::new("taskkill")
+        return std::process::Command::new("taskkill")
             .args(["/F", "/T", "/PID", &pid.to_string()])
             .creation_flags(CREATE_NO_WINDOW)
-            .spawn();
+            .spawn()
+            .ok();
     }
     #[cfg(not(windows))]
     let _ = child;
+    None
 }
 
 /// Deletes a task's temp script file (best-effort). No-op for shells.
@@ -301,6 +318,19 @@ fn cleanup_handle(h: &mut PtyHandle) {
     if let Some(p) = h.cleanup.take() {
         let _ = std::fs::remove_file(p);
     }
+}
+
+/// Full teardown of a removed handle: kill (tree first), WAIT for the Windows
+/// `taskkill` to finish sweeping descendants, then delete the temp script. The
+/// wait is what makes the delete stick — a child that still holds the script
+/// open at delete time would otherwise leak it. Blocking: run this on a
+/// dedicated or detached thread, never the main thread (sync Tauri commands run
+/// there).
+fn teardown_handle(mut h: PtyHandle) {
+    if let Some(mut tk) = kill_handle(&mut h) {
+        let _ = tk.wait();
+    }
+    cleanup_handle(&mut h);
 }
 
 /// Opens a PTY, starts streaming its output to `on_event`, and registers it under
@@ -333,7 +363,7 @@ pub async fn pty_open(
         })
         .map_err(|e| AppError::Command(format!("failed to open a terminal: {e}")))?;
 
-    let child = pair.slave.spawn_command(cmd).map_err(|e| {
+    let mut child = pair.slave.spawn_command(cmd).map_err(|e| {
         // The temp script file is orphaned if the spawn fails — clean it up.
         if let Some(p) = &cleanup {
             let _ = std::fs::remove_file(p);
@@ -343,16 +373,29 @@ pub async fn pty_open(
     // Drop the slave so the child owns the only handle to it (else close can hang).
     drop(pair.slave);
 
-    let reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|e| AppError::Command(format!("terminal reader: {e}")))?;
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(|e| AppError::Command(format!("terminal writer: {e}")))?;
+    // From here the child is LIVE: any error return must kill it and remove the
+    // temp script, or the process (and file) leak untracked — no PtyHandle
+    // exists yet for Stop/pty_close to reach. (A just-spawned interpreter has no
+    // descendants yet, so a plain kill suffices on these instant-failure paths.)
+    let mut fail = |e: String| {
+        let _ = child.kill();
+        if let Some(p) = &cleanup {
+            let _ = std::fs::remove_file(p);
+        }
+        AppError::Command(e)
+    };
+    let reader = match pair.master.try_clone_reader() {
+        Ok(r) => r,
+        Err(e) => return Err(fail(format!("terminal reader: {e}"))),
+    };
+    let writer = match pair.master.take_writer() {
+        Ok(w) => w,
+        Err(e) => return Err(fail(format!("terminal writer: {e}"))),
+    };
 
-    state.ptys.lock().unwrap().insert(
+    let gen = PTY_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let cleanup_path = cleanup.clone();
+    let prev = state.ptys.lock().unwrap().insert(
         id.clone(),
         PtyHandle {
             master: pair.master,
@@ -360,8 +403,19 @@ pub async fn pty_open(
             child,
             cleanup,
             tree_kill,
+            gen,
         },
     );
+    // A same-id re-open (React StrictMode double-mount in dev fires two opens
+    // whose closes can't catch them) — tear the stale process tree down so it
+    // can't orphan. Skip deleting its temp script when this run reuses the same
+    // path (inline tasks derive the name from the shared id).
+    if let Some(mut old) = prev {
+        if old.cleanup == cleanup_path {
+            old.cleanup = None;
+        }
+        std::thread::spawn(move || teardown_handle(old));
+    }
 
     // A dim first line with the container's reachable URL(s).
     if let Some(tip) = tip {
@@ -391,18 +445,38 @@ pub async fn pty_open(
                 }
             }
         }
-        // Reap WITHOUT holding the lock or blocking: take the handle out (releasing
-        // the lock immediately), then a NON-blocking try_wait for the code. If the
-        // child is still alive (the reader stopped early), kill it so it can't
-        // orphan. (Holding the lock across a blocking wait() here froze the app.)
-        // `pty_close` may have already removed + torn down the handle (Stop) — then
-        // this just reports the exit.
-        let handle = ptys.lock().unwrap().remove(&id);
+        // Reap WITHOUT holding the lock across anything blocking (a blocking
+        // wait() under the lock froze the app once). Remove OUR OWN entry only —
+        // gen-guarded, so if `pty_close` already tore us down (Stop) or a
+        // same-id re-open clobbered us (StrictMode dev), we leave the newer
+        // entry alone and just report the exit.
+        let handle = {
+            let mut map = ptys.lock().unwrap();
+            if map.get(&id).map(|h| h.gen) == Some(gen) {
+                map.remove(&id)
+            } else {
+                None
+            }
+        };
         let mut code = None;
         if let Some(mut h) = handle {
-            match h.child.try_wait() {
-                Ok(Some(status)) => code = Some(status.exit_code()),
-                _ => kill_handle(&mut h),
+            // EOF often lands a beat before the OS finalizes the exit status —
+            // poll briefly (dedicated thread; blocking is fine) so a clean exit
+            // reports its real code instead of a false "Stopped".
+            for _ in 0..50 {
+                if let Ok(Some(status)) = h.child.try_wait() {
+                    code = Some(status.exit_code());
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            if code.is_none() {
+                // Still alive after the grace window (the reader stopped early)
+                // — kill it (tree first) so it can't orphan, and wait for the
+                // Windows tree-kill so the temp delete below sticks.
+                if let Some(mut tk) = kill_handle(&mut h) {
+                    let _ = tk.wait();
+                }
             }
             cleanup_handle(&mut h);
         }
@@ -440,12 +514,13 @@ pub fn pty_resize(state: State<'_, PtyState>, id: String, cols: u16, rows: u16) 
 
 /// Kills the process and drops the PTY (on terminal unmount / dock close / task
 /// Stop). Tree-kills a task's descendants and removes its temp script. Idempotent.
+/// Sync command (main thread) — the teardown waits on the Windows tree-kill
+/// before deleting the temp script, so it runs detached rather than blocking UI.
 #[tauri::command]
 pub fn pty_close(state: State<'_, PtyState>, id: String) -> AppResult<()> {
     let handle = state.ptys.lock().unwrap().remove(&id);
-    if let Some(mut h) = handle {
-        kill_handle(&mut h);
-        cleanup_handle(&mut h);
+    if let Some(h) = handle {
+        std::thread::spawn(move || teardown_handle(h));
     }
     Ok(())
 }

@@ -16,16 +16,21 @@ import { parseArgs, type TaskDef } from "./types";
 export const TASKS_USE_EXTERNAL_TERMINAL = import.meta.env.DEV && isWindows;
 
 /**
- * Runs a task in the user's OS terminal — the dev escape hatch on Windows, and an
- * explicit convenience elsewhere. A real, interactive terminal window, so even a
- * prompting script (a release flow) works while iterating in dev.
+ * Runs a task in the user's OS terminal — the dev-only fallback for the Windows
+ * ConPTY limitation. A real, interactive terminal window, so even a prompting
+ * script (a release flow) works while iterating in dev. `args` is the effective
+ * argument string for THIS run (the run dialog may have adjusted it).
  */
-export function openTaskInTerminal(task: TaskDef, cwd: string): Promise<void> {
+export function openTaskInTerminal(
+  task: TaskDef,
+  cwd: string,
+  args: string,
+): Promise<void> {
   return invoke<void>("task_open_terminal", {
     cwd,
     interpreter: task.interpreter,
     body: task.source.kind === "inline" ? task.source.body : null,
     path: task.source.kind === "file" ? task.source.path : null,
-    args: parseArgs(task.args),
+    args: parseArgs(args),
   });
 }

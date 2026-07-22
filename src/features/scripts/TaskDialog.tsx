@@ -1,4 +1,4 @@
-import { SparkleIcon } from "@phosphor-icons/react";
+import { PlusIcon, SparkleIcon, XIcon } from "@phosphor-icons/react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -22,6 +22,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import {
+  type ArgDoc,
   DEFAULT_INTERPRETER,
   type Interpreter,
   INTERPRETERS,
@@ -32,6 +33,7 @@ import {
 import { useAiConfigured, useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
+import { useAnalyzeScript } from "./useAnalyzeScript";
 import { useGenerateScript } from "./useGenerateScript";
 
 // CodeMirror is heavy; lazy-load it so its chunk stays off the boot path and only
@@ -43,6 +45,13 @@ const CodeEditor = lazy(() =>
 const INTERPRETER_LABELS: Record<string, string> = Object.fromEntries(
   INTERPRETERS.map((i) => [i.id, i.label]),
 );
+
+/** An arg-doc row in the editor: the doc plus a dialog-local key, so removing a
+ *  row can't re-key its neighbours' inputs (index keys would). Stripped on save. */
+type ArgDocRow = ArgDoc & { key: string };
+
+const toRows = (docs: ArgDoc[]): ArgDocRow[] =>
+  docs.map((d) => ({ ...d, key: crypto.randomUUID() }));
 
 /** Make a picked absolute path relative to the repo root when it's inside it, so a
  *  task like `scripts/release.mjs` works in any repo that has it. Outside the repo,
@@ -62,8 +71,9 @@ function toRepoRelative(picked: string, repoRoot: string | null): string {
  * Create or edit a task. The parent owns open state + persistence: `onSave`
  * receives the full task (with a stable id) and `onDelete` its id. A task's script
  * is either an **existing file** in the repo (run in place) or an **inline** body;
- * inline bodies can be AI-generated. Definitions are app-data only — never repo
- * content.
+ * inline bodies can be AI-generated, and **Analyze with AI** documents either kind
+ * (name, description, accepted arguments) from the script itself. Definitions are
+ * app-data only — never repo content.
  */
 export function TaskDialog({
   task,
@@ -85,14 +95,17 @@ export function TaskDialog({
   const aiEnabled = useAiEnabled();
   const aiConfigured = useAiConfigured();
   const scriptGen = useGenerateScript(repoPath ?? "");
+  const scriptAnalyze = useAnalyzeScript(repoPath ?? "");
 
   const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
   const [interpreter, setInterpreter] =
     useState<Interpreter>(DEFAULT_INTERPRETER);
   const [sourceKind, setSourceKind] = useState<TaskSource["kind"]>("file");
   const [path, setPath] = useState("");
   const [body, setBody] = useState("");
   const [args, setArgs] = useState("");
+  const [argDocs, setArgDocs] = useState<ArgDocRow[]>([]);
   const [describe, setDescribe] = useState("");
   const [confirmBeforeRun, setConfirmBeforeRun] = useState(true);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -100,29 +113,41 @@ export function TaskDialog({
   // Seed the fields when a task (or "new") opens. Keyed on the dialog opening so
   // reopening the same task re-seeds from the saved value, discarding stray edits.
   const seededFor = useRef<string | null>(null);
+  const cancelGenerate = scriptGen.cancel;
+  const cancelAnalyze = scriptAnalyze.cancel;
   useEffect(() => {
     if (!open) {
       seededFor.current = null;
+      // Abort any in-flight Generate/Analyze: this component instance stays
+      // mounted across open/close (only the Dialog hides), so a stream left
+      // running would resolve into whichever task is opened NEXT — its
+      // callbacks write through the same state setters.
+      cancelGenerate();
+      cancelAnalyze();
       return;
     }
     const key = editing?.id ?? "new";
     if (seededFor.current === key) return;
     seededFor.current = key;
     setName(editing?.name ?? "");
+    setDescription(editing?.description ?? "");
     setInterpreter(editing?.interpreter ?? DEFAULT_INTERPRETER);
     setSourceKind(editing?.source.kind ?? "file");
     setPath(editing?.source.kind === "file" ? editing.source.path : "");
     setBody(editing?.source.kind === "inline" ? editing.source.body : "");
     setArgs(editing?.args ?? "");
+    setArgDocs(toRows(editing?.argDocs ?? []));
     setDescribe("");
     setConfirmBeforeRun(editing?.confirmBeforeRun ?? true);
     setConfirmDelete(false);
-  }, [open, editing]);
+  }, [open, editing, cancelGenerate, cancelAnalyze]);
 
   const trimmedName = name.trim();
   const canSave =
     trimmedName !== "" &&
     (sourceKind === "file" ? path.trim() !== "" : body.trim() !== "");
+  const canAnalyze =
+    sourceKind === "file" ? path.trim() !== "" : body.trim() !== "";
 
   async function choose() {
     const picked = await openDialog({
@@ -136,6 +161,26 @@ export function TaskDialog({
     if (guess) setInterpreter(guess);
   }
 
+  function runAnalyze() {
+    scriptAnalyze.analyze({
+      interpreter,
+      ...(sourceKind === "file" ? { path: path.trim() } : { body }),
+      onResult: (r) => {
+        // Fill what the analysis produced; leave anything it couldn't derive
+        // untouched (and never clear hand-written docs on an empty result).
+        if (r.name) setName(r.name);
+        if (r.description) setDescription(r.description);
+        if (r.argDocs.length > 0) setArgDocs(toRows(r.argDocs));
+      },
+    });
+  }
+
+  function updateRow(key: string, patch: Partial<ArgDoc>) {
+    setArgDocs((rows) =>
+      rows.map((r) => (r.key === key ? { ...r, ...patch } : r)),
+    );
+  }
+
   function save() {
     if (!canSave) return;
     const source: TaskSource =
@@ -145,16 +190,20 @@ export function TaskDialog({
     onSave({
       id: editing?.id ?? crypto.randomUUID(),
       name: trimmedName,
+      description: description.trim(),
       interpreter,
       source,
       args: args.trim(),
+      argDocs: argDocs
+        .filter((r) => r.arg.trim() !== "")
+        .map(({ arg, description: d }) => ({ arg: arg.trim(), description: d })),
       confirmBeforeRun,
     });
   }
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-2xl">
+      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>{editing ? "Edit task" : "New task"}</DialogTitle>
           <DialogDescription>
@@ -202,28 +251,84 @@ export function TaskDialog({
           </div>
         </div>
 
-        {/* Source: an existing file, or an inline body. */}
-        <div className="inline-flex w-fit rounded-md border p-0.5 text-xs">
-          {(
-            [
-              ["file", "Existing file"],
-              ["inline", "Inline script"],
-            ] as const
-          ).map(([kind, label]) => (
-            <button
-              key={kind}
-              type="button"
-              onClick={() => setSourceKind(kind)}
-              className={cn(
-                "rounded px-2.5 py-1 transition-colors",
-                sourceKind === kind
-                  ? "bg-accent text-accent-foreground"
-                  : "text-muted-foreground hover:text-foreground",
-              )}
-            >
-              {label}
-            </button>
-          ))}
+        <div className="space-y-1.5">
+          <Label htmlFor="task-description">
+            Description{" "}
+            <span className="font-normal text-muted-foreground">(optional)</span>
+          </Label>
+          <Input
+            id="task-description"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="What running this does, in a sentence"
+            autoComplete="off"
+          />
+        </div>
+
+        {/* Source: an existing file, or an inline body — with the AI analyzer
+            alongside, since it documents whichever source is active. */}
+        <div className="flex items-center justify-between gap-2">
+          <div className="inline-flex w-fit rounded-md border p-0.5 text-xs">
+            {(
+              [
+                ["file", "Existing file"],
+                ["inline", "Inline script"],
+              ] as const
+            ).map(([kind, label]) => (
+              <button
+                key={kind}
+                type="button"
+                onClick={() => setSourceKind(kind)}
+                className={cn(
+                  "rounded px-2.5 py-1 transition-colors",
+                  sourceKind === kind
+                    ? "bg-accent text-accent-foreground"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {aiEnabled &&
+            aiConfigured &&
+            (scriptAnalyze.analyzing ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                className="text-muted-foreground"
+                onClick={scriptAnalyze.cancel}
+              >
+                <Spinner data-icon="inline-start" />
+                Analyzing…
+              </Button>
+            ) : (
+              // A natively-disabled button swallows pointer events, so its own
+              // `title` never shows — the explanation lives on a wrapping span
+              // (the repo's established pattern for disabled-control tooltips).
+              <span
+                title={
+                  canAnalyze
+                    ? "Read the script and fill in the name, description, and documented arguments"
+                    : sourceKind === "file"
+                      ? "Choose a script file first"
+                      : "Write or generate a script first"
+                }
+              >
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="xs"
+                  className="text-muted-foreground"
+                  disabled={!canAnalyze}
+                  onClick={runAnalyze}
+                >
+                  <SparkleIcon data-icon="inline-start" />
+                  Analyze with AI
+                </Button>
+              </span>
+            ))}
         </div>
 
         {sourceKind === "file" ? (
@@ -253,18 +358,8 @@ export function TaskDialog({
             <div className="flex items-center justify-between gap-2">
               <Label>Script</Label>
               {aiEnabled &&
-                (scriptGen.generating ? (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="xs"
-                    className="text-muted-foreground"
-                    onClick={scriptGen.cancel}
-                  >
-                    <Spinner data-icon="inline-start" />
-                    Generating…
-                  </Button>
-                ) : !aiConfigured ? (
+                !aiConfigured &&
+                (scriptGen.generating ? null : (
                   <Button
                     type="button"
                     variant="ghost"
@@ -279,7 +374,19 @@ export function TaskDialog({
                     <SparkleIcon data-icon="inline-start" />
                     Set up AI to generate
                   </Button>
-                ) : null)}
+                ))}
+              {aiEnabled && aiConfigured && scriptGen.generating && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="xs"
+                  className="text-muted-foreground"
+                  onClick={scriptGen.cancel}
+                >
+                  <Spinner data-icon="inline-start" />
+                  Generating…
+                </Button>
+              )}
             </div>
 
             {aiEnabled && aiConfigured && !scriptGen.generating && (
@@ -318,7 +425,7 @@ export function TaskDialog({
               </div>
             )}
 
-            <div className="h-56 overflow-hidden rounded-md border">
+            <div className="h-48 overflow-hidden rounded-md border">
               <Suspense fallback={<Skeleton className="h-full w-full" />}>
                 <CodeEditor value={body} onChange={setBody} />
               </Suspense>
@@ -347,9 +454,74 @@ export function TaskDialog({
             spellCheck={false}
           />
           <p className="text-xs text-muted-foreground">
-            Passed to the script after its path. Quote values with spaces, e.g.{" "}
+            The default arguments; a run that asks for confirmation can adjust
+            them per run. Quote values with spaces, e.g.{" "}
             <span className="font-mono">--message "two words"</span>.
           </p>
+        </div>
+
+        <div
+          role="group"
+          aria-labelledby="task-argdocs-label"
+          className="space-y-1.5"
+        >
+          <Label id="task-argdocs-label">
+            Documented arguments{" "}
+            <span className="font-normal text-muted-foreground">
+              (optional — shown as a reference when running)
+            </span>
+          </Label>
+          {argDocs.map((row, index) => (
+            <div key={row.key} className="flex gap-2">
+              <Input
+                className="w-40 font-mono"
+                value={row.arg}
+                onChange={(e) => updateRow(row.key, { arg: e.target.value })}
+                placeholder="--flag"
+                autoComplete="off"
+                spellCheck={false}
+                aria-label={`Argument ${index + 1}`}
+              />
+              <Input
+                className="min-w-0 flex-1"
+                value={row.description}
+                onChange={(e) =>
+                  updateRow(row.key, { description: e.target.value })
+                }
+                placeholder="What it does"
+                autoComplete="off"
+                aria-label={`Argument ${index + 1} description`}
+              />
+              <Button
+                type="button"
+                size="icon-xs"
+                variant="ghost"
+                className="shrink-0 self-center text-muted-foreground"
+                onClick={() =>
+                  setArgDocs((rows) => rows.filter((r) => r.key !== row.key))
+                }
+                title={`Remove ${row.arg.trim() || "this argument"}`}
+                aria-label={`Remove argument ${index + 1}`}
+              >
+                <XIcon />
+              </Button>
+            </div>
+          ))}
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            className="text-muted-foreground"
+            onClick={() =>
+              setArgDocs((rows) => [
+                ...rows,
+                { key: crypto.randomUUID(), arg: "", description: "" },
+              ])
+            }
+          >
+            <PlusIcon data-icon="inline-start" />
+            Add argument
+          </Button>
         </div>
 
         <label className="flex items-center gap-2 text-xs">

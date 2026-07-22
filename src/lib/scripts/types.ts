@@ -72,6 +72,16 @@ export type TaskSource =
   | { kind: "file"; path: string }
   | { kind: "inline"; body: string };
 
+/** One documented argument a task's script accepts — `--help`-style reference
+ *  shown while editing args and in the run dialog. Documentation only; what
+ *  actually gets passed is the args string. */
+export interface ArgDoc {
+  /** The flag/argument as typed, e.g. `--preview`. */
+  arg: string;
+  /** What it does, one line. */
+  description: string;
+}
+
 /**
  * A registered runnable task (a saved script). Definitions live in app-data only
  * (`scripts.json`), never read from repository content — so a cloned or malicious
@@ -83,14 +93,21 @@ export interface TaskDef {
   id: string;
   /** Display name, e.g. "Release". */
   name: string;
+  /** One-line summary of what the task does — shown on the row, in the run
+   *  picker, and in the run dialog. Empty = none. */
+  description: string;
   /** Which interpreter runs the script. */
   interpreter: Interpreter;
   /** File (an existing script, run in place) or inline (a body saved here). Both
    *  run in the current repo's directory. */
   source: TaskSource;
   /** Extra arguments passed to the script (e.g. `--preview`), as the user typed
-   *  them; split to argv at run time by {@link parseArgs}. Empty = none. */
+   *  them; split to argv at run time by {@link parseArgs}. Empty = none. The run
+   *  dialog can adjust these per run (this string stays the saved default). */
   args: string;
+  /** `--help`-style documentation of the arguments the script accepts. Reference
+   *  only — shown in the editor and the run dialog. Empty = undocumented. */
+  argDocs: ArgDoc[];
   /** Confirm before each run. Defaults on; a trusted, frequently-run task can turn
    *  it off in its editor. */
   confirmBeforeRun: boolean;

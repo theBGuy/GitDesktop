@@ -9,8 +9,9 @@ const INTERPRETER_LABELS: Record<string, string> = Object.fromEntries(
 );
 
 /** Strips a Markdown code fence (```lang … ```) the model may wrap the script in.
- *  Tolerant of a partial buffer mid-stream (closing fence not yet arrived). */
-function stripFences(text: string): string {
+ *  Tolerant of a partial buffer mid-stream (closing fence not yet arrived).
+ *  Shared with the analyze hook (JSON answers get fenced the same way). */
+export function stripFences(text: string): string {
   return text.replace(/^\s*```[^\n]*\n/, "").replace(/\n?```\s*$/, "");
 }
 

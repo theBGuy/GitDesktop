@@ -396,7 +396,8 @@ export const capabilities: Capability[] = [
   {
     group: "AI · generate & review",
     ai: true,
-    label: "Generate a task's script from a plain-English description",
+    label:
+      "Generate a task's script from plain English — or analyze one to document it",
   },
   {
     group: "AI · generate & review",

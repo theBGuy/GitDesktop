@@ -1563,20 +1563,26 @@ tab menu, or from the command palette ({{kbd:command-palette}}).
   **Enable task running** button. Your saved tasks live in GitDesktop's own data on this
   machine and are **never read from a repository**, so opening or cloning a repo can never
   add or run one.
-- **Add a task.** Give it a name and pick an interpreter — **PowerShell**, **cmd**,
-  **bash / sh / zsh**, **Node**, or **Python**. Then either **point it at an existing
-  script** in the repo (it runs the live file, so edits take effect on the next run) or
-  write one **inline** — a one-liner like \`node scripts/release.mjs\` or several lines with
-  pipes and \`&&\`.{{ai}} With an AI provider connected, **Generate** writes an inline script
-  from a short description.{{/ai}} You can also pass **arguments** (e.g. \`--preview\`; quote
-  values with spaces). Either way it runs in the open repository's folder.
-- **Run it.** Click a task, or use **Run a task…** from the command palette. Runs happen in
-  an **interactive** terminal, so a script that prompts you — the next version to release, a
-  yes/no — works, and output keeps its colour. **Stop** ends a run and the processes it
-  started; **Rerun** starts a fresh one.
+- **Add a task.** Give it a name, an optional one-line description, and pick an
+  interpreter — **PowerShell**, **cmd**, **bash / sh / zsh**, **Node**, or **Python**. Then
+  either **point it at an existing script** in the repo (it runs the live file, so edits
+  take effect on the next run) or write one **inline** — a one-liner like
+  \`node scripts/release.mjs\` or several lines with pipes and \`&&\`.{{ai}} With an AI
+  provider connected, **Generate** writes an inline script from a short description, and
+  **Analyze with AI** reads the script and fills in the name, description, and the
+  arguments it accepts.{{/ai}} Either way it runs in the open repository's folder.
+- **Arguments.** A task carries default **arguments** (e.g. \`--preview\`; quote values with
+  spaces), and you can **document the arguments** the script accepts — each with a short
+  description, like a CLI's \`--help\` — shown as a reference wherever you set arguments.
+- **Run it.** Click a task, or use **Run a task…** from the command palette. A
+  confirm-gated run shows the arguments prefilled and lets you **adjust them for that run**
+  (the saved task is untouched) — press Enter to run. Runs happen in an **interactive**
+  terminal, so a script that prompts you — the next version to release, a yes/no — works,
+  and output keeps its colour. **Stop** ends a run and the processes it started; **Rerun**
+  starts a fresh one with the same arguments.
 - **Confirm before running.** Each task can ask for confirmation first (on by default) —
-  turn it off per task once you trust it. Starting a task while another is still running
-  asks before it replaces it.`,
+  turn it off per task once you trust it (it then always runs its saved arguments).
+  Starting a task while another is still running asks before it replaces it.`,
   },
   {
     id: "keyboard",

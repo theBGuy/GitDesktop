@@ -42,7 +42,7 @@ export function TaskRunView() {
     );
   }
 
-  const { task, status, code, token } = activeRun;
+  const { task, args, status, code, token } = activeRun;
   const ptyId = taskPtyId(activeRun);
   const running = status === "running";
   const succeeded = status === "exited" && code === 0;
@@ -57,6 +57,14 @@ export function TaskRunView() {
             title={task.source.path}
           >
             {task.source.path}
+          </span>
+        )}
+        {args !== "" && (
+          <span
+            className="min-w-0 truncate font-mono text-[10px] text-muted-foreground"
+            title={args}
+          >
+            {args}
           </span>
         )}
         <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
@@ -128,7 +136,7 @@ export function TaskRunView() {
           interpreter={task.interpreter}
           body={task.source.kind === "inline" ? task.source.body : undefined}
           path={task.source.kind === "file" ? task.source.path : undefined}
-          args={parseArgs(task.args)}
+          args={parseArgs(args)}
           onExit={(c) => markExited(token, c)}
           className="min-h-0 flex-1 px-1 pb-1"
         />

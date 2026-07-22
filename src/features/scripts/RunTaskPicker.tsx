@@ -37,7 +37,12 @@ export function RunTaskPicker({
   }, [open]);
 
   const q = query.trim().toLowerCase();
-  const items = tasks.filter((t) => !q || t.name.toLowerCase().includes(q));
+  const items = tasks.filter(
+    (t) =>
+      !q ||
+      t.name.toLowerCase().includes(q) ||
+      t.description.toLowerCase().includes(q),
+  );
   const highlighted = items[Math.min(highlight, items.length - 1)];
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: scrolls to whichever row carries the highlight
@@ -96,7 +101,7 @@ export function RunTaskPicker({
                   type="button"
                   data-highlighted={index === highlight || undefined}
                   className={cn(
-                    "flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs",
+                    "flex w-full items-start gap-2 px-3 py-1.5 text-left text-xs",
                     index === highlight
                       ? "bg-accent text-accent-foreground"
                       : "hover:bg-muted/60",
@@ -104,8 +109,15 @@ export function RunTaskPicker({
                   onMouseMove={() => setHighlight(index)}
                   onClick={() => run(task.id)}
                 >
-                  <PlayIcon className="size-3.5 shrink-0 text-muted-foreground" />
-                  <span className="min-w-0 flex-1 truncate">{task.name}</span>
+                  <PlayIcon className="mt-px size-3.5 shrink-0 text-muted-foreground" />
+                  <span className="flex min-w-0 flex-1 flex-col">
+                    <span className="truncate">{task.name}</span>
+                    {task.description !== "" && (
+                      <span className="truncate text-[11px] text-muted-foreground">
+                        {task.description}
+                      </span>
+                    )}
+                  </span>
                   <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
                     {INTERPRETER_LABELS[task.interpreter] ?? task.interpreter}
                   </span>
