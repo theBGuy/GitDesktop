@@ -317,30 +317,30 @@ fn launch_terminal_unix(kind: &str, program: &str, path: &str) -> AppResult<()> 
         // binary with the tool's own working-directory flag. Warp/Hyper/Ghostty
         // have no stable such flag → best-effort `open -a` (may open at $HOME).
         let inner = |bin: &str| bundle.join("Contents").join("MacOS").join(bin);
-        let mut cmd = match kind {
+        let flag_launch = match kind {
             "alacritty" if !program.is_empty() => {
-                let mut c = Command::new(inner("alacritty"));
-                c.args(["--working-directory", path]);
-                c
+                Some((inner("alacritty"), vec!["--working-directory", path]))
             }
-            "kitty" if !program.is_empty() => {
-                let mut c = Command::new(inner("kitty"));
-                c.args(["--directory", path]);
-                c
-            }
+            "kitty" if !program.is_empty() => Some((inner("kitty"), vec!["--directory", path])),
             "wezterm" if !program.is_empty() => {
-                let mut c = Command::new(inner("wezterm"));
-                c.args(["start", "--cwd", path]);
-                c
+                Some((inner("wezterm"), vec!["start", "--cwd", path]))
             }
-            _ => {
-                let app = mac_terminal_app(kind, program);
-                let mut c = Command::new("open");
-                c.args(["-a", app.as_str(), path]);
-                c
-            }
+            _ => None,
         };
-        cmd.spawn().map(|_| ()).map_err(AppError::Io)
+        // If the emulator's inner binary is missing/renamed (a future release or a
+        // divergent bundle layout), fall through to `open -a` rather than
+        // hard-failing — mirroring the Linux branch's fallback posture.
+        if let Some((prog, args)) = flag_launch {
+            if Command::new(&prog).args(&args).spawn().is_ok() {
+                return Ok(());
+            }
+        }
+        let app = mac_terminal_app(kind, program);
+        Command::new("open")
+            .args(["-a", app.as_str(), path])
+            .spawn()
+            .map(|_| ())
+            .map_err(AppError::Io)
     }
     #[cfg(not(target_os = "macos"))]
     {
