@@ -11,6 +11,6 @@
   you (a version to release, a yes/no) work and keep their colour; **Stop** kills the run
   and its child processes, **Rerun** starts a fresh one. Choose the interpreter — PowerShell,
   cmd, Git Bash, bash/sh/zsh, Node, Deno, Bun, Python, or Ruby, with the editor showing which
-  are installed on your machine. Task definitions live in your app data
+  it detected on your machine. Task definitions live in your app data
   and are never read from repository content, running is off until you enable it, and each
   task can ask for confirmation before it runs.

@@ -124,3 +124,19 @@ export const useTaskRunStore = create<TaskRunState>((set, get) => ({
 export function taskPtyId(run: ActiveRun): string {
   return `task:${run.task.id}:${run.token}`;
 }
+
+// A run belongs to the repo it was started in. `taskRun` is a separate store, so
+// the ui store's CROSS_REPO_RESET can't reach it — subscribe to repo changes and
+// drop the run here. Without this the run leaks across a repo switch:
+// RepositoryView unmounts on close and remounts on the next open, so the run
+// pane's Terminal mounts fresh and re-executes the task in the NEW repo's folder
+// (with a now-wrong repo-relative path), and the stale "running" status drives a
+// phantom run indicator plus a spurious "already running" dialog naming the old
+// task.
+useUiStore.subscribe((s, prev) => {
+  if (s.repoPath === prev.repoPath) return;
+  const { activeRun, pending } = useTaskRunStore.getState();
+  if (activeRun || pending) {
+    useTaskRunStore.setState({ activeRun: null, pending: null });
+  }
+});

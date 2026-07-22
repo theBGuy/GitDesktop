@@ -159,7 +159,11 @@ export function TasksPanel() {
                 <button
                   type="button"
                   data-row={task.id}
-                  tabIndex={index === activeIndex ? 0 : -1}
+                  // Roving tabindex: exactly one row is a tab stop. Until a row
+                  // is focused (activeIndex === -1) that's the first row, so the
+                  // list is keyboard-reachable from the start — otherwise nothing
+                  // is tabbable and the arrow-nav + Enter-to-run can't be reached.
+                  tabIndex={index === Math.max(activeIndex, 0) ? 0 : -1}
                   onFocus={() => setActiveIndex(index)}
                   onClick={() => request(task)}
                   className={cn(

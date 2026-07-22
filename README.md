@@ -528,8 +528,8 @@ you **adjust the arguments per run**. Runs happen in an **interactive** in-app t
 the repo's folder, so scripts that prompt you (a version to release, a yes/no) work and
 keep their colour; **Stop** kills the run and its child processes, **Rerun** starts a
 fresh one. Pick the interpreter — **PowerShell**, **cmd**, **Git Bash**, **bash/sh/zsh**,
-**Node**, **Deno**, **Bun**, **Python**, or **Ruby** — with the editor showing **which are
-installed** on your machine (and where). Task definitions live in your app data — never
+**Node**, **Deno**, **Bun**, **Python**, or **Ruby** — with the editor showing **which it
+detected** on your machine (and where). Task definitions live in your app data — never
 read from repository content, so a cloned repo can't plant one — running is **off until you
 enable it**, and each task can **confirm before it runs**.
 
