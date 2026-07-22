@@ -5,8 +5,8 @@ import { readTextFile } from "@/lib/git/api";
 import { normalizeArgDocs } from "@/lib/scripts/store";
 import {
   type ArgDoc,
-  type Interpreter,
   INTERPRETERS,
+  type Interpreter,
 } from "@/lib/scripts/types";
 import { stripFences } from "./useGenerateScript";
 

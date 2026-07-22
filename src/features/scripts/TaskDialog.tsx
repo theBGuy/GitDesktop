@@ -27,8 +27,8 @@ import {
   type ArgDoc,
   availableInterpreters,
   DEFAULT_INTERPRETER,
-  type Interpreter,
   INTERPRETERS,
+  type Interpreter,
   interpreterForExt,
   type TaskDef,
   type TaskSource,
@@ -203,7 +203,10 @@ export function TaskDialog({
       args: args.trim(),
       argDocs: argDocs
         .filter((r) => r.arg.trim() !== "")
-        .map(({ arg, description: d }) => ({ arg: arg.trim(), description: d })),
+        .map(({ arg, description: d }) => ({
+          arg: arg.trim(),
+          description: d,
+        })),
       confirmBeforeRun,
     });
   }
@@ -214,9 +217,9 @@ export function TaskDialog({
         <DialogHeader>
           <DialogTitle>{editing ? "Edit task" : "New task"}</DialogTitle>
           <DialogDescription>
-            A saved script you can run from here without a terminal. Point it at an
-            existing script in the repo, or write one inline. Either way it runs in
-            the repository's folder.
+            A saved script you can run from here without a terminal. Point it at
+            an existing script in the repo, or write one inline. Either way it
+            runs in the repository's folder.
           </DialogDescription>
         </DialogHeader>
 
@@ -286,15 +289,17 @@ export function TaskDialog({
         {detected.isSuccess &&
           detected.data?.get(interpreter)?.path == null && (
             <p className="text-xs text-warning">
-              {INTERPRETER_LABELS[interpreter] ?? interpreter} isn't on your PATH —
-              the task will fail to run until it's installed.
+              {INTERPRETER_LABELS[interpreter] ?? interpreter} isn't on your
+              PATH — the task will fail to run until it's installed.
             </p>
           )}
 
         <div className="space-y-1.5">
           <Label htmlFor="task-description">
             Description{" "}
-            <span className="font-normal text-muted-foreground">(optional)</span>
+            <span className="font-normal text-muted-foreground">
+              (optional)
+            </span>
           </Label>
           <Input
             id="task-description"
@@ -389,8 +394,8 @@ export function TaskDialog({
               </Button>
             </div>
             <p className="text-xs text-muted-foreground">
-              Relative to the repository root — runs the live file, so edits to it
-              take effect on the next run.
+              Relative to the repository root — runs the live file, so edits to
+              it take effect on the next run.
             </p>
           </div>
         ) : (
@@ -482,7 +487,9 @@ export function TaskDialog({
         <div className="space-y-1.5">
           <Label htmlFor="task-args">
             Arguments{" "}
-            <span className="font-normal text-muted-foreground">(optional)</span>
+            <span className="font-normal text-muted-foreground">
+              (optional)
+            </span>
           </Label>
           <Input
             id="task-args"

@@ -26,7 +26,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use base64::Engine;
@@ -203,7 +203,7 @@ fn find_git_bash() -> Option<PathBuf> {
     }
     for base in bases {
         for rel in ["Git\\bin\\bash.exe", "Git\\usr\\bin\\bash.exe"] {
-            let b = Path::new(&base).join(rel);
+            let b = std::path::Path::new(&base).join(rel);
             if b.is_file() {
                 return Some(b);
             }

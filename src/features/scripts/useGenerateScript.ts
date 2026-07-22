@@ -2,7 +2,7 @@ import { useCallback } from "react";
 import { toast } from "sonner";
 import { useAiStream } from "@/features/conversations/useAiStream";
 import { readRepoInstructions } from "@/lib/git/api";
-import { type Interpreter, INTERPRETERS } from "@/lib/scripts/types";
+import { INTERPRETERS, type Interpreter } from "@/lib/scripts/types";
 
 const INTERPRETER_LABELS: Record<string, string> = Object.fromEntries(
   INTERPRETERS.map((i) => [i.id, i.label]),
@@ -35,8 +35,7 @@ export function useGenerateScript(repoPath: string) {
         toast.error("Describe what the script should do first.");
         return;
       }
-      const label =
-        INTERPRETER_LABELS[opts.interpreter] ?? opts.interpreter;
+      const label = INTERPRETER_LABELS[opts.interpreter] ?? opts.interpreter;
 
       const buffer = await run(
         async () => {

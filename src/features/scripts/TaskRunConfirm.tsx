@@ -71,9 +71,7 @@ export function TaskRunConfirm() {
       <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-md">
         <DialogHeader>
           <DialogTitle>
-            {replacing
-              ? "A task is already running"
-              : `Run “${task?.name}”?`}
+            {replacing ? "A task is already running" : `Run “${task?.name}”?`}
           </DialogTitle>
           <DialogDescription>
             {replacing ? (

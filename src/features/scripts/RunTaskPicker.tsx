@@ -112,7 +112,10 @@ export function RunTaskPicker({
                 >
                   <PlayIcon className="mt-px size-3.5 shrink-0 text-muted-foreground" />
                   <span className="flex min-w-0 flex-1 flex-col">
-                    <span className="truncate" onMouseEnter={clipTitle(task.name)}>
+                    <span
+                      className="truncate"
+                      onMouseEnter={clipTitle(task.name)}
+                    >
                       {task.name}
                     </span>
                     {task.description !== "" && (

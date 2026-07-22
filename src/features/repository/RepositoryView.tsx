@@ -214,9 +214,7 @@ export function RepositoryView() {
   const tasksEnabled = scripts.data?.enabled ?? false;
   const hasTasks = (scripts.data?.tasks.length ?? 0) > 0;
   // A running task shows a dot on the "More" trigger when you're on another tab.
-  const taskRunning = useTaskRunStore(
-    (s) => s.activeRun?.status === "running",
-  );
+  const taskRunning = useTaskRunStore((s) => s.activeRun?.status === "running");
 
   // OS notifications for PR/check and workflow-run events while this repo is open.
   usePrNotifications(repoPath ?? "");

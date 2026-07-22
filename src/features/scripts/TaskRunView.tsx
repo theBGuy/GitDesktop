@@ -7,14 +7,13 @@ import {
   WarningCircleIcon,
   XIcon,
 } from "@phosphor-icons/react";
-import { Suspense, lazy } from "react";
+import { lazy, Suspense } from "react";
 import { Button } from "@/components/ui/button";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { clipTitle } from "@/lib/clip-title";
 import { ptyClose } from "@/lib/pty";
 import { INTERPRETERS, parseArgs } from "@/lib/scripts/types";
-import { useTaskRunStore } from "@/lib/stores/taskRun";
-import { taskPtyId } from "@/lib/stores/taskRun";
+import { taskPtyId, useTaskRunStore } from "@/lib/stores/taskRun";
 import { useUiStore } from "@/lib/stores/ui";
 
 // Reuse the interactive PTY terminal (xterm + Rust PTY). Lazy so its chunk loads

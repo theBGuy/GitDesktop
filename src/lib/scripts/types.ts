@@ -30,7 +30,11 @@ export interface InterpreterInfo {
 
 /** Interpreter options for the task editor, in display order. */
 export const INTERPRETERS: InterpreterInfo[] = [
-  { id: "powershell", label: "PowerShell", hint: "pwsh, or Windows PowerShell" },
+  {
+    id: "powershell",
+    label: "PowerShell",
+    hint: "pwsh, or Windows PowerShell",
+  },
   { id: "cmd", label: "Command Prompt", hint: "cmd.exe batch", os: "windows" },
   {
     id: "git-bash",
@@ -59,7 +63,9 @@ export function isInterpreter(v: unknown): v is Interpreter {
 }
 
 /** The interpreter a new task defaults to, by platform (the host shell). */
-export const DEFAULT_INTERPRETER: Interpreter = isWindows ? "powershell" : "bash";
+export const DEFAULT_INTERPRETER: Interpreter = isWindows
+  ? "powershell"
+  : "bash";
 
 /** Guess the interpreter for an existing script from its file extension — used
  *  to pre-select the dropdown when the user picks a file. Returns null when the

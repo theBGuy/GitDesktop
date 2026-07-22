@@ -127,9 +127,7 @@ export function normalizeScripts(saved: unknown): ScriptsConfig {
   if (!saved || typeof saved !== "object") return { ...EMPTY_SCRIPTS };
   const obj = saved as { enabled?: unknown; tasks?: unknown };
   const tasks = Array.isArray(obj.tasks)
-    ? obj.tasks
-        .map(normalizeTask)
-        .filter((t): t is TaskDef => t !== undefined)
+    ? obj.tasks.map(normalizeTask).filter((t): t is TaskDef => t !== undefined)
     : [];
   // Drop duplicate ids (keep first) so list keys stay unique.
   const seen = new Set<string>();
