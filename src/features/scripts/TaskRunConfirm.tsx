@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -111,16 +111,17 @@ export function TaskRunConfirm() {
             spellCheck={false}
           />
           {docRows.length > 0 && (
-            <dl className="space-y-0.5 pt-1 text-xs">
+            // --help-style reference: flag column + description that WRAPS —
+            // this is documentation the user is here to read, so it never
+            // truncates (the dialog itself scrolls if the list is long).
+            <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 pt-1 text-xs">
               {docRows.map((d) => (
-                <div key={d.key} className="flex gap-2">
-                  <dt className="shrink-0 font-mono text-muted-foreground">
-                    {d.arg}
-                  </dt>
-                  <dd className="min-w-0 flex-1 truncate text-muted-foreground">
+                <Fragment key={d.key}>
+                  <dt className="font-mono text-muted-foreground">{d.arg}</dt>
+                  <dd className="min-w-0 wrap-break-word text-muted-foreground">
                     {d.description}
                   </dd>
-                </div>
+                </Fragment>
               ))}
             </dl>
           )}

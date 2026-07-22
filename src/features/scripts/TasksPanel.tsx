@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
+import { clipTitle } from "@/lib/clip-title";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import {
   useAddTask,
@@ -171,13 +172,16 @@ export function TasksPanel() {
                   <PlayIcon className="mt-px size-3.5 shrink-0 text-muted-foreground" />
                   <span className="flex min-w-0 flex-1 flex-col gap-0.5">
                     <span className="flex items-center gap-2">
-                      <span className="min-w-0 flex-1 truncate">
+                      <span
+                        className="min-w-0 flex-1 truncate"
+                        onMouseEnter={clipTitle(task.name)}
+                      >
                         {task.name}
                       </span>
                       {task.args !== "" && (
                         <span
                           className="min-w-0 max-w-32 truncate font-mono text-[10px] text-muted-foreground"
-                          title={task.args}
+                          onMouseEnter={clipTitle(task.args)}
                         >
                           {task.args}
                         </span>
@@ -188,7 +192,10 @@ export function TasksPanel() {
                       </span>
                     </span>
                     {task.description !== "" && (
-                      <span className="truncate text-[11px] text-muted-foreground">
+                      <span
+                        className="truncate text-[11px] text-muted-foreground"
+                        onMouseEnter={clipTitle(task.description)}
+                      >
                         {task.description}
                       </span>
                     )}

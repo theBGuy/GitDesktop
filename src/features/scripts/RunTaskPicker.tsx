@@ -2,6 +2,7 @@ import { PlayIcon } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { clipTitle } from "@/lib/clip-title";
 import { useScripts } from "@/lib/scripts/queries";
 import { INTERPRETERS } from "@/lib/scripts/types";
 import { useTaskRunStore } from "@/lib/stores/taskRun";
@@ -111,9 +112,14 @@ export function RunTaskPicker({
                 >
                   <PlayIcon className="mt-px size-3.5 shrink-0 text-muted-foreground" />
                   <span className="flex min-w-0 flex-1 flex-col">
-                    <span className="truncate">{task.name}</span>
+                    <span className="truncate" onMouseEnter={clipTitle(task.name)}>
+                      {task.name}
+                    </span>
                     {task.description !== "" && (
-                      <span className="truncate text-[11px] text-muted-foreground">
+                      <span
+                        className="truncate text-[11px] text-muted-foreground"
+                        onMouseEnter={clipTitle(task.description)}
+                      >
                         {task.description}
                       </span>
                     )}

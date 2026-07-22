@@ -10,6 +10,7 @@ import {
 import { Suspense, lazy } from "react";
 import { Button } from "@/components/ui/button";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
+import { clipTitle } from "@/lib/clip-title";
 import { ptyClose } from "@/lib/pty";
 import { INTERPRETERS, parseArgs } from "@/lib/scripts/types";
 import { useTaskRunStore } from "@/lib/stores/taskRun";
@@ -54,7 +55,7 @@ export function TaskRunView() {
         {task.source.kind === "file" && (
           <span
             className="min-w-0 truncate font-mono text-[10px] text-muted-foreground"
-            title={task.source.path}
+            onMouseEnter={clipTitle(task.source.path)}
           >
             {task.source.path}
           </span>
@@ -62,7 +63,7 @@ export function TaskRunView() {
         {args !== "" && (
           <span
             className="min-w-0 truncate font-mono text-[10px] text-muted-foreground"
-            title={args}
+            onMouseEnter={clipTitle(args)}
           >
             {args}
           </span>
