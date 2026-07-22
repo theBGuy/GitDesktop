@@ -7,15 +7,46 @@ import { useMemo, useSyncExternalStore } from "react";
 // canonical scoped forms carry it:
 //   #r/{repoId}/status · #r/{repoId}/prs · #r/{repoId}/prs/{n} · #r/{repoId}/ci ·
 //   #r/{repoId}/ci/{id} · #r/{repoId}/agents · #r/{repoId}/agents/{streamId}
+// Slice 6 adds four read-only surfaces (SCOPED-ONLY — no legacy repo-less forms):
+//   #r/{repoId}/changes · #r/{repoId}/changes/{section}/{encodedFile}
+//   #r/{repoId}/history · #r/{repoId}/history/{sha} · #r/{repoId}/history/{sha}/{encodedFile}
+//   #r/{repoId}/branches
+//   #r/{repoId}/issues · #r/{repoId}/issues/{n}
 // Plus two global (repo-less) routes:
 //   #pair   — the pairing takeover (unchanged)
 //   #repos  — the repo picker
 // Legacy single-repo hashes (`#status`, `#prs/{n}`, `#ci/{id}`, `#agents/{id}`)
 // still parse — with `repoId: null` — so old bookmarks keep working; the shell
-// redirects them to the scoped equivalent once it knows which repo to use.
+// redirects them to the scoped equivalent once it knows which repo to use. The
+// slice-6 tabs are deliberately NOT part of the legacy grammar (an unknown head on
+// the legacy branch degrades to status, exactly as before).
 // Default (empty / unknown hash) resolves to #status with a null repoId.
 
-export type Tab = "status" | "prs" | "ci" | "agents";
+export type Tab =
+  | "status"
+  | "prs"
+  | "ci"
+  | "agents"
+  | "changes"
+  | "history"
+  | "branches"
+  | "issues";
+
+/** The working-tree section a Changes file-diff is scoped to. `unstaged` and
+ *  `untracked` both map to the working-tree side server-side, but they're distinct
+ *  routes so the file-diff fetch can pass the right `staged`/`untracked` flags. */
+export type ChangesSection = "staged" | "unstaged" | "untracked";
+
+const CHANGES_SECTIONS: readonly ChangesSection[] = [
+  "staged",
+  "unstaged",
+  "untracked",
+];
+
+// A commit sha segment: 7–64 hex chars (64 covers SHA-256 object-format repos). A tail that fails this guard is treated as
+// absent (`sha: null`) — the same "unknown detail → list" degradation the other
+// tabs use — so a malformed sha never reaches a scoped commit URL.
+const SHA_RE = /^[0-9a-f]{7,64}$/i;
 
 // Agent-stream ids are opaque UUID-like STRINGS (not numbers like PR/CI ids), so
 // they parse into their own `streamId` field. A conservative charset guard keeps
@@ -52,32 +83,123 @@ export interface Route {
   /** A selected agent-stream id (`#…/agents/{id}`), else null. String because
    *  stream ids are UUID-like, not numeric. Only parsed on the agents tab. */
   streamId: string | null;
+  /** The working-tree section a Changes file-diff is scoped to
+   *  (`#…/changes/{section}/{file}`), else null. Null on every route but a
+   *  changes file-diff route with a recognized section. */
+  section: ChangesSection | null;
+  /** A selected file path (`#…/changes/{section}/{file}`,
+   *  `#…/history/{sha}/{file}`), already `decodeURIComponent`-decoded, else null. */
+  filePath: string | null;
+  /** A selected commit sha (`#…/history/{sha}[/…]`), else null. Only ever a
+   *  7–64 hex-char string or null — a malformed sha segment parses as null. */
+  sha: string | null;
   /** The raw normalized hash (without the leading `#`). */
   raw: string;
 }
 
-/** Parse the `{tab}[/detail]` portion shared by both the legacy and scoped forms
- *  into `{ tab, detailId, streamId }`. `head` is the tab segment, `tail` the
- *  optional detail segment. */
+/** The tab-and-detail portion shared by both forms. Legacy hashes never carry a
+ *  `section`/`filePath`/`sha` (the slice-6 tabs are scoped-only), so those stay
+ *  null there; the scoped parse fills them from the trailing segments. */
+interface TabParse {
+  tab: Tab;
+  detailId: number | null;
+  streamId: string | null;
+  section: ChangesSection | null;
+  filePath: string | null;
+  sha: string | null;
+}
+
+/** The all-null detail defaults every branch spreads over — keeps each `case`
+ *  focused on the one or two fields its tab actually uses. */
+const NO_DETAIL = {
+  detailId: null,
+  streamId: null,
+  section: null,
+  filePath: null,
+  sha: null,
+} as const;
+
+/** Parse the `{tab}[/detail…]` portion shared by both the legacy and scoped forms.
+ *  `head` is the tab segment, `tail` the first detail segment, `extra` the segment
+ *  after that (only the scoped slice-6 file-diff routes reach for it — a file path
+ *  under `changes/{section}/{file}` or `history/{sha}/{file}`).
+ *
+ *  `scoped` marks the caller as the scoped `#r/{id}/…` branch. The four slice-6
+ *  tabs (changes/history/branches/issues) are SCOPED-ONLY: on the legacy branch
+ *  (`scoped: false`) their heads are unknown and degrade to status, exactly like any
+ *  other unknown legacy head — the legacy grammar is deliberately NOT extended.
+ *  The original tabs (prs/ci/agents/status) parse identically under either branch. */
 function parseTab(
   head: string | undefined,
   tail: string | undefined,
-): { tab: Tab; detailId: number | null; streamId: string | null } {
+  extra: string | undefined,
+  scoped: boolean,
+): TabParse {
   const detailId = tail && /^\d+$/.test(tail) ? Number(tail) : null;
   switch (head) {
     case "prs":
-      return { tab: "prs", detailId, streamId: null };
+      return { ...NO_DETAIL, tab: "prs", detailId };
     case "ci":
-      return { tab: "ci", detailId, streamId: null };
+      return { ...NO_DETAIL, tab: "ci", detailId };
     case "agents": {
       // Stream ids are strings, so `detailId` never applies here; a tail that
       // fails the charset guard falls back to the list (streamId null).
       const streamId = tail && STREAM_ID_RE.test(tail) ? tail : null;
-      return { tab: "agents", detailId: null, streamId };
+      return { ...NO_DETAIL, tab: "agents", streamId };
     }
-    default:
-      return { tab: "status", detailId: null, streamId: null };
+    case "changes": {
+      if (!scoped) break; // scoped-only → unknown on the legacy branch
+      // `changes/{section}/{encodedFile}` → a file-diff route; `changes` alone →
+      // the list. A tail outside the three-value section set (or a missing file
+      // segment) is an unknown detail: fall back to the list, exactly as an
+      // unknown PR/CI tail does.
+      const section =
+        tail && (CHANGES_SECTIONS as readonly string[]).includes(tail)
+          ? (tail as ChangesSection)
+          : null;
+      const filePath = section && extra ? decodeSegment(extra) : null;
+      // A section without a file segment isn't a valid file-diff route; drop both
+      // so it renders the list (never a half-formed detail).
+      return filePath
+        ? { ...NO_DETAIL, tab: "changes", section, filePath }
+        : { ...NO_DETAIL, tab: "changes" };
+    }
+    case "history": {
+      if (!scoped) break; // scoped-only
+      // `history/{sha}[/{encodedFile}]`. A tail that isn't a 7–64 hex sha is an
+      // unknown detail → the list (sha null); a valid sha may carry a file tail.
+      const sha = tail && SHA_RE.test(tail) ? tail : null;
+      const filePath = sha && extra ? decodeSegment(extra) : null;
+      return { ...NO_DETAIL, tab: "history", sha, filePath };
+    }
+    case "branches":
+      if (!scoped) break; // scoped-only
+      return { ...NO_DETAIL, tab: "branches" };
+    case "issues":
+      if (!scoped) break; // scoped-only
+      // Numeric detail → the issue number (`detailId`), exactly like prs.
+      return { ...NO_DETAIL, tab: "issues", detailId };
   }
+  // Unknown head (or a scoped-only tab reached via the legacy branch) → status.
+  return { ...NO_DETAIL, tab: "status" };
+}
+
+/** Decode one `encodeURIComponent`-encoded path segment back to its raw path. A
+ *  malformed escape (a hand-crafted hash) throws in `decodeURIComponent`; treat
+ *  that as no file (null-equivalent "") rather than crashing the whole parse. */
+function decodeSegment(seg: string): string | null {
+  try {
+    return decodeURIComponent(seg);
+  } catch {
+    return null;
+  }
+}
+
+/** Encode a file path into a single hash segment (`encodeURIComponent` exactly
+ *  once, so `/` and other path chars survive the round-trip through the hash).
+ *  The inverse of the parser's `decodeSegment`. */
+export function encodeFileSegment(path: string): string {
+  return encodeURIComponent(path);
 }
 
 function parseHash(hash: string): Route {
@@ -88,8 +210,7 @@ function parseHash(hash: string): Route {
       isPairing: true,
       isRepos: false,
       repoId: null,
-      detailId: null,
-      streamId: null,
+      ...NO_DETAIL,
       raw,
     };
   }
@@ -99,36 +220,34 @@ function parseHash(hash: string): Route {
       isPairing: false,
       isRepos: true,
       repoId: null,
-      detailId: null,
-      streamId: null,
+      ...NO_DETAIL,
       raw,
     };
   }
   const parts = raw.split("/");
-  // Scoped form: `r/{repoId}/{tab}[/{detail}]`. A malformed repoId segment falls
-  // through to the legacy parse below (repoId stays null), so it degrades to the
-  // legacy meaning rather than routing to a repo that can't exist.
+  // Scoped form: `r/{repoId}/{tab}[/{detail}[/{extra}]]`. A malformed repoId segment
+  // falls through to the legacy parse below (repoId stays null), so it degrades to
+  // the legacy meaning rather than routing to a repo that can't exist. The scoped
+  // form is the ONLY one that passes `parts[4]` (the file segment) — the slice-6
+  // file-diff routes are scoped-only.
   if (parts[0] === "r" && parts[1] && REPO_ID_RE.test(parts[1])) {
-    const { tab, detailId, streamId } = parseTab(parts[2], parts[3]);
     return {
-      tab,
+      ...parseTab(parts[2], parts[3], parts[4], true),
       isPairing: false,
       isRepos: false,
       repoId: parts[1],
-      detailId,
-      streamId,
       raw,
     };
   }
-  // Legacy single-repo form: `{tab}[/{detail}]` with no repo scope.
-  const { tab, detailId, streamId } = parseTab(parts[0], parts[1]);
+  // Legacy single-repo form: `{tab}[/{detail}]` with no repo scope. `scoped: false`
+  // and no `extra` segment: the slice-6 tabs (changes/history/branches/issues) are
+  // scoped-only, so a legacy head that isn't status/prs/ci/agents degrades to status
+  // as before.
   return {
-    tab,
+    ...parseTab(parts[0], parts[1], undefined, false),
     isPairing: false,
     isRepos: false,
     repoId: null,
-    detailId,
-    streamId,
     raw,
   };
 }

@@ -3,6 +3,7 @@ import {
   GitBranchIcon,
   GitPullRequestIcon,
   PlayCircleIcon,
+  RadioButtonIcon,
   RobotIcon,
 } from "@phosphor-icons/react";
 import type { ReactNode } from "react";
@@ -65,15 +66,20 @@ export function TopBar({
 const TABS: { tab: Tab; label: string; icon: ReactNode }[] = [
   { tab: "status", label: "Status", icon: <GitBranchIcon size={22} /> },
   { tab: "prs", label: "PRs", icon: <GitPullRequestIcon size={22} /> },
+  { tab: "issues", label: "Issues", icon: <RadioButtonIcon size={22} /> },
   { tab: "ci", label: "CI", icon: <PlayCircleIcon size={22} /> },
   { tab: "agents", label: "Agents", icon: <RobotIcon size={22} /> },
 ];
 
 /** Build a tab's hash for the current repo scope. With a repoId the tabs are
  *  scoped (`#r/{repoId}/{tab}`); without one (picker / mid-redirect) they fall
- *  back to the legacy hash, which the shell resolves to a scoped route. */
+ *  back to the legacy hash, which the shell resolves to a scoped route. Issues is
+ *  scoped-only (it has NO legacy grammar — an unknown legacy head parses as
+ *  status), so pre-scope it degrades to `#status` explicitly: the landing state
+ *  is identical either way, but the transient hash stays honest. */
 function tabHash(tab: Tab, repoId: string | null): string {
-  return repoId ? repoHash(repoId, tab) : `#${tab}`;
+  if (repoId) return repoHash(repoId, tab);
+  return tab === "issues" ? "#status" : `#${tab}`;
 }
 
 /** Bottom tab nav. Each tab is a real link (Tab-focusable) scoped to the selected
@@ -110,7 +116,7 @@ export function BottomNav({
   return (
     <nav
       className={`sticky bottom-0 z-10 grid border-t border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80 pb-[env(safe-area-inset-bottom)] ${
-        tabs.length === 3 ? "grid-cols-3" : "grid-cols-4"
+        tabs.length === 4 ? "grid-cols-4" : "grid-cols-5"
       }`}
       aria-label="Sections"
     >

@@ -14,7 +14,11 @@ import {
   useRoute,
 } from "./lib/router";
 import { AgentsBody, AgentWatch } from "./screens/Agents";
+import { BranchesBody } from "./screens/Branches";
+import { ChangesBody, ChangesFileBody } from "./screens/Changes";
 import { CiBody, CiDetail } from "./screens/Ci";
+import { CommitBody, CommitFileBody, HistoryBody } from "./screens/History";
+import { IssueDetailBody, IssuesBody } from "./screens/Issues";
 import { Pair } from "./screens/Pair";
 import { PrDetail, PrsBody } from "./screens/Prs";
 import { ReposBody } from "./screens/Repos";
@@ -319,6 +323,45 @@ function Screen({
       />
     ) : (
       <AgentsBody repoId={repoId} active hideAi={hideAi} />
+    );
+  }
+  if (route.tab === "changes") {
+    // A file-diff route needs BOTH a section and a decoded file; the router only
+    // emits them together (a section without a file falls back to the list), but
+    // gate on both so a partial route always renders the list, never a half-formed
+    // detail.
+    return route.section != null && route.filePath != null ? (
+      <ChangesFileBody
+        repoId={repoId}
+        section={route.section}
+        filePath={route.filePath}
+      />
+    ) : (
+      <ChangesBody repoId={repoId} active />
+    );
+  }
+  if (route.tab === "history") {
+    if (route.sha != null) {
+      return route.filePath != null ? (
+        <CommitFileBody
+          repoId={repoId}
+          sha={route.sha}
+          filePath={route.filePath}
+        />
+      ) : (
+        <CommitBody repoId={repoId} sha={route.sha} />
+      );
+    }
+    return <HistoryBody repoId={repoId} active />;
+  }
+  if (route.tab === "branches") {
+    return <BranchesBody repoId={repoId} active />;
+  }
+  if (route.tab === "issues") {
+    return route.detailId != null ? (
+      <IssueDetailBody repoId={repoId} number={route.detailId} />
+    ) : (
+      <IssuesBody repoId={repoId} active />
     );
   }
   return <StatusBody repoId={repoId} active />;
