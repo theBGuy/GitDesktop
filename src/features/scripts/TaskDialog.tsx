@@ -22,6 +22,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { clipTitle } from "@/lib/clip-title";
+import { isMac, isWindows } from "@/lib/hotkeys/binding";
 import { useDetectedInterpreters } from "@/lib/scripts/interpreters";
 import {
   type ArgDoc,
@@ -58,16 +59,18 @@ const toRows = (docs: ArgDoc[]): ArgDocRow[] =>
 
 /** Make a picked absolute path relative to the repo root when it's inside it, so a
  *  task like `scripts/release.mjs` works in any repo that has it. Outside the repo,
- *  keep the absolute path (it's machine-specific). Windows paths compare
- *  case-insensitively; store forward slashes either way. */
+ *  keep the absolute path (it's machine-specific). Windows and macOS paths
+ *  compare case-insensitively; store forward slashes either way. */
 function toRepoRelative(picked: string, repoRoot: string | null): string {
   const norm = (p: string) => p.replace(/\\/g, "/");
   const p = norm(picked);
   if (!repoRoot) return p;
   const root = norm(repoRoot).replace(/\/+$/, "");
-  return p.toLowerCase().startsWith(`${root.toLowerCase()}/`)
-    ? p.slice(root.length + 1)
-    : p;
+  // Windows and macOS default to case-insensitive filesystems; Linux is
+  // case-sensitive, so folding the prefix there could wrongly relativize a
+  // sibling directory that differs only in case.
+  const fold = (s: string) => (isWindows || isMac ? s.toLowerCase() : s);
+  return fold(p).startsWith(`${fold(root)}/`) ? p.slice(root.length + 1) : p;
 }
 
 /**
@@ -261,7 +264,7 @@ export function TaskDialog({
                           {i.label}
                           {missing && (
                             <span className="text-[10px] text-muted-foreground">
-                              · not installed
+                              · not detected
                             </span>
                           )}
                         </span>
@@ -289,8 +292,9 @@ export function TaskDialog({
         {detected.isSuccess &&
           detected.data?.get(interpreter)?.path == null && (
             <p className="text-xs text-warning">
-              {INTERPRETER_LABELS[interpreter] ?? interpreter} isn't on your
-              PATH — the task will fail to run until it's installed.
+              {INTERPRETER_LABELS[interpreter] ?? interpreter} wasn't detected
+              on your PATH — it may still run if your shell resolves it,
+              otherwise you'll need to install it.
             </p>
           )}
 
@@ -476,10 +480,8 @@ export function TaskDialog({
               </Suspense>
             </div>
             <p className="text-xs text-muted-foreground">
-              A one-liner like{" "}
-              <span className="font-mono">node scripts/release.mjs</span> or
-              several lines with pipes and{" "}
-              <span className="font-mono">&amp;&amp;</span>.
+              The script's contents, run by the selected interpreter — shell
+              commands for PowerShell or bash, JavaScript for Node, and so on.
             </p>
           </div>
         )}

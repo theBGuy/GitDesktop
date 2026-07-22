@@ -1565,11 +1565,12 @@ tab menu, or from the command palette ({{kbd:command-palette}}).
   add or run one.
 - **Add a task.** Give it a name, an optional one-line description, and pick an
   interpreter — **PowerShell**, **cmd**, **Git Bash**, **bash / sh / zsh**, **Node**,
-  **Deno**, **Bun**, **Python**, or **Ruby** (the editor shows which are installed on your
+  **Deno**, **Bun**, **Python**, or **Ruby** (the editor shows which it detected on your
   machine, and where). Then
   either **point it at an existing script** in the repo (it runs the live file, so edits
-  take effect on the next run) or write one **inline** — a one-liner like
-  \`node scripts/release.mjs\` or several lines with pipes and \`&&\`.{{ai}} With an AI
+  take effect on the next run) or write one **inline** — the script's contents, written
+  in your chosen interpreter's language (shell for PowerShell or bash, JavaScript for
+  Node, and so on).{{ai}} With an AI
   provider connected, **Generate** writes an inline script from a short description, and
   **Analyze with AI** reads the script and fills in the name, description, and the
   arguments it accepts.{{/ai}} Either way it runs in the open repository's folder.
