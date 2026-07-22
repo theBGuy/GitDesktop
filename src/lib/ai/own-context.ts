@@ -4,7 +4,7 @@ import { loadSettings } from "@/lib/settings/api";
 import { GD_COMMENT_ANCHOR } from "./comment-branding";
 import { getDigest, saveDigest } from "./own-digest-store";
 import { distillOwnComments } from "./own-distill";
-import { OWN_COMMENTS_CHAR_BUDGET } from "./truncate";
+import { OWN_COMMENTS_CHAR_BUDGET, safeSlice } from "./truncate";
 
 /** What `buildReviewPrompt` needs about GitDesktop's OWN prior comments on a PR. */
 export interface OwnCommentsContext {
@@ -70,7 +70,7 @@ function condenseOwnComment(body: string, cap: number): string {
     .join("\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
-  return cleaned.length > cap ? `${cleaned.slice(0, cap)}…` : cleaned;
+  return cleaned.length > cap ? `${safeSlice(cleaned, cap)}…` : cleaned;
 }
 
 /** A short "where + state" tag for an inline comment or a thread reply. Plain
@@ -236,5 +236,5 @@ export async function resolveOwnCommentsContext(
  *  budget (the model is asked to stay ~3500 chars, well under, but never trust
  *  that). The cap is the profile-scaled budget, not the fixed constant. */
 function capLedger(ledger: string, cap: number): string {
-  return ledger.length > cap ? `${ledger.slice(0, cap)}…` : ledger;
+  return ledger.length > cap ? `${safeSlice(ledger, cap)}…` : ledger;
 }

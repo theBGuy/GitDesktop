@@ -1,5 +1,6 @@
 import { forgePrExternalReviews } from "@/lib/git/api";
 import type { ExternalReviewItem } from "@/lib/git/types";
+import { safeSlice } from "./truncate";
 
 /** What `buildReviewPrompt` needs about third-party AI reviews on a PR. */
 export interface ExternalContext {
@@ -142,7 +143,7 @@ function condense(body: string, cap: number): string {
     .replace(/<\/?[a-z][^>]*>/gi, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
-  return cleaned.length > cap ? `${cleaned.slice(0, cap)}…` : cleaned;
+  return cleaned.length > cap ? `${safeSlice(cleaned, cap)}…` : cleaned;
 }
 
 /** A short "where" tag for an inline finding. */

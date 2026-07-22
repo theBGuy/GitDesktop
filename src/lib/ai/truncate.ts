@@ -5,6 +5,26 @@ export const DIFF_CHAR_BUDGET = 80_000;
 /** Cap applied to each individual file section once over budget. */
 const PER_FILE_CAP = 6_000;
 
+/**
+ * Slices `s` to at most `max` UTF-16 code units WITHOUT splitting a surrogate
+ * pair at the cut. A plain `s.slice(0, max)` cuts on code-unit boundaries, so a
+ * cap landing between the two halves of an astral char (e.g. an emoji like 💡 in
+ * a bot review) leaves a LONE high surrogate at the end. That lone surrogate
+ * becomes an invalid `\u` escape the moment the prompt is JSON-serialized into
+ * the model request — which every provider rejects (serde_json "unexpected end
+ * of hex escape" for the CLI providers; "Invalid body: failed to parse JSON" for
+ * HTTP APIs), failing the whole review. Backing off one unit when the boundary
+ * char is a high surrogate keeps every emoji whole.
+ */
+export function safeSlice(s: string, max: number): string {
+  if (s.length <= max) return s;
+  const boundary = s.charCodeAt(max - 1);
+  // High surrogate at the last kept index → its low half sits at `max` (dropped),
+  // so drop the high half too rather than emit a lone surrogate.
+  const end = boundary >= 0xd800 && boundary <= 0xdbff ? max - 1 : max;
+  return s.slice(0, end);
+}
+
 const LOW_VALUE_PATH =
   /(^|\/)(pnpm-lock\.yaml|package-lock\.json|yarn\.lock|Cargo\.lock|bun\.lockb?|composer\.lock|Gemfile\.lock|go\.sum)$|\.min\.(js|css)$|\.(map|snap)$/;
 
@@ -67,7 +87,7 @@ export function budgetDiff(
       s.text.length > perFileCap
         ? {
             ...s,
-            text: `${s.text.slice(0, perFileCap)}\n[... rest of ${s.path} truncated]\n`,
+            text: `${safeSlice(s.text, perFileCap)}\n[... rest of ${s.path} truncated]\n`,
           }
         : s,
     );
@@ -186,7 +206,7 @@ export function budgetReviewExtras(input: {
     const result =
       text.length <= cap
         ? { text, truncated: false }
-        : { text: text.slice(0, cap), truncated: true };
+        : { text: safeSlice(text, cap), truncated: true };
     remaining -= result.text.length;
     return { result, dropped: false };
   };
@@ -218,7 +238,7 @@ export function budgetReviewExtras(input: {
     let truncated: boolean;
     if (keptCount === 0) {
       // Not even the newest block fits — include it alone, head-sliced.
-      text = present[present.length - 1].slice(0, cap);
+      text = safeSlice(present[present.length - 1], cap);
       truncated = true;
     } else {
       const selected = present.slice(present.length - keptCount);
