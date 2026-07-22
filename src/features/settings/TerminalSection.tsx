@@ -27,7 +27,9 @@ const DEFAULT_LABEL = isWindows
     : "Default terminal";
 const CUSTOM_PLACEHOLDER = isWindows
   ? "C:\\path\\to\\terminal.exe"
-  : "/Applications/iTerm.app";
+  : isMac
+    ? "/Applications/iTerm.app"
+    : "/usr/bin/alacritty";
 
 export const TerminalSection = withForm({
   ...settingsFormOpts,

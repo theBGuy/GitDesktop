@@ -14,14 +14,16 @@ import {
 } from "@/components/ui/select";
 import { withForm } from "@/lib/form";
 import { detectEditors } from "@/lib/git/api";
-import { isWindows } from "@/lib/hotkeys/binding";
+import { isMac, isWindows } from "@/lib/hotkeys/binding";
 import { settingsFormOpts } from "./settings-form";
 
 const CUSTOM = "__custom__";
 const NONE = "__none__";
 const CUSTOM_PLACEHOLDER = isWindows
   ? "C:\\path\\to\\editor.exe"
-  : "/Applications/Visual Studio Code.app";
+  : isMac
+    ? "/Applications/Visual Studio Code.app"
+    : "/usr/bin/code";
 
 export const EditorSection = withForm({
   ...settingsFormOpts,

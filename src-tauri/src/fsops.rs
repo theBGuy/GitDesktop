@@ -300,15 +300,47 @@ fn launch_terminal_unix(kind: &str, program: &str, path: &str) -> AppResult<()> 
     use std::process::Command;
     #[cfg(target_os = "macos")]
     {
-        // `open -a <app> <dir>` opens the chosen terminal rooted at the folder.
-        // `<app>` is the detected `.app` bundle path when we have one (most
-        // robust), else a well-known app name for the kind, else Terminal.app.
-        let app = mac_terminal_app(kind, program);
-        Command::new("open")
-            .args(["-a", app.as_str(), path])
-            .spawn()
-            .map(|_| ())
-            .map_err(AppError::Io)
+        let bundle = Path::new(program);
+        // A stored bundle path that no longer exists (the app was uninstalled
+        // after being picked) would make `open -a <missing>` a silent no-op that
+        // still returns Ok from spawn(); fall back to Terminal.app instead.
+        if !program.is_empty() && !bundle.exists() {
+            return Command::new("open")
+                .args(["-a", "Terminal", path])
+                .spawn()
+                .map(|_| ())
+                .map_err(AppError::Io);
+        }
+        // `open -a <app> <dir>` only roots the window at the folder for apps that
+        // register as folder handlers (Terminal, iTerm). Pure-GUI emulators
+        // (Alacritty, kitty, WezTerm) ignore the dir arg, so spawn their inner
+        // binary with the tool's own working-directory flag. Warp/Hyper/Ghostty
+        // have no stable such flag → best-effort `open -a` (may open at $HOME).
+        let inner = |bin: &str| bundle.join("Contents").join("MacOS").join(bin);
+        let mut cmd = match kind {
+            "alacritty" if !program.is_empty() => {
+                let mut c = Command::new(inner("alacritty"));
+                c.args(["--working-directory", path]);
+                c
+            }
+            "kitty" if !program.is_empty() => {
+                let mut c = Command::new(inner("kitty"));
+                c.args(["--directory", path]);
+                c
+            }
+            "wezterm" if !program.is_empty() => {
+                let mut c = Command::new(inner("wezterm"));
+                c.args(["start", "--cwd", path]);
+                c
+            }
+            _ => {
+                let app = mac_terminal_app(kind, program);
+                let mut c = Command::new("open");
+                c.args(["-a", app.as_str(), path]);
+                c
+            }
+        };
+        cmd.spawn().map(|_| ()).map_err(AppError::Io)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -485,7 +517,12 @@ fn scan_jetbrains(dirs: &[PathBuf]) -> Vec<DetectedEditor> {
                 continue;
             };
             let lower = stem.to_ascii_lowercase();
-            if !JETBRAINS_PREFIXES.iter().any(|&p| lower.starts_with(p)) {
+            // Match a product name exactly or followed by a space (edition/version
+            // suffix), so a short prefix like "aqua" doesn't catch "Aquamacs".
+            if !JETBRAINS_PREFIXES
+                .iter()
+                .any(|&p| lower == p || lower.strip_prefix(p).is_some_and(|r| r.starts_with(' ')))
+            {
                 continue;
             }
             if found.iter().any(|e| e.name == stem) {
@@ -988,6 +1025,7 @@ mod tests {
         let apps = tmp.path().join("Applications");
         make_bundle(&apps, "IntelliJ IDEA.app");
         make_bundle(&apps, "PyCharm Community Edition.app");
+        make_bundle(&apps, "Aquamacs.app"); // NOT JetBrains "aqua" (no word boundary)
         make_bundle(&apps, "Some Random App.app"); // not JetBrains
         make_bundle(&apps, "Cursor.app"); // not JetBrains
 
@@ -997,6 +1035,8 @@ mod tests {
         assert!(names.contains(&"IntelliJ IDEA"));
         // Edition suffix is preserved (display name = bundle stem).
         assert!(names.contains(&"PyCharm Community Edition"));
+        // "aqua" prefix must not swallow "Aquamacs" (word-boundary match).
+        assert!(!names.contains(&"Aquamacs"));
         assert!(!names.iter().any(|n| n.contains("Random")));
         assert!(!names.contains(&"Cursor"));
     }
