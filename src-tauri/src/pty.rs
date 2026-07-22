@@ -266,6 +266,31 @@ pub async fn detect_interpreters() -> AppResult<Vec<DetectedInterpreter>> {
     .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))
 }
 
+/// Full run-resolution for a SINGLE interpreter — the same resolution an actual
+/// task run uses (macOS/Linux login-shell PATH recovery, Windows live-registry
+/// PATH), unlike the cheap PATH-only `detect_interpreters`. The task editor calls
+/// this lazily for the SELECTED interpreter when the cheap pass missed it, so a
+/// Finder/Dock-launched macOS app (which inherits launchd's minimal PATH) doesn't
+/// warn that an nvm/fnm-managed `node` is absent when it will actually run fine.
+/// Returns the resolved absolute path, or `None` when even the login shell can't
+/// find it. An unknown key resolves to `None`, matching `detect_interpreters`.
+#[tauri::command]
+pub async fn resolve_task_interpreter(key: String) -> AppResult<Option<String>> {
+    // git-bash resolves specially inside `resolve_interpreter_run` (names ignored);
+    // every other key maps through `task_interp`.
+    let names: &[&str] = if key == "git-bash" {
+        &[]
+    } else {
+        match task_interp(&key) {
+            Some((names, _, _)) => names,
+            None => return Ok(None),
+        }
+    };
+    Ok(resolve_interpreter_run(&key, names)
+        .await
+        .map(|p| p.to_string_lossy().into_owned()))
+}
+
 /// The built PTY child plus teardown metadata.
 struct BuiltCommand {
     cmd: CommandBuilder,

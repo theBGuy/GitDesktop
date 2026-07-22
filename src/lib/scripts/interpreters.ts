@@ -27,3 +27,24 @@ export function useDetectedInterpreters() {
     staleTime: 5 * 60 * 1000,
   });
 }
+
+const resolveTaskInterpreter = (key: Interpreter) =>
+  invoke<string | null>("resolve_task_interpreter", { key });
+
+/**
+ * Full run-resolution for the SELECTED interpreter — the same resolution an actual
+ * task run performs (login-shell PATH recovery on macOS/Linux), unlike the cheap
+ * PATH-only {@link useDetectedInterpreters}. Enabled lazily, only when the cheap
+ * pass missed the interpreter, so we never spawn a login shell we don't need: this
+ * is what stops a Finder/Dock-launched macOS app (which inherits launchd's minimal
+ * PATH) from warning that an nvm/fnm-managed `node` is absent when it runs fine.
+ * Resolves to the absolute path, or null when even the login shell can't find it.
+ */
+export function useResolvedInterpreter(key: Interpreter, enabled: boolean) {
+  return useQuery({
+    queryKey: ["resolve-interpreter", key],
+    queryFn: () => resolveTaskInterpreter(key),
+    enabled,
+    staleTime: 5 * 60 * 1000,
+  });
+}

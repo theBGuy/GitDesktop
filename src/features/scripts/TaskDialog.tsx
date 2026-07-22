@@ -23,7 +23,10 @@ import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { clipTitle } from "@/lib/clip-title";
 import { isMac, isWindows } from "@/lib/hotkeys/binding";
-import { useDetectedInterpreters } from "@/lib/scripts/interpreters";
+import {
+  useDetectedInterpreters,
+  useResolvedInterpreter,
+} from "@/lib/scripts/interpreters";
 import {
   type ArgDoc,
   availableInterpreters,
@@ -119,6 +122,21 @@ export function TaskDialog({
   const [describe, setDescribe] = useState("");
   const [confirmBeforeRun, setConfirmBeforeRun] = useState(true);
   const [confirmDelete, setConfirmDelete] = useState(false);
+
+  // The cheap `detected` pass above only checks PATH + known install dirs, so it
+  // misses nvm/fnm-managed binaries when the app was launched from Finder/Dock
+  // (launchd's minimal PATH). For the SELECTED interpreter only — and only while
+  // the editor is open and the cheap pass missed it — confirm the way an actual
+  // run resolves it (login shell), so we neither warn that a runnable interpreter
+  // is absent nor spawn a login shell we don't need (the dialog stays mounted
+  // across close, so the `open` guard keeps a stale selection from probing).
+  const cheapSelectedPath = detected.data?.get(interpreter)?.path ?? null;
+  const needsConfirm = open && detected.isSuccess && cheapSelectedPath === null;
+  const confirmed = useResolvedInterpreter(interpreter, needsConfirm);
+  // Authoritative path for the selected interpreter: cheap hit, else the confirm.
+  const selectedPath = cheapSelectedPath ?? confirmed.data ?? null;
+  const selectedMissing =
+    needsConfirm && confirmed.isSuccess && confirmed.data == null;
 
   // Seed the fields when a task (or "new") opens. Keyed on the dialog opening so
   // reopening the same task re-seeds from the saved value, discarding stray edits.
@@ -255,8 +273,16 @@ export function TaskDialog({
                   (max-w-64) with the clipped-title tooltip. */}
               <SelectContent className="w-80">
                 {options.map((i) => {
-                  const found = detected.data?.get(i.id)?.path ?? null;
-                  const missing = detected.isSuccess && found === null;
+                  // The selected interpreter reflects the login-shell confirm (what
+                  // a run actually resolves); others stay on cheap PATH detection.
+                  const isSelected = i.id === interpreter;
+                  const found = isSelected
+                    ? selectedPath
+                    : (detected.data?.get(i.id)?.path ?? null);
+                  const missing = isSelected
+                    ? selectedMissing
+                    : detected.isSuccess &&
+                      (detected.data?.get(i.id)?.path ?? null) === null;
                   return (
                     <SelectItem key={i.id} value={i.id}>
                       <span className="flex flex-col">
@@ -289,14 +315,13 @@ export function TaskDialog({
           </div>
         </div>
 
-        {detected.isSuccess &&
-          detected.data?.get(interpreter)?.path == null && (
-            <p className="text-xs text-warning">
-              {INTERPRETER_LABELS[interpreter] ?? interpreter} wasn't detected
-              on your PATH — it may still run if your shell resolves it,
-              otherwise you'll need to install it.
-            </p>
-          )}
+        {selectedMissing && (
+          <p className="text-xs text-warning">
+            {INTERPRETER_LABELS[interpreter] ?? interpreter} isn't installed, or
+            GitDesktop can't find it — install it, or make sure it's on your
+            shell's PATH.
+          </p>
+        )}
 
         <div className="space-y-1.5">
           <Label htmlFor="task-description">
