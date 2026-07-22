@@ -624,9 +624,7 @@ const LINUX_TERMINALS: &[(&str, &str, &[&str])] = &[
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
 fn detect_terminals_sync() -> Vec<DetectedTerminal> {
-    probe_terminal_bins(LINUX_TERMINALS, |names| {
-        crate::agent::find_executable(names)
-    })
+    probe_terminal_bins(LINUX_TERMINALS, crate::agent::find_executable)
 }
 
 /// Probes well-known install locations for editors/IDEs, GitHub Desktop
@@ -782,8 +780,7 @@ const LINUX_EDITORS: &[(&str, &[&str])] = &[
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
 fn detect_editors_sync() -> Vec<DetectedEditor> {
-    let mut found =
-        probe_editor_bins(LINUX_EDITORS, |names| crate::agent::find_executable(names));
+    let mut found = probe_editor_bins(LINUX_EDITORS, crate::agent::find_executable);
     found.sort_by(|a, b| a.name.cmp(&b.name));
     found.dedup_by(|a, b| a.name == b.name);
     found
