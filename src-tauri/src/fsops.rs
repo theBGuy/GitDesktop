@@ -233,8 +233,7 @@ pub async fn open_in_terminal(
     }
     #[cfg(not(windows))]
     {
-        let _ = (&kind, &program);
-        launch_terminal_unix(&path)
+        launch_terminal_unix(&kind, &program, &path)
     }
 }
 
@@ -297,18 +296,37 @@ fn launch_terminal_windows(kind: &str, program: &str, path: &str) -> AppResult<(
 }
 
 #[cfg(not(windows))]
-fn launch_terminal_unix(path: &str) -> AppResult<()> {
+fn launch_terminal_unix(kind: &str, program: &str, path: &str) -> AppResult<()> {
     use std::process::Command;
     #[cfg(target_os = "macos")]
     {
+        // `open -a <app> <dir>` opens the chosen terminal rooted at the folder.
+        // `<app>` is the detected `.app` bundle path when we have one (most
+        // robust), else a well-known app name for the kind, else Terminal.app.
+        let app = mac_terminal_app(kind, program);
         Command::new("open")
-            .args(["-a", "Terminal", path])
+            .args(["-a", app.as_str(), path])
             .spawn()
             .map(|_| ())
             .map_err(AppError::Io)
     }
     #[cfg(not(target_os = "macos"))]
     {
+        // Honor the picked emulator (its stored path, or the id which equals the
+        // binary name); fall back to the common emulators when none was chosen
+        // or the pick fails to spawn.
+        let chosen = if !program.is_empty() {
+            Some(program.to_string())
+        } else if !kind.is_empty() && kind != "custom" {
+            Some(kind.to_string())
+        } else {
+            None
+        };
+        if let Some(bin) = chosen {
+            if Command::new(&bin).current_dir(path).spawn().is_ok() {
+                return Ok(());
+            }
+        }
         for term in ["x-terminal-emulator", "gnome-terminal", "konsole", "xterm"] {
             if Command::new(term).current_dir(path).spawn().is_ok() {
                 return Ok(());
@@ -377,9 +395,238 @@ fn detect_terminals_sync() -> Vec<DetectedTerminal> {
     found
 }
 
-#[cfg(not(windows))]
+// ---- Shared detection cores (platform-neutral, dependency-injected so the
+// logic is unit-tested regardless of host OS; the `#[cfg]` wrappers below just
+// supply each platform's search dirs / probe tables) ----
+
+/// A macOS application to probe for: (kind id, display name, `.app` bundle name).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+type MacApp = (&'static str, &'static str, &'static str);
+
+/// Scans `dirs` for the terminal `.app` bundles in `table`, one entry per
+/// distinct id (first directory match wins). Pure filesystem probing — never
+/// PATH — so a Finder-launched app (minimal launchd PATH) detects the same set.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn scan_app_terminals(dirs: &[PathBuf], table: &[MacApp]) -> Vec<DetectedTerminal> {
+    let mut found: Vec<DetectedTerminal> = Vec::new();
+    for &(id, name, bundle) in table {
+        if found.iter().any(|t| t.id == id) {
+            continue;
+        }
+        for dir in dirs {
+            let p = dir.join(bundle);
+            if p.exists() {
+                found.push(DetectedTerminal {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    path: p.to_string_lossy().into_owned(),
+                });
+                break;
+            }
+        }
+    }
+    found
+}
+
+/// Scans `dirs` for the editor `.app` bundles in `table` (display name, bundle
+/// name), one entry per distinct name.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn scan_app_editors(dirs: &[PathBuf], table: &[(&str, &str)]) -> Vec<DetectedEditor> {
+    let mut found: Vec<DetectedEditor> = Vec::new();
+    for &(name, bundle) in table {
+        if found.iter().any(|e| e.name == name) {
+            continue;
+        }
+        for dir in dirs {
+            let p = dir.join(bundle);
+            if p.exists() {
+                found.push(DetectedEditor {
+                    name: name.to_string(),
+                    path: p.to_string_lossy().into_owned(),
+                });
+                break;
+            }
+        }
+    }
+    found
+}
+
+/// Lowercased JetBrains product-name prefixes recognized among `*.app` bundles.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const JETBRAINS_PREFIXES: &[&str] = &[
+    "intellij idea",
+    "pycharm",
+    "webstorm",
+    "goland",
+    "clion",
+    "rider",
+    "rubymine",
+    "phpstorm",
+    "datagrip",
+    "rustrover",
+    "dataspell",
+    "aqua",
+    "android studio",
+];
+
+/// Scans `dirs` for JetBrains IDE `.app` bundles (standalone or Toolbox),
+/// matching by product-name prefix. Display name is the bundle's file stem, so
+/// edition suffixes ("PyCharm Community") are preserved. Deduped by name.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn scan_jetbrains(dirs: &[PathBuf]) -> Vec<DetectedEditor> {
+    let mut found: Vec<DetectedEditor> = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let file_name = entry.file_name().to_string_lossy().into_owned();
+            let Some(stem) = file_name.strip_suffix(".app") else {
+                continue;
+            };
+            let lower = stem.to_ascii_lowercase();
+            if !JETBRAINS_PREFIXES.iter().any(|&p| lower.starts_with(p)) {
+                continue;
+            }
+            if found.iter().any(|e| e.name == stem) {
+                continue;
+            }
+            found.push(DetectedEditor {
+                name: stem.to_string(),
+                path: entry.path().to_string_lossy().into_owned(),
+            });
+        }
+    }
+    found
+}
+
+/// Assembles detected terminals from `(id, name, bin-names)` rows via `resolve`
+/// (a name→path lookup). The injected resolver keeps assembly pure/testable; the
+/// real caller passes the Homebrew-aware `crate::agent::find_executable`.
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
+fn probe_terminal_bins<F>(table: &[(&str, &str, &[&str])], resolve: F) -> Vec<DetectedTerminal>
+where
+    F: Fn(&[&str]) -> Option<PathBuf>,
+{
+    let mut found = Vec::new();
+    for &(id, name, names) in table {
+        if let Some(path) = resolve(names) {
+            found.push(DetectedTerminal {
+                id: id.to_string(),
+                name: name.to_string(),
+                path: path.to_string_lossy().into_owned(),
+            });
+        }
+    }
+    found
+}
+
+/// Assembles detected editors from `(name, bin-names)` rows via `resolve`.
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
+fn probe_editor_bins<F>(table: &[(&str, &[&str])], resolve: F) -> Vec<DetectedEditor>
+where
+    F: Fn(&[&str]) -> Option<PathBuf>,
+{
+    let mut found = Vec::new();
+    for &(name, names) in table {
+        if let Some(path) = resolve(names) {
+            found.push(DetectedEditor {
+                name: name.to_string(),
+                path: path.to_string_lossy().into_owned(),
+            });
+        }
+    }
+    found
+}
+
+/// True when `program` points at a macOS `.app` bundle (a directory launched via
+/// `open -a`, not executed directly).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn is_app_bundle(program: &str) -> bool {
+    program
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
+        .ends_with(".app")
+}
+
+/// The macOS application name to pass to `open -a` for a terminal `kind` when no
+/// explicit bundle path was stored (the stored bundle path wins when present).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn mac_terminal_app(kind: &str, program: &str) -> String {
+    if !program.is_empty() {
+        return program.to_string();
+    }
+    match kind {
+        "iterm" => "iTerm",
+        "warp" => "Warp",
+        "alacritty" => "Alacritty",
+        "kitty" => "kitty",
+        "wezterm" => "WezTerm",
+        "hyper" => "Hyper",
+        "ghostty" => "Ghostty",
+        _ => "Terminal",
+    }
+    .to_string()
+}
+
+#[cfg(target_os = "macos")]
+fn unix_home() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+#[cfg(target_os = "macos")]
+fn mac_app_dirs() -> Vec<PathBuf> {
+    let mut dirs = vec![
+        PathBuf::from("/Applications"),
+        PathBuf::from("/Applications/Utilities"),
+        PathBuf::from("/System/Applications"),
+        PathBuf::from("/System/Applications/Utilities"),
+    ];
+    if let Some(home) = unix_home() {
+        dirs.push(home.join("Applications"));
+    }
+    dirs
+}
+
+#[cfg(target_os = "macos")]
+const MAC_TERMINALS: &[MacApp] = &[
+    ("macos-terminal", "Terminal", "Terminal.app"),
+    ("iterm", "iTerm", "iTerm.app"),
+    ("warp", "Warp", "Warp.app"),
+    ("alacritty", "Alacritty", "Alacritty.app"),
+    ("kitty", "kitty", "kitty.app"),
+    ("wezterm", "WezTerm", "WezTerm.app"),
+    ("hyper", "Hyper", "Hyper.app"),
+    ("ghostty", "Ghostty", "Ghostty.app"),
+];
+
+#[cfg(target_os = "macos")]
 fn detect_terminals_sync() -> Vec<DetectedTerminal> {
-    Vec::new()
+    scan_app_terminals(&mac_app_dirs(), MAC_TERMINALS)
+}
+
+// Linux/other unix: terminal emulators are PATH binaries, resolved through the
+// Homebrew-aware `find_executable` (which searches PATH + the well-known bin
+// dirs); the id equals the binary name so the launcher can honor a pick even
+// without a stored path.
+#[cfg(all(not(windows), not(target_os = "macos")))]
+const LINUX_TERMINALS: &[(&str, &str, &[&str])] = &[
+    ("gnome-terminal", "GNOME Terminal", &["gnome-terminal"]),
+    ("konsole", "Konsole", &["konsole"]),
+    ("alacritty", "Alacritty", &["alacritty"]),
+    ("kitty", "kitty", &["kitty"]),
+    ("wezterm", "WezTerm", &["wezterm"]),
+    ("tilix", "Tilix", &["tilix"]),
+    ("xfce4-terminal", "Xfce Terminal", &["xfce4-terminal"]),
+    ("terminator", "Terminator", &["terminator"]),
+    ("xterm", "XTerm", &["xterm"]),
+];
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn detect_terminals_sync() -> Vec<DetectedTerminal> {
+    probe_terminal_bins(LINUX_TERMINALS, |names| {
+        crate::agent::find_executable(names)
+    })
 }
 
 /// Probes well-known install locations for editors/IDEs, GitHub Desktop
@@ -391,6 +638,7 @@ pub async fn detect_editors() -> AppResult<Vec<DetectedEditor>> {
         .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))
 }
 
+#[cfg(windows)]
 fn detect_editors_sync() -> Vec<DetectedEditor> {
     let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
     let pf = std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".into());
@@ -483,12 +731,81 @@ fn detect_editors_sync() -> Vec<DetectedEditor> {
     found
 }
 
+// macOS editors are `.app` bundles under /Applications (+ ~/Applications for
+// user/Toolbox installs), never `.exe`. Pure-terminal editors (nvim/vim) are
+// deliberately omitted: launched from the GUI file menu they have no controlling
+// tty and would fail — GUI-capable editors only (Emacs.app is fine).
+#[cfg(target_os = "macos")]
+const MAC_EDITORS: &[(&str, &str)] = &[
+    ("Visual Studio Code", "Visual Studio Code.app"),
+    ("VS Code Insiders", "Visual Studio Code - Insiders.app"),
+    ("Cursor", "Cursor.app"),
+    ("Sublime Text", "Sublime Text.app"),
+    ("Zed", "Zed.app"),
+    ("Xcode", "Xcode.app"),
+    ("Nova", "Nova.app"),
+    ("BBEdit", "BBEdit.app"),
+    ("Emacs", "Emacs.app"),
+];
+
+#[cfg(target_os = "macos")]
+fn detect_editors_sync() -> Vec<DetectedEditor> {
+    let dirs = mac_app_dirs();
+    let mut found = scan_app_editors(&dirs, MAC_EDITORS);
+    // JetBrains IDEs: standalone in /Applications, or Toolbox under
+    // ~/Applications (some Toolbox versions nest a "JetBrains Toolbox" folder).
+    let mut jb_dirs = dirs.clone();
+    if let Some(home) = unix_home() {
+        jb_dirs.push(home.join("Applications").join("JetBrains Toolbox"));
+    }
+    found.extend(scan_jetbrains(&jb_dirs));
+    found.sort_by(|a, b| a.name.cmp(&b.name));
+    found.dedup_by(|a, b| a.name == b.name);
+    found
+}
+
+// Linux/other unix: editors are PATH binaries. GUI editors launch fine via
+// `open_with_program`'s direct spawn; terminal-only editors are omitted for the
+// same reason as macOS.
+#[cfg(all(not(windows), not(target_os = "macos")))]
+const LINUX_EDITORS: &[(&str, &[&str])] = &[
+    ("Visual Studio Code", &["code"]),
+    ("VS Code Insiders", &["code-insiders"]),
+    ("Cursor", &["cursor"]),
+    ("Sublime Text", &["subl"]),
+    ("Zed", &["zed", "zeditor"]),
+    ("Gedit", &["gedit"]),
+    ("Kate", &["kate"]),
+    ("GNOME Text Editor", &["gnome-text-editor"]),
+    ("Emacs", &["emacs"]),
+];
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn detect_editors_sync() -> Vec<DetectedEditor> {
+    let mut found =
+        probe_editor_bins(LINUX_EDITORS, |names| crate::agent::find_executable(names));
+    found.sort_by(|a, b| a.name.cmp(&b.name));
+    found.dedup_by(|a, b| a.name == b.name);
+    found
+}
+
 /// Opens a file in a user-configured program (e.g. an editor).
 #[tauri::command]
 pub async fn open_with_program(program: String, path: String) -> AppResult<()> {
     let program = program.trim().to_string();
     if program.is_empty() {
         return Err(AppError::InvalidArgument("no program configured".into()));
+    }
+    // macOS `.app` bundles (e.g. "/Applications/Visual Studio Code.app") are
+    // directories, not executables — launch them with `open -a <bundle> <file>`
+    // rather than trying to spawn the bundle directory as a command.
+    #[cfg(target_os = "macos")]
+    if is_app_bundle(&program) {
+        std::process::Command::new("open")
+            .args(["-a", program.as_str(), path.as_str()])
+            .spawn()
+            .map_err(AppError::Io)?;
+        return Ok(());
     }
     let lower = program.to_lowercase();
     // .cmd/.bat shims (like VS Code's `code.cmd`) can't be spawned directly
@@ -590,5 +907,142 @@ mod tests {
         assert_eq!(added, 0);
         let after = std::fs::read_to_string(&path).unwrap();
         assert_eq!(before, after);
+    }
+
+    // ---- Terminal/editor detection cores (platform-neutral; run on every OS) ----
+
+    fn make_bundle(dir: &Path, name: &str) {
+        std::fs::create_dir_all(dir.join(name)).expect("create bundle dir");
+    }
+
+    #[test]
+    fn is_app_bundle_classifies_paths() {
+        assert!(is_app_bundle("/Applications/Visual Studio Code.app"));
+        assert!(is_app_bundle("/Applications/iTerm.app/")); // trailing slash
+        assert!(is_app_bundle("Cursor.APP")); // case-insensitive
+        assert!(!is_app_bundle("/usr/local/bin/code"));
+        assert!(!is_app_bundle("/Applications/foo.app.bak"));
+        assert!(!is_app_bundle(""));
+    }
+
+    #[test]
+    fn mac_terminal_app_prefers_program_then_kind_then_default() {
+        // A stored bundle path always wins.
+        assert_eq!(
+            mac_terminal_app("iterm", "/Applications/iTerm.app"),
+            "/Applications/iTerm.app"
+        );
+        // No path: map the known kind id to its app name.
+        assert_eq!(mac_terminal_app("warp", ""), "Warp");
+        assert_eq!(mac_terminal_app("ghostty", ""), "Ghostty");
+        // Unknown/empty kind falls back to Terminal.app.
+        assert_eq!(mac_terminal_app("", ""), "Terminal");
+        assert_eq!(mac_terminal_app("custom", ""), "Terminal");
+    }
+
+    #[test]
+    fn scan_app_terminals_detects_and_dedups_by_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let apps = tmp.path().join("Applications");
+        let utils = tmp.path().join("Utilities");
+        make_bundle(&apps, "iTerm.app");
+        make_bundle(&apps, "Warp.app");
+        make_bundle(&utils, "iTerm.app"); // same id in a later dir → ignored
+
+        let table: &[MacApp] = &[
+            ("iterm", "iTerm", "iTerm.app"),
+            ("warp", "Warp", "Warp.app"),
+            ("kitty", "kitty", "kitty.app"), // not installed
+        ];
+        let found = scan_app_terminals(&[apps.clone(), utils], table);
+
+        assert_eq!(found.len(), 2);
+        let iterm = found.iter().find(|t| t.id == "iterm").unwrap();
+        assert_eq!(iterm.name, "iTerm");
+        // First matching directory wins.
+        assert_eq!(iterm.path, apps.join("iTerm.app").to_string_lossy());
+        assert!(found.iter().any(|t| t.id == "warp"));
+        assert!(!found.iter().any(|t| t.id == "kitty"));
+    }
+
+    #[test]
+    fn scan_app_editors_detects_installed_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let apps = tmp.path().join("Applications");
+        make_bundle(&apps, "Visual Studio Code.app");
+        make_bundle(&apps, "Zed.app");
+
+        let table: &[(&str, &str)] = &[
+            ("Visual Studio Code", "Visual Studio Code.app"),
+            ("Zed", "Zed.app"),
+            ("Cursor", "Cursor.app"), // not installed
+        ];
+        let found = scan_app_editors(&[apps], table);
+
+        assert_eq!(found.len(), 2);
+        assert!(found.iter().any(|e| e.name == "Visual Studio Code"));
+        assert!(found.iter().any(|e| e.name == "Zed"));
+        assert!(!found.iter().any(|e| e.name == "Cursor"));
+    }
+
+    #[test]
+    fn scan_jetbrains_matches_product_prefixes_and_keeps_edition() {
+        let tmp = tempfile::tempdir().unwrap();
+        let apps = tmp.path().join("Applications");
+        make_bundle(&apps, "IntelliJ IDEA.app");
+        make_bundle(&apps, "PyCharm Community Edition.app");
+        make_bundle(&apps, "Some Random App.app"); // not JetBrains
+        make_bundle(&apps, "Cursor.app"); // not JetBrains
+
+        let found = scan_jetbrains(&[apps]);
+
+        let names: Vec<&str> = found.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"IntelliJ IDEA"));
+        // Edition suffix is preserved (display name = bundle stem).
+        assert!(names.contains(&"PyCharm Community Edition"));
+        assert!(!names.iter().any(|n| n.contains("Random")));
+        assert!(!names.contains(&"Cursor"));
+    }
+
+    #[test]
+    fn probe_terminal_bins_resolves_via_injected_lookup() {
+        // Fake resolver: only "konsole" and "kitty" are "installed".
+        let resolve = |names: &[&str]| -> Option<PathBuf> {
+            names
+                .iter()
+                .find(|n| matches!(**n, "konsole" | "kitty"))
+                .map(|n| PathBuf::from(format!("/usr/bin/{n}")))
+        };
+        let table: &[(&str, &str, &[&str])] = &[
+            ("gnome-terminal", "GNOME Terminal", &["gnome-terminal"]),
+            ("konsole", "Konsole", &["konsole"]),
+            ("kitty", "kitty", &["kitty"]),
+        ];
+        let found = probe_terminal_bins(table, resolve);
+
+        assert_eq!(found.len(), 2);
+        let konsole = found.iter().find(|t| t.id == "konsole").unwrap();
+        assert_eq!(konsole.path, "/usr/bin/konsole");
+        assert!(!found.iter().any(|t| t.id == "gnome-terminal"));
+    }
+
+    #[test]
+    fn probe_editor_bins_resolves_first_matching_name() {
+        // Zed ships as either `zed` or `zeditor`; only `zeditor` is present here.
+        let resolve = |names: &[&str]| -> Option<PathBuf> {
+            names
+                .iter()
+                .find(|n| **n == "zeditor")
+                .map(|_| PathBuf::from("/usr/local/bin/zeditor"))
+        };
+        let table: &[(&str, &[&str])] = &[
+            ("Zed", &["zed", "zeditor"]),
+            ("Cursor", &["cursor"]), // not installed
+        ];
+        let found = probe_editor_bins(table, resolve);
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "Zed");
+        assert_eq!(found[0].path, "/usr/local/bin/zeditor");
     }
 }

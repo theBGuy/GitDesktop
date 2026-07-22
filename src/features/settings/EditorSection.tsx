@@ -14,10 +14,14 @@ import {
 } from "@/components/ui/select";
 import { withForm } from "@/lib/form";
 import { detectEditors } from "@/lib/git/api";
+import { isWindows } from "@/lib/hotkeys/binding";
 import { settingsFormOpts } from "./settings-form";
 
 const CUSTOM = "__custom__";
 const NONE = "__none__";
+const CUSTOM_PLACEHOLDER = isWindows
+  ? "C:\\path\\to\\editor.exe"
+  : "/Applications/Visual Studio Code.app";
 
 export const EditorSection = withForm({
   ...settingsFormOpts,
@@ -60,7 +64,11 @@ export const EditorSection = withForm({
     async function choose() {
       const picked = await openDialog({
         title: "Choose a program",
-        filters: [{ name: "Programs", extensions: ["exe", "cmd", "bat"] }],
+        // macOS editors are `.app` bundles and Linux ones are bare binaries;
+        // only Windows uses .exe/.cmd/.bat, so don't filter elsewhere.
+        filters: isWindows
+          ? [{ name: "Programs", extensions: ["exe", "cmd", "bat"] }]
+          : undefined,
       });
       if (picked) setEditor(picked, programLabel(picked));
     }
@@ -123,7 +131,7 @@ export const EditorSection = withForm({
               <Input
                 id="external-editor"
                 className="flex-1 font-mono"
-                placeholder="C:\\path\\to\\editor.exe"
+                placeholder={CUSTOM_PLACEHOLDER}
                 autoComplete="off"
                 value={externalEditor}
                 onChange={(e) =>
@@ -141,8 +149,8 @@ export const EditorSection = withForm({
   },
 });
 
-/** "C:\\apps\\Code.exe" -> "Code" for labels. */
+/** "C:\\apps\\Code.exe" or "/Applications/Cursor.app" -> "Code"/"Cursor". */
 function programLabel(program: string): string {
   const base = program.replaceAll("\\", "/").split("/").pop() ?? program;
-  return base.replace(/\.(exe|cmd|bat)$/i, "") || "Custom";
+  return base.replace(/\.(exe|cmd|bat|app)$/i, "") || "Custom";
 }

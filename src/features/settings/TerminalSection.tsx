@@ -13,10 +13,21 @@ import {
 } from "@/components/ui/select";
 import { withForm } from "@/lib/form";
 import { detectTerminals } from "@/lib/git/api";
+import { isMac, isWindows } from "@/lib/hotkeys/binding";
 import { settingsFormOpts } from "./settings-form";
 
 const DEFAULT = "__default__";
 const CUSTOM = "__custom__";
+
+// The default terminal is platform-specific, so its label can't be hardcoded.
+const DEFAULT_LABEL = isWindows
+  ? "Default (Command Prompt)"
+  : isMac
+    ? "Default (Terminal)"
+    : "Default terminal";
+const CUSTOM_PLACEHOLDER = isWindows
+  ? "C:\\path\\to\\terminal.exe"
+  : "/Applications/iTerm.app";
 
 export const TerminalSection = withForm({
   ...settingsFormOpts,
@@ -39,7 +50,7 @@ export const TerminalSection = withForm({
 
     // Base UI's Select.Value renders the raw value unless given value→label items
     const selectItems: Record<string, string> = {
-      [DEFAULT]: "Default (Command Prompt)",
+      [DEFAULT]: DEFAULT_LABEL,
       [CUSTOM]: "Custom…",
       ...Object.fromEntries(terminals.map((t) => [t.id, t.name])),
     };
@@ -52,7 +63,11 @@ export const TerminalSection = withForm({
     async function choose() {
       const picked = await openDialog({
         title: "Choose a terminal program",
-        filters: [{ name: "Programs", extensions: ["exe", "cmd", "bat"] }],
+        // Windows programs are .exe/.cmd/.bat; macOS terminals are `.app`
+        // bundles and Linux ones are bare binaries, so don't filter there.
+        filters: isWindows
+          ? [{ name: "Programs", extensions: ["exe", "cmd", "bat"] }]
+          : undefined,
       });
       if (picked) setTerminal("custom", picked);
     }
@@ -86,7 +101,7 @@ export const TerminalSection = withForm({
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value={DEFAULT}>Default (Command Prompt)</SelectItem>
+              <SelectItem value={DEFAULT}>{DEFAULT_LABEL}</SelectItem>
               {terminals.map((t) => (
                 <SelectItem key={t.id} value={t.id}>
                   {t.name}
@@ -113,7 +128,7 @@ export const TerminalSection = withForm({
               <Input
                 id="custom-terminal"
                 className="flex-1 font-mono"
-                placeholder="C:\\path\\to\\terminal.exe"
+                placeholder={CUSTOM_PLACEHOLDER}
                 autoComplete="off"
                 value={terminalPath}
                 onChange={(e) => setTerminal("custom", e.target.value)}
