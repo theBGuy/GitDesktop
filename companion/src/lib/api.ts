@@ -184,6 +184,146 @@ export const fetchRepos = () => getJson<ReposResponse>("/api/repos");
  *  router before it reaches here, but encode it anyway (defense in depth). */
 const scope = (repoId: string) => `/api/repos/${encodeURIComponent(repoId)}`;
 
+// ── Slice-6 read shapes (Changes · History · Branches · Issues) ───────────────
+// These mirror the desktop's serde camelCase types EXACTLY (verified against the
+// Rust handlers). They're declared HERE — not imported from `@/lib/git/types` — on
+// purpose: the desktop's git types.ts carries far more than the LAN routes return,
+// and a few (IssueComment, ForgeUserRef, IssueLabel) are re-named companion-side to
+// read naturally on this surface. The RepoSummary idiom (own local interfaces).
+
+/** One file's line-count summary in a diff (`StagedDiff.files[]`). */
+export interface DiffStatEntry {
+  path: string;
+  added: number;
+  deleted: number;
+  isBinary: boolean;
+}
+
+/** The working-tree diff (staged ∪ unstaged), with a per-file stat list. `text` is
+ *  the unified diff, `truncated` when it hit the server's 1MB cap; `excludedFiles`
+ *  counts files hidden from the diff by ignore patterns. */
+export interface StagedDiff {
+  text: string;
+  truncated: boolean;
+  files: DiffStatEntry[];
+  excludedFiles: number;
+}
+
+/** A single file's diff (`diff/file`). `text` is the unified diff for one path. */
+export interface FileDiff {
+  filePath: string;
+  isBinary: boolean;
+  isTruncated: boolean;
+  text: string;
+}
+
+/** One local branch, for the Branches list. */
+export interface Branch {
+  name: string;
+  isCurrent: boolean;
+  upstream: string | null;
+  lastCommitDate: string;
+  archived: boolean;
+  upstreamAhead: number;
+  upstreamBehind: number;
+  upstreamGone: boolean;
+  upstreamRemote: string | null;
+}
+
+/** One commit in the history log. `tags` are refs pointing at it; `isMerge` marks a
+ *  multi-parent commit. */
+export interface CommitSummary {
+  hash: string;
+  subject: string;
+  author: string;
+  authorEmail: string;
+  date: string;
+  tags: string[];
+  isMerge: boolean;
+}
+
+/** Full details for one commit (subject + full body). */
+export interface CommitDetails {
+  hash: string;
+  subject: string;
+  body: string;
+  author: string;
+  authorEmail: string;
+  date: string;
+}
+
+/** One issue in the Issues list. `state` is "OPEN"/"CLOSED"; `author` is null for a
+ *  ghost author; `labels` carries just the names for the list chips. */
+export interface IssueInfo {
+  number: number;
+  url: string;
+  title: string;
+  state: string;
+  createdAt: string;
+  updatedAt: string;
+  author: { login: string } | null;
+  labels: { name: string }[];
+}
+
+/** A neutral user reference (assignees) — carries an avatar the provider supplies
+ *  (GitLab) or the frontend derives from the login (GitHub). */
+export interface ForgeUserRef {
+  id: string;
+  label: string;
+  avatarUrl: string;
+  isBot: boolean;
+}
+
+/** One issue conversation comment. The server names this `PrThreadOut` (shared with
+ *  PRs); it's re-named `IssueComment` companion-side to read naturally on the Issues
+ *  surface. `state` is empty for a plain comment. */
+export interface IssueComment {
+  author: string;
+  authorAvatarUrl: string;
+  state: string;
+  body: string;
+  date: string;
+  id: string;
+  url: string;
+  viewerDidAuthor: boolean;
+  isMinimized: boolean;
+  minimizedReason: string;
+  reviewId: string;
+}
+
+/** One issue label (the server's `RepoLabel`). `color` is hex without the leading
+ *  '#', as GitHub returns it; `description` is absent/null when the source has none. */
+export interface IssueLabel {
+  id: string;
+  name: string;
+  color: string;
+  description?: string | null;
+}
+
+/** Full details for one issue's read view: body, assignees, labels, and the
+ *  conversation comments. Mirrors the desktop's `IssueDetails` exactly. */
+export interface IssueDetails {
+  id: string;
+  number: number;
+  title: string;
+  body: string;
+  author: string;
+  authorAvatarUrl: string;
+  state: string;
+  createdAt: string;
+  url: string;
+  assignees: ForgeUserRef[];
+  milestone: { number: number; title: string } | null;
+  issueType: { id: string; name: string; color: string } | null;
+  isPinned: boolean;
+  locked: boolean;
+  activeLockReason: string | null;
+  confidential: boolean;
+  dueDate: string | null;
+  comments: IssueComment[];
+  labels: IssueLabel[];
+}
+
 export const fetchStatus = (repoId: string) =>
   getJson<RepoStatus>(`${scope(repoId)}/status`);
 
@@ -210,6 +350,61 @@ export const fetchPrTimeline = (repoId: string, number: number) =>
  *  neutral shape the desktop's `forgePrReviewThreads` returns. */
 export const fetchPrThreads = (repoId: string, number: number) =>
   getJson<ReviewThreadOut[]>(`${scope(repoId)}/prs/${number}/threads`);
+
+// ── Slice-6 read fetchers (Changes · History · Branches · Issues) ─────────────
+
+/** The repo's local branches (`branches`). */
+export const fetchBranches = (repoId: string) =>
+  getJson<Branch[]>(`${scope(repoId)}/branches`);
+
+/** A page of the commit history (`log?limit&skip`). Named `fetchLog` to mirror the
+ *  route (not `fetchHistory`). */
+export const fetchLog = (repoId: string, limit = 50, skip = 0) =>
+  getJson<CommitSummary[]>(`${scope(repoId)}/log?limit=${limit}&skip=${skip}`);
+
+/** One commit's details (`commits/{hash}`). */
+export const fetchCommit = (repoId: string, hash: string) =>
+  getJson<CommitDetails>(
+    `${scope(repoId)}/commits/${encodeURIComponent(hash)}`,
+  );
+
+/** One commit's unified diff (`commits/{hash}/diff`). No `maxBytes` param — the
+ *  server applies its default 1MB cap and sets `truncated` when it's hit. */
+export const fetchCommitDiff = (repoId: string, hash: string) =>
+  getJson<StagedDiff>(
+    `${scope(repoId)}/commits/${encodeURIComponent(hash)}/diff`,
+  );
+
+/** The working-tree diff (`diff/working`) — staged ∪ unstaged, with per-file stats. */
+export const fetchWorkingDiff = (repoId: string) =>
+  getJson<StagedDiff>(`${scope(repoId)}/diff/working`);
+
+/** One file's diff (`diff/file?path&staged&untracked`). `staged` reads the index
+ *  side; `untracked` diffs an on-disk file with `--no-index`. The path is
+ *  `encodeURIComponent`-encoded into the query string (the router already decoded it
+ *  from the hash). */
+export const fetchFileDiff = (
+  repoId: string,
+  path: string,
+  opts: { staged?: boolean; untracked?: boolean },
+) =>
+  getJson<FileDiff>(
+    `${scope(repoId)}/diff/file?path=${encodeURIComponent(path)}&staged=${
+      opts.staged ?? false
+    }&untracked=${opts.untracked ?? false}`,
+  );
+
+/** The repo's issues (`issues?state&limit`). `state` is "open" or "closed". Errors
+ *  with a typed variant on a Bitbucket repo (issues unsupported) or a fork with
+ *  issues disabled — the screen renders a teaching state for those. */
+export const fetchIssues = (repoId: string, state = "open", limit = 30) =>
+  getJson<IssueInfo[]>(
+    `${scope(repoId)}/issues?state=${encodeURIComponent(state)}&limit=${limit}`,
+  );
+
+/** One issue's full read view (`issues/{number}`). */
+export const fetchIssue = (repoId: string, number: number) =>
+  getJson<IssueDetails>(`${scope(repoId)}/issues/${number}`);
 
 // ── Agent streams (live AI review / agent sessions) ───────────────────────────
 

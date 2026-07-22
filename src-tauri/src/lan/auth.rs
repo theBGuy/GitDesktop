@@ -1006,11 +1006,14 @@ fn bad_request(msg: &str) -> Response {
         .into_response()
 }
 
-/// Map an [`AppError`] to an HTTP response for the route handlers: `NotARepo` and
-/// `InvalidArgument` → 400; a "no such remote" git failure → a dedicated 400
-/// `noRemote` (see [`no_remote_response`]); everything else → 502. The body reuses
-/// the app's own `{ kind, message }` serialization so a phone client sees the same
-/// shape the desktop frontend does.
+/// Map an [`AppError`] to an HTTP response for the route handlers: `NotARepo`,
+/// `InvalidArgument`, and `IssuesDisabled` → 400; a "no such remote" git failure → a
+/// dedicated 400 `noRemote` (see [`no_remote_response`]); everything else → 502.
+/// `IssuesDisabled` is a stable repo state (a GitHub fork with issues turned off), not
+/// a server failure, so it must be a 400 the phone renders as a calm notice — a 502
+/// would read as a transient error and trigger the client's retry. The body reuses the
+/// app's own `{ kind, message }` serialization so a phone client sees the same shape
+/// the desktop frontend does.
 pub fn app_error_response(err: &AppError) -> Response {
     // A remoteless repo surfaces as a `Git` failure whose stderr is `error: No such
     // remote 'origin'` (chain: gh_lens_slug → git_remote_url). Its raw serialization
@@ -1025,7 +1028,9 @@ pub fn app_error_response(err: &AppError) -> Response {
         }
     }
     let status = match err {
-        AppError::NotARepo(_) | AppError::InvalidArgument(_) => StatusCode::BAD_REQUEST,
+        AppError::NotARepo(_) | AppError::InvalidArgument(_) | AppError::IssuesDisabled => {
+            StatusCode::BAD_REQUEST
+        }
         _ => StatusCode::BAD_GATEWAY,
     };
     let body = serde_json::to_value(err).unwrap_or_else(|_| {
@@ -1085,6 +1090,24 @@ mod tests {
             .unwrap();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["kind"], "git");
+    }
+
+    #[tokio::test]
+    async fn issues_disabled_maps_to_400_issues_disabled() {
+        // A GitHub fork with issues turned off surfaces as `AppError::IssuesDisabled`.
+        // It's a stable repo state (the desktop shows a calm notice), NOT a server
+        // failure, so `app_error_response` must map it to a 400 — a 502 would read as
+        // transient and trigger the phone's retry. The body carries the stable
+        // `issuesDisabled` kind + a human-readable message.
+        let err = AppError::IssuesDisabled;
+        let resp = app_error_response(&err);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["kind"], "issuesDisabled");
+        assert!(body["message"].as_str().is_some_and(|m| !m.is_empty()));
     }
 
     #[test]

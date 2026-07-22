@@ -2,11 +2,13 @@
   phone over your local network from **Settings → Phone companion**: pair a device by
   scanning a QR code and typing a PIN. Scanning opens a slim companion web app right
   in your phone's browser — pair with the PIN, then read a repo's **Status, pull
-  requests, and CI** from your phone, read-only. Open a pull request for its overview,
-  activity timeline, and review-thread conversation, and watch live **AI PR reviews and
-  agent sessions** stream in as they happen. Your phone always sees the repository open
-  on this desktop, and you can **share and unshare additional repositories** (from the
-  panel or the command palette) to keep them reachable while you work in another —
+  requests, issues, working-tree changes, commit history, branches, and CI** from your
+  phone, read-only. The Status tab is a hub that drills into those surfaces; open a pull
+  request or issue for its full conversation, browse file diffs and per-commit changes,
+  and watch live **AI PR reviews and agent sessions** stream in as they happen. Your
+  phone always sees the repository open on this desktop, and you can **share and unshare
+  additional repositories** (from the panel or the command palette) to keep them
+  reachable while you work in another —
   switching repos no longer cuts a phone watching a shared repository. The companion honors
   your **Hide AI features** setting — turn it on and the phone's Agents tab and live agent-run
   watching disappear too, matching the desktop. Off by default, with per-device tokens
