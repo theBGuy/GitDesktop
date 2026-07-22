@@ -7,6 +7,8 @@
 // output is always ≤ budget; a README that already fits passes through normalized
 // (CRLF→LF + trim) but otherwise untouched.
 
+import { safeSlice } from "./truncate";
+
 // Heading text (lowercased) that marks a HIGH-signal section — its body is worth
 // keeping in full for as long as the budget allows.
 const HIGH_HEADINGS = [
@@ -264,7 +266,7 @@ function hardCut(text: string, budget: number): string {
   if (text.length <= budget) {
     return text;
   }
-  const window = text.slice(0, budget);
+  const window = safeSlice(text, budget);
   const para = window.lastIndexOf("\n\n");
   if (para >= budget * 0.6) {
     return text.slice(0, para).trim();

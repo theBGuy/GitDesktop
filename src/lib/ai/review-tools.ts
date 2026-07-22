@@ -12,6 +12,7 @@ import {
 } from "@/lib/git/api";
 import type { CommitSummary } from "@/lib/git/types";
 import { errorMessage } from "@/lib/tauri/invoke";
+import { safeSlice } from "./truncate";
 import type { PromptProvider } from "./types";
 
 /** Context a review tool loop needs to read the PR at its head ref. */
@@ -28,7 +29,7 @@ export interface ReviewToolContext {
 
 /** Head-cap a string, appending a marker when it overflows. */
 function capHead(text: string, max: number): string {
-  return text.length > max ? `${text.slice(0, max)}\n[... truncated]` : text;
+  return text.length > max ? `${safeSlice(text, max)}\n[... truncated]` : text;
 }
 
 /** Max review-thread `diffHunk` lines surfaced by `list_pull_request_comments`.

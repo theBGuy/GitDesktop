@@ -1,5 +1,6 @@
 import { loadSettings } from "@/lib/settings/api";
 import { createAiClient } from "./client";
+import { safeSlice } from "./truncate";
 
 /** Per-block head cap before the blocks are joined into the distillation prompt —
  *  keeps one verbose review from crowding out later follow-ups. Head-kept:
@@ -41,7 +42,7 @@ export async function distillOwnComments(input: {
   // dropping the oldest overflow — so the request stays bounded regardless of how
   // many review rounds have accumulated.
   const capped = input.blocks.map((b) =>
-    b.length > DISTILL_BLOCK_CAP ? b.slice(0, DISTILL_BLOCK_CAP) : b,
+    b.length > DISTILL_BLOCK_CAP ? safeSlice(b, DISTILL_BLOCK_CAP) : b,
   );
   let keptCount = 0;
   let running = 0;
@@ -54,7 +55,7 @@ export async function distillOwnComments(input: {
   // If not even the newest block fits, include it alone, head-sliced to the cap.
   const selected =
     keptCount === 0
-      ? [capped[capped.length - 1].slice(0, DISTILL_INPUT_CAP)]
+      ? [safeSlice(capped[capped.length - 1], DISTILL_INPUT_CAP)]
       : capped.slice(capped.length - keptCount);
   const body = selected.join("\n\n");
 

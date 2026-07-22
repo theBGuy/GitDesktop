@@ -1,4 +1,5 @@
 import type { ConflictSides } from "@/lib/git/conflict";
+import { safeSlice } from "./truncate";
 
 const CONFLICT_SYSTEM = `You resolve a single git merge conflict. You are given the conflicted file WITH its conflict markers, plus — when available — the clean BASE (common ancestor), OURS (current branch / HEAD side), and THEIRS (incoming side) versions of the whole file.
 
@@ -25,7 +26,7 @@ function section(title: string, body: string | null): string | null {
   if (body == null) return null;
   const clipped =
     body.length > SECTION_MAX
-      ? `${body.slice(0, SECTION_MAX)}\n[…truncated for length…]`
+      ? `${safeSlice(body, SECTION_MAX)}\n[…truncated for length…]`
       : body;
   return `## ${title}\n\`\`\`\n${clipped}\n\`\`\``;
 }
