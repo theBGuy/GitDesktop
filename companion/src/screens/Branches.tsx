@@ -54,6 +54,13 @@ export function BranchesBody({
   }
 
   const branches = sortBranches(data);
+  // Hoisted membership check (once per render, not per row): the remembered
+  // focus name is active only while its branch is still in the list; otherwise
+  // the tab stop falls back to row 0.
+  const activeName =
+    focusName != null && branches.some((b) => b.name === focusName)
+      ? focusName
+      : null;
   // "Only the current branch exists" is a real (fresh-repo) state — show the single
   // row PLUS a teaching hint rather than an empty list.
   const onlyCurrent = branches.length === 1 && branches[0].isCurrent;
@@ -78,12 +85,7 @@ export function BranchesBody({
                   // keyboard nav) — but NOT a control: there's no branch detail to
                   // open, so it's a plain row, not a button/link.
                   tabIndex={
-                    (
-                      focusName != null &&
-                      branches.some((b) => b.name === focusName)
-                        ? branch.name === focusName
-                        : i === 0
-                    )
+                    (activeName != null ? branch.name === activeName : i === 0)
                       ? 0
                       : -1
                   }
