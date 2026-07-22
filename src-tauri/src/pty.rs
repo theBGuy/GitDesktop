@@ -26,7 +26,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use base64::Engine;
@@ -145,17 +145,125 @@ fn task_interp(interpreter: &str) -> Option<(&'static [&'static str], &'static s
     };
     let file_arg: TaskArgs = |p| vec![p.into()];
     let cmd_c: TaskArgs = |p| vec!["/c".into(), p.into()];
+    // Deno needs the `run` subcommand; `-A` grants full permissions — this is the
+    // user's own registered script, run as they would themselves.
+    let deno: TaskArgs = |p| vec!["run".into(), "-A".into(), p.into()];
     match interpreter {
         // Prefer PowerShell 7 (`pwsh`), fall back to Windows PowerShell 5.1.
         "powershell" => Some((&["pwsh", "powershell"], "ps1", ps)),
         "cmd" => Some((&["cmd"], "cmd", cmd_c)),
+        // Git Bash resolves specially (see `find_git_bash`); `bash` here is only a
+        // detection/fallback name, not what the run uses on Windows.
+        "git-bash" => Some((&["bash"], "sh", file_arg)),
         "bash" => Some((&["bash"], "sh", file_arg)),
         "sh" => Some((&["sh"], "sh", file_arg)),
         "zsh" => Some((&["zsh"], "sh", file_arg)),
         "node" => Some((&["node"], "mjs", file_arg)),
         "python" => Some((&["python3", "python"], "py", file_arg)),
+        "deno" => Some((&["deno"], "ts", deno)),
+        "bun" => Some((&["bun"], "ts", file_arg)),
+        "ruby" => Some((&["ruby"], "rb", file_arg)),
         _ => None,
     }
+}
+
+/// Every interpreter key, for detection. Mirrors the frontend's `INTERPRETERS`.
+const INTERPRETER_KEYS: &[&str] = &[
+    "powershell", "cmd", "git-bash", "bash", "sh", "zsh", "node", "python", "deno", "bun", "ruby",
+];
+
+/// Locates Git Bash's `bash.exe` — a bare `bash` on Windows resolves to WSL, not
+/// Git's, so this is separate. Derives it from the resolved `git` (walking up to
+/// the Git root's `bin\bash.exe` / `usr\bin\bash.exe`), then falls back to
+/// well-known install locations.
+#[cfg(windows)]
+fn find_git_bash() -> Option<PathBuf> {
+    if let Some(git) = crate::agent::find_executable(&["git"]) {
+        let mut anc = git.parent();
+        for _ in 0..4 {
+            let dir = anc?;
+            for rel in ["bin\\bash.exe", "usr\\bin\\bash.exe"] {
+                let b = dir.join(rel);
+                if b.is_file() {
+                    return Some(b);
+                }
+            }
+            anc = dir.parent();
+        }
+    }
+    let mut bases: Vec<String> = Vec::new();
+    if let Ok(p) = std::env::var("ProgramFiles") {
+        bases.push(p);
+    }
+    if let Ok(p) = std::env::var("ProgramFiles(x86)") {
+        bases.push(p);
+    }
+    if let Ok(l) = std::env::var("LOCALAPPDATA") {
+        bases.push(format!("{l}\\Programs"));
+    }
+    for base in bases {
+        for rel in ["Git\\bin\\bash.exe", "Git\\usr\\bin\\bash.exe"] {
+            let b = Path::new(&base).join(rel);
+            if b.is_file() {
+                return Some(b);
+            }
+        }
+    }
+    None
+}
+
+/// On non-Windows, "Git Bash" is just bash — the frontend doesn't offer it there,
+/// but detection stays honest if it's ever queried.
+#[cfg(not(windows))]
+fn find_git_bash() -> Option<PathBuf> {
+    crate::agent::find_executable(&["bash"])
+}
+
+/// Resolves an interpreter's binary for a RUN — full resolution (macOS login-shell
+/// PATH recovery, Windows live-registry PATH), with Git Bash special-cased.
+async fn resolve_interpreter_run(key: &str, names: &[&str]) -> Option<PathBuf> {
+    if key == "git-bash" {
+        return find_git_bash();
+    }
+    resolve_named(names, None).await
+}
+
+/// Resolves an interpreter's binary for DETECTION — cheap (PATH + install dirs, no
+/// login-shell probe, so probing missing ones can't hang). "Found" here means "on
+/// your PATH"; a run additionally recovers login-shell/registry PATH.
+fn detect_interpreter_bin(key: &str) -> Option<PathBuf> {
+    if key == "git-bash" {
+        return find_git_bash();
+    }
+    let names = task_interp(key)?.0;
+    crate::agent::find_executable(names)
+}
+
+/// One interpreter's availability for the task editor's dropdown.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectedInterpreter {
+    /// The interpreter key (matches the frontend `Interpreter` union).
+    id: String,
+    /// Resolved absolute path, or `None` when it isn't on PATH.
+    path: Option<String>,
+}
+
+/// Reports which task interpreters are installed, so the editor can show what a
+/// task can actually run with. Cheap + off-thread.
+#[tauri::command]
+pub async fn detect_interpreters() -> AppResult<Vec<DetectedInterpreter>> {
+    tauri::async_runtime::spawn_blocking(|| {
+        INTERPRETER_KEYS
+            .iter()
+            .map(|&key| DetectedInterpreter {
+                id: key.to_string(),
+                path: detect_interpreter_bin(key).map(|p| p.to_string_lossy().into_owned()),
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))
 }
 
 /// The built PTY child plus teardown metadata.
@@ -193,11 +301,13 @@ async fn build_command(opts: &PtyOpts, id: &str) -> AppResult<BuiltCommand> {
         let (names, ext, build_args) = task_interp(interpreter).ok_or_else(|| {
             AppError::Command(format!("unknown task interpreter '{interpreter}'"))
         })?;
-        let bin = resolve_named(names, None).await.ok_or_else(|| {
-            AppError::Command(format!(
-                "couldn't find the '{interpreter}' interpreter on your PATH — is it installed?"
-            ))
-        })?;
+        let bin = resolve_interpreter_run(interpreter, names)
+            .await
+            .ok_or_else(|| {
+                AppError::Command(format!(
+                    "couldn't find the '{interpreter}' interpreter on your PATH — is it installed?"
+                ))
+            })?;
 
         // File source: run an EXISTING script file in place — never written, never
         // deleted (it's the user's own file, run live so edits take effect). Inline
@@ -660,11 +770,13 @@ async fn task_open_terminal_impl(
     let (names, ext, build_args) = task_interp(&interpreter).ok_or_else(|| {
         AppError::Command(format!("unknown task interpreter '{interpreter}'"))
     })?;
-    let bin = resolve_named(names, None).await.ok_or_else(|| {
-        AppError::Command(format!(
-            "couldn't find the '{interpreter}' interpreter on your PATH — is it installed?"
-        ))
-    })?;
+    let bin = resolve_interpreter_run(&interpreter, names)
+        .await
+        .ok_or_else(|| {
+            AppError::Command(format!(
+                "couldn't find the '{interpreter}' interpreter on your PATH — is it installed?"
+            ))
+        })?;
 
     let script_path = match path.as_deref().filter(|p| !p.is_empty()) {
         Some(file) => {
@@ -714,18 +826,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn task_interp_maps_every_known_key() {
-        for key in ["powershell", "cmd", "bash", "sh", "zsh", "node", "python"] {
-            assert!(task_interp(key).is_some(), "{key} should map to a command");
+    fn task_interp_maps_every_key_the_frontend_offers() {
+        // The frontend's INTERPRETERS list and this backend map must agree, or a
+        // dropdown choice errors at run time.
+        for key in INTERPRETER_KEYS {
+            assert!(
+                task_interp(key).is_some(),
+                "{key} is a detection key but has no task_interp mapping"
+            );
         }
     }
 
     #[test]
     fn task_interp_rejects_unknown_keys() {
         // An unknown/empty interpreter must be rejected, not silently run something.
-        assert!(task_interp("ruby").is_none());
+        assert!(task_interp("perl").is_none());
         assert!(task_interp("").is_none());
         assert!(task_interp("bash;rm").is_none());
+    }
+
+    #[test]
+    fn deno_prepends_run_then_the_file() {
+        // Deno is the one interpreter with a subcommand before the file.
+        let (_names, ext, build) = task_interp("deno").unwrap();
+        assert_eq!(ext, "ts");
+        let args = build("/tmp/gd-task-x.ts");
+        assert_eq!(args.first().unwrap(), "run");
+        assert!(args.last().unwrap().ends_with("gd-task-x.ts"));
     }
 
     #[test]
@@ -741,7 +868,7 @@ mod tests {
 
     #[test]
     fn interpreters_pass_the_file_as_a_discrete_arg() {
-        for key in ["bash", "sh", "zsh", "node", "python"] {
+        for key in ["bash", "git-bash", "sh", "zsh", "node", "python", "bun", "ruby"] {
             let (_names, _ext, build) = task_interp(key).unwrap();
             let path = "/tmp/gd-task-x";
             let args = build(path);

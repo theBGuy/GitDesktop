@@ -312,7 +312,7 @@ fn probe_dir(dir: &Path, names: &[&str], exts: &[String]) -> Option<PathBuf> {
     None
 }
 
-fn find_executable(names: &[&str]) -> Option<PathBuf> {
+pub(crate) fn find_executable(names: &[&str]) -> Option<PathBuf> {
     let exts = exe_exts();
     // PATH first, then the known per-tool install dirs.
     let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")

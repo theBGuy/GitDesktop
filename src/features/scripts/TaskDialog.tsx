@@ -21,8 +21,11 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
+import { clipTitle } from "@/lib/clip-title";
+import { useDetectedInterpreters } from "@/lib/scripts/interpreters";
 import {
   type ArgDoc,
+  availableInterpreters,
   DEFAULT_INTERPRETER,
   type Interpreter,
   INTERPRETERS,
@@ -96,6 +99,10 @@ export function TaskDialog({
   const aiConfigured = useAiConfigured();
   const scriptGen = useGenerateScript(repoPath ?? "");
   const scriptAnalyze = useAnalyzeScript(repoPath ?? "");
+  // Which interpreters are actually installed — shown per-option so you can see
+  // what a task can run with, and warned about when the chosen one is missing.
+  const detected = useDetectedInterpreters();
+  const options = availableInterpreters();
 
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -232,24 +239,57 @@ export function TaskDialog({
               value={interpreter}
               onValueChange={(v) => v && setInterpreter(v as Interpreter)}
             >
-              <SelectTrigger id="task-interpreter" className="w-44">
+              <SelectTrigger id="task-interpreter" className="w-48">
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent>
-                {INTERPRETERS.map((i) => (
-                  <SelectItem key={i.id} value={i.id}>
-                    <span className="flex flex-col">
-                      <span>{i.label}</span>
-                      <span className="text-[11px] text-muted-foreground">
-                        {i.hint}
+              {/* Wider than the trigger: the popup defaults to the trigger's
+                  width (w-(--anchor-width)) and hard-clips overflow, which cut
+                  the detected interpreter paths mid-character. 320px gives the
+                  paths room; anything longer still ellipsizes inside the span
+                  (max-w-64) with the clipped-title tooltip. */}
+              <SelectContent className="w-80">
+                {options.map((i) => {
+                  const found = detected.data?.get(i.id)?.path ?? null;
+                  const missing = detected.isSuccess && found === null;
+                  return (
+                    <SelectItem key={i.id} value={i.id}>
+                      <span className="flex flex-col">
+                        <span className="flex items-center gap-1.5">
+                          {i.label}
+                          {missing && (
+                            <span className="text-[10px] text-muted-foreground">
+                              · not installed
+                            </span>
+                          )}
+                        </span>
+                        {found ? (
+                          <span
+                            className="max-w-64 truncate font-mono text-[10px] text-muted-foreground"
+                            onMouseEnter={clipTitle(found)}
+                          >
+                            {found}
+                          </span>
+                        ) : (
+                          <span className="text-[11px] text-muted-foreground">
+                            {i.hint}
+                          </span>
+                        )}
                       </span>
-                    </span>
-                  </SelectItem>
-                ))}
+                    </SelectItem>
+                  );
+                })}
               </SelectContent>
             </Select>
           </div>
         </div>
+
+        {detected.isSuccess &&
+          detected.data?.get(interpreter)?.path == null && (
+            <p className="text-xs text-warning">
+              {INTERPRETER_LABELS[interpreter] ?? interpreter} isn't on your PATH —
+              the task will fail to run until it's installed.
+            </p>
+          )}
 
         <div className="space-y-1.5">
           <Label htmlFor="task-description">

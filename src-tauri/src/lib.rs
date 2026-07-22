@@ -191,6 +191,7 @@ pub fn run() {
             pty::pty_write,
             pty::pty_resize,
             pty::pty_close,
+            pty::detect_interpreters,
             pty::task_open_terminal,
             git::ops::git_checkout_commit,
             git::ops::git_revert,

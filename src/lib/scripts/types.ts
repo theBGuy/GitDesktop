@@ -8,29 +8,50 @@ import { isWindows } from "@/lib/hotkeys/binding";
 export type Interpreter =
   | "powershell"
   | "cmd"
+  | "git-bash"
   | "bash"
   | "sh"
   | "zsh"
   | "node"
-  | "python";
+  | "python"
+  | "deno"
+  | "bun"
+  | "ruby";
 
 export interface InterpreterInfo {
   id: Interpreter;
   label: string;
   /** A short hint shown in the picker (what the body is written in). */
   hint: string;
+  /** Only offered on this platform; absent = every platform. cmd + Git Bash are
+   *  Windows-only concepts. */
+  os?: "windows";
 }
 
 /** Interpreter options for the task editor, in display order. */
 export const INTERPRETERS: InterpreterInfo[] = [
   { id: "powershell", label: "PowerShell", hint: "pwsh, or Windows PowerShell" },
-  { id: "cmd", label: "Command Prompt", hint: "cmd.exe batch" },
+  { id: "cmd", label: "Command Prompt", hint: "cmd.exe batch", os: "windows" },
+  {
+    id: "git-bash",
+    label: "Git Bash",
+    hint: "the bash that ships with Git",
+    os: "windows",
+  },
   { id: "bash", label: "Bash", hint: "bash script" },
   { id: "sh", label: "sh", hint: "POSIX shell" },
   { id: "zsh", label: "Zsh", hint: "zsh script" },
   { id: "node", label: "Node.js", hint: "JavaScript (ESM)" },
   { id: "python", label: "Python", hint: "python3, or python" },
+  { id: "deno", label: "Deno", hint: "TypeScript / JS (deno run -A)" },
+  { id: "bun", label: "Bun", hint: "TypeScript / JS" },
+  { id: "ruby", label: "Ruby", hint: "ruby script" },
 ];
+
+/** The interpreters offered on the current platform (Windows-only ones hidden
+ *  elsewhere). Detection still reflects whichever the backend probes. */
+export const availableInterpreters = (): InterpreterInfo[] =>
+  INTERPRETERS.filter((i) => i.os !== "windows" || isWindows);
 
 const INTERPRETER_IDS = new Set<string>(INTERPRETERS.map((i) => i.id));
 export function isInterpreter(v: unknown): v is Interpreter {
@@ -59,8 +80,12 @@ export function interpreterForExt(path: string): Interpreter | null {
     case "cjs":
     case "js":
       return "node";
+    case "ts":
+      return "deno";
     case "py":
       return "python";
+    case "rb":
+      return "ruby";
     default:
       return null;
   }

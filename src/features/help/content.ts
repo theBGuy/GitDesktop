@@ -1564,7 +1564,9 @@ tab menu, or from the command palette ({{kbd:command-palette}}).
   machine and are **never read from a repository**, so opening or cloning a repo can never
   add or run one.
 - **Add a task.** Give it a name, an optional one-line description, and pick an
-  interpreter — **PowerShell**, **cmd**, **bash / sh / zsh**, **Node**, or **Python**. Then
+  interpreter — **PowerShell**, **cmd**, **Git Bash**, **bash / sh / zsh**, **Node**,
+  **Deno**, **Bun**, **Python**, or **Ruby** (the editor shows which are installed on your
+  machine, and where). Then
   either **point it at an existing script** in the repo (it runs the live file, so edits
   take effect on the next run) or write one **inline** — a one-liner like
   \`node scripts/release.mjs\` or several lines with pipes and \`&&\`.{{ai}} With an AI
