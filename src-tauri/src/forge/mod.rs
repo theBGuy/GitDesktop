@@ -694,7 +694,7 @@ pub async fn forge_clone(
         Provider::Bitbucket => {
             if bitbucket::seed_git_credential().await {
                 clone_url = bitbucket::strip_https_userinfo(&clone_url);
-                vec!["credential.interactive=false".to_string()]
+                vec![bitbucket::CREDENTIAL_NONINTERACTIVE.to_string()]
             } else {
                 Vec::new()
             }

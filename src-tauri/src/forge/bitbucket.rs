@@ -2878,13 +2878,19 @@ pub(crate) fn strip_https_userinfo(url: &str) -> String {
 ///    (Safe as a `-c` key: Bitbucket remote URLs contain no `=`, so the key can't
 ///    be mis-split.)
 pub(crate) fn bitbucket_credential_entries(url: &str) -> Vec<String> {
-    let mut entries = vec!["credential.interactive=false".to_string()];
+    let mut entries = vec![CREDENTIAL_NONINTERACTIVE.to_string()];
     let stripped = strip_https_userinfo(url);
     if stripped != url {
         entries.push(format!("url.{stripped}.insteadOf={url}"));
     }
     entries
 }
+
+/// The one-shot `-c` entry suppressing interactive credential-helper GUIs (e.g.
+/// GCM's dialog — `GIT_TERMINAL_PROMPT=0` doesn't block those). Shared by
+/// [`bitbucket_credential_entries`] and `forge_clone`'s Bitbucket arm so the
+/// literal lives in one place.
+pub(crate) const CREDENTIAL_NONINTERACTIVE: &str = "credential.interactive=false";
 
 /// Push `head` to origin, then open a pull request from `head` into `base`. Mirrors
 /// `gitlab::create_mr`, with two Bitbucket-specific differences:
