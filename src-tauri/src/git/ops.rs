@@ -610,10 +610,142 @@ pub(crate) async fn git_stash_paths_core(
     if paths.is_empty() {
         return Ok(());
     }
-    let mut args = vec!["stash", "push", "--include-untracked", "--"];
-    args.extend(paths.iter().map(String::as_str));
-    run_git_mutating(state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
-    Ok(())
+
+    // A native `git stash push -- <paths>` always snapshots the WHOLE index into
+    // the stash's index-commit (`^2`), so any OTHER staged file rides along and can
+    // resurrect on `pop --index`. To capture only the selection we hold the per-repo
+    // lock across the whole compound sequence and, while holding the guard, use the
+    // lock-free `run_git` for every step — `repo_lock` is a non-reentrant
+    // `tokio::sync::Mutex`, so `run_git_mutating` (which re-acquires it) would
+    // deadlock (mirrors the `git_splice_*` precedent above).
+    let lock = state.repo_lock(&repo_path).await;
+    let _guard = lock.lock().await;
+
+    // Refuse during a merge (unmerged index): a native `git stash push` can't write
+    // the index while a conflict is in flight, and the selective slow-path can't
+    // snapshot it (`git write-tree` fails on unmerged entries). Guard BOTH paths up
+    // front — a non-empty `ls-files --unmerged` means a conflict is in progress —
+    // so we never make a partial mutation or a stash. (The slow path's `write-tree`
+    // below is the same refuse-guard as defense in depth.)
+    let unmerged = run_git(
+        Some(&repo_path),
+        &["ls-files", "--unmerged"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    if !unmerged.stdout_lossy().trim().is_empty() {
+        return Err(AppError::InvalidArgument(
+            "Can't stash only selected files while a merge is in progress — \
+             resolve the conflict or use Stash all instead."
+                .into(),
+        ));
+    }
+
+    // Enumerate EVERY path staged vs HEAD, NUL-safe. `--no-renames` decomposes a
+    // staged rename into delete+add so the subtraction sees stable per-path names
+    // (an unselected half is preserved via reset/restore like any other staged path).
+    let all_out = run_git(
+        Some(&repo_path),
+        &["diff", "--cached", "--no-renames", "-z", "--name-only"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    let all_staged: Vec<String> = all_out
+        .stdout_lossy()
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    // Enumerate the staged files MATCHED by the selection pathspecs, via git's own
+    // pathspec resolution (`diff --cached -- <paths>`). This makes `unselected_staged`
+    // definitionally consistent with what `stash push -- <paths>` will actually sweep:
+    // a directory arg (e.g. "src") matches its files recursively, globs expand, and
+    // case handling on case-insensitive filesystems resolves exactly as the stash
+    // pathspec does — an exact string match against the enumeration would misclassify
+    // all of these. A pathspec matching nothing staged contributes nothing (exits 0).
+    // Chunk the paths at 100 for the Windows argv limit (same as the reset/restore
+    // loops) and union the results.
+    let mut selected_staged: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for chunk in paths.chunks(100) {
+        let mut args = vec!["diff", "--cached", "--no-renames", "-z", "--name-only", "--"];
+        args.extend(chunk.iter().map(String::as_str));
+        let matched = run_git(Some(&repo_path), &args, DEFAULT_TIMEOUT).await?;
+        selected_staged.extend(
+            matched
+                .stdout_lossy()
+                .split('\0')
+                .filter(|p| !p.is_empty())
+                .map(str::to_string),
+        );
+    }
+
+    let unselected_staged: Vec<&str> = all_staged
+        .iter()
+        .filter(|p| !selected_staged.contains(*p))
+        .map(String::as_str)
+        .collect();
+
+    // Args for the native pathspec stash of the selection.
+    let mut stash_args = vec!["stash", "push", "--include-untracked", "--"];
+    stash_args.extend(paths.iter().map(String::as_str));
+
+    // Fast path: no other staged file to protect, so the native pathspec stash is
+    // already exact.
+    if unselected_staged.is_empty() {
+        run_git(Some(&repo_path), &stash_args, DEFAULT_TIMEOUT).await?;
+        return Ok(());
+    }
+
+    // Snapshot the full index so we can restore the unselected files' exact staged
+    // blobs afterward. `git write-tree` FAILS on an unmerged index (merge in
+    // progress) — treat that as the refuse-guard.
+    let full_tree = match run_git(Some(&repo_path), &["write-tree"], DEFAULT_TIMEOUT).await {
+        Ok(o) => o.stdout_lossy().trim().to_string(),
+        Err(_) => {
+            return Err(AppError::InvalidArgument(
+                "Can't stash only selected files while a merge is in progress — \
+                 resolve the conflict or use Stash all instead."
+                    .into(),
+            ))
+        }
+    };
+
+    // Do the mutation, then ALWAYS restore the unselected index — even if the stash
+    // step errors, else the unselected staged files are left unstaged. `Result::and`
+    // lets the primary (mutate) error win; otherwise the restore error surfaces.
+    let mutate: AppResult<()> = async {
+        // a. Unstage the unselected staged paths (index only; worktree untouched).
+        //    Chunk at 100 for the Windows argv limit (mirror git_discard_paths_core).
+        for chunk in unselected_staged.chunks(100) {
+            let mut args = vec!["reset", "-q", "--"];
+            args.extend(chunk.iter().copied());
+            run_git(Some(&repo_path), &args, DEFAULT_TIMEOUT).await?;
+        }
+        // b. Native pathspec stash of the selection — EXACTLY ONE call (chunking
+        //    would create multiple stash entries). The `^2` index-commit is now
+        //    clean: the index holds only the selected staged changes.
+        run_git(Some(&repo_path), &stash_args, DEFAULT_TIMEOUT).await?;
+        Ok(())
+    }
+    .await;
+
+    // c. Restore the exact staged blobs for the unselected paths (index only, no
+    //    worktree). An unselected staged NEW file became untracked after its
+    //    `reset`; the stash's selection-only pathspec did not sweep it, and this
+    //    re-adds it.
+    let source_arg = format!("--source={full_tree}");
+    let mut restore: AppResult<()> = Ok(());
+    for chunk in unselected_staged.chunks(100) {
+        let mut args = vec!["restore", "--staged", &source_arg, "--"];
+        args.extend(chunk.iter().copied());
+        if let Err(e) = run_git(Some(&repo_path), &args, DEFAULT_TIMEOUT).await {
+            restore = Err(e);
+            break;
+        }
+    }
+
+    mutate.and(restore)
 }
 
 /// Stops tracking the files matching `pathspecs` (each a file, a folder, or a
@@ -3803,5 +3935,271 @@ detached
             !std::path::Path::new(&wt_path).exists(),
             "worktree removed after abort"
         );
+    }
+
+    // --- git_stash_paths_core: selective stash must not leak unselected staged files ---
+
+    /// Strip CRLF → LF so content assertions are line-ending-agnostic: on Windows
+    /// with `core.autocrlf=true` git checks blobs out CRLF, so a worktree read (or a
+    /// `git show :f` of a text blob) comes back with `\r\n`.
+    fn nlf(s: impl AsRef<str>) -> String {
+        s.as_ref().replace("\r\n", "\n")
+    }
+
+    /// Names listed in a stash entry (`^2` index + `^3` untracked), one per line.
+    async fn stash_names(repo: &str) -> Vec<String> {
+        git(
+            repo,
+            &[
+                "stash",
+                "show",
+                "--include-untracked",
+                "--name-only",
+                "stash@{0}",
+            ],
+        )
+        .await
+        .lines()
+        .map(str::to_string)
+        .collect()
+    }
+
+    /// Count of stash entries.
+    async fn stash_count(repo: &str) -> usize {
+        git(repo, &["stash", "list"])
+            .await
+            .lines()
+            .filter(|l| !l.is_empty())
+            .count()
+    }
+
+    #[tokio::test]
+    async fn directory_selection_matches_pathspec_semantics() {
+        let (dir, repo) = setup_repo("stash-dir-selection").await;
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        commit_file(&repo, dir.path(), "src/a.txt", "a0\n", "add src/a").await;
+        commit_file(&repo, dir.path(), "src/b.txt", "b0\n", "add src/b").await;
+        commit_file(&repo, dir.path(), "other.txt", "o0\n", "add other").await;
+        // Stage changes to src/a.txt AND other.txt; leave src/b.txt unstaged.
+        std::fs::write(dir.path().join("src/a.txt"), "a1\n").unwrap();
+        std::fs::write(dir.path().join("other.txt"), "o1\n").unwrap();
+        git(&repo, &["add", "src/a.txt", "other.txt"]).await;
+        std::fs::write(dir.path().join("src/b.txt"), "b1\n").unwrap();
+
+        let state = AppState::default();
+        // A directory pathspec: git stashes src/* recursively, so the classification
+        // must treat both src files as selected (not misclassify them as unselected).
+        git_stash_paths_core(&state, repo.clone(), vec!["src".into()])
+            .await
+            .unwrap();
+
+        // Stash lists exactly the two src files (order-insensitive).
+        let mut names = stash_names(&repo).await;
+        names.sort();
+        assert_eq!(names, vec!["src/a.txt".to_string(), "src/b.txt".to_string()]);
+        // other.txt still staged with its full change.
+        assert_eq!(nlf(git(&repo, &["show", ":other.txt"]).await), "o1\n");
+        // Both src files reverted to HEAD in the worktree.
+        assert_eq!(nlf(std::fs::read_to_string(dir.path().join("src/a.txt")).unwrap()), "a0\n");
+        assert_eq!(nlf(std::fs::read_to_string(dir.path().join("src/b.txt")).unwrap()), "b0\n");
+        // No split-brain: neither src file is left staged (which would mean its
+        // change lives in BOTH the stash and the index).
+        let cached = git(&repo, &["diff", "--cached", "--name-only"]).await;
+        assert!(!cached.contains("src/a.txt"), "src/a.txt not staged: {cached:?}");
+        assert!(!cached.contains("src/b.txt"), "src/b.txt not staged: {cached:?}");
+    }
+
+    #[tokio::test]
+    async fn stashes_only_selected_leaves_unselected_fully_staged() {
+        let (dir, repo) = setup_repo("stash-only-selected").await;
+        commit_file(&repo, dir.path(), "A", "a0\n", "add A").await;
+        commit_file(&repo, dir.path(), "B", "b0\n", "add B").await;
+        // A fully staged, B unstaged working-tree change.
+        std::fs::write(dir.path().join("A"), "a1\n").unwrap();
+        git(&repo, &["add", "A"]).await;
+        std::fs::write(dir.path().join("B"), "b1\n").unwrap();
+
+        let state = AppState::default();
+        git_stash_paths_core(&state, repo.clone(), vec!["B".into()])
+            .await
+            .unwrap();
+
+        // Stash lists ONLY B — A did not ride along.
+        assert_eq!(stash_names(&repo).await, vec!["B".to_string()]);
+        // A is still staged with its full change.
+        assert_eq!(nlf(git(&repo, &["show", ":A"]).await), "a1\n");
+        // B was reverted to HEAD in the worktree.
+        assert_eq!(
+            nlf(std::fs::read_to_string(dir.path().join("B")).unwrap()),
+            "b0\n"
+        );
+    }
+
+    // Helper: overwrite `f` with `staged`, `git add f`, then overwrite the worktree
+    // with `worktree` — the index now holds `staged`, the worktree holds `worktree`
+    // (deterministic hunk-level partial staging).
+    async fn partial_stage(repo: &str, dir: &std::path::Path, f: &str, staged: &str, worktree: &str) {
+        std::fs::write(dir.join(f), staged).unwrap();
+        git(repo, &["add", f]).await;
+        std::fs::write(dir.join(f), worktree).unwrap();
+    }
+
+    #[tokio::test]
+    async fn preserves_unselected_partial_staging() {
+        let (dir, repo) = setup_repo("stash-partial-unselected").await;
+        let full = "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\n";
+        commit_file(&repo, dir.path(), "A2", full, "add A2").await;
+        commit_file(&repo, dir.path(), "B", "b0\n", "add B").await;
+        // A2 partially staged: index gets line2 edited, worktree also edits line9.
+        let staged = "l1\nL2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\n";
+        let worktree = "l1\nL2\nl3\nl4\nl5\nl6\nl7\nl8\nL9\n";
+        partial_stage(&repo, dir.path(), "A2", staged, worktree).await;
+        // B unstaged.
+        std::fs::write(dir.path().join("B"), "b1\n").unwrap();
+
+        let state = AppState::default();
+        git_stash_paths_core(&state, repo.clone(), vec!["B".into()])
+            .await
+            .unwrap();
+
+        // Stash lists only B.
+        assert_eq!(stash_names(&repo).await, vec!["B".to_string()]);
+        // A2's index blob (partial hunk) and worktree are both unchanged.
+        assert_eq!(nlf(git(&repo, &["show", ":A2"]).await), staged);
+        assert_eq!(
+            nlf(std::fs::read_to_string(dir.path().join("A2")).unwrap()),
+            worktree
+        );
+    }
+
+    #[tokio::test]
+    async fn preserves_unselected_staged_new_and_deletion() {
+        let (dir, repo) = setup_repo("stash-new-and-delete").await;
+        commit_file(&repo, dir.path(), "D", "d0\n", "add D").await;
+        commit_file(&repo, dir.path(), "B", "b0\n", "add B").await;
+        // N staged-new.
+        std::fs::write(dir.path().join("N"), "n0\n").unwrap();
+        git(&repo, &["add", "N"]).await;
+        // D staged-delete.
+        git(&repo, &["rm", "D"]).await;
+        // B unstaged.
+        std::fs::write(dir.path().join("B"), "b1\n").unwrap();
+
+        let state = AppState::default();
+        git_stash_paths_core(&state, repo.clone(), vec!["B".into()])
+            .await
+            .unwrap();
+
+        assert_eq!(stash_names(&repo).await, vec!["B".to_string()]);
+        // N still staged as an addition; D still staged as a deletion.
+        let staged_status = git(&repo, &["diff", "--cached", "--name-status"]).await;
+        assert!(staged_status.contains("A\tN"), "N staged-new: {staged_status:?}");
+        assert!(staged_status.contains("D\tD"), "D staged-delete: {staged_status:?}");
+
+        // After popping the (B-only) stash, N/D states are intact.
+        git(&repo, &["stash", "pop"]).await;
+        let after = git(&repo, &["diff", "--cached", "--name-status"]).await;
+        assert!(after.contains("A\tN"), "N intact after pop: {after:?}");
+        assert!(after.contains("D\tD"), "D intact after pop: {after:?}");
+    }
+
+    #[tokio::test]
+    async fn selected_partially_staged_file_fully_stashed_and_reverts() {
+        let (dir, repo) = setup_repo("stash-selected-partial").await;
+        let full = "p1\np2\np3\n";
+        commit_file(&repo, dir.path(), "P", full, "add P").await;
+        commit_file(&repo, dir.path(), "A", "a0\n", "add A").await;
+        // P partially staged (selected): index edits p1, worktree also edits p3.
+        let staged = "P1\np2\np3\n";
+        let worktree = "P1\np2\nP3\n";
+        partial_stage(&repo, dir.path(), "P", staged, worktree).await;
+        // A fully staged (unselected).
+        std::fs::write(dir.path().join("A"), "a1\n").unwrap();
+        git(&repo, &["add", "A"]).await;
+
+        let state = AppState::default();
+        git_stash_paths_core(&state, repo.clone(), vec!["P".into()])
+            .await
+            .unwrap();
+
+        // Stash lists only P; A stayed staged.
+        assert_eq!(stash_names(&repo).await, vec!["P".to_string()]);
+        assert_eq!(nlf(git(&repo, &["show", ":A"]).await), "a1\n");
+        // P reverted to HEAD in the worktree.
+        assert_eq!(nlf(std::fs::read_to_string(dir.path().join("P")).unwrap()), full);
+
+        // Popping restores P's FULL change into the worktree — both the staged and
+        // unstaged hunks (p1→P1 AND p3→P3). A plain `stash pop` (no --index) restores
+        // to the worktree only, so we assert the file content, not the index split.
+        git(&repo, &["stash", "pop"]).await;
+        assert_eq!(
+            nlf(std::fs::read_to_string(dir.path().join("P")).unwrap()),
+            worktree
+        );
+    }
+
+    #[tokio::test]
+    async fn selected_untracked_file_stashed_and_removed() {
+        let (dir, repo) = setup_repo("stash-selected-untracked").await;
+        // Another staged file so we exercise the index-protecting path.
+        commit_file(&repo, dir.path(), "A", "a0\n", "add A").await;
+        std::fs::write(dir.path().join("A"), "a1\n").unwrap();
+        git(&repo, &["add", "A"]).await;
+        // U untracked, selected.
+        std::fs::write(dir.path().join("U"), "u0\n").unwrap();
+
+        let state = AppState::default();
+        git_stash_paths_core(&state, repo.clone(), vec!["U".into()])
+            .await
+            .unwrap();
+
+        // U gone from the worktree, and listed in the stash's untracked parent.
+        assert!(!dir.path().join("U").exists(), "U removed from worktree");
+        assert_eq!(stash_names(&repo).await, vec!["U".to_string()]);
+        // A left staged, untouched.
+        assert_eq!(nlf(git(&repo, &["show", ":A"]).await), "a1\n");
+    }
+
+    #[tokio::test]
+    async fn refuses_selective_stash_during_merge() {
+        let (dir, repo) = setup_repo("stash-merge-refuse").await;
+        commit_file(&repo, dir.path(), "x", "base\n", "add x").await;
+        let base = git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        // Two branches editing x divergently → conflicting merge.
+        git(&repo, &["switch", "-c", "other"]).await;
+        commit_file(&repo, dir.path(), "x", "other\n", "other edit").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "x", "main\n", "main edit").await;
+        // Conflicting merge leaves an unmerged index (merge in progress). Use
+        // run_git_raw — a conflicting `git merge` exits non-zero, which run_git
+        // would surface as an Err.
+        let merge = run_git_raw(Some(&repo), &["merge", "other"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_ne!(merge.code, 0, "merge should conflict");
+
+        let state = AppState::default();
+        let err = git_stash_paths_core(&state, repo.clone(), vec!["x".into()])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::InvalidArgument(_)), "got {err:?}");
+        // No stash created.
+        assert_eq!(stash_count(&repo).await, 0);
+    }
+
+    #[tokio::test]
+    async fn empty_selection_is_noop() {
+        let (dir, repo) = setup_repo("stash-empty").await;
+        std::fs::write(dir.path().join("a.txt"), "changed\n").unwrap();
+
+        let state = AppState::default();
+        git_stash_paths_core(&state, repo.clone(), vec![])
+            .await
+            .unwrap();
+
+        assert_eq!(stash_count(&repo).await, 0);
     }
 }

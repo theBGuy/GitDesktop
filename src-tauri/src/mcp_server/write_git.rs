@@ -129,8 +129,8 @@ struct PullArgs {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct StashPushArgs {
     /// Optional repo-relative paths to stash. When omitted/empty, stashes ALL changes
-    /// (including untracked). NOTE: stashing selected paths snapshots the WHOLE index,
-    /// so already-staged files ride along (a known `git stash push -- <paths>` behavior).
+    /// (including untracked). With `paths`, only those files are stashed; every other
+    /// file's staged and unstaged changes are left exactly as they were.
     #[serde(default)]
     paths: Vec<String>,
 }
@@ -478,9 +478,9 @@ impl GitDesktopMcp {
 
     #[tool(
         description = "Stash changes in the bound repository. With no `paths`, stashes ALL changes \
-                       (including untracked). With `paths`, stashes only those files — but NOTE: \
-                       `git stash push -- <paths>` snapshots the WHOLE index, so already-staged \
-                       files ride along in the stash. Requires --allow-git-write.",
+                       (including untracked). With `paths`, stashes only those files, leaving every \
+                       other file's staged and unstaged changes exactly as they were. \
+                       Requires --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn stash_push(
