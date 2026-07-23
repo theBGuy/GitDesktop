@@ -519,14 +519,13 @@ function RenderedDiff({
   // a previously-expanded file doesn't carry over to the next one.
   const [showFull, setShowFull] = useState(false);
   // A generated/minified file (one enormous line) shows a placeholder rather
-  // than freezing the un-virtualized renderer; "Show diff anyway" opts in. Reset
-  // per file alongside showFull (derive-during-render, no effect — repo idiom).
+  // than freezing the un-virtualized renderer; "Show diff anyway" opts in.
+  // (Reset lives below, keyed on the DEFERRED path — see the comment there.)
   const [showAnyway, setShowAnyway] = useState(false);
   const [prevPath, setPrevPath] = useState(filePath);
   if (prevPath !== filePath) {
     setPrevPath(filePath);
     if (showFull) setShowFull(false);
-    if (showAnyway) setShowAnyway(false);
   }
 
   // Build the diff off deferred values so rapid arrow-key navigation isn't
@@ -534,6 +533,21 @@ function RenderedDiff({
   // screen and builds the new one at low priority, coalescing fast steps.
   const deferredText = useDeferredValue(text);
   const deferredPath = useDeferredValue(filePath);
+
+  // Reset the "Show diff anyway" opt-in when the file actually changes on the
+  // DEFERRED timeline — not the urgent `filePath` — because `blocked` derives
+  // from `deferredText`. Resetting on the urgent change would re-block the
+  // OUTGOING mega file for the transition frame(s) before the new file's
+  // deferred text lands, flashing the placeholder over its opted-in shortened
+  // render (spec-review finding). Keyed on deferredPath, it rides the same
+  // values `blocked` reads, so the outgoing file keeps its render through the
+  // transition — matching how every deferred transition holds the previous
+  // content on screen.
+  const [prevDeferredPath, setPrevDeferredPath] = useState(deferredPath);
+  if (prevDeferredPath !== deferredPath) {
+    setPrevDeferredPath(deferredPath);
+    if (showAnyway) setShowAnyway(false);
+  }
 
   // The longest single line drives both guards below. The renderer mounts the
   // longest line synchronously on the main thread, so a mega-line (minified

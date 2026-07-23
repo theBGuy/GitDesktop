@@ -45,7 +45,12 @@ import { useEffectiveSyntax } from "@/lib/syntax/queries";
 import { toastError } from "@/lib/toast";
 import { useIsDark } from "@/lib/use-is-dark";
 import { useLatestRef } from "@/lib/use-latest-ref";
-import { DIFF_MEGA_LINE_CHARS, longestLineLength } from "./cap-diff";
+import {
+  DIFF_MAX_LINE_CHARS,
+  DIFF_MEGA_LINE_CHARS,
+  longestLineLength,
+  shortenLongLines,
+} from "./cap-diff";
 import { DiffLanguagePicker } from "./DiffLanguagePicker";
 import { DiffPlaceholder } from "./DiffPlaceholder";
 import {
@@ -583,6 +588,22 @@ function StagingDiffView({
   const { syntaxMap, customLanguages } = useEffectiveSyntax(activeRepo);
   const deferredText = useDeferredValue(diffText);
   const deferredPath = useDeferredValue(filePath);
+  // Hard-shorten over-long lines before rendering so a file with lines in the
+  // 4K–20K band (past the mega threshold it falls back to the whole-file
+  // surface entirely) can't freeze the un-virtualized renderer here either.
+  // DISPLAY-ONLY: shortening preserves line COUNT and numbers, so the drag
+  // manager, paint helpers, hunk anchors, and every mutation path (which all
+  // work off the ORIGINAL text/parsed hunks in WorkingTreeDiff) stay correct.
+  // Normal files fast-path to the SAME string reference (shortened=0), keeping
+  // createDiffFile's inputs — and thus behavior — byte-identical.
+  const longestLine = useMemo(
+    () => longestLineLength(deferredText),
+    [deferredText],
+  );
+  const { text: displayText, shortened } = useMemo(
+    () => shortenLongLines(deferredText, DIFF_MAX_LINE_CHARS),
+    [deferredText],
+  );
   // Whole-file highlight context + expand. The staging view renders every hunk
   // regardless, so let content mode engage for big diffs too — bounded by the
   // file highlight budget, not the read-only surface's 200-line render cap.
@@ -594,25 +615,30 @@ function StagingDiffView({
     repoPath,
     deferredPath,
     deferredText,
-    contentRevs,
+    // Shortened hunk text (long lines cut) no longer lines up with the
+    // whole-file reads content mode maps syntax onto, and the reads are wasted
+    // IPC there — skip content mode once any line is over the shorten cap.
+    longestLine > DIFF_MAX_LINE_CHARS ? undefined : contentRevs,
     HIGHLIGHT_MAX_LINES,
   );
   // The whole-file diff (every hunk) — never capped, so all hunks stay stageable.
-  // Null while content reads are pending: don't build an intermediate diff the
-  // arriving reads would immediately restructure.
+  // Built from the shortened DISPLAY text; the original text still backs every
+  // stage/unstage/discard patch (see WorkingTreeDiff). Null while content reads
+  // are pending: don't build an intermediate diff the arriving reads would
+  // immediately restructure.
   const diffFile = useMemo(
     () =>
       contentPending
         ? null
         : createDiffFile(
             deferredPath,
-            deferredText,
+            displayText,
             { syntaxMap, customLanguages },
             content ?? undefined,
           ),
     [
       deferredPath,
-      deferredText,
+      displayText,
       syntaxMap,
       customLanguages,
       content,
@@ -791,6 +817,14 @@ function StagingDiffView({
             />
           </div>
         ) : null,
+      )}
+      {shortened > 0 && (
+        <div className="flex items-center justify-center gap-3 border-t bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+          <span>
+            {shortened.toLocaleString()} long{" "}
+            {shortened === 1 ? "line" : "lines"} shortened for performance
+          </span>
+        </div>
       )}
     </div>
   );
