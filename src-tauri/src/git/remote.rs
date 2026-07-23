@@ -18,7 +18,9 @@ fn validate_remote_arg(value: &str, what: &str) -> AppResult<()> {
 }
 
 /// Prefix one-shot credential `-c` entries before a git subcommand's args.
-fn with_credentials(cred: &[String], sub: &[&str]) -> Vec<String> {
+/// `pub(crate)` so provider-side pushes (e.g. Bitbucket `create_pr`) can build
+/// funnel-identical args.
+pub(crate) fn with_credentials(cred: &[String], sub: &[&str]) -> Vec<String> {
     let mut v = Vec::with_capacity(cred.len() * 2 + sub.len());
     for c in cred {
         v.push("-c".to_string());

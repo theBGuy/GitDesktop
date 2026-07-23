@@ -2895,11 +2895,12 @@ pub(crate) fn bitbucket_credential_entries(url: &str) -> Vec<String> {
 ///    ""). So BEFORE any mutation we read the open PRs from `head` (via the same query
 ///    `prs_for_branch` uses) and, if one already targets `base`, error out naming its
 ///    number — nothing is pushed or changed.
-///  - **Seeded credential, no `-c` helper on the push.** Bitbucket has no CLI
-///    credential helper, so instead of glab's one-shot `-c` helper the token is
-///    seeded into git's credential store on STDIN (`seed_git_credential`) and a
-///    plain `git push origin <head>` then authenticates from it. The keyring token
-///    is NEVER put on argv / env / git config of the push process.
+///  - **Funnel credentials on the push.** The push routes through the same
+///    `credential_config_for_remote` funnel as every other network op: on a
+///    Bitbucket HTTPS origin the token is seeded into git's credential store on
+///    STDIN (`seed_git_credential`) and the one-shot `-c` pair (interactive
+///    suppression + `insteadOf` rewrite for `user@` origins) rides the push. The
+///    keyring token is NEVER put on argv / env / git config of the push process.
 ///
 /// Order: duplicate pre-check (read-only) → validate → push → POST create. If the POST
 /// fails after a successful push, the error discloses the partial state (the branch was
@@ -2935,22 +2936,22 @@ pub async fn create_pr(
         )));
     }
 
-    // A PR needs the branch on the remote first. Bitbucket has no CLI credential
-    // helper, so seed the token into git's credential store (STDIN only — never
-    // argv/env/git config) and the push authenticates from it (cross-platform, not
-    // just via an ambient Windows GCM). Only a SUCCESSFUL seed suppresses
-    // interactive helpers (`credential.interactive=false`, matching `publish_repo` —
-    // GIT_TERMINAL_PROMPT=0 doesn't block a GUI dialog); an unconfigured user keeps
-    // git's ambient, possibly interactive, behavior — fail-open.
-    let push_args: &[&str] = if seed_git_credential().await {
-        &["-c", "credential.interactive=false", "push", "-u", "origin", head]
-    } else {
-        &["push", "-u", "origin", head]
-    };
+    // A PR needs the branch on the remote first. Route the push's credentials
+    // through the SAME funnel every other network op uses
+    // (`credential_config_for_remote`): on a Bitbucket HTTPS origin it seeds the
+    // token into git's credential store (STDIN only) and returns the one-shot `-c`
+    // pair — interactive-helper suppression + the `insteadOf` host rewrite a
+    // `user@`-form origin needs for git's credential lookup to find the sentinel
+    // seed. An unconfigured user (or an SSH origin) gets no entries, keeping git's
+    // ambient, possibly interactive, behavior — fail-open, funnel-identical.
+    let cred = crate::forge::credential_config_for_remote(repo_path, "origin").await?;
+    let push_args =
+        crate::git::remote::with_credentials(&cred, &["push", "-u", "origin", head]);
+    let push_refs: Vec<&str> = push_args.iter().map(String::as_str).collect();
     crate::git::runner::run_git_mutating(
         state,
         repo_path,
-        push_args,
+        &push_refs,
         crate::git::runner::NETWORK_TIMEOUT,
     )
     .await?;
