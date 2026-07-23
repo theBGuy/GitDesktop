@@ -125,18 +125,27 @@ export function TaskDialog({
 
   // The cheap `detected` pass above only checks PATH + known install dirs, so it
   // misses nvm/fnm-managed binaries when the app was launched from Finder/Dock
-  // (launchd's minimal PATH). For the SELECTED interpreter only — and only while
-  // the editor is open and the cheap pass missed it — confirm the way an actual
-  // run resolves it (login shell), so we neither warn that a runnable interpreter
-  // is absent nor spawn a login shell we don't need (the dialog stays mounted
-  // across close, so the `open` guard keeps a stale selection from probing).
+  // (launchd's minimal PATH). For the SELECTED interpreter, confirm the way an
+  // actual run resolves it (login shell) before warning.
   const cheapSelectedPath = detected.data?.get(interpreter)?.path ?? null;
-  const needsConfirm = open && detected.isSuccess && cheapSelectedPath === null;
+  const cheapMissed = detected.isSuccess && cheapSelectedPath === null;
+  // Only confirm off Windows — there `resolve_named` reduces to the same
+  // `find_executable` the cheap pass already ran (no login-shell probe), so a
+  // confirm can never change the outcome. And only while the editor is open (the
+  // dialog stays mounted across close, so `open` keeps a stale selection from
+  // probing) and the cheap pass missed — so we never spawn a shell we don't need.
+  const needsConfirm = open && !isWindows && cheapMissed;
   const confirmed = useResolvedInterpreter(interpreter, needsConfirm);
   // Authoritative path for the selected interpreter: cheap hit, else the confirm.
   const selectedPath = cheapSelectedPath ?? confirmed.data ?? null;
+  const selectedResolving = needsConfirm && confirmed.isLoading;
+  // Missing = the cheap pass found nothing AND either we're not confirming
+  // (Windows / dialog closed → cheap detection is authoritative) or the
+  // login-shell confirm also came back empty. While a confirm is in flight it is
+  // not yet "missing" — that window is `selectedResolving` instead.
   const selectedMissing =
-    needsConfirm && confirmed.isSuccess && confirmed.data == null;
+    cheapMissed &&
+    (needsConfirm ? confirmed.isSuccess && confirmed.data == null : true);
 
   // Seed the fields when a task (or "new") opens. Keyed on the dialog opening so
   // reopening the same task re-seeds from the saved value, discarding stray edits.
@@ -315,6 +324,13 @@ export function TaskDialog({
           </div>
         </div>
 
+        {selectedResolving && (
+          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Spinner className="size-3" />
+            Checking your shell for{" "}
+            {INTERPRETER_LABELS[interpreter] ?? interpreter}…
+          </p>
+        )}
         {selectedMissing && (
           <p className="text-xs text-warning">
             {INTERPRETER_LABELS[interpreter] ?? interpreter} isn't installed, or
