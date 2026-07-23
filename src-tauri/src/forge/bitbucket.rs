@@ -291,10 +291,13 @@ pub async fn clear_account() -> AppResult<()> {
     })
     .await
     .map_err(|e| AppError::Bitbucket(format!("keyring task failed: {e}")))??;
-    // Drop the cached credential and re-arm the seed latch so a future reconnect
-    // re-reads the keyring and re-seeds.
+    // Drop the cached credential, re-arm the seed latch, and evict the seeded
+    // entry from git's OS credential store — git's store is separate from our
+    // keyring, so without the eviction a disconnected account would keep
+    // authenticating git ops until the token expired.
     http::invalidate_credential_cache();
     reset_credential_seed();
+    evict_git_credential().await;
     Ok(())
 }
 
@@ -2813,6 +2816,25 @@ pub async fn seed_git_credential() -> bool {
 /// so a re-authenticated token replaces the persisted git credential.
 pub(crate) fn reset_credential_seed() {
     CREDENTIAL_SEEDED.store(false, Ordering::Release);
+}
+
+/// Evict the seeded entry from git's OS credential store (`git credential reject`,
+/// same protocol/host/username shape the seed wrote, no password — helpers match on
+/// those fields, so ONLY our sentinel-account entry is erased; a user's own ambient
+/// Bitbucket credential under a different username is untouched). Called on
+/// disconnect: git's store is SEPARATE from GitDesktop's keyring, so without this a
+/// disconnected account would keep authenticating git ops until the token expired.
+/// Best-effort — a missing helper or non-zero exit is tolerated.
+async fn evict_git_credential() {
+    let reject_input =
+        format!("protocol=https\nhost={BB_HOST}\nusername=x-bitbucket-api-token-auth\n\n");
+    let _ = crate::git::runner::run_git_input(
+        None,
+        &["credential", "reject"],
+        Some(&reject_input),
+        crate::git::runner::DEFAULT_TIMEOUT,
+    )
+    .await;
 }
 
 /// Strip an embedded `user@` from an `https://` URL's authority so git's credential
