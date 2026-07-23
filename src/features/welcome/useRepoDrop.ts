@@ -22,7 +22,12 @@ export function useRepoDrop() {
       if (!path) return;
       try {
         const info = await validateRepo(path);
-        addRecentRef.current.mutate({ path: info.root, name: info.name });
+        // Await the recents write so the row exists before RepositoryView mounts
+        // and its open-time visibility probe persists onto it (best-effort — a
+        // settings-write failure must never block opening the repo).
+        await addRecentRef.current
+          .mutateAsync({ path: info.root, name: info.name })
+          .catch(() => undefined);
         useUiStore.getState().openRepo(info);
       } catch (e) {
         // Not a git repo (or a file, not a folder) — surface why.

@@ -104,7 +104,12 @@ export function CloneRepoDialog({
             ? await cloneRepo(cloneUrl, dest)
             : await forgeClone(provider, cloneUrl, dest, selected?.name);
         const info = await validateRepo(clonedPath);
-        addRecent.mutate({ path: info.root, name: info.name });
+        // Await the recents write so the row exists before RepositoryView mounts
+        // and its open-time visibility probe persists onto it (best-effort — a
+        // settings-write failure must never block opening the repo).
+        await addRecent
+          .mutateAsync({ path: info.root, name: info.name })
+          .catch(() => undefined);
         onOpenChange(false);
         openRepo(info);
       } catch (e) {

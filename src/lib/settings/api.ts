@@ -445,14 +445,23 @@ export function addRecentRepo(repo: {
     // Windows paths are case-insensitive; compare them that way to dedupe
     const samePath = (a: string, b: string) =>
       a.toLowerCase() === b.toLowerCase();
-    // Reopening a repo must not wipe the alias on its previous entry.
+    // Reopening a repo must PRESERVE everything backfilled onto its previous
+    // entry — not just the alias, but the derived forge metadata (owner/host/
+    // provider/visibility/isFork/forkParent). Rebuilding the moved-to-front
+    // record as `{...repo, ...}` wiped those every open, so a fresh clone lost
+    // its fork badge / provider label until the repo list next rendered and
+    // re-backfilled. Spreading `previous` first, then `repo`, keeps the derived
+    // fields while letting the fresh `path`/`name` win (Windows case refresh); a
+    // brand-new repo (no `previous`) starts with just its own fields, unchanged.
+    // Any staleness self-corrects: the open-time visibility probe re-persists
+    // owner + visibility on every open (see probeAndPersistVisibility).
     const previous = settings.recentRepos.find((r) =>
       samePath(r.path, repo.path),
     );
     const recentRepos = [
       {
+        ...previous,
         ...repo,
-        alias: previous?.alias,
         lastOpenedAt: new Date().toISOString(),
       },
       ...settings.recentRepos.filter((r) => !samePath(r.path, repo.path)),

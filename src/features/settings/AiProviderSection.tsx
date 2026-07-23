@@ -757,7 +757,7 @@ export const AiProviderSection = withForm({
             }}
           >
             <div className="space-y-2">
-              <Label>
+              <Label htmlFor="ai-api-key">
                 API key{" "}
                 <span className="font-normal text-muted-foreground">
                   {keyPreview.data
@@ -773,6 +773,7 @@ export const AiProviderSection = withForm({
                   >
                     {(field) => (
                       <field.TextField
+                        id="ai-api-key"
                         type="password"
                         placeholder={
                           keyPreview.data

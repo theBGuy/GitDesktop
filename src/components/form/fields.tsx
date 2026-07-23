@@ -40,6 +40,7 @@ export function TextField({
   disabled,
   className,
   warning,
+  id,
 }: {
   label?: ReactNode;
   placeholder?: string;
@@ -48,14 +49,18 @@ export function TextField({
   disabled?: boolean;
   className?: string;
   warning?: (value: string) => string | null;
+  /** Override the auto-generated input id — for call sites that render their
+   *  own label outside the field and need to target the input via `htmlFor`. */
+  id?: string;
 }) {
   const field = useFieldContext<string>();
-  const id = useId();
+  const autoId = useId();
+  const inputId = id ?? autoId;
   return (
     <div className="space-y-2">
-      {label && <Label htmlFor={id}>{label}</Label>}
+      {label && <Label htmlFor={inputId}>{label}</Label>}
       <Input
-        id={id}
+        id={inputId}
         type={type}
         placeholder={placeholder}
         autoFocus={autoFocus}

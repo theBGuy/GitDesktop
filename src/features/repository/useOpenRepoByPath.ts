@@ -22,7 +22,12 @@ export function useOpenRepoByPath() {
     async (path: string, source: "recent" | "picker" = "recent") => {
       try {
         const info = await validateRepo(path);
-        addRecent.mutate({ path: info.root, name: info.name });
+        // Await the recents write so the row exists before RepositoryView mounts
+        // and its open-time visibility probe persists onto it (best-effort — a
+        // settings-write failure must never block opening the repo).
+        await addRecent
+          .mutateAsync({ path: info.root, name: info.name })
+          .catch(() => undefined);
         openRepo(info);
         track({ name: "repo_opened", properties: { source } });
       } catch (e) {

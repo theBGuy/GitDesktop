@@ -5,17 +5,24 @@ import {
   gitRepoOwners,
   type RepoVisibility,
 } from "@/lib/git/api";
-import { persistRepoVisibility } from "@/lib/settings/api";
+import { persistRepoOwners, persistRepoVisibility } from "@/lib/settings/api";
 import { settingsKeys } from "@/lib/settings/queries";
 
 /**
  * Probe a repo's hosted visibility + fork provenance and persist the result,
  * returning the fresh probe (or `null` when the repo has no known provider — a
- * removed/absent remote, which persists `{ visibility: null }` so a stale badge
+ * removed/absent remote, which clears every derived field so a stale badge
  * clears). Shared by the ambient open-time probe below and the Danger zone's
  * "Re-check fork status" affordance, so the fork badge + persisted `isFork`
  * converge without an app restart after the user leaves the fork network on
  * GitHub. Persistence is serialized against the other recentRepos writers.
+ *
+ * The owner/host/provider from `gitRepoOwners` are ALSO persisted here (not just
+ * visibility/fork) — that's what makes a fresh clone's provider label, host, and
+ * fork badge land on the FIRST open, without waiting for a RepoList render to
+ * backfill them. The Danger-zone "Re-check fork status" therefore also refreshes
+ * owners now, which is desired: after the user re-points origin then re-checks,
+ * the provider label heals in the same action.
  *
  * A rejection propagates to the caller (the ambient probe swallows it; the
  * Danger-zone re-check surfaces it as a toast). Does NOT invalidate the settings
@@ -26,9 +33,26 @@ export async function probeAndPersistVisibility(
 ): Promise<RepoVisibility | null> {
   const [owner] = await gitRepoOwners([repoPath]);
   if (!owner?.provider) {
-    await persistRepoVisibility([{ path: repoPath, visibility: null }]);
+    // No resolvable provider (remote removed/absent): persistRepoOwners with a
+    // null provider clears owner/host/provider AND, because visibility/isFork/
+    // forkParent can't outlive the provider, those three too — all six derived
+    // fields cleared in one write. (owner is undefined here only when the repo
+    // has no recentRepos row yet; pass a null-filled entry so the clear still
+    // targets this path.)
+    await persistRepoOwners([
+      {
+        path: repoPath,
+        owner: owner?.owner ?? null,
+        host: owner?.host ?? null,
+        provider: null,
+      },
+    ]);
     return null;
   }
+  // Persist owners FIRST (owner has a non-null provider, so persistRepoVisibility
+  // fields it preserves are left intact), then the visibility/fork result —
+  // deterministic order under the serialized write chain.
+  await persistRepoOwners([owner]);
   const probe = await forgeRepoVisibility(repoPath);
   await persistRepoVisibility([
     {
@@ -46,12 +70,17 @@ export async function probeAndPersistVisibility(
  * app-relaunch restore), fire-and-forget refreshes the repo's stored
  * visibility badge:
  *
- * - Resolve the provider via `gitRepoOwners` (a cheap local read). When it's
- *   null (no remote, or the remote was removed), persist `{ visibility: null }`
- *   so a stale badge clears.
+ * - Resolve the provider via `gitRepoOwners` (a cheap local read) and persist
+ *   the owner/host/provider onto the record. When it's null (no remote, or the
+ *   remote was removed), that clears all six derived fields so a stale badge
+ *   clears.
  * - When the provider is known, probe `forgeRepoVisibility` and persist the
- *   result. A rejection (signed out, API failure) persists nothing — the prior
- *   value is left alone.
+ *   result. A rejection (signed out, API failure) persists nothing beyond the
+ *   owners already stored — the prior visibility/fork value is left alone.
+ *
+ * Because the owner/host/provider land here, a freshly cloned repo shows its
+ * provider label and fork badge on the FIRST open, not the second — this probe
+ * runs even when the repo list never rendered to backfill them.
  *
  * Never blocks or delays repo open, and swallows every error silently: this is
  * ambient metadata, not a user-facing action (no toasts).
