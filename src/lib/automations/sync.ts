@@ -122,12 +122,14 @@ export interface CatchUpCandidate {
  * `gh pr create` therefore falls between both triggers and never gets a first
  * pass. This closes that gap by detecting such a PR on the existing poll tick
  * and firing the same `pr-open` event an in-app create would — which then flows
- * through the untouched runner (claim dedup → review → post → record → toast).
+ * through the runner (per-mode pr-open gate → claim dedup → review → post →
+ * record → toast); the runner runs only the mode(s) still missing a review.
  * Do NOT "simplify" this away: without it, externally-opened PRs get zero signal.
  *
  * Scope is deliberately narrow (user-locked): the viewer's OWN, open, recent
- * PRs with no prior review (any mode) and no dismissed head. Drafts are included
- * only when `reviewDrafts` is set (the `reviewDraftPrs` setting); off (the
+ * PRs where AT LEAST ONE mode still needs a review (no prior record and no
+ * matching dismissed head for that mode — see {@link prOpenEligible}). Drafts are
+ * included only when `reviewDrafts` is set (the `reviewDraftPrs` setting); off (the
  * default) they're skipped until marked ready for review. At most ONE PR is
  * caught up per call (the oldest), bounding burst token spend — the next tick
  * takes the next one.
@@ -187,12 +189,16 @@ export function maybeCatchUpMissedOpen(
 }
 
 /**
- * Async eligibility to fire a first `pr-open` review for a remote PR: true only
- * when NO review record exists for it in EITHER mode (a manual OR automated
- * review in general or security counts as "the user knows this PR" and
- * suppresses it), and no dismissed head matches the current head in either mode.
- * Errors swallow to `false` (fail-closed) — a store hiccup must never fire a
- * redundant review.
+ * Async eligibility to fire a `pr-open` review for a remote PR: true when AT LEAST
+ * ONE mode still needs a first review — i.e. it has NO prior review record (neither
+ * a manual nor an automated general/security review) AND no dismissed head matching
+ * the current head. Previously this required BOTH modes to be missing, so a single
+ * stolen or failed mode could never be caught up once the other mode ran; now the
+ * synthesized `pr-open` fires whenever any mode is missing, and the runner's per-mode
+ * `pr-open` gate skips the mode(s) that already ran — so a failed general review is
+ * retried even when the security audit already delivered (and only the missing mode
+ * actually runs). Errors swallow to `false` (fail-closed) — a store hiccup must never
+ * fire a redundant review.
  *
  * Shared by the catch-up poller (via {@link catchUpEligible}) and the in-app
  * Mark-ready trigger (RemotePrView), so both ready paths stay behaviorally
@@ -209,11 +215,16 @@ export async function prOpenEligible(
     const modes = ["general", "security"] as const;
     for (const mode of modes) {
       const prior = await getLatestReview(repoPath, "remote", ref, mode);
-      if (prior) return false;
+      if (prior) continue; // this mode already reviewed — no need on its account
       const dismissed = await getDismissedHead(repoPath, "remote", ref, mode);
-      if (dismissed && sameSha(dismissed, currentHeadSha)) return false;
+      // A dismissed head matching the current head means this mode was deliberately
+      // skipped for this head — it doesn't need a review either.
+      if (dismissed && sameSha(dismissed, currentHeadSha)) continue;
+      // This mode has no prior and no matching dismissal → it needs a first review, so
+      // the PR is eligible. The runner filters out the already-covered modes.
+      return true;
     }
-    return true;
+    return false;
   } catch {
     return false;
   }

@@ -622,11 +622,13 @@ export const openInTerminal = (
   path: string,
   terminal?: string,
   program?: string,
+  command?: string,
 ) =>
   invoke<void>("open_in_terminal", {
     path,
     terminal: terminal || null,
     program: program || null,
+    command: command || null,
   });
 
 /** The repo's web URL on its provider (GitHub or GitLab). */

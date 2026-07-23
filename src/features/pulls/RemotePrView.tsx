@@ -650,8 +650,9 @@ export function RemotePrView({
   // the user readies it here — the catch-up poller only covers PRs within its
   // 14-day window (sync.ts), so a long-lived draft readied in-app would
   // otherwise slip through. Gated by `prOpenEligible` — the SAME eligibility the
-  // external catch-up path enforces (no prior review in either mode, head not
-  // dismissed), so the two ready paths behave identically. This guard, not claim
+  // external catch-up path enforces (some mode still missing its review, head not
+  // dismissed; the runner's per-mode pr-open gate skips the modes that already
+  // ran), so the two ready paths behave identically. This guard, not claim
   // dedup, is what prevents a double review: a manual panel review saves via
   // `saveReview` WITHOUT taking an automation claim, so claim dedup can't see it
   // — only this prior-review check can (round-2 finding, PR #91). Mirrors the

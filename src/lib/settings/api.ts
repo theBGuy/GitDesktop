@@ -222,6 +222,9 @@ export interface AppSettings {
   terminal: string;
   /** Executable path for the chosen terminal (empty for default/built-ins). */
   terminalPath: string;
+  /** Argv command template for the "custom-command" terminal mode. `{path}` is
+   *  replaced with the repository path; runs with no shell. Empty otherwise. */
+  terminalCommand: string;
   /** @deprecated No longer read. The default branch for new repos now lives in
    *  global git config (`init.defaultBranch`), edited in Settings → Git. Kept so
    *  existing settings.json files round-trip without churn. */
@@ -331,6 +334,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   externalEditorName: "",
   terminal: "",
   terminalPath: "",
+  terminalCommand: "",
   defaultBranch: "main",
   hotkeys: {},
   confirmAmendForcePush: true,

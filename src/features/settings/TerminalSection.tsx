@@ -1,3 +1,4 @@
+import { WarningCircleIcon } from "@phosphor-icons/react";
 import { useQuery } from "@tanstack/react-query";
 import { useSelector } from "@tanstack/react-store";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -18,6 +19,7 @@ import { settingsFormOpts } from "./settings-form";
 
 const DEFAULT = "__default__";
 const CUSTOM = "__custom__";
+const CUSTOM_COMMAND = "__custom_command__";
 
 // The default terminal is platform-specific, so its label can't be hardcoded.
 const DEFAULT_LABEL = isWindows
@@ -30,6 +32,12 @@ const CUSTOM_PLACEHOLDER = isWindows
   : isMac
     ? "/Applications/iTerm.app"
     : "/usr/bin/alacritty";
+// A representative shell-free command per platform, showing the {path} token.
+const CUSTOM_COMMAND_PLACEHOLDER = isWindows
+  ? "wt -d {path}"
+  : isMac
+    ? "wezterm start --cwd {path}"
+    : "tmux new-window -c {path}";
 
 export const TerminalSection = withForm({
   ...settingsFormOpts,
@@ -42,21 +50,41 @@ export const TerminalSection = withForm({
 
     const terminal = useSelector(form.store, (s) => s.values.terminal);
     const terminalPath = useSelector(form.store, (s) => s.values.terminalPath);
+    const terminalCommand = useSelector(
+      form.store,
+      (s) => s.values.terminalCommand,
+    );
 
     const terminals = detected.data ?? [];
     const matched = terminals.find((t) => t.id === terminal);
     const isCustom = terminal === "custom";
-    const selectValue =
-      terminal === "" ? DEFAULT : isCustom ? CUSTOM : (matched?.id ?? CUSTOM);
+    const isCustomCommand = terminal === "custom-command";
+    const selectValue = isCustomCommand
+      ? CUSTOM_COMMAND
+      : terminal === ""
+        ? DEFAULT
+        : isCustom
+          ? CUSTOM
+          : (matched?.id ?? CUSTOM);
     const showCustom = selectValue === CUSTOM;
+    const showCustomCommand = selectValue === CUSTOM_COMMAND;
+    // Non-blocking hint: a template without {path} still runs (it starts in the
+    // repo directory), but the user probably meant to reference the repo.
+    const missingPathToken =
+      showCustomCommand &&
+      terminalCommand.trim() !== "" &&
+      !terminalCommand.includes("{path}");
 
     // Base UI's Select.Value renders the raw value unless given value→label items
     const selectItems: Record<string, string> = {
       [DEFAULT]: DEFAULT_LABEL,
       [CUSTOM]: "Custom…",
+      [CUSTOM_COMMAND]: "Custom command…",
       ...Object.fromEntries(terminals.map((t) => [t.id, t.name])),
     };
 
+    // Only ever writes `terminal`/`terminalPath`, leaving `terminalCommand`
+    // untouched — so switching between modes preserves the other mode's value.
     function setTerminal(kind: string, path: string) {
       form.setFieldValue("terminal", kind);
       form.setFieldValue("terminalPath", path);
@@ -92,7 +120,12 @@ export const TerminalSection = withForm({
               if (value === DEFAULT) {
                 setTerminal("", "");
               } else if (value === CUSTOM) {
+                // Flip the mode only; keep terminalPath (and terminalCommand)
+                // so switching back and forth doesn't wipe the other value.
                 if (!isCustom) form.setFieldValue("terminal", "custom");
+              } else if (value === CUSTOM_COMMAND) {
+                if (!isCustomCommand)
+                  form.setFieldValue("terminal", "custom-command");
               } else if (value) {
                 const t = terminals.find((x) => x.id === value);
                 if (t) setTerminal(t.id, t.path);
@@ -110,6 +143,7 @@ export const TerminalSection = withForm({
                 </SelectItem>
               ))}
               <SelectItem value={CUSTOM}>Custom…</SelectItem>
+              <SelectItem value={CUSTOM_COMMAND}>Custom command…</SelectItem>
             </SelectContent>
           </Select>
           {detected.isPending && (
@@ -142,6 +176,36 @@ export const TerminalSection = withForm({
             <p className="text-xs text-muted-foreground">
               Launched in a new window at the repository folder.
             </p>
+          </div>
+        )}
+        {showCustomCommand && (
+          <div className="space-y-2">
+            <Label htmlFor="custom-terminal-command">Command</Label>
+            <Input
+              id="custom-terminal-command"
+              className="font-mono"
+              placeholder={CUSTOM_COMMAND_PLACEHOLDER}
+              autoComplete="off"
+              value={terminalCommand}
+              onChange={(e) =>
+                form.setFieldValue("terminalCommand", e.target.value)
+              }
+            />
+            <p className="text-xs text-muted-foreground">
+              Runs without a shell.{" "}
+              <code className="font-mono">{"{path}"}</code> is replaced with the
+              repository path; when omitted, the command starts in the
+              repository directory. Use it for multiplexers, wrappers, or a
+              terminal that isn't auto-detected.
+            </p>
+            {missingPathToken && (
+              <p className="flex items-center gap-1 text-xs text-warning">
+                <WarningCircleIcon className="size-3.5 shrink-0" />
+                No <code className="font-mono">{"{path}"}</code> in the command
+                — it will start in the repository directory without receiving
+                the path as an argument.
+              </p>
+            )}
           </div>
         )}
       </section>

@@ -138,6 +138,7 @@ export function ChangesEmptyState({
                 repoPath,
                 settings.data?.terminal,
                 settings.data?.terminalPath,
+                settings.data?.terminalCommand,
               ).catch(onError)
             }
           >

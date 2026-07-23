@@ -212,13 +212,15 @@ pub async fn open_with_default(path: String) -> AppResult<()> {
 }
 
 /// Opens a terminal rooted at `path`. `terminal` is a known kind id (e.g.
-/// "powershell", "windows-terminal", "git-bash", "custom") and `program` its
-/// executable; both empty means pick a sensible default.
+/// "powershell", "windows-terminal", "git-bash", "custom", "custom-command")
+/// and `program` its executable; both empty means pick a sensible default.
+/// `command` carries the free-text argv template for the "custom-command" mode.
 #[tauri::command]
 pub async fn open_in_terminal(
     path: String,
     terminal: Option<String>,
     program: Option<String>,
+    command: Option<String>,
 ) -> AppResult<()> {
     if !Path::new(&path).is_dir() {
         return Err(AppError::InvalidArgument(format!(
@@ -227,6 +229,15 @@ pub async fn open_in_terminal(
     }
     let kind = terminal.unwrap_or_default();
     let program = program.unwrap_or_default();
+    // The custom-command mode is a free-text argv template, resolved and spawned
+    // with no shell (see `launch_custom_command`); it is platform-neutral, so it
+    // dispatches ahead of the per-OS kind matchers below.
+    if kind == "custom-command" {
+        let command = command.unwrap_or_default();
+        if !command.trim().is_empty() {
+            return launch_custom_command(&command, &path).await;
+        }
+    }
     #[cfg(windows)]
     {
         launch_terminal_windows(&kind, &program, &path)
@@ -235,6 +246,136 @@ pub async fn open_in_terminal(
     {
         launch_terminal_unix(&kind, &program, &path)
     }
+}
+
+/// Splits a command template into argv tokens: whitespace-separated, with
+/// double-quotes grouping a run that may contain spaces (the quotes are
+/// stripped). There are no escape sequences beyond quote grouping — a literal
+/// double-quote inside a path is not supported, which is fine for the launcher
+/// templates this powers. Returns `InvalidArgument` for an empty/whitespace-only
+/// template.
+fn tokenize_command(command: &str) -> AppResult<Vec<String>> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut has_token = false;
+    for ch in command.chars() {
+        match ch {
+            '"' => {
+                // A quote toggles grouping and always starts a token (so `""`
+                // yields an empty argument rather than nothing).
+                in_quotes = !in_quotes;
+                has_token = true;
+            }
+            c if c.is_whitespace() && !in_quotes => {
+                if has_token {
+                    tokens.push(std::mem::take(&mut current));
+                    has_token = false;
+                }
+            }
+            c => {
+                current.push(c);
+                has_token = true;
+            }
+        }
+    }
+    if has_token {
+        tokens.push(current);
+    }
+    if tokens.is_empty() {
+        return Err(AppError::InvalidArgument(
+            "empty terminal command".to_string(),
+        ));
+    }
+    Ok(tokens)
+}
+
+/// Substitutes every `{path}` occurrence within each token by `path`. This is a
+/// per-token substring replace (not a re-tokenize), so `--cwd={path}` expands in
+/// place and a repository path containing spaces, `;`, or `$()` stays a single
+/// argv token — it is never re-split and never reaches a shell.
+fn substitute_path(tokens: &[String], path: &str) -> Vec<String> {
+    tokens.iter().map(|t| t.replace("{path}", path)).collect()
+}
+
+/// True when `program` ends in a Windows batch extension (`.cmd`/`.bat`,
+/// case-insensitive). Rust ≥1.77 routes batch files through `cmd.exe` (the
+/// BatBadBut CVE mitigation), which silently re-introduces a shell and `%VAR%`
+/// expansion — exactly what the shell-free custom-command mode must avoid — so
+/// a resolved batch file is rejected rather than launched.
+fn is_batch_file(program: &str) -> bool {
+    let lower = program.to_ascii_lowercase();
+    lower.ends_with(".cmd") || lower.ends_with(".bat")
+}
+
+/// True when the first command token looks like an explicit path (contains a
+/// `/` or `\` separator) rather than a bare program name to look up. This
+/// selects `resolve_named`'s two behaviors: a path-like token is exists-checked
+/// as given (`Some(token)`), a bare name goes through the real PATH/PATHEXT
+/// (and, on Unix, login-shell) lookup (`None`).
+fn first_token_is_pathlike(token: &str) -> bool {
+    token.contains(['/', '\\'])
+}
+
+/// Launches a user-supplied command template with no shell: tokenize → expand
+/// `{path}` → resolve the first token to an absolute executable → spawn it with
+/// the remaining tokens, rooted at the repository directory. Every step here is
+/// deliberately shell-free so a path with spaces/metacharacters can never be
+/// re-interpreted.
+async fn launch_custom_command(command: &str, path: &str) -> AppResult<()> {
+    use std::process::Command;
+
+    let tokens = tokenize_command(command)?;
+    let tokens = substitute_path(&tokens, path);
+    // tokenize_command guarantees a non-empty list.
+    let (first, rest) = tokens.split_first().expect("tokens is non-empty");
+
+    // SECURITY: resolve the program to an ABSOLUTE path BEFORE building the
+    // Command with `current_dir(path)`. On Windows, `Command` resolves a bare
+    // program name against the child's current_dir (the repository!) ahead of
+    // PATH — so an unresolved bare token plus `current_dir(repo)` would execute a
+    // repo-committed `wt.exe` sitting next to a trusted-looking template.
+    //
+    // `resolve_named` only PATH-searches when its `bin_path` override is None; a
+    // Some(non-empty) value is taken as an explicit path and merely exists-checked
+    // (it never falls through to the lookup). So route by shape: a path-like first
+    // token (`./bin/wt`, `C:\tools\wt.exe`) is exists-checked as given, and a bare
+    // name (`wt`, `wezterm`, `tmux`) goes through the real PATH/PATHEXT/login-shell
+    // lookup — the whole reason the resolver is mandated here. Either branch yields
+    // an absolute path.
+    let bin_path = first_token_is_pathlike(first).then_some(first.as_str());
+    let resolved = crate::agent::resolve_named(&[first.as_str()], bin_path)
+        .await
+        .ok_or_else(|| {
+            AppError::InvalidArgument(format!(
+                "terminal command not found: {first}"
+            ))
+        })?;
+
+    // SECURITY: reject batch files on the RESOLVED path — a bare `foo` on PATH
+    // can resolve to `foo.cmd`, which Rust would run through cmd.exe.
+    if is_batch_file(&resolved.to_string_lossy()) {
+        return Err(AppError::InvalidArgument(format!(
+            "terminal command points at a batch file ({}); point at the real \
+             executable instead",
+            resolved.display()
+        )));
+    }
+
+    let mut cmd = Command::new(&resolved);
+    cmd.args(rest);
+    // Always root at the repository directory: harmless when `{path}` is used
+    // explicitly, and the only cwd signal for launchers that inherit it
+    // (multiplexers, wrappers) rather than taking a directory flag. No `open -a`
+    // anywhere — it does not propagate cwd into a `.app`; GUI `.app`s belong in
+    // the "Custom…" mode.
+    cmd.current_dir(path);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW — hide any transient console
+    }
+    cmd.spawn().map(|_| ()).map_err(AppError::Io)
 }
 
 #[cfg(windows)]
@@ -334,6 +475,16 @@ fn launch_terminal_unix(kind: &str, program: &str, path: &str) -> AppResult<()> 
             if Command::new(&prog).args(&args).spawn().is_ok() {
                 return Ok(());
             }
+        }
+        // A "Custom…" pick that is a plain executable (not a `.app` bundle) must
+        // be spawned directly rooted at the repo: routing it through `open -a`
+        // treats the raw binary as an application name and mis-launches it.
+        if kind == "custom" && !program.is_empty() && !is_app_bundle(program) {
+            return Command::new(program)
+                .current_dir(path)
+                .spawn()
+                .map(|_| ())
+                .map_err(AppError::Io);
         }
         let app = mac_terminal_app(kind, program);
         Command::new("open")
@@ -1081,5 +1232,92 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, "Zed");
         assert_eq!(found[0].path, "/usr/local/bin/zeditor");
+    }
+
+    // ---- Custom terminal-command parsing (pure; run on every OS) ----
+
+    #[test]
+    fn tokenize_command_plain_split() {
+        assert_eq!(
+            tokenize_command("wt -d {path}").unwrap(),
+            vec!["wt", "-d", "{path}"]
+        );
+        // Runs of whitespace collapse; leading/trailing whitespace is trimmed.
+        assert_eq!(
+            tokenize_command("  tmux   new-window  ").unwrap(),
+            vec!["tmux", "new-window"]
+        );
+    }
+
+    #[test]
+    fn tokenize_command_quotes_group_and_strip() {
+        // A quoted run with spaces stays a single token; the quotes are stripped.
+        assert_eq!(
+            tokenize_command("\"C:\\Program Files\\wt.exe\" -d {path}").unwrap(),
+            vec!["C:\\Program Files\\wt.exe", "-d", "{path}"]
+        );
+        // Quotes can open mid-token and still group.
+        assert_eq!(
+            tokenize_command("start=\"a b\"").unwrap(),
+            vec!["start=a b"]
+        );
+    }
+
+    #[test]
+    fn tokenize_command_empty_is_error() {
+        assert!(tokenize_command("").is_err());
+        assert!(tokenize_command("   ").is_err());
+    }
+
+    #[test]
+    fn substitute_path_replaces_standalone_and_embedded() {
+        let tokens = vec!["wezterm".into(), "--cwd={path}".into(), "{path}".into()];
+        assert_eq!(
+            substitute_path(&tokens, "/home/me/repo"),
+            vec!["wezterm", "--cwd=/home/me/repo", "/home/me/repo"]
+        );
+    }
+
+    #[test]
+    fn substitute_path_keeps_spaced_path_as_one_token() {
+        // A path with spaces is substituted into a single token — it is never
+        // re-split, so the launcher receives exactly one argv entry.
+        let tokens = vec!["kitty".into(), "--directory".into(), "{path}".into()];
+        let out = substitute_path(&tokens, "/Users/me/My Repo");
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[2], "/Users/me/My Repo");
+    }
+
+    #[test]
+    fn substitute_path_without_placeholder_is_unchanged() {
+        let tokens = vec!["tmux".into(), "new-window".into()];
+        assert_eq!(
+            substitute_path(&tokens, "/home/me/repo"),
+            vec!["tmux", "new-window"]
+        );
+    }
+
+    #[test]
+    fn is_batch_file_rejects_cmd_and_bat_case_insensitively() {
+        assert!(is_batch_file("C:\\tools\\wt.cmd"));
+        assert!(is_batch_file("C:\\tools\\wt.CMD"));
+        assert!(is_batch_file("launch.bat"));
+        assert!(is_batch_file("launch.BAT"));
+        // Real executables / extensionless names pass.
+        assert!(!is_batch_file("C:\\tools\\wt.exe"));
+        assert!(!is_batch_file("/usr/bin/wezterm"));
+        assert!(!is_batch_file("wt"));
+    }
+
+    #[test]
+    fn first_token_is_pathlike_distinguishes_bare_names_from_paths() {
+        // Bare names (looked up on PATH) — not path-like.
+        assert!(!first_token_is_pathlike("wt"));
+        assert!(!first_token_is_pathlike("wezterm"));
+        assert!(!first_token_is_pathlike("tmux"));
+        // Explicit paths (exists-checked as given) — path-like.
+        assert!(first_token_is_pathlike("./bin/wt"));
+        assert!(first_token_is_pathlike("C:\\tools\\wt.exe"));
+        assert!(first_token_is_pathlike("/usr/local/bin/wezterm"));
     }
 }

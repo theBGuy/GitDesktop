@@ -38,6 +38,7 @@ export function SessionOpenMenu({
     (settings.data?.externalEditorName ?? "").trim() || "editor";
   const terminal = (settings.data?.terminal ?? "").trim();
   const terminalPath = (settings.data?.terminalPath ?? "").trim();
+  const terminalCommand = (settings.data?.terminalCommand ?? "").trim();
   const onError = (e: unknown) => toastError(e);
   const container = isolation === "container";
 
@@ -71,6 +72,7 @@ export function SessionOpenMenu({
                 worktreePath,
                 terminal || undefined,
                 terminalPath || undefined,
+                terminalCommand || undefined,
               ).catch(onError)
             }
           >

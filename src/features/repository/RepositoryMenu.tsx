@@ -194,6 +194,7 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
       repoPath,
       settings.data?.terminal,
       settings.data?.terminalPath,
+      settings.data?.terminalCommand,
     ).catch(onError),
   );
   useHotkeyAction("show-in-explorer", () =>
@@ -320,6 +321,7 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
               repoPath,
               settings.data?.terminal,
               settings.data?.terminalPath,
+              settings.data?.terminalCommand,
             ).catch(onError)
           }
         >

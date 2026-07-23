@@ -186,6 +186,7 @@ function ReconnectFlow({
       repoPath,
       settings.data?.terminal,
       settings.data?.terminalPath,
+      settings.data?.terminalCommand,
     ).catch(toastError);
   }
 

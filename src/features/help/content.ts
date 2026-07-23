@@ -1698,8 +1698,9 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   identity override, and line endings (\`core.autocrlf\`).
 - **Syntax** — map file extensions to languages or add custom grammars, personally or
   shared with the repo via \`.gitdesktop/syntax.json\`.
-- **External editor / Terminal** — auto-detected, or point at any executable. These power
-  the "Open in…" actions throughout the app.
+- **External editor / Terminal** — auto-detected, point at any executable, or set a full
+  custom terminal command with a \`{path}\` placeholder (for multiplexers, wrappers, or a
+  terminal the detection doesn't know). These power the "Open in…" actions throughout the app.
 - **About** — app, OS, and component versions, a **health check** for your installed tools
   (Git, the GitHub / GitLab CLIs{{ai}}, and the Claude Code / Codex / Copilot / opencode
   agents{{/ai}}), and the current window position.

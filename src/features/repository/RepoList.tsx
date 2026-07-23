@@ -409,6 +409,7 @@ export function RepoList({
                 editorName={editorName}
                 terminal={settings.data?.terminal}
                 terminalPath={settings.data?.terminalPath}
+                terminalCommand={settings.data?.terminalCommand}
                 onAlias={onAliasRepo}
                 onRemove={onRemoveRepo}
               />
@@ -603,6 +604,7 @@ function RepoMenuItems({
   editorName,
   terminal,
   terminalPath,
+  terminalCommand,
   onAlias,
   onRemove,
 }: {
@@ -614,6 +616,7 @@ function RepoMenuItems({
   editorName: string;
   terminal?: string;
   terminalPath?: string;
+  terminalCommand?: string;
   onAlias: (repo: RecentRepo) => void;
   onRemove: (repo: RecentRepo) => void;
 }) {
@@ -649,7 +652,12 @@ function RepoMenuItems({
       )}
       <ContextMenuItem
         onClick={() =>
-          openInTerminal(repo.path, terminal, terminalPath).catch(toastError)
+          openInTerminal(
+            repo.path,
+            terminal,
+            terminalPath,
+            terminalCommand,
+          ).catch(toastError)
         }
       >
         Open in terminal

@@ -537,8 +537,9 @@ enable it**, and each task can **confirm before it runs**.
 reviewed PR) that runs AI review or security audit automatically, with per-action
 branch conditions, Save/Discard drafts, global defaults, and per-repo overrides.
 
-**Integrations** — open in any editor or terminal (auto-detected, or point at any
-executable), and tunable OS notifications for PR activity, checks, and CI runs.
+**Integrations** — open in any editor or terminal (auto-detected, point at any
+executable, or set a full custom command with a `{path}` placeholder), and tunable
+OS notifications for PR activity, checks, and CI runs.
 
 **Activity & notifications** — a persistent bell in the header that collects terminal
 events (a finished review, checks passing/failing, a PR approved/commented/merged, a

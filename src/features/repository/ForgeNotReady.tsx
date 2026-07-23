@@ -135,6 +135,7 @@ export function ForgeNotReady({
                   repoPath,
                   settings.data?.terminal,
                   settings.data?.terminalPath,
+                  settings.data?.terminalCommand,
                 ).catch(toastError)
               }
             >
@@ -271,6 +272,7 @@ export function ForgeNotReady({
                   repoPath,
                   settings.data?.terminal,
                   settings.data?.terminalPath,
+                  settings.data?.terminalCommand,
                 ).catch(toastError)
               }
             >

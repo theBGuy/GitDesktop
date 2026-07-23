@@ -47,6 +47,23 @@ use crate::error::{AppError, AppResult};
 /// run and longer than any head stays "current", so a sweep never races a live claim.
 const SWEEP_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
+/// A claim file this old with no accompanying release is treated as abandoned and
+/// reclaimed by the next claimant (the sweep only fires at 30 days). This closes the
+/// starvation bug where an instance that dies WITHOUT running its release arm (crash,
+/// kill, a version-skewed old build) leaves a claim that suppresses this exact
+/// `(repo, target, sha, action)` review across ALL instances until the 30-day sweep.
+///
+/// 30 minutes is safe because a DELIVERED review no longer relies on its claim for
+/// dedup: at delivery the runner writes a pr-reviews history record, and that record —
+/// not the claim — gates pr-open (per-mode) and pr-sync (same-sha skip). Reclaiming an
+/// old delivered claim therefore cannot cause a re-review. The residual risk is a
+/// legitimately still-RUNNING review that outlasts 30 minutes being double-claimed by a
+/// concurrently polling second instance — accepted, bounded to a single duplicate
+/// review, and strictly better than a 30-day starvation. A run whose delivery-record
+/// write failed (best-effort in the runner) is the same bounded case: one duplicate
+/// after 30 minutes, not a month of silence.
+const STALE_CLAIM_AGE: Duration = Duration::from_secs(30 * 60);
+
 /// The app-data subdir holding claim files.
 const CLAIMS_DIR: &str = "automation-claims";
 
@@ -120,20 +137,17 @@ fn sweep_older_than(dir: &Path, cutoff: SystemTime) {
     }
 }
 
-/// Atomically claim `key` inside `dir`. Returns `Ok(true)` when THIS caller won the
-/// claim (the file did not exist and we created it), `Ok(false)` when another
-/// instance already owns it. `create_new` is the atomic exclusive-create: exactly one
-/// of two racing callers gets `Ok(File)`, the other gets `AlreadyExists`. The plain
-/// composite key is written as the file's content for debuggability; the mtime
-/// supplies the claim timestamp. This helper takes a `&Path` so it's unit-testable
-/// without an `AppHandle`.
-fn claim_in_dir(dir: &Path, key: &str) -> std::io::Result<bool> {
+/// Atomically create the claim file for `key` at `path`. `Ok(true)` = created by us,
+/// `Ok(false)` = it already existed. `create_new` is the atomic exclusive-create:
+/// exactly one of two racing callers gets `Ok(File)`, the other gets `AlreadyExists`.
+/// The plain composite key is written as the file's content for debuggability; the
+/// mtime supplies the claim timestamp.
+fn create_new_claim(path: &Path, key: &str) -> std::io::Result<bool> {
     use std::io::Write as _;
-    let path = dir.join(claim_filename(key));
     match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&path)
+        .open(path)
     {
         Ok(mut file) => {
             // Best-effort content write; even if it fails the claim is already ours
@@ -144,6 +158,43 @@ fn claim_in_dir(dir: &Path, key: &str) -> std::io::Result<bool> {
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
         Err(e) => Err(e),
     }
+}
+
+/// Claim `key` inside `dir`. Returns `Ok(true)` when THIS caller won the claim (the
+/// file did not exist and we created it, OR we reclaimed a stale one), `Ok(false)` when
+/// another instance already owns a FRESH claim. This helper takes a `&Path` so it's
+/// unit-testable without an `AppHandle`.
+///
+/// Stale-claim reclaim: if the exclusive-create loses to an existing file, we stat that
+/// file — if its mtime is older than [`STALE_CLAIM_AGE`], the owning instance is assumed
+/// dead (it never ran its release arm), so we best-effort delete the file and retry the
+/// exclusive-create EXACTLY ONCE. A second `AlreadyExists` means a concurrent instance
+/// won the reclaim race, so we yield to it with `Ok(false)` rather than looping. A fresh
+/// (< `STALE_CLAIM_AGE`) existing claim keeps returning `Ok(false)` unchanged.
+fn claim_in_dir(dir: &Path, key: &str) -> std::io::Result<bool> {
+    let path = dir.join(claim_filename(key));
+    if create_new_claim(&path, key)? {
+        return Ok(true);
+    }
+    // The file already exists. Reclaim it only when it is older than STALE_CLAIM_AGE —
+    // a still-fresh claim is a live run and must keep excluding us.
+    let stale = match path.metadata().and_then(|m| m.modified()) {
+        Ok(modified) => SystemTime::now()
+            .duration_since(modified)
+            .map(|age| age >= STALE_CLAIM_AGE)
+            // A future mtime (clock skew) yields Err — treat as not-stale, keep excluding.
+            .unwrap_or(false),
+        // Can't stat the mtime (raced away, permission) → don't reclaim; behave as before.
+        Err(_) => false,
+    };
+    if !stale {
+        return Ok(false);
+    }
+    // Best-effort delete of the abandoned claim, then retry the exclusive-create ONCE.
+    // A failed delete or a lost retry race both resolve to Ok(false): another instance
+    // owns the (possibly just-reclaimed) claim, so we skip this run rather than loop.
+    let _ = std::fs::remove_file(&path);
+    create_new_claim(&path, key)
 }
 
 /// Best-effort release of `key`'s claim inside `dir` (delete the file). Errors are
@@ -311,6 +362,78 @@ mod tests {
         assert_eq!(fnv1a_64(b""), 0xcbf2_9ce4_8422_2325);
         assert_eq!(fnv1a_64(b"a"), 0xaf63_dc4c_8601_ec8c);
         assert_ne!(fnv1a_64(b"review"), fnv1a_64(b"security"));
+    }
+
+    /// Backdate a claim file's mtime so it looks abandoned. Mirrors the sweep test:
+    /// `set_modified` needs a writable handle on Windows.
+    fn backdate(path: &Path, age: Duration) {
+        let when = SystemTime::now() - age;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+    }
+
+    #[test]
+    fn stale_claim_is_reclaimed_and_caller_wins() {
+        let (_tmp, dir) = tmp_dir();
+        let key = composite_key(r"C:\repo\one", "42", "abc123", "review");
+
+        // An instance takes the claim, then "dies" without releasing (its mtime ages
+        // past the stale cutoff).
+        assert!(claim_in_dir(&dir, &key).unwrap(), "first claim should win");
+        let path = dir.join(claim_filename(&key));
+        backdate(&path, STALE_CLAIM_AGE + Duration::from_secs(60));
+
+        // The next claimant reclaims the abandoned file instead of being starved.
+        assert!(
+            claim_in_dir(&dir, &key).unwrap(),
+            "a stale claim must be reclaimed by the next claimant"
+        );
+    }
+
+    #[test]
+    fn fresh_existing_claim_still_denies() {
+        let (_tmp, dir) = tmp_dir();
+        let key = composite_key(r"C:\repo\one", "42", "abc123", "review");
+
+        // A just-taken (fresh) claim keeps excluding a second claimant — reclaim must
+        // NOT fire before STALE_CLAIM_AGE.
+        assert!(claim_in_dir(&dir, &key).unwrap(), "first claim should win");
+        assert!(
+            !claim_in_dir(&dir, &key).unwrap(),
+            "a fresh existing claim must still deny the second claimant"
+        );
+    }
+
+    #[test]
+    fn stale_reclaim_rewrites_file_with_new_key() {
+        let (_tmp, dir) = tmp_dir();
+        // Two DISTINCT composite keys whose sanitized tails + hash collide onto the SAME
+        // filename cannot be relied on, so assert the reclaimed file holds the CURRENT
+        // key's content. Both claims key the same run, so the filename is identical and
+        // the reclaim overwrites the file body with a fresh (identical) key. To prove the
+        // content is the NEW write and not the stale one, we re-key the file content and
+        // confirm it matches after reclaim.
+        let key = composite_key(r"C:\repo\one", "42", "abc123", "review");
+        assert!(claim_in_dir(&dir, &key).unwrap());
+        let path = dir.join(claim_filename(&key));
+        // Corrupt the stale file's content so we can tell a reclaim (rewrite) from a
+        // no-op, then backdate it past the cutoff.
+        std::fs::write(&path, b"STALE-LEFTOVER-CONTENT").unwrap();
+        backdate(&path, STALE_CLAIM_AGE + Duration::from_secs(60));
+
+        assert!(
+            claim_in_dir(&dir, &key).unwrap(),
+            "stale claim should be reclaimed"
+        );
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            content, key,
+            "a reclaimed claim file must hold the NEW composite key, not the stale content"
+        );
     }
 
     #[test]

@@ -266,6 +266,30 @@ async function run(
         continue;
       }
     }
+    // pr-open is FIRST-review per mode: skip any mode that already has a review record
+    // for this PR (real pr-open events are then idempotent per mode, and per-mode
+    // catch-up synthesis is safe — a synthesized pr-open re-fires only the mode(s) that
+    // still have no record). Also skip a head this mode already dismissed. Mirrors the
+    // pr-sync gate above; the difference is pr-sync requires a prior (re-review), while
+    // pr-open requires the ABSENCE of one (first review).
+    if (event.kind === "pr-open") {
+      const prior = await getLatestReview(
+        event.repoPath,
+        event.target.type,
+        targetRef(event),
+        action,
+      );
+      if (prior) continue;
+      const dismissedHead = await getDismissedHead(
+        event.repoPath,
+        event.target.type,
+        targetRef(event),
+        action,
+      );
+      if (event.headSha && sameSha(dismissedHead ?? "", event.headSha)) {
+        continue;
+      }
+    }
     // Cross-instance dedup: claim this exact run atomically BEFORE any (paid) AI
     // work, so two instances watching the same repo (a main checkout + a linked
     // worktree share a worktree-stable identity) don't both post the same review.
