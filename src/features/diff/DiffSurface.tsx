@@ -593,13 +593,22 @@ function RenderedDiff({
     // shortened (the safety invariant — no rendered diff can ever freeze). In
     // content mode `longestLine <= DIFF_MAX_LINE_CHARS` by construction (the
     // gate above), so this hits the fast-path with shortened=0.
-    const short = shortenLongLines(capped.text, DIFF_MAX_LINE_CHARS);
+    //
+    // `longestLine` is measured on the FULL deferredText, so ≤ cap on the full
+    // text implies ≤ cap on any subset (capped / showFull / content text) —
+    // skipping the shorten pass is always safe there and avoids its re-scan.
+    // When > cap we still call shortenLongLines, whose own fast-path also
+    // returns shortened=0 for the case where capDiffText cut the long line out.
+    const short =
+      longestLine <= DIFF_MAX_LINE_CHARS
+        ? { text: capped.text, shortened: 0 }
+        : shortenLongLines(capped.text, DIFF_MAX_LINE_CHARS);
     return {
       shown: short.text,
       hidden: capped.hidden,
       shortened: short.shortened,
     };
-  }, [deferredText, showFull, content, blocked]);
+  }, [deferredText, showFull, content, blocked, longestLine]);
 
   // Syntax prefs follow the active repo (repo-scoped custom languages); the
   // active repo owns every surface that supplies content, so this matches.

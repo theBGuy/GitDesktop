@@ -594,16 +594,21 @@ function StagingDiffView({
   // DISPLAY-ONLY: shortening preserves line COUNT and numbers, so the drag
   // manager, paint helpers, hunk anchors, and every mutation path (which all
   // work off the ORIGINAL text/parsed hunks in WorkingTreeDiff) stay correct.
-  // Normal files fast-path to the SAME string reference (shortened=0), keeping
-  // createDiffFile's inputs — and thus behavior — byte-identical.
-  const longestLine = useMemo(
-    () => longestLineLength(deferredText),
-    [deferredText],
-  );
-  const { text: displayText, shortened } = useMemo(
-    () => shortenLongLines(deferredText, DIFF_MAX_LINE_CHARS),
-    [deferredText],
-  );
+  // One scan: measure the longest line once, and only shorten when it overflows
+  // — normal files then fast-path to the SAME string reference (shortened=0),
+  // keeping createDiffFile's inputs — and thus behavior — byte-identical.
+  const { longestLine, displayText, shortened } = useMemo(() => {
+    const longest = longestLineLength(deferredText);
+    if (longest <= DIFF_MAX_LINE_CHARS) {
+      return { longestLine: longest, displayText: deferredText, shortened: 0 };
+    }
+    const short = shortenLongLines(deferredText, DIFF_MAX_LINE_CHARS);
+    return {
+      longestLine: longest,
+      displayText: short.text,
+      shortened: short.shortened,
+    };
+  }, [deferredText]);
   // Whole-file highlight context + expand. The staging view renders every hunk
   // regardless, so let content mode engage for big diffs too — bounded by the
   // file highlight budget, not the read-only surface's 200-line render cap.
