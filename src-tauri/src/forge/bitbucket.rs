@@ -24,6 +24,8 @@
 //! pages) are workspace members, PR tasks, and PR comments — each documented at its
 //! call site.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use serde::{Deserialize, Serialize};
 use tauri_plugin_http::reqwest;
 
@@ -44,6 +46,12 @@ use crate::github::pr::{
     PrDetails, PrFileOut, PrInfo, PrListLabel, PrPollInfo, PrRef, PrThreadOut, PrTimelineEventOut,
     ReviewSubmitOut, ReviewThreadOut,
 };
+
+/// Whether this process has already seeded git's credential store this session (the
+/// seed persists in the OS store, so re-seeding — and re-reading the keyring, which
+/// re-prompts on macOS — every op is wasteful). Re-armed by `reset_credential_seed`
+/// when the stored token changes. See [`seed_git_credential`].
+static CREDENTIAL_SEEDED: AtomicBool = AtomicBool::new(false);
 
 /// Failed-step logs can run to many MB; keep the tail (failures land at the end).
 const CI_RUN_LOG_CAP: usize = 200_000;
@@ -254,6 +262,10 @@ pub async fn set_account(email: &str, token: &str) -> AppResult<BbAccountInfo> {
     .await
     .map_err(|e| AppError::Bitbucket(format!("keyring task failed: {e}")))??;
 
+    // The stored token changed — re-arm the seed latch so the next git op re-seeds
+    // git's credential store with the new token.
+    reset_credential_seed();
+
     Ok(BbAccountInfo {
         email,
         username,
@@ -272,7 +284,11 @@ pub async fn clear_account() -> AppResult<()> {
         Ok::<_, AppError>(())
     })
     .await
-    .map_err(|e| AppError::Bitbucket(format!("keyring task failed: {e}")))?
+    .map_err(|e| AppError::Bitbucket(format!("keyring task failed: {e}")))??;
+    // Re-arm the seed latch so a future reconnect re-seeds (and a lingering seeded
+    // credential isn't silently reused by the next op after a disconnect).
+    reset_credential_seed();
+    Ok(())
 }
 
 /// The stored account (keyring existence read ONLY — no network). `None` when no
@@ -2724,6 +2740,10 @@ fn duplicate_pr_number(open_prs: &[PrInfo], base: &str) -> Option<u64> {
 /// fetch/pull/push funnel, and `create_pr` can share it. Best-effort: no stored
 /// token, a missing credential helper, or a non-zero exit are all tolerated (the
 /// git op itself surfaces any real auth failure); it only ever ADDS a credential.
+/// Seeds at most ONCE per process (the seed persists in the OS store), re-armed
+/// when the stored token changes — otherwise every op would re-read the OS keyring
+/// and, on macOS, re-pop the "gitdesktop wants to use your confidential
+/// information" keychain prompt.
 ///
 /// Runs `git credential approve` OUTSIDE any repo (`run_git_input(None, …)`) and
 /// takes NO repo lock — deliberately, so it stays safe to call from ANY context,
@@ -2738,8 +2758,18 @@ fn duplicate_pr_number(open_prs: &[PrInfo], base: &str) -> Option<u64> {
 /// account email authenticates the REST API but NOT git (probe-validated — see
 /// `publish_repo`). Do not change the username to the email; it will fail auth.
 pub async fn seed_git_credential() {
+    // Latch BEFORE the keyring read so concurrent callers don't each pop the macOS
+    // keychain prompt; if already latched, another op has seeded this process.
+    if CREDENTIAL_SEEDED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
     let Ok(creds) = http::load_credentials().await else {
-        return; // no stored token → seed nothing; ambient auth is unchanged
+        // No stored token → nothing to seed; un-latch so a later connect re-seeds.
+        CREDENTIAL_SEEDED.store(false, Ordering::Release);
+        return;
     };
     let approve_input = format!(
         "protocol=https\nhost=bitbucket.org\nusername=x-bitbucket-api-token-auth\npassword={}\n\n",
@@ -2752,6 +2782,13 @@ pub async fn seed_git_credential() {
         crate::git::runner::DEFAULT_TIMEOUT,
     )
     .await;
+}
+
+/// Re-arm the once-per-process seed latch so the next Bitbucket git op re-seeds git's
+/// credential store — called whenever the stored token changes (connect / disconnect),
+/// so a re-authenticated token replaces the persisted git credential.
+pub(crate) fn reset_credential_seed() {
+    CREDENTIAL_SEEDED.store(false, Ordering::Release);
 }
 
 /// Strip an embedded `user@` from an `https://` URL's authority so git's credential
