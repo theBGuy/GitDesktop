@@ -269,8 +269,15 @@ pub async fn set_account(email: &str, token: &str) -> AppResult<BbAccountInfo> {
 
     // The stored token changed — drop the cached credential and re-arm the seed
     // latch so the next load reads the new token and the next git op re-seeds.
-    http::invalidate_credential_cache();
-    reset_credential_seed();
+    // Taken UNDER the seed lock: once we hold it, no seed is in flight, so an
+    // old-token seed that raced this connect has fully finished — our reset then
+    // guarantees the next op re-seeds (upserting the store entry with the NEW
+    // token) instead of fast-pathing on the stale latch.
+    {
+        let _seed_guard = CREDENTIAL_SEED_LOCK.lock().await;
+        http::invalidate_credential_cache();
+        reset_credential_seed();
+    }
 
     Ok(BbAccountInfo {
         email,
@@ -294,7 +301,12 @@ pub async fn clear_account() -> AppResult<()> {
     // Drop the cached credential, re-arm the seed latch, and evict the seeded
     // entry from git's OS credential store — git's store is separate from our
     // keyring, so without the eviction a disconnected account would keep
-    // authenticating git ops until the token expired.
+    // authenticating git ops until the token expired. All UNDER the seed lock:
+    // once we hold it, no seed is in flight, so an in-flight first-op seed that
+    // raced this disconnect has fully finished (its entry written, its latch
+    // stored) — the reset + evict below then clear exactly that state, instead of
+    // being silently undone by the seed completing after us.
+    let _seed_guard = CREDENTIAL_SEED_LOCK.lock().await;
     http::invalidate_credential_cache();
     reset_credential_seed();
     evict_git_credential().await;
