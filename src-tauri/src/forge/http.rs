@@ -93,12 +93,15 @@ static CREDENTIAL_GENERATION: AtomicU64 = AtomicU64::new(0);
 /// turn into the "connect an account" state.
 pub async fn load_credentials() -> AppResult<BbCredentials> {
     // Fast path: reuse the cached credential (no keyring read → no macOS prompt).
-    if let Some(creds) = CREDENTIAL_CACHE.read().unwrap().clone() {
+    // Poison recovery (`into_inner`) matches the oplog locks: nothing fallible runs
+    // under these guards, and the cache is atomically-assigned, so a recovered
+    // value is always coherent.
+    if let Some(creds) = CREDENTIAL_CACHE.read().unwrap_or_else(|p| p.into_inner()).clone() {
         return Ok(creds);
     }
     // Serialize the cold load so concurrent first-callers don't each read the keyring.
     let _guard = CREDENTIAL_LOAD_LOCK.lock().await;
-    if let Some(creds) = CREDENTIAL_CACHE.read().unwrap().clone() {
+    if let Some(creds) = CREDENTIAL_CACHE.read().unwrap_or_else(|p| p.into_inner()).clone() {
         return Ok(creds); // another caller warmed the cache while we waited
     }
     // Capture the generation before the (slow) keyring read; if a connect/disconnect
@@ -120,7 +123,7 @@ pub async fn load_credentials() -> AppResult<BbCredentials> {
             // stale write, or our write is superseded by the clear; a stale value is
             // never left cached.
             {
-                let mut cache = CREDENTIAL_CACHE.write().unwrap();
+                let mut cache = CREDENTIAL_CACHE.write().unwrap_or_else(|p| p.into_inner());
                 if CREDENTIAL_GENERATION.load(Ordering::Acquire) == generation {
                     *cache = Some(creds.clone());
                 }
@@ -138,7 +141,7 @@ pub(crate) fn invalidate_credential_cache() {
     // caching its stale read; the clear is serialized (cache write lock) against
     // that load's commit.
     CREDENTIAL_GENERATION.fetch_add(1, Ordering::AcqRel);
-    *CREDENTIAL_CACHE.write().unwrap() = None;
+    *CREDENTIAL_CACHE.write().unwrap_or_else(|p| p.into_inner()) = None;
 }
 
 /// Bitbucket's error envelope. The common shape is
