@@ -36,9 +36,9 @@ export async function probeAndPersistVisibility(
     // No resolvable provider (remote removed/absent): persistRepoOwners with a
     // null provider clears owner/host/provider AND, because visibility/isFork/
     // forkParent can't outlive the provider, those three too — all six derived
-    // fields cleared in one write. (owner is undefined here only when the repo
-    // has no recentRepos row yet; pass a null-filled entry so the clear still
-    // targets this path.)
+    // fields cleared in one write. (owner is undefined when gitRepoOwners
+    // returns no entry for this path — e.g. no remote at all; the null-filled
+    // entry still targets this path so the clear lands.)
     await persistRepoOwners([
       {
         path: repoPath,
@@ -49,11 +49,15 @@ export async function probeAndPersistVisibility(
     ]);
     return null;
   }
-  // Persist owners FIRST (owner has a non-null provider, so persistRepoVisibility
-  // fields it preserves are left intact), then the visibility/fork result —
-  // deterministic order under the serialized write chain.
-  await persistRepoOwners([owner]);
-  const probe = await forgeRepoVisibility(repoPath);
+  // The owners write and the visibility probe are independent once gitRepoOwners
+  // resolved, so run them in parallel; the Promise.all barrier still guarantees
+  // the owners write completes before the visibility/fork persist below, and
+  // persistRepoOwners (non-null provider) preserves the visibility fields it
+  // doesn't own — so the ordering that matters is kept.
+  const [, probe] = await Promise.all([
+    persistRepoOwners([owner]),
+    forgeRepoVisibility(repoPath),
+  ]);
   await persistRepoVisibility([
     {
       path: repoPath,
