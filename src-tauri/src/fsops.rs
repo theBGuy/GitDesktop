@@ -253,7 +253,7 @@ pub async fn open_in_terminal(
 /// stripped). There are no escape sequences beyond quote grouping — a literal
 /// double-quote inside a path is not supported, which is fine for the launcher
 /// templates this powers. Returns `InvalidArgument` for an empty/whitespace-only
-/// template.
+/// template or one with an unbalanced (unterminated) double-quote.
 fn tokenize_command(command: &str) -> AppResult<Vec<String>> {
     let mut tokens: Vec<String> = Vec::new();
     let mut current = String::new();
@@ -278,6 +278,13 @@ fn tokenize_command(command: &str) -> AppResult<Vec<String>> {
                 has_token = true;
             }
         }
+    }
+    if in_quotes {
+        // An unterminated quote is almost certainly a typo; parsing "the rest of
+        // the string is one token" would silently mis-launch. Reject it instead.
+        return Err(AppError::InvalidArgument(
+            "unbalanced quote in terminal command".to_string(),
+        ));
     }
     if has_token {
         tokens.push(current);
@@ -317,6 +324,21 @@ fn first_token_is_pathlike(token: &str) -> bool {
     token.contains(['/', '\\'])
 }
 
+/// Returns `p` unchanged if already absolute, else joins it onto `base`. Used to
+/// pin a relative resolved program (e.g. `./bin/wt`, which `resolve_named`
+/// exists-checks against the app's cwd but returns verbatim) to that same base
+/// BEFORE we `current_dir(repo)` the child — otherwise the path we exists-checked
+/// (against app cwd) and the path the OS execs (against the repo cwd, on Unix)
+/// would differ: a confused deputy. Joining (not `canonicalize`) keeps the bytes
+/// identical to what was checked and avoids Windows `\\?\` verbatim-path quirks.
+fn ensure_absolute(p: PathBuf, base: &Path) -> PathBuf {
+    if p.is_absolute() {
+        p
+    } else {
+        base.join(p)
+    }
+}
+
 /// Launches a user-supplied command template with no shell: tokenize → expand
 /// `{path}` → resolve the first token to an absolute executable → spawn it with
 /// the remaining tokens, rooted at the repository directory. Every step here is
@@ -327,8 +349,15 @@ async fn launch_custom_command(command: &str, path: &str) -> AppResult<()> {
 
     let tokens = tokenize_command(command)?;
     let tokens = substitute_path(&tokens, path);
-    // tokenize_command guarantees a non-empty list.
+    // tokenize_command guarantees a non-empty list — but a quoted-empty template
+    // ('"" -d …') yields an EMPTY first token, which would reach the resolver as an
+    // empty program name and fail with a confusing blank-named error. Reject it.
     let (first, rest) = tokens.split_first().expect("tokens is non-empty");
+    if first.is_empty() {
+        return Err(AppError::InvalidArgument(
+            "terminal command must start with a program name".to_string(),
+        ));
+    }
 
     // SECURITY: resolve the program to an ABSOLUTE path BEFORE building the
     // Command with `current_dir(path)`. On Windows, `Command` resolves a bare
@@ -341,8 +370,7 @@ async fn launch_custom_command(command: &str, path: &str) -> AppResult<()> {
     // (it never falls through to the lookup). So route by shape: a path-like first
     // token (`./bin/wt`, `C:\tools\wt.exe`) is exists-checked as given, and a bare
     // name (`wt`, `wezterm`, `tmux`) goes through the real PATH/PATHEXT/login-shell
-    // lookup — the whole reason the resolver is mandated here. Either branch yields
-    // an absolute path.
+    // lookup — the whole reason the resolver is mandated here.
     let bin_path = first_token_is_pathlike(first).then_some(first.as_str());
     let resolved = crate::agent::resolve_named(&[first.as_str()], bin_path)
         .await
@@ -351,6 +379,13 @@ async fn launch_custom_command(command: &str, path: &str) -> AppResult<()> {
                 "terminal command not found: {first}"
             ))
         })?;
+    // A PATH/PATHEXT hit is already absolute, but a RELATIVE path-like token
+    // (`./bin/wt`) is exists-checked by `resolve_named` against the APP's cwd yet
+    // returned verbatim — and we are about to `current_dir(repo)` the child, so on
+    // Unix the OS would exec that relative path against the REPO dir instead: a
+    // different file than the one checked. Pin it to the app cwd now so the checked
+    // path and the executed path are byte-identical.
+    let resolved = ensure_absolute(resolved, &std::env::current_dir().map_err(AppError::Io)?);
 
     // SECURITY: reject batch files on the RESOLVED path — a bare `foo` on PATH
     // can resolve to `foo.cmd`, which Rust would run through cmd.exe.
@@ -1269,6 +1304,27 @@ mod tests {
         assert!(tokenize_command("   ").is_err());
     }
 
+    #[tokio::test]
+    async fn launch_custom_command_rejects_empty_program_token() {
+        // A quoted-empty first token ('"" -d …') must fail with a clear error
+        // before ever reaching the resolver (deterministic: returns pre-resolve).
+        assert!(launch_custom_command("\"\" -d {path}", "C:\\nowhere")
+            .await
+            .is_err());
+    }
+
+    #[test]
+    fn tokenize_command_unbalanced_quote_is_error() {
+        // An unterminated quote is a typo, not "the rest is one token".
+        assert!(tokenize_command("wt -d \"C:\\path").is_err());
+        assert!(tokenize_command("\"just an opening quote").is_err());
+        // A balanced pair around the same content is fine.
+        assert_eq!(
+            tokenize_command("wt -d \"C:\\path\"").unwrap(),
+            vec!["wt", "-d", "C:\\path"]
+        );
+    }
+
     #[test]
     fn substitute_path_replaces_standalone_and_embedded() {
         let tokens = vec!["wezterm".into(), "--cwd={path}".into(), "{path}".into()];
@@ -1319,5 +1375,25 @@ mod tests {
         assert!(first_token_is_pathlike("./bin/wt"));
         assert!(first_token_is_pathlike("C:\\tools\\wt.exe"));
         assert!(first_token_is_pathlike("/usr/local/bin/wezterm"));
+    }
+
+    #[test]
+    fn ensure_absolute_joins_relative_and_passes_absolute() {
+        let base = if cfg!(windows) {
+            Path::new("C:\\app\\cwd")
+        } else {
+            Path::new("/app/cwd")
+        };
+        // A relative path is joined onto the base.
+        let rel = ensure_absolute(PathBuf::from("bin/wt"), base);
+        assert_eq!(rel, base.join("bin/wt"));
+        assert!(rel.is_absolute());
+        // An already-absolute path is returned unchanged (bytes identical).
+        let abs = if cfg!(windows) {
+            PathBuf::from("C:\\tools\\wt.exe")
+        } else {
+            PathBuf::from("/usr/local/bin/wezterm")
+        };
+        assert_eq!(ensure_absolute(abs.clone(), base), abs);
     }
 }

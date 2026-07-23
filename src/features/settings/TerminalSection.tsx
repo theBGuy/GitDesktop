@@ -186,6 +186,7 @@ export const TerminalSection = withForm({
               className="font-mono"
               placeholder={CUSTOM_COMMAND_PLACEHOLDER}
               autoComplete="off"
+              spellCheck={false}
               value={terminalCommand}
               onChange={(e) =>
                 form.setFieldValue("terminalCommand", e.target.value)
@@ -199,7 +200,10 @@ export const TerminalSection = withForm({
               terminal that isn't auto-detected.
             </p>
             {missingPathToken && (
-              <p className="flex items-center gap-1 text-xs text-warning">
+              <p
+                role="status"
+                className="flex items-center gap-1 text-xs text-warning"
+              >
                 <WarningCircleIcon className="size-3.5 shrink-0" />
                 No <code className="font-mono">{"{path}"}</code> in the command
                 — it will start in the repository directory without receiving
