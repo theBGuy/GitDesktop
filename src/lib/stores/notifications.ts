@@ -102,8 +102,10 @@ function isValidNotification(x: unknown): x is AppNotification {
     typeof n.read === "boolean" &&
     typeof n.repoPath === "string" &&
     typeof n.repoName === "string" &&
-    // Optional author fields: absent entries stay valid (old files keep loading);
-    // present ones must be strings.
+    // Optional string fields: absent entries stay valid (old files keep
+    // loading); present ones must be strings. `subtitle` renders as a React
+    // child, so a non-string here would crash the row.
+    (n.subtitle === undefined || typeof n.subtitle === "string") &&
     (n.authorLogin === undefined || typeof n.authorLogin === "string") &&
     (n.authorAvatarUrl === undefined ||
       typeof n.authorAvatarUrl === "string") &&

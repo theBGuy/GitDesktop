@@ -547,7 +547,9 @@ clearable history that survives a restart — so a review that finishes while yo
 never a missed click. Open it from the command palette; which events show follows your
 notification settings. A cancelled or failed **automated** review also lingers in a
 **Stopped** group with one-click **Re-run** (re-firing exactly that run's mode) and
-**Dismiss**, so a stopped automation isn't a dead end.
+**Dismiss**, so a stopped automation isn't a dead end. The *review failed* notification
+row itself also states why the run failed, and for automated runs carries the same
+one-click **Re-run** right on the row.
 
 **Environment check** — a Settings → **About** panel reports your app/OS/Tauri
 versions and the status of every CLI GitDesktop uses (git, the GitHub & GitLab
