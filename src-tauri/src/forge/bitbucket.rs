@@ -14,7 +14,9 @@
 //! app passwords are dead — with the token stored in the OS keyring under
 //! `forge/bitbucket.org/*`. git-over-HTTPS is the exception: it authenticates with the
 //! literal `x-bitbucket-api-token-auth` sentinel username (NOT the account email) plus
-//! the same token (see `publish_repo`).
+//! the same token, seeded into git's credential store on STDIN by
+//! [`seed_git_credential`] (shared by clone, fetch/pull/push, `create_pr`, and
+//! `publish_repo`).
 //!
 //! Pagination policy matches GitLab: a single page at the endpoint's max `pagelen`,
 //! no `next`-following loops (documented per call). The PR-list endpoint caps at 50;
@@ -2716,6 +2718,67 @@ fn duplicate_pr_number(open_prs: &[PrInfo], base: &str) -> Option<u64> {
         .map(|p| p.number)
 }
 
+/// Seed git's credential store with the Bitbucket API token so a subsequent HTTPS
+/// clone / fetch / pull / push authenticates non-interactively — the same mechanism
+/// `publish_repo`'s post-create push has always used, lifted out so clone, the
+/// fetch/pull/push funnel, and `create_pr` can share it. Best-effort: no stored
+/// token, a missing credential helper, or a non-zero exit are all tolerated (the
+/// git op itself surfaces any real auth failure); it only ever ADDS a credential.
+///
+/// Runs `git credential approve` OUTSIDE any repo (`run_git_input(None, …)`) and
+/// takes NO repo lock — deliberately, so it stays safe to call from ANY context,
+/// including a future caller that already holds the per-repo mutating lock. (Today's
+/// callers compute the credential config BEFORE the op takes its lock, so there is
+/// no present-day deadlock; the non-locking runner is defensive, not load-bearing.)
+/// Do NOT switch this to a locking runner.
+///
+/// SECURITY: the token is fed on STDIN ONLY — never argv / env / git config —
+/// matching the discipline the rest of the Bitbucket git path holds. NOTE:
+/// git-over-HTTPS REQUIRES the `x-bitbucket-api-token-auth` sentinel username; the
+/// account email authenticates the REST API but NOT git (probe-validated — see
+/// `publish_repo`). Do not change the username to the email; it will fail auth.
+pub async fn seed_git_credential() {
+    let Ok(creds) = http::load_credentials().await else {
+        return; // no stored token → seed nothing; ambient auth is unchanged
+    };
+    let approve_input = format!(
+        "protocol=https\nhost=bitbucket.org\nusername=x-bitbucket-api-token-auth\npassword={}\n\n",
+        creds.token
+    );
+    let _ = crate::git::runner::run_git_input(
+        None,
+        &["credential", "approve"],
+        Some(&approve_input),
+        crate::git::runner::DEFAULT_TIMEOUT,
+    )
+    .await;
+}
+
+/// Strip an embedded `user@` from an `https://` URL's authority so git's credential
+/// lookup keys on the host alone and finds the seeded `x-bitbucket-api-token-auth`
+/// entry. Bitbucket's API/web clone links embed the account username
+/// (`https://<user>@bitbucket.org/…`); git SCOPES its credential lookup by the URL
+/// username when present, so a `user@` URL asks the helper for account=`user` and
+/// misses the sentinel-account seed — re-prompting. This is git's protocol behavior,
+/// so it bites BOTH macOS osxkeychain and Windows GCM, not just macOS. Non-`https`
+/// URLs and URLs without userinfo pass through unchanged.
+pub(crate) fn strip_https_userinfo(url: &str) -> String {
+    let Some(rest) = url.strip_prefix("https://") else {
+        return url.to_string();
+    };
+    let (authority, path) = match rest.split_once('/') {
+        Some((a, p)) => (a, Some(p)),
+        None => (rest, None),
+    };
+    let Some((_userinfo, hostport)) = authority.rsplit_once('@') else {
+        return url.to_string(); // no userinfo → unchanged
+    };
+    match path {
+        Some(p) => format!("https://{hostport}/{p}"),
+        None => format!("https://{hostport}"),
+    }
+}
+
 /// Push `head` to origin, then open a pull request from `head` into `base`. Mirrors
 /// `gitlab::create_mr`, with two Bitbucket-specific differences:
 ///
@@ -2725,11 +2788,11 @@ fn duplicate_pr_number(open_prs: &[PrInfo], base: &str) -> Option<u64> {
 ///    ""). So BEFORE any mutation we read the open PRs from `head` (via the same query
 ///    `prs_for_branch` uses) and, if one already targets `base`, error out naming its
 ///    number — nothing is pushed or changed.
-///  - **No credential config on the push.** Unlike glab (whose token isn't in git's
-///    store, so it injects a one-shot helper), Bitbucket repos in this app are
-///    cloned/pushed with the user's ambient git credentials (GCM), so a plain
-///    `git push origin <head>` works. The keyring token is NEVER put on argv / env /
-///    git config of the push process.
+///  - **Seeded credential, no `-c` helper on the push.** Bitbucket has no CLI
+///    credential helper, so instead of glab's one-shot `-c` helper the token is
+///    seeded into git's credential store on STDIN (`seed_git_credential`) and a
+///    plain `git push origin <head>` then authenticates from it. The keyring token
+///    is NEVER put on argv / env / git config of the push process.
 ///
 /// Order: duplicate pre-check (read-only) → validate → push → POST create. If the POST
 /// fails after a successful push, the error discloses the partial state (the branch was
@@ -2765,13 +2828,18 @@ pub async fn create_pr(
         )));
     }
 
-    // A PR needs the branch on the remote first. Bitbucket uses the user's ambient git
-    // credentials (GCM) — no token-derived credential helper, so the keyring token
-    // never reaches the git process.
+    // A PR needs the branch on the remote first. Bitbucket has no CLI credential
+    // helper, so seed the token into git's credential store (STDIN only — never
+    // argv/env/git config) and a plain push then authenticates from it (cross-
+    // platform, not just via an ambient Windows GCM).
+    seed_git_credential().await;
     crate::git::runner::run_git_mutating(
         state,
         repo_path,
-        &["push", "-u", "origin", head],
+        // `credential.interactive=false` suppresses an interactive helper GUI (e.g.
+        // GCM's dialog) that GIT_TERMINAL_PROMPT=0 does not block — matching the
+        // proven `publish_repo` seed+push.
+        &["-c", "credential.interactive=false", "push", "-u", "origin", head],
         crate::git::runner::NETWORK_TIMEOUT,
     )
     .await?;
@@ -4876,6 +4944,30 @@ pub async fn publish_repo(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strip_https_userinfo_removes_embedded_username() {
+        // Bitbucket's API clone link embeds the account username.
+        assert_eq!(
+            strip_https_userinfo("https://alice-admin@bitbucket.org/ws/repo.git"),
+            "https://bitbucket.org/ws/repo.git"
+        );
+        // No userinfo → unchanged.
+        assert_eq!(
+            strip_https_userinfo("https://bitbucket.org/ws/repo.git"),
+            "https://bitbucket.org/ws/repo.git"
+        );
+        // Authority only, no path → unchanged host.
+        assert_eq!(
+            strip_https_userinfo("https://bob@bitbucket.org"),
+            "https://bitbucket.org"
+        );
+        // Non-https (scp-style SSH) → untouched.
+        assert_eq!(
+            strip_https_userinfo("git@bitbucket.org:ws/repo.git"),
+            "git@bitbucket.org:ws/repo.git"
+        );
+    }
 
     fn pr(json: &str) -> PrInfo {
         from_bb_pr(serde_json::from_str(json).expect("PR should parse"))

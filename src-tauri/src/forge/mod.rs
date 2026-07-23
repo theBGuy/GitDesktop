@@ -161,13 +161,20 @@ pub(crate) async fn detect_non_github(repo_path: &str) -> Option<(Provider, Stri
 ///
 /// Empty (→ git's ambient behavior, unchanged, so this never breaks a local, SSH,
 /// or already-authenticated repo) for: SSH remotes (credential helpers don't
-/// apply), Bitbucket (its push flow injects auth its own way), a repo with no such
-/// remote, an unknown HTTPS host (the GitHub-default routing's gh gate injects the
-/// pair ONLY when gh holds a token for that host — e.g. a signed-in GitHub
-/// Enterprise host, which is what makes GHE work — and nothing otherwise), and —
-/// fail open — when the provider CLI isn't installed OR is installed but has no
-/// stored token/session for this host (ambient helpers like git-credential-manager
-/// keep working for both).
+/// apply), a repo with no such remote, an unknown HTTPS host (the GitHub-default
+/// routing's gh gate injects the pair ONLY when gh holds a token for that host —
+/// e.g. a signed-in GitHub Enterprise host, which is what makes GHE work — and
+/// nothing otherwise), and — fail open — when the provider CLI isn't installed OR
+/// is installed but has no stored token/session for this host (ambient helpers like
+/// git-credential-manager keep working for both).
+///
+/// Bitbucket is the exception to the `[reset, helper]` shape: it has no CLI, so
+/// rather than injecting `-c` entries it SEEDS git's credential store out of band
+/// with the `x-bitbucket-api-token-auth` sentinel + token (STDIN only, no repo
+/// lock — see [`bitbucket::seed_git_credential`]) and returns NO entries; the op
+/// then authenticates ambiently from the seeded store. Seeding is best-effort, so a
+/// repo with no stored token, or one already authenticated by an ambient BB helper,
+/// is unaffected.
 pub async fn credential_config_for_remote(repo_path: &str, remote: &str) -> AppResult<Vec<String>> {
     let url = match crate::git::remote::git_remote_url(repo_path.to_string(), remote.to_string()).await
     {
@@ -195,7 +202,29 @@ pub async fn credential_config_for_remote(repo_path: &str, remote: &str) -> AppR
     // fail just because gh/glab isn't installed.
     match provider {
         Some(Provider::GitLab) => Ok(gitlab::clone_credential_config(&url).await.unwrap_or_default()),
-        Some(Provider::Bitbucket) => Ok(Vec::new()),
+        Some(Provider::Bitbucket) => {
+            // Bitbucket has no CLI helper. Two steps, then no `-c` entries:
+            //  1. If the stored remote embeds `user@` (Bitbucket's web-UI clone
+            //     form), rewrite it to the bare host. git scopes its credential
+            //     lookup by the URL username, so a `user@` remote would ask the
+            //     helper for that account and miss the host+sentinel-account seed
+            //     (on osxkeychain AND GCM). Best-effort, one-time, idempotent — the
+            //     op re-reads config, so the current op benefits too.
+            //  2. Seed the token into git's credential store (STDIN only) so the op
+            //     authenticates ambiently from it.
+            let stripped = bitbucket::strip_https_userinfo(&url);
+            if stripped != url {
+                let _ = crate::git::runner::run_git_input(
+                    Some(repo_path),
+                    &["remote", "set-url", remote, &stripped],
+                    None,
+                    crate::git::runner::DEFAULT_TIMEOUT,
+                )
+                .await;
+            }
+            bitbucket::seed_git_credential().await;
+            Ok(Vec::new())
+        }
         _ => Ok(github::clone_credential_config(&url).await.unwrap_or_default()),
     }
 }
@@ -657,12 +686,21 @@ pub async fn forge_clone(
     parent_dir: String,
     dir_name: Option<String>,
 ) -> AppResult<String> {
+    // Bitbucket needs the token seeded into git's credential store and the API's
+    // embedded `user@` stripped from the clone URL (so the host-keyed lookup finds
+    // the sentinel-account seed — osxkeychain matches by host+account); the others
+    // inject `-c` credential-helper entries.
+    let mut clone_url = url;
     let extra = match provider {
-        Provider::GitLab => gitlab::clone_credential_config(&url).await?,
-        Provider::GitHub => github::clone_credential_config(&url).await.unwrap_or_default(),
-        Provider::Bitbucket => Vec::new(),
+        Provider::GitLab => gitlab::clone_credential_config(&clone_url).await?,
+        Provider::GitHub => github::clone_credential_config(&clone_url).await.unwrap_or_default(),
+        Provider::Bitbucket => {
+            bitbucket::seed_git_credential().await;
+            clone_url = bitbucket::strip_https_userinfo(&clone_url);
+            Vec::new()
+        }
     };
-    crate::git::repo::clone_repo_core(&url, &parent_dir, dir_name, &extra).await
+    crate::git::repo::clone_repo_core(&clone_url, &parent_dir, dir_name, &extra).await
 }
 
 /// A repo's merge/pull requests, behind the provider abstraction. GitHub
