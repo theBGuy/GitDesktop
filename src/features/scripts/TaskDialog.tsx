@@ -310,6 +310,10 @@ export function TaskDialog({
                           >
                             {found}
                           </span>
+                        ) : isSelected && selectedResolving ? (
+                          <span className="text-[11px] text-muted-foreground">
+                            Checking your shell…
+                          </span>
                         ) : (
                           <span className="text-[11px] text-muted-foreground">
                             {i.hint}
