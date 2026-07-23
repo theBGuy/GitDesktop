@@ -45,6 +45,7 @@ import { useEffectiveSyntax } from "@/lib/syntax/queries";
 import { toastError } from "@/lib/toast";
 import { useIsDark } from "@/lib/use-is-dark";
 import { useLatestRef } from "@/lib/use-latest-ref";
+import { DIFF_MEGA_LINE_CHARS, longestLineLength } from "./cap-diff";
 import { DiffLanguagePicker } from "./DiffLanguagePicker";
 import { DiffPlaceholder } from "./DiffPlaceholder";
 import {
@@ -121,8 +122,9 @@ export function DiffViewer({ repoPath }: { repoPath: string }) {
 /**
  * The working-tree variant of the diff pane: hunks render as individual cards
  * with whole-hunk stage/unstage/discard actions, plus drag-to-select for
- * staging an individual subset of lines. Untracked, binary, and truncated
- * diffs fall back to the plain whole-file surface.
+ * staging an individual subset of lines. Untracked, binary, truncated, and
+ * generated/minified (one enormous line) diffs fall back to the plain
+ * whole-file surface (which shows the generated/minified placeholder).
  */
 function WorkingTreeDiff({
   repoPath,
@@ -163,7 +165,16 @@ function WorkingTreeDiff({
 
   const parsed: ParsedDiff | null = useMemo(() => {
     const data = diff.data;
-    if (!data || data.isBinary || data.isTruncated) return null;
+    // A generated/minified file (one enormous line) would freeze the
+    // un-virtualized staging renderer — route it down the whole-file
+    // DiffSurface fallback, which shows the generated/minified placeholder.
+    if (
+      !data ||
+      data.isBinary ||
+      data.isTruncated ||
+      longestLineLength(data.text) > DIFF_MEGA_LINE_CHARS
+    )
+      return null;
     return parseHunks(data.text);
   }, [diff.data]);
 

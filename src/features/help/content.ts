@@ -270,6 +270,9 @@ The **Changes** tab ({{kbd:tab-changes}}) lists your modified files, split into
 - **Image diffs** render side by side.
 - Very large diffs are capped (with a **Show full diff** escape hatch) so a huge file
   never freezes the view.
+- Files that look **generated or minified** (one enormous line — bundles, source maps,
+  \`.tsbuildinfo\`) show a placeholder instead of freezing the view — **Show diff anyway**
+  renders a safely shortened version.
 
 ## Committing
 
