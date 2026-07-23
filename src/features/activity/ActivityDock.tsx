@@ -479,7 +479,10 @@ function NotificationRow({
             {n.title}
           </span>
           {n.subtitle && (
-            <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">
+            <span
+              className="mt-0.5 block truncate text-[11px] text-muted-foreground"
+              title={n.subtitle}
+            >
               {n.subtitle}
             </span>
           )}
@@ -519,6 +522,24 @@ function NotificationRow({
           {formatRelativeTime(new Date(n.ts).toISOString())}
         </span>
       </button>
+      {n.action && (
+        <Button
+          variant="ghost"
+          size="xs"
+          className="my-1.5 shrink-0 self-start"
+          // Self-contained: a row is ambiguous by its action label alone.
+          aria-label={`${n.action.label} — ${n.title}`}
+          onClick={() => {
+            // Mark read (it's now acted on) then fire — but keep the popover open
+            // and the row in place: the fresh run registers an "In progress" row in
+            // this same panel (that's the feedback), and the notification is history.
+            markNotificationRead(n.id);
+            n.action?.run();
+          }}
+        >
+          {n.action.label}
+        </Button>
+      )}
       <Button
         variant="ghost"
         size="icon-xs"

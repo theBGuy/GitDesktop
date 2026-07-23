@@ -444,14 +444,22 @@ async function run(
       // too, gated on the same automations pref. Commit events have no PR target;
       // PR events carry a navigable one.
       if (notify) {
+        // Carry the failure reason into the durable subtitle so the inbox row
+        // (and the OS ping) say WHY — subject-only when the reason is empty.
+        const subject =
+          event.kind === "commit"
+            ? `"${event.hash.slice(0, 7)}"`
+            : `"${event.title}"`;
+        const subtitle = message.trim() ? `${subject} — ${message}` : subject;
+        // Local alias for the loop's `action: ReviewMode` — the Re-run closure's
+        // `run` body sees the outer `action` fine, but aliasing keeps the object
+        // literal (which also has a field named `action`) unambiguous to read.
+        const mode = action;
         pushNotification({
           kind: "review-failed",
           tone: "danger",
           title: `AI ${label} failed`,
-          subtitle:
-            event.kind === "commit"
-              ? `"${event.hash.slice(0, 7)}"`
-              : `"${event.title}"`,
+          subtitle,
           repoPath: event.repoPath,
           repoName: event.repoPath.split(/[/\\]/).pop() ?? event.repoPath,
           ...(event.kind === "commit"
@@ -463,11 +471,18 @@ async function run(
                   ref: targetRef(event),
                 },
               }),
+          // Re-fires exactly this event + mode. `selfKey` is this run's stopped
+          // dock row (already assigned); passing it when the row was dismissed is
+          // safe — resetReview no-ops on a gone key.
+          action: {
+            label: "Re-run",
+            run: () => rerunAutomation(event, mode, selfKey),
+          },
           dedupeKey: `automation-failed:${event.repoPath}:${event.kind}:${
             event.kind === "commit" ? event.hash : targetRef(event)
           }:${action}`,
         });
-        void notifyIfUnfocused(`AI ${label} failed`, `"${event.title}"`);
+        void notifyIfUnfocused(`AI ${label} failed`, subtitle);
       }
       // Persist a "Failed" stopped row (keeping its Re-run) instead of removing it.
       handle.fail(message);

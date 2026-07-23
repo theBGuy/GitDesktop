@@ -1670,7 +1670,8 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   under a **Stopped** group with **Re-run** (re-fires exactly that run's mode) and
   **Dismiss** — a stopped row notes how long it ran before it stopped — and a failed
   automated run also lands a *review failed* row in the inbox (gated on the automations
-  notification preference), matching manual-run failures.{{/ai}}
+  notification preference) that shows why it failed and offers a one-click **Re-run** right
+  from the row, matching manual-run failures (which show their reason too).{{/ai}}
 - **Keyboard** — rebind any shortcut, with live key-capture.
 - **Accounts** — your **GitHub** and **GitLab** sign-ins and your **Bitbucket**
   connection. **Sign in to GitHub…** and **Sign in to gitlab.com…** run the CLI's

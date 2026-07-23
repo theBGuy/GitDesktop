@@ -47,6 +47,10 @@ export interface AppNotification {
    *  non-GitHub providers, where a login isn't avatar-derivable. */
   authorGhHost?: string;
   target?: NotificationTarget;
+  /** Inline action rendered on the row (e.g. Re-run). MEMORY-ONLY: never
+   *  persisted — stripped before every disk write and on hydrate — so a
+   *  restart degrades the row to navigate-only rather than a dead button. */
+  action?: { label: string; run: () => void };
   /** Collapses accidental double-fires of the same transition (a re-render or a
    *  poll seam) within a short window — NOT persisted-across-restart dedup. */
   dedupeKey?: string;
@@ -110,7 +114,13 @@ function isValidNotification(x: unknown): x is AppNotification {
 async function persist(items: AppNotification[]): Promise<void> {
   try {
     const store = await getStore();
-    await store.set(STORE_KEY, items);
+    // Strip the in-memory `action` closure before it ever hits disk: JSON would
+    // silently drop the function but keep the object (and its `label`), leaving a
+    // dead button on reload. Memory-only by contract.
+    await store.set(
+      STORE_KEY,
+      items.map(({ action: _action, ...rest }) => rest),
+    );
   } catch {
     // best-effort — a failed persist must never break the work that fired it
   }
@@ -167,8 +177,14 @@ void (async () => {
     const raw = (await store.get<unknown[]>(STORE_KEY)) ?? [];
     const clean = (Array.isArray(raw) ? raw.filter(isValidNotification) : [])
       // Coerce an out-of-enum tone (hand-edited / older file) to neutral so the
-      // glyph is never left uncolored.
-      .map((n) => (TONES.has(n.tone) ? n : { ...n, tone: "neutral" as const }))
+      // glyph is never left uncolored, AND drop any `action` key: it's memory-only,
+      // so a hand-edited disk value must render as navigate-only, never a button.
+      .map((n) => {
+        const { action: _action, ...rest } = n;
+        return TONES.has(rest.tone)
+          ? rest
+          : { ...rest, tone: "neutral" as const };
+      })
       .slice(0, CAP);
     useNotifStore.getState().hydrate(clean);
   } catch {
@@ -197,6 +213,8 @@ export function pushNotification(input: {
   authorAvatarUrl?: string;
   authorGhHost?: string;
   target?: NotificationTarget;
+  /** Optional inline action for the row (memory-only; see {@link AppNotification.action}). */
+  action?: { label: string; run: () => void };
   dedupeKey?: string;
 }): void {
   const now = Date.now();
@@ -223,6 +241,7 @@ export function pushNotification(input: {
     authorAvatarUrl: input.authorAvatarUrl,
     authorGhHost: input.authorGhHost,
     target: input.target,
+    action: input.action,
     dedupeKey: input.dedupeKey,
   });
 }

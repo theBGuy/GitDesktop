@@ -297,25 +297,34 @@ async function notifyReviewDone(
   mode: ReviewMode,
   ok: boolean,
   target: ReviewTarget,
+  /** Failure reason (from `errorMessage`), carried into the failed row's
+   *  subtitle so the durable inbox record says WHY. Ignored on success. No
+   *  Re-run action here (unlike the automation path): a manual re-fire closure
+   *  would capture a stale AiSettings snapshot, whereas the panel's Run button
+   *  re-resolves fresh config. */
+  error?: string,
 ): Promise<void> {
   try {
     const { notifications } = await loadSettings();
     if (!notifications.reviews) return;
     const label = mode === "security" ? "security audit" : "review";
     const headline = ok ? `AI ${label} ready` : `AI ${label} failed`;
+    // A failed review carries its reason in the subtitle; success stays subject-only.
+    const subtitle =
+      !ok && error?.trim() ? `"${title}" — ${error}` : `"${title}"`;
     // Durable record in the inbox (regardless of focus), plus the OS ping when
     // the window is hidden. Both ride the same `reviews` pref.
     pushNotification({
       kind: ok ? "review-ready" : "review-failed",
       tone: ok ? "success" : "danger",
       title: headline,
-      subtitle: `"${title}"`,
+      subtitle,
       repoPath: target.repoPath,
       repoName: target.repoName,
       target: { type: "pr", kind: target.kind, ref: target.ref },
       dedupeKey: `review:${target.kind}:${target.repoPath}:${target.ref}:${ok}`,
     });
-    void notifyIfUnfocused(headline, `"${title}"`);
+    void notifyIfUnfocused(headline, subtitle);
   } catch {
     // best-effort — a missed notification must never affect the review
   }
@@ -590,15 +599,18 @@ export async function startReview(
     }
   } catch (e) {
     if (!control.cancelled) {
+      // CLI failures reject with a plain AppError object (not an Error), so
+      // `String(e)` would print "[object Object]" — use the shared extractor.
+      // Computed once: the store patch AND the inbox notification's subtitle both
+      // read the same reason.
+      const message = errorMessage(e);
       patch({
         phase: "error",
         status: "",
-        // CLI failures reject with a plain AppError object (not an Error), so
-        // `String(e)` would print "[object Object]" — use the shared extractor.
-        error: errorMessage(e),
+        error: message,
         endedAt: Date.now(),
       });
-      void notifyReviewDone(title, mode, false, target);
+      void notifyReviewDone(title, mode, false, target, message);
     }
   } finally {
     // Release the lane slot for the next queued run (only if this run actually
