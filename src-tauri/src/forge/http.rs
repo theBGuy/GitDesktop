@@ -8,7 +8,8 @@
 //! (`{atlassian_account_email}:{api_token}`) — app passwords are dead (removed
 //! 2026-07-28), so the API token is the only supported credential.
 
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{OnceLock, RwLock};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -65,15 +66,44 @@ fn client() -> &'static Client {
 
 /// The stored Bitbucket credentials (email + token), loaded from the OS keyring.
 /// Never logged, never returned across IPC.
+#[derive(Clone)]
 pub struct BbCredentials {
     pub email: String,
     pub token: String,
 }
 
-/// Load the stored credentials from the keyring (blocking keyring reads run on a
-/// blocking thread). `BitbucketNotConfigured` when no token is stored — the signal
-/// the read commands turn into the "connect an account" state.
+/// Process cache of the loaded credentials so the OS keyring is read ONCE per
+/// session, not on every call. Each keyring read pops a macOS keychain-authorization
+/// prompt, and the Bitbucket layer loads credentials at 70+ call sites (every REST
+/// request + the git-credential seed), so reading each time was a prompt storm.
+/// Invalidated on connect/disconnect via [`invalidate_credential_cache`].
+static CREDENTIAL_CACHE: RwLock<Option<BbCredentials>> = RwLock::new(None);
+/// Serializes the first (uncached) load so a burst of concurrent callers on repo
+/// open triggers ONE keyring read (one prompt), not one per caller.
+static CREDENTIAL_LOAD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// Bumped by every invalidation. A cold load captures it before the keyring read and
+/// only commits the read to the cache if it's unchanged — so a connect/disconnect
+/// that races an in-flight read can't be clobbered by a stale re-warm (the
+/// write-after-invalidate race). See [`load_credentials`] / [`invalidate_credential_cache`].
+static CREDENTIAL_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Load the stored credentials — from the process cache when warm, else the OS
+/// keyring (blocking reads run on a blocking thread), caching the result.
+/// `BitbucketNotConfigured` when no token is stored — the signal the read commands
+/// turn into the "connect an account" state.
 pub async fn load_credentials() -> AppResult<BbCredentials> {
+    // Fast path: reuse the cached credential (no keyring read → no macOS prompt).
+    if let Some(creds) = CREDENTIAL_CACHE.read().unwrap().clone() {
+        return Ok(creds);
+    }
+    // Serialize the cold load so concurrent first-callers don't each read the keyring.
+    let _guard = CREDENTIAL_LOAD_LOCK.lock().await;
+    if let Some(creds) = CREDENTIAL_CACHE.read().unwrap().clone() {
+        return Ok(creds); // another caller warmed the cache while we waited
+    }
+    // Capture the generation before the (slow) keyring read; if a connect/disconnect
+    // invalidates while we read, we must NOT cache the now-stale value.
+    let generation = CREDENTIAL_GENERATION.load(Ordering::Acquire);
     let (email, token) = tauri::async_runtime::spawn_blocking(|| {
         let email = crate::secrets::read_forge_secret(BB_HOST, KEY_EMAIL)?;
         let token = crate::secrets::read_forge_secret(BB_HOST, KEY_TOKEN)?;
@@ -83,10 +113,32 @@ pub async fn load_credentials() -> AppResult<BbCredentials> {
     .map_err(|e| AppError::Bitbucket(format!("keyring task failed: {e}")))??;
     match (email, token) {
         (Some(email), Some(token)) if !email.is_empty() && !token.is_empty() => {
-            Ok(BbCredentials { email, token })
+            let creds = BbCredentials { email, token };
+            // Commit only if no invalidation raced in during the read. The check and
+            // write are held under the cache write lock, and `invalidate` bumps the
+            // generation BEFORE clearing under the same lock — so either we skip the
+            // stale write, or our write is superseded by the clear; a stale value is
+            // never left cached.
+            {
+                let mut cache = CREDENTIAL_CACHE.write().unwrap();
+                if CREDENTIAL_GENERATION.load(Ordering::Acquire) == generation {
+                    *cache = Some(creds.clone());
+                }
+            }
+            Ok(creds)
         }
         _ => Err(AppError::BitbucketNotConfigured),
     }
+}
+
+/// Drop the cached credential so the next [`load_credentials`] re-reads the keyring —
+/// called on connect/disconnect (the stored token changed).
+pub(crate) fn invalidate_credential_cache() {
+    // Bump BEFORE clearing so an in-flight cold load sees the change and skips
+    // caching its stale read; the clear is serialized (cache write lock) against
+    // that load's commit.
+    CREDENTIAL_GENERATION.fetch_add(1, Ordering::AcqRel);
+    *CREDENTIAL_CACHE.write().unwrap() = None;
 }
 
 /// Bitbucket's error envelope. The common shape is

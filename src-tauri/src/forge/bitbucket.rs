@@ -262,8 +262,9 @@ pub async fn set_account(email: &str, token: &str) -> AppResult<BbAccountInfo> {
     .await
     .map_err(|e| AppError::Bitbucket(format!("keyring task failed: {e}")))??;
 
-    // The stored token changed — re-arm the seed latch so the next git op re-seeds
-    // git's credential store with the new token.
+    // The stored token changed — drop the cached credential and re-arm the seed
+    // latch so the next load reads the new token and the next git op re-seeds.
+    http::invalidate_credential_cache();
     reset_credential_seed();
 
     Ok(BbAccountInfo {
@@ -285,8 +286,9 @@ pub async fn clear_account() -> AppResult<()> {
     })
     .await
     .map_err(|e| AppError::Bitbucket(format!("keyring task failed: {e}")))??;
-    // Re-arm the seed latch so a future reconnect re-seeds (and a lingering seeded
-    // credential isn't silently reused by the next op after a disconnect).
+    // Drop the cached credential and re-arm the seed latch so a future reconnect
+    // re-reads the keyring and re-seeds.
+    http::invalidate_credential_cache();
     reset_credential_seed();
     Ok(())
 }
@@ -2741,9 +2743,10 @@ fn duplicate_pr_number(open_prs: &[PrInfo], base: &str) -> Option<u64> {
 /// token, a missing credential helper, or a non-zero exit are all tolerated (the
 /// git op itself surfaces any real auth failure); it only ever ADDS a credential.
 /// Seeds at most ONCE per process (the seed persists in the OS store), re-armed
-/// when the stored token changes — otherwise every op would re-read the OS keyring
-/// and, on macOS, re-pop the "gitdesktop wants to use your confidential
-/// information" keychain prompt.
+/// when the stored token changes — otherwise every op would re-run `git credential
+/// approve` (a subprocess) redundantly. (The keyring READ is separately cached in
+/// `http::load_credentials`, so neither this nor the REST layer re-pops the macOS
+/// "gitdesktop wants to use your confidential information" prompt after the first.)
 ///
 /// Runs `git credential approve` OUTSIDE any repo (`run_git_input(None, …)`) and
 /// takes NO repo lock — deliberately, so it stays safe to call from ANY context,
