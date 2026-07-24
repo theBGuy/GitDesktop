@@ -290,6 +290,12 @@ export const capabilities: Capability[] = [
   },
   {
     group: "Repository & workspace",
+    label:
+      "Locate a moved repo — repoint the entry and bring its local PRs, issues, review history & automations along",
+    ai: false,
+  },
+  {
+    group: "Repository & workspace",
     label: "Worktree manager — create, switch, promote & remove",
     highlight: true,
   },

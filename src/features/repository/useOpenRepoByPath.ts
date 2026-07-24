@@ -9,7 +9,9 @@ import {
   useAddRecentRepo,
   useRelocateRecentRepo,
   useRemoveRecentRepo,
+  useSettings,
 } from "@/lib/settings/queries";
+import { useConfirm } from "@/lib/stores/confirm";
 import { useUiStore } from "@/lib/stores/ui";
 import { isAppError } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
@@ -25,6 +27,8 @@ export function useOpenRepoByPath() {
   const addRecent = useAddRecentRepo();
   const removeRecent = useRemoveRecentRepo();
   const relocate = useRelocateRecentRepo();
+  const settings = useSettings();
+  const recentRepos = settings.data?.recentRepos;
 
   // Shared tail for every successful open: record in recents (best-effort — a
   // settings-write failure must never block opening), switch to the repo, track.
@@ -52,6 +56,23 @@ export function useOpenRepoByPath() {
       if (typeof picked !== "string") return;
       try {
         const info = await validateRepo(picked);
+        // Any git repo validates, but the OLD folder is gone so we can't verify
+        // it's the SAME repo — picking a different one would irreversibly fold
+        // this repo's app data into another's identity keys. Confirm first (the
+        // house rule for destructive paths). The name comes from the recents row
+        // (alias or name), else the moved folder's basename.
+        const oldRow = recentRepos?.find((r) => r.path === oldPath);
+        const oldName =
+          oldRow?.alias?.trim() ||
+          oldRow?.name ||
+          oldPath.split(/[/\\]/).pop() ||
+          oldPath;
+        const confirmed = await useConfirm.getState().ask({
+          title: `Relocate "${oldName}"?`,
+          body: `GitDesktop will point this entry at ${info.root} — its alias, local PRs, issues, review history, and settings will follow the folder. If this is a different repository, that data is merged in and can't be undone.`,
+          confirmLabel: "Relocate",
+        });
+        if (!confirmed) return;
         // Best-effort, like the addRecent write below — a settings failure must
         // never block opening. Repoint before addRecent so the follow-up write
         // finds the row at its new path and just refreshes name/order.
@@ -73,7 +94,7 @@ export function useOpenRepoByPath() {
         }
       }
     },
-    [relocate, recordOpenAndTrack],
+    [relocate, recordOpenAndTrack, recentRepos],
   );
 
   return useCallback(

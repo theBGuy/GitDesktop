@@ -311,6 +311,10 @@ scaffolding), publish to GitHub, and fork.
   for an unrecognized remote, a folder for local-only — and a visibility icon: lock /
   buildings / globe for private / internal / public), aliases, and recycle-bin-safe
   removal. Star or unstar from the menu.
+- **Locate a moved repository** — when a repo's folder moves on disk, point GitDesktop at
+  its new home from the "no longer a git repository" notice; after you confirm the folder,
+  the entry keeps its alias and badges, and its local PRs, issues, review history, and
+  automations follow along.
 - **GitHub repo settings** (admin) — description & topics (with AI suggestions), merge
   options and default commit messages, template & forking, **collaborators &
   invitations**, **branch rulesets** (create/edit, reversible enable/disable), **code

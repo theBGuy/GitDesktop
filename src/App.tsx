@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { ConfirmDialogHost } from "@/components/confirm-dialog-host";
 import { Spinner } from "@/components/ui/spinner";
 import { ReconnectDialog } from "@/features/accounts/ReconnectDialog";
 import { ActivityStrip } from "@/features/activity/ActivityDock";
@@ -205,6 +206,7 @@ function App() {
         <ActivityStrip />
       </div>
       <AutomationResultDialog />
+      <ConfirmDialogHost />
       <ReconnectDialog />
       <UpdateChecker />
       <WhatsNew />

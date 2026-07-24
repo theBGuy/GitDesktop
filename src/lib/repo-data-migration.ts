@@ -55,6 +55,12 @@ import { storeName } from "@/lib/test-mode";
 // whole-object write-back. The window is milliseconds wide and requires relocating
 // a repo at the exact moment a background writer fires; it matches the risk the
 // MCP-vs-GUI dual-writer stores already carry by design (reload-before-mutate).
+//
+// **Accepted residual — no retry:** when a single store throws mid-migration its
+// old-key data is orphaned permanently — nothing re-attempts the move on the next
+// reopen. The stores' own legacy folding only re-homes the *current* checkout's
+// raw-path key onto its identity, never the departed `<oldPath>/.git` key, so a
+// failed store stays split at the old location.
 
 /** Load a store with the exact shared-instance options every feature module uses,
  *  so we mutate the same cached instance rather than a private copy. */
@@ -123,8 +129,9 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 }
 
 /** Merge two id-bearing arrays: keep-array records first, append old records whose
- *  id isn't already present. Non-object/idless entries in the old array are dropped
- *  (they can't be de-duped and shouldn't shadow real records). */
+ *  id isn't already present. Non-object entries in the old array are dropped (they
+ *  can't be de-duped); an idless object still passes `isRecord` and is kept (its
+ *  `id` is `undefined`, so at most one idless old record survives per merge). */
 function mergeIds(keep: unknown[], old: unknown[]): unknown[] {
   const seen = new Set(
     keep.filter((r): r is { id: unknown } => isRecord(r)).map((r) => r.id),
@@ -194,6 +201,8 @@ function combine(
     return Object.keys(result).length > 0 ? result : undefined;
   }
   // keep-new: the new key's value wins when present; else the first old value.
+  // `undefined` IS the missing-key sentinel: plugin-store's `get` maps absent
+  // keys to undefined (dist-js: `return exists ? value : undefined`), never null.
   return newVal !== undefined ? newVal : oldVals[0];
 }
 
