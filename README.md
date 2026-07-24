@@ -71,6 +71,13 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
 - **GitHub Actions cockpit** — browse runs, drill into jobs and steps, re-run (all
   or failed), cancel, dispatch a workflow, and read failed-step logs — none of
   which GitHub Desktop does.
+- **Explore repositories** — a full-page browser across **GitHub, GitLab & Bitbucket**:
+  before you type it shows **your own repositories** (grouped by owner) and a **Popular**
+  star-sorted feed (GitHub & GitLab); typing searches GitHub, all public GitLab projects,
+  or your Bitbucket workspaces (Bitbucket retired global repo search). Sort by best match,
+  most stars, or recently updated, then open a result for its README preview and **clone**,
+  **fork** (all three, then offer to clone the fork), or **star** it (GitHub & GitLab) —
+  without knowing the URL. Fully keyboard-navigable.
 - **GitLab, first-class** — via the **GitLab CLI (`glab`)**, on gitlab.com or
   **self-managed** (any host `glab auth login` knows). Browse and clone projects,
   then read and act on merge requests, issues, pipelines, and releases in the same

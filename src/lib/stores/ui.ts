@@ -2,7 +2,7 @@ import { create } from "zustand";
 import type { CommitAuthor, RepoInfo } from "@/lib/git/types";
 import { startViewTransition } from "@/lib/view-transition";
 
-export type AppView = "welcome" | "repo" | "settings" | "help";
+export type AppView = "welcome" | "repo" | "settings" | "help" | "explore";
 export type RepoTab =
   | "changes"
   | "history"
@@ -138,8 +138,8 @@ function isEmptyDraft(d: CommitDraft): boolean {
 
 interface UiState {
   view: AppView;
-  /** Underlying view to return to when settings or help closes. */
-  previousView: Exclude<AppView, "settings" | "help">;
+  /** Underlying view to return to when an overlay (settings, help, explore) closes. */
+  previousView: Exclude<AppView, "settings" | "help" | "explore">;
   /** Settings section to jump to when opening Settings; null = leave as-is.
    *  Consumed (and cleared) by SettingsScreen once applied. */
   settingsTarget: SettingsTarget | null;
@@ -268,6 +268,8 @@ interface UiState {
   closeSettings: () => void;
   openHelp: () => void;
   closeHelp: () => void;
+  openExplore: () => void;
+  closeExplore: () => void;
   setRepoTab: (tab: RepoTab) => void;
   setCompareBranch: (branch: string | null) => void;
   selectPr: (pr: SelectedPr | null) => void;
@@ -491,7 +493,9 @@ export const useUiStore = create<UiState>()((set, get) => {
           settingsTarget: target ?? null,
           // Keep the underlying view when opening from another overlay.
           previousView:
-            view === "settings" || view === "help" ? get().previousView : view,
+            view === "settings" || view === "help" || view === "explore"
+              ? get().previousView
+              : view,
         });
       }),
     clearSettingsTarget: () => set({ settingsTarget: null }),
@@ -505,7 +509,9 @@ export const useUiStore = create<UiState>()((set, get) => {
           settingsTarget: "mcp-servers",
           mcpBrowseOpen: true,
           previousView:
-            view === "settings" || view === "help" ? get().previousView : view,
+            view === "settings" || view === "help" || view === "explore"
+              ? get().previousView
+              : view,
         });
       }),
     setMcpBrowseOpen: (open) => set({ mcpBrowseOpen: open }),
@@ -525,10 +531,27 @@ export const useUiStore = create<UiState>()((set, get) => {
         set({
           view: "help",
           previousView:
-            view === "settings" || view === "help" ? get().previousView : view,
+            view === "settings" || view === "help" || view === "explore"
+              ? get().previousView
+              : view,
         });
       }),
     closeHelp: () =>
+      startViewTransition(() => set({ view: get().previousView })),
+    openExplore: () =>
+      startViewTransition(() => {
+        const { view } = get();
+        set({
+          view: "explore",
+          // Keep the underlying view when opening Explore from another overlay,
+          // so closing Explore returns to what was really underneath.
+          previousView:
+            view === "settings" || view === "help" || view === "explore"
+              ? get().previousView
+              : view,
+        });
+      }),
+    closeExplore: () =>
       startViewTransition(() => set({ view: get().previousView })),
     selectFile: (file) => set({ selectedFile: file }),
     setCommitDraft: (title, body) =>

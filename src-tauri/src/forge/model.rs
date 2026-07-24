@@ -305,6 +305,23 @@ pub struct Implemented {
     /// `canWrite` (the forge-gating convention for a shared control whose GitHub arm
     /// has its own gate), so the frontend enables it there without this flag.
     pub mr_draft_toggle: bool,
+    /// Searching / browsing repositories on the provider for the Explore view — a
+    /// shared read (GitHub `search/repositories`, GitLab `projects?search=`,
+    /// Bitbucket workspace-scoped `q=name~"…"`), so true for all three. Bitbucket's
+    /// is workspace-scoped by design (global repo search was retired platform-wide).
+    pub repo_search: bool,
+    /// Forking a repo by its `owner/name` (Explore's Fork action, distinct from the
+    /// current-repo fork). Wired for all three (`gh repo fork`, GitLab fork POST,
+    /// Bitbucket forks POST), so true for each.
+    pub repo_fork_by_name: bool,
+    /// Starring / unstarring a repo by its `owner/name` from Explore, plus the
+    /// starred-state read. GitHub and GitLab both have a star API; Bitbucket Cloud
+    /// has no stars, so it stays `false` there.
+    pub repo_star: bool,
+    /// Reading a repo's rendered README for the Explore preview — a shared read
+    /// (GitHub `repos/…/readme`, GitLab repository-files raw, Bitbucket `src/…`),
+    /// so true for all three.
+    pub repo_readme: bool,
 }
 
 impl Implemented {
@@ -381,6 +398,12 @@ impl Implemented {
             // GitHub's Ready / Convert-to-draft goes via `gh pr ready [--undo]`
             // gated on `canWrite`, not this flag.
             mr_draft_toggle: false,
+            // Explore: repo search, fork-by-name, star, and README are all built
+            // for GitHub.
+            repo_search: true,
+            repo_fork_by_name: true,
+            repo_star: true,
+            repo_readme: true,
         }
     }
 
@@ -439,6 +462,10 @@ impl Implemented {
             mr_thread_create: false,
             mr_review_submit: false,
             mr_draft_toggle: false,
+            repo_search: false,
+            repo_fork_by_name: false,
+            repo_star: false,
+            repo_readme: false,
         }
     }
 
@@ -528,6 +555,13 @@ impl Implemented {
                 mr_review_submit: true,
                 // Draft toggle both ways via `glab mr update --ready|--draft`.
                 mr_draft_toggle: true,
+                // Explore: repo search (`projects?search=`), fork-by-name (fork
+                // POST), star (`projects/{id}/star`), and README (repository-files
+                // raw) are all wired for GitLab.
+                repo_search: true,
+                repo_fork_by_name: true,
+                repo_star: true,
+                repo_readme: true,
             },
             // Bitbucket Cloud reads (Phase 3): PR list/view/diff, CI pipelines, and
             // repo View/URL are wired over direct HTTP. Phase 4 adds the WRITES: PR
@@ -584,6 +618,12 @@ impl Implemented {
                 mr_review_submit: true,
                 // Draft toggle both ways (PUT `draft`).
                 mr_draft_toggle: true,
+                // Explore: repo search (workspace-scoped `q=name~"…"`), fork-by-name
+                // (forks POST), and README (`src/…`) are wired. `repo_star` stays
+                // false (via `..Self::none()`) — Bitbucket Cloud has no stars.
+                repo_search: true,
+                repo_fork_by_name: true,
+                repo_readme: true,
                 ..Self::none()
             },
         }
@@ -682,6 +722,71 @@ pub struct ForgeRepoList {
     pub repos: Vec<ForgeRepo>,
 }
 
+/// One search-result repository for the Explore view — a superset of [`ForgeRepo`]
+/// carrying the extra columns a discovery/browse row shows (stars, language, the
+/// web URL, the default branch). Each provider maps its own search payload onto it.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ForgeSearchRepo {
+    /// "owner/name" (GitHub / Bitbucket) or "group/subgroup/name" (GitLab).
+    pub full_name: String,
+    pub owner: String,
+    pub name: String,
+    pub private: bool,
+    pub archived: bool,
+    pub fork: bool,
+    /// HTTPS clone URL.
+    pub clone_url: String,
+    /// SSH clone URL — empty string when the provider doesn't supply one.
+    pub ssh_url: String,
+    pub description: Option<String>,
+    /// The provider's last-activity time (GitHub `pushed_at` / GitLab
+    /// `last_activity_at` / Bitbucket `updated_on`), for recency display.
+    pub updated_at: Option<String>,
+    pub stars: Option<u64>,
+    pub language: Option<String>,
+    pub web_url: Option<String>,
+    pub default_branch: Option<String>,
+}
+
+/// One page of [`ForgeSearchRepo`] results for the Explore view.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ForgeSearchList {
+    pub repos: Vec<ForgeSearchRepo>,
+    /// Whether another page is likely available (per-provider heuristic).
+    pub has_more: bool,
+    /// The total result count where the provider reports one (GitHub REST
+    /// `total_count`); `None` on GitLab/Bitbucket, which don't.
+    pub total: Option<u64>,
+}
+
+/// The outcome of forking a repo by name — the fork's identity plus a best-effort
+/// readiness flag (fork creation is asynchronous on every provider).
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ForgeForkResult {
+    /// The fork's `owner/name` (or `group/…/name` on GitLab).
+    pub full_name: String,
+    /// HTTPS clone URL of the fork.
+    pub clone_url: String,
+    pub web_url: Option<String>,
+    /// Whether the fork looked ready after a bounded readiness poll. `false` is not
+    /// an error — the fork exists, it just may not be cloneable for a few more
+    /// seconds.
+    pub ready: bool,
+}
+
+/// A provider's static feature profile — its platform [`Capabilities`] plus what
+/// GitDesktop has [`Implemented`] for it. Pure (no I/O), so the Explore view can
+/// ask "does this provider support fork/star/search?" without a repo in hand.
+#[derive(Serialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderFeatures {
+    pub capabilities: Capabilities,
+    pub implemented: Implemented,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -754,6 +859,8 @@ mod tests {
         // The draft toggle stays false for GitHub — its Ready/Convert path goes via
         // `gh pr ready [--undo]` gated on canWrite, not this flag.
         assert!(!i.mr_draft_toggle);
+        // Explore: repo search, fork-by-name, star, and README are all built for GitHub.
+        assert!(i.repo_search && i.repo_fork_by_name && i.repo_star && i.repo_readme);
     }
 
     #[test]
@@ -805,6 +912,8 @@ mod tests {
         assert!(imp.commit_comments && imp.mr_thread_create && imp.mr_review_submit);
         // …and the draft toggle both ways (`glab mr update --ready|--draft`).
         assert!(imp.mr_draft_toggle);
+        // Explore: repo search, fork-by-name, star, and README are all wired for GitLab.
+        assert!(imp.repo_search && imp.repo_fork_by_name && imp.repo_star && imp.repo_readme);
     }
 
     #[test]
@@ -861,5 +970,9 @@ mod tests {
         assert!(bb.mr_draft_toggle);
         // GitHub keeps the draft toggle off (its Ready/Convert path is gh-native).
         assert!(!gh.mr_draft_toggle);
+        // Explore: repo search, fork-by-name, and README are wired for Bitbucket;
+        // star is NOT (Bitbucket Cloud has no stars).
+        assert!(bb.repo_search && bb.repo_fork_by_name && bb.repo_readme);
+        assert!(!bb.repo_star);
     }
 }

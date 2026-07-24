@@ -6,12 +6,16 @@
 //! `gh_status` → the neutral [`ForgeStatus`]; later phases add the PR/issue/CI
 //! methods, each delegating to the matching `gh_*` function.
 
+use serde_json::Value;
+
 use crate::error::{AppError, AppResult};
 use crate::forge::model::{
-    Capabilities, ForgeRepo, ForgeRepoList, ForgeStatus, Implemented, Provider,
+    Capabilities, ForgeForkResult, ForgeRepo, ForgeRepoList, ForgeSearchList, ForgeSearchRepo,
+    ForgeStatus, Implemented, Provider,
 };
-use crate::forge::Forge;
+use crate::forge::{validate_owner, validate_repo_name, Forge};
 use crate::github::pr::{gh_list_repos, gh_status, GhRepo, GhStatus};
+use crate::github::runner::{run_gh, run_gh_raw, GH_NETWORK_TIMEOUT, GH_TIMEOUT};
 
 /// GitHub via the `gh` CLI. Unit struct — `gh` carries all the state (auth, host).
 pub struct GitHubForge;
@@ -868,9 +872,304 @@ fn auth_cache_put(host: &str, authed: bool) {
         .insert(host.to_string(), (std::time::Instant::now(), authed));
 }
 
+// ── Explore: repo search / fork-by-name / star / README ───────────────────────
+//
+// The Explore view's GitHub backend, over `gh api`. Search uses GitHub's
+// `search/repositories` endpoint; fork/star/readme use the REST repo endpoints.
+// All owner/name values are grammar-validated before interpolation (argv/path
+// injection guard), and search payloads are parsed tolerantly via `serde_json::Value`
+// (a malformed item is skipped, not fatal).
+
+/// GitHub caps its search result set at 1000 items regardless of the client, and
+/// this backend requests 30 per page.
+const GH_SEARCH_PER_PAGE: u64 = 30;
+const GH_SEARCH_CAP: u64 = 1000;
+
+/// Map the neutral `sort` (`"best" | "stars" | "updated"`) onto the extra `gh api`
+/// `-f` args for `search/repositories`. `"best"` omits sort (GitHub's best-match
+/// default); the others pin `order=desc`. Any other value is rejected by the caller
+/// before this is reached, but we return an empty slice defensively.
+fn github_sort_args(sort: &str) -> Vec<&'static str> {
+    match sort {
+        "stars" => vec!["-f", "sort=stars", "-f", "order=desc"],
+        "updated" => vec!["-f", "sort=updated", "-f", "order=desc"],
+        // "best" (and, defensively, anything else) → best-match default, no sort.
+        _ => Vec::new(),
+    }
+}
+
+/// Whether another search page is available, given the 1-based `page` just fetched
+/// and the reported `total_count`. GitHub hard-caps search at 1000 results, so the
+/// effective end is `min(total, 1000)`; more pages exist while what we've consumed
+/// (`page * 30`) is still short of it. Pure, so it's unit-testable.
+fn github_has_more(page: u32, total_count: u64) -> bool {
+    let consumed = u64::from(page) * GH_SEARCH_PER_PAGE;
+    consumed < total_count.min(GH_SEARCH_CAP)
+}
+
+/// One search-result repo from a `serde_json::Value` item of GitHub's
+/// `search/repositories` response. Tolerant: a missing `full_name` skips the item
+/// (returns `None`); every other field defaults gracefully.
+fn search_repo_from_value(item: &Value) -> Option<ForgeSearchRepo> {
+    let full_name = item.get("full_name").and_then(Value::as_str)?.to_string();
+    if full_name.is_empty() {
+        return None;
+    }
+    let str_field = |k: &str| item.get(k).and_then(Value::as_str).map(str::to_string);
+    Some(ForgeSearchRepo {
+        owner: item
+            .get("owner")
+            .and_then(|o| o.get("login"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        name: item.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
+        full_name,
+        private: item.get("private").and_then(Value::as_bool).unwrap_or(false),
+        archived: item.get("archived").and_then(Value::as_bool).unwrap_or(false),
+        fork: item.get("fork").and_then(Value::as_bool).unwrap_or(false),
+        clone_url: str_field("clone_url").unwrap_or_default(),
+        ssh_url: str_field("ssh_url").unwrap_or_default(),
+        description: str_field("description"),
+        updated_at: str_field("pushed_at"),
+        stars: item.get("stargazers_count").and_then(Value::as_u64),
+        language: str_field("language"),
+        web_url: str_field("html_url"),
+        default_branch: str_field("default_branch"),
+    })
+}
+
+/// Search GitHub repositories for the Explore view. An empty `query` is the
+/// Popular/Discover feed (`stars:>1000` sorted by stars). Uses `gh api -X GET
+/// search/repositories -f q=… -f per_page=30 -f page=…` (gh URL-encodes the `-f`
+/// query params). GitHub's search bucket is 30 req/min — a rate-limit error
+/// surfaces rather than being retried.
+pub async fn search_repos(query: &str, sort: &str, page: u32) -> AppResult<ForgeSearchList> {
+    // Popular mode: no query → high-star discovery feed, forced to star order.
+    let (q, sort) = if query.trim().is_empty() {
+        ("stars:>1000".to_string(), "stars")
+    } else {
+        (query.to_string(), sort)
+    };
+    let per_page = GH_SEARCH_PER_PAGE.to_string();
+    let page_s = page.to_string();
+    let q_arg = format!("q={q}");
+    let per_page_arg = format!("per_page={per_page}");
+    let page_arg = format!("page={page_s}");
+    let mut args: Vec<&str> = vec![
+        "api",
+        "-X",
+        "GET",
+        "search/repositories",
+        "-f",
+        &q_arg,
+        "-f",
+        &per_page_arg,
+        "-f",
+        &page_arg,
+    ];
+    args.extend(github_sort_args(sort));
+    let out = run_gh(None, &args, GH_NETWORK_TIMEOUT).await?;
+    let value: Value = serde_json::from_str(&out.stdout_lossy())
+        .map_err(|e| AppError::Gh(format!("could not parse GitHub search results: {e}")))?;
+    let total_count = value.get("total_count").and_then(Value::as_u64).unwrap_or(0);
+    let repos = value
+        .get("items")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(search_repo_from_value).collect())
+        .unwrap_or_default();
+    Ok(ForgeSearchList {
+        repos,
+        has_more: github_has_more(page, total_count),
+        total: Some(total_count),
+    })
+}
+
+/// Fork a GitHub repo by `owner/name` into the caller's account. Idempotent: an
+/// existing fork makes `gh repo fork` exit 0 with an "already exists" note, which we
+/// treat as success. `--clone=false --remote=false` skips the non-TTY clone prompt.
+/// Resolves the real fork nwo via `gh api user` + `gh api repos/{login}/{name}`
+/// (handles GitHub's rename-on-collision), then polls the fork's commits until it's
+/// cloneable (bounded — a timeout returns `ready: false`, never an error).
+pub async fn fork_repo(owner: &str, name: &str) -> AppResult<ForgeForkResult> {
+    validate_owner(owner)?;
+    validate_repo_name(name)?;
+    let slug = format!("{owner}/{name}");
+    // Fork creation. An already-existing fork exits 0 ("… already exists"), so a
+    // clean success and the idempotent case both land here; a real failure errors.
+    run_gh(
+        None,
+        &["repo", "fork", &slug, "--clone=false", "--remote=false"],
+        GH_NETWORK_TIMEOUT,
+    )
+    .await?;
+    // Resolve the fork's owner (the signed-in user) and confirm its canonical nwo —
+    // GitHub renames on a name collision, so read `full_name` back rather than
+    // assuming `{login}/{name}`.
+    let login = run_gh(None, &["api", "user", "-q", ".login"], GH_TIMEOUT)
+        .await?
+        .stdout_lossy()
+        .trim()
+        .to_string();
+    if login.is_empty() {
+        return Err(AppError::Gh("could not resolve your GitHub login".into()));
+    }
+    let fork_slug = format!("{login}/{name}");
+    let repo_out = run_gh(None, &["api", &format!("repos/{fork_slug}")], GH_NETWORK_TIMEOUT).await?;
+    let repo: Value = serde_json::from_str(&repo_out.stdout_lossy())
+        .map_err(|e| AppError::Gh(format!("could not parse the forked repository: {e}")))?;
+    let full_name = repo
+        .get("full_name")
+        .and_then(Value::as_str)
+        .unwrap_or(&fork_slug)
+        .to_string();
+    let clone_url = repo
+        .get("clone_url")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let web_url = repo.get("html_url").and_then(Value::as_str).map(str::to_string);
+    // Readiness: fork creation is async (202). Poll the commits endpoint (5×2s);
+    // first success = ready. A timeout is not an error — the fork exists.
+    let ready = poll_fork_ready(&full_name).await;
+    Ok(ForgeForkResult {
+        full_name,
+        clone_url,
+        web_url,
+        ready,
+    })
+}
+
+/// Poll a fork's `commits?per_page=1` up to 5 times (2s apart) — the fork is
+/// cloneable once GitHub has populated it. Returns `true` on the first success,
+/// `false` if it never became ready in the bound (not an error).
+async fn poll_fork_ready(full_name: &str) -> bool {
+    let endpoint = format!("repos/{full_name}/commits?per_page=1");
+    for attempt in 0..5 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+        if let Ok(out) = run_gh_raw(None, &["api", &endpoint], GH_TIMEOUT).await {
+            if out.code == 0 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Star (`PUT`) or unstar (`DELETE`) a repo by name for the signed-in user via
+/// `user/starred/{owner}/{name}` — idempotent on GitHub's side.
+pub async fn star_repo(owner: &str, name: &str, star: bool) -> AppResult<()> {
+    validate_owner(owner)?;
+    validate_repo_name(name)?;
+    let endpoint = format!("user/starred/{owner}/{name}");
+    let method = if star { "PUT" } else { "DELETE" };
+    run_gh(None, &["api", "--method", method, &endpoint], GH_NETWORK_TIMEOUT).await?;
+    Ok(())
+}
+
+/// Whether the signed-in user has starred `owner/name`. `GET
+/// user/starred/{owner}/{name}` answers 204 (starred) / 404 (not) — `run_gh_raw`
+/// keeps the 404 as `code != 0` (→ false) rather than erroring; any other spawn
+/// failure surfaces.
+pub async fn starred(owner: &str, name: &str) -> AppResult<bool> {
+    validate_owner(owner)?;
+    validate_repo_name(name)?;
+    let endpoint = format!("user/starred/{owner}/{name}");
+    let out = run_gh_raw(None, &["api", "--method", "GET", &endpoint], GH_TIMEOUT).await?;
+    Ok(out.code == 0)
+}
+
+/// A repo's raw README markdown, or `None` when it has none. `gh api
+/// repos/{owner}/{name}/readme` with the `raw` media type returns the body; a 404
+/// (no README) reads as `None` rather than an error.
+pub async fn repo_readme(owner: &str, name: &str) -> AppResult<Option<String>> {
+    validate_owner(owner)?;
+    validate_repo_name(name)?;
+    let endpoint = format!("repos/{owner}/{name}/readme");
+    let out = run_gh_raw(
+        None,
+        &["api", &endpoint, "-H", "Accept: application/vnd.github.raw"],
+        GH_NETWORK_TIMEOUT,
+    )
+    .await?;
+    if out.code != 0 {
+        // A 404 (no README) is absence, not an error. Any other non-zero exit is a
+        // real failure worth surfacing (rate limit, auth, network).
+        let stderr = out.stderr.to_ascii_lowercase();
+        if stderr.contains("404") || stderr.contains("not found") {
+            return Ok(None);
+        }
+        let msg = out.stderr.trim();
+        return Err(AppError::Gh(if msg.is_empty() {
+            format!("gh exited with code {} reading the README", out.code)
+        } else {
+            msg.to_string()
+        }));
+    }
+    Ok(Some(crate::forge::cap_readme(&out.stdout_lossy())))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn github_sort_args_map_each_sort() {
+        assert_eq!(github_sort_args("best"), Vec::<&str>::new());
+        assert_eq!(github_sort_args("stars"), vec!["-f", "sort=stars", "-f", "order=desc"]);
+        assert_eq!(github_sort_args("updated"), vec!["-f", "sort=updated", "-f", "order=desc"]);
+    }
+
+    #[test]
+    fn github_has_more_respects_page_and_1000_cap() {
+        // Page 1 of 100 total → more pages.
+        assert!(github_has_more(1, 100));
+        // Exactly consumed (page 4 * 30 = 120 >= 100) → no more.
+        assert!(!github_has_more(4, 100));
+        // The 1000 cap bites even when total_count is huge: page 33*30 = 990 < 1000.
+        assert!(github_has_more(33, 50_000));
+        // page 34 * 30 = 1020 >= 1000 → no more, despite 50k reported.
+        assert!(!github_has_more(34, 50_000));
+        // Empty result set.
+        assert!(!github_has_more(1, 0));
+    }
+
+    #[test]
+    fn search_repo_from_value_parses_and_skips_malformed() {
+        let item = serde_json::json!({
+            "full_name": "rust-lang/rust",
+            "name": "rust",
+            "owner": { "login": "rust-lang" },
+            "private": false,
+            "archived": false,
+            "fork": false,
+            "clone_url": "https://github.com/rust-lang/rust.git",
+            "ssh_url": "git@github.com:rust-lang/rust.git",
+            "description": "The Rust language",
+            "pushed_at": "2026-01-01T00:00:00Z",
+            "stargazers_count": 90000,
+            "language": "Rust",
+            "html_url": "https://github.com/rust-lang/rust",
+            "default_branch": "master"
+        });
+        let r = search_repo_from_value(&item).expect("parses a well-formed item");
+        assert_eq!(r.full_name, "rust-lang/rust");
+        assert_eq!(r.owner, "rust-lang");
+        assert_eq!(r.stars, Some(90000));
+        assert_eq!(r.language.as_deref(), Some("Rust"));
+        assert_eq!(r.default_branch.as_deref(), Some("master"));
+        // GitHub's REST `items[].name` is already the URL SLUG (not a display name),
+        // `owner.login` the URL owner, and `full_name` their join — so the identity
+        // every by-owner/name command depends on holds natively.
+        assert_eq!(r.name, "rust");
+        assert_eq!(format!("{}/{}", r.owner, r.name), r.full_name);
+        // A missing full_name skips the item rather than sinking the batch.
+        assert!(search_repo_from_value(&serde_json::json!({ "name": "x" })).is_none());
+        // An empty full_name is also skipped.
+        assert!(search_repo_from_value(&serde_json::json!({ "full_name": "" })).is_none());
+    }
 
     #[test]
     fn credential_entries_are_reset_then_helper_for_default_host() {

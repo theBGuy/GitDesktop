@@ -42,9 +42,12 @@ import type {
   DraftCommentIn,
   ExternalReviewItem,
   FileDiff,
+  ForgeForkResult,
   ForgeProvider,
+  ForgeProviderFeatures,
   ForgeRepoAdmin,
   ForgeRepoList,
+  ForgeSearchList,
   ForgeStatus,
   ForgeUserRef,
   GeneratedNotes,
@@ -1080,6 +1083,70 @@ export const forgeStatus = (repoPath: string) =>
 /** The signed-in user's repositories on a provider, for the clone browser. */
 export const forgeListRepos = (provider: ForgeProvider) =>
   invoke<ForgeRepoList>("forge_list_repos", { provider });
+
+// ── Explore: search / browse / fork / star / README ──────────────────────────
+//
+// The Explore surface searches and browses repositories on a provider. An empty
+// `query` means the Popular feed (GitHub/GitLab only — never send an empty query
+// for Bitbucket, whose search is workspace-scoped and single-page).
+
+/** Search repositories on a provider (empty `query` = the Popular feed on
+ *  GitHub/GitLab). `page` is 1-based; `hasMore` on the result drives paging. */
+export const forgeSearchRepos = (
+  provider: ForgeProvider,
+  query: string,
+  sort: "best" | "stars" | "updated",
+  page: number,
+) =>
+  invoke<ForgeSearchList>("forge_search_repos", {
+    provider,
+    query,
+    sort,
+    page,
+  });
+
+/** Fork a repository under the signed-in user's account. Async server-side — the
+ *  result's `ready` is false when the fork's git objects may not be clonable yet. */
+export const forgeForkRepo = (
+  provider: ForgeProvider,
+  owner: string,
+  name: string,
+) => invoke<ForgeForkResult>("forge_fork_repo", { provider, owner, name });
+
+/** Star (or unstar, when `star` is false) a repository. */
+export const forgeStarRepo = (
+  provider: ForgeProvider,
+  owner: string,
+  name: string,
+  star: boolean,
+) => invoke<void>("forge_star_repo", { provider, owner, name, star });
+
+/** Whether the signed-in user has starred a repository. */
+export const forgeStarred = (
+  provider: ForgeProvider,
+  owner: string,
+  name: string,
+) => invoke<boolean>("forge_starred", { provider, owner, name });
+
+/** A repository's rendered README (HTML/markdown from the provider); null when the
+ *  repo has no README (not an error). `defaultBranch` scopes the lookup when known. */
+export const forgeRepoReadme = (
+  provider: ForgeProvider,
+  owner: string,
+  name: string,
+  defaultBranch: string | null,
+) =>
+  invoke<string | null>("forge_repo_readme", {
+    provider,
+    owner,
+    name,
+    defaultBranch,
+  });
+
+/** What a provider supports and what GitDesktop has built for it — the gate the
+ *  Explore surface reads to show only Fork/Star/README controls that work. */
+export const forgeProviderFeatures = (provider: ForgeProvider) =>
+  invoke<ForgeProviderFeatures>("forge_provider_features", { provider });
 
 // ── Bitbucket account (Atlassian API token) ──────────────────────────────────
 //

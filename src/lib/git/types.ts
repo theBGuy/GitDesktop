@@ -507,6 +507,54 @@ export interface ForgeRepoList {
   repos: ForgeRepo[];
 }
 
+/** A repository row from the Explore search/browse surface — a richer shape than
+ *  {@link ForgeRepo} (which the clone browser lists your own repos with): it
+ *  carries stars/language/updatedAt so search results can rank and describe repos
+ *  you don't own. `Option<T>` on the Rust side serializes to `null`. */
+export interface ForgeSearchRepo {
+  fullName: string;
+  owner: string;
+  name: string;
+  private: boolean;
+  archived: boolean;
+  fork: boolean;
+  cloneUrl: string;
+  sshUrl: string;
+  description: string | null;
+  updatedAt: string | null;
+  stars: number | null;
+  language: string | null;
+  webUrl: string | null;
+  defaultBranch: string | null;
+}
+
+/** One page of Explore search results. `hasMore` drives the load-more button;
+ *  `total` is the provider's reported match count (GitHub caps search at 1000
+ *  reachable results, so `total` may exceed what paging can reach; null when the
+ *  provider gives no count). */
+export interface ForgeSearchList {
+  repos: ForgeSearchRepo[];
+  hasMore: boolean;
+  total: number | null;
+}
+
+/** The result of forking a repo by name. Fork is async server-side, so
+ *  `ready: false` means the fork was created but its git objects may not be
+ *  clonable yet. */
+export interface ForgeForkResult {
+  fullName: string;
+  cloneUrl: string;
+  webUrl: string | null;
+  ready: boolean;
+}
+
+/** What a provider supports *and* what GitDesktop has built for it, bundled for
+ *  the Explore surface so it can gate Fork/Star/README in one fetch. */
+export interface ForgeProviderFeatures {
+  capabilities: ForgeCapabilities;
+  implemented: ForgeImplemented;
+}
+
 export interface GhAccount {
   /** The host this account is signed in to ("github.com" or an Enterprise
    *  server). Accounts are grouped by host and switched per host. */
@@ -627,6 +675,14 @@ export interface ForgeImplemented {
   insights: boolean;
   /** Repo-management surface: View/Fork/Star/admin settings, branch-rule import. */
   repoActions: boolean;
+  /** Searching/browsing repositories on the provider (the Explore surface). */
+  repoSearch: boolean;
+  /** Forking a repository by owner/name from the Explore surface. */
+  repoForkByName: boolean;
+  /** Starring / unstarring a repository from the Explore surface. */
+  repoStar: boolean;
+  /** Fetching a repository's rendered README for the Explore preview. */
+  repoReadme: boolean;
   /** Publishing a local repo to the provider (create remote + push). */
   publish: boolean;
   /** Posting a comment/note on an issue (first per-action write). */

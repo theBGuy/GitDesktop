@@ -36,9 +36,10 @@ use crate::forge::http::{
     self, BbCredentials, BB_HOST, KEY_DISPLAY_NAME, KEY_EMAIL, KEY_TOKEN, KEY_USERNAME,
 };
 use crate::forge::model::{
-    Capabilities, CompletedReviewerOut, ForgeRepo, ForgeRepoList, ForgeStatus, ForgeUserRef,
-    Implemented, Provider,
+    Capabilities, CompletedReviewerOut, ForgeForkResult, ForgeRepo, ForgeRepoList, ForgeSearchList,
+    ForgeSearchRepo, ForgeStatus, ForgeUserRef, Implemented, Provider,
 };
+use crate::forge::{cap_readme, validate_owner, validate_repo_name};
 use crate::forge::Forge;
 use crate::github::actions::{RunDetail, RunJob, WorkflowRun};
 use crate::github::pr::{
@@ -5056,9 +5057,345 @@ pub async fn publish_repo(
     Ok(html_url)
 }
 
+// ── Explore: repo search / fork-by-name / README ──────────────────────────────
+//
+// Bitbucket retired global repo search (`GET /2.0/repositories` → 410 Gone,
+// CHANGE-2770), so Explore search is workspace-scoped by design: we iterate the
+// viewer's workspaces and run a `q=name~"…"` filter in each, aggregating results.
+// Fork and README address the repo by `owner/name` over the REST API. Bitbucket
+// Cloud has no stars, so `star_repo`/`starred` are inert (the frontend never calls
+// them — the flag is false). All owner/name values are grammar-validated.
+
+/// Bitbucket's single page cap for the workspace repo-search endpoint.
+const BB_SEARCH_PAGELEN: u32 = 50;
+
+/// Escape a user query for embedding inside a BBQL double-quoted string literal
+/// (`name ~ "<escaped>"`). A backslash and a double-quote are the two characters
+/// that would break out of the literal, so each is backslash-escaped. Pure, tested.
+fn bbql_escape(query: &str) -> String {
+    let mut out = String::with_capacity(query.len());
+    for c in query.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// One search-result repo from a `serde_json::Value` item of a workspace repo page.
+/// Tolerant: a missing `full_name` skips the item. Bitbucket carries `language` and
+/// `mainbranch`, but no star concept, so `stars` is always `None`.
+///
+/// CRITICAL: `name` must be the URL SLUG (`slug`), never Bitbucket's `name` field —
+/// that's the DISPLAY name and can diverge from the slug. Every by-owner/name
+/// command (README, fork) addresses `{owner}/{name}`, so a display name there 404s.
+/// `owner` and the slug fallback are derived from `full_name` (`workspace/slug`) so
+/// the identity `owner + "/" + name == full_name` ALWAYS holds.
+fn bb_search_repo_from_value(item: &serde_json::Value) -> Option<ForgeSearchRepo> {
+    use serde_json::Value;
+    let full_name = item.get("full_name").and_then(Value::as_str)?.to_string();
+    if full_name.is_empty() {
+        return None;
+    }
+    // Clone URLs live in links.clone[] keyed by name ("https"/"ssh").
+    let clone_link = |kind: &str| -> String {
+        item.get("links")
+            .and_then(|l| l.get("clone"))
+            .and_then(Value::as_array)
+            .and_then(|arr| {
+                arr.iter()
+                    .find(|c| c.get("name").and_then(Value::as_str) == Some(kind))
+                    .and_then(|c| c.get("href").and_then(Value::as_str))
+            })
+            .unwrap_or("")
+            .to_string()
+    };
+    // Owner and slug derived from full_name (`workspace/slug`) so `owner/name ==
+    // full_name`. Prefer the explicit `slug` field for the slug; fall back to the
+    // last `/`-segment of full_name (never the display `name` field).
+    let (owner, name_from_full) = match full_name.rsplit_once('/') {
+        Some((o, n)) => (o.to_string(), n.to_string()),
+        None => (String::new(), full_name.clone()),
+    };
+    let name = item
+        .get("slug")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or(name_from_full);
+    let str_field = |k: &str| item.get(k).and_then(Value::as_str).map(str::to_string);
+    // Bitbucket's `language` is often an empty string rather than absent — treat
+    // empty as None so the UI doesn't render a blank language chip.
+    let language = str_field("language").filter(|s| !s.is_empty());
+    Some(ForgeSearchRepo {
+        owner,
+        name,
+        full_name,
+        private: item.get("is_private").and_then(Value::as_bool).unwrap_or(false),
+        // Bitbucket Cloud has no repo-archived concept.
+        archived: false,
+        fork: item.get("parent").map(|v| !v.is_null()).unwrap_or(false),
+        clone_url: clone_link("https"),
+        ssh_url: clone_link("ssh"),
+        description: str_field("description"),
+        updated_at: str_field("updated_on"),
+        stars: None,
+        language,
+        web_url: item
+            .get("links")
+            .and_then(|l| l.get("html"))
+            .and_then(|h| h.get("href"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        default_branch: item
+            .get("mainbranch")
+            .and_then(|b| b.get("name"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
+}
+
+/// Search Bitbucket repositories for the Explore view — workspace-scoped by design
+/// (global repo search was retired). Iterates the viewer's workspaces, running a
+/// `name ~ "<query>"` filter in each. `page` is ignored (no cross-workspace paging);
+/// any `sort` maps to `-updated_on` (Bitbucket has no stars). An empty query is
+/// rejected upstream by the dispatcher.
+pub async fn search_repos(query: &str, _sort: &str, _page: u32) -> AppResult<ForgeSearchList> {
+    let creds = http::load_credentials().await?;
+    let bbql = format!("name ~ \"{}\"", bbql_escape(query));
+    let q_enc = encode_query_value(&bbql);
+    let mut repos: Vec<ForgeSearchRepo> = Vec::new();
+    // Best-effort per workspace: one workspace erroring shouldn't sink the others.
+    for ws in workspaces().await? {
+        let path = format!(
+            "repositories/{}?q={q_enc}&sort=-updated_on&pagelen={BB_SEARCH_PAGELEN}",
+            encode_query_value(&ws.slug),
+        );
+        let Ok(page) = http::bb_get_json::<BbPage<serde_json::Value>>(&creds, &path, "repositories")
+            .await
+        else {
+            continue;
+        };
+        repos.extend(page.values.iter().filter_map(bb_search_repo_from_value));
+    }
+    Ok(ForgeSearchList {
+        repos,
+        has_more: false,
+        total: None,
+    })
+}
+
+/// Fork a Bitbucket repo by `owner/name` into the caller's personal workspace
+/// (`POST repositories/{owner}/{name}/forks` with an empty body). The response is
+/// the new repo object; readiness is a bounded `GET` poll on the fork (5×2s → ready
+/// on 200).
+pub async fn fork_repo(owner: &str, name: &str) -> AppResult<ForgeForkResult> {
+    use serde_json::Value;
+    validate_owner(owner)?;
+    validate_repo_name(name)?;
+    let creds = http::load_credentials().await?;
+    let path = format!(
+        "repositories/{}/{}/forks",
+        encode_query_value(owner),
+        encode_query_value(name),
+    );
+    let fork: Value = http::bb_post_json(&creds, &path, &serde_json::json!({}), "fork").await?;
+    let full_name = fork
+        .get("full_name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let clone_url = fork
+        .get("links")
+        .and_then(|l| l.get("clone"))
+        .and_then(Value::as_array)
+        .and_then(|arr| {
+            arr.iter()
+                .find(|c| c.get("name").and_then(Value::as_str) == Some("https"))
+                .and_then(|c| c.get("href").and_then(Value::as_str))
+        })
+        .unwrap_or("")
+        .to_string();
+    let web_url = fork
+        .get("links")
+        .and_then(|l| l.get("html"))
+        .and_then(|h| h.get("href"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    // Readiness: poll the fork by its full_name (5×2s) — 200 ⇒ ready. Bitbucket's
+    // async fork semantics aren't documented-confirmed; the bounded poll covers
+    // both a synchronous and an eventual-consistency case.
+    let ready = if full_name.is_empty() {
+        false
+    } else {
+        poll_fork_ready(&creds, &full_name).await
+    };
+    Ok(ForgeForkResult {
+        full_name,
+        clone_url,
+        web_url,
+        ready,
+    })
+}
+
+/// Poll `GET repositories/{full_name}` up to 5 times (2s apart); ready on the first
+/// 2xx. `false` if it never became ready in the bound (not an error).
+async fn poll_fork_ready(creds: &BbCredentials, full_name: &str) -> bool {
+    let path = format!("repositories/{full_name}");
+    for attempt in 0..5 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+        if let Ok((status, _)) = http::bb_get_text_status(creds, &path).await {
+            if (200..300).contains(&status) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// A Bitbucket repo's raw README markdown, or `None` when absent. Resolves the
+/// repo's `mainbranch.name`, then tries a candidate filename list via the `src`
+/// endpoint; the first hit wins.
+pub async fn repo_readme(owner: &str, name: &str) -> AppResult<Option<String>> {
+    validate_owner(owner)?;
+    validate_repo_name(name)?;
+    let creds = http::load_credentials().await?;
+    // Resolve the default branch from the repo object.
+    let repo_path = format!(
+        "repositories/{}/{}",
+        encode_query_value(owner),
+        encode_query_value(name),
+    );
+    #[derive(Deserialize)]
+    struct RepoMain {
+        #[serde(default)]
+        mainbranch: Option<BbBranchRef>,
+    }
+    let repo: RepoMain = http::bb_get_json(&creds, &repo_path, "repository").await?;
+    let branch = repo.mainbranch.map(|b| b.name).filter(|s| !s.is_empty());
+    let Some(branch) = branch else {
+        return Ok(None);
+    };
+    for candidate in ["README.md", "readme.md", "README.rst", "README"] {
+        let src_path = format!(
+            "repositories/{}/{}/src/{}/{}",
+            encode_query_value(owner),
+            encode_query_value(name),
+            encode_query_value(&branch),
+            encode_query_value(candidate),
+        );
+        let (status, body) = http::bb_get_text_status(&creds, &src_path).await?;
+        if (200..300).contains(&status) {
+            return Ok(Some(cap_readme(&body)));
+        }
+        // Non-2xx (usually 404 for a missing candidate) → try the next name.
+    }
+    Ok(None)
+}
+
+/// Star a Bitbucket repo — unsupported (Bitbucket Cloud has no stars). Inert: the
+/// `repo_star` flag is false so the frontend never calls this; the dispatcher errors
+/// as defense-in-depth.
+pub async fn star_repo(_owner: &str, _name: &str, _star: bool) -> AppResult<()> {
+    Err(AppError::InvalidArgument(
+        "Bitbucket Cloud doesn't support starring repositories.".into(),
+    ))
+}
+
+/// Whether a Bitbucket repo is starred — always `false` (Bitbucket Cloud has no
+/// stars). Returned rather than erroring so a shared starred-state read is harmless.
+pub async fn starred(_owner: &str, _name: &str) -> AppResult<bool> {
+    Ok(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bbql_escape_escapes_quote_and_backslash() {
+        // A plain query is unchanged.
+        assert_eq!(bbql_escape("hello world"), "hello world");
+        // A double-quote is backslash-escaped so it can't close the BBQL literal.
+        assert_eq!(bbql_escape("say \"hi\""), "say \\\"hi\\\"");
+        // A backslash is doubled.
+        assert_eq!(bbql_escape("a\\b"), "a\\\\b");
+        // Both together: a backslash then a quote.
+        assert_eq!(bbql_escape("x\\\"y"), "x\\\\\\\"y");
+    }
+
+    #[test]
+    fn bb_search_repo_parses_and_skips_malformed() {
+        let item = serde_json::json!({
+            "full_name": "myws/repo",
+            "slug": "repo",
+            "name": "repo",
+            "workspace": { "slug": "myws" },
+            "is_private": true,
+            "parent": { "full_name": "other/repo" },
+            "description": "desc",
+            "updated_on": "2026-01-01T00:00:00Z",
+            "language": "python",
+            "mainbranch": { "name": "main" },
+            "links": {
+                "clone": [
+                    { "name": "https", "href": "https://bitbucket.org/myws/repo.git" },
+                    { "name": "ssh", "href": "git@bitbucket.org:myws/repo.git" }
+                ],
+                "html": { "href": "https://bitbucket.org/myws/repo" }
+            }
+        });
+        let r = bb_search_repo_from_value(&item).expect("parses");
+        assert_eq!(r.full_name, "myws/repo");
+        assert_eq!(r.owner, "myws");
+        assert!(r.private);
+        assert!(r.fork);
+        assert!(r.stars.is_none());
+        assert_eq!(r.language.as_deref(), Some("python"));
+        assert_eq!(r.clone_url, "https://bitbucket.org/myws/repo.git");
+        assert_eq!(r.ssh_url, "git@bitbucket.org:myws/repo.git");
+        assert_eq!(r.web_url.as_deref(), Some("https://bitbucket.org/myws/repo"));
+        assert_eq!(r.default_branch.as_deref(), Some("main"));
+        // An empty language string is normalized to None.
+        let no_lang = serde_json::json!({ "full_name": "w/r", "language": "" });
+        assert!(bb_search_repo_from_value(&no_lang).unwrap().language.is_none());
+        // Missing full_name → skipped.
+        assert!(bb_search_repo_from_value(&serde_json::json!({ "name": "x" })).is_none());
+    }
+
+    #[test]
+    fn bb_search_repo_name_is_slug_not_display_name() {
+        // Same class as the GitLab bug: Bitbucket's `name` is a DISPLAY name that
+        // can diverge from the URL slug. `ForgeSearchRepo.name` must be the slug so
+        // `owner + "/" + name == full_name` and by-owner/name commands address the
+        // right repo.
+        let item = serde_json::json!({
+            "full_name": "ws/pretty-name",
+            "slug": "pretty-name",
+            "name": "Pretty Name"
+        });
+        let r = bb_search_repo_from_value(&item).expect("parses");
+        assert_eq!(r.name, "pretty-name", "name must be the slug, not the display name");
+        assert_eq!(r.owner, "ws");
+        assert_eq!(r.full_name, "ws/pretty-name");
+        // The load-bearing identity every by-owner/name command relies on.
+        assert_eq!(format!("{}/{}", r.owner, r.name), r.full_name);
+
+        // Fallback: when `slug` is absent, the slug is the last segment of
+        // full_name (never the display `name`), and owner still holds.
+        let no_slug = serde_json::json!({
+            "full_name": "ws/pretty-name",
+            "name": "Pretty Name"
+        });
+        let r2 = bb_search_repo_from_value(&no_slug).expect("parses");
+        assert_eq!(r2.name, "pretty-name");
+        assert_eq!(r2.owner, "ws");
+        assert_eq!(format!("{}/{}", r2.owner, r2.name), r2.full_name);
+    }
 
     #[test]
     fn credential_entries_suppress_interactive_and_rewrite_userinfo_urls() {

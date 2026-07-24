@@ -277,6 +277,12 @@ export const capabilities: Capability[] = [
   {
     group: "Repository & workspace",
     label:
+      "Explore repositories — search GitHub, GitLab & Bitbucket, then clone, fork or star",
+    ai: false,
+  },
+  {
+    group: "Repository & workspace",
+    label:
       "Update a fork from its upstream — fetch, then fast-forward or merge",
   },
   {

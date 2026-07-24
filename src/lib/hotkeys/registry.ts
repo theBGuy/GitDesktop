@@ -52,6 +52,12 @@ export const ACTIONS = [
     defaultBinding: "f1",
   },
   {
+    id: "open-explore",
+    label: "Explore repositories",
+    category: "Application",
+    defaultBinding: null,
+  },
+  {
     id: "open-mcp-servers-settings",
     label: "MCP server settings",
     category: "Application",

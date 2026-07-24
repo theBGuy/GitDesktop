@@ -8,6 +8,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { ReconnectDialog } from "@/features/accounts/ReconnectDialog";
 import { ActivityStrip } from "@/features/activity/ActivityDock";
 import { AutomationResultDialog } from "@/features/automations/AutomationResultDialog";
+import { ExploreScreen } from "@/features/explore/ExploreScreen";
 import { HelpScreen } from "@/features/help/HelpScreen";
 import { RepositoryView } from "@/features/repository/RepositoryView";
 import { SettingsScreen } from "@/features/settings/SettingsScreen";
@@ -39,6 +40,7 @@ function App() {
   const openSettings = useUiStore((s) => s.openSettings);
   const openMcpBrowse = useUiStore((s) => s.openMcpBrowse);
   const openHelp = useUiStore((s) => s.openHelp);
+  const openExplore = useUiStore((s) => s.openExplore);
   const toggleActivity = useUiStore((s) => s.toggleActivity);
   const gitInstalled = useGitInstalled();
   const queryClient = useQueryClient();
@@ -135,6 +137,7 @@ function App() {
   );
   useHotkeyAction("browse-mcp-registry", openMcpBrowse, !settings.data?.hideAi);
   useHotkeyAction("show-help", openHelp);
+  useHotkeyAction("open-explore", openExplore);
   useHotkeyAction("toggle-notifications", toggleActivity);
   useHotkeyAction("show-shortcuts", () => setShortcutsOpen(true));
   useHotkeyAction("command-palette", () => setPaletteOpen(true));
@@ -201,6 +204,7 @@ function App() {
         {view === "repo" && <RepositoryView />}
         {view === "settings" && <SettingsScreen />}
         {view === "help" && <HelpScreen />}
+        {view === "explore" && <ExploreScreen />}
         {/* A thin activity strip for the headerless screens (the repo view uses
             its in-header dock instead); only present while a review runs. */}
         <ActivityStrip />

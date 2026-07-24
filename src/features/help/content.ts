@@ -136,6 +136,56 @@ The app remembers each window's **position and size** across launches, including
 monitor it was on — see **Settings → About** for the current coordinates.`,
   },
   {
+    id: "explore",
+    label: "Explore repositories",
+    body: `# Explore repositories
+
+**Explore repositories** is a full-page browser for finding a repo to clone, fork, or
+star — without knowing its URL. Open it from the **Explore repositories** button on the
+welcome screen, or from the command palette (*Explore repositories*).
+
+Across the top are **GitHub**, **GitLab**, and **Bitbucket** tabs (each needs its account
+connected — see *Getting started*), a **search box**, and a **sort** control:
+**Best match**, **Most stars**, or **Recently updated**.
+
+## Before you search
+
+With the search box empty, the page shows two sections:
+
+- **Your repositories** — the repos you own, grouped by owner.
+- **Popular** — a star-sorted feed of popular repositories (**GitHub and GitLab** only;
+  Bitbucket has no popular feed here).
+
+## Searching
+
+Start typing to search the active provider. What each covers differs by provider:
+
+- **GitHub** — all of GitHub, up to GitHub's cap of **1,000 search results**.
+- **GitLab** — all public projects.
+- **Bitbucket** — **your Bitbucket workspaces only**. Bitbucket retired global repository
+  search from its API, so the page notes that *search covers your Bitbucket workspaces*.
+
+The results list is **keyboard-navigable**: with the search box focused, press **↑ / ↓**
+to move through the results — the detail pane follows along — and **Enter** to jump to the
+highlighted repository's actions.
+
+## The detail pane
+
+Selecting a result opens a detail pane with its **description**, **stars**, **language**,
+and **last-updated** time, plus a **README preview** (loaded when you open the result).
+From here:
+
+- **Clone** — pick a folder to clone into; GitDesktop opens the repo once it finishes.
+- **Fork** — create a fork under your account (on **GitHub, GitLab, and Bitbucket**). The
+  fork is created in the background, and then you're offered to **clone** it.
+- **Star / Unstar** — on **GitHub and GitLab** only. Bitbucket has no stars, so this action
+  doesn't appear on Bitbucket results.
+- **View on GitHub / GitLab / Bitbucket** — open the repository on its host in your browser.
+
+> A provider tab you haven't connected shows a **connect prompt** pointing at
+> **Settings → Accounts**, rather than empty results.`,
+  },
+  {
     id: "repo-settings",
     label: "Repository settings",
     body: `# Repository settings

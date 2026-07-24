@@ -1,5 +1,6 @@
 import {
   BookOpenIcon,
+  CompassIcon,
   FolderOpenIcon,
   FolderPlusIcon,
   GearIcon,
@@ -27,6 +28,7 @@ import { RecentRepoList } from "./RecentRepoList";
 export function WelcomeScreen() {
   const openSettings = useUiStore((s) => s.openSettings);
   const openHelp = useUiStore((s) => s.openHelp);
+  const openExplore = useUiStore((s) => s.openExplore);
   const pickAndOpen = usePickAndOpenRepo();
   const settings = useSettings();
   const saveSettings = useSaveSettings();
@@ -79,6 +81,13 @@ export function WelcomeScreen() {
       icon: FolderPlusIcon,
       variant: "outline",
       onClick: () => setCreateOpen(true),
+    },
+    {
+      id: "open-explore",
+      label: "Explore repositories",
+      icon: CompassIcon,
+      variant: "outline",
+      onClick: openExplore,
     },
   ];
 

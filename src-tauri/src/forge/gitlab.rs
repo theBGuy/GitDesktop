@@ -15,9 +15,10 @@ use serde::{Deserialize, Serialize};
 use crate::error::{AppError, AppResult};
 use crate::forge::glab::{run_glab, run_glab_ex, run_glab_raw, GLAB_NETWORK_TIMEOUT, GLAB_TIMEOUT};
 use crate::forge::model::{
-    Capabilities, CompletedReviewerOut, ForgeRepo, ForgeRepoList, ForgeStatus, ForgeUserRef,
-    Implemented, Provider,
+    Capabilities, CompletedReviewerOut, ForgeForkResult, ForgeRepo, ForgeRepoList, ForgeSearchList,
+    ForgeSearchRepo, ForgeStatus, ForgeUserRef, Implemented, Provider,
 };
+use crate::forge::{cap_readme, validate_owner, validate_repo_name};
 use crate::forge::Forge;
 use crate::github::actions::{RunDetail, RunJob, WorkflowRun};
 use crate::github::issue::{IssueDetails, IssueInfo, IssueReactions, Milestone, Reaction};
@@ -7309,9 +7310,349 @@ pub async fn unlink_issue(repo_path: &str, number: u64, link_id: &str) -> AppRes
     Ok(())
 }
 
+// ── Explore: repo search / fork-by-name / star / README ───────────────────────
+//
+// The Explore view's GitLab backend, over the `glab api` REST escape hatch. Search
+// uses `projects?search=…`; fork/star/readme address the project by its
+// URL-encoded `owner%2Fname` path (which GitLab accepts in place of a numeric id).
+// All owner/name values are grammar-validated before interpolation.
+
+/// GitLab returns 30 projects per Explore search page; a full page is the
+/// documented "more available" heuristic (we don't parse response headers).
+const GL_SEARCH_PER_PAGE: usize = 30;
+
+/// Map the neutral `sort` onto GitLab's `order_by` value. `order_by` and `sort` are
+/// two separate query params — a combined `order_by=stars_desc` 400s. `"best"` maps
+/// to `star_count`, NOT GitLab's `similarity`: similarity ordering is silently
+/// restricted to projects the caller is a member of, so a public Explore search
+/// with `order_by=similarity` returns an EMPTY set (live-verified on gitlab.com,
+/// 2026-07-24 — `search=tree-online&order_by=similarity` → `[]`, `star_count` → hits).
+fn gitlab_order_by(sort: &str) -> &'static str {
+    match sort {
+        "stars" => "star_count",
+        "updated" => "last_activity_at",
+        // "best" → star_count as the relevance proxy (see doc comment — similarity
+        // is member-scoped and empties public searches). Defensive default for any
+        // other value the caller didn't already reject.
+        _ => "star_count",
+    }
+}
+
+/// One search-result repo from a `serde_json::Value` item of GitLab's `projects`
+/// response. Tolerant: a missing `path_with_namespace` skips the item. GitLab has no
+/// per-request language field on this endpoint, so `language` is always `None`.
+///
+/// CRITICAL: `name` must be the URL SLUG (`path`), never GitLab's `name` field —
+/// that's the DISPLAY name and can diverge (e.g. path `tree-online` / display
+/// `tree.nathanfriend.com`). Every by-owner/name command (README, fork, star)
+/// addresses `owner%2Fname`, so a display name there 404s. `owner` is derived by
+/// stripping the last `/`-segment of `path_with_namespace` (rather than
+/// `namespace.full_path`) so the identity `owner + "/" + name == full_name` ALWAYS
+/// holds — that identity is what every by-owner/name command depends on.
+fn gl_search_repo_from_value(item: &serde_json::Value) -> Option<ForgeSearchRepo> {
+    use serde_json::Value;
+    let full_name = item
+        .get("path_with_namespace")
+        .and_then(Value::as_str)?
+        .to_string();
+    if full_name.is_empty() {
+        return None;
+    }
+    // Slug (the URL path segment) and owner, derived so `owner/name == full_name`.
+    // Prefer the explicit `path` field for the slug; fall back to the last segment
+    // of `path_with_namespace`. Owner is everything before that last segment.
+    let (owner, name) = match full_name.rsplit_once('/') {
+        Some((o, n)) => (o.to_string(), n.to_string()),
+        // No namespace separator (shouldn't happen for a real project) — no owner.
+        None => (String::new(), full_name.clone()),
+    };
+    let name = item
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or(name);
+    let str_field = |k: &str| item.get(k).and_then(Value::as_str).map(str::to_string);
+    Some(ForgeSearchRepo {
+        owner,
+        name,
+        full_name,
+        // visibility public|internal|private — anything but public shows the lock.
+        private: item.get("visibility").and_then(Value::as_str) != Some("public"),
+        archived: item.get("archived").and_then(Value::as_bool).unwrap_or(false),
+        // Presence of forked_from_project → this is a fork.
+        fork: item
+            .get("forked_from_project")
+            .map(|v| !v.is_null())
+            .unwrap_or(false),
+        clone_url: str_field("http_url_to_repo").unwrap_or_default(),
+        ssh_url: str_field("ssh_url_to_repo").unwrap_or_default(),
+        description: str_field("description"),
+        updated_at: str_field("last_activity_at"),
+        stars: item.get("star_count").and_then(Value::as_u64),
+        language: None,
+        web_url: str_field("web_url"),
+        default_branch: str_field("default_branch"),
+    })
+}
+
+/// Search GitLab projects for the Explore view. An empty `query` is the
+/// Popular/Discover feed (no `search`, ordered by star count). `has_more` is the
+/// documented full-page heuristic (a returned page of exactly 30).
+pub async fn search_repos(query: &str, sort: &str, page: u32) -> AppResult<ForgeSearchList> {
+    let per_page = GL_SEARCH_PER_PAGE;
+    let endpoint = if query.trim().is_empty() {
+        // Popular mode: no search term, order by stars.
+        format!("projects?order_by=star_count&sort=desc&per_page={per_page}&page={page}")
+    } else {
+        let enc = encode_query_value(query);
+        let order_by = gitlab_order_by(sort);
+        format!(
+            "projects?search={enc}&order_by={order_by}&sort=desc&per_page={per_page}&page={page}"
+        )
+    };
+    let out = run_glab(None, &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
+    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
+        .map_err(|e| AppError::Glab(format!("could not parse GitLab project search: {e}")))?;
+    let items = value.as_array().cloned().unwrap_or_default();
+    let returned = items.len();
+    let repos = items.iter().filter_map(gl_search_repo_from_value).collect();
+    Ok(ForgeSearchList {
+        repos,
+        has_more: returned == per_page,
+        total: None,
+    })
+}
+
+/// Fork a GitLab project by `owner/name` into the caller's namespace. `glab api -X
+/// POST projects/{enc}/fork` returns the new project; we poll `projects/{id}` until
+/// `import_status == "finished"` (bounded 5×2s → `ready`). A 409 (already forked)
+/// maps to a clear error rather than a fake success.
+pub async fn fork_repo(owner: &str, name: &str) -> AppResult<ForgeForkResult> {
+    use serde_json::Value;
+    validate_owner(owner)?;
+    validate_repo_name(name)?;
+    let enc = encode_project(&format!("{owner}/{name}"));
+    let endpoint = format!("projects/{enc}/fork");
+    // A conflict (already forked) exits non-zero with a 409 — surface a clear message
+    // instead of an opaque glab error or a fabricated success.
+    let out = run_glab_raw(None, &["api", "--method", "POST", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
+    if out.code != 0 {
+        let stderr = out.stderr.to_ascii_lowercase();
+        if stderr.contains("409") || stderr.contains("already") {
+            return Err(AppError::Glab(
+                "You already have a fork of this project on GitLab.".into(),
+            ));
+        }
+        let msg = out.stderr.trim();
+        return Err(AppError::Glab(if msg.is_empty() {
+            format!("glab exited with code {} forking the project", out.code)
+        } else {
+            msg.to_string()
+        }));
+    }
+    let fork: Value = serde_json::from_str(&out.stdout_lossy())
+        .map_err(|e| AppError::Glab(format!("could not parse the forked project: {e}")))?;
+    let full_name = fork
+        .get("path_with_namespace")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let clone_url = fork
+        .get("http_url_to_repo")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let web_url = fork.get("web_url").and_then(Value::as_str).map(str::to_string);
+    // Readiness: the fork's `import_status` starts non-"finished" while GitLab copies
+    // the repository. Poll by numeric id (5×2s). A missing id → treat the initial
+    // status as authoritative.
+    let ready = match fork.get("id").and_then(Value::as_u64) {
+        Some(id) => poll_fork_ready(id).await,
+        None => {
+            fork.get("import_status").and_then(Value::as_str) == Some("finished")
+        }
+    };
+    Ok(ForgeForkResult {
+        full_name,
+        clone_url,
+        web_url,
+        ready,
+    })
+}
+
+/// Poll `projects/{id}` until `import_status == "finished"` (5×2s). Returns `true`
+/// on the first finished read, `false` if it never finished within the bound (not
+/// an error — the fork exists).
+async fn poll_fork_ready(id: u64) -> bool {
+    let endpoint = format!("projects/{id}");
+    for attempt in 0..5 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+        if let Ok(out) = run_glab_raw(None, &["api", &endpoint], GLAB_TIMEOUT).await {
+            if out.code == 0 {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out.stdout_lossy()) {
+                    if v.get("import_status").and_then(serde_json::Value::as_str) == Some("finished")
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Star (`POST …/star`) or unstar (`POST …/unstar`) a GitLab project by name. A 304
+/// (already in the desired state) is success.
+pub async fn star_repo(owner: &str, name: &str, star: bool) -> AppResult<()> {
+    validate_owner(owner)?;
+    validate_repo_name(name)?;
+    let enc = encode_project(&format!("{owner}/{name}"));
+    let action = if star { "star" } else { "unstar" };
+    let endpoint = format!("projects/{enc}/{action}");
+    let out = run_glab_raw(None, &["api", "--method", "POST", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
+    if out.code != 0 {
+        // A 304 means the project was already in the desired star state — success.
+        if out.stderr.contains("304") {
+            return Ok(());
+        }
+        let msg = out.stderr.trim();
+        return Err(AppError::Glab(if msg.is_empty() {
+            format!("glab exited with code {} toggling the star", out.code)
+        } else {
+            msg.to_string()
+        }));
+    }
+    Ok(())
+}
+
+/// Whether the signed-in user has starred `owner/name`. GitLab has no direct
+/// "is this starred" endpoint, so we list the viewer's starred projects filtered by
+/// the repo's name and check for an exact `path_with_namespace` match. Best-effort:
+/// the query caps at 100 results (a very common name past 100 starred could miss).
+pub async fn starred(owner: &str, name: &str) -> AppResult<bool> {
+    use serde_json::Value;
+    validate_owner(owner)?;
+    validate_repo_name(name)?;
+    let want = format!("{owner}/{name}");
+    let enc = encode_query_value(name);
+    let endpoint = format!("projects?starred=true&search={enc}&per_page=100");
+    let out = run_glab(None, &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
+    let value: Value = serde_json::from_str(&out.stdout_lossy())
+        .map_err(|e| AppError::Glab(format!("could not parse starred projects: {e}")))?;
+    let hit = value
+        .as_array()
+        .map(|arr| {
+            arr.iter().any(|p| {
+                p.get("path_with_namespace").and_then(Value::as_str) == Some(want.as_str())
+            })
+        })
+        .unwrap_or(false);
+    Ok(hit)
+}
+
+/// A GitLab project's raw README markdown, or `None` when absent. Tries a set of
+/// candidate filenames via the repository-files raw endpoint at
+/// `?ref={default_branch or "HEAD"}`; the first hit wins.
+pub async fn repo_readme(
+    owner: &str,
+    name: &str,
+    default_branch: Option<&str>,
+) -> AppResult<Option<String>> {
+    validate_owner(owner)?;
+    validate_repo_name(name)?;
+    let enc = encode_project(&format!("{owner}/{name}"));
+    let git_ref = default_branch.filter(|b| !b.is_empty()).unwrap_or("HEAD");
+    let ref_enc = encode_query_value(git_ref);
+    for candidate in ["README.md", "readme.md", "README.rst", "README"] {
+        let file_enc = encode_query_value(candidate);
+        let endpoint = format!("projects/{enc}/repository/files/{file_enc}/raw?ref={ref_enc}");
+        let out = run_glab_raw(None, &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
+        if out.code == 0 {
+            return Ok(Some(cap_readme(&out.stdout_lossy())));
+        }
+        // A non-zero exit here is almost always a 404 (this candidate doesn't
+        // exist) — try the next candidate rather than erroring the whole read.
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gitlab_order_by_maps_each_sort() {
+        assert_eq!(gitlab_order_by("stars"), "star_count");
+        assert_eq!(gitlab_order_by("updated"), "last_activity_at");
+        // "best" deliberately avoids `similarity` (member-scoped → empty public
+        // searches); star_count is the relevance proxy.
+        assert_eq!(gitlab_order_by("best"), "star_count");
+    }
+
+    #[test]
+    fn gl_search_repo_parses_and_skips_malformed() {
+        let item = serde_json::json!({
+            "path_with_namespace": "group/sub/repo",
+            "path": "repo",
+            "name": "repo",
+            "namespace": { "full_path": "group/sub" },
+            "visibility": "private",
+            "archived": false,
+            "forked_from_project": { "id": 5 },
+            "http_url_to_repo": "https://gitlab.com/group/sub/repo.git",
+            "ssh_url_to_repo": "git@gitlab.com:group/sub/repo.git",
+            "description": "desc",
+            "last_activity_at": "2026-01-01T00:00:00Z",
+            "star_count": 42,
+            "web_url": "https://gitlab.com/group/sub/repo",
+            "default_branch": "main"
+        });
+        let r = gl_search_repo_from_value(&item).expect("parses");
+        assert_eq!(r.full_name, "group/sub/repo");
+        assert_eq!(r.owner, "group/sub");
+        assert!(r.private);
+        assert!(r.fork);
+        assert_eq!(r.stars, Some(42));
+        // No per-request language on this endpoint.
+        assert!(r.language.is_none());
+        assert_eq!(r.default_branch.as_deref(), Some("main"));
+        // Missing path_with_namespace → skipped.
+        assert!(gl_search_repo_from_value(&serde_json::json!({ "name": "x" })).is_none());
+    }
+
+    #[test]
+    fn gl_search_repo_name_is_slug_not_display_name() {
+        // The live-caught bug: GitLab's `name` is a DISPLAY name that can diverge
+        // from the URL slug (`path`). `ForgeSearchRepo.name` must be the slug so
+        // `owner + "/" + name == full_name` and by-owner/name commands address the
+        // right project.
+        let item = serde_json::json!({
+            "path_with_namespace": "grp/pretty-name",
+            "path": "pretty-name",
+            "name": "Pretty Name",
+            "web_url": "https://gitlab.com/grp/pretty-name"
+        });
+        let r = gl_search_repo_from_value(&item).expect("parses");
+        assert_eq!(r.name, "pretty-name", "name must be the slug, not the display name");
+        assert_eq!(r.owner, "grp");
+        assert_eq!(r.full_name, "grp/pretty-name");
+        // The load-bearing identity every by-owner/name command relies on.
+        assert_eq!(format!("{}/{}", r.owner, r.name), r.full_name);
+
+        // Fallback: when `path` is absent, the slug is the last segment of
+        // path_with_namespace (never the display `name`), and owner still holds.
+        let no_path = serde_json::json!({
+            "path_with_namespace": "a/b/pretty-name",
+            "name": "Pretty Name"
+        });
+        let r2 = gl_search_repo_from_value(&no_path).expect("parses");
+        assert_eq!(r2.name, "pretty-name");
+        assert_eq!(r2.owner, "a/b");
+        assert_eq!(format!("{}/{}", r2.owner, r2.name), r2.full_name);
+    }
 
     #[test]
     fn credential_entries_are_reset_then_helper() {

@@ -29,6 +29,7 @@ import type {
   ForgeCapabilities,
   ForgeImplemented,
   ForgeProvider,
+  ForgeSearchList,
   ForgeStatus,
   ForgeUserRef,
   GitLabHookInput,
@@ -2549,6 +2550,10 @@ const NO_FORGE_STATUS: ForgeStatus = {
     releases: false,
     insights: false,
     repoActions: false,
+    repoSearch: false,
+    repoForkByName: false,
+    repoStar: false,
+    repoReadme: false,
     publish: false,
     issueComment: false,
     issueState: false,
@@ -2709,6 +2714,120 @@ export function useForgeRepos(provider: ForgeProvider, enabled: boolean) {
     enabled,
     staleTime: 5 * 60_000,
     retry: false,
+  });
+}
+
+// ── Explore: search / browse / fork / star / README ──────────────────────────
+
+/** What a provider supports and has built — the Explore surface's gate for the
+ *  Fork/Star/README controls. Capabilities rarely change, so cache forever. */
+export function useForgeProviderFeatures(provider: ForgeProvider) {
+  return useQuery({
+    queryKey: ["forge-provider-features", provider] as const,
+    queryFn: () => api.forgeProviderFeatures(provider),
+    staleTime: Number.POSITIVE_INFINITY,
+    retry: false,
+  });
+}
+
+/** Paged repository search on a provider (empty `query` = the Popular feed on
+ *  GitHub/GitLab). Pages are 1-based; `getNextPageParam` walks `hasMore`. */
+export function useForgeSearchRepos(
+  provider: ForgeProvider,
+  query: string,
+  sort: "best" | "stars" | "updated",
+  enabled: boolean,
+) {
+  return useInfiniteQuery({
+    queryKey: ["forge-search", provider, query, sort] as const,
+    queryFn: ({ pageParam }) =>
+      api.forgeSearchRepos(provider, query, sort, pageParam),
+    initialPageParam: 1,
+    getNextPageParam: (lastPage: ForgeSearchList, allPages) =>
+      lastPage.hasMore ? allPages.length + 1 : undefined,
+    enabled,
+    staleTime: 60_000,
+    retry: false,
+  });
+}
+
+/** A repository's rendered README, lazily fetched when a repo is selected in the
+ *  Explore detail pane. Null = no README (rendered as a quiet note, not an error). */
+export function useRepoReadme(
+  provider: ForgeProvider,
+  owner: string,
+  name: string,
+  defaultBranch: string | null,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: ["forge-readme", provider, owner, name, defaultBranch] as const,
+    queryFn: () => api.forgeRepoReadme(provider, owner, name, defaultBranch),
+    enabled,
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+}
+
+const starredKey = (provider: ForgeProvider, owner: string, name: string) =>
+  ["forge-starred", provider, owner, name] as const;
+
+/** Whether the viewer has starred the selected Explore repo — drives the
+ *  Star/Unstar toggle's pressed state; only fetched when a repo is selected. */
+export function useRepoStarred(
+  provider: ForgeProvider,
+  owner: string,
+  name: string,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: starredKey(provider, owner, name),
+    queryFn: () => api.forgeStarred(provider, owner, name),
+    enabled,
+    staleTime: 60_000,
+    retry: false,
+  });
+}
+
+/** Star / unstar a repo, optimistically flipping the starred-query cache with
+ *  exact-key snapshot/rollback (repo convention for remote-content mutations).
+ *  The key is derived from the args at mutate time so a mid-flight repo switch
+ *  never corrupts another repo's cache. */
+export function useStarRepo() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (args: {
+      provider: ForgeProvider;
+      owner: string;
+      name: string;
+      star: boolean;
+    }) => api.forgeStarRepo(args.provider, args.owner, args.name, args.star),
+    onMutate: async (args) => {
+      const key = starredKey(args.provider, args.owner, args.name);
+      await queryClient.cancelQueries({ queryKey: key });
+      const prev = queryClient.getQueryData<boolean>(key);
+      queryClient.setQueryData<boolean>(key, args.star);
+      return { prev, key };
+    },
+    onError: (_e, _args, ctx) => {
+      if (ctx?.prev !== undefined) queryClient.setQueryData(ctx.key, ctx.prev);
+    },
+    onSettled: (_d, _e, args) =>
+      void queryClient.invalidateQueries({
+        queryKey: starredKey(args.provider, args.owner, args.name),
+      }),
+  });
+}
+
+/** Fork a repo by owner/name. Returns the {@link ForgeForkResult} so the caller
+ *  can offer "Clone the fork" (and warn when it's not yet clonable). */
+export function useForkRepoByName() {
+  return useMutation({
+    mutationFn: (args: {
+      provider: ForgeProvider;
+      owner: string;
+      name: string;
+    }) => api.forgeForkRepo(args.provider, args.owner, args.name),
   });
 }
 
