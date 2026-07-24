@@ -484,8 +484,11 @@ export async function startReview(
     const diff = await context.loadDiff();
     if (control.cancelled) return;
     if (!diff.text.trim()) {
-      // A no-op run shouldn't linger in the dock; a momentary toast is enough.
+      // A no-op run shouldn't linger in the dock; a momentary toast is enough. Drop any
+      // queued second mode too — same PR, same empty diff, so it would only load nothing
+      // and toast "No changes" a second time.
       toast.info("No changes to review.");
+      queuedRuns.delete(key);
       useReviewStore.getState().remove(key);
       return;
     }
