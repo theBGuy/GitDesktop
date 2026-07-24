@@ -10,7 +10,9 @@ export type AnalyticsEvent =
   | { name: "screen_viewed"; properties: { screen: string } }
   | {
       name: "repo_opened";
-      properties: { source: "recent" | "clone" | "create" | "picker" };
+      properties: {
+        source: "recent" | "clone" | "create" | "picker" | "relocate";
+      };
     }
   | {
       name: "commit_created";

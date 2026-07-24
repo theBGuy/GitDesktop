@@ -3,37 +3,93 @@ import { useCallback } from "react";
 import { toast } from "sonner";
 import { track } from "@/lib/analytics";
 import { validateRepo } from "@/lib/git/api";
-import { useAddRecentRepo, useRemoveRecentRepo } from "@/lib/settings/queries";
+import type { RepoInfo } from "@/lib/git/types";
+import { migrateRepoData } from "@/lib/repo-data-migration";
+import {
+  useAddRecentRepo,
+  useRelocateRecentRepo,
+  useRemoveRecentRepo,
+} from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { isAppError } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 
 /**
  * Opens a repository by path: validates it, records it in recents, and switches
- * the app to it. A path that's no longer a git repo offers a "Remove" toast.
+ * the app to it. A path that's no longer a git repo offers a toast to **Locate…**
+ * the folder's new home (moved on disk) or **Remove** the stale row.
  * Shared by the welcome list and the in-app repo switcher.
  */
 export function useOpenRepoByPath() {
   const openRepo = useUiStore((s) => s.openRepo);
   const addRecent = useAddRecentRepo();
   const removeRecent = useRemoveRecentRepo();
+  const relocate = useRelocateRecentRepo();
+
+  // Shared tail for every successful open: record in recents (best-effort — a
+  // settings-write failure must never block opening), switch to the repo, track.
+  // Awaiting the recents write means the row exists before RepositoryView mounts
+  // and its open-time visibility probe persists onto it.
+  const recordOpenAndTrack = useCallback(
+    async (info: RepoInfo, source: "recent" | "picker" | "relocate") => {
+      await addRecent
+        .mutateAsync({ path: info.root, name: info.name })
+        .catch(() => undefined);
+      openRepo(info);
+      track({ name: "repo_opened", properties: { source } });
+    },
+    [addRecent, openRepo],
+  );
+
+  // A recents row whose folder moved: pick the new folder, validate it, repoint
+  // the existing row in place (preserving alias + probed metadata), then open.
+  const locateAndReopen = useCallback(
+    async (oldPath: string) => {
+      const picked = await openDialog({
+        directory: true,
+        title: "Locate repository",
+      });
+      if (typeof picked !== "string") return;
+      try {
+        const info = await validateRepo(picked);
+        // Best-effort, like the addRecent write below — a settings failure must
+        // never block opening. Repoint before addRecent so the follow-up write
+        // finds the row at its new path and just refreshes name/order.
+        await relocate
+          .mutateAsync({ oldPath, newPath: info.root })
+          .catch(() => undefined);
+        // Re-home every per-repo app-data store (local PRs/issues, review history,
+        // automations, Jira link, …) onto the new location's identity key. Purely
+        // best-effort — a migration failure must never block opening the repo.
+        await migrateRepoData(oldPath, info.root).catch(() => undefined);
+        await recordOpenAndTrack(info, "relocate");
+      } catch (e) {
+        if (isAppError(e) && e.kind === "notARepo") {
+          // The picked folder isn't a repo — no Locate/Remove actions here (no
+          // recursion; the original row is still in the list to re-offer).
+          toast.error(`${picked} is not a git repository.`);
+        } else {
+          toastError(e);
+        }
+      }
+    },
+    [relocate, recordOpenAndTrack],
+  );
 
   return useCallback(
     async (path: string, source: "recent" | "picker" = "recent") => {
       try {
         const info = await validateRepo(path);
-        // Await the recents write so the row exists before RepositoryView mounts
-        // and its open-time visibility probe persists onto it (best-effort — a
-        // settings-write failure must never block opening the repo).
-        await addRecent
-          .mutateAsync({ path: info.root, name: info.name })
-          .catch(() => undefined);
-        openRepo(info);
-        track({ name: "repo_opened", properties: { source } });
+        await recordOpenAndTrack(info, source);
       } catch (e) {
         if (isAppError(e) && e.kind === "notARepo") {
           toast.error(`${path} is no longer a git repository.`, {
+            duration: 10_000,
             action: {
+              label: "Locate…",
+              onClick: () => void locateAndReopen(path),
+            },
+            cancel: {
               label: "Remove",
               onClick: () => removeRecent.mutate(path),
             },
@@ -43,7 +99,7 @@ export function useOpenRepoByPath() {
         }
       }
     },
-    [openRepo, addRecent, removeRecent],
+    [recordOpenAndTrack, locateAndReopen, removeRecent],
   );
 }
 

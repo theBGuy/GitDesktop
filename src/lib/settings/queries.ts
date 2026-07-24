@@ -10,6 +10,7 @@ import {
   addRecentRepo,
   loadSettings,
   persistRepoOwners,
+  relocateRecentRepo,
   removeRecentRepo,
   saveSettings,
   setRepoAlias,
@@ -181,6 +182,18 @@ export function useRemoveRecentRepo() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (path: string) => removeRecentRepo(path),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: settingsKeys.settings }),
+  });
+}
+
+/** Repoints a recent-repo row to a moved folder's new path (see
+ *  `relocateRecentRepo`). */
+export function useRelocateRecentRepo() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { oldPath: string; newPath: string }) =>
+      relocateRecentRepo(args.oldPath, args.newPath),
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: settingsKeys.settings }),
   });

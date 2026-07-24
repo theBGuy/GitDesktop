@@ -105,6 +105,10 @@ unrecognized host, a folder for a local-only repo) and, once resolved, a trailin
 **visibility** icon — a lock (private), buildings (internal), or globe (public) — plus a
 **fork** glyph when the repo is a fork of another (hover it for the upstream repo).
 
+If a repo's folder was moved or deleted, opening it offers to **Locate…** its new folder
+(keeping its alias and settings, and bringing its local PRs and issues, review history, and
+automations along to the new location) or **Remove** it from the list.
+
 ## The repository menu
 
 Click the **⋮** menu next to the repo name for repo-wide actions:

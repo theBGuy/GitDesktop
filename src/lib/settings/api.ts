@@ -633,6 +633,67 @@ export function removeRecentRepo(path: string): Promise<void> {
 }
 
 /**
+ * Repoints a recent-repo row from `oldPath` to `newPath` when the folder was
+ * moved on disk. Rides the same serialized RMW chain as the other recent-repo
+ * writes (the lost-update race above is real).
+ *
+ * This ONLY rewrites the row's `path` — it deliberately leaves `name`,
+ * `lastOpenedAt`, list order, and every derived field (alias/owner/host/
+ * provider/visibility/isFork/forkParent) untouched. The `name`/`lastOpenedAt`
+ * refresh and the move-to-front happen in the standard `addRecentRepo` call that
+ * follows in the open flow; carrying the derived fields verbatim avoids
+ * reintroducing the wipe-on-reopen class fixed in `addRecentRepo` (see the
+ * comment there). Any staleness (the user pointed at a different repo) self-
+ * corrects: the open-time visibility probe re-persists owner + visibility on
+ * every open (see probeAndPersistVisibility).
+ *
+ * Cases:
+ *   - No row at `oldPath` (removed concurrently): no-op — the follow-up
+ *     `addRecentRepo` creates a fresh entry anyway.
+ *   - A row ALREADY exists at `newPath` (the user previously opened the repo at
+ *     its new location, so a broken old row and a live new row coexist): MERGE —
+ *     drop the old row, keep the new-path row in place, and carry the old row's
+ *     alias onto it only when the new row has none. Never leave two rows for one
+ *     path.
+ *   - Otherwise: rewrite the old row in place as `{ ...old, path: newPath }`.
+ */
+export function relocateRecentRepo(
+  oldPath: string,
+  newPath: string,
+): Promise<void> {
+  return serializedRecentRepoWrite(async () => {
+    const settings = await loadSettings();
+    // Windows paths are case-insensitive; compare them that way (see addRecentRepo).
+    const samePath = (a: string, b: string) =>
+      a.toLowerCase() === b.toLowerCase();
+    // Picking the folder at its ORIGINAL path (repo restored / moved back) is a
+    // no-op — the row already points there. Without this guard the merge branch
+    // below would match the row as both `old` and `existing` and drop it.
+    if (samePath(oldPath, newPath)) return;
+    const old = settings.recentRepos.find((r) => samePath(r.path, oldPath));
+    if (!old) return;
+    const existing = settings.recentRepos.find((r) =>
+      samePath(r.path, newPath),
+    );
+    const recentRepos = existing
+      ? // Merge: keep the live new-path row in place, drop the broken old row,
+        // and adopt the old alias only when the new row has none of its own.
+        settings.recentRepos
+          .filter((r) => !samePath(r.path, oldPath))
+          .map((r) =>
+            samePath(r.path, newPath)
+              ? { ...r, alias: existing.alias ?? old.alias }
+              : r,
+          )
+      : // Rewrite the old row in place — everything but `path` stays put.
+        settings.recentRepos.map((r) =>
+          samePath(r.path, oldPath) ? { ...r, path: newPath } : r,
+        );
+    await saveSettings({ ...settings, recentRepos });
+  });
+}
+
+/**
  * Sets (or clears, with null) the optional Bitbucket token expiry date. Rides the
  * same serialized load→modify→save chain as the recent-repo writes above: it's a
  * top-level settings RMW that writes the whole `settings` object, so running it
