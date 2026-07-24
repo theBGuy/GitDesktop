@@ -229,6 +229,16 @@ function sharedTokenScore(title: string, rankText: Set<string>): number {
   return score;
 }
 
+/** Tie-break comparator: newest `updatedAt` first, as a proper three-way that
+ *  returns 0 for equal timestamps (a comparator that never returns 0 violates the
+ *  sort contract). ISO-8601 strings compare correctly as plain strings — no
+ *  locale-sensitive `localeCompare`. */
+function byUpdatedAtDesc(a: string, b: string): number {
+  if (a > b) return -1;
+  if (a < b) return 1;
+  return 0;
+}
+
 /**
  * The shared linked-issue chip state machine. Extracted from CreatePrDialog so
  * the create, edit, and local-create paths share ONE implementation (chips,
@@ -380,9 +390,14 @@ export function useLinkedIssueChips(opts: {
   }
   // Manual pick from the picker: an explicit user intent, so it clears any prior
   // dismissal for that number and adds it as a `manual` relates chip. The picker
-  // already excludes current chips, so a duplicate can't arrive here.
+  // already excludes current chips, so a duplicate can't arrive here. The picker
+  // offers CLOSED issues too, which aren't on the open page — seed those with an
+  // empty title/state so the backfill-probe effect resolves them (a placeholder
+  // `#N`/OPEN would be a permanent lie, since that effect only targets empty
+  // titles). Clear the probed marker so the effect re-probes this number.
   function pick(issueNumber: number) {
     dismissedIssuesRef.current.delete(issueNumber);
+    probedIssuesRef.current.delete(issueNumber);
     const found = (issueList.data ?? []).find((i) => i.number === issueNumber);
     setChips((prev) => {
       if (prev.some((c) => c.number === issueNumber)) return prev;
@@ -390,8 +405,8 @@ export function useLinkedIssueChips(opts: {
         ...prev,
         {
           number: issueNumber,
-          title: found?.title ?? `#${issueNumber}`,
-          state: found?.state ?? "OPEN",
+          title: found?.title ?? "",
+          state: found?.state ?? "",
           keyword: "relates",
           source: "manual",
           aiSuggestedClose: false,
@@ -494,7 +509,8 @@ export function useLinkedIssueChips(opts: {
       .map((i) => ({ issue: i, score: sharedTokenScore(i.title, rankText) }))
       .sort(
         (a, b) =>
-          b.score - a.score || (b.issue.updatedAt < a.issue.updatedAt ? -1 : 1),
+          b.score - a.score ||
+          byUpdatedAtDesc(a.issue.updatedAt, b.issue.updatedAt),
       )
       .map((r) => ({
         number: r.issue.number,
@@ -712,9 +728,14 @@ export function useJiraMentionChips(opts: {
   }
   // Manual pick from the picker: an explicit user intent, so it clears any prior
   // dismissal for that key and adds it as a `manual` chip. The picker already
-  // excludes current chips, so a duplicate can't arrive here.
+  // excludes current chips, so a duplicate can't arrive here. The picker offers
+  // ALL states (incl. done/closed), which aren't on the open page — seed those
+  // with an empty summary so the backfill-probe effect resolves them (a `key`
+  // placeholder would be a permanent lie, since that effect only targets empty
+  // summaries). Clear the probed marker so the effect re-probes this key.
   function pick(key: string) {
     dismissedRef.current.delete(key);
+    probedRef.current.delete(key);
     const found = (issueList.data ?? []).find((i) => i.key === key);
     setChips((prev) => {
       if (prev.some((c) => c.key === key)) return prev;
@@ -722,7 +743,7 @@ export function useJiraMentionChips(opts: {
         ...prev,
         {
           key,
-          summary: found?.summary ?? key,
+          summary: found?.summary ?? "",
           statusCategory: found?.statusCategory ?? "",
           source: "manual",
         },
@@ -819,7 +840,8 @@ export function useJiraMentionChips(opts: {
       .map((i) => ({ issue: i, score: sharedTokenScore(i.summary, rankText) }))
       .sort(
         (a, b) =>
-          b.score - a.score || (b.issue.updatedAt < a.issue.updatedAt ? -1 : 1),
+          b.score - a.score ||
+          byUpdatedAtDesc(a.issue.updatedAt, b.issue.updatedAt),
       )
       .map((r) => ({
         key: r.issue.key,

@@ -204,13 +204,14 @@ function renderLabelLine(name: string, description?: string | null): string {
 }
 
 /** Render one candidate issue as a bullet for the `## Related issues` section:
- *  `- #123 — title`, ` (closed)` suffixed when the issue is closed, the ` — title`
- *  part omitted when the title is empty. Title code-point-capped at 140. KEEP IN
- *  SYNC: `render_issue_line` in src-tauri/src/mcp_server/generate.rs. */
+ *  `- #123 — title`, ` (closed)` suffixed on the number (before ` — title`) when
+ *  the issue is closed, the ` — title` part omitted when the title is empty. Title
+ *  code-point-capped at 140. KEEP IN SYNC: `render_issue_line` in
+ *  src-tauri/src/mcp_server/generate.rs (number-adjacent suffix placement). */
 function renderIssueLine(number: number, title: string, state: string): string {
+  const suffix = state.toUpperCase() === "CLOSED" ? " (closed)" : "";
   const t = [...title.trim()].slice(0, 140).join("");
-  const base = t ? `- #${number} — ${t}` : `- #${number}`;
-  return state.toUpperCase() === "CLOSED" ? `${base} (closed)` : base;
+  return t ? `- #${number}${suffix} — ${t}` : `- #${number}${suffix}`;
 }
 
 /** Render one Jira candidate as a bullet for the `## Related issues` section:
@@ -827,6 +828,13 @@ export function splitCommitMessage(raw: string): {
  *   against `candidateJiraKeys` → `jiraMentions` (canonical uppercase, deduped);
  *   `jiraMentions` is `[]` when `candidateJiraKeys` is empty. A key-shaped token on
  *   a `Closes:` line is DROPPED always — Jira tickets are never closed from PR text.
+ *
+ * Note: the trailing `Labels:` / `Closes:` / `Relates:` lines are peeled off the
+ * body even when NO candidates were fed (mirroring the pre-existing `Labels:`
+ * behavior) — the peel is unconditional so a partial directive line never flickers
+ * into the rendered body mid-stream. A genuine prose final line that happens to
+ * start with one of those tokens is intentionally sacrificed to that flicker-free
+ * guarantee.
  */
 export function extractPrDraft(
   raw: string,

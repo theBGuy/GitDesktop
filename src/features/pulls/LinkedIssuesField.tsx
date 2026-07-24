@@ -91,6 +91,13 @@ function NativeLinkedIssuesField({
     (a, b) => Number(b.aiSuggestedClose) - Number(a.aiSuggestedClose),
   );
   const excluded = new Set(chips.map((c) => c.number));
+  // Clamp the roved index at point of use: chips can shrink via the mouse ✕
+  // without touching `focusIndex`, and a stale index past the end would render
+  // EVERY chip tabIndex=-1 — the band would drop out of the tab order entirely.
+  const effectiveFocusIndex = Math.max(
+    0,
+    Math.min(focusIndex, ordered.length - 1),
+  );
 
   function focusChip(index: number) {
     const clamped = Math.max(0, Math.min(index, ordered.length - 1));
@@ -112,9 +119,15 @@ function NativeLinkedIssuesField({
     } else if (e.key === "Delete" || e.key === "Backspace") {
       e.preventDefault();
       onRemove(chip.number);
-      // Focus the chip that slides into this slot (or the new last one).
+      // Focus the chip that slides into this slot (or the new last one). Defer
+      // past the removal re-render: focusChip reads chipRefs, and reading them
+      // synchronously here would target the node being unmounted (focus drops to
+      // body for any non-last chip). rAF lands after the list has re-rendered.
       const nextCount = ordered.length - 1;
-      if (nextCount > 0) focusChip(Math.min(index, nextCount - 1));
+      if (nextCount > 0) {
+        const target = Math.min(index, nextCount - 1);
+        requestAnimationFrame(() => focusChip(target));
+      }
     }
   }
 
@@ -174,7 +187,15 @@ function NativeLinkedIssuesField({
                 chip.aiSuggestedClose && chip.keyword === "relates"
                   ? `AI suggests this pull request closes #${chip.number} — click to switch to Closes.`
                   : undefined;
-              const stateWord = chip.state === "CLOSED" ? "Closed" : "Open";
+              // State word omitted while unresolved (a just-picked closed issue
+              // seeds state "" until the probe resolves) — no "Open issue." lie
+              // and no dangling sentence.
+              const stateSentence =
+                chip.state === "CLOSED"
+                  ? "Closed issue. "
+                  : chip.state === "OPEN"
+                    ? "Open issue. "
+                    : "";
               const switchTo =
                 chip.keyword === "closes" ? "Relates to" : "Closes";
               return (
@@ -188,9 +209,9 @@ function NativeLinkedIssuesField({
                     ref={(el) => {
                       chipRefs.current[index] = el;
                     }}
-                    tabIndex={index === focusIndex ? 0 : -1}
+                    tabIndex={index === effectiveFocusIndex ? 0 : -1}
                     title={keywordHint}
-                    aria-label={`${keywordLabel} issue ${chip.number}: ${chip.title}. ${stateWord} issue. Press Enter to switch to ${switchTo}, Delete to remove.`}
+                    aria-label={`${keywordLabel} issue ${chip.number}: ${chip.title}. ${stateSentence}Press Enter to switch to ${switchTo}, Delete to remove.`}
                     onClick={() => onToggleKeyword(chip.number)}
                     onFocus={() => setFocusIndex(index)}
                     onKeyDown={(e) => onChipKeyDown(e, index)}
@@ -262,6 +283,13 @@ function JiraMentionsField({
     (a, b) => Number(b.source === "ai") - Number(a.source === "ai"),
   );
   const excluded = new Set(jiraChips.map((c) => c.key));
+  // Clamp the roved index at point of use (see the native band): a mouse ✕ can
+  // shrink the list without touching `focusIndex`, and a stale index past the end
+  // would render every chip tabIndex=-1, dropping the band out of the tab order.
+  const effectiveFocusIndex = Math.max(
+    0,
+    Math.min(focusIndex, ordered.length - 1),
+  );
 
   function focusChip(index: number) {
     const clamped = Math.max(0, Math.min(index, ordered.length - 1));
@@ -280,9 +308,14 @@ function JiraMentionsField({
     } else if (e.key === "Delete" || e.key === "Backspace") {
       e.preventDefault();
       onRemove(chip.key);
-      // Focus the chip that slides into this slot (or the new last one).
+      // Focus the slid-in chip, deferred past the removal re-render (reading
+      // chipRefs synchronously would target the unmounting node — focus drops to
+      // body for any non-last chip). Same rAF fix as the native band.
       const nextCount = ordered.length - 1;
-      if (nextCount > 0) focusChip(Math.min(index, nextCount - 1));
+      if (nextCount > 0) {
+        const target = Math.min(index, nextCount - 1);
+        requestAnimationFrame(() => focusChip(target));
+      }
     }
     // Enter/Space intentionally do nothing — there is no keyword toggle.
   }
@@ -337,8 +370,12 @@ function JiraMentionsField({
             className="flex flex-wrap items-center gap-1.5"
           >
             {ordered.map((chip, index) => {
-              const stateWord =
-                chip.statusCategory.toLowerCase() === "done" ? "Done" : "Open";
+              // State word omitted while unresolved (a just-picked issue seeds
+              // statusCategory "" until the probe resolves) — no wrong "Open" and
+              // no dangling sentence.
+              const cat = chip.statusCategory.toLowerCase();
+              const stateSentence =
+                cat === "done" ? "Done. " : cat ? "Open. " : "";
               const summary = chip.summary || chip.key;
               return (
                 <span
@@ -351,8 +388,8 @@ function JiraMentionsField({
                     ref={(el) => {
                       chipRefs.current[index] = el;
                     }}
-                    tabIndex={index === focusIndex ? 0 : -1}
-                    aria-label={`Relates to ${chip.key}: ${summary}. ${stateWord}. Press Delete to remove.`}
+                    tabIndex={index === effectiveFocusIndex ? 0 : -1}
+                    aria-label={`Relates to ${chip.key}: ${summary}. ${stateSentence}Press Delete to remove.`}
                     onFocus={() => setFocusIndex(index)}
                     onKeyDown={(e) => onChipKeyDown(e, index)}
                     className="inline-flex items-center gap-1 cursor-default rounded-none outline-none focus-visible:ring-1 focus-visible:ring-ring/50"
