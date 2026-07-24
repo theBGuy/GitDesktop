@@ -228,6 +228,9 @@ function TodosResults({
   return (
     <>
       {isError ? <StaleBanner error={error} onRetry={onRetry} /> : null}
+      {/* The "2,000" mirrors the server's `DEFAULT_MAX_HITS` in
+          src-tauri/src/git/todos.rs — the companion never sends `maxHits`, so that
+          default always applies. Keep the two in sync (grep DEFAULT_MAX_HITS). */}
       {data.truncated ? (
         <p className="flex items-center gap-2 border-b border-info/40 bg-info/10 px-4 py-2 text-xs text-foreground">
           <InfoIcon size={14} className="shrink-0 text-info" aria-hidden />
