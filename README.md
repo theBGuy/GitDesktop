@@ -404,7 +404,8 @@ Codex agent, and never writes until you accept.
 workflow against any two branches with no remote at all).
 
 - **AI review + security audit** on any PR, with an activity indicator, a cancel, and a
-  concurrency-capped queue. Re-runs are **iterative** — they feed back the previous
+  concurrency-capped queue — and while one mode streams you can **queue the other to run
+  next** instead of waiting. Re-runs are **iterative** — they feed back the previous
   round, fold in other bots' findings, and read GitDesktop's own earlier comments (past
   reviews and any "fixed in `<sha>`" / refutation replies) as soft, re-verifiable
   context, so an already-addressed finding isn't re-raised cold (the current diff is

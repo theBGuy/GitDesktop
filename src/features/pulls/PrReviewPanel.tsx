@@ -41,7 +41,6 @@ import {
   PROVIDERS_REQUIRING_KEY,
 } from "@/lib/ai/providers";
 import type { AiProviderId, ReviewMode } from "@/lib/ai/types";
-import { track } from "@/lib/analytics";
 import { copyText } from "@/lib/clipboard";
 import { quickTransition } from "@/lib/motion";
 import { useExternalReviews, useReviewHistory } from "@/lib/pulls/queries";
@@ -248,24 +247,9 @@ export function PrReviewPanel({
         ? securityReviewAi
         : globalReviewAi);
     if (!effective) return;
+    // `ai_review_triggered` is emitted in startReview when the run actually begins
+    // (so it counts a drained queued run and skips a dismissed one), not here.
     generate(effective, mode, context, ignoredModes.has(mode), ignoreExternal);
-    const model = effective.model.toLowerCase();
-    const model_tier =
-      model.includes("haiku") ||
-      model.includes("mini") ||
-      model.includes("flash")
-        ? "fast"
-        : model.includes("opus") ||
-            model.includes("gpt-4o") ||
-            model.includes("sonnet-4")
-          ? "powerful"
-          : effective.provider === "ollama"
-            ? "local"
-            : "balanced";
-    track({
-      name: "ai_review_triggered",
-      properties: { provider: effective.provider, model_tier },
-    });
   }
 
   async function post() {

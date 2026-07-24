@@ -425,6 +425,11 @@ export const capabilities: Capability[] = [
   {
     group: "AI · generate & review",
     ai: true,
+    label: "Queue the other review mode while one streams — runs it next",
+  },
+  {
+    group: "AI · generate & review",
+    ai: true,
     label: "Iterative reviews build on the last round & other bots' findings",
   },
   {
