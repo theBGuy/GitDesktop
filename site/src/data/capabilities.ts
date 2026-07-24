@@ -158,6 +158,11 @@ export const capabilities: Capability[] = [
   },
   {
     group: "Pull requests & review",
+    label:
+      "Link related issues as you open a PR — auto-detected from your branch and commits (GitHub & GitLab)",
+  },
+  {
+    group: "Pull requests & review",
     label: "Request reviewers on a PR/MR (GitHub, GitLab & Bitbucket)",
   },
   {

@@ -82,6 +82,12 @@ export interface PrPromptInput {
    *  this set (no invented labels). The description is shown so the model judges a
    *  label by what it's for, not a name-plausible match. Empty ⇒ no label line. */
   availableLabels: { name: string; description?: string | null }[];
+  /** Real issues from the target repo's tracker the model MAY link (already
+   *  validated to exist). When non-empty, the system prompt's issue-reference ban
+   *  is swapped for a grounded rule: the model may end its output with
+   *  `Closes:` / `Relates:` lines choosing ONLY from these numbers; the parser
+   *  drops anything not in this set. Empty/absent ⇒ prompt unchanged, ban intact. */
+  issueCandidates?: { number: number; title: string; state: string }[];
   /** Target host — swaps the change-request noun + markdown flavor in the prompt.
    *  Absent/`"github"` keeps the original GitHub wording byte-for-byte. */
   provider?: PromptProvider;

@@ -711,10 +711,21 @@ line, and the composer says so.
 Create a PR with **Create pull request** ({{kbd:create-pr}}) or from the Compare tab — as
 a **draft** if you like, and set its **labels** and **assignees** right in the dialog
 (GitHub and GitLab; Bitbucket PRs have neither, so it shows only its reviewers picker
-instead){{ai}}. You can also fill the title and description with an **AI-generated** draft
-from the branch diff and commit subjects — which additionally **proposes labels**, chosen
-only from the repository's existing labels and added to whatever you've already picked
-(never invented). The same **Generate** button is on the **Edit** dialog too, so you can
+instead). A **Linked issues** row (GitHub and GitLab, wherever the repo has an issue
+tracker) lets you reference real repo issues on create: chips are **auto-detected** from
+your branch name and commit subjects (a \`fix/123-…\` branch seeds \`#123\`, validated
+against your actual issues), and you can add more by hand with **Link issue**. Each chip
+starts as **Relates to** and a click — or Enter on the focused chip — flips it to
+**Closes**, which asks the forge to close that issue when the PR merges; the chips become
+\`Closes #N\` / \`Relates to #N\` lines appended to the description on create. The row is
+keyboard-operable: **← / →** move between chips, Enter or Space toggles Closes / Relates,
+and Delete removes a chip.{{ai}} You can also fill the title and description with an
+**AI-generated** draft from the branch diff and commit subjects — which additionally
+**proposes labels**, chosen only from the repository's existing labels and added to
+whatever you've already picked (never invented), and can **propose issue links** too,
+picked only from a grounded shortlist of your open issues (AI-picked chips carry a
+**sparkle**; a proposed *Closes* still lands as a safe *Relates to* you can toggle up).
+The same **Generate** button is on the **Edit** dialog too, so you can
 write or regenerate an existing PR's title and description at any time — including for pull
 requests from forks. The Create dialog also has an optional collapsed **Notes for
 reviewers** field below the description — it pre-fills from any notes an agent (or another

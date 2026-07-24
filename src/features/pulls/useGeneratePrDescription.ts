@@ -22,6 +22,24 @@ interface AvailableLabel {
   description?: string | null;
 }
 
+/** A validated real issue the model may link (fed as a grounded candidate). The
+ *  parser validates a proposed link's number against this set. */
+interface IssueCandidate {
+  number: number;
+  title: string;
+  state: string;
+}
+
+/** The parsed draft streamed to `onUpdate` — title/body plus the validated
+ *  labels and the model's proposed `Closes:` / `Relates:` issue numbers. */
+interface PrDraft {
+  title: string;
+  body: string;
+  labels: string[];
+  closes: number[];
+  relates: number[];
+}
+
 /**
  * Streams an AI-written PR title + body from the branch diff and the commits
  * the PR would introduce. `onUpdate` fires with the parsed draft on each chunk.
@@ -39,15 +57,14 @@ export function useGeneratePrDescription(repoPath: string) {
       base: string,
       head: string,
       commitSubjects: string[],
-      onUpdate: (draft: {
-        title: string;
-        body: string;
-        labels: string[];
-      }) => void,
+      onUpdate: (draft: PrDraft) => void,
       availableLabels: AvailableLabel[],
       provider?: PromptProvider,
       /** Author's "Notes for reviewers" — reflected into the description. */
       reviewNotes?: string,
+      /** Validated real issues the model may link (grounded candidates). Empty ⇒
+       *  no issue links proposed. */
+      issueCandidates?: IssueCandidate[],
     ) => {
       await run(
         async (settings) => {
@@ -70,6 +87,7 @@ export function useGeneratePrDescription(repoPath: string) {
             globalInstructions: settings.globalInstructions,
             reviewNotes,
             availableLabels,
+            issueCandidates,
             provider,
           });
         },
@@ -79,6 +97,7 @@ export function useGeneratePrDescription(repoPath: string) {
               extractPrDraft(
                 buffer,
                 availableLabels.map((l) => l.name),
+                (issueCandidates ?? []).map((c) => c.number),
               ),
             ),
         },
@@ -94,11 +113,7 @@ export function useGeneratePrDescription(repoPath: string) {
       base: string,
       head: string,
       commitSubjects: string[],
-      onUpdate: (draft: {
-        title: string;
-        body: string;
-        labels: string[];
-      }) => void,
+      onUpdate: (draft: PrDraft) => void,
       /** Target host — swaps the change-request noun + markdown flavor in the
        *  prompt. Omit (local PRs) to keep the base GitHub wording. */
       provider?: PromptProvider,
@@ -108,6 +123,8 @@ export function useGeneratePrDescription(repoPath: string) {
       availableLabels: AvailableLabel[] = [],
       /** Author's "Notes for reviewers" — reflected into the description. */
       reviewNotes?: string,
+      /** Validated real issues the model may link (grounded candidates). */
+      issueCandidates?: IssueCandidate[],
     ) =>
       runFromDiff(
         () => gitBranchDiff(repoPath, base, head, RAW_DIFF_MAX_BYTES),
@@ -118,6 +135,7 @@ export function useGeneratePrDescription(repoPath: string) {
         availableLabels,
         provider,
         reviewNotes,
+        issueCandidates,
       ),
     [repoPath, runFromDiff],
   );
@@ -131,11 +149,7 @@ export function useGeneratePrDescription(repoPath: string) {
       base: string,
       head: string,
       commitSubjects: string[],
-      onUpdate: (draft: {
-        title: string;
-        body: string;
-        labels: string[];
-      }) => void,
+      onUpdate: (draft: PrDraft) => void,
       provider?: PromptProvider,
       /** The repo's existing labels (name + description) to propose from. Empty ⇒
        *  no labels proposed. Invented labels the model returns are dropped by the
@@ -143,6 +157,8 @@ export function useGeneratePrDescription(repoPath: string) {
       availableLabels: AvailableLabel[] = [],
       /** Author's "Notes for reviewers" — reflected into the description. */
       reviewNotes?: string,
+      /** Validated real issues the model may link (grounded candidates). */
+      issueCandidates?: IssueCandidate[],
     ) =>
       runFromDiff(
         getDiff,
@@ -153,6 +169,7 @@ export function useGeneratePrDescription(repoPath: string) {
         availableLabels,
         provider,
         reviewNotes,
+        issueCandidates,
       ),
     [runFromDiff],
   );

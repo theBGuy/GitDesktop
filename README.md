@@ -38,7 +38,11 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
 - **The whole PR lifecycle, in-app** — review, comment, label, **assign**, **request
   reviewers**, approve, edit, and merge (merge/squash/rebase) GitHub PRs without the
   browser. Set **labels and assignees** right when you **open** a PR/MR (GitHub &
-  GitLab); request reviewers across GitHub, GitLab & Bitbucket. Flip a PR between
+  GitLab), and **link related issues** in the same dialog — chips **auto-detected**
+  from your branch name and commits (a `fix/123-…` branch seeds `#123`), or picked by
+  hand, each toggleable between **Closes** (auto-closes the issue on merge) and
+  **Relates to** (GitHub & GitLab). Request reviewers across GitHub, GitLab &
+  Bitbucket. Flip a PR between
   **draft and ready for review** either way — on GitHub, GitLab & Bitbucket — and
   **create new PRs as drafts by default** (Settings → General).
   - **Activity feed** — a PR's Conversation is a **date-sorted timeline** of reviews,
@@ -237,7 +241,8 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
   GitHub issue (and on a finished plan) seeds the agent composer with the spec, so
   you pick the agent and confirm — then it builds it in an isolated worktree.
 - **AI where it helps** — commit messages, branch names, PR and issue
-  titles/descriptions (and **suggested labels** from the repo's existing set when
+  titles/descriptions (and **suggested labels** from the repo's existing set, plus
+  **proposed issue links** picked from a grounded shortlist of your open issues, when
   you generate a PR/MR), repository descriptions and topics, and a streaming code
   review or security audit. Bring your own provider: cloud APIs, local **Ollama**,
   or a **keyless agent CLI** you already pay for (Claude Code, Codex, GitHub
