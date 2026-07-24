@@ -135,14 +135,30 @@ export function DiscussionsBody({
   }
 
   // ── List states (meta is confirmed available) ──
+  // Meta is loaded + enabled here, so the segment is a persistent sibling of the
+  // list — hoist it above the list's own early returns (mirrors IssuesBody) so the
+  // `[ Issues | Discussions ]` switch the user just tapped never flashes away during
+  // the list's first-load skeleton/error. (The meta-gated states above don't carry it
+  // on purpose: the segment self-hides until meta is enabled, so it'd render null
+  // there anyway.)
+  const segment = (
+    <IssuesDiscussionsSegment repoId={repoId} current="discussions" />
+  );
   // Prefer stale data: keep the last-known list on screen even on error, with a
   // StaleBanner above it. Full-screen states only when there's nothing to show;
   // skeleton only while the first fetch is pending.
   const data = list.data;
   if (!data) {
-    if (list.isError)
-      return <ErrorState error={list.error} onRetry={() => list.refetch()} />;
-    return <SkeletonRows />;
+    return (
+      <div className="flex flex-col">
+        {segment}
+        {list.isError ? (
+          <ErrorState error={list.error} onRetry={() => list.refetch()} />
+        ) : (
+          <SkeletonRows />
+        )}
+      </div>
+    );
   }
 
   // The last page came back short → nothing more to load; hide the button. While a
@@ -154,7 +170,7 @@ export function DiscussionsBody({
 
   return (
     <div className="flex flex-col">
-      <IssuesDiscussionsSegment repoId={repoId} current="discussions" />
+      {segment}
       {categories.length > 0 ? (
         <CategoryChips
           categories={categories}

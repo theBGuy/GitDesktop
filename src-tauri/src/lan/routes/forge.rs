@@ -180,14 +180,34 @@ pub struct DiscussionListQuery {
     limit: Option<u32>,
 }
 
+/// Whether a `category` query value is a well-formed GitHub node id — the only
+/// thing this param is ever meant to carry (a `DiscussionCategory.id`). The charset
+/// covers both the modern (`DIC_kwDO…`, base64url) and legacy (`MDE…=`, padded
+/// base64) node-id forms: letters, digits, and `_ - = + /`. Defense-in-depth at the
+/// LAN boundary: `gh_discussion_list` now passes the value with `-f` (no magic), so
+/// this is belt-and-braces — but rejecting anything with an `@`/whitespace/other
+/// metacharacter keeps a hostile value from ever reaching `gh` at all.
+fn is_valid_category_id(cat: &str) -> bool {
+    !cat.is_empty()
+        && cat
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'=' | b'+' | b'/'))
+}
+
 /// GET discussion list (alias: `/api/forge/discussions?category&limit`). `category`
-/// is a category node id to filter by; absent keeps all categories.
+/// is a category node id to filter by; absent keeps all categories. A present but
+/// malformed `category` is rejected at the boundary (400) rather than forwarded.
 pub async fn discussions_list(
     Extension(ScopedRepo(repo)): Extension<ScopedRepo>,
     Query(q): Query<DiscussionListQuery>,
 ) -> Response {
     if !discussions_allowed(&repo).await {
         return discussions_unavailable();
+    }
+    if let Some(cat) = q.category.as_deref() {
+        if !is_valid_category_id(cat) {
+            return bad_request("invalid category id");
+        }
     }
     respond(crate::github::discussion::gh_discussion_list(repo, q.category, q.limit).await)
 }
@@ -210,4 +230,28 @@ pub async fn discussions_view(
         Err(resp) => return *resp,
     };
     respond(crate::github::discussion::gh_discussion_view(repo, number).await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_valid_category_id;
+
+    #[test]
+    fn accepts_real_node_id_shapes() {
+        // Modern (base64url) and legacy (padded base64) GitHub node ids.
+        assert!(is_valid_category_id("DIC_kwDOS_FYH84Abc-_Xyz"));
+        assert!(is_valid_category_id("MDEwOlJlcG9zaXRvcnkx=="));
+        assert!(is_valid_category_id("abcABC0189_-=+/"));
+    }
+
+    #[test]
+    fn rejects_injection_and_junk() {
+        // The `@`-leading value is the `gh -F` file-read vector; also reject any
+        // whitespace or other metacharacter, and the empty string.
+        assert!(!is_valid_category_id("@/etc/passwd"));
+        assert!(!is_valid_category_id("@-")); // gh's stdin marker
+        assert!(!is_valid_category_id("DIC_kw@evil"));
+        assert!(!is_valid_category_id("has space"));
+        assert!(!is_valid_category_id(""));
+    }
 }

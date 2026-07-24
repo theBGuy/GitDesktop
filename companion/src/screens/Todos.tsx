@@ -262,6 +262,18 @@ function TodoList({
   onKeyDown: (e: React.KeyboardEvent) => void;
 }) {
   const groups = groupByPath(items);
+  // True roving tabindex: the tab stop follows the last-focused row (by stable
+  // path:line identity, NOT index) so Tab-ing away and back returns to it, not row 0
+  // — and a rescan that reorders the list keeps the stop on the same hit. An
+  // unknown/absent key falls back to the first row. Mirrors TagsBody/BranchesBody.
+  const [focusKey, setFocusKey] = useState<string | null>(null);
+  const rowKey = (item: TodoScanItem) => `${item.path}:${item.line}`;
+  // Hoisted membership check (once per render): the remembered key is active only
+  // while its hit is still in the list; otherwise the tab stop falls back to row 0.
+  const activeKey =
+    focusKey != null && items.some((it) => rowKey(it) === focusKey)
+      ? focusKey
+      : null;
   // Roving index runs across ALL rows (flat), not per-group, so ArrowUp/Down scans
   // the whole scan continuously; `rowIndex` counts rows as we emit them.
   let rowIndex = 0;
@@ -280,19 +292,24 @@ function TodoList({
           <ul className="flex flex-col divide-y divide-border">
             {group.items.map((item) => {
               const i = rowIndex++;
+              const key = rowKey(item);
               return (
                 // Keyed by the hit's stable identity (path:line) — NOT the flat roving
                 // index, which would remount every subsequent row when a rescan shifts
                 // earlier rows (losing focus + the dimmed-placeholder transition).
-                <li key={`${item.path}:${item.line}`}>
+                <li key={key}>
                   <div
                     ref={register(i)}
                     onKeyDown={onKeyDown}
+                    onFocus={() => setFocusKey(key)}
                     // A focusable, roving list row (repo convention: every list gets
                     // keyboard nav) — but NOT a control: there's no file viewer to
-                    // open, so it's a plain row, not a button/link. First row is the
-                    // tab stop; roving moves it as the user arrows.
-                    tabIndex={i === 0 ? 0 : -1}
+                    // open, so it's a plain row, not a button/link. The tab stop
+                    // follows the last-focused hit (identity-keyed), falling back to
+                    // the first row.
+                    tabIndex={
+                      (activeKey != null ? key === activeKey : i === 0) ? 0 : -1
+                    }
                     className="flex min-h-11 items-center gap-3 px-4 py-2 outline-none focus-visible:bg-muted/40"
                   >
                     <MarkerChip label={item.marker} />

@@ -243,8 +243,15 @@ pub async fn gh_discussion_list(
             format!("first={page}"),
         ];
         // Only pass categoryId when filtering; absent leaves the variable null.
+        // Pass it as a RAW string field (`-f`), never a typed field (`-F`): gh's
+        // `-F` magic-converts a value beginning with `@` into a FILE READ
+        // (`-F x=@/path` reads that file and sends its contents as the value). The
+        // category flows in from an attacker-reachable LAN query param, so `-F`
+        // here would be an arbitrary host-file read (SSH keys, tokens) exfiltrated
+        // to GitHub. The GraphQL `$category` is an `ID` (string-compatible), so
+        // `-f` is correct — and it matches the `after` cursor's handling below.
         if let Some(cat) = category.as_deref().filter(|c| !c.is_empty()) {
-            args.push("-F".to_string());
+            args.push("-f".to_string());
             args.push(format!("category={cat}"));
         }
         // The `after` cursor is server-opaque text, so it travels as a String

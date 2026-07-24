@@ -2632,6 +2632,54 @@ mod tests {
         std::fs::remove_file(&store).ok();
     }
 
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn discussions_list_rejects_category_injection() {
+        // A GitHub-origin repo: the host gate PASSES, so the request reaches the
+        // category boundary guard. A `@`-leading category is the `gh -F` file-read
+        // vector; the guard rejects it with 400 `invalidArgument` BEFORE any `gh`
+        // call, so this runs offline and proves the injection can't reach `gh`.
+        let _lock = auth::store_test_lock();
+        let store = temp_store();
+        let prev = auth::set_store_path_for_test(Some(store.clone()));
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        git_in(root, &["init", "-q"]);
+        git_in(root, &["config", "user.email", "t@t.t"]);
+        git_in(root, &["config", "user.name", "t"]);
+        git_in(
+            root,
+            &["remote", "add", "origin", "https://github.com/x/y.git"],
+        );
+        let repo = root.to_string_lossy().to_string();
+
+        let (device, bearer, token_hash) = auth::mint_device("Cat Phone");
+        auth::persist_device(&device, &token_hash).unwrap();
+        let router = server::build_router(test_router(Some(repo)));
+
+        // %40 = '@'; %2F = '/'. The exploit value `@/etc/passwd` url-encoded.
+        let resp = router
+            .clone()
+            .oneshot(authed_get(
+                "/api/forge/discussions?category=%40%2Fetc%2Fpasswd",
+                &bearer,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "an `@`-leading category must be rejected at the boundary"
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["kind"], "invalidArgument", "kind: {body}");
+
+        auth::set_store_path_for_test(prev);
+        std::fs::remove_file(&store).ok();
+    }
+
     /// Insert a live stream into a router state's registry, tagged with the repo it
     /// operates on. Mirrors what `AppState::register_stream` stores, but built
     /// directly so the test doesn't need a whole `AppState`. Returns the sender so
