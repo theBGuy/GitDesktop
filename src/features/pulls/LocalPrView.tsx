@@ -64,6 +64,7 @@ import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
+import { LinkedIssuesField } from "./LinkedIssuesField";
 import { LocalPrLifecycleRow } from "./LocalPrTimeline";
 import { PromoteLocalPrDialog } from "./PromoteLocalPrDialog";
 import { PrReviewPanel } from "./PrReviewPanel";
@@ -74,6 +75,11 @@ import {
 } from "./PrTimeline";
 import { ResolveConflictsView } from "./ResolveConflictsView";
 import { useGeneratePrDescription } from "./useGeneratePrDescription";
+import {
+  composeBodyWithRefs,
+  splitBodyRefBlock,
+  useLinkedIssueChips,
+} from "./useLinkedIssueChips";
 
 type Section = "conversation" | "commits" | "files" | "review";
 
@@ -140,12 +146,21 @@ export function LocalPrView({
   });
   const [promoteOpen, setPromoteOpen] = useState(false);
   const ghStatus = useForgeStatus(repoPath);
+  // Linked-issue chips on the local-PR edit path: the chips OWN the trailing ref
+  // block (peeled at open, re-composed on save). A local PR's `Closes #N` lines
+  // survive promotion verbatim into the real forge PR, so these become real
+  // closing refs later — that's intended.
+  const canLinkIssues =
+    !!ghStatus.data && forgeFeatureReady(ghStatus.data, "issues");
   const edit = useEditTitleBody({
     onSave: async ({ title, body }) => {
       if (!pr) return;
+      const finalBody = canLinkIssues
+        ? composeBodyWithRefs(body, linkedIssues)
+        : body;
       await update.mutateAsync({
         id: pr.id,
-        mutate: (cur) => ({ ...cur, title, body }),
+        mutate: (cur) => ({ ...cur, title, body: finalBody }),
       });
     },
   });
@@ -163,6 +178,25 @@ export function LocalPrView({
     pr?.base ?? null,
     pr?.head ?? null,
   );
+  // Shared chip state machine — enabled only while the edit dialog is open (and
+  // the tracker is usable). Local PRs have no lens concept, so read the forge's
+  // own issues ("origin"). Body refs are peeled into chips at open (`resetWith`
+  // in openEdit), so the body and the chips are never two sources of truth.
+  const {
+    chips: linkedIssues,
+    resetWith: resetLinkedIssues,
+    toggleKeyword: toggleIssueKeyword,
+    remove: removeIssue,
+    pick: pickIssue,
+    buildCandidates: buildIssueCandidates,
+    upsertFromDraft: upsertAiIssues,
+  } = useLinkedIssueChips({
+    repoPath,
+    lens: "origin",
+    enabled: canLinkIssues && edit.open,
+    headBranch: pr?.head ?? null,
+    commitSubjects: comparison.data?.ahead?.map((c) => c.subject) ?? [],
+  });
   const diffFiles = useBranchDiffFiles(
     repoPath,
     pr?.base ?? null,
@@ -208,7 +242,9 @@ export function LocalPrView({
   const prForGen = pr;
   function runGenerate() {
     // Local PRs have real local branches — the base..head branch-diff path works,
-    // and (like create) keeps base GitHub prompt wording.
+    // and (like create) keeps base GitHub prompt wording (no provider) and
+    // proposes no labels. The trailing args are reviewer notes (none on an edit)
+    // and the grounded issue candidates.
     prGen.generate(
       prForGen.base,
       prForGen.head,
@@ -216,7 +252,14 @@ export function LocalPrView({
       (d) => {
         edit.form.setFieldValue("title", d.title);
         edit.form.setFieldValue("body", d.body);
+        // Union the model's proposed issue links into the chip cluster (same
+        // rules as create — relate-default, dismissed-set, AI sparkle).
+        upsertAiIssues({ closes: d.closes, relates: d.relates });
       },
+      undefined,
+      [],
+      undefined,
+      buildIssueCandidates(),
     );
   }
   const fileCount = diffFiles.data?.length;
@@ -239,7 +282,17 @@ export function LocalPrView({
 
   function openEdit() {
     if (!pr) return;
-    edit.openEdit({ title: pr.title, body: pr.body });
+    // The chips OWN the trailing ref block: peel any exact `Closes #N` /
+    // `Relates to #N` lines off the end of the body into chips (keyword
+    // preserved) and open the editor with the STRIPPED text. On save the block is
+    // re-appended from chips. With the tracker unavailable there are no chips.
+    if (canLinkIssues) {
+      const { text, refs } = splitBodyRefBlock(pr.body, "native");
+      edit.openEdit({ title: pr.title, body: text });
+      resetLinkedIssues(refs);
+    } else {
+      edit.openEdit({ title: pr.title, body: pr.body });
+    }
   }
 
   function doMerge(strategy: MergeStrategy) {
@@ -998,6 +1051,19 @@ export function LocalPrView({
         onGenerate={aiEnabled ? runGenerate : undefined}
         generating={prGen.generating}
         generateDisabled={ahead.length === 0}
+        belowBody={
+          canLinkIssues ? (
+            <LinkedIssuesField
+              repoPath={repoPath}
+              lens="origin"
+              chips={linkedIssues}
+              onToggleKeyword={toggleIssueKeyword}
+              onRemove={removeIssue}
+              onPick={pickIssue}
+              disabled={prGen.generating}
+            />
+          ) : undefined
+        }
         bodyActions={
           !aiEnabled ? undefined : prGen.generating ? (
             <Button

@@ -30,14 +30,24 @@ interface IssueCandidate {
   state: string;
 }
 
+/** A mention-only Jira candidate from the repo's linked project (Bitbucket
+ *  repos). The parser validates a proposed `Relates:` key against this set. */
+interface JiraCandidate {
+  key: string;
+  summary: string;
+  statusCategory: string;
+}
+
 /** The parsed draft streamed to `onUpdate` — title/body plus the validated
- *  labels and the model's proposed `Closes:` / `Relates:` issue numbers. */
+ *  labels, the model's proposed `Closes:` / `Relates:` issue numbers, and any
+ *  validated linked-Jira mention keys. */
 interface PrDraft {
   title: string;
   body: string;
   labels: string[];
   closes: number[];
   relates: number[];
+  jiraMentions: string[];
 }
 
 /**
@@ -65,6 +75,10 @@ export function useGeneratePrDescription(repoPath: string) {
       /** Validated real issues the model may link (grounded candidates). Empty ⇒
        *  no issue links proposed. */
       issueCandidates?: IssueCandidate[],
+      /** Mention-only Jira candidates (Bitbucket repos with a linked project).
+       *  Empty ⇒ no Jira mentions proposed. Mutually exclusive with
+       *  `issueCandidates` — `buildPrPrompt` gives natives precedence. */
+      jiraCandidates?: JiraCandidate[],
     ) => {
       await run(
         async (settings) => {
@@ -88,6 +102,7 @@ export function useGeneratePrDescription(repoPath: string) {
             reviewNotes,
             availableLabels,
             issueCandidates,
+            jiraCandidates,
             provider,
           });
         },
@@ -98,6 +113,7 @@ export function useGeneratePrDescription(repoPath: string) {
                 buffer,
                 availableLabels.map((l) => l.name),
                 (issueCandidates ?? []).map((c) => c.number),
+                (jiraCandidates ?? []).map((c) => c.key),
               ),
             ),
         },
@@ -125,6 +141,8 @@ export function useGeneratePrDescription(repoPath: string) {
       reviewNotes?: string,
       /** Validated real issues the model may link (grounded candidates). */
       issueCandidates?: IssueCandidate[],
+      /** Mention-only Jira candidates (Bitbucket + linked project). */
+      jiraCandidates?: JiraCandidate[],
     ) =>
       runFromDiff(
         () => gitBranchDiff(repoPath, base, head, RAW_DIFF_MAX_BYTES),
@@ -136,6 +154,7 @@ export function useGeneratePrDescription(repoPath: string) {
         provider,
         reviewNotes,
         issueCandidates,
+        jiraCandidates,
       ),
     [repoPath, runFromDiff],
   );
@@ -159,6 +178,8 @@ export function useGeneratePrDescription(repoPath: string) {
       reviewNotes?: string,
       /** Validated real issues the model may link (grounded candidates). */
       issueCandidates?: IssueCandidate[],
+      /** Mention-only Jira candidates (Bitbucket + linked project). */
+      jiraCandidates?: JiraCandidate[],
     ) =>
       runFromDiff(
         getDiff,
@@ -170,6 +191,7 @@ export function useGeneratePrDescription(repoPath: string) {
         provider,
         reviewNotes,
         issueCandidates,
+        jiraCandidates,
       ),
     [runFromDiff],
   );

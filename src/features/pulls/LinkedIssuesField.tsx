@@ -5,6 +5,8 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { IssuePicker, StateIcon } from "@/features/issues/IssueRelations";
 import type { RemoteLens } from "@/lib/git/types";
+import type { JiraLink } from "@/lib/jira/store";
+import { JiraIssuePicker, JiraStatusIcon } from "./JiraIssuePicker";
 
 /** One linked-issue chip: a real repo issue the PR will reference on create. The
  *  keyword becomes a `Closes #N` / `Relates to #N` line appended to the body. */
@@ -19,18 +21,22 @@ export interface LinkedIssueChip {
   aiSuggestedClose: boolean;
 }
 
-/** The chip cluster in Create PR: extraction-seeded, AI-proposed, and
- *  manually-added issue links. The parent owns the chip state; this renders the
- *  band + the "Link issue" picker and reports toggles/removes/picks upward. */
-export function LinkedIssuesField({
-  repoPath,
-  lens,
-  chips,
-  onToggleKeyword,
-  onRemove,
-  onPick,
-  disabled,
-}: {
+/** One Jira mention chip: a linked-project issue the PR MENTIONS (Bitbucket repos
+ *  with no native tracker). Mention-only — there is no keyword toggle and no close
+ *  semantics; it becomes a `Relates to KEY` line appended to the body. */
+export interface JiraMentionChip {
+  key: string;
+  summary: string;
+  /** Jira `statusCategory` key: "done" maps to the closed/merged glyph, anything
+   *  else to the open/success glyph. */
+  statusCategory: string;
+  source: "extraction" | "ai" | "manual";
+}
+
+/** Props for the native (GitHub/GitLab) issue-link cluster. `variant` is optional
+ *  (absent ⇒ native), so existing call sites compile unchanged. */
+interface NativeFieldProps {
+  variant?: "native";
   repoPath: string;
   lens: RemoteLens;
   chips: LinkedIssueChip[];
@@ -38,7 +44,42 @@ export function LinkedIssuesField({
   onRemove: (issueNumber: number) => void;
   onPick: (issueNumber: number) => void;
   disabled?: boolean;
-}) {
+}
+
+/** Props for the Jira mention-only cluster (Bitbucket + linked project). No
+ *  keyword toggle — the chips are mention-only. */
+interface JiraFieldProps {
+  variant: "jira";
+  repoPath: string;
+  /** The repo's Jira link (site + project) — drives the picker. */
+  link: JiraLink | null;
+  jiraChips: JiraMentionChip[];
+  onRemove: (key: string) => void;
+  onPick: (key: string) => void;
+  disabled?: boolean;
+}
+
+/** The linked-issue cluster in the PR create/edit dialogs. Two variants: the
+ *  native (GitHub/GitLab) issue-link band with a Closes/Relates keyword toggle,
+ *  and the Bitbucket Jira mention-only band. They're mutually exclusive — a repo
+ *  is exactly one provider — so a caller renders exactly one. */
+export function LinkedIssuesField(props: NativeFieldProps | JiraFieldProps) {
+  if (props.variant === "jira") return <JiraMentionsField {...props} />;
+  return <NativeLinkedIssuesField {...props} />;
+}
+
+/** The chip cluster in Create PR: extraction-seeded, AI-proposed, and
+ *  manually-added issue links. The parent owns the chip state; this renders the
+ *  band + the "Link issue" picker and reports toggles/removes/picks upward. */
+function NativeLinkedIssuesField({
+  repoPath,
+  lens,
+  chips,
+  onToggleKeyword,
+  onRemove,
+  onPick,
+  disabled,
+}: NativeFieldProps) {
   const [pickerOpen, setPickerOpen] = useState(false);
   // Roving tabindex: the band is a single tab stop; ArrowLeft/Right move the
   // roved index, which sets which chip is focusable + focused.
@@ -181,6 +222,159 @@ export function LinkedIssuesField({
                     aria-label={`Remove #${chip.number}`}
                     className="text-muted-foreground"
                     onClick={() => onRemove(chip.number)}
+                  >
+                    <XIcon />
+                  </Button>
+                </span>
+              );
+            })}
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Added to the description on create.
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** The Jira mention-only cluster (Bitbucket + linked project). Same band shape as
+ *  the native field minus the keyword toggle: each chip shows a fixed muted
+ *  "Relates to" label, the key, and its summary; the only chip action is remove.
+ *  Roving tabindex identical to native minus the Enter/Space toggle. */
+function JiraMentionsField({
+  repoPath,
+  link,
+  jiraChips,
+  onRemove,
+  onPick,
+  disabled,
+}: JiraFieldProps) {
+  const [pickerOpen, setPickerOpen] = useState(false);
+  // Roving tabindex: the band is a single tab stop; ArrowLeft/Right move the
+  // roved index, which sets which chip is focusable + focused.
+  const [focusIndex, setFocusIndex] = useState(0);
+  const chipRefs = useRef<(HTMLButtonElement | null)[]>([]);
+
+  // AI-suggested chips sort first (parity with the native band's sparkle-first
+  // ordering); ties keep insertion order (stable sort).
+  const ordered = [...jiraChips].sort(
+    (a, b) => Number(b.source === "ai") - Number(a.source === "ai"),
+  );
+  const excluded = new Set(jiraChips.map((c) => c.key));
+
+  function focusChip(index: number) {
+    const clamped = Math.max(0, Math.min(index, ordered.length - 1));
+    setFocusIndex(clamped);
+    chipRefs.current[clamped]?.focus();
+  }
+
+  function onChipKeyDown(e: KeyboardEvent<HTMLButtonElement>, index: number) {
+    const chip = ordered[index];
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      if (index > 0) focusChip(index - 1);
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault();
+      if (index < ordered.length - 1) focusChip(index + 1);
+    } else if (e.key === "Delete" || e.key === "Backspace") {
+      e.preventDefault();
+      onRemove(chip.key);
+      // Focus the chip that slides into this slot (or the new last one).
+      const nextCount = ordered.length - 1;
+      if (nextCount > 0) focusChip(Math.min(index, nextCount - 1));
+    }
+    // Enter/Space intentionally do nothing — there is no keyword toggle.
+  }
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-2">
+        <Label>Linked issues</Label>
+        <span className="flex-1" />
+        <Popover.Root open={pickerOpen} onOpenChange={setPickerOpen}>
+          <Popover.Trigger
+            render={
+              <Button
+                variant="outline"
+                size="xs"
+                disabled={disabled}
+                aria-label="Link an issue"
+              />
+            }
+          >
+            <LinkIcon data-icon="inline-start" />
+            Link issue
+          </Popover.Trigger>
+          <Popover.Portal>
+            <Popover.Positioner
+              align="end"
+              sideOffset={4}
+              className="isolate z-50"
+            >
+              <Popover.Popup className="w-72 rounded-none bg-popover p-2 text-popover-foreground shadow-md ring-1 ring-foreground/10">
+                <JiraIssuePicker
+                  repoPath={repoPath}
+                  link={link}
+                  exclude={excluded}
+                  pending={false}
+                  onPick={(key) => {
+                    setPickerOpen(false);
+                    onPick(key);
+                  }}
+                />
+              </Popover.Popup>
+            </Popover.Positioner>
+          </Popover.Portal>
+        </Popover.Root>
+      </div>
+
+      {ordered.length > 0 && (
+        <>
+          <div
+            role="group"
+            aria-label="Linked issues"
+            className="flex flex-wrap items-center gap-1.5"
+          >
+            {ordered.map((chip, index) => {
+              const stateWord =
+                chip.statusCategory.toLowerCase() === "done" ? "Done" : "Open";
+              const summary = chip.summary || chip.key;
+              return (
+                <span
+                  key={chip.key}
+                  className="inline-flex items-center gap-1 border py-0.5 pr-0.5 pl-1.5 text-xs"
+                >
+                  <JiraStatusIcon statusCategory={chip.statusCategory} />
+                  <button
+                    type="button"
+                    ref={(el) => {
+                      chipRefs.current[index] = el;
+                    }}
+                    tabIndex={index === focusIndex ? 0 : -1}
+                    aria-label={`Relates to ${chip.key}: ${summary}. ${stateWord}. Press Delete to remove.`}
+                    onFocus={() => setFocusIndex(index)}
+                    onKeyDown={(e) => onChipKeyDown(e, index)}
+                    className="inline-flex items-center gap-1 cursor-default rounded-none outline-none focus-visible:ring-1 focus-visible:ring-ring/50"
+                  >
+                    {chip.source === "ai" && (
+                      <SparkleIcon className="size-3 shrink-0 text-muted-foreground" />
+                    )}
+                    <span className="text-muted-foreground">Relates to</span>
+                    <span className="font-mono text-muted-foreground">
+                      {chip.key}
+                    </span>
+                    <span className="max-w-40 truncate" title={summary}>
+                      {summary}
+                    </span>
+                  </button>
+                  <Button
+                    variant="ghost"
+                    size="icon-xs"
+                    tabIndex={-1}
+                    aria-label={`Remove ${chip.key}`}
+                    className="text-muted-foreground"
+                    onClick={() => onRemove(chip.key)}
                   >
                     <XIcon />
                   </Button>

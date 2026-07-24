@@ -84,6 +84,11 @@ interface EditTitleBodyDialogProps {
   /** Mirrors the Generate button's disabled state (undefined ⇒ false): the chord
    *  still swallows but doesn't run. */
   generateDisabled?: boolean;
+  /** Optional content rendered between the body field and the footer (e.g. the
+   *  linked-issue chip cluster on the PR edit paths). Optional exactly like
+   *  `onGenerate` — the issue views omit it, so they compile untouched and render
+   *  byte-identically. */
+  belowBody?: ReactNode;
 }
 
 export const EditTitleBodyDialog = withForm({
@@ -101,6 +106,7 @@ export const EditTitleBodyDialog = withForm({
     onGenerate: undefined as (() => void) | undefined,
     generating: undefined as boolean | undefined,
     generateDisabled: undefined as boolean | undefined,
+    belowBody: undefined as ReactNode,
   } as EditTitleBodyDialogProps,
   render: function EditTitleBodyDialogRender({
     form,
@@ -114,6 +120,7 @@ export const EditTitleBodyDialog = withForm({
     onGenerate,
     generating,
     generateDisabled,
+    belowBody,
   }) {
     // Context-sensitive reuse of the `generate-commit-message` binding (mod+g by
     // default) while this dialog is open — never a hardcoded chord, so a
@@ -190,6 +197,7 @@ export const EditTitleBodyDialog = withForm({
                 />
               )}
             </form.AppField>
+            {belowBody}
             <DialogFooter>
               <Button
                 type="button"

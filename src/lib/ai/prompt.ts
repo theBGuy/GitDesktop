@@ -213,6 +213,21 @@ function renderIssueLine(number: number, title: string, state: string): string {
   return state.toUpperCase() === "CLOSED" ? `${base} (closed)` : base;
 }
 
+/** Render one Jira candidate as a bullet for the `## Related issues` section:
+ *  `- KEY — summary`, ` (done)` suffixed on the key when `statusCategory` is
+ *  "done", bare `- KEY` when the summary is empty. Summary trimmed + 140-char
+ *  cap. Mention-only — there is no closed/close notion. KEEP IN SYNC:
+ *  `render_jira_line` in src-tauri/src/mcp_server/generate.rs. */
+function renderJiraLine(
+  key: string,
+  summary: string,
+  statusCategory: string,
+): string {
+  const suffix = statusCategory.toLowerCase() === "done" ? " (done)" : "";
+  const s = [...summary.trim()].slice(0, 140).join("");
+  return s ? `- ${key}${suffix} — ${s}` : `- ${key}${suffix}`;
+}
+
 // KEEP IN SYNC: src-tauri/src/mcp_server/generate.rs mirrors this for the MCP recipe tools.
 export function buildPrPrompt(input: PrPromptInput): {
   system: string;
@@ -229,10 +244,25 @@ export function buildPrPrompt(input: PrPromptInput): {
   const candidates = (input.issueCandidates ?? [])
     .filter((c) => Number.isInteger(c.number) && c.number > 0)
     .slice(0, 8);
+  // Mention-only Jira candidates (Bitbucket repos with a linked project). Native
+  // `candidates` win — the Jira variant fires ONLY when there are no native
+  // candidates (the Bitbucket-only gather makes both-non-empty impossible, but the
+  // precedence is encoded here defensively). Filter empty keys, then cap at 8.
+  const jira =
+    candidates.length > 0
+      ? []
+      : (input.jiraCandidates ?? []).filter((c) => c.key.trim()).slice(0, 8);
   if (candidates.length > 0) {
     // Both strings built with the in-scope `abbrev`; swap the first occurrence.
     const ban = `- NEVER reference issue or ${abbrev} numbers, tickets, milestones, or external links (e.g. "Closes #123", "part of #60", "fixes JIRA-4"). You have no access to the issue tracker, so any such reference is fabricated — leave them out entirely.`;
     const relaxed = `- Do not put issue or ${abbrev} numbers, tickets, milestones, or external links in the description body — the ONLY issue references you may make are the final Closes:/Relates: lines defined in the "Related issues" section, chosen from its list. Any other reference is fabricated — leave it out.`;
+    systemParts[0] = systemParts[0].replace(ban, relaxed);
+  } else if (jira.length > 0) {
+    // Jira mention-only variant: swap the ban for a RELAXED line that permits only
+    // the final `Relates:` line (no `Closes:` — Jira tickets aren't closed from PR
+    // text). `abbrev` is "PR" on Bitbucket. KEEP IN SYNC with generate.rs.
+    const ban = `- NEVER reference issue or ${abbrev} numbers, tickets, milestones, or external links (e.g. "Closes #123", "part of #60", "fixes JIRA-4"). You have no access to the issue tracker, so any such reference is fabricated — leave them out entirely.`;
+    const relaxed = `- Do not put issue or ${abbrev} numbers, tickets, milestones, or external links in the description body — the ONLY ticket references you may make are the final Relates: line defined in the "Related issues" section, chosen from its list. Any other reference is fabricated — leave it out.`;
     systemParts[0] = systemParts[0].replace(ban, relaxed);
   }
 
@@ -308,6 +338,16 @@ export function buildPrPrompt(input: PrPromptInput): {
     systemParts.push(
       `## Related issues\n${issueLines}\nThese are real, open-or-closed issues from this repository's tracker that MAY be related to this change — judge each by its title against what the diff actually does. Most changes genuinely address at most one or two, often none; never force a link. After the description (and after the Labels line when present), report qualifying issues on up to two final lines, exactly like:\nCloses: 123, 456\nRelates: 789\nUse Closes ONLY for an issue this change fully resolves — merging will close it automatically, so prefer Relates when unsure. Use Relates for an issue this change advances or clearly connects to without resolving it. List ONLY numbers from the list above, never any other number; omit either line (or both) when no issue qualifies.`,
     );
+  } else if (jira.length > 0) {
+    // Jira mention-only variant of the Related-issues section (Bitbucket + linked
+    // project). Only a `Relates:` line is offered — Jira tickets aren't closed from
+    // PR text. KEEP IN SYNC with generate.rs.
+    const issueLines = jira
+      .map((c) => renderJiraLine(c.key, c.summary, c.statusCategory))
+      .join("\n");
+    systemParts.push(
+      `## Related issues\n${issueLines}\nThese are real issues from this repository's linked Jira project that MAY be related to this change — judge each by its title against what the diff actually does. Most changes genuinely address at most one or two, often none; never force a link. After the description (and after the Labels line when present), report qualifying issues on ONE final line, exactly like:\nRelates: MYT-123, MYT-456\nNever use a Closes line for these — Jira tickets are not closed from pull-request text. List ONLY keys from the list above, never any other key; omit the line when no issue qualifies.`,
+    );
   }
 
   let closing = `Write the ${prNoun} title and description. Lead with a summary of the goal, then group related changes by theme under \`###\` headings when the diff touches several areas, citing the files involved.`;
@@ -316,6 +356,8 @@ export function buildPrPrompt(input: PrPromptInput): {
   }
   if (candidates.length > 0) {
     closing += ` Then, if any of the listed related issues qualify, end with the \`Closes:\` / \`Relates:\` line(s) as instructed.`;
+  } else if (jira.length > 0) {
+    closing += ` Then, if any of the listed related issues qualify, end with the \`Relates:\` line as instructed.`;
   }
   promptParts.push(closing);
 
@@ -781,17 +823,23 @@ export function splitCommitMessage(raw: string): {
  *   validated against `candidateIssueNumbers`, and deduped. A number appearing in
  *   BOTH lines lands in `relates` only (the safe default). Both are `[]` when
  *   `candidateIssueNumbers` is empty (the lines are STILL peeled from the body).
+ * - `Relates:` KEY-shaped tokens (e.g. `MYT-123`) are validated (case-insensitively)
+ *   against `candidateJiraKeys` → `jiraMentions` (canonical uppercase, deduped);
+ *   `jiraMentions` is `[]` when `candidateJiraKeys` is empty. A key-shaped token on
+ *   a `Closes:` line is DROPPED always — Jira tickets are never closed from PR text.
  */
 export function extractPrDraft(
   raw: string,
   availableLabels: string[],
   candidateIssueNumbers: number[] = [],
+  candidateJiraKeys: string[] = [],
 ): {
   title: string;
   body: string;
   labels: string[];
   closes: number[];
   relates: number[];
+  jiraMentions: string[];
 } {
   const { title, body: fullBody } = splitCommitMessage(raw);
 
@@ -881,7 +929,29 @@ export function extractPrDraft(
     (n) => !relatesSet.has(n),
   );
 
-  return { title, body, labels, closes, relates };
+  // Validate Jira keys against the fed candidate set (canonical uppercase). Only
+  // the `Relates:` line contributes — a key-shaped token on `Closes:` is dropped
+  // (Jira tickets are never closed from PR text). `jiraMentions` is empty when the
+  // candidate set is empty (the line is still peeled regardless).
+  const jiraMentions: string[] = [];
+  if (candidateJiraKeys.length > 0 && captured.relates) {
+    const canonicalKeys = new Set<string>();
+    for (const k of candidateJiraKeys) {
+      const trimmed = k.trim().toUpperCase();
+      if (trimmed) canonicalKeys.add(trimmed);
+    }
+    const seen = new Set<string>();
+    for (const part of captured.relates.split(",")) {
+      const token = part.trim().toUpperCase();
+      if (!/^[A-Z][A-Z0-9_]*-\d+$/.test(token)) continue;
+      if (canonicalKeys.has(token) && !seen.has(token)) {
+        seen.add(token);
+        jiraMentions.push(token);
+      }
+    }
+  }
+
+  return { title, body, labels, closes, relates, jiraMentions };
 }
 
 /** The branch name from a branch-name response, tolerant of a leaked preamble

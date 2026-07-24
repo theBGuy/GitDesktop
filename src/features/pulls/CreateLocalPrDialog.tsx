@@ -16,8 +16,10 @@ import { REVIEWER_NOTES_MARKER } from "@/lib/ai/notes-context";
 import { triggerAutomations } from "@/lib/automations/runner";
 import { required, useAppForm } from "@/lib/form";
 import {
+  forgeFeatureReady,
   useCompareBranches,
   useDefaultBranch,
+  useForgeStatus,
   useRepoStatus,
 } from "@/lib/git/queries";
 import { eventToBinding, formatBinding } from "@/lib/hotkeys/binding";
@@ -28,9 +30,14 @@ import { deleteReviewNote } from "@/lib/review-notes/store";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
+import { LinkedIssuesField } from "./LinkedIssuesField";
 import { ReviewerNotesField } from "./ReviewerNotesField";
 import { useBranchPickerOptions } from "./useBranchPickerOptions";
 import { useGeneratePrDescription } from "./useGeneratePrDescription";
+import {
+  composeBodyWithRefs,
+  useLinkedIssueChips,
+} from "./useLinkedIssueChips";
 
 /** Platform-correct submit hint (Cmd+Enter on macOS, Ctrl+Enter else) — never a
  *  literal modifier (house platform-mod-key rule). */
@@ -57,6 +64,13 @@ export function CreateLocalPrDialog({
   const createPr = useCreateLocalPr(repoPath);
   const { generate, cancel, generating } = useGeneratePrDescription(repoPath);
   const aiEnabled = useAiEnabled();
+  // Linked issues: real repo issues to reference. A local PR's `Closes #N` lines
+  // survive promotion verbatim into the real forge PR, so these become real
+  // closing refs later — intended. Non-AI surface (shown under Hide-AI too),
+  // gated only on the forge having a usable issue tracker.
+  const ghStatus = useForgeStatus(repoPath);
+  const canLinkIssues =
+    !!ghStatus.data && forgeFeatureReady(ghStatus.data, "issues");
   const selectPr = useUiStore((s) => s.selectPr);
   const setRepoTab = useUiStore((s) => s.setRepoTab);
   const queryClient = useQueryClient();
@@ -82,9 +96,14 @@ export function CreateLocalPrDialog({
     },
     onSubmit: async ({ value }) => {
       try {
+        // Append the linked-issue chips as their exact keyword lines via the
+        // shared composer (the single ref-block composition every create/edit
+        // save path uses). These `Closes #N` lines carry into a later promotion,
+        // and the review event below reads the same composed body.
+        const finalBody = composeBodyWithRefs(value.body, linkedIssues);
         const pr = await createPr.mutateAsync({
           title: value.title.trim(),
-          body: value.body,
+          body: finalBody,
           base: value.base,
           head: value.head,
         });
@@ -140,7 +159,7 @@ export function CreateLocalPrDialog({
           // `ahead` (git log) is newest-first, so the head is the first entry.
           headSha: ahead[0]?.hash,
           title: value.title.trim(),
-          body: value.body,
+          body: finalBody,
           commitSubjects: ahead.map((c) => c.subject),
           target: { type: "local", id: pr.id },
           reviewNotes: notes || undefined,
@@ -154,6 +173,10 @@ export function CreateLocalPrDialog({
   // keepDefaultValues: otherwise the per-render options sync clobbers the
   // seeded head/base back to empty (untouched form).
   const seedOnOpen = useEffectEvent(() => {
+    // Reset the linked-issue chips (and their dismissed/probed refs) to empty —
+    // the dialog opens with no seeded body refs; extraction/AI seeding then
+    // repopulates from the head branch + commits.
+    resetLinkedIssues([]);
     const h = defaultHead ?? currentName ?? names[0] ?? "";
     const fallbackBase =
       defaultBranch.data && defaultBranch.data !== h
@@ -185,6 +208,26 @@ export function CreateLocalPrDialog({
   const ahead = comparison.data?.ahead ?? [];
   const sameBranch = base === head;
 
+  // Shared chip state machine — enabled while the dialog is open and the tracker
+  // is usable. Local PRs have no lens concept, so read the forge's own issues
+  // ("origin"). Reset to empty on open (seedOnOpen); extraction/AI seeding then
+  // repopulates from the head branch + commits.
+  const {
+    chips: linkedIssues,
+    resetWith: resetLinkedIssues,
+    toggleKeyword: toggleIssueKeyword,
+    remove: removeIssue,
+    pick: pickIssue,
+    buildCandidates: buildIssueCandidates,
+    upsertFromDraft: upsertAiIssues,
+  } = useLinkedIssueChips({
+    repoPath,
+    lens: "origin",
+    enabled: open && canLinkIssues,
+    headBranch: head || null,
+    commitSubjects: ahead.map((c) => c.subject),
+  });
+
   // AI title+description generation — shared by the Generate button's onClick and
   // the dialog-local generate chord below. Verbatim the button's prior body.
   function runGenerate() {
@@ -195,13 +238,18 @@ export function CreateLocalPrDialog({
       (d) => {
         form.setFieldValue("title", d.title);
         form.setFieldValue("body", d.body);
+        // Union the model's proposed issue links into the chip cluster (same
+        // rules as create — relate-default, dismissed-set, AI sparkle).
+        upsertAiIssues({ closes: d.closes, relates: d.relates });
       },
       // Local PRs keep the base GitHub prompt wording (no provider) and propose
-      // no labels; the trailing arg is the author's reviewer notes, reflected
-      // into the generated description.
+      // no labels. The trailing args are the author's reviewer notes (reflected
+      // into the generated description) and the grounded issue candidates —
+      // chips pinned first, then top-ranked open issues.
       undefined,
       [],
       notes.trim() || undefined,
+      buildIssueCandidates(),
     );
   }
   // Context-sensitive reuse of the `generate-commit-message` binding (mod+g by
@@ -362,6 +410,21 @@ export function CreateLocalPrDialog({
                 />
               )}
             </form.AppField>
+
+            {/* Linked issues: real repo issues referenced on create. Non-AI
+                surface (shown under Hide-AI too), gated on the tracker being
+                usable. Composed into the body as `Closes #N`/`Relates to #N`. */}
+            {canLinkIssues && (
+              <LinkedIssuesField
+                repoPath={repoPath}
+                lens="origin"
+                chips={linkedIssues}
+                onToggleKeyword={toggleIssueKeyword}
+                onRemove={removeIssue}
+                onPick={pickIssue}
+                disabled={generating}
+              />
+            )}
 
             {/* Collapsed "Notes for reviewers": deposit-seeded author context,
                 appended as the local PR's first comment and fed to the AI

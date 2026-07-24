@@ -1483,7 +1483,11 @@ export function useIssueList(
   });
 }
 
-const issueDetailsOptions = (repo: string, number: number, lens: RemoteLens) =>
+export const issueDetailsOptions = (
+  repo: string,
+  number: number,
+  lens: RemoteLens,
+) =>
   queryOptions({
     queryKey: ["repo", repo, "issue", lens, number] as const,
     queryFn: () => api.forgeIssueView(repo, number, lens),

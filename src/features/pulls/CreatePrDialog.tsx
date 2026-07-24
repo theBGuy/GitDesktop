@@ -5,7 +5,7 @@ import {
   TagIcon,
   XIcon,
 } from "@phosphor-icons/react";
-import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSelector } from "@tanstack/react-store";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useEffectEvent, useId, useRef, useState } from "react";
@@ -35,7 +35,6 @@ import {
   useCreatePr,
   useDefaultBranch,
   useForgeStatus,
-  useIssueList,
   usePrsForBranch,
   useRepoLabels,
   useRepoStatus,
@@ -47,7 +46,7 @@ import {
 } from "@/lib/git/types";
 import { eventToBinding, formatBinding } from "@/lib/hotkeys/binding";
 import { useEffectiveBindings } from "@/lib/hotkeys/hotkeys";
-import { extractIssueNumbers } from "@/lib/issues/extract";
+import { useJiraLink } from "@/lib/jira/queries";
 import {
   useLensGate,
   useRemoteSlug,
@@ -56,33 +55,17 @@ import {
 import { deleteReviewNote } from "@/lib/review-notes/store";
 import { useAiEnabled, useSettings } from "@/lib/settings/queries";
 import { toastError } from "@/lib/toast";
-import { type LinkedIssueChip, LinkedIssuesField } from "./LinkedIssuesField";
+import { LinkedIssuesField } from "./LinkedIssuesField";
 import { ReviewerNotesField } from "./ReviewerNotesField";
 import { ReviewersPopover } from "./ReviewersPopover";
 import { useBranchPickerOptions } from "./useBranchPickerOptions";
 import { useGeneratePrDescription } from "./useGeneratePrDescription";
-
-/** Issue-detail probe options mirroring `issueDetailsOptions` in queries.ts
- *  (not exported there). Used to validate an extracted number that isn't on the
- *  open-issues page before it becomes a chip. */
-function issueDetailsOptions(repo: string, number: number, lens: RemoteLens) {
-  return queryOptions({
-    queryKey: ["repo", repo, "issue", lens, number] as const,
-    queryFn: () => api.forgeIssueView(repo, number, lens),
-    staleTime: 30_000,
-  });
-}
-
-/** Lowercased tokens (length ≥ 4, split on non-alphanumerics) for ranking issue
- *  titles against the branch + commit subjects by shared-token overlap. */
-function rankTokens(text: string): Set<string> {
-  return new Set(
-    text
-      .toLowerCase()
-      .split(/[^a-z0-9]+/)
-      .filter((t) => t.length >= 4),
-  );
-}
+import {
+  composeBodyWithJiraRefs,
+  composeBodyWithRefs,
+  useJiraMentionChips,
+  useLinkedIssueChips,
+} from "./useLinkedIssueChips";
 
 /** Platform-correct submit hint (Cmd+Enter on macOS, Ctrl+Enter else) — never a
  *  literal modifier (house platform-mod-key rule). */
@@ -191,23 +174,12 @@ export function CreatePrDialog({
   // Gated only on the forge having a usable issue tracker (not on `aiEnabled`:
   // the cluster is a non-AI surface — Hide-AI still shows it, minus AI chips).
   const canLinkIssues = !!forge.data && forgeFeatureReady(forge.data, "issues");
-  // Open issues (page of 50) to validate seeds against and to rank as prompt
-  // candidates. Uses the create lens, so the parent target reads the parent's
-  // issues.
-  const issueList = useIssueList(
-    repoPath,
-    open && canLinkIssues,
-    "open",
-    50,
-    createLens,
-  );
-  const [linkedIssues, setLinkedIssues] = useState<LinkedIssueChip[]>([]);
-  // A number the user removed (or that came in dismissed): upserts (seed/AI) skip
-  // it; a MANUAL pick clears it (explicit intent overrides). Reset in seedOnOpen.
-  const dismissedIssuesRef = useRef<Set<number>>(new Set());
-  // Numbers already probed this dialog-open (present-or-absent from the open
-  // page), so the fetchQuery probe runs at most once per number per open.
-  const probedIssuesRef = useRef<Set<number>>(new Set());
+  // Bitbucket repos have no native tracker (`canLinkIssues` is false), so a
+  // LINKED Jira project drives a mention-only cluster instead. Mutually exclusive
+  // with the native cluster — only ever one in the dialog.
+  const jiraLink = useJiraLink(repoPath);
+  const canJiraMention =
+    !canLinkIssues && forge.data?.provider === "bitbucket" && !!jiraLink.data;
   // Group-label ids: these fields wrap trigger-style widgets (segmented buttons
   // and popover triggers) that carry their own aria-label, so the visible field
   // label names the surrounding group via aria-labelledby rather than htmlFor.
@@ -301,19 +273,16 @@ export function CreatePrDialog({
     },
     onSubmit: async ({ value }) => {
       try {
-        // Append the linked-issue chips as their exact keyword lines. The forge
-        // does the real linking/auto-closing on merge; here we only compose body
-        // text. Two blank lines separate the refs block from the description.
-        const refLines = linkedIssues.map((c) =>
-          c.keyword === "closes"
-            ? `Closes #${c.number}`
-            : `Relates to #${c.number}`,
-        );
-        const finalBody = refLines.length
-          ? [value.body.trimEnd(), refLines.join("\n")]
-              .filter(Boolean)
-              .join("\n\n")
-          : value.body;
+        // Append the linked-issue chips as their exact keyword lines via the
+        // shared composer (the single ref-block composition used by every
+        // create/edit save path). The forge does the real linking/auto-closing on
+        // merge; here we only compose body text. On a Bitbucket repo with a Jira
+        // link, the Jira mention chips compose `Relates to KEY` lines instead (the
+        // two clusters are mutually exclusive).
+        const finalBody =
+          canJiraMention && jiraChips.length > 0
+            ? composeBodyWithJiraRefs(value.body, jiraChips)
+            : composeBodyWithRefs(value.body, linkedIssues);
         const { number, url } = await createPr.mutateAsync({
           base: value.base,
           // Head stays a bare LOCAL branch name either way: the backend pushes it
@@ -436,9 +405,12 @@ export function CreatePrDialog({
     setReviewers([]);
     setLabels(new Set());
     setAssignees([]);
-    setLinkedIssues([]);
-    dismissedIssuesRef.current = new Set();
-    probedIssuesRef.current = new Set();
+    // Reset the linked-issue chips (and their dismissed/probed refs) to empty —
+    // the create dialog opens with no seeded body refs; extraction/AI seeding
+    // then repopulates from the head branch + commits.
+    resetLinkedIssues([]);
+    // Same for the Jira mention cluster (Bitbucket + linked project).
+    resetJiraChips([]);
     // Reset the target to the default (parent) every open, so a prior fork/parent
     // choice doesn't leak into the next PR.
     setTarget("upstream");
@@ -547,110 +519,44 @@ export function CreatePrDialog({
   const branchPrs = usePrsForBranch(repoPath, head || null, open, createLens);
   const existingPr = (branchPrs.data ?? []).find((p) => p.baseRefName === base);
 
-  // ── Linked-issue chip mutations ──────────────────────────────────────────
-  function toggleIssueKeyword(issueNumber: number) {
-    setLinkedIssues((prev) =>
-      prev.map((c) =>
-        c.number === issueNumber
-          ? { ...c, keyword: c.keyword === "closes" ? "relates" : "closes" }
-          : c,
-      ),
-    );
-  }
-  function removeIssue(issueNumber: number) {
-    dismissedIssuesRef.current.add(issueNumber);
-    setLinkedIssues((prev) => prev.filter((c) => c.number !== issueNumber));
-  }
-  // Manual pick from the picker: an explicit user intent, so it clears any prior
-  // dismissal for that number and adds it as a `manual` relates chip. The picker
-  // already excludes current chips, so a duplicate can't arrive here.
-  function pickIssue(issueNumber: number) {
-    dismissedIssuesRef.current.delete(issueNumber);
-    const found = (issueList.data ?? []).find((i) => i.number === issueNumber);
-    setLinkedIssues((prev) => {
-      if (prev.some((c) => c.number === issueNumber)) return prev;
-      return [
-        ...prev,
-        {
-          number: issueNumber,
-          title: found?.title ?? `#${issueNumber}`,
-          state: found?.state ?? "OPEN",
-          keyword: "relates",
-          source: "manual",
-          aiSuggestedClose: false,
-        },
-      ];
-    });
-  }
+  // Linked-issue chip cluster — extraction seeding, AI union, candidate ranking,
+  // and the chip mutations all live in the shared hook (also used by the edit and
+  // local-create paths). Gated on the tracker being usable AND the dialog open;
+  // reset from empty in seedOnOpen. The parent target reads the parent's issues
+  // (createLens). Chips compose into the body as `Closes #N`/`Relates to #N`.
+  const {
+    chips: linkedIssues,
+    resetWith: resetLinkedIssues,
+    toggleKeyword: toggleIssueKeyword,
+    remove: removeIssue,
+    pick: pickIssue,
+    buildCandidates: buildIssueCandidates,
+    upsertFromDraft: upsertAiIssues,
+  } = useLinkedIssueChips({
+    repoPath,
+    lens: createLens,
+    enabled: open && canLinkIssues,
+    headBranch: head || null,
+    commitSubjects: ahead.map((c) => c.subject),
+  });
 
-  // Extraction seeding: pull candidate issue numbers from the head branch name
-  // and the commit subjects, then add a chip for each that's a real repo issue —
-  // resolving from the open-issues page, or probing the tracker once for a number
-  // not on that page (dropping it on any error: it's a PR number, a deleted
-  // issue, or noise). Dismissed and already-present numbers are skipped. Runs
-  // once per number per dialog-open; re-runs when head/commits change.
-  const seedExtractedIssues = useEffectEvent(
-    (numbers: number[], openIssues: typeof issueList.data) => {
-      const existing = new Set(linkedIssues.map((c) => c.number));
-      for (const n of numbers) {
-        if (existing.has(n) || dismissedIssuesRef.current.has(n)) continue;
-        const hit = openIssues?.find((i) => i.number === n);
-        if (hit) {
-          setLinkedIssues((prev) =>
-            prev.some((c) => c.number === n)
-              ? prev
-              : [
-                  ...prev,
-                  {
-                    number: n,
-                    title: hit.title,
-                    state: hit.state,
-                    keyword: "relates",
-                    source: "extraction",
-                    aiSuggestedClose: false,
-                  },
-                ],
-          );
-          continue;
-        }
-        // Not on the open page — probe the tracker once. Skip if the open list
-        // hasn't loaded yet (a later run resolves it) so we don't probe numbers
-        // that would have matched the page.
-        if (!openIssues) continue;
-        if (probedIssuesRef.current.has(n)) continue;
-        probedIssuesRef.current.add(n);
-        queryClient
-          .fetchQuery(issueDetailsOptions(repoPath, n, createLens))
-          .then((issue) => {
-            if (dismissedIssuesRef.current.has(n)) return;
-            setLinkedIssues((prev) =>
-              prev.some((c) => c.number === n)
-                ? prev
-                : [
-                    ...prev,
-                    {
-                      number: issue.number,
-                      title: issue.title,
-                      state: issue.state,
-                      keyword: "relates",
-                      source: "extraction",
-                      aiSuggestedClose: false,
-                    },
-                  ],
-            );
-          })
-          .catch(() => undefined);
-      }
-    },
-  );
-  useEffect(() => {
-    if (!open || !canLinkIssues) return;
-    const numbers = extractIssueNumbers(
-      `${head}\n${ahead.map((c) => c.subject).join("\n")}`,
-    );
-    if (numbers.length === 0) return;
-    seedExtractedIssues(numbers, issueList.data);
-  }, [open, canLinkIssues, head, ahead, issueList.data]);
+  // Jira mention chips — the Bitbucket-only sibling cluster. Enabled on
+  // `open && canJiraMention`; reset from empty in seedOnOpen. Chips compose into
+  // the body as `Relates to KEY` lines; there's no keyword toggle.
+  const {
+    chips: jiraChips,
+    resetWith: resetJiraChips,
+    remove: removeJiraChip,
+    pick: pickJiraChip,
+    buildCandidates: buildJiraCandidates,
+    upsertFromDraft: upsertAiJira,
+  } = useJiraMentionChips({
+    repoPath,
+    enabled: open && canJiraMention,
+    headBranch: head || null,
+    commitSubjects: ahead.map((c) => c.subject),
+    link: jiraLink.data ?? null,
+  });
 
   function toggleLabel(name: string, on: boolean) {
     setLabels((prev) => {
@@ -669,43 +575,13 @@ export function CreatePrDialog({
   // the dialog-local generate chord below. Verbatim the button's prior body.
   function runGenerate() {
     aiDescriptionRef.current = true;
-    // Grounded issue candidates the model may link: current chips (extraction +
-    // manual + AI) pinned first, then the highest-scoring OPEN issues by
-    // shared-token overlap between the title and the branch + commit subjects,
-    // filling to a total cap of 8. Dismissed numbers are still eligible as
-    // candidates (the user dismissed a CHIP, not the model's judgment) — but the
-    // stream-union below skips re-adding a dismissed number as a chip.
-    const chipNumbers = new Set(linkedIssues.map((c) => c.number));
-    const chipCandidates = linkedIssues.map((c) => ({
-      number: c.number,
-      title: c.title,
-      state: c.state,
-    }));
-    const rankText = rankTokens(
-      `${head} ${ahead.map((c) => c.subject).join(" ")}`,
-    );
-    const ranked = (issueList.data ?? [])
-      .filter((i) => !chipNumbers.has(i.number))
-      .map((i) => {
-        const titleTokens = rankTokens(i.title);
-        let score = 0;
-        for (const t of titleTokens) if (rankText.has(t)) score++;
-        return { issue: i, score };
-      })
-      .sort(
-        (a, b) =>
-          b.score - a.score || (b.issue.updatedAt < a.issue.updatedAt ? -1 : 1),
-      )
-      .map((r) => ({
-        number: r.issue.number,
-        title: r.issue.title,
-        state: r.issue.state,
-      }));
-    const issueCandidates = canLinkIssues
-      ? [...chipCandidates, ...ranked].slice(0, 8)
-      : [];
-    // Resolve title/state for AI-proposed numbers from the exact set we fed.
-    const fedByNumber = new Map(issueCandidates.map((c) => [c.number, c]));
+    // Grounded issue candidates the model may link: current chips pinned first,
+    // then the highest-scoring OPEN issues, capped at 8 (the hook records the set
+    // it fed so `upsertAiIssues` can resolve an AI-proposed number's title/state).
+    const issueCandidates = buildIssueCandidates();
+    // Grounded Jira mention candidates (Bitbucket + linked project). Empty unless
+    // the Jira cluster is active; mutually exclusive with `issueCandidates`.
+    const jiraCandidates = canJiraMention ? buildJiraCandidates() : undefined;
     generate(
       base,
       head,
@@ -721,7 +597,9 @@ export function CreatePrDialog({
         // as `relates` chips (the safe default the user can toggle up). Skip
         // dismissed numbers; never downgrade an existing chip — only OR-in the
         // `aiSuggestedClose` flag.
-        upsertAiIssues(d.closes, d.relates, fedByNumber);
+        upsertAiIssues({ closes: d.closes, relates: d.relates });
+        // Union the model's proposed Jira mentions into the mention cluster.
+        upsertAiJira({ jiraMentions: d.jiraMentions });
       },
       // Provider-aware prompt copy (MR/merge-request noun, markdown flavor);
       // null host → base GitHub wording.
@@ -736,49 +614,9 @@ export function CreatePrDialog({
       notes.trim() || undefined,
       // Grounded issue candidates — empty ⇒ prompt's issue-reference ban intact.
       issueCandidates,
+      // Grounded Jira mention candidates — empty/undefined ⇒ no Jira variant.
+      jiraCandidates,
     );
-  }
-
-  /** Merge the model's proposed close/relate numbers into the chip cluster. */
-  function upsertAiIssues(
-    closes: number[],
-    relates: number[],
-    fed: Map<number, { number: number; title: string; state: string }>,
-  ) {
-    // A number in both lists is a close proposal (stronger signal wins).
-    const closeSet = new Set(closes);
-    const all = [...new Set([...closes, ...relates])];
-    setLinkedIssues((prev) => {
-      let next = prev;
-      for (const n of all) {
-        if (dismissedIssuesRef.current.has(n)) continue;
-        const suggestedClose = closeSet.has(n);
-        const existingIdx = next.findIndex((c) => c.number === n);
-        if (existingIdx >= 0) {
-          // Never downgrade an existing chip — only OR-in the AI close hint.
-          if (suggestedClose && !next[existingIdx].aiSuggestedClose) {
-            next = next.map((c, i) =>
-              i === existingIdx ? { ...c, aiSuggestedClose: true } : c,
-            );
-          }
-          continue;
-        }
-        const meta = fed.get(n);
-        if (!meta) continue;
-        next = [
-          ...next,
-          {
-            number: n,
-            title: meta.title,
-            state: meta.state,
-            keyword: "relates",
-            source: "ai",
-            aiSuggestedClose: suggestedClose,
-          },
-        ];
-      }
-      return next;
-    });
   }
   // Context-sensitive reuse of the `generate-commit-message` binding (mod+g by
   // default) while this dialog is open — never a hardcoded chord, so a
@@ -1150,8 +988,10 @@ export function CreatePrDialog({
             {/* Linked issues: real repo issues referenced on create. Non-AI
                 surface (shown under Hide-AI too), gated on the tracker being
                 usable. Chips stay interactive while generating — the stream union
-                only adds/annotates, never fights a user edit. */}
-            {canLinkIssues && (
+                only adds/annotates, never fights a user edit. On a Bitbucket repo
+                with a linked Jira project the mention-only variant renders in the
+                SAME slot instead (the two clusters are mutually exclusive). */}
+            {canLinkIssues ? (
               <LinkedIssuesField
                 repoPath={repoPath}
                 lens={createLens}
@@ -1161,7 +1001,17 @@ export function CreatePrDialog({
                 onPick={pickIssue}
                 disabled={generating}
               />
-            )}
+            ) : canJiraMention ? (
+              <LinkedIssuesField
+                variant="jira"
+                repoPath={repoPath}
+                link={jiraLink.data ?? null}
+                jiraChips={jiraChips}
+                onRemove={removeJiraChip}
+                onPick={pickJiraChip}
+                disabled={generating}
+              />
+            ) : null}
 
             {/* Collapsed "Notes for reviewers": deposit-seeded author context,
                 posted as the PR's first comment and fed to the AI review. AI-only. */}

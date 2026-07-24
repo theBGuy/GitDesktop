@@ -74,6 +74,7 @@ import { displayLogin } from "@/lib/git/bot-login";
 import { splitUnifiedDiff } from "@/lib/git/diff-split";
 import { useForgeGhHost } from "@/lib/git/host";
 import {
+  forgeFeatureReady,
   PIPELINE_IN_FLIGHT,
   prDiffOptions,
   useApplySuggestion,
@@ -123,6 +124,7 @@ import {
 } from "@/lib/git/types";
 import { formatBinding } from "@/lib/hotkeys/binding";
 import { useEffectiveBindings, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
+import { useJiraLink } from "@/lib/jira/queries";
 import {
   useClearReviewDrafts,
   useReviewDrafts,
@@ -133,6 +135,7 @@ import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { ChecksRollup } from "./ChecksRollup";
+import { LinkedIssuesField } from "./LinkedIssuesField";
 import { PendingReviewBar } from "./PendingReviewBar";
 import { PrCommitDetail } from "./PrCommitDetail";
 import { PrReviewPanel } from "./PrReviewPanel";
@@ -161,6 +164,13 @@ import {
 } from "./ReviewThreads";
 import { SubmitReviewDialog } from "./SubmitReviewDialog";
 import { useGeneratePrDescription } from "./useGeneratePrDescription";
+import {
+  composeBodyWithJiraRefs,
+  composeBodyWithRefs,
+  splitBodyRefBlock,
+  useJiraMentionChips,
+  useLinkedIssueChips,
+} from "./useLinkedIssueChips";
 import { usePrCapabilities } from "./usePrCapabilities";
 
 type Section = "conversation" | "commits" | "files" | "review";
@@ -444,11 +454,67 @@ export function RemotePrView({
   // Whether the open merge dialog is arming auto-merge (vs merging now) — set by
   // the dropdown item that opened it, read by confirmMerge + the dialog copy.
   const [mergeAuto, setMergeAuto] = useState(false);
+  // Linked-issue chips on the EDIT path: the chips OWN the trailing ref block, so
+  // on save the body is re-composed from the (stripped) text + the chips' refs —
+  // never a raw body that would double the refs the chips already carry.
+  const canLinkIssues = !!forge.data && forgeFeatureReady(forge.data, "issues");
+  // Bitbucket repos have no native tracker, so a LINKED Jira project drives a
+  // mention-only cluster on the edit path instead. Mutually exclusive with the
+  // native cluster.
+  const jiraLink = useJiraLink(repoPath);
+  const canJiraMention =
+    !canLinkIssues && provider === "bitbucket" && !!jiraLink.data;
   const edit = useEditTitleBody({
     onSave: async ({ title, body }) => {
-      await editPr.mutateAsync({ number, title, body });
+      await editPr.mutateAsync({
+        number,
+        title,
+        // The active cluster owns the trailing ref block, so re-compose from the
+        // stripped text + its chips. Jira mention chips emit `Relates to KEY`
+        // lines; the native chips emit `Closes/Relates to #N`.
+        body:
+          canJiraMention && jiraChips.length > 0
+            ? composeBodyWithJiraRefs(body, jiraChips)
+            : canLinkIssues
+              ? composeBodyWithRefs(body, linkedIssues)
+              : body,
+      });
     },
     successToast: "Pull request updated",
+  });
+  // Shared chip state machine — enabled only while the edit dialog is open (and
+  // the tracker is usable). Extraction/AI seeds follow the create rules; the
+  // body's own trailing refs are peeled into chips at open (`resetWith` in
+  // openEdit below), so the two never fight as two sources of truth.
+  const {
+    chips: linkedIssues,
+    resetWith: resetLinkedIssues,
+    toggleKeyword: toggleIssueKeyword,
+    remove: removeIssue,
+    pick: pickIssue,
+    buildCandidates: buildIssueCandidates,
+    upsertFromDraft: upsertAiIssues,
+  } = useLinkedIssueChips({
+    repoPath,
+    lens,
+    enabled: canLinkIssues && edit.open,
+    headBranch: details.data?.headRefName ?? null,
+    commitSubjects: details.data?.commits.map((c) => c.headline) ?? [],
+  });
+  // Jira mention chips — the Bitbucket-only sibling cluster on the edit path.
+  const {
+    chips: jiraChips,
+    resetWith: resetJiraChips,
+    remove: removeJiraChip,
+    pick: pickJiraChip,
+    buildCandidates: buildJiraCandidates,
+    upsertFromDraft: upsertAiJira,
+  } = useJiraMentionChips({
+    repoPath,
+    enabled: canJiraMention && edit.open,
+    headBranch: details.data?.headRefName ?? null,
+    commitSubjects: details.data?.commits.map((c) => c.headline) ?? [],
+    link: jiraLink.data ?? null,
   });
   const prGen = useGeneratePrDescription(repoPath);
   const composerRef = useRef<MarkdownEditorHandle>(null);
@@ -844,10 +910,35 @@ export function RemotePrView({
     );
   }
 
-  // AI title+description generation — shared by the Edit dialog's Generate button
-  // and its mod+g chord. Verbatim the button's prior onClick body. `pr` is aliased
-  // to a narrowed const so the (hoisted) function body sees it as defined.
+  // Open the Edit dialog: the chips OWN the trailing ref block, so peel any exact
+  // `Closes #N` / `Relates to #N` lines off the end of the body into chips
+  // (keyword preserved) and open the editor with the STRIPPED text — the user
+  // never edits the ref block as text, and on save it's re-appended from chips.
+  // With the tracker unavailable there are no chips: open with the raw body.
+  // `pr` is aliased to a narrowed const (`prForGen`) below so these hoisted
+  // function bodies see it as defined — TS doesn't carry the outer `!pr` guard
+  // into a nested closure.
   const prForGen = pr;
+  function openEditWithChips() {
+    if (canLinkIssues) {
+      // Native active: numeric refs → chips; any trailing Jira line rides back in
+      // `text` so an unedited save can't drop it.
+      const { text, refs } = splitBodyRefBlock(prForGen.body, "native");
+      edit.openEdit({ title: prForGen.title, body: text });
+      resetLinkedIssues(refs);
+    } else if (canJiraMention) {
+      // Jira active: mention keys → chips; any trailing numeric line rides back in
+      // `text` (mirror preservation).
+      const { text, jiraRefs } = splitBodyRefBlock(prForGen.body, "jira");
+      edit.openEdit({ title: prForGen.title, body: text });
+      resetJiraChips(jiraRefs);
+    } else {
+      edit.openEdit({ title: prForGen.title, body: prForGen.body });
+    }
+  }
+
+  // AI title+description generation — shared by the Edit dialog's Generate button
+  // and its mod+g chord. Verbatim the button's prior onClick body.
   function runGenerate() {
     prGen.generateFromDiff(
       // Reuse the diff already cached by usePrDiff — and, crucially,
@@ -872,9 +963,24 @@ export function RemotePrView({
       (d) => {
         edit.form.setFieldValue("title", d.title);
         edit.form.setFieldValue("body", d.body);
+        // Union the model's proposed issue links into the chip cluster (same
+        // rules as create — relate-default, dismissed-set, AI sparkle).
+        upsertAiIssues({ closes: d.closes, relates: d.relates });
+        // Union the model's proposed Jira mentions into the mention cluster.
+        upsertAiJira({ jiraMentions: d.jiraMentions });
       },
       // Provider-aware prompt copy; null host → base GitHub wording.
       provider ?? undefined,
+      // Labels aren't wired on the edit path — keep the create default of no
+      // proposed labels; reviewer notes aren't part of an edit either.
+      [],
+      undefined,
+      // Grounded issue candidates — chips pinned first, then top-ranked open
+      // issues (empty ⇒ the prompt's issue-reference ban stays intact).
+      buildIssueCandidates(),
+      // Grounded Jira mention candidates (Bitbucket + linked project); empty
+      // unless the Jira cluster is active.
+      canJiraMention ? buildJiraCandidates() : undefined,
     );
   }
 
@@ -1047,7 +1153,7 @@ export function RemotePrView({
             <Button
               variant="outline"
               size="xs"
-              onClick={() => edit.openEdit({ title: pr.title, body: pr.body })}
+              onClick={openEditWithChips}
               title="Edit the title and description"
             >
               <PencilSimpleIcon data-icon="inline-start" />
@@ -1355,11 +1461,7 @@ export function RemotePrView({
                         Copy markdown
                       </DropdownMenuItem>
                       {isOpen && canEdit && (
-                        <DropdownMenuItem
-                          onClick={() =>
-                            edit.openEdit({ title: pr.title, body: pr.body })
-                          }
-                        >
+                        <DropdownMenuItem onClick={openEditWithChips}>
                           Edit
                         </DropdownMenuItem>
                       )}
@@ -2224,6 +2326,29 @@ export function RemotePrView({
         bodyTextareaClassName="max-h-72 min-h-24 resize-y font-mono"
         onGenerate={aiEnabled ? runGenerate : undefined}
         generating={prGen.generating}
+        belowBody={
+          canLinkIssues ? (
+            <LinkedIssuesField
+              repoPath={repoPath}
+              lens={lens}
+              chips={linkedIssues}
+              onToggleKeyword={toggleIssueKeyword}
+              onRemove={removeIssue}
+              onPick={pickIssue}
+              disabled={prGen.generating}
+            />
+          ) : canJiraMention ? (
+            <LinkedIssuesField
+              variant="jira"
+              repoPath={repoPath}
+              link={jiraLink.data ?? null}
+              jiraChips={jiraChips}
+              onRemove={removeJiraChip}
+              onPick={pickJiraChip}
+              disabled={prGen.generating}
+            />
+          ) : undefined
+        }
         bodyActions={
           !aiEnabled ? undefined : prGen.generating ? (
             <Button
