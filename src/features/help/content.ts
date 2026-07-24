@@ -1691,12 +1691,22 @@ straight into the companion app — a bottom tab bar with **Status**, **PRs**, *
   place to catch up on a PR's conversation from your phone, not to reply.
 - **Issues** — the open-issue list; open one for its description, labels, assignees, and
   comment conversation, read-only.
+- **Discussions** — on GitHub repositories with Discussions enabled, the Issues tab gains
+  an **Issues | Discussions** switch: browse the discussion list (filterable by category),
+  and open one for its body and threaded comments — answered questions carry their
+  accepted-answer marker. The switch stays hidden on repositories whose host has no
+  Discussions, or where the feature is turned off.
 - **Changes** — the working tree's staged, changed, and untracked files; open a file for
   its diff.
 - **History** — the commit log; open a commit for its message and diff, or drill into a
   single file's changes.
 - **Branches** — the local branches, each with its upstream, ahead/behind divergence, and
   last-commit time (the current branch first).
+- **Tags** — the repository's tags, newest first, each with its message and commit; tap
+  one to jump to that commit.
+- **Code TODOs** — scan the working tree for **TODO / FIXME / HACK / BUG / XXX** comment
+  markers, grouped by file with line numbers; toggle which markers to include and rescan
+  on demand.
 - **CI** — recent workflow runs and their jobs.
 {{ai}}- **Agents** — everything your desktop is currently broadcasting: **AI PR reviews**
   and **agent sessions**. Open one to **watch it live** — the assistant's prose streams in

@@ -4,10 +4,11 @@
 // threads. Mirrors the Issues screen anatomy (rows, growing list, teaching-state
 // blocks, back bar, CommentCard) so the two screens read as one surface.
 //
-// Discussions are GitHub-only. On a GitLab/Bitbucket repo or a GitHub repo with the
-// feature turned off, the LAN server mints `400 { kind: "discussionsUnavailable" }`
-// (never a raw gh error), and the screen renders a calm teaching state — see the
-// state ladder in DiscussionsBody.
+// Discussions are GitHub-only, with TWO distinct unavailable shapes: a
+// GitLab/Bitbucket HOST gets the LAN server's `400 { kind: "discussionsUnavailable" }`
+// (never a raw gh error), while a GitHub repo with the feature turned OFF answers
+// 200 with `meta.hasDiscussionsEnabled: false`. Each gets its own calm teaching
+// state — see the state ladder in DiscussionsBody.
 
 import {
   ArrowLeftIcon,

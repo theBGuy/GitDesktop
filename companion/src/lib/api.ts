@@ -99,12 +99,14 @@ export class ApiError extends Error {
     return this.status === 404 && this.kind === "noSuchRepo";
   }
   /**
-   * This repo can't serve Discussions — a non-GitHub repo (GitLab/Bitbucket have
-   * no Discussions equivalent) or a GitHub repo with the feature turned off. The
-   * server mints `400 { kind: "discussionsUnavailable", … }` for it; the screen
-   * renders a calm teaching state (NOT the generic error, and no retry — a retry
-   * can't turn the feature on). Both the status AND the kind must match so an
-   * unrelated 400 never reads as "no discussions here".
+   * This repo's HOST can't serve Discussions — a non-GitHub repo (GitLab/Bitbucket
+   * have no Discussions equivalent). The server mints
+   * `400 { kind: "discussionsUnavailable", … }` for exactly that case; a GitHub
+   * repo with the feature merely turned OFF is NOT an error — it answers 200 with
+   * `DiscussionMeta.hasDiscussionsEnabled: false` (a separate teaching state). The
+   * screen renders a calm teaching state for this kind (NOT the generic error, and
+   * no retry — a retry can't change the host). Both the status AND the kind must
+   * match so an unrelated 400 never reads as "no discussions here".
    *
    * The kind string `discussionsUnavailable` is a VERBATIM cross-layer contract
    * with the Rust LAN server (`src-tauri/src/lan/routes/forge.rs` mints it) — keep

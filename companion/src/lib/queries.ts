@@ -53,13 +53,17 @@ export const queryClient = new QueryClient({
       staleTime: 10_000,
       // One retry for transient failures — but never for a definitive error: a
       // 401 (re-sending the dead cookie double-bills the per-IP lockout budget on
-      // every poll cycle), a 409 noActiveRepo, or a 404 noSuchRepo (the scoped
+      // every poll cycle), a 409 noActiveRepo, a 404 noSuchRepo (the scoped
       // repo is gone — a retry can't conjure it back and only delays the
-      // repo-gone state).
+      // repo-gone state), or a 400 discussionsUnavailable (the repo's HOST has no
+      // Discussions — a retry can't change the host).
       retry: (failureCount, err) =>
         !(
           err instanceof ApiError &&
-          (err.isUnauthorized || err.isNoActiveRepo || err.isNoSuchRepo)
+          (err.isUnauthorized ||
+            err.isNoActiveRepo ||
+            err.isNoSuchRepo ||
+            err.isDiscussionsUnavailable)
         ) && failureCount < 1,
       refetchOnWindowFocus: false,
     },
