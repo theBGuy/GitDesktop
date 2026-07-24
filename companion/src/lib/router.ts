@@ -12,6 +12,10 @@ import { useMemo, useSyncExternalStore } from "react";
 //   #r/{repoId}/history · #r/{repoId}/history/{sha} · #r/{repoId}/history/{sha}/{encodedFile}
 //   #r/{repoId}/branches
 //   #r/{repoId}/issues · #r/{repoId}/issues/{n}
+// The companion-extras slice adds three more read-only surfaces (also SCOPED-ONLY):
+//   #r/{repoId}/tags
+//   #r/{repoId}/todos
+//   #r/{repoId}/discussions · #r/{repoId}/discussions/{n}
 // Plus two global (repo-less) routes:
 //   #pair   — the pairing takeover (unchanged)
 //   #repos  — the repo picker
@@ -30,7 +34,10 @@ export type Tab =
   | "changes"
   | "history"
   | "branches"
-  | "issues";
+  | "issues"
+  | "tags"
+  | "todos"
+  | "discussions";
 
 /** The working-tree section a Changes file-diff is scoped to. `unstaged` and
  *  `untracked` both map to the working-tree side server-side, but they're distinct
@@ -124,11 +131,12 @@ const NO_DETAIL = {
  *  after that (only the scoped slice-6 file-diff routes reach for it — a file path
  *  under `changes/{section}/{file}` or `history/{sha}/{file}`).
  *
- *  `scoped` marks the caller as the scoped `#r/{id}/…` branch. The four slice-6
- *  tabs (changes/history/branches/issues) are SCOPED-ONLY: on the legacy branch
- *  (`scoped: false`) their heads are unknown and degrade to status, exactly like any
- *  other unknown legacy head — the legacy grammar is deliberately NOT extended.
- *  The original tabs (prs/ci/agents/status) parse identically under either branch. */
+ *  `scoped` marks the caller as the scoped `#r/{id}/…` branch. The slice-6 tabs
+ *  (changes/history/branches/issues) and the companion-extras tabs
+ *  (tags/todos/discussions) are SCOPED-ONLY: on the legacy branch (`scoped: false`)
+ *  their heads are unknown and degrade to status, exactly like any other unknown
+ *  legacy head — the legacy grammar is deliberately NOT extended. The original tabs
+ *  (prs/ci/agents/status) parse identically under either branch. */
 function parseTab(
   head: string | undefined,
   tail: string | undefined,
@@ -179,6 +187,17 @@ function parseTab(
       if (!scoped) break; // scoped-only
       // Numeric detail → the issue number (`detailId`), exactly like prs.
       return { ...NO_DETAIL, tab: "issues", detailId };
+    case "tags":
+      if (!scoped) break; // scoped-only
+      return { ...NO_DETAIL, tab: "tags" };
+    case "todos":
+      if (!scoped) break; // scoped-only
+      return { ...NO_DETAIL, tab: "todos" };
+    case "discussions":
+      if (!scoped) break; // scoped-only
+      // Numeric detail → the discussion number (`detailId`), exactly like issues;
+      // a malformed tail degrades to the list (detailId null).
+      return { ...NO_DETAIL, tab: "discussions", detailId };
   }
   // Unknown head (or a scoped-only tab reached via the legacy branch) → status.
   return { ...NO_DETAIL, tab: "status" };

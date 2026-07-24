@@ -20,6 +20,7 @@ import {
   SkeletonRows,
   StaleBanner,
 } from "../components/states";
+import { IssuesDiscussionsSegment } from "../components/tab-segment";
 import type { IssueComment, IssueDetails, IssueInfo } from "../lib/api";
 import { timeAgo } from "../lib/format";
 import { asApiError, useIssue, useIssues } from "../lib/queries";
@@ -89,8 +90,17 @@ export function IssuesBody({
   const { register, onKeyDown } = useRovingList();
 
   // Definitive gone WINS over stale data: a `noSuchRepo` 404 kicks to the teaching
-  // state even when a cached list is on hand (see isRepoGoneError).
+  // state even when a cached list is on hand (see isRepoGoneError). No segment then —
+  // the repo is unshared, so there's nothing (issues OR discussions) to switch to.
   if (isRepoGoneError(error)) return <RepoGoneState />;
+
+  // The Discussions segment is HOISTED above every other IssuesBody state so a repo
+  // where issues are unavailable but Discussions are enabled (a GitHub fork with the
+  // issue tracker off) still offers a path to Discussions — the issues content was the
+  // only entry point before, leaving Discussions unreachable. The segment self-hides on
+  // repos without Discussions, so every currently-pixel-identical case stays identical
+  // (it renders null, zero extra layout). Never on the issue DETAIL view.
+  const segment = <IssuesDiscussionsSegment repoId={repoId} current="issues" />;
 
   // Prefer stale data: keep the last-known list on screen even on error, with a
   // StaleBanner above it. Full-screen states only when there's nothing to show;
@@ -100,10 +110,26 @@ export function IssuesBody({
     // calm teaching state carrying the server's message — never the generic error,
     // and no retry (retrying can't turn the tracker on).
     if (isTrackerUnavailable(error)) {
-      return <TrackerUnavailableState message={asApiError(error)?.message} />;
+      return (
+        <div className="flex flex-col">
+          {segment}
+          <TrackerUnavailableState message={asApiError(error)?.message} />
+        </div>
+      );
     }
-    if (isError) return <ErrorState error={error} onRetry={() => refetch()} />;
-    return <SkeletonRows />;
+    if (isError)
+      return (
+        <div className="flex flex-col">
+          {segment}
+          <ErrorState error={error} onRetry={() => refetch()} />
+        </div>
+      );
+    return (
+      <div className="flex flex-col">
+        {segment}
+        <SkeletonRows />
+      </div>
+    );
   }
 
   // The last page came back short (fewer issues than we asked for) → there's nothing
@@ -115,6 +141,7 @@ export function IssuesBody({
 
   return (
     <div className="flex flex-col">
+      {segment}
       {isError ? <StaleBanner error={error} onRetry={() => refetch()} /> : null}
       {data.length === 0 ? (
         <EmptyState

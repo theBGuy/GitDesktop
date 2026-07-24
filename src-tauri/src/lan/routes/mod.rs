@@ -1,6 +1,6 @@
 //! The read-only route handlers mounted by the LAN companion server.
 //!
-//! The allowlist is STRUCTURAL: [`crate::lan::server`] mounts exactly the 17
+//! The allowlist is STRUCTURAL: [`crate::lan::server`] mounts exactly the 22
 //! handlers below and nothing else — there is no catch-all and no static serving,
 //! so any path outside the list 404s. Every handler operates on ONE resolved repo
 //! it reads from the `Extension<ScopedRepo>` a resolver middleware inserts, calls
@@ -29,6 +29,8 @@
 //! | `/api/repo/commits/{hash}/diff`       | `commits/{hash}/diff`                 |
 //! | `/api/repo/diff/working`              | `diff/working`                        |
 //! | `/api/repo/diff/file`                 | `diff/file`                           |
+//! | `/api/repo/tags`                      | `tags`                                |
+//! | `/api/repo/todos`                     | `todos`                               |
 //! | `/api/forge/prs`                      | `prs`                                 |
 //! | `/api/forge/prs/{number}`             | `prs/{number}`                        |
 //! | `/api/forge/prs/{number}/timeline`    | `prs/{number}/timeline`               |
@@ -37,6 +39,9 @@
 //! | `/api/forge/issues/{number}`          | `issues/{number}`                     |
 //! | `/api/forge/ci/runs`                  | `ci/runs`                             |
 //! | `/api/forge/ci/runs/{id}`             | `ci/runs/{id}`                        |
+//! | `/api/forge/discussions/meta`         | `discussions/meta`                    |
+//! | `/api/forge/discussions`              | `discussions`                         |
+//! | `/api/forge/discussions/{number}`     | `discussions/{number}`                |
 //! | `/api/reviews`                        | `reviews`                             |
 //! | `/api/reviews/{id}/stream`            | `reviews/{id}/stream`                 |
 //!
