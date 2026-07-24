@@ -109,6 +109,11 @@ export interface ReviewEntry {
    *  a single patch, so it lives on the entry, not the per-token `texts` map). The
    *  panel shows it behind a "Thought process" disclosure; the dock ignores it. */
   thoughts?: string;
+  /** The OTHER review mode a user queued behind this in-flight run (interim
+   *  single-output-surface queue) — drives the panel's "runs next" chip. Set only
+   *  while this entry is running/queued; cleared when the queued run starts or is
+   *  dismissed. */
+  queuedMode?: ReviewMode;
   /** Re-fires this run through the automation pipeline — set ONLY on automation
    *  rows (by {@link registerAutomationRun}). Its presence is the discriminator
    *  that a stopped (cancelled/error) row belongs in the dock's Stopped group: a
@@ -197,6 +202,21 @@ interface RunControl {
   wakeQueued: (() => void) | null;
   /** The lane this run draws its slot from (for release + queue removal). */
   lane: Limiter | null;
+  /** A second review mode requested while this run was in flight — started
+   *  automatically when this run settles (interim single-flight queue). Null when
+   *  nothing is queued; cleared by dismiss. */
+  queuedNext: QueuedRun | null;
+}
+
+/** A queued second review mode + the config captured when the user requested it.
+ *  Same target/key as the in-flight run — only the mode and its settings differ. */
+interface QueuedRun {
+  ai: AiSettings;
+  mode: ReviewMode;
+  context: ReviewContext;
+  title: string;
+  ignorePrior: boolean;
+  ignoreExternal: boolean;
 }
 
 const controls = new Map<string, RunControl>();
@@ -353,11 +373,27 @@ export async function startReview(
   ignoreExternal = false,
 ): Promise<void> {
   const key = reviewKey(target);
-  // Single-flight per key — the UI hides the run buttons while generating, but
-  // guard against a double-fire racing two streams into one entry (a queued run
-  // counts as already-started).
-  const phase = useReviewStore.getState().entries[key]?.phase;
-  if (phase === "running" || phase === "queued") return;
+  // Single-flight per key — one review streams into the single per-PR entry at a
+  // time. A request for the OTHER mode while a run is in flight isn't dropped: it's
+  // remembered as `queuedNext` and started automatically when this run settles
+  // (interim single-output-surface queue). A repeat of the mode already running is a
+  // no-op, and the cap is one queued — there are only two modes.
+  const activeEntry = useReviewStore.getState().entries[key];
+  if (activeEntry?.phase === "running" || activeEntry?.phase === "queued") {
+    const active = controls.get(key);
+    if (active && mode !== activeEntry.mode) {
+      active.queuedNext = {
+        ai,
+        mode,
+        context,
+        title,
+        ignorePrior,
+        ignoreExternal,
+      };
+      useReviewStore.getState().patch(key, { queuedMode: mode });
+    }
+    return;
+  }
 
   const patch = (p: Partial<ReviewEntry>) =>
     useReviewStore.getState().patch(key, p);
@@ -373,6 +409,7 @@ export async function startReview(
     hasSlot: false,
     wakeQueued: null,
     lane,
+    queuedNext: null,
   };
   controls.set(key, control);
   // Clear any text from a prior run on this key before the new stream appends.
@@ -390,6 +427,9 @@ export async function startReview(
     deltaState: undefined,
     truncatedCoverage: undefined,
     thoughts: undefined,
+    // A fresh run has nothing queued behind it yet; if this IS the drained queued
+    // run, clear the chip now that it has become the active run.
+    queuedMode: undefined,
     // Clear a prior run's stamps on this key so a re-run's live elapsed and
     // persisted duration start fresh (stamped at the running transition below).
     startedAt: undefined,
@@ -619,8 +659,30 @@ export async function startReview(
       control.hasSlot = false;
       releaseSlot(lane);
     }
+    // A second mode queued behind this run starts once this one settles — on ANY
+    // terminal outcome incl. user-cancel (it's independent work the user asked for;
+    // dismissing its chip is the only way to stop it). Captured before the handle is
+    // relinquished; startReview re-checks single-flight and this entry is already in
+    // a terminal phase, so the drain starts cleanly on the same key.
+    const next = control.queuedNext;
     // Only the owning run releases its handle — a cancel may have replaced us.
     if (controls.get(key) === control) controls.delete(key);
+    // Drain the queued mode only when the key is now unclaimed: a normal settle just
+    // freed it, and a bare cancel freed it too (so the queued run still proceeds). But
+    // if a DIFFERENT run has claimed the key since — a cancel followed by a fresh manual
+    // review on the same PR — draining would resurrect our queued mode onto that
+    // unrelated run, so skip it there.
+    if (next && !controls.has(key)) {
+      void startReview(
+        target,
+        next.title,
+        next.ai,
+        next.mode,
+        next.context,
+        next.ignorePrior,
+        next.ignoreExternal,
+      );
+    }
   }
 }
 
@@ -660,6 +722,17 @@ export function cancelReview(key: string): void {
 /** Clears a finished review's text — used after posting it as a comment. */
 export function resetReview(key: string): void {
   useReviewStore.getState().remove(key);
+}
+
+/**
+ * Drops a review mode queued behind an in-flight run (the interim single-flight
+ * queue) before it starts — the chip's Dismiss action. Safe to call when nothing
+ * is queued.
+ */
+export function dismissQueuedReview(key: string): void {
+  const control = controls.get(key);
+  if (control) control.queuedNext = null;
+  useReviewStore.getState().patch(key, { queuedMode: undefined });
 }
 
 /**
@@ -704,6 +777,9 @@ export function registerAutomationRun(opts: {
     hasSlot: false,
     wakeQueued: null,
     lane: null,
+    // Automation fires both modes as separate `auto:` entries — never a
+    // panel-style queued-second — so this stays null.
+    queuedNext: null,
   };
   controls.set(key, control);
   useReviewStore.getState().patch(key, {
@@ -796,11 +872,17 @@ export function useReviewRun(target: ReviewTarget) {
   );
   const cancel = useCallback(() => cancelReview(key), [key]);
   const reset = useCallback(() => resetReview(key), [key]);
+  const dismissQueued = useCallback(() => dismissQueuedReview(key), [key]);
   return {
     generate,
     cancel,
     reset,
+    dismissQueued,
     generating: entry.phase === "running" || entry.phase === "queued",
+    /** The OTHER review mode queued behind the in-flight run (interim
+     *  single-output-surface queue) — drives the "runs next" chip; undefined when
+     *  nothing is queued. */
+    queuedMode: entry.queuedMode,
     text,
     status: entry.status,
     mode: entry.mode,

@@ -1,4 +1,5 @@
 import {
+  ClockIcon,
   CopyIcon,
   RobotIcon,
   ShieldCheckIcon,
@@ -104,6 +105,8 @@ export function PrReviewPanel({
     generate,
     cancel,
     reset,
+    dismissQueued,
+    queuedMode,
     generating,
     text,
     status,
@@ -425,7 +428,7 @@ export function PrReviewPanel({
             {generating ? (
               <m.div
                 key="cancel"
-                className="flex items-center gap-2"
+                className="flex flex-wrap items-center gap-2"
                 initial={{ opacity: 0, scale: 0.96 }}
                 animate={{ opacity: 1, scale: 1 }}
                 exit={{ opacity: 0, scale: 0.96 }}
@@ -442,6 +445,25 @@ export function PrReviewPanel({
                     since={startedAt}
                     className="text-xs text-muted-foreground"
                   />
+                )}
+                {/* Queue the OTHER mode to run next — one output surface, so it
+                    starts when this run finishes. Hidden once something's queued
+                    (only two modes exist). */}
+                {!queuedMode && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() =>
+                      run(mode === "security" ? "general" : "security")
+                    }
+                  >
+                    {mode === "security" ? (
+                      <SparkleIcon data-icon="inline-start" />
+                    ) : (
+                      <ShieldCheckIcon data-icon="inline-start" />
+                    )}
+                    Queue {mode === "security" ? "review" : "security audit"}
+                  </Button>
                 )}
               </m.div>
             ) : (
@@ -495,6 +517,23 @@ export function PrReviewPanel({
               </span>
             )}
         </div>
+        {queuedMode && (
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
+            <ClockIcon className="size-3 shrink-0" />
+            <span className="min-w-0">
+              {queuedMode === "security" ? "Security audit" : "Review"} queued —
+              runs when the {mode === "security" ? "security audit" : "review"}{" "}
+              finishes.
+            </span>
+            <button
+              type="button"
+              className="cursor-pointer underline-offset-2 hover:underline"
+              onClick={dismissQueued}
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
         {(["general", "security"] as ReviewMode[]).map((m) => {
           const prior = latestByMode[m];
           if (!prior) return null;

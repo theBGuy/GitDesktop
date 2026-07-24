@@ -827,6 +827,13 @@ controls how much diff and prior-discussion context reviews send — **Auto** fi
 reviewing model's context window (probing Ollama live), or pick Compact / Standard /
 Expanded.
 
+**One review at a time — queue the other.** A PR streams one AI review at a time,
+but you don't have to pick between a code review and a security audit: start one
+while the other is running and it **queues**, then starts automatically when the
+first finishes (whose result moves to **Previous reviews**). A chip shows what's up
+next; **Dismiss** drops it, and cancelling the running review still lets the queued
+one proceed.
+
 **Agentic review.** The panel's **Agentic review** toggle gives the reviewer read-only
 tools so that, instead of relying on the prompt's truncated summary, it pulls the **full PR
 diff**, reads any file at any ref, searches the repo, runs history, and reads the
