@@ -7553,9 +7553,21 @@ pub async fn starred(owner: &str, name: &str) -> AppResult<bool> {
     Ok(hit)
 }
 
+/// Whether a failed `glab api` invocation's output looks like a 404 (Not Found) —
+/// the signal that a candidate file is absent, as opposed to a transport/auth/
+/// rate-limit failure that must be surfaced. glab prints the HTTP status to stderr
+/// (`404 Not Found`); some builds echo the JSON body (`{"message":"404 ... Not
+/// Found"}`) too, so scan both. Pure, so it's unit-testable.
+fn glab_output_is_404(stderr: &str, stdout: &str) -> bool {
+    let hay = format!("{stderr}\n{stdout}").to_ascii_lowercase();
+    hay.contains("404") || hay.contains("not found")
+}
+
 /// A GitLab project's raw README markdown, or `None` when absent. Tries a set of
 /// candidate filenames via the repository-files raw endpoint at
-/// `?ref={default_branch or "HEAD"}`; the first hit wins.
+/// `?ref={default_branch or "HEAD"}`; the first hit wins. Continues to the next
+/// candidate ONLY on a 404 (that file doesn't exist); any other failure (auth,
+/// rate-limit, network) surfaces as an error rather than silently reading "no README".
 pub async fn repo_readme(
     owner: &str,
     name: &str,
@@ -7573,8 +7585,16 @@ pub async fn repo_readme(
         if out.code == 0 {
             return Ok(Some(cap_readme(&out.stdout_lossy())));
         }
-        // A non-zero exit here is almost always a 404 (this candidate doesn't
-        // exist) — try the next candidate rather than erroring the whole read.
+        // Only a 404 means "this candidate doesn't exist" — try the next one. Any
+        // other failure is a real error worth surfacing, not "No README."
+        if !glab_output_is_404(&out.stderr, &out.stdout_lossy()) {
+            let msg = out.stderr.trim();
+            return Err(AppError::Glab(if msg.is_empty() {
+                format!("glab exited with code {} reading the README", out.code)
+            } else {
+                msg.to_string()
+            }));
+        }
     }
     Ok(None)
 }
@@ -7590,6 +7610,18 @@ mod tests {
         // "best" deliberately avoids `similarity` (member-scoped → empty public
         // searches); star_count is the relevance proxy.
         assert_eq!(gitlab_order_by("best"), "star_count");
+    }
+
+    #[test]
+    fn glab_output_404_distinguishes_absence_from_other_failures() {
+        // glab's 404 shapes (stderr line and/or JSON body).
+        assert!(glab_output_is_404("404 Not Found", ""));
+        assert!(glab_output_is_404("", "{\"message\":\"404 File Not Found\"}"));
+        // Auth / rate-limit / 5xx must surface, not read as "no README".
+        assert!(!glab_output_is_404("401 Unauthorized", ""));
+        assert!(!glab_output_is_404("429 Too Many Requests", ""));
+        assert!(!glab_output_is_404("500 Internal Server Error", ""));
+        assert!(!glab_output_is_404("", ""));
     }
 
     #[test]

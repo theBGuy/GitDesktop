@@ -988,24 +988,23 @@ pub async fn search_repos(query: &str, sort: &str, page: u32) -> AppResult<Forge
 /// Fork a GitHub repo by `owner/name` into the caller's account. Idempotent: an
 /// existing fork makes `gh repo fork` exit 0 with an "already exists" note, which we
 /// treat as success. `--clone=false --remote=false` skips the non-TTY clone prompt.
-/// Resolves the real fork nwo via `gh api user` + `gh api repos/{login}/{name}`
-/// (handles GitHub's rename-on-collision), then polls the fork's commits until it's
-/// cloneable (bounded — a timeout returns `ready: false`, never an error).
+/// Resolves the real fork nwo with PARENT VERIFICATION (GitHub renames on a
+/// name-collision — `login/name` may be an unrelated pre-existing repo, and the real
+/// fork is `login/name-1`), then polls the fork's commits until it's cloneable
+/// (bounded — a timeout returns `ready: false`, never an error).
 pub async fn fork_repo(owner: &str, name: &str) -> AppResult<ForgeForkResult> {
     validate_owner(owner)?;
     validate_repo_name(name)?;
-    let slug = format!("{owner}/{name}");
+    let source = format!("{owner}/{name}");
     // Fork creation. An already-existing fork exits 0 ("… already exists"), so a
     // clean success and the idempotent case both land here; a real failure errors.
     run_gh(
         None,
-        &["repo", "fork", &slug, "--clone=false", "--remote=false"],
+        &["repo", "fork", &source, "--clone=false", "--remote=false"],
         GH_NETWORK_TIMEOUT,
     )
     .await?;
-    // Resolve the fork's owner (the signed-in user) and confirm its canonical nwo —
-    // GitHub renames on a name collision, so read `full_name` back rather than
-    // assuming `{login}/{name}`.
+    // The fork owner is the signed-in user.
     let login = run_gh(None, &["api", "user", "-q", ".login"], GH_TIMEOUT)
         .await?
         .stdout_lossy()
@@ -1014,14 +1013,39 @@ pub async fn fork_repo(owner: &str, name: &str) -> AppResult<ForgeForkResult> {
     if login.is_empty() {
         return Err(AppError::Gh("could not resolve your GitHub login".into()));
     }
-    let fork_slug = format!("{login}/{name}");
-    let repo_out = run_gh(None, &["api", &format!("repos/{fork_slug}")], GH_NETWORK_TIMEOUT).await?;
-    let repo: Value = serde_json::from_str(&repo_out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse the forked repository: {e}")))?;
+    // First attempt: `repos/{login}/{name}`. VERIFY it's actually a fork of the
+    // source before trusting it — a caller who already owns an unrelated
+    // `login/name` would otherwise get that repo back (and clone the wrong thing).
+    let candidate_slug = format!("{login}/{name}");
+    let verified = match run_gh_raw(
+        None,
+        &["api", &format!("repos/{candidate_slug}")],
+        GH_NETWORK_TIMEOUT,
+    )
+    .await
+    {
+        Ok(out) if out.code == 0 => serde_json::from_str::<Value>(&out.stdout_lossy())
+            .ok()
+            .filter(|repo| repo_is_fork_of(repo, &source)),
+        // 404 (no such repo) or a transient error: fall through to the forks list.
+        _ => None,
+    };
+    // Fallback: the candidate wasn't the fork (renamed on collision, or absent).
+    // List the source's forks and pick the one owned by the viewer.
+    let repo = match verified {
+        Some(repo) => repo,
+        None => find_viewer_fork(owner, name, &login)
+            .await?
+            .ok_or_else(|| {
+                AppError::Gh(format!(
+                    "forked {source} but couldn't locate your fork afterward"
+                ))
+            })?,
+    };
     let full_name = repo
         .get("full_name")
         .and_then(Value::as_str)
-        .unwrap_or(&fork_slug)
+        .unwrap_or(&candidate_slug)
         .to_string();
     let clone_url = repo
         .get("clone_url")
@@ -1038,6 +1062,40 @@ pub async fn fork_repo(owner: &str, name: &str) -> AppResult<ForgeForkResult> {
         web_url,
         ready,
     })
+}
+
+/// Whether a repo JSON object is a fork whose parent is exactly `source`
+/// (`owner/name`, case-insensitive — GitHub logins/repos are case-insensitive).
+/// Pure, so it's unit-testable.
+fn repo_is_fork_of(repo: &Value, source: &str) -> bool {
+    repo.get("fork").and_then(Value::as_bool).unwrap_or(false)
+        && repo
+            .get("parent")
+            .and_then(|p| p.get("full_name"))
+            .and_then(Value::as_str)
+            .is_some_and(|parent| parent.eq_ignore_ascii_case(source))
+}
+
+/// Find the viewer's fork of `owner/name` by listing the source's forks
+/// (`repos/{owner}/{name}/forks?per_page=100`) and returning the first whose
+/// `owner.login` is `login`. `Ok(None)` when the viewer has no fork in the first
+/// page (or the source has none); an API failure surfaces.
+async fn find_viewer_fork(owner: &str, name: &str, login: &str) -> AppResult<Option<Value>> {
+    let endpoint = format!("repos/{owner}/{name}/forks?per_page=100");
+    let out = run_gh(None, &["api", &endpoint], GH_NETWORK_TIMEOUT).await?;
+    let forks: Value = serde_json::from_str(&out.stdout_lossy())
+        .map_err(|e| AppError::Gh(format!("could not parse the fork list: {e}")))?;
+    let hit = forks.as_array().and_then(|arr| {
+        arr.iter()
+            .find(|fork| {
+                fork.get("owner")
+                    .and_then(|o| o.get("login"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|l| l.eq_ignore_ascii_case(login))
+            })
+            .cloned()
+    });
+    Ok(hit)
 }
 
 /// Poll a fork's `commits?per_page=1` up to 5 times (2s apart) — the fork is
@@ -1069,16 +1127,36 @@ pub async fn star_repo(owner: &str, name: &str, star: bool) -> AppResult<()> {
     Ok(())
 }
 
+/// Whether a failed `gh api` invocation's stderr looks like a 404 (Not Found) — the
+/// signal that a resource is absent (README missing, star not present) rather than a
+/// transport/auth/rate-limit failure that must be surfaced. gh prints the HTTP status
+/// on stderr (`HTTP 404: Not Found (…)`). Pure, so it's unit-testable.
+fn gh_stderr_is_404(stderr: &str) -> bool {
+    let s = stderr.to_ascii_lowercase();
+    s.contains("404") || s.contains("not found")
+}
+
 /// Whether the signed-in user has starred `owner/name`. `GET
-/// user/starred/{owner}/{name}` answers 204 (starred) / 404 (not) — `run_gh_raw`
-/// keeps the 404 as `code != 0` (→ false) rather than erroring; any other spawn
-/// failure surfaces.
+/// user/starred/{owner}/{name}` answers 204 (starred) / 404 (not). A 404 → `false`;
+/// ANY other non-zero exit (403 rate-limit, 5xx, auth) is a real failure and
+/// surfaces as `Err` rather than masquerading as "not starred".
 pub async fn starred(owner: &str, name: &str) -> AppResult<bool> {
     validate_owner(owner)?;
     validate_repo_name(name)?;
     let endpoint = format!("user/starred/{owner}/{name}");
     let out = run_gh_raw(None, &["api", "--method", "GET", &endpoint], GH_TIMEOUT).await?;
-    Ok(out.code == 0)
+    if out.code == 0 {
+        return Ok(true);
+    }
+    if gh_stderr_is_404(&out.stderr) {
+        return Ok(false);
+    }
+    let msg = out.stderr.trim();
+    Err(AppError::Gh(if msg.is_empty() {
+        format!("gh exited with code {} checking the star", out.code)
+    } else {
+        msg.to_string()
+    }))
 }
 
 /// A repo's raw README markdown, or `None` when it has none. `gh api
@@ -1097,8 +1175,7 @@ pub async fn repo_readme(owner: &str, name: &str) -> AppResult<Option<String>> {
     if out.code != 0 {
         // A 404 (no README) is absence, not an error. Any other non-zero exit is a
         // real failure worth surfacing (rate limit, auth, network).
-        let stderr = out.stderr.to_ascii_lowercase();
-        if stderr.contains("404") || stderr.contains("not found") {
+        if gh_stderr_is_404(&out.stderr) {
             return Ok(None);
         }
         let msg = out.stderr.trim();
@@ -1114,6 +1191,44 @@ pub async fn repo_readme(owner: &str, name: &str) -> AppResult<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repo_is_fork_of_verifies_parent_not_just_the_name() {
+        // A genuine fork of the source verifies.
+        let real = serde_json::json!({
+            "full_name": "me/rust",
+            "fork": true,
+            "parent": { "full_name": "rust-lang/rust" }
+        });
+        assert!(repo_is_fork_of(&real, "rust-lang/rust"));
+        // Case-insensitive parent match (GitHub nwo is case-insensitive).
+        assert!(repo_is_fork_of(&real, "Rust-Lang/Rust"));
+        // A pre-existing UNRELATED repo the caller owns at the same name: not a fork,
+        // or a fork of a different parent → rejected (this is the collision bug).
+        let unrelated = serde_json::json!({ "full_name": "me/rust", "fork": false });
+        assert!(!repo_is_fork_of(&unrelated, "rust-lang/rust"));
+        let wrong_parent = serde_json::json!({
+            "full_name": "me/rust",
+            "fork": true,
+            "parent": { "full_name": "someone-else/rust" }
+        });
+        assert!(!repo_is_fork_of(&wrong_parent, "rust-lang/rust"));
+        // A fork object with no parent field → rejected.
+        let no_parent = serde_json::json!({ "full_name": "me/rust", "fork": true });
+        assert!(!repo_is_fork_of(&no_parent, "rust-lang/rust"));
+    }
+
+    #[test]
+    fn gh_stderr_404_distinguishes_absence_from_other_failures() {
+        // gh's real 404 stderr shape.
+        assert!(gh_stderr_is_404("HTTP 404: Not Found (https://api.github.com/…)"));
+        assert!(gh_stderr_is_404("gh: Not Found"));
+        // Rate limit, auth, and 5xx are NOT absence — they must surface.
+        assert!(!gh_stderr_is_404("HTTP 403: API rate limit exceeded"));
+        assert!(!gh_stderr_is_404("HTTP 401: Bad credentials"));
+        assert!(!gh_stderr_is_404("HTTP 500: Internal Server Error"));
+        assert!(!gh_stderr_is_404(""));
+    }
 
     #[test]
     fn github_sort_args_map_each_sort() {

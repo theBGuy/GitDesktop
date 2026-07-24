@@ -100,13 +100,14 @@ export function ExploreScreen() {
   }, []);
 
   // Clear the lifted rows whenever the visible list changes (provider / query /
-  // mode). The mounted list republishes its real rows via onRowsChange; this
+  // mode / sort — sort re-keys the search query, so its refetch window counts
+  // too). The mounted list republishes its real rows via onRowsChange; this
   // reset covers the non-ready states (loading / error / empty) that don't
   // render a list at all, so stale rows can't drive the input's arrow nav.
   // biome-ignore lint/correctness/useExhaustiveDependencies: these are change-triggers, not values the body reads
   useEffect(() => {
     setFlatRepos([]);
-  }, [provider, query, effectiveZeroMode]);
+  }, [provider, query, effectiveZeroMode, sort]);
 
   // Arrow keys from the search input move the selection through the flat rows
   // (mirroring CloneRepoDialog); Enter jumps focus to the detail pane's first

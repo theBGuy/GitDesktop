@@ -5158,27 +5158,48 @@ fn bb_search_repo_from_value(item: &serde_json::Value) -> Option<ForgeSearchRepo
 }
 
 /// Search Bitbucket repositories for the Explore view — workspace-scoped by design
-/// (global repo search was retired). Iterates the viewer's workspaces, running a
-/// `name ~ "<query>"` filter in each. `page` is ignored (no cross-workspace paging);
+/// (global repo search was retired). Runs a `name ~ "<query>"` filter across the
+/// viewer's workspaces CONCURRENTLY. `page` is ignored (no cross-workspace paging);
 /// any `sort` maps to `-updated_on` (Bitbucket has no stars). An empty query is
-/// rejected upstream by the dispatcher.
+/// rejected upstream by the dispatcher. Best-effort per workspace (one erroring
+/// doesn't sink the others), but if EVERY workspace fetch fails, the last error
+/// surfaces rather than an empty "no results" list — mirroring `list_repos`.
 pub async fn search_repos(query: &str, _sort: &str, _page: u32) -> AppResult<ForgeSearchList> {
     let creds = http::load_credentials().await?;
     let bbql = format!("name ~ \"{}\"", bbql_escape(query));
     let q_enc = encode_query_value(&bbql);
+    let ws_list = workspaces().await?;
+    // Fetch every workspace's page concurrently (the local join_all — no futures crate).
+    let pages = crate::forge::futures_join_all(ws_list.iter().map(|ws| {
+        let creds = &creds;
+        let q_enc = &q_enc;
+        async move {
+            let path = format!(
+                "repositories/{}?q={q_enc}&sort=-updated_on&pagelen={BB_SEARCH_PAGELEN}",
+                encode_query_value(&ws.slug),
+            );
+            http::bb_get_json::<BbPage<serde_json::Value>>(creds, &path, "repositories").await
+        }
+    }))
+    .await;
     let mut repos: Vec<ForgeSearchRepo> = Vec::new();
-    // Best-effort per workspace: one workspace erroring shouldn't sink the others.
-    for ws in workspaces().await? {
-        let path = format!(
-            "repositories/{}?q={q_enc}&sort=-updated_on&pagelen={BB_SEARCH_PAGELEN}",
-            encode_query_value(&ws.slug),
-        );
-        let Ok(page) = http::bb_get_json::<BbPage<serde_json::Value>>(&creds, &path, "repositories")
-            .await
-        else {
-            continue;
-        };
-        repos.extend(page.values.iter().filter_map(bb_search_repo_from_value));
+    let mut any_ok = false;
+    let mut last_err: Option<AppError> = None;
+    for page in pages {
+        match page {
+            Ok(page) => {
+                any_ok = true;
+                repos.extend(page.values.iter().filter_map(bb_search_repo_from_value));
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    // Every workspace fetch failed (and there was at least one) → surface the error
+    // instead of a misleading empty result.
+    if !ws_list.is_empty() && !any_ok {
+        return Err(last_err.unwrap_or_else(|| {
+            AppError::Bitbucket("could not search Bitbucket repositories".into())
+        }));
     }
     Ok(ForgeSearchList {
         repos,
@@ -5259,7 +5280,9 @@ async fn poll_fork_ready(creds: &BbCredentials, full_name: &str) -> bool {
 
 /// A Bitbucket repo's raw README markdown, or `None` when absent. Resolves the
 /// repo's `mainbranch.name`, then tries a candidate filename list via the `src`
-/// endpoint; the first hit wins.
+/// endpoint; the first hit wins. Continues to the next candidate ONLY on a 404 (that
+/// file doesn't exist); any other non-2xx (auth, rate-limit, 5xx) surfaces as an
+/// error rather than silently reading "no README".
 pub async fn repo_readme(owner: &str, name: &str) -> AppResult<Option<String>> {
     validate_owner(owner)?;
     validate_repo_name(name)?;
@@ -5292,7 +5315,11 @@ pub async fn repo_readme(owner: &str, name: &str) -> AppResult<Option<String>> {
         if (200..300).contains(&status) {
             return Ok(Some(cap_readme(&body)));
         }
-        // Non-2xx (usually 404 for a missing candidate) → try the next name.
+        // Only a 404 means "this candidate doesn't exist" — try the next one. Any
+        // other non-2xx is a real failure worth surfacing, not "No README."
+        if status != 404 {
+            return Err(http::http_error(status, &body));
+        }
     }
     Ok(None)
 }

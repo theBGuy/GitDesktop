@@ -97,16 +97,24 @@ pub(crate) fn encode_query_value(s: &str) -> String {
     out
 }
 
-/// Whether a single repo/owner path *segment* matches the safe grammar
-/// `^[A-Za-z0-9][A-Za-z0-9._-]*$` — a leading alphanumeric then alphanumerics,
-/// dots, underscores, or hyphens. This blocks both argv injection (a `-`-leading
-/// value that gh/glab would read as a flag) and path traversal (`..`, empty, `/`
-/// inside a segment) before any value is interpolated into a CLI arg or URL path.
+/// Whether a single repo/owner path *segment* is safe to interpolate into a CLI
+/// arg or URL path. The character set is alphanumerics, dots, underscores, and
+/// hyphens; the FIRST char may be an alphanumeric, a dot, or an underscore (so
+/// legitimate config repos like `.github` / `.gitlab` and `_name` are allowed),
+/// but NEVER a hyphen — a `-`-leading value would be read as a flag by gh/glab.
+/// The two pure-traversal segments `.` and `..` are rejected outright, as is the
+/// empty string. A `/` never appears in a segment (the caller splits on it).
 fn is_valid_path_segment(seg: &str) -> bool {
+    // Reject empty and the two path-traversal segments explicitly.
+    if seg.is_empty() || seg == "." || seg == ".." {
+        return false;
+    }
     let mut chars = seg.chars();
     match chars.next() {
-        Some(c) if c.is_ascii_alphanumeric() => {}
-        _ => return false, // empty or non-alphanumeric first char (blocks "", "-x", ".x")
+        // Leading `.` and `_` are allowed (`.github`, `_name`); a leading `-` is not
+        // (argv-flag injection).
+        Some(c) if c.is_ascii_alphanumeric() || c == '.' || c == '_' => {}
+        _ => return false,
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
 }
@@ -155,6 +163,46 @@ pub(crate) fn cap_readme(body: &str) -> String {
         end -= 1;
     }
     body[..end].to_string()
+}
+
+/// Drive a set of futures CONCURRENTLY and collect their results in input order — a
+/// tiny local `join_all` so we don't pull in the `futures` crate. All futures share
+/// this task (no spawn), so they may borrow non-`'static` data; each poll advances
+/// every not-yet-ready future. Shared by the forge providers (GitLab health probes,
+/// Bitbucket per-workspace search).
+pub(crate) async fn futures_join_all<F, T>(futures: impl IntoIterator<Item = F>) -> Vec<T>
+where
+    F: std::future::Future<Output = T>,
+{
+    use std::future::poll_fn;
+    use std::pin::Pin;
+    use std::task::Poll;
+
+    let mut pinned: Vec<Pin<Box<F>>> = futures.into_iter().map(Box::pin).collect();
+    let mut results: Vec<Option<T>> = (0..pinned.len()).map(|_| None).collect();
+
+    poll_fn(|cx| {
+        let mut all_done = true;
+        for (i, fut) in pinned.iter_mut().enumerate() {
+            if results[i].is_none() {
+                match fut.as_mut().poll(cx) {
+                    Poll::Ready(v) => results[i] = Some(v),
+                    Poll::Pending => all_done = false,
+                }
+            }
+        }
+        if all_done {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    })
+    .await;
+
+    results
+        .into_iter()
+        .map(|r| r.expect("all futures ready"))
+        .collect()
 }
 
 /// Route a remote host to a **non-GitHub** provider, but only when it's
@@ -751,6 +799,13 @@ pub async fn forge_search_repos(
 ) -> AppResult<ForgeSearchList> {
     if !matches!(sort.as_str(), "best" | "stars" | "updated") {
         return Err(AppError::InvalidArgument(format!("invalid sort: {sort}")));
+    }
+    // `page` is 1-based; page 0 is a client bug (every provider would treat it
+    // inconsistently — GitHub 422s, GitLab clamps to 1), so reject it explicitly.
+    if page == 0 {
+        return Err(AppError::InvalidArgument(
+            "page is 1-based; page 0 is invalid".into(),
+        ));
     }
     match provider {
         Provider::GitHub => github::search_repos(&query, &sort, page).await,
@@ -3659,17 +3714,21 @@ mod tests {
         assert!(validate_repo_name("rust-lang").is_ok());
         assert!(validate_repo_name("a.b_c-d").is_ok());
         assert!(validate_repo_name("Repo123").is_ok());
+        // Legitimate dot/underscore-leading config repos (`.github`, `.gitlab`) and
+        // underscore-leading names are accepted.
+        assert!(validate_repo_name(".github").is_ok());
+        assert!(validate_repo_name(".gitlab").is_ok());
+        assert!(validate_repo_name("_name").is_ok());
         // Leading `-` would be read as a flag by gh/glab.
         assert!(validate_repo_name("-evil").is_err());
         // A `;` (or any shell/query metachar) is rejected.
         assert!(validate_repo_name("foo;bar").is_err());
-        // Path traversal and empties.
+        // The two pure-traversal segments and empties are rejected.
+        assert!(validate_repo_name(".").is_err());
         assert!(validate_repo_name("..").is_err());
         assert!(validate_repo_name("").is_err());
         // A name is a single segment — a slash is never allowed.
         assert!(validate_repo_name("owner/name").is_err());
-        // A leading dot (dotfile-ish traversal vector) is rejected.
-        assert!(validate_repo_name(".hidden").is_err());
     }
 
     #[test]
@@ -3687,6 +3746,18 @@ mod tests {
         assert!(validate_owner("/group").is_err());
         assert!(validate_owner("group/").is_err());
         assert!(validate_owner("a//b").is_err());
+    }
+
+    #[tokio::test]
+    async fn search_rejects_bad_sort_and_zero_page_before_dispatch() {
+        // Both guards fire before any provider dispatch (no CLI / network needed).
+        let bad_sort =
+            forge_search_repos(Provider::GitHub, "rust".into(), "nonsense".into(), 1).await;
+        assert!(matches!(bad_sort, Err(AppError::InvalidArgument(_))));
+        // page is 1-based; 0 is rejected.
+        let zero_page =
+            forge_search_repos(Provider::GitHub, "rust".into(), "best".into(), 0).await;
+        assert!(matches!(zero_page, Err(AppError::InvalidArgument(_))));
     }
 
     #[test]

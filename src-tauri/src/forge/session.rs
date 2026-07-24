@@ -682,7 +682,7 @@ async fn gitlab_accounts_health() -> Vec<SessionHealth> {
     }
     // Probe each host concurrently.
     let futures = hosts.iter().map(|h| gitlab_health(h));
-    futures_join_all(futures).await
+    crate::forge::futures_join_all(futures).await
 }
 
 // ── Bitbucket ───────────────────────────────────────────────────────────────────
@@ -1344,45 +1344,6 @@ fn today_civil_days() -> i64 {
     use chrono::Datelike;
     let now = chrono::Utc::now().date_naive();
     days_from_civil(now.year() as i64, now.month() as i64, now.day() as i64)
-}
-
-/// Drive a set of futures CONCURRENTLY and collect their results in input order — a
-/// tiny local `join_all` so we don't pull in the `futures` crate for one call site.
-/// All futures share this task (no spawn), so they may borrow non-`'static` data;
-/// each poll advances every not-yet-ready future.
-async fn futures_join_all<F, T>(futures: impl IntoIterator<Item = F>) -> Vec<T>
-where
-    F: std::future::Future<Output = T>,
-{
-    use std::future::poll_fn;
-    use std::pin::Pin;
-    use std::task::Poll;
-
-    let mut pinned: Vec<Pin<Box<F>>> = futures.into_iter().map(Box::pin).collect();
-    let mut results: Vec<Option<T>> = (0..pinned.len()).map(|_| None).collect();
-
-    poll_fn(|cx| {
-        let mut all_done = true;
-        for (i, fut) in pinned.iter_mut().enumerate() {
-            if results[i].is_none() {
-                match fut.as_mut().poll(cx) {
-                    Poll::Ready(v) => results[i] = Some(v),
-                    Poll::Pending => all_done = false,
-                }
-            }
-        }
-        if all_done {
-            Poll::Ready(())
-        } else {
-            Poll::Pending
-        }
-    })
-    .await;
-
-    results
-        .into_iter()
-        .map(|r| r.expect("all futures ready"))
-        .collect()
 }
 
 #[cfg(test)]
