@@ -121,7 +121,13 @@ export function BottomNav({
       aria-label="Sections"
     >
       {tabs.map((t, i) => {
-        const active = tabActive && route.tab === t.tab;
+        // Discussions is a segmented sibling living UNDER the Issues tab (no tab of
+        // its own), so a discussions route highlights Issues. tags/todos are
+        // Status-hub drill-ins that (like branches/changes/history) highlight no tab.
+        const active =
+          tabActive &&
+          (route.tab === t.tab ||
+            (t.tab === "issues" && route.tab === "discussions"));
         return (
           <a
             key={t.tab}

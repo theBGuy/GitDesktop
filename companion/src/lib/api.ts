@@ -98,6 +98,21 @@ export class ApiError extends Error {
   get isNoSuchRepo(): boolean {
     return this.status === 404 && this.kind === "noSuchRepo";
   }
+  /**
+   * This repo can't serve Discussions — a non-GitHub repo (GitLab/Bitbucket have
+   * no Discussions equivalent) or a GitHub repo with the feature turned off. The
+   * server mints `400 { kind: "discussionsUnavailable", … }` for it; the screen
+   * renders a calm teaching state (NOT the generic error, and no retry — a retry
+   * can't turn the feature on). Both the status AND the kind must match so an
+   * unrelated 400 never reads as "no discussions here".
+   *
+   * The kind string `discussionsUnavailable` is a VERBATIM cross-layer contract
+   * with the Rust LAN server (`src-tauri/src/lan/routes/forge.rs` mints it) — keep
+   * the two spellings in lockstep.
+   */
+  get isDiscussionsUnavailable(): boolean {
+    return this.status === 400 && this.kind === "discussionsUnavailable";
+  }
 }
 
 interface ErrorBody {
@@ -405,6 +420,173 @@ export const fetchIssues = (repoId: string, state = "open", limit = 30) =>
 /** One issue's full read view (`issues/{number}`). */
 export const fetchIssue = (repoId: string, number: number) =>
   getJson<IssueDetails>(`${scope(repoId)}/issues/${number}`);
+
+// ── Companion-extras read shapes (Tags · Code TODOs · Discussions) ────────────
+// These mirror the desktop's serde camelCase types EXACTLY (verified against the
+// desktop Rust structs). Declared HERE (own local interfaces, like the slice-6
+// shapes above) rather than imported from `@/lib/git/types`.
+
+/** One tag ref for the Tags list (the desktop's `TagInfo`). `target` is the commit
+ *  sha the tag points at; `date` is the tagger date (annotated) or commit date
+ *  (lightweight); `annotated` distinguishes the two; `subject` is the annotation
+ *  message subject (empty for a lightweight tag). */
+export interface TagInfo {
+  name: string;
+  target: string;
+  date: string;
+  annotated: boolean;
+  subject: string;
+}
+
+/** One hit from a code-TODO scan (the desktop's `TodoScanItem`). `path` is the
+ *  repo-relative file, `line` the 1-based line number, `marker` the matched marker
+ *  (e.g. "TODO"/"FIXME"), `text` the trailing comment text. */
+export interface TodoScanItem {
+  path: string;
+  line: number;
+  marker: string;
+  text: string;
+}
+
+/** A code-TODO scan result (the desktop's `TodoScan`). `truncated` is true when the
+ *  scan hit the server's max-hits cap and the list is a prefix. */
+export interface TodoScan {
+  items: TodoScanItem[];
+  truncated: boolean;
+}
+
+/** One discussion category (the desktop's `DiscussionCategory`). `emoji` is the
+ *  rendered category emoji; `isAnswerable` marks a Q&A category. */
+export interface DiscussionCategory {
+  id: string;
+  name: string;
+  emoji: string;
+  isAnswerable: boolean;
+}
+
+/** The repo's discussions metadata (the desktop's `DiscussionMeta`): whether
+ *  Discussions are enabled and the available categories. */
+export interface DiscussionMeta {
+  repoId: string;
+  hasDiscussionsEnabled: boolean;
+  categories: DiscussionCategory[];
+}
+
+/** One discussion label (the desktop's `DiscussionLabel`). `color` is hex without
+ *  the leading '#', as GitHub returns it; `description` is null when the source has
+ *  none. Distinct from {@link IssueLabel} (whose `description` is optional) — the
+ *  discussion wire shape always carries the field. */
+export interface DiscussionLabel {
+  id: string;
+  name: string;
+  color: string;
+  description: string | null;
+}
+
+/** One discussion in the Discussions list (the desktop's `DiscussionInfo`). */
+export interface DiscussionInfo {
+  number: number;
+  title: string;
+  url: string;
+  createdAt: string;
+  isAnswered: boolean;
+  closed: boolean;
+  stateReason: string | null;
+  categoryName: string;
+  categoryEmoji: string;
+  author: string;
+  commentCount: number;
+  upvoteCount: number;
+  labels: DiscussionLabel[];
+}
+
+/** One reply under a discussion comment (the desktop's `DiscussionReply`). */
+export interface DiscussionReply {
+  id: string;
+  author: string;
+  body: string;
+  date: string;
+  url: string;
+  viewerDidAuthor: boolean;
+  isMinimized: boolean;
+  minimizedReason: string;
+}
+
+/** One top-level discussion comment (the desktop's `DiscussionComment`) — a
+ *  {@link DiscussionReply} plus upvotes, the answer flag, and its nested replies. */
+export interface DiscussionComment extends DiscussionReply {
+  upvoteCount: number;
+  viewerHasUpvoted: boolean;
+  isAnswer: boolean;
+  replies: DiscussionReply[];
+}
+
+/** Full details for one discussion's read view (the desktop's `DiscussionDetails`):
+ *  body, category, answer/lock/close state, labels, and the comment threads. */
+export interface DiscussionDetails {
+  id: string;
+  number: number;
+  title: string;
+  body: string;
+  url: string;
+  author: string;
+  createdAt: string;
+  categoryName: string;
+  categoryEmoji: string;
+  isAnswerable: boolean;
+  isAnswered: boolean;
+  upvoteCount: number;
+  viewerHasUpvoted: boolean;
+  locked: boolean;
+  activeLockReason: string | null;
+  closed: boolean;
+  stateReason: string | null;
+  labels: DiscussionLabel[];
+  comments: DiscussionComment[];
+}
+
+// ── Companion-extras read fetchers (Tags · Code TODOs · Discussions) ──────────
+
+/** The repo's tags (`tags`), newest first (server-ordered). */
+export const fetchTags = (repoId: string) =>
+  getJson<TagInfo[]>(`${scope(repoId)}/tags`);
+
+/** A code-TODO scan (`todos?markers&maxHits`). `markers` are comma-joined into the
+ *  query; `maxHits` caps the result (server default when omitted). */
+export const fetchTodoScan = (
+  repoId: string,
+  markers: string[],
+  maxHits?: number,
+) =>
+  getJson<TodoScan>(
+    `${scope(repoId)}/todos?markers=${encodeURIComponent(markers.join(","))}${
+      maxHits != null ? `&maxHits=${maxHits}` : ""
+    }`,
+  );
+
+/** The repo's discussions metadata (`discussions/meta`) — enablement + categories.
+ *  Errors with a typed `discussionsUnavailable` variant on a non-GitHub repo. */
+export const fetchDiscussionMeta = (repoId: string) =>
+  getJson<DiscussionMeta>(`${scope(repoId)}/discussions/meta`);
+
+/** The repo's discussions (`discussions?limit&category`). `category` filters by a
+ *  category NODE ID (a `DiscussionCategory.id`, not its name — the server forwards
+ *  it verbatim into the GraphQL category filter) when non-null; `limit` caps the
+ *  page. */
+export const fetchDiscussions = (
+  repoId: string,
+  category: string | null,
+  limit: number,
+) =>
+  getJson<DiscussionInfo[]>(
+    `${scope(repoId)}/discussions?limit=${limit}${
+      category != null ? `&category=${encodeURIComponent(category)}` : ""
+    }`,
+  );
+
+/** One discussion's full read view (`discussions/{number}`). */
+export const fetchDiscussion = (repoId: string, number: number) =>
+  getJson<DiscussionDetails>(`${scope(repoId)}/discussions/${number}`);
 
 // ── Agent streams (live AI review / agent sessions) ───────────────────────────
 

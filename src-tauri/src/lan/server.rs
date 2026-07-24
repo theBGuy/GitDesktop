@@ -2,7 +2,7 @@
 //! shutdown for the LAN companion server.
 //!
 //! The router mounts EXACTLY the pairing routes plus the read-only routes
-//! (structural allowlist — see [`crate::lan::routes`]): the 17 read handlers,
+//! (structural allowlist — see [`crate::lan::routes`]): the 22 read handlers,
 //! mounted TWICE — once as the frozen active-repo ALIAS surface (`/api/repo/…`,
 //! `/api/forge/…`, `/api/reviews…`) and once under the SCOPED
 //! `/api/repos/{repoId}/…` surface — plus `GET /api/repos`; anything else 404s.
@@ -80,6 +80,8 @@ pub fn build_router(state: RouterState) -> Router {
         .route("/api/repo/commits/{hash}/diff", get(git::commit_diff))
         .route("/api/repo/diff/working", get(git::diff_working))
         .route("/api/repo/diff/file", get(git::diff_file))
+        .route("/api/repo/tags", get(git::tags))
+        .route("/api/repo/todos", get(git::todos))
         .route("/api/forge/prs", get(forge::pr_list))
         .route("/api/forge/prs/{number}", get(forge::pr_view))
         .route("/api/forge/prs/{number}/timeline", get(forge::pr_timeline))
@@ -88,6 +90,12 @@ pub fn build_router(state: RouterState) -> Router {
         .route("/api/forge/issues/{number}", get(forge::issue_view))
         .route("/api/forge/ci/runs", get(forge::ci_run_list))
         .route("/api/forge/ci/runs/{id}", get(forge::ci_run_view))
+        // Discussions (GitHub-only; the handlers gate non-GitHub hosts). matchit
+        // gives the static `discussions/meta` priority over `discussions/{number}`,
+        // so both mount safely regardless of order — don't "fix" the ordering.
+        .route("/api/forge/discussions/meta", get(forge::discussions_meta))
+        .route("/api/forge/discussions", get(forge::discussions_list))
+        .route("/api/forge/discussions/{number}", get(forge::discussions_view))
         // Live-monitoring: enumerate active agent streams + watch one over SSE.
         .route("/api/reviews", get(reviews::list))
         .route("/api/reviews/{id}/stream", get(reviews::stream))
@@ -110,6 +118,8 @@ pub fn build_router(state: RouterState) -> Router {
         )
         .route("/api/repos/{repoId}/diff/working", get(git::diff_working))
         .route("/api/repos/{repoId}/diff/file", get(git::diff_file))
+        .route("/api/repos/{repoId}/tags", get(git::tags))
+        .route("/api/repos/{repoId}/todos", get(git::todos))
         .route("/api/repos/{repoId}/prs", get(forge::pr_list))
         .route("/api/repos/{repoId}/prs/{number}", get(forge::pr_view))
         .route(
@@ -124,6 +134,15 @@ pub fn build_router(state: RouterState) -> Router {
         .route("/api/repos/{repoId}/issues/{number}", get(forge::issue_view))
         .route("/api/repos/{repoId}/ci/runs", get(forge::ci_run_list))
         .route("/api/repos/{repoId}/ci/runs/{id}", get(forge::ci_run_view))
+        .route(
+            "/api/repos/{repoId}/discussions/meta",
+            get(forge::discussions_meta),
+        )
+        .route("/api/repos/{repoId}/discussions", get(forge::discussions_list))
+        .route(
+            "/api/repos/{repoId}/discussions/{number}",
+            get(forge::discussions_view),
+        )
         .route("/api/repos/{repoId}/reviews", get(reviews::list))
         .route(
             "/api/repos/{repoId}/reviews/{id}/stream",

@@ -17,12 +17,15 @@ import { AgentsBody, AgentWatch } from "./screens/Agents";
 import { BranchesBody } from "./screens/Branches";
 import { ChangesBody, ChangesFileBody } from "./screens/Changes";
 import { CiBody, CiDetail } from "./screens/Ci";
+import { DiscussionDetailBody, DiscussionsBody } from "./screens/Discussions";
 import { CommitBody, CommitFileBody, HistoryBody } from "./screens/History";
 import { IssueDetailBody, IssuesBody } from "./screens/Issues";
 import { Pair } from "./screens/Pair";
 import { PrDetail, PrsBody } from "./screens/Prs";
 import { ReposBody } from "./screens/Repos";
 import { StatusBody } from "./screens/Status";
+import { TagsBody } from "./screens/Tags";
+import { TodosBody } from "./screens/Todos";
 
 // The app shell. It owns the cross-cutting states so every screen inherits them:
 //   • 401 anywhere → route to #pair (token revoked / never paired)
@@ -217,6 +220,8 @@ function tabTail(route: Route): string {
     return `ci/${route.detailId}`;
   if (route.tab === "agents" && route.streamId != null)
     return `agents/${route.streamId}`;
+  if (route.tab === "discussions" && route.detailId != null)
+    return `discussions/${route.detailId}`;
   return route.tab;
 }
 
@@ -362,6 +367,19 @@ function Screen({
       <IssueDetailBody repoId={repoId} number={route.detailId} />
     ) : (
       <IssuesBody repoId={repoId} active />
+    );
+  }
+  if (route.tab === "tags") {
+    return <TagsBody repoId={repoId} active />;
+  }
+  if (route.tab === "todos") {
+    return <TodosBody repoId={repoId} active />;
+  }
+  if (route.tab === "discussions") {
+    return route.detailId != null ? (
+      <DiscussionDetailBody repoId={repoId} number={route.detailId} />
+    ) : (
+      <DiscussionsBody repoId={repoId} active />
     );
   }
   return <StatusBody repoId={repoId} active />;

@@ -11,6 +11,9 @@ import {
   fetchCiRuns,
   fetchCommit,
   fetchCommitDiff,
+  fetchDiscussion,
+  fetchDiscussionMeta,
+  fetchDiscussions,
   fetchFileDiff,
   fetchIssue,
   fetchIssues,
@@ -22,6 +25,8 @@ import {
   fetchRepos,
   fetchReviews,
   fetchStatus,
+  fetchTags,
+  fetchTodoScan,
   fetchWorkingDiff,
 } from "./api";
 import { navigate } from "./router";
@@ -313,6 +318,91 @@ export function useIssue(repoId: string | null, number: number | null) {
   return useQuery({
     queryKey: ["issue", repoId, number],
     queryFn: () => fetchIssue(repoId as string, number as number),
+    enabled: on,
+    refetchInterval: on ? POLL_MS : (false as const),
+  });
+}
+
+// ── Companion-extras hooks (Tags · Code TODOs · Discussions) ──────────────────
+
+/** The repo's tags. `active` gates polling to the visible screen — refs are cheap,
+ *  so the list polls at the standard cadence like the other list screens. */
+export function useTags(repoId: string | null, active: boolean) {
+  return useQuery({
+    queryKey: ["tags", repoId],
+    queryFn: () => fetchTags(repoId as string),
+    enabled: repoId != null,
+    refetchInterval: repoId != null ? poll(active) : false,
+  });
+}
+
+/** A code-TODO scan for the given markers. Deliberately NOT polled: a scan is a
+ *  git-grep sweep across the tree, so re-running it every 15s is pure waste — this is
+ *  a deliberate divergence from the other list hooks (which DO poll). A modest
+ *  `staleTime` lets a re-visit refetch without hammering. `markers` are sorted into
+ *  the cache key so `["TODO","FIXME"]` and `["FIXME","TODO"]` share one entry.
+ *  `enabled` (default true) plus a repo and at least one marker gate the query —
+ *  scanning with zero markers would match nothing. `keepPreviousData`: toggling a
+ *  marker chip re-keys the query, and without a placeholder the list would collapse
+ *  to skeletons on every toggle (same finding as useLog). */
+export function useTodoScan(
+  repoId: string | null,
+  markers: string[],
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: ["todos", repoId, [...markers].sort().join(",")],
+    queryFn: () => fetchTodoScan(repoId as string, markers),
+    enabled: enabled && repoId != null && markers.length > 0,
+    refetchInterval: false,
+    staleTime: 30_000,
+    placeholderData: keepPreviousData,
+  });
+}
+
+/** The repo's discussions metadata (enablement + categories). No poll — categories
+ *  and enablement rarely change — and a long `staleTime` (the desktop uses the same
+ *  5-minute window). A null `repoId` disables it. */
+export function useDiscussionMeta(repoId: string | null) {
+  return useQuery({
+    queryKey: ["discussions", repoId, "meta"],
+    queryFn: () => fetchDiscussionMeta(repoId as string),
+    enabled: repoId != null,
+    staleTime: 300_000,
+  });
+}
+
+/** The repo's discussions, filtered by `category` (null = all) and paged by `limit`.
+ *  `active` gates polling to the visible screen; `enabled` (default true) additionally
+ *  gates the query (e.g. off while Discussions are known-unavailable). `category` and
+ *  `limit` are part of the cache key so each filter/page caches independently.
+ *  `keepPreviousData`: a growing limit or a category switch re-keys the query — keep
+ *  the prior page visible while the new one loads (same finding as useLog/useIssues). */
+export function useDiscussions(
+  repoId: string | null,
+  active: boolean,
+  category: string | null,
+  limit: number,
+  enabled = true,
+) {
+  const on = enabled && repoId != null;
+  return useQuery({
+    queryKey: ["discussions", repoId, category ?? "all", limit],
+    queryFn: () => fetchDiscussions(repoId as string, category, limit),
+    enabled: on,
+    refetchInterval: on ? poll(active) : false,
+    placeholderData: keepPreviousData,
+  });
+}
+
+/** One discussion's full read view. Polls while open (comments/answers change) — a
+ *  detail view is a deliberate drill-in, so keep it fresh at the standard cadence
+ *  (same as useIssue). */
+export function useDiscussion(repoId: string | null, number: number | null) {
+  const on = repoId != null && number != null;
+  return useQuery({
+    queryKey: ["discussion", repoId, number],
+    queryFn: () => fetchDiscussion(repoId as string, number as number),
     enabled: on,
     refetchInterval: on ? POLL_MS : (false as const),
   });

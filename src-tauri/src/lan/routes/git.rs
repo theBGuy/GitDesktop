@@ -101,6 +101,49 @@ pub struct FileDiffQuery {
     untracked: bool,
 }
 
+/// GET tags (alias: `/api/repo/tags`). Every tag, newest first — annotated tags
+/// carry their own message + date, lightweight ones fall back to the commit.
+pub async fn tags(Extension(ScopedRepo(repo)): Extension<ScopedRepo>) -> Response {
+    respond(crate::git::ops::git_list_tags(repo).await)
+}
+
+/// The default comment markers scanned when the request omits `markers` (or it
+/// parses empty). Three copies of this set exist BY DESIGN — keep them in sync:
+/// the desktop's `DEFAULT_MARKERS` in `src/features/code-todos/markers.ts`, the
+/// companion's marker chip row, and this server-side fallback.
+const DEFAULT_TODO_MARKERS: &[&str] = &["TODO", "FIXME", "HACK", "BUG", "XXX"];
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoQuery {
+    markers: Option<String>,
+    max_hits: Option<u32>,
+}
+
+/// GET code-TODO scan (alias: `/api/repo/todos?markers=TODO,FIXME&maxHits=2000`).
+/// `markers` is a comma-separated list (split on `,`, trimmed, empties dropped);
+/// absent or empty-after-parse falls back to [`DEFAULT_TODO_MARKERS`]. The core
+/// fn validates the marker charset (injection guard) and caps hits at 2000, so no
+/// validation is duplicated here.
+pub async fn todos(
+    Extension(ScopedRepo(repo)): Extension<ScopedRepo>,
+    Query(q): Query<TodoQuery>,
+) -> Response {
+    let markers: Vec<String> = q
+        .markers
+        .as_deref()
+        .map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| DEFAULT_TODO_MARKERS.iter().map(|m| m.to_string()).collect());
+    respond(crate::git::todos::git_todo_scan(repo, markers, q.max_hits).await)
+}
+
 /// GET file diff (alias: `/api/repo/diff/file?path&staged&untracked`).
 pub async fn diff_file(
     Extension(ScopedRepo(repo)): Extension<ScopedRepo>,

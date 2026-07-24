@@ -15,6 +15,7 @@ use axum::response::Response;
 use axum::Extension;
 use serde::Deserialize;
 
+use crate::forge::model::Provider;
 use crate::lan::routes::{bad_request, path_param, respond, ScopedRepo};
 
 /// Read a `u64` path param by name (`number`/`id`), returning the app's standard
@@ -126,4 +127,87 @@ pub async fn ci_run_view(
         Err(resp) => return *resp,
     };
     respond(crate::forge::forge_ci_run_view(repo, id.to_string()).await)
+}
+
+/// The 400 returned when a discussions route is hit on a non-GitHub repo. The
+/// desktop gates discussions client-side (`forgeSupports`), so the `gh_discussion_*`
+/// core fns have no server-side host guard — without this they'd emit a raw
+/// `AppError::Gh` on a GitLab/Bitbucket repo. `discussionsUnavailable` is a VERBATIM
+/// cross-layer contract: the companion matches this `kind` exactly to render its
+/// teaching state — do not rename it. Mirrors the `bad_request`/`no_active_repo`
+/// response-builder style in [`crate::lan::routes`].
+fn discussions_unavailable() -> Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use axum::Json;
+    use serde_json::json;
+
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "kind": "discussionsUnavailable",
+            "message": "Discussions aren't available on this repository's host."
+        })),
+    )
+        .into_response()
+}
+
+/// Whether the repo's host supports GitHub Discussions. `detect_non_github` returns
+/// `Some((GitLab | Bitbucket, _))` for a known non-GitHub host → block; `None`
+/// (GitHub-or-unknown, the app's gh-default routing) or a `GitHub` arm (GHE hosts)
+/// → proceed. Runs BEFORE any `gh` invocation, so a non-GitHub repo short-circuits
+/// with no network call.
+async fn discussions_allowed(repo: &str) -> bool {
+    !matches!(
+        crate::forge::detect_non_github(repo).await,
+        Some((Provider::GitLab | Provider::Bitbucket, _))
+    )
+}
+
+/// GET discussion metadata (alias: `/api/forge/discussions/meta`). Node id, whether
+/// discussions are enabled, and the categories.
+pub async fn discussions_meta(Extension(ScopedRepo(repo)): Extension<ScopedRepo>) -> Response {
+    if !discussions_allowed(&repo).await {
+        return discussions_unavailable();
+    }
+    respond(crate::github::discussion::gh_discussion_categories(repo).await)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscussionListQuery {
+    category: Option<String>,
+    limit: Option<u32>,
+}
+
+/// GET discussion list (alias: `/api/forge/discussions?category&limit`). `category`
+/// is a category node id to filter by; absent keeps all categories.
+pub async fn discussions_list(
+    Extension(ScopedRepo(repo)): Extension<ScopedRepo>,
+    Query(q): Query<DiscussionListQuery>,
+) -> Response {
+    if !discussions_allowed(&repo).await {
+        return discussions_unavailable();
+    }
+    respond(crate::github::discussion::gh_discussion_list(repo, q.category, q.limit).await)
+}
+
+/// GET a discussion's full thread (alias: `/api/forge/discussions/{number}`). The
+/// `number` path param is read by name so the handler works under both mounts.
+///
+/// Route order: axum's matchit gives the static `discussions/meta` priority over
+/// this `discussions/{number}` pattern, so mounting both is safe regardless of
+/// registration order — don't "fix" the ordering.
+pub async fn discussions_view(
+    Extension(ScopedRepo(repo)): Extension<ScopedRepo>,
+    Path(params): Path<HashMap<String, String>>,
+) -> Response {
+    if !discussions_allowed(&repo).await {
+        return discussions_unavailable();
+    }
+    let number = match u64_param(&params, "number") {
+        Ok(n) => n,
+        Err(resp) => return *resp,
+    };
+    respond(crate::github::discussion::gh_discussion_view(repo, number).await)
 }

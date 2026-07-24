@@ -13,9 +13,9 @@ import {
   SkeletonRows,
   StaleBanner,
 } from "../components/states";
-import type { CommitSummary } from "../lib/api";
+import type { CommitSummary, TagInfo } from "../lib/api";
 import { timeAgo } from "../lib/format";
-import { useLog, useStatus } from "../lib/queries";
+import { useLog, useStatus, useTags } from "../lib/queries";
 import { navigate, repoHash, type Tab } from "../lib/router";
 
 // Status is the repo HUB — still glanceable (each group ANSWERS at a glance:
@@ -116,6 +116,19 @@ export function StatusBody({
         <HubGroup repoId={repoId} tab="history" label="Recent commits">
           <RecentCommits repoId={repoId} active={active} />
         </HubGroup>
+
+        <HubGroup repoId={repoId} tab="tags" label="Tags">
+          <TagsGlance repoId={repoId} active={active} />
+        </HubGroup>
+
+        <HubGroup repoId={repoId} tab="todos" label="Code TODOs">
+          {/* Deliberately a STATIC child, NOT a query: a TODO scan is a git-grep
+              sweep across the working tree, so the hub must never fire one — the
+              scan runs only once the user opens the tab. */}
+          <p className="text-sm text-muted-foreground">
+            Scan the working tree for TODO markers.
+          </p>
+        </HubGroup>
       </div>
     </div>
   );
@@ -211,6 +224,46 @@ function RecentCommits({
         </li>
       ))}
     </ul>
+  );
+}
+
+/** The tags glance inside the Tags hub group: the single newest tag as
+ *  `{name} · {timeAgo}`. Non-blocking exactly like RecentCommits — a quiet pulse
+ *  line while loading, a calm "Open to view tags." on error (the group row stays
+ *  tappable), and "No tags yet." when there are none. Fetches the full tags list
+ *  (the same query the Tags tab uses, so the hub warms its cache) and reads only
+ *  the first entry. */
+function TagsGlance({ repoId, active }: { repoId: string; active: boolean }) {
+  const { data, isPending } = useTags(repoId, active);
+
+  if (isPending && !data) {
+    return (
+      <div className="flex flex-col gap-1.5" aria-hidden>
+        <div className="h-3 w-2/3 animate-pulse rounded bg-muted" />
+      </div>
+    );
+  }
+
+  // On error (data undefined, not pending) omit the glance — never block the hub on
+  // it. The group header row stays tappable.
+  if (!data || data.length === 0) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        {data ? "No tags yet." : "Open to view tags."}
+      </p>
+    );
+  }
+
+  const tag: TagInfo = data[0];
+  return (
+    <p className="flex items-baseline gap-1.5 text-sm">
+      <span className="min-w-0 truncate font-medium text-foreground">
+        {tag.name}
+      </span>
+      <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
+        · {timeAgo(tag.date)}
+      </span>
+    </p>
   );
 }
 

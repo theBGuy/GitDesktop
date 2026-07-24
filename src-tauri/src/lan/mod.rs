@@ -2419,6 +2419,219 @@ mod tests {
         std::fs::remove_dir_all(&repo_dir).ok();
     }
 
+    /// Run `git` in `cwd`, asserting success — the shared setup helper for the
+    /// companion-extras route tests (tags/todos/discussions) below.
+    fn git_in(cwd: &std::path::Path, args: &[&str]) {
+        git_in_at(cwd, args, None);
+    }
+
+    /// Like [`git_in`], but pins the author + committer date (an RFC-2822/ISO
+    /// timestamp) so `--sort=-creatordate` is deterministic: back-to-back commits
+    /// (and an annotated tag) would otherwise share a one-second timestamp and tie,
+    /// making the newest-first ordering flaky.
+    fn git_in_at(cwd: &std::path::Path, args: &[&str], date: Option<&str>) {
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(args).current_dir(cwd);
+        if let Some(date) = date {
+            cmd.env("GIT_AUTHOR_DATE", date)
+                .env("GIT_COMMITTER_DATE", date);
+        }
+        assert!(
+            cmd.output().unwrap().status.success(),
+            "git {args:?} failed in {cwd:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn tags_route_lists_annotated_and_lightweight_newest_first() {
+        // A real temp repo with one lightweight and one annotated tag on distinct
+        // commits: the route returns both, newest-first, with the full field set.
+        let _lock = auth::store_test_lock();
+        let store = temp_store();
+        let prev = auth::set_store_path_for_test(Some(store.clone()));
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        git_in(root, &["init", "-q"]);
+        git_in(root, &["config", "user.email", "t@t.t"]);
+        git_in(root, &["config", "user.name", "t"]);
+        // Pin distinct, ordered dates so `--sort=-creatordate` is deterministic
+        // (a lightweight tag inherits its commit's date; an annotated tag uses the
+        // tag-creation date). Without this, same-second timestamps tie and the
+        // newest-first assertion flakes.
+        git_in_at(
+            root,
+            &["commit", "-q", "--allow-empty", "-m", "first"],
+            Some("2026-01-01T00:00:00"),
+        );
+        // Lightweight tag on the first (older) commit.
+        git_in(root, &["tag", "v0.1.0"]);
+        git_in_at(
+            root,
+            &["commit", "-q", "--allow-empty", "-m", "second"],
+            Some("2026-02-01T00:00:00"),
+        );
+        // Annotated tag on the second (newer) commit — must sort first.
+        git_in_at(
+            root,
+            &["tag", "-a", "v0.2.0", "-m", "release 0.2.0"],
+            Some("2026-02-01T00:00:00"),
+        );
+        let repo = root.to_string_lossy().to_string();
+
+        let (device, bearer, token_hash) = auth::mint_device("Tags Phone");
+        auth::persist_device(&device, &token_hash).unwrap();
+        let router = server::build_router(test_router(Some(repo)));
+
+        let resp = router
+            .oneshot(authed_get("/api/repo/tags", &bearer))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let tags: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let arr = tags.as_array().expect("tags is a JSON array");
+        assert_eq!(arr.len(), 2, "both tags present: {tags}");
+        // Newest first: the annotated v0.2.0 (on the newer commit) leads.
+        assert_eq!(arr[0]["name"], "v0.2.0");
+        assert_eq!(arr[0]["annotated"], true);
+        assert_eq!(arr[0]["subject"], "release 0.2.0");
+        assert_eq!(arr[1]["name"], "v0.1.0");
+        assert_eq!(arr[1]["annotated"], false);
+        // Every entry carries the full camelCase field set.
+        for entry in arr {
+            for field in ["name", "target", "date", "annotated", "subject"] {
+                assert!(entry.get(field).is_some(), "field {field} present: {entry}");
+            }
+        }
+
+        auth::set_store_path_for_test(prev);
+        std::fs::remove_file(&store).ok();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn todos_route_scans_with_defaults_when_markers_absent() {
+        // A seeded `// TODO:` is found with NO `markers` param — the handler's
+        // default marker set (mirroring the desktop's) includes TODO.
+        let _lock = auth::store_test_lock();
+        let store = temp_store();
+        let prev = auth::set_store_path_for_test(Some(store.clone()));
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        git_in(root, &["init", "-q"]);
+        git_in(root, &["config", "user.email", "t@t.t"]);
+        git_in(root, &["config", "user.name", "t"]);
+        std::fs::write(root.join("code.rs"), "fn main() {} // TODO: wire it up\n").unwrap();
+        git_in(root, &["add", "-A"]);
+        git_in(root, &["commit", "-q", "-m", "seed"]);
+        let repo = root.to_string_lossy().to_string();
+
+        let (device, bearer, token_hash) = auth::mint_device("Todos Phone");
+        auth::persist_device(&device, &token_hash).unwrap();
+        let router = server::build_router(test_router(Some(repo)));
+
+        // No `markers` param → the default set is used.
+        let resp = router
+            .oneshot(authed_get("/api/repo/todos", &bearer))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let scan: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let items = scan["items"].as_array().expect("items array");
+        assert!(!items.is_empty(), "the seeded TODO is found with defaults: {scan}");
+        assert_eq!(scan["truncated"], false);
+
+        auth::set_store_path_for_test(prev);
+        std::fs::remove_file(&store).ok();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn todos_route_rejects_a_bad_marker() {
+        // The core fn's injection guard rejects a marker with illegal charset — it
+        // surfaces as the mapped 400 (InvalidArgument), not a 200.
+        let _lock = auth::store_test_lock();
+        let store = temp_store();
+        let prev = auth::set_store_path_for_test(Some(store.clone()));
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        git_in(root, &["init", "-q"]);
+        git_in(root, &["config", "user.email", "t@t.t"]);
+        git_in(root, &["config", "user.name", "t"]);
+        git_in(root, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let repo = root.to_string_lossy().to_string();
+
+        let (device, bearer, token_hash) = auth::mint_device("Bad Marker Phone");
+        auth::persist_device(&device, &token_hash).unwrap();
+        let router = server::build_router(test_router(Some(repo)));
+
+        let resp = router
+            .oneshot(authed_get("/api/repo/todos?markers=BAD*MARKER", &bearer))
+            .await
+            .unwrap();
+        assert_ne!(resp.status(), StatusCode::OK, "a bad marker must not 200");
+
+        auth::set_store_path_for_test(prev);
+        std::fs::remove_file(&store).ok();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn discussions_routes_gate_non_github_hosts() {
+        // A repo whose `origin` is a gitlab.com URL: all three discussions routes
+        // return 400 `discussionsUnavailable` from the server-side gate BEFORE any
+        // `gh` call — so no network is needed to run this test.
+        let _lock = auth::store_test_lock();
+        let store = temp_store();
+        let prev = auth::set_store_path_for_test(Some(store.clone()));
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        git_in(root, &["init", "-q"]);
+        git_in(root, &["config", "user.email", "t@t.t"]);
+        git_in(root, &["config", "user.name", "t"]);
+        git_in(
+            root,
+            &["remote", "add", "origin", "https://gitlab.com/x/y.git"],
+        );
+        let repo = root.to_string_lossy().to_string();
+
+        let (device, bearer, token_hash) = auth::mint_device("Gate Phone");
+        auth::persist_device(&device, &token_hash).unwrap();
+        let router = server::build_router(test_router(Some(repo)));
+
+        for path in [
+            "/api/forge/discussions/meta",
+            "/api/forge/discussions",
+            "/api/forge/discussions/1",
+        ] {
+            let resp = router
+                .clone()
+                .oneshot(authed_get(path, &bearer))
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "{path} must 400 on a non-GitHub host"
+            );
+            let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                body["kind"], "discussionsUnavailable",
+                "{path} kind: {body}"
+            );
+        }
+
+        auth::set_store_path_for_test(prev);
+        std::fs::remove_file(&store).ok();
+    }
+
     /// Insert a live stream into a router state's registry, tagged with the repo it
     /// operates on. Mirrors what `AppState::register_stream` stores, but built
     /// directly so the test doesn't need a whole `AppState`. Returns the sender so
