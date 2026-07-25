@@ -56,6 +56,7 @@ import {
   PROVIDER_LABELS,
   PROVIDERS_REQUIRING_KEY,
 } from "@/lib/ai/providers";
+import type { ReviewTimeout } from "@/lib/ai/review-timeout";
 import type { AiProviderId, AiSettings } from "@/lib/ai/types";
 import { required, useAppForm, withForm } from "@/lib/form";
 import { deleteSecret, setSecret } from "@/lib/git/api";
@@ -287,6 +288,30 @@ const REVIEW_CONTEXT_ITEMS: Record<ReviewContextSize, string> = {
   medium: "Standard (1×)",
   large: "Expanded (4×)",
 };
+
+/** Review-timeout labels — same `items` contract as REVIEW_CONTEXT_ITEMS above
+ *  (Base UI SelectValue renders the raw value without the map). */
+const REVIEW_TIMEOUT_ITEMS: Record<ReviewTimeout, string> = {
+  auto: "Auto — 5 min, 20 min agentic",
+  "10": "10 minutes",
+  "15": "15 minutes",
+  "20": "20 minutes",
+  "30": "30 minutes",
+  "45": "45 minutes",
+  "60": "60 minutes",
+};
+
+/** Explicit render order — `Object.keys` puts integer-like keys first, which
+ *  would bury "Auto" at the bottom of the list. */
+const REVIEW_TIMEOUT_ORDER: ReviewTimeout[] = [
+  "auto",
+  "10",
+  "15",
+  "20",
+  "30",
+  "45",
+  "60",
+];
 
 /** Ollama base-URL field — the URL the local/LAN Ollama server is reached at. */
 function OllamaConfig({
@@ -589,6 +614,10 @@ export const AiProviderSection = withForm({
     const reviewContextSize = useSelector(
       form.store,
       (s) => s.values.reviewContextSize ?? "auto",
+    );
+    const reviewTimeout = useSelector(
+      form.store,
+      (s) => s.values.reviewTimeout ?? "auto",
     );
     const agentIsolation = useSelector(
       form.store,
@@ -967,6 +996,38 @@ export const AiProviderSection = withForm({
               probes the model's context window where possible.
             </p>
           </div>
+          {/* Only the agent-CLI providers run under a kill timeout, so the row
+              shows when a CLI drives reviews or security audits. */}
+          {(isCliProvider(reviewAi.provider) ||
+            (securityReviewAi && isCliProvider(securityReviewAi.provider))) && (
+            <div className="space-y-2">
+              <Label htmlFor="review-timeout">Review timeout</Label>
+              <Select
+                items={REVIEW_TIMEOUT_ITEMS}
+                value={reviewTimeout}
+                onValueChange={(v) => {
+                  if (v)
+                    form.setFieldValue("reviewTimeout", v as ReviewTimeout);
+                }}
+              >
+                <SelectTrigger id="review-timeout" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {REVIEW_TIMEOUT_ORDER.map((id) => (
+                    <SelectItem key={id} value={id}>
+                      {REVIEW_TIMEOUT_ITEMS[id]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                How long an agent-CLI review may run before it's stopped. Auto
+                allows 5 minutes — 20 when the review is agentic; a fixed limit
+                applies to every review.
+              </p>
+            </div>
+          )}
         </div>
 
         {showAllowedHosts && (

@@ -15,6 +15,7 @@ import { type PriorContext, resolvePriorContext } from "@/lib/ai/prior-context";
 import { buildReviewPrompt } from "@/lib/ai/prompt";
 import { isLocalProvider } from "@/lib/ai/providers";
 import { buildReviewTools } from "@/lib/ai/review-tools";
+import { reviewTimeoutSecs } from "@/lib/ai/review-timeout";
 import { streamAi } from "@/lib/ai/stream";
 import type {
   AiSettings,
@@ -510,10 +511,14 @@ export async function startReview(
     // BEFORE the own/external harvest so the own-comments distillation trigger +
     // ledger cap key off the SAME scaled budget as the rest of the prompt; reused
     // verbatim at buildReviewPrompt below (single resolution, used twice).
+    const appSettings = await loadSettings();
     const budgetProfile = await resolveBudgetProfile(
       ai,
-      (await loadSettings()).reviewContextSize,
+      appSettings.reviewContextSize,
     );
+    // The user's Review-timeout override (null = the backend's tier defaults).
+    // CLI providers only; the HTTP path ignores it.
+    const timeoutSecs = reviewTimeoutSecs(appSettings.reviewTimeout);
     if (control.cancelled) return;
     // Own-comments distillation runs a generation-model call that can outlast a
     // dock Cancel; the CLI/HTTP review stream only gets an abort handle later (via
@@ -612,6 +617,8 @@ export async function startReview(
       repoPath: context.repoPath,
       headSha: context.headSha,
       mcpSelf: mcpTools,
+      timeoutSecs,
+      timeoutConfigurable: true,
       reviewTools,
       setText: pushText,
       setStatus: (s) => patch({ status: s }),

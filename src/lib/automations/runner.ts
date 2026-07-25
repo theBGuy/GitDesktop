@@ -14,6 +14,7 @@ import {
 import { type PriorContext, resolvePriorContext } from "@/lib/ai/prior-context";
 import { buildReviewPrompt } from "@/lib/ai/prompt";
 import { isCliProvider, isLocalProvider } from "@/lib/ai/providers";
+import { reviewTimeoutSecs } from "@/lib/ai/review-timeout";
 import { runCliStream } from "@/lib/ai/stream";
 import type { AiSettings, PromptProvider, ReviewMode } from "@/lib/ai/types";
 import {
@@ -774,6 +775,9 @@ async function generateReviewText(
       // Read the reviewed commit / PR-head's files in a worktree, not whatever
       // branch happens to be checked out.
       headSha: event.kind === "commit" ? event.hash : event.headSha,
+      // The user's Review-timeout override (null = the backend's tier defaults).
+      timeoutSecs: reviewTimeoutSecs(appSettings.reviewTimeout),
+      timeoutConfigurable: true,
       // runCliStream replaces with the agent's final answer on done; the last
       // setText carries that clean review body (narration is peeled into onThoughts).
       setText: (t) => {

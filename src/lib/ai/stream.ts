@@ -35,6 +35,13 @@ export interface CliStreamOpts {
    *  agentic reviewer can pull the full PR diff and read files at any ref. Default
    *  off keeps every other CLI flow (Debug with AI, generation) byte-identical. */
   mcpSelf?: boolean;
+  /** Kill-timeout override for the run, in seconds. Review flows resolve it from
+   *  the user's Review-timeout setting; generation / Debug-with-AI callers omit
+   *  it and keep the backend's tier defaults. */
+  timeoutSecs?: number | null;
+  /** True only for the AI-review flows the Review-timeout setting governs; drives
+   *  the timed-out message's settings hint. Omitted by Debug with AI / generation. */
+  timeoutConfigurable?: boolean;
   /** Called at most once, at successful settle, with the narration that streamed
    *  before the final answer (a tool-using run's "Let me check…" prose). Never
    *  called when there is none — a codex run (no deltas) or a run whose whole
@@ -80,6 +87,8 @@ export async function runCliStream({
   onCost,
   effort,
   mcpSelf,
+  timeoutSecs,
+  timeoutConfigurable,
   onThoughts,
 }: CliStreamOpts): Promise<void> {
   const kind = providerKind(ai.provider);
@@ -117,6 +126,8 @@ export async function runCliStream({
         repoPath: cwd,
         repoAware: Boolean(ai.cliRepoAware),
         mcpSelf: Boolean(mcpSelf),
+        timeoutSecs: timeoutSecs ?? null,
+        timeoutConfigurable: Boolean(timeoutConfigurable),
         reviewId,
         onEvent: (event) => {
           if (event.kind === "delta") {
@@ -195,6 +206,13 @@ export interface StreamAiOpts {
    *  Omitted by non-review callers (Debug with AI, generation), keeping them
    *  byte-identical. */
   mcpSelf?: boolean;
+  /** Kill-timeout override in seconds for a CLI review run, from the user's
+   *  Review-timeout setting. CLI path only — the HTTP branch ignores it; other
+   *  callers omit it and keep the backend's tier defaults. */
+  timeoutSecs?: number | null;
+  /** True only for the AI-review flows the Review-timeout setting governs; drives
+   *  the timed-out message's settings hint. CLI path only. */
+  timeoutConfigurable?: boolean;
   /** Native AI-SDK review tools for an HTTP-provider agentic review — the model
    *  explores via a tool loop (no MCP, no worktree). HTTP agentic reviews only;
    *  CLI and non-review callers omit it, keeping their path byte-identical. */
@@ -226,6 +244,8 @@ export async function streamAi({
   repoPath,
   headSha,
   mcpSelf,
+  timeoutSecs,
+  timeoutConfigurable,
   reviewTools,
   setText,
   setStatus,
@@ -241,6 +261,8 @@ export async function streamAi({
       repoPath,
       headSha,
       mcpSelf,
+      timeoutSecs,
+      timeoutConfigurable,
       setText,
       setStatus,
       registerId: onCliId,

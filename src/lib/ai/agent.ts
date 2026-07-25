@@ -169,6 +169,14 @@ export interface AgentReviewArgs {
    *  so an agentic reviewer can pull the full PR diff, read files at any ref, blame,
    *  and list PR comments. Reviews only; default off is byte-identical to today. */
   mcpSelf?: boolean;
+  /** Kill-timeout override for the run, in seconds (clamped backend-side to
+   *  60–7200); null/absent = the backend's tier defaults (300s, 1200s agentic). */
+  timeoutSecs?: number | null;
+  /** True only for flows whose timeout the user's Review-timeout setting governs
+   *  (the AI reviews). Drives the timed-out message's settings hint, so generation
+   *  and Debug-with-AI — which share this command — don't advertise a knob that
+   *  can't help them. */
+  timeoutConfigurable?: boolean;
   /** Caller-generated id used to cancel this run via `cancelAgentReview`. */
   reviewId: string;
   onEvent: (event: ReviewEvent) => void;
@@ -191,6 +199,8 @@ export async function runAgentReview(args: AgentReviewArgs): Promise<void> {
     repoPath: args.repoPath,
     repoAware: args.repoAware,
     mcpSelf: Boolean(args.mcpSelf),
+    timeoutSecs: args.timeoutSecs ?? null,
+    timeoutConfigurable: Boolean(args.timeoutConfigurable),
     reviewId: args.reviewId,
     onEvent: channel,
   });

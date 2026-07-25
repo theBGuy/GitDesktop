@@ -1,5 +1,6 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
 import type { ReviewContextSize } from "@/lib/ai/context-budget";
+import type { ReviewTimeout } from "@/lib/ai/review-timeout";
 import type { AiSettings, ReviewMode } from "@/lib/ai/types";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import { storeName } from "@/lib/test-mode";
@@ -187,6 +188,11 @@ export interface AppSettings {
    *  reviewing model. `"auto"` fits the model's context window (probing Ollama
    *  live); the others force a fixed multiple of the default budget. */
   reviewContextSize?: ReviewContextSize;
+  /** How long an agent-CLI review may run before it's stopped — applies to
+   *  interactive PR reviews, automated first reviews, and security audits.
+   *  Absent (settings written before this shipped) reads as `"auto"`, the
+   *  backend's tier defaults. */
+  reviewTimeout?: ReviewTimeout;
   /** Hide every AI surface (commit/PR helpers, review panel, AI settings).
    *  Provider config and API keys are kept, just not shown. */
   hideAi: boolean;
@@ -314,6 +320,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     openaiCompatibleBaseUrl: "https://ai-gateway.vercel.sh/v1",
   },
   reviewContextSize: "auto",
+  reviewTimeout: "auto",
   hideAi: false,
   notifications: {
     automations: true,

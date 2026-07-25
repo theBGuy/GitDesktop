@@ -21,11 +21,58 @@ use crate::state::AppState;
 
 pub(crate) const DETECT_TIMEOUT: Duration = Duration::from_secs(20);
 const REVIEW_TIMEOUT: Duration = Duration::from_secs(300);
-/// Repo-aware (Tier 2) runs explore the tree with tools and take longer.
-const REVIEW_TIMEOUT_AGENTIC: Duration = Duration::from_secs(600);
+/// Repo-aware (Tier 2) runs explore the tree with tools and take longer — a
+/// self-MCP review pulling the full diff routinely runs past ten minutes, so
+/// the default budget is twenty. Users can override it in Settings.
+const REVIEW_TIMEOUT_AGENTIC: Duration = Duration::from_secs(1200);
 /// A write-capable agent session implements a real task, so it gets a much
 /// longer budget than a review. Generous for the slice; configurable later.
 const SESSION_TIMEOUT: Duration = Duration::from_secs(1800);
+
+/// Effective kill timeout for a review run: the user's override (clamped to
+/// 1–120 minutes) when set and non-zero, else the tier default.
+fn review_timeout(agentic: bool, override_secs: Option<u64>) -> Duration {
+    match override_secs {
+        Some(s) if s > 0 => Duration::from_secs(s.clamp(60, 7200)),
+        _ => {
+            if agentic {
+                REVIEW_TIMEOUT_AGENTIC
+            } else {
+                REVIEW_TIMEOUT
+            }
+        }
+    }
+}
+
+/// Human-readable duration for timeout copy: whole minutes when it divides
+/// evenly ("20 minutes"), else seconds ("90 seconds").
+fn human_duration(secs: u64) -> String {
+    if secs >= 60 && secs.is_multiple_of(60) {
+        let mins = secs / 60;
+        if mins == 1 {
+            "1 minute".to_string()
+        } else {
+            format!("{mins} minutes")
+        }
+    } else {
+        format!("{secs} seconds")
+    }
+}
+
+/// Copy for a run killed by its deadline. `hint` points at the setting that
+/// governs the limit — set only by the review flows the "Review timeout"
+/// setting actually reaches, so generation / Debug-with-AI (which share the
+/// "review" noun) and sessions never advertise a knob that can't help them.
+fn timeout_message(noun: &str, timeout: Duration, hint: bool) -> String {
+    let mut msg = format!(
+        "The {noun} timed out after {}.",
+        human_duration(timeout.as_secs())
+    );
+    if hint {
+        msg.push_str(" You can raise the limit in Settings → AI.");
+    }
+    msg
+}
 
 /// Which agent CLI to drive. Frontend sends `"claude"` / `"codex"` / `"copilot"` /
 /// `"opencode"`. All four are fully wired for sessions + reviews; opencode runs
@@ -1619,6 +1666,9 @@ async fn stream_agent(
     timeout: Duration,
     cancel_id: &str,
     noun: &str,
+    // Whether a timeout message may point at the "Review timeout" setting — true
+    // only for the review flows that setting governs (see `timeout_message`).
+    timeout_hint: bool,
     // When the run is wrapped in a container (`binary` = docker/podman), the
     // `(runtime, container name)` to force-remove on cancel/timeout — killing the
     // `run` client alone leaves the engine's container running.
@@ -1764,7 +1814,7 @@ async fn stream_agent(
     }
     if timed_out {
         on_event.send(ReviewEvent::Error {
-            message: format!("The {noun} timed out after {}s.", timeout.as_secs()),
+            message: timeout_message(noun, timeout, timeout_hint),
         });
         return Ok(());
     }
@@ -1805,6 +1855,13 @@ pub async fn agent_review(
     // diff in the prompt. Honored for Claude / Copilot / opencode (Codex is exempt —
     // see below). `false` = today's behavior, byte-for-byte.
     mcp_self: bool,
+    // User's "Review timeout" override in seconds, clamped to 1–120 minutes here.
+    // `None` / `0` = the tier defaults below.
+    timeout_secs: Option<u64>,
+    // Whether that setting governs THIS run — true for the AI-review flows, absent
+    // (false) for generation / Debug-with-AI, which share the command but not the
+    // setting. Only gates the timeout message's "raise the limit" hint.
+    timeout_configurable: Option<bool>,
     review_id: String,
     on_event: Channel<ReviewEvent>,
 ) -> AppResult<()> {
@@ -1903,14 +1960,24 @@ pub async fn agent_review(
     // Codex always explores the repo, so it gets the longer agentic budget too — and
     // a self-MCP review is agentic regardless of `repo_aware` (the agent pulls the
     // full diff / reads files via the server), so it gets the agentic budget too.
-    let timeout = if repo_aware || self_mcp_wanted || matches!(kind, AgentKind::Codex) {
-        REVIEW_TIMEOUT_AGENTIC
-    } else {
-        REVIEW_TIMEOUT
-    };
+    let timeout = review_timeout(
+        repo_aware || self_mcp_wanted || matches!(kind, AgentKind::Codex),
+        timeout_secs,
+    );
     let result = stream_agent(
-        &state, kind, &binary, args, stdin_text, &repo_path, timeout, &review_id, "review", None,
-        &extra_env, &on_event,
+        &state,
+        kind,
+        &binary,
+        args,
+        stdin_text,
+        &repo_path,
+        timeout,
+        &review_id,
+        "review",
+        timeout_configurable.unwrap_or(false),
+        None,
+        &extra_env,
+        &on_event,
     )
     .await;
     // Remove the generated config on EVERY path (success, error), mirroring the
@@ -2332,6 +2399,7 @@ pub async fn agent_session(
             SESSION_TIMEOUT,
             &session_id,
             "session",
+            false,
             Some((runtime.clone(), name)),
             &extra_env,
             &on_event,
@@ -2370,6 +2438,7 @@ pub async fn agent_session(
         SESSION_TIMEOUT,
         &session_id,
         "session",
+        false,
         None,
         &host_extra_env,
         &on_event,
@@ -2922,5 +2991,49 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert!(matches!(&events[0], ReviewEvent::Delta { text } if text == "hello"));
         assert!(matches!(&events[1], ReviewEvent::Error { message } if message == "boom"));
+    }
+
+    #[test]
+    fn review_timeout_falls_back_to_the_tier_default() {
+        assert_eq!(review_timeout(false, None), Duration::from_secs(300));
+        assert_eq!(review_timeout(true, None), Duration::from_secs(1200));
+        // A zero override is "no override", not an instant kill.
+        assert_eq!(review_timeout(true, Some(0)), Duration::from_secs(1200));
+        assert_eq!(review_timeout(false, Some(0)), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn review_timeout_clamps_and_overrides_both_tiers() {
+        assert_eq!(review_timeout(true, Some(30)), Duration::from_secs(60));
+        assert_eq!(review_timeout(true, Some(999_999)), Duration::from_secs(7200));
+        // The override wins regardless of tier — even below the agentic default.
+        assert_eq!(review_timeout(false, Some(1500)), Duration::from_secs(1500));
+    }
+
+    #[test]
+    fn timeout_message_hints_only_when_the_flag_is_set() {
+        let msg = timeout_message("review", Duration::from_secs(1200), true);
+        assert_eq!(
+            msg,
+            "The review timed out after 20 minutes. You can raise the limit in Settings → AI."
+        );
+        assert!(msg.contains("Settings → AI."));
+        // Same noun, no flag — generation / Debug-with-AI also run `agent_review`,
+        // and the setting doesn't reach them.
+        let plain = timeout_message("review", Duration::from_secs(300), false);
+        assert_eq!(plain, "The review timed out after 5 minutes.");
+        assert!(!plain.contains("Settings"));
+        assert_eq!(
+            timeout_message("session", Duration::from_secs(1800), false),
+            "The session timed out after 30 minutes."
+        );
+    }
+
+    #[test]
+    fn human_duration_prefers_whole_minutes() {
+        assert_eq!(human_duration(60), "1 minute");
+        assert_eq!(human_duration(1200), "20 minutes");
+        assert_eq!(human_duration(90), "90 seconds");
+        assert_eq!(human_duration(7200), "120 minutes");
     }
 }
