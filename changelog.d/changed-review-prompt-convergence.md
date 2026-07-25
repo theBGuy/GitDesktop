@@ -4,8 +4,8 @@
   one round's fix stops becoming the next round's finding. A problem repeated across
   files is reported once with every affected location, and everything the reviewer is
   confident about lands in the first review instead of trickling out over several.
-- Re-reviews collect late-noticed polish in an explicitly non-blocking leftover list
-  instead of letting it hold rounds open, and wrap up in a line once nothing substantive is
-  left. Decisions you recorded in the PR description or *Notes for reviewers* are respected
+- **General** re-reviews collect late-noticed polish in an explicitly non-blocking
+  leftover list instead of letting it hold rounds open, and every re-review — general or
+  security audit — wraps up in a line once nothing substantive is left. Decisions you recorded in the PR description or *Notes for reviewers* are respected
   for every kind of finding, and when a large diff crowds out GitDesktop's own earlier
   comments the review is told they were omitted rather than quietly losing the record.
