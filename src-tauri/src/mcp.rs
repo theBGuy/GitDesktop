@@ -9,7 +9,8 @@
 //! each consumes a different config shape (`build_claude_config` /
 //! `build_copilot_config` / `build_opencode_config`) delivered a different way
 //! (Claude `--mcp-config`, Copilot `--additional-mcp-config @file`, opencode the
-//! `OPENCODE_CONFIG` env var). **Codex** is container-only (`build_codex_config`);
+//! `OPENCODE_CONFIG` env var). **Codex** MCP is container-only (`build_codex_config`)
+//! — host Codex runs fine, it just can't approve MCP tool calls;
 //! container delivery for the other CLIs is a later tier.
 
 use std::path::{Path, PathBuf};
@@ -411,7 +412,7 @@ pub fn cleanup_host_config(app: &tauri::AppHandle, session_id: &str) {
     }
 }
 
-// --- Codex (container only) --------------------------------------------------
+// --- Codex MCP (container only) --------------------------------------------------
 //
 // Codex reads MCP servers from its `~/.codex/config.toml`, NOT a `--mcp-config`
 // flag. A container session's `~/.codex` is a per-session mounted home seeded

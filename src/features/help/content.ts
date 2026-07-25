@@ -1362,6 +1362,8 @@ In the composer you can:
   or Codex) and your project's custom commands and **skills**.
 - Opt into **MCP servers** for the session from the **MCP** picker (appears once you've
   registered some — see below).
+- Choose this session's **isolation** — worktree or container — under **Options**
+  (see *Isolation* below).
 - Continue the conversation across turns; **↑ / ↓** recall previous prompts.
 
 ## MCP servers
@@ -1380,7 +1382,8 @@ server keeps working. In a container the servers run *inside* the sandbox,
 sharing an npm cache so an \`npx\` server is downloaded only once. A Claude run is **strict** —
 it gets *only* the servers you picked and never inherits others on your machine — while
 Copilot and opencode layer your picks onto their own config. The composer's **MCP** picker
-shows for every agent and tells you when to switch isolation. You can also change the
+shows for every agent and tells you when a pick needs a container session — with Codex it
+points you at the **Isolation** control in the same **Options** popover. You can also change the
 selection **mid-session** — the picker appears in a running session's reply box too, and a
 new choice applies from your next turn.
 
@@ -1508,7 +1511,24 @@ Every session is sandboxed. By default it runs in a **worktree** (a separate wor
 on a session branch). Optionally, run it inside a **Docker or Podman container** for a
 stronger sandbox — with a built-in **terminal** ({{kbd:agent-toggle-terminal}}) running
 *inside* the container, where you choose which dev-server port(s) to publish before it
-starts. Set the default in **Settings → AI**. A repo can also layer **extra tools** into
+starts. Set the default in **Settings → AI**.
+
+**Per session.** You don't have to take that default. The composer's **Options** popover
+carries an **Isolation** control — **Worktree** or **Container** — for the session you're
+about to start. It opens on your Settings default, and picking the other one overrides it
+for that session alone (the Options badge counts it only when it differs from your default;
+in Best-of-N every arm shares the pick). Isolation is settled when the session starts, so it
+never changes under a running agent — start a new session to switch. Choose **Container** and
+GitDesktop checks readiness right there — Docker or Podman installed, the engine running, the
+agent image built — and keeps **Send** disabled until it is, naming what's missing (the
+composer says so outside the popover too, so a disabled **Send** is never a mystery). Where
+**Settings → AI** is where you'd fix it — no container runtime, or the agent image not built
+yet — it offers a jump straight there; a stopped engine you start yourself. Overriding *down*
+to **Worktree** when your default is a container says
+so plainly: that run happens on your host, where **Codex** still applies its own OS-enforced
+sandbox and the other agents stay inside the worktree by convention.
+
+A repo can also layer **extra tools** into
 that container: commit a \`.gitdesktop/agent.Dockerfile\` (it must start
 \`FROM gitdesktop-agent:latest\`), and — after you review and confirm it in
 **Settings → AI** — GitDesktop builds it into a per-repo image this repo's container

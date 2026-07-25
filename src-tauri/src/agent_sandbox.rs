@@ -21,9 +21,10 @@
 //! its container authenticates from a GitHub token (`gh auth token`) passed by env
 //! (`COPILOT_GITHUB_TOKEN`), never a file.
 //!
-//! Claude, opencode, and Copilot run on the host or in a container; **Codex is
-//! container-only** (its host `workspace-write` is trust-gated, but full-bypass is
-//! safe in the box). Validated end-to-end by spike + live runs (Codex 2026-06-22,
+//! Every agent — Codex included — runs on the host or in a container; on the host
+//! Codex is confined by its own OS sandbox (`-s workspace-write`), and the container
+//! is what makes its full-bypass safe. Only Codex's **MCP** support is container-only
+//! (see `mcp.rs`). Validated end-to-end by spike + live runs (Codex 2026-06-22,
 //! opencode 2026-06-23); see docs/agent-sandbox-docker.md.
 
 use std::path::{Path, PathBuf};
@@ -260,7 +261,7 @@ pub(crate) async fn detect_runtime() -> Option<(PathBuf, String)> {
 }
 
 /// True when `<rt> version` exits 0 (engine reachable, not just the client).
-async fn runtime_ready(bin: &Path) -> bool {
+pub(crate) async fn runtime_ready(bin: &Path) -> bool {
     matches!(
         run_capture(bin, &["version"], DETECT_TIMEOUT).await,
         Ok((0, _))

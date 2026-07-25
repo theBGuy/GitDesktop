@@ -171,9 +171,11 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
   - **Several at once** — organized into **Active** and **Kept** tabs, searchable, with
     a notification when each finishes
   - **Sandbox** — confine writes to a **Docker/Podman container** (or rely on each CLI's
-    own worktree confinement on the host), and add per-repo tools (e.g. Playwright) via
-    a committed `.gitdesktop/agent.Dockerfile` that GitDesktop builds into a per-repo
-    image after you confirm it
+    own worktree confinement on the host), pick worktree or container **per session**
+    from the composer's **Options** (with an inline readiness check before it starts),
+    and add per-repo tools (e.g. Playwright) via a committed
+    `.gitdesktop/agent.Dockerfile` that GitDesktop builds into a per-repo image after you
+    confirm it
   - **Drive each turn** — **slash commands and skills** (built-in starters, custom
     commands, and the agent's own commands and **Agent Skills** — project *and* global,
     incl. the shared `.agents/skills`), `@file` mentions, a model/effort picker, and

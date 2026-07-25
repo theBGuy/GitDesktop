@@ -497,7 +497,8 @@ export const capabilities: Capability[] = [
   {
     group: "AI · agents & sessions",
     ai: true,
-    label: "Run agents in a Docker/Podman sandbox (opt-in)",
+    label:
+      "Run agents in a Docker/Podman sandbox (opt-in), per session or by default",
   },
   {
     group: "AI · agents & sessions",

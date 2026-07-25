@@ -154,6 +154,9 @@ interface SessionsState {
     effort: string,
     ensembleId?: string,
     mcpServers?: string[],
+    /** Per-session override of the global isolation setting (the composer's
+     *  Isolation row). Absent = follow Settings → AI. */
+    isolation?: "worktree" | "container",
   ) => Promise<string | null>;
   /** Best-of-N: start one session per `arm` on the SAME task, sharing one ensemble
    *  id, so they can be reviewed side by side and the best one kept. Each arm runs
@@ -171,6 +174,9 @@ interface SessionsState {
     /** MCP server ids shared across every arm (each arm drops the ones its own
      *  agent/isolation can't use). Absent/empty = no MCP. */
     mcpServers?: string[],
+    /** Per-session isolation override, shared by every arm. Absent = follow
+     *  Settings → AI. */
+    isolation?: "worktree" | "container",
   ) => Promise<string[]>;
   send: (id: string, prompt: string) => Promise<void>;
   setModel: (id: string, model: string) => void;
@@ -533,6 +539,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     effort,
     ensembleId,
     mcpServers,
+    isolationOverride,
   ) => {
     const task = prompt.trim();
     if (!task || get().creating) return null;
@@ -545,7 +552,9 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       (await loadSettings().catch(() => null))?.agentIsolation ?? "worktree";
     // Every agent honors the setting now — Copilot's container authenticates from a
     // `gh auth token` (no mountable creds file), so it no longer forces host-only.
-    const isolation = setting;
+    // The composer's Isolation row can override the global setting for THIS session
+    // (absent = follow Settings → AI).
+    const isolation = isolationOverride ?? setting;
     let wt: Awaited<ReturnType<typeof createWorktree>>;
     try {
       wt = await createWorktree(repoPath);
@@ -605,7 +614,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     return wt.id;
   },
 
-  startEnsemble: async (repoPath, prompt, arms, mcpServers) => {
+  startEnsemble: async (repoPath, prompt, arms, mcpServers, isolation) => {
     const task = prompt.trim();
     if (!task || arms.length === 0) return [];
     // One shared id ties the arms together; each is otherwise a normal session
@@ -626,6 +635,9 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
         // The shared MCP selection; start() drops it for an arm whose
         // agent/isolation can't run MCP, and runTurn filters per-agent each turn.
         mcpServers,
+        // One shared isolation for the whole ensemble (arms differ by agent/model,
+        // never by how they're sandboxed).
+        isolation,
       );
       if (id) ids.push(id);
     }

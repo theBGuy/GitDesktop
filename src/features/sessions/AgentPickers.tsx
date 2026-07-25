@@ -2,9 +2,11 @@ import {
   GaugeIcon,
   GearSixIcon,
   PlugsConnectedIcon,
+  ShieldCheckIcon,
   UsersThreeIcon,
+  WarningCircleIcon,
 } from "@phosphor-icons/react";
-import type { ReactNode } from "react";
+import { type ReactNode, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -143,8 +145,10 @@ export function EffortPicker({
 export type RunMode = "single" | "ensemble";
 
 /** A compact inline segmented control (radio-group of buttons). Used inside the
- *  composer Options popover for run mode and effort — no nested dropdown, fully
- *  keyboard-operable. */
+ *  composer Options popover for run mode, effort, and isolation — no nested
+ *  dropdown, fully keyboard-operable: the ARIA radiogroup pattern, so the group is
+ *  ONE tab stop (roving tabindex on the checked option) and the arrow keys move the
+ *  selection with focus following it. Clicking is unchanged. */
 function Segmented<T extends string>({
   value,
   onChange,
@@ -156,8 +160,35 @@ function Segmented<T extends string>({
   options: { value: T; label: string }[];
   ariaLabel: string;
 }) {
+  const groupRef = useRef<HTMLDivElement>(null);
+  // The tab stop. A value outside `options` (shouldn't happen) still leaves the
+  // group reachable rather than trapping the keyboard past it.
+  const checked = options.findIndex((o) => o.value === value);
+  const roving = checked < 0 ? 0 : checked;
+
+  // Arrow keys select-and-focus the neighbour, wrapping at the ends. The buttons
+  // are stable DOM children, so the new target can be focused straight away — the
+  // re-render then hands it the tab stop.
+  const move = (delta: number) => {
+    const next = (roving + delta + options.length) % options.length;
+    onChange(options[next].value);
+    const btn = groupRef.current?.children[next];
+    if (btn instanceof HTMLElement) btn.focus();
+  };
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+      e.preventDefault();
+      move(1);
+    } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+      e.preventDefault();
+      move(-1);
+    }
+  };
+
   return (
     <div
+      ref={groupRef}
       role="radiogroup"
       aria-label={ariaLabel}
       className="flex overflow-hidden rounded-none border border-input"
@@ -168,7 +199,9 @@ function Segmented<T extends string>({
           type="button"
           role="radio"
           aria-checked={value === o.value}
+          tabIndex={i === roving ? 0 : -1}
           onClick={() => onChange(o.value)}
+          onKeyDown={onKeyDown}
           className={cn(
             "flex-1 px-1.5 py-1 text-[11px] transition-colors outline-none focus-visible:ring-1 focus-visible:ring-ring",
             i > 0 && "border-l border-input",
@@ -197,8 +230,31 @@ const RUN_MODE_OPTIONS: { value: RunMode; label: string }[] = [
   { value: "ensemble", label: "Best-of-N" },
 ];
 
+/** How a NEW session is sandboxed: a throwaway worktree on the host, or that
+ *  worktree inside an ephemeral container. Fixed once the session starts. */
+export type Isolation = "worktree" | "container";
+
+const ISOLATION_OPTIONS: { value: Isolation; label: string }[] = [
+  { value: "worktree", label: "Worktree" },
+  { value: "container", label: "Container" },
+];
+
+/** A one-line caveat under the Isolation control — a readiness warning for
+ *  container, or the host-downgrade disclosure. Computed by the call site (this
+ *  module stays presentational). */
+export interface IsolationNote {
+  tone: "warn" | "muted";
+  text: string;
+  /** Offer a jump to Settings → AI (where the runtime/image is set up). */
+  settingsAction?: boolean;
+}
+
 function effortLabel(value: string): string {
   return EFFORT_OPTIONS.find((o) => o.value === value)?.label ?? "Auto";
+}
+
+function isolationLabel(value: Isolation): string {
+  return ISOLATION_OPTIONS.find((o) => o.value === value)?.label ?? "Worktree";
 }
 
 /** A labeled field row inside the Options popover. */
@@ -224,27 +280,39 @@ function OptionField({
 
 /**
  * The composer's collapsed "Options" popover. Provider + model stay inline on the
- * toolbar for quick access; everything else — run mode, reasoning effort, and the
- * per-session MCP-server opt-in — lives here so the action row never overflows or
- * shifts as the box grows. Each control renders only when the parent passes its
- * props: run mode is new-session only; effort + MCP drop out in best-of-N (each
- * arm sets its own); MCP also self-hides when no servers are registered. The
- * trigger shows a count + summary tooltip of the non-default choices so collapsing
- * them stays discoverable. MCP rules (frozen at turn 1 for a new session, strict
- * "only these" for Claude, the container/host caveats) are unchanged — see the
- * call site.
+ * toolbar for quick access; everything else — run mode, reasoning effort, the
+ * per-session isolation override, and the per-session MCP-server opt-in — lives
+ * here so the action row never overflows or shifts as the box grows. Each control
+ * renders only when the parent passes its props: run mode + isolation are
+ * new-session only; effort + MCP drop out in best-of-N (each arm sets its own); MCP
+ * also self-hides when no servers are registered. Isolation sits directly above MCP
+ * because it gates it (Codex runs MCP only in a container), so the dependency reads
+ * top-down. The trigger shows a count + summary tooltip of the non-default choices
+ * so collapsing them stays discoverable. MCP rules (frozen at turn 1 for a new
+ * session, strict "only these" for Claude, the container/host caveats) are
+ * unchanged — see the call site.
  */
 export function ComposerOptions({
   effort,
   onEffort,
   mode,
   onMode,
+  isolation,
   mcp,
 }: {
   effort?: string;
   onEffort?: (e: string) => void;
   mode?: RunMode;
   onMode?: (m: RunMode) => void;
+  /** New-session isolation override. `isOverride` = the pick differs from the
+   *  global setting (that's what the badge counts); `note` is the caller-computed
+   *  readiness warning / host-downgrade disclosure. */
+  isolation?: {
+    value: Isolation;
+    onChange: (v: Isolation) => void;
+    isOverride: boolean;
+    note?: IsolationNote;
+  };
   mcp?: {
     servers: McpServer[];
     value: string[];
@@ -264,6 +332,10 @@ export function ComposerOptions({
   const summary: string[] = [];
   if (mode === "ensemble") summary.push("Best-of-N");
   if (effort) summary.push(`Effort: ${effortLabel(effort)}`);
+  // Only an EXPLICIT pick that differs from the global setting counts — following
+  // Settings → AI isn't a choice the user made here.
+  if (isolation?.isOverride)
+    summary.push(`Isolation: ${isolationLabel(isolation.value)}`);
   if (mcpCount > 0)
     summary.push(`${mcpCount} MCP server${mcpCount > 1 ? "s" : ""}`);
   const count = summary.length;
@@ -320,6 +392,49 @@ export function ComposerOptions({
               />
             </OptionField>
           )}
+          {isolation && (
+            <OptionField
+              icon={<ShieldCheckIcon className="size-3.5" />}
+              label="Isolation"
+            >
+              <Segmented
+                ariaLabel="Isolation"
+                value={isolation.value}
+                onChange={isolation.onChange}
+                options={ISOLATION_OPTIONS}
+              />
+              {isolation.note && (
+                <p
+                  className={cn(
+                    "flex items-start gap-1.5 text-[11px]",
+                    isolation.note.tone === "warn"
+                      ? "text-foreground"
+                      : "text-muted-foreground",
+                  )}
+                >
+                  {/* Icon + text, never color alone. */}
+                  {isolation.note.tone === "warn" && (
+                    <WarningCircleIcon
+                      weight="fill"
+                      className="mt-px size-3.5 shrink-0"
+                      aria-hidden
+                    />
+                  )}
+                  <span>{isolation.note.text}</span>
+                </p>
+              )}
+              {isolation.note?.settingsAction && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 justify-start text-muted-foreground"
+                  onClick={() => openSettings("ai")}
+                >
+                  Set up in Settings…
+                </Button>
+              )}
+            </OptionField>
+          )}
           {mcp?.disabledReason ? (
             <OptionField
               icon={<PlugsConnectedIcon className="size-3.5" />}
@@ -372,10 +487,10 @@ export function ComposerOptions({
   );
 }
 
-/** Picks the CLI for a NEW session (fixed once it starts). Every agent honors the
- *  isolation setting — host (worktree-confined, soft) or container — provided that
- *  agent is baked into the image (Codex is container-only). Reused by the plan
- *  composer and the best-of-N arm editor. */
+/** Picks the CLI for a NEW session (fixed once it starts). Every agent runs either
+ *  way — host (worktree-confined; Codex adds its own OS-enforced sandbox) or
+ *  container, provided that agent is baked into the image. Only Codex's MCP support
+ *  is container-only. Reused by the plan composer and the best-of-N arm editor. */
 export function AgentPicker({
   value,
   onChange,

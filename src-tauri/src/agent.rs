@@ -1940,8 +1940,9 @@ pub async fn agent_review_cancel(
 /// `agent` picks the CLI. Each runs worktree-confined on the **host** (Claude full-
 /// auto via `bypassPermissions` — soft until its permission prompt lands; Codex via
 /// its own OS sandbox, `-s workspace-write`; Copilot via `--add-dir`; opencode via
-/// `--dangerously-skip-permissions`) or in a **container** (kernel boundary; Codex is
-/// container-only). Copilot's container authenticates from a `gh auth token` passed by
+/// `--dangerously-skip-permissions`) or in a **container** (kernel boundary; for Codex
+/// that's also what makes full-bypass safe, and it's the only mode where its MCP support
+/// works). Copilot's container authenticates from a `gh auth token` passed by
 /// env, since its login isn't a mountable creds file like the others'.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
@@ -2075,7 +2076,8 @@ pub async fn agent_session(
             (AgentKind::Codex, false) => {
                 return Err(AppError::Command(
                     "Codex runs MCP servers in container sessions only — host Codex can't \
-                     approve MCP tool calls. Turn on container isolation in Settings → AI."
+                     approve MCP tool calls. Turn on container isolation in Settings → AI, \
+                     or start a new session with Isolation set to Container (composer → Options)."
                         .into(),
                 ));
             }
@@ -2191,13 +2193,21 @@ pub async fn agent_session(
     // resolve a host binary; the runtime drives it.
     if container {
         let (runtime, runtime_name) = crate::agent_sandbox::detect_runtime().await.ok_or_else(|| {
-            AppError::Command(if matches!(kind, AgentKind::Codex) {
-                // Codex is container-only, so "turn isolation off" isn't an option.
-                "Codex sessions need Docker or Podman (they run only in a container). Install and start it, then build the image in Settings → AI — or use Claude instead.".to_string()
-            } else {
-                "Container isolation is on, but Docker/Podman isn't available. Install/start it or turn isolation off in Settings.".to_string()
-            })
+            AppError::Command("Container isolation is on for this session, but Docker/Podman isn't available. Install and start it — or start a new session with Isolation set to Worktree (composer → Options), or turn container isolation off in Settings → AI.".to_string())
         })?;
+        // The binary being on PATH doesn't mean the engine is up — probe it here so a
+        // stopped daemon reports itself instead of surfacing as "image isn't built yet"
+        // (every check below needs the daemon).
+        if !crate::agent_sandbox::runtime_ready(&runtime).await {
+            let label = if runtime_name == "podman" {
+                "Podman"
+            } else {
+                "Docker"
+            };
+            return Err(AppError::Command(format!(
+                "{label} is installed but its engine isn't running. Start it, then try again."
+            )));
+        }
         if !crate::agent_sandbox::image_present(&runtime).await {
             return Err(AppError::Command(
                 "The agent container image isn't built yet. Open Settings → AI and click \"Build image\", then try again.".to_string(),

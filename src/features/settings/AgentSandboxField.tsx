@@ -24,10 +24,10 @@ import {
   buildCustomImage,
   type ContainerStatus,
   customImageStatus,
-  detectContainerSandbox,
   prepareContainerSandbox,
   scaffoldCustomDockerfile,
 } from "@/lib/ai/sandbox";
+import { useContainerStatus } from "@/lib/ai/sandbox-queries";
 import { toastError } from "@/lib/toast";
 
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
@@ -71,16 +71,7 @@ export function AgentSandboxField({
   repoPath: string | null;
 }) {
   const enabled = value === "container";
-  const status = useQuery({
-    queryKey: [
-      "agentContainerStatus",
-      nodeVersion,
-      [...providers].sort().join(","),
-    ],
-    queryFn: () => detectContainerSandbox(nodeVersion, providers),
-    staleTime: 30_000,
-    enabled,
-  });
+  const status = useContainerStatus({ nodeVersion, providers, enabled });
   const queryClient = useQueryClient();
   const [building, setBuilding] = useState(false);
 
