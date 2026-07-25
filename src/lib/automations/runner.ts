@@ -112,14 +112,16 @@ const DIFF_MAX_BYTES = 200_000;
  *  residual as before the heartbeat.) */
 const CLAIM_HEARTBEAT_MS = 5 * 60 * 1000;
 
-/** Upper bound on heartbeats per run: 25 × 5 min = 125 minutes, past the backend's
- *  7200s max kill clamp with margin. A run still unsettled by then is wedged — an
+/** Upper bound on heartbeats per run: 30 × 5 min = 150 minutes. The cap runs from
+ *  the heartbeat's ARM (top of the try, before prompt building), so it must cover
+ *  the backend's 7200s max kill clamp — reachable by hand-editing settings.json;
+ *  the UI tops out at 60 min — PLUS the pre-stream phase (diff load, context
+ *  harvest, distill), with margin. A run still unsettled past that is wedged — an
  *  HTTP stream has no deadline at all, and a stalled fetch (e.g. a LAN Ollama box
  *  asleep mid-stream) never settles, so its `finally` never runs. Stopping the
  *  heartbeat lets the claim age out (`STALE_CLAIM_AGE` + this cap) so a second
- *  instance can recover the head — the recovery the stale-reclaim exists for.
- *  Every legitimately-running review is covered: CLI runs are hard-killed by 7200s. */
-const CLAIM_HEARTBEAT_MAX_BEATS = 25;
+ *  instance can recover the head — the recovery the stale-reclaim exists for. */
+const CLAIM_HEARTBEAT_MAX_BEATS = 30;
 
 /** The store key for a PR target, used to look up its review-history watermark. */
 function targetRef(event: PrAutomationEvent): string {
