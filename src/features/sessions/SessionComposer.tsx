@@ -390,9 +390,10 @@ export function SessionComposer({
   // own `session.isolation` governs, below). Derived during render — no effect.
   const globalIsolation: Isolation =
     settings.data?.agentIsolation ?? "worktree";
-  const effectiveIsolation = !session
-    ? (startIsolation ?? globalIsolation)
-    : undefined;
+  // Resolved ONCE (override ?? global) and reused by the gate, the note, and the
+  // radio value below, so the warn line and the Send gate can never disagree.
+  const resolvedStartIsolation: Isolation = startIsolation ?? globalIsolation;
+  const effectiveIsolation = !session ? resolvedStartIsolation : undefined;
   const isContainer = effectiveIsolation === "container";
   // Container readiness, probed lazily and shared with Settings → AI (same query
   // key, so one Docker/Podman check serves both). Only while a new session is
@@ -438,7 +439,7 @@ export function SessionComposer({
   const isolationNote = session
     ? undefined
     : isolationNoteFor({
-        effective: startIsolation ?? globalIsolation,
+        effective: resolvedStartIsolation,
         global: globalIsolation,
         agent: startAgent,
         // Best-of-N arms each pick their own agent, so no agent-specific claim
@@ -941,7 +942,7 @@ export function SessionComposer({
                   session
                     ? undefined
                     : {
-                        value: startIsolation ?? globalIsolation,
+                        value: resolvedStartIsolation,
                         onChange: setStartIsolation,
                         isOverride:
                           startIsolation !== null &&
