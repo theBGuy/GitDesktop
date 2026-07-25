@@ -573,7 +573,10 @@ kbd {
    --astro-code-color-text/-background.) */
 .prose pre.astro-code {
   --astro-code-foreground: var(--color-body);
-  --astro-code-background: transparent;
+  /* Shiki inlines `background-color: var(--astro-code-background)` on the
+     <pre>, which beats any stylesheet `background` — so the tint has to ride
+     the VARIABLE. (.prose pre's own background still covers non-Shiki pre.) */
+  --astro-code-background: oklch(1 0 0 / 0.015);
   --astro-code-token-comment: var(--color-faint);
   --astro-code-token-keyword: var(--color-mint);
   --astro-code-token-string: var(--color-add);
