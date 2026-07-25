@@ -102,6 +102,14 @@ type PrAutomationEvent = Extract<
 
 const DIFF_MAX_BYTES = 200_000;
 
+/** How often a running automation refreshes its cross-instance claim file's mtime.
+ *  Rust's `STALE_CLAIM_AGE` (automation_claims.rs) reclaims a claim after 30 minutes
+ *  of silence, so 5 minutes (30/6) leaves a generous margin for timer drift and OS
+ *  suspend while a long review — the Review-timeout setting allows up to 60 minutes —
+ *  keeps its claim alive. Without it, a second instance would reclaim a LIVE run and
+ *  post a duplicate paid review. */
+const CLAIM_HEARTBEAT_MS = 5 * 60 * 1000;
+
 /** The store key for a PR target, used to look up its review-history watermark. */
 function targetRef(event: PrAutomationEvent): string {
   return event.target.type === "remote"
@@ -322,6 +330,29 @@ async function run(
       if (!won) continue; // another instance owns this run
       claimKey = repoKey;
     }
+    // Liveness heartbeat for the claim we just won: while this run is in flight we
+    // refresh its claim file's mtime, so the Rust stale-reclaim window measures "this
+    // instance went quiet" rather than "this review is slow". A 45/60-minute Review
+    // timeout would otherwise outlive the 30-minute window and let a second instance
+    // reclaim a LIVE run. Best-effort, like claim/release. Cleared in the `finally`
+    // below so it never outlives the run on any path (success, error, cancel).
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    const stopHeartbeat = () => {
+      if (heartbeat !== undefined) {
+        clearInterval(heartbeat);
+        heartbeat = undefined;
+      }
+    };
+    if (claimKey) {
+      heartbeat = setInterval(() => {
+        void invoke("touch_automation_claim", {
+          repoKey: claimKey,
+          target: claimTarget,
+          headSha,
+          action,
+        }).catch(() => undefined);
+      }, CLAIM_HEARTBEAT_MS);
+    }
     // Release this instance's claim (best-effort) so a non-delivering terminal path
     // (failure/cancel/no-op) doesn't permanently suppress the automation for this
     // head across instances. A successfully DELIVERED review keeps its claim.
@@ -511,6 +542,11 @@ async function run(
       }
       // Persist a "Failed" stopped row (keeping its Re-run) instead of removing it.
       handle.fail(message);
+    } finally {
+      // Every terminal path lands here — including the `continue`s in both arms and
+      // the delivered-success path, which keeps its claim but must still stop
+      // heartbeating it.
+      stopHeartbeat();
     }
   }
   return { matched, attempted };

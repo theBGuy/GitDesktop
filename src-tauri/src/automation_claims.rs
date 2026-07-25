@@ -56,12 +56,20 @@ const SWEEP_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// 30 minutes is safe because a DELIVERED review no longer relies on its claim for
 /// dedup: at delivery the runner writes a pr-reviews history record, and that record —
 /// not the claim — gates pr-open (per-mode) and pr-sync (same-sha skip). Reclaiming an
-/// old delivered claim therefore cannot cause a re-review. The residual risk is a
-/// legitimately still-RUNNING review that outlasts 30 minutes being double-claimed by a
-/// concurrently polling second instance — accepted, bounded to a single duplicate
-/// review, and strictly better than a 30-day starvation. A run whose delivery-record
-/// write failed (best-effort in the runner) is the same bounded case: one duplicate
+/// old delivered claim therefore cannot cause a re-review. A run whose delivery-record
+/// write failed (best-effort in the runner) is bounded the same way: one duplicate
 /// after 30 minutes, not a month of silence.
+///
+/// **This window measures heartbeat LIVENESS, not run length.** A running automation
+/// refreshes its own claim's mtime from the runner every few minutes (see
+/// [`touch_automation_claim`]) for as long as the AI call is in flight, so a long run
+/// stays "fresh" indefinitely and is never double-claimed. That heartbeat closes what
+/// used to be an accepted residual risk: reviews were once capped at 600s backend-side,
+/// making a 30-minute overrun unreachable, but the user-facing "Review timeout" setting
+/// now allows up to 60 minutes (and the backend clamp permits 7200s), so a legitimately
+/// still-RUNNING review can outlive this window. The crash story is unchanged: an
+/// instance that dies stops heartbeating, its claim ages out at 30 minutes, and the next
+/// claimant reclaims it instead of being starved until the 30-day sweep.
 const STALE_CLAIM_AGE: Duration = Duration::from_secs(30 * 60);
 
 /// The app-data subdir holding claim files.
@@ -197,6 +205,21 @@ fn claim_in_dir(dir: &Path, key: &str) -> std::io::Result<bool> {
     create_new_claim(&path, key)
 }
 
+/// Best-effort liveness heartbeat: refresh the mtime of `key`'s claim file so a
+/// long-running automation keeps its claim "fresh" past [`STALE_CLAIM_AGE`]. All errors
+/// are ignored (fail-open philosophy — a failed heartbeat degrades to the old behavior,
+/// a reclaim after 30 quiet minutes). Opens WITHOUT `create`, so a claim that was
+/// already released or reclaimed is never resurrected by a late heartbeat — the open
+/// simply errs and is ignored. The write handle is required, not incidental: on Windows
+/// `set_modified` on a read-only handle fails with PermissionDenied (the tests'
+/// `backdate` helper documents the same constraint).
+fn touch_in_dir(dir: &Path, key: &str) {
+    let _ = std::fs::OpenOptions::new()
+        .write(true)
+        .open(dir.join(claim_filename(key)))
+        .and_then(|f| f.set_modified(SystemTime::now()));
+}
+
 /// Best-effort release of `key`'s claim inside `dir` (delete the file). Errors are
 /// ignored — a release that fails or races another instance is harmless; the 30-day
 /// sweep is the backstop. Takes a `&Path` so it's unit-testable without an `AppHandle`.
@@ -257,6 +280,26 @@ pub async fn release_automation_claim(
     if let Ok(dir) = claims_dir(&app) {
         let key = composite_key(&repo_key, &target, &head_sha, &action);
         release_in_dir(&dir, &key);
+    }
+    Ok(())
+}
+
+/// Best-effort liveness heartbeat from a RUNNING automation: refreshes its claim's
+/// mtime so [`STALE_CLAIM_AGE`] measures "has this instance gone quiet", not "how long
+/// has this review taken". Called on an interval by the runner while the AI call is in
+/// flight. Always `Ok(())` — a failed heartbeat (missing file, permission, unresolvable
+/// dir) is silently tolerated, degrading to the pre-heartbeat reclaim behavior.
+#[tauri::command]
+pub async fn touch_automation_claim(
+    app: tauri::AppHandle,
+    repo_key: String,
+    target: String,
+    head_sha: String,
+    action: String,
+) -> AppResult<()> {
+    if let Ok(dir) = claims_dir(&app) {
+        let key = composite_key(&repo_key, &target, &head_sha, &action);
+        touch_in_dir(&dir, &key);
     }
     Ok(())
 }
@@ -391,6 +434,41 @@ mod tests {
         assert!(
             claim_in_dir(&dir, &key).unwrap(),
             "a stale claim must be reclaimed by the next claimant"
+        );
+    }
+
+    #[test]
+    fn heartbeat_keeps_a_long_running_claim_alive() {
+        let (_tmp, dir) = tmp_dir();
+        let key = composite_key(r"C:\repo\one", "42", "abc123", "review");
+
+        // A run takes the claim, then outlives STALE_CLAIM_AGE (a 45/60-minute
+        // Review-timeout override) — but keeps heartbeating.
+        assert!(claim_in_dir(&dir, &key).unwrap(), "first claim should win");
+        let path = dir.join(claim_filename(&key));
+        backdate(&path, STALE_CLAIM_AGE + Duration::from_secs(60));
+        touch_in_dir(&dir, &key);
+
+        // The refreshed mtime makes it fresh again, so a second instance is denied
+        // instead of reclaiming and posting a duplicate paid review.
+        assert!(
+            !claim_in_dir(&dir, &key).unwrap(),
+            "a heartbeated claim must keep denying a second claimant"
+        );
+    }
+
+    #[test]
+    fn heartbeat_on_a_missing_claim_is_a_no_op() {
+        let (_tmp, dir) = tmp_dir();
+        let key = composite_key(r"C:\repo\one", "42", "abc123", "review");
+        let path = dir.join(claim_filename(&key));
+
+        // A released/reclaimed claim must never be resurrected by a late heartbeat.
+        assert!(!path.exists(), "precondition: no claim file yet");
+        touch_in_dir(&dir, &key);
+        assert!(
+            !path.exists(),
+            "a heartbeat must not create a claim file that isn't there"
         );
     }
 

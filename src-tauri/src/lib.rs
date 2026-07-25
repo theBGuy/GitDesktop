@@ -231,6 +231,7 @@ pub fn run() {
             oplog::git_oplog_dismiss,
             automation_claims::claim_automation_run,
             automation_claims::release_automation_claim,
+            automation_claims::touch_automation_claim,
             git::ops::git_merge,
             git::ops::git_merge_preview,
             git::ops::git_rebase,
