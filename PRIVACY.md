@@ -79,11 +79,14 @@ advertising or cross-site tracking.
      Analytics, "Automatic setup" on the proxied zone). It is EDGE-derived: no
      beacon script is injected into the served HTML, which is what keeps the
      "no other third-party scripts" claim below literally true. If collection
-     is ever switched to beacon-based, update both claims. -->
+     is ever switched to beacon-based, update both claims. Re-verified live
+     2026-07-25: zero references to static.cloudflareinsights.com in the
+     served apex HTML, browser UA included. -->
 
 - **Traffic measurement.** The site uses **Cloudflare Web Analytics** —
-  cookie-free, aggregate measurement (page views, referrers, performance
-  timings) with no cookies, no client-side state, and no cross-site profiles.
+  cookie-free, aggregate measurement (page views and referrers, derived at
+  Cloudflare's edge) with no cookies, no client-side state, and no cross-site
+  profiles.
   It is processed by Cloudflare under
   [Cloudflare's privacy policy](https://www.cloudflare.com/privacypolicy/).
 - **Hosting.** The site is served by Cloudflare Pages; like any host, Cloudflare

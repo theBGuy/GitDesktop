@@ -73,7 +73,9 @@ const softwareLd = JSON.stringify({
   license: "https://www.apache.org/licenses/LICENSE-2.0",
   url: "https://gitdesktop.app/",
   sameAs: "https://github.com/theBGuy/GitDesktop",
-});
+  // Same < escape as Head.astro's graph — rel.version comes from the
+  // GitHub API at build time.
+}).replace(/</g, "\\u003c");
 ---
 
 <SiteLayout

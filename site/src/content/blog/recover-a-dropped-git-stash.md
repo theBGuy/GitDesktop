@@ -9,8 +9,8 @@ tags: ["git", "recovery", "stash"]
 
 You stashed something, moved on, and now it's gone. Maybe you ran `git stash
 drop` one too many times. Maybe a rebase went sideways and took the stash list
-with it. Maybe you ran `git stash pop` into a conflict, resolved it wrong, and
-the entry vanished anyway.
+with it. Maybe you ran `git stash pop` into a conflict, cleaned up, and
+dropped the entry before noticing the resolution was wrong.
 
 The good news is that Git almost never deletes anything on the spot. A dropped
 stash is unlinked, not erased, and it stays in the object database until garbage

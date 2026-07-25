@@ -85,6 +85,13 @@ const graph: Record<string, unknown>[] = [
   },
 ];
 
+// Crumb paths arrive as root-absolute literals ("/blog/") or as already
+// base-composed helper output (postUrl/tagUrl). Join the base onto the former
+// so BreadcrumbList items agree with canonicalUrl under the documented
+// /GitDesktop/ base contingency; at base "/" this is a no-op.
+const withBase = (p: string) =>
+  p.startsWith(base) ? p : base.replace(/\/$/, "") + p;
+
 if (breadcrumbs && breadcrumbs.length > 0) {
   graph.push({
     "@type": "BreadcrumbList",
@@ -94,7 +101,7 @@ if (breadcrumbs && breadcrumbs.length > 0) {
         "@type": "ListItem",
         position: i + 2,
         name: crumb.name,
-        item: new URL(crumb.path, site).href,
+        item: new URL(withBase(crumb.path), site).href,
       })),
     ],
   });
@@ -120,10 +127,12 @@ if (ogType === "article" && publishedTime) {
   });
 }
 
+// <-escaped so content containing a literal "</script>" (a post title,
+// say) can't terminate the inline JSON-LD block early.
 const jsonLd = JSON.stringify({
   "@context": "https://schema.org",
   "@graph": graph,
-});
+}).replace(/</g, "\\u003c");
 ---
 
 <meta charset="UTF-8" />
