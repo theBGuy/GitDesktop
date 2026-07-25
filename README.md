@@ -271,10 +271,10 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
   - **Sized to your model** — a **Review context** setting scales the review's context
     budget to the reviewing model's window (Auto probes a local **Ollama** model's context
     length live), so a larger model sees more of the PR before agentic review is needed
-  - **Timeboxed on your terms** — agentic reviews get 20 minutes before they're stopped
-    (plain reviews 5; Codex reviews are always agentic), and a **Review timeout** setting
-    pins a fixed limit when your reviews need more room — the timeout error itself points
-    at the knob
+  - **Timeboxed on your terms** — agent-CLI reviews are timeboxed: agentic ones get 20
+    minutes before they're stopped (plain 5; Codex reviews are always agentic), and a
+    **Review timeout** setting pins a fixed limit when your reviews need more room — the
+    timeout error itself points at the knob. HTTP/API reviews stream without a deadline.
   - **Notes for reviewers** — hand the reviewer context up front: an agent deposits
     per-branch notes via the GitDesktop MCP, or you type them in the Create PR dialog; on
     create they post as the PR's first comment and reach the automated review as
