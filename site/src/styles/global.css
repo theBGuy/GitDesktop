@@ -116,14 +116,17 @@
 /* --- View modes: AI-native (default) vs "Just Git" (AI hidden) ------------
    Mirrors the app's "hide AI features" setting. The initial class is set
    pre-paint by an inline head script, so there's no flash of the wrong view. */
-[data-view="git"] {
+/* Each arm is only ever HIDDEN, never handed a display: data-view sits on
+   sections, list items, paragraphs AND inline count spans, so imposing
+   `display: block` in git mode would blockify the spans and split their
+   parent pills mid-line. html:not() works because the pre-paint script puts
+   the class on documentElement; with no class at all (JS off) the git arm
+   stays hidden — the same default as before. */
+html:not(.mode-git) [data-view="git"] {
   display: none;
 }
 .mode-git [data-view="ai"] {
   display: none;
-}
-.mode-git [data-view="git"] {
-  display: block;
 }
 
 /* --- Product-window frame: present each real screenshot as a native window -- */
@@ -582,16 +585,16 @@ kbd {
   --astro-code-token-link: var(--color-mint);
 }
 
-/* Markdown emits a bare <table>, so the table is its own scroll container —
-   under html's `overflow-x: clip` a wide table would otherwise be simply
-   unreachable, the exact failure the `.prose pre` note above describes.
-   `max-content` + `max-width` keeps narrow tables shrink-wrapped and wide
-   ones scrollable. */
-.prose table {
-  display: block;
-  width: max-content;
-  max-width: 100%;
+/* The rehype plugin in astro.config.mjs wraps every markdown table in this
+   div, so the WRAPPER owns horizontal overflow (html's `overflow-x: clip`
+   would otherwise make a wide table unreachable) and the table keeps real
+   table display — display:block on the table itself would drop implicit
+   table semantics for assistive tech in some engines. */
+.prose .table-wrap {
   overflow-x: auto;
+}
+.prose table {
+  width: 100%;
   border-collapse: collapse;
   font-size: 0.9rem;
 }

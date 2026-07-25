@@ -175,10 +175,12 @@ const aiCount = page.data.filter((p) => p.data.ai).length;
               </a>
             </h2>
             <ul class="mt-4 flex flex-wrap gap-2">
-              {tags.map(({ tag, count, aiCount }) => (
+              {/* aiCount is renamed on destructure — this file already has a
+                  page-level aiCount (hidden rows on THIS page) at the top. */}
+              {tags.map(({ tag, count, aiCount: tagAiCount }) => (
                 /* Same honesty rule as the list above: an all-AI tag vanishes
                    in Just Git, a mixed tag shows the per-view count. */
-                <li data-view={aiCount === count ? "ai" : undefined}>
+                <li data-view={tagAiCount === count ? "ai" : undefined}>
                   <a
                     href={tagUrl(tag)}
                     class="rounded-md border border-line px-2.5 py-1 text-sm text-muted transition-colors hover:border-line-2 hover:text-ink"
@@ -190,12 +192,12 @@ const aiCount = page.data.filter((p) => p.data.ai).length;
                       </span>
                       <span class="sr-only">({count} posts)</span>
                     </span>
-                    {aiCount < count && (
+                    {tagAiCount < count && (
                       <span data-view="git">
                         <span class="text-faint" aria-hidden="true">
-                          {count - aiCount}
+                          {count - tagAiCount}
                         </span>
-                        <span class="sr-only">({count - aiCount} posts)</span>
+                        <span class="sr-only">({count - tagAiCount} posts)</span>
                       </span>
                     )}
                   </a>
