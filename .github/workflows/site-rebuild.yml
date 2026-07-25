@@ -1,0 +1,34 @@
+name: site-rebuild
+
+# Rebuild gitdesktop.app when a release is PUBLISHED — not when its tag is
+# pushed. release.yml creates the GitHub Release as a DRAFT on tag push; the
+# draft is published manually once every platform leg is green, which is the
+# moment `releases/latest` flips to the new version. The site bakes release
+# facts at build time (site/src/lib/release.ts: version, date, direct asset
+# links), and publishing a draft is not a git push — so without this hook the
+# baked facts stay stale until the next unrelated commit.
+#
+# CLOUDFLARE_PAGES_DEPLOY_HOOK is the Pages deploy-hook URL (project
+# `gitdesktop`, branch `master`), stored as an Actions secret. Treat it like a
+# credential: anyone holding the URL can trigger builds.
+
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Cloudflare Pages rebuild
+        env:
+          HOOK: ${{ secrets.CLOUDFLARE_PAGES_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "CLOUDFLARE_PAGES_DEPLOY_HOOK not set — skipping (site will refresh on the next site commit instead)."
+            exit 0
+          fi
+          curl -fsS -X POST "$HOOK" > /dev/null
+          echo "Pages rebuild triggered for ${{ github.event.release.tag_name }}."
