@@ -9,8 +9,8 @@ import { defineConfig } from "astro/config";
 // site/package.json — which is also why @tailwindcss/vite works here.
 export default defineConfig({
   site: "https://gitdesktop.app",
-  // import.meta.env.BASE_URL mirrors this, so `${BASE_URL}favicon.svg`
-  // resolves to `/favicon.svg` at the domain root.
+  // import.meta.env.BASE_URL mirrors this, so `${BASE_URL}app-icon.svg`
+  // resolves to `/app-icon.svg` at the domain root.
   base: "/",
 
   // Cloudflare 308-redirects every extension-less path to its slash form, so

@@ -12,13 +12,19 @@
   <img alt="Platforms: Windows, macOS, Linux" src="https://img.shields.io/badge/platforms-Windows_%7C_macOS_%7C_Linux-555?style=flat-square">
 </p>
 
-GitDesktop keeps GitHub Desktop's approachable model and goes further: the full
+GitDesktop is a free, open-source (Apache-2.0) desktop Git client for Windows,
+macOS, and Linux, built with Tauri 2 and React 19 by theBGuy. It works with
+GitHub, GitLab, and Bitbucket — staging, diffs, branches, history, and the full
+pull-request loop with code review, CI, and issues — with optional AI you can
+hide entirely.
+
+It keeps GitHub Desktop's approachable model and goes further: the full
 pull-request lifecycle in the app (including offline "local" PRs), a GitHub
 Actions cockpit, and AI woven through commits, reviews, and CI debugging — with
 the provider you choose, local models included.
 
-Built with **Tauri 2 + React 19**. All GitHub access goes through the **GitHub
-CLI (`gh`)**: no OAuth app, and the app never stores your tokens. Core git runs
+All GitHub access goes through the **GitHub CLI (`gh`)**: no OAuth app, and the
+app never stores your tokens. Core git runs
 against any remote via system `git`. Because everything follows `gh` — which
 detects each repo's host from its remote — **GitHub Enterprise** servers work
 the same as github.com once you've run `gh auth login --hostname <host>`, and

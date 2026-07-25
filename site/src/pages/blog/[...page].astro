@@ -22,7 +22,6 @@ interface Props {
 }
 
 const { page } = Astro.props;
-const base = import.meta.env.BASE_URL;
 const tags = await getTags();
 
 // Named so the "N AI posts hidden" line can state a real number rather than
@@ -33,6 +32,7 @@ const aiCount = page.data.filter((p) => p.data.ai).length;
 <SiteLayout
   active="blog"
   feed
+  breadcrumbs={[{ name: "Blog", path: "/blog/" }]}
   title="Blog — notes from building GitDesktop"
   description="Engineering notes from building a native Git client: merge previews, stash recovery, multi-forge parity, and AI you can switch off entirely."
   ogTitle="The GitDesktop blog"

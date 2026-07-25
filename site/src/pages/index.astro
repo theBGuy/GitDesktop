@@ -17,12 +17,17 @@ import ForgeMark from "../components/ForgeMark.astro";
 import McpConfig from "../components/McpConfig.astro";
 import { highlightCapabilities } from "../data/capabilities";
 import SiteLayout from "../layouts/SiteLayout.astro";
+import { getLatestRelease } from "../lib/release";
 
 const repo = "https://github.com/theBGuy/GitDesktop";
 const base = import.meta.env.BASE_URL;
 // The Download CTAs go to the on-site, OS-aware download page (not straight to
 // GitHub Releases).
 const download = `${base}download/`;
+
+// Build-time release facts (guarded fetch, package.json fallback) so the
+// version exists as text for crawlers; the runtime script still refreshes it.
+const rel = await getLatestRelease();
 
 // Home highlights are the "everything else" tail — capabilities that don't get
 // their own narrative section. Non-AI ones show in both views; AI ones are gated.
@@ -52,8 +57,8 @@ const forges = [
 ---
 
 <SiteLayout
-  title="GitDesktop — one calm, AI-native client for GitHub, GitLab & Bitbucket"
-  description="A native desktop Git client for GitHub, GitLab, and Bitbucket: staging and diffs, the full pull-request loop with code review, CI, and issues — in one window, with AI you fully control, or hide entirely."
+  title="GitDesktop — Git client for GitHub, GitLab & Bitbucket"
+  description="A free, open-source GitHub Desktop alternative that also works with GitLab and Bitbucket — staging, diffs, pull requests, CI, and issues in one native window."
   ogTitle="GitDesktop — the whole Git loop, one native app"
   ogDescription="GitHub Desktop fundamentals across GitHub, GitLab & Bitbucket, plus the full pull-request loop, code review, CI, and issues — in one fast native window. With AI you control, or hide entirely."
 >
@@ -65,22 +70,28 @@ const forges = [
       class="relative mx-auto grid max-w-6xl items-center gap-x-12 gap-y-14 px-5 py-20 md:py-28 lg:grid-cols-[1fr_1.12fr]"
     >
       <div class="min-w-0">
-        <p data-reveal class="mb-6 text-sm text-faint" style="transition-delay:0ms">
-          <span class="text-add">//</span> an AI-native Git client for GitHub, GitLab &amp; Bitbucket
-        </p>
+        {/* The h1 carries the query-shaped line; the display line below is an
+            h2 styled exactly like the h1 it replaced — zero visual change. */}
         <h1
+          data-reveal
+          class="mb-6 text-sm font-normal tracking-normal text-pretty text-faint"
+          style="transition-delay:0ms"
+        >
+          <span class="text-add" aria-hidden="true">//</span> an AI-native Git client for GitHub, GitLab &amp; Bitbucket
+        </h1>
+        <h2
           data-reveal
           style="transition-delay:60ms"
           class="text-[clamp(2.25rem,5vw,3.5rem)] font-semibold tracking-tight"
         >
           The whole loop,<br class="hidden sm:block" /> one window.
-        </h1>
+        </h2>
         <p
           data-reveal
           style="transition-delay:120ms"
           class="mt-7 max-w-[58ch] text-base leading-relaxed text-body sm:text-lg"
         >
-          Everything GitHub&nbsp;Desktop does (staging, branches, diffs, history,
+          Everything <span class="whitespace-nowrap">GitHub Desktop</span> does (staging, branches, diffs, history,
           sync), now across <span class="text-ink">GitHub, GitLab &amp; Bitbucket</span>,
           with the full pull-request loop, CI, and issues in one window. Then AI that
           reads your diff for commits, PR descriptions, and code review — and takes on
@@ -104,7 +115,7 @@ const forges = [
           >
         </div>
         <p data-reveal style="transition-delay:240ms" class="mt-6 text-sm text-muted">
-          <span data-dl-version></span>Windows, macOS &amp; Linux · Apache-2.0 ·
+          <span data-dl-version>{rel.tag + " · "}</span>Windows, macOS &amp; Linux · Apache-2.0 ·
           <button type="button" data-mode-btn="git" class="text-mint underline-offset-4 hover:underline">
             not into AI? hide it →
           </button>
@@ -135,22 +146,26 @@ const forges = [
       class="relative mx-auto grid max-w-6xl items-center gap-x-12 gap-y-14 px-5 py-20 md:py-28 lg:grid-cols-[1fr_1.12fr]"
     >
       <div class="min-w-0">
-        <p data-reveal class="mb-6 text-sm text-faint" style="transition-delay:0ms">
-          <span class="text-add">//</span> a calm, native Git client for GitHub, GitLab &amp; Bitbucket
-        </p>
         <h1
+          data-reveal
+          class="mb-6 text-sm font-normal tracking-normal text-pretty text-faint"
+          style="transition-delay:0ms"
+        >
+          <span class="text-add" aria-hidden="true">//</span> a calm, native Git client for GitHub, GitLab &amp; Bitbucket
+        </h1>
+        <h2
           data-reveal
           style="transition-delay:60ms"
           class="text-[clamp(2.25rem,5vw,3.5rem)] font-semibold tracking-tight"
         >
           The whole loop,<br class="hidden sm:block" /> one window.
-        </h1>
+        </h2>
         <p
           data-reveal
           style="transition-delay:120ms"
           class="mt-7 max-w-[58ch] text-base leading-relaxed text-body sm:text-lg"
         >
-          Everything you expect from GitHub&nbsp;Desktop — staging, branches, diffs,
+          Everything you expect from <span class="whitespace-nowrap">GitHub Desktop</span> — staging, branches, diffs,
           history, sync — now across <span class="text-ink">GitHub, GitLab &amp;
           Bitbucket</span>, with the full pull-request loop, CI, issues, and branch
           protection in one fast native window. Built to be trusted with uncommitted
@@ -174,7 +189,7 @@ const forges = [
           >
         </div>
         <p data-reveal style="transition-delay:240ms" class="mt-6 text-sm text-muted">
-          <span data-dl-version></span>Windows, macOS &amp; Linux · Apache-2.0 ·
+          <span data-dl-version>{rel.tag + " · "}</span>Windows, macOS &amp; Linux · Apache-2.0 ·
           <button type="button" data-mode-btn="ai" class="text-mint underline-offset-4 hover:underline">
             curious about the AI? →
           </button>
@@ -190,7 +205,7 @@ const forges = [
             sizes="(min-width: 1024px) 620px, 92vw"
             format="webp"
             quality={82}
-            loading="eager"
+            loading="lazy"
           />
         </figure>
       </div>
@@ -413,8 +428,9 @@ const forges = [
           gated on your Jira permissions.
         </p>
         <p class="mt-4 max-w-[56ch] leading-relaxed text-muted">
-          Especially handy for Bitbucket, whose native tracker Atlassian retires in
-          August 2026.
+          Especially handy for Bitbucket, whose native tracker Atlassian retires on
+          August 20, 2026 —
+          <a href={`${base}bitbucket-issues-sunset/`} class="text-mint underline-offset-4 hover:underline">what that means for your repos →</a>
         </p>
         <p class="mt-6 text-sm">
           <a href={`${base}integrations/`} class="text-mint underline-offset-4 hover:underline">More on Jira &amp; forges →</a>
@@ -446,6 +462,7 @@ const forges = [
 
   <!-- Local PRs (shared) -->
   <FeatureRow
+    id="pull-requests"
     title="Pull requests. Without the browser — or the cloud."
     image={appPrDialog}
     alt="The New local pull request dialog: merge one branch into another and review it locally"
@@ -468,6 +485,7 @@ const forges = [
 
   <!-- CI / Actions (shared) -->
   <FeatureRow
+    id="ci"
     title="Watch CI without a browser tab."
     image={appActions}
     alt="The GitHub Actions view: a workflow run with its jobs and step-by-step status, plus a re-run control"
@@ -488,6 +506,7 @@ const forges = [
 
   <!-- Issues (shared) -->
   <FeatureRow
+    id="issues"
     title="Issues and to-dos, triaged in place."
     image={appIssues}
     alt="An issue in GitDesktop: a bug report with labels, an assignee, a linked pull request, and a comment thread"
@@ -513,6 +532,7 @@ const forges = [
 
   <!-- Discussions (shared) -->
   <FeatureRow
+    id="discussions"
     title="Discussions, where the thread lives."
     image={appDiscussions}
     alt="A GitHub Discussion in GitDesktop: a roadmap thread with a category, an upvote count, reactions, and a threaded reply"
@@ -581,6 +601,7 @@ const forges = [
 
   <!-- Compare (shared) -->
   <FeatureRow
+    id="compare"
     title="Compare anything."
     image={appCompare}
     alt="Comparing a feature branch against main: ahead/behind counts, the changed files, and a diff"
@@ -598,7 +619,7 @@ const forges = [
   </FeatureRow>
 
   <!-- Built to be trusted (NEW — shared) -->
-  <section class="border-b border-line">
+  <section id="trust" class="scroll-mt-20 border-b border-line">
     <div class="mx-auto max-w-6xl px-5 py-20 md:py-28">
       <div data-reveal class="max-w-2xl">
         <h2 class="text-balance text-3xl tracking-[-0.02em] sm:text-4xl">
@@ -632,7 +653,7 @@ const forges = [
             exact state it started from.
           </p>
         </div>
-        <div class="min-w-0">
+        <div id="recover" class="min-w-0 scroll-mt-20">
           <h3 class="text-ink">Recover lost work.</h3>
           <p class="mt-2 max-w-[48ch] text-sm leading-relaxed text-muted">
             A <code class="text-ink">git fsck</code> scan finds orphaned stashes that
@@ -701,6 +722,7 @@ const forges = [
 
   <!-- Tags & releases (shared) -->
   <FeatureRow
+    id="releases"
     title="Cut a release without the dashboard."
     image={appTags}
     alt="The Tags panel beside a release in GitDesktop: version tags, the release's changelog notes, and its attached macOS, Linux, and Windows binaries with sizes"
@@ -782,7 +804,7 @@ const forges = [
         >
       </div>
       <p data-reveal style="transition-delay:200ms" class="mt-6 text-sm text-muted">
-        <span data-dl-version></span>Windows, macOS &amp; Linux
+        <span data-dl-version>{rel.tag + " · "}</span>Windows, macOS &amp; Linux
       </p>
     </div>
   </section>

@@ -133,7 +133,7 @@ it's worth knowing. But at the moment you actually need it, you're stressed,
 you're guessing at SHAs, and the failure mode is silently restoring the wrong
 half of your work.
 
-In [GitDesktop](/) that same `fsck` walk runs behind a list: recoverable stashes,
+In [GitDesktop](/#recover) that same `fsck` walk runs behind a list: recoverable stashes,
 each with its message, its date, and a diff you can read before you commit to
 anything. Same objects, same operation, minus the shell pipeline and minus the
 chance of applying the index twin by mistake.

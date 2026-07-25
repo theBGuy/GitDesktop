@@ -37,6 +37,10 @@ const toc = headings.filter((h) => h.depth === 2 || h.depth === 3);
   active="blog"
   showViewToggle={false}
   feed
+  breadcrumbs={[
+    { name: "Blog", path: "/blog/" },
+    { name: data.title, path: postUrl(post) },
+  ]}
   title={`${data.title} — GitDesktop`}
   description={data.description}
   ogTitle={data.title}

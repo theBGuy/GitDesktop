@@ -11,6 +11,8 @@ interface Props {
   sizes?: string;
   widths?: number[];
   surface?: boolean;
+  /** Stable anchor so posts and comparison pages can deep-link the section. */
+  id?: string;
 }
 
 const {
@@ -22,6 +24,7 @@ const {
   sizes = "(min-width: 1024px) 540px, 94vw",
   widths = [560, 860, 1296],
   surface = false,
+  id,
 } = Astro.props;
 
 // Text always reads first on mobile; image side only matters at lg+.
@@ -29,7 +32,10 @@ const imgOrder = side === "left" ? "order-2 lg:order-1" : "order-2";
 const txtOrder = side === "left" ? "order-1 lg:order-2" : "order-1";
 ---
 
-<section class:list={["border-b border-line", surface && "bg-surface/30"]}>
+<section
+  id={id}
+  class:list={["border-b border-line", surface && "bg-surface/30", id && "scroll-mt-20"]}
+>
   <div
     class="mx-auto grid max-w-6xl items-center gap-x-14 gap-y-10 px-5 py-20 md:py-28 lg:grid-cols-2"
   >

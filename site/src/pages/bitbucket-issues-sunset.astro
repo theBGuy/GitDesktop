@@ -1,0 +1,179 @@
+---
+// The one page on this list with an expiry date: Atlassian removes Bitbucket
+// Cloud's built-in issue tracker on 2026-08-20, and the search demand for
+// "what happens to my Bitbucket issues" exists for exactly as long as people
+// are migrating. Facts below are sourced from Atlassian's own announcement —
+// linked in the body — not from our copy elsewhere on the site.
+import { Image } from "astro:assets";
+import appJira from "../assets/app-jira.png";
+import SiteLayout from "../layouts/SiteLayout.astro";
+
+const base = import.meta.env.BASE_URL;
+const download = `${base}download/`;
+
+const announcement =
+  "https://community.atlassian.com/forums/Bitbucket-articles/Announcing-sunset-of-Bitbucket-Issues-and-Wikis/ba-p/3193882";
+const issuesDoc =
+  "https://support.atlassian.com/bitbucket-cloud/docs/understand-bitbucket-issues/";
+
+const options = [
+  {
+    label: "Export the data",
+    detail:
+      "Issues can be exported from Bitbucket as a zip archive — a snapshot you keep, not a live tracker. Do this before the removal date even if you migrate; it's the only raw copy you'll have.",
+  },
+  {
+    label: "Migrate to Jira",
+    detail:
+      "Atlassian's recommended path: move the issues into a Jira Cloud project. Your tracker stays live and linked to the same team, at the cost of living in a second product.",
+  },
+  {
+    label: "Keep a tracker next to your code",
+    detail:
+      "If the browser round-trip is what you're trying to avoid, put the tracker inside your Git client — the section below is the honest pitch for that.",
+  },
+];
+
+const jiraPoints = [
+  "Link a Jira Cloud site and project to any repository, and its Issues tab gains a Jira section — browse, filter, and read status, priority, assignee, description, and comments",
+  "Create, comment, assign, set due dates, change priority, and close or reopen along the project's own workflow — every action gated on your Jira permissions",
+  "Issue keys in your branch names, commit messages, and PR titles are spotted and linked straight back to the issue",
+  "A local issue can be promoted to Jira when the work goes public",
+];
+---
+
+<SiteLayout
+  title="Bitbucket's issue tracker retires on August 20, 2026"
+  description="Atlassian removes Bitbucket Cloud's built-in issue tracker on August 20, 2026. How to export your issues, migrate to Jira, and keep a tracker next to your code."
+  ogTitle="Bitbucket's issue tracker retires on August 20, 2026"
+  ogDescription="What happens to your Bitbucket issues, how to export or migrate them, and how to keep a tracker next to your code."
+  breadcrumbs={[
+    { name: "Bitbucket issue-tracker sunset", path: "/bitbucket-issues-sunset/" },
+  ]}
+>
+  <section class="border-b border-line">
+    <div class="mx-auto max-w-6xl px-5 py-16 md:py-20">
+      <p data-reveal class="text-sm text-faint"><span class="text-add">//</span> bitbucket</p>
+      <h1
+        data-reveal
+        style="transition-delay:60ms"
+        class="mt-5 max-w-[26ch] text-[clamp(1.9rem,4.5vw,3rem)] font-semibold tracking-tight"
+      >
+        Bitbucket's issue tracker goes away on August 20, 2026.
+      </h1>
+      {/* Answer-first and self-contained on purpose: this paragraph is the
+          extraction target for "what's happening to Bitbucket issues". */}
+      <p
+        data-reveal
+        style="transition-delay:120ms"
+        class="mt-6 max-w-[62ch] text-base leading-relaxed text-body sm:text-lg"
+      >
+        Atlassian is removing the built-in issue tracker (and wikis) from
+        Bitbucket Cloud on <span class="text-ink">August 20, 2026</span>.
+        Existing issues can be exported as a zip archive or migrated to Jira,
+        and since April 2026 repositories that never enabled Issues can no
+        longer turn them on.
+      </p>
+      <p data-reveal style="transition-delay:180ms" class="mt-5 text-sm text-muted">
+        Source:
+        <a href={announcement} class="text-mint underline-offset-4 hover:underline"
+          >Atlassian's sunset announcement</a
+        >
+        ·
+        <a href={issuesDoc} class="text-mint underline-offset-4 hover:underline"
+          >Bitbucket issues documentation</a
+        >
+      </p>
+    </div>
+  </section>
+
+  <section class="border-b border-line">
+    <div class="mx-auto max-w-6xl px-5 py-14 md:py-16">
+      <h2 data-reveal class="text-balance text-2xl tracking-[-0.02em] sm:text-3xl">
+        Your options before the date
+      </h2>
+      <ul data-reveal style="transition-delay:80ms" class="mt-8 divide-y divide-line border-y border-line">
+        {
+          options.map((o) => (
+            <li class="grid gap-2 py-6 sm:grid-cols-[16rem_1fr] sm:gap-8">
+              <h3 class="text-ink">{o.label}</h3>
+              <p class="max-w-[62ch] text-[15px] leading-relaxed text-body">{o.detail}</p>
+            </li>
+          ))
+        }
+      </ul>
+    </div>
+  </section>
+
+  <section class="border-b border-line bg-surface/30">
+    <div class="mx-auto max-w-6xl px-5 py-16 md:py-20">
+      <div class="grid gap-x-14 gap-y-10 lg:grid-cols-[0.9fr_1.1fr]">
+        <div data-reveal class="min-w-0">
+          <h2 class="text-balance text-2xl tracking-[-0.02em] sm:text-3xl">
+            A tracker inside your Git client
+          </h2>
+          <p class="mt-6 max-w-[52ch] leading-relaxed text-body">
+            GitDesktop is a desktop Git client for GitHub, GitLab, and Bitbucket
+            — and for Bitbucket repositories, its issue story is a linked
+            <span class="text-ink">Jira Cloud</span> project, so the migration
+            Atlassian is pushing you toward doesn't have to mean living in a
+            browser tab.
+          </p>
+          <ul class="mt-7 space-y-3">
+            {
+              jiraPoints.map((x) => (
+                <li class="flex items-start gap-2.5 text-[15px] leading-relaxed text-body">
+                  <span class="mt-px select-none text-mint" aria-hidden="true">◆</span>
+                  <span>{x}</span>
+                </li>
+              ))
+            }
+          </ul>
+          <p class="mt-7 max-w-[52ch] text-sm leading-relaxed text-muted">
+            Not moving to Jira? GitDesktop also keeps plain
+            <span class="text-ink">local issues</span> that never leave your
+            machine, and a <span class="text-ink">Code TODOs</span> tab that
+            turns a <code class="text-ink">TODO</code> comment into one.
+          </p>
+          <p class="mt-6 text-sm">
+            <a href={`${base}integrations/#jira`} class="text-mint underline-offset-4 hover:underline">
+              Everything the Jira link covers →
+            </a>
+          </p>
+        </div>
+        <figure data-reveal style="transition-delay:80ms" class="window min-w-0 self-start">
+          <Image
+            src={appJira}
+            alt="The Issues tab in GitDesktop showing a linked Jira project: an issue list with statuses and story-point badges, and an issue detail with status, priority, assignee, story points, labels, and a comment"
+            widths={[720, 1080, 1440]}
+            sizes="(min-width: 1024px) 620px, 94vw"
+            format="webp"
+            quality={82}
+            loading="lazy"
+          />
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <section class="relative overflow-hidden">
+    <div class="grid-bg pointer-events-none absolute inset-0 opacity-60"></div>
+    <div class="relative mx-auto max-w-6xl px-5 py-16 text-center md:py-20">
+      <h2 data-reveal class="text-balance text-2xl tracking-tight sm:text-3xl">
+        Migrating anyway? Bring the client too.
+      </h2>
+      <p data-reveal style="transition-delay:80ms" class="mx-auto mt-5 max-w-[48ch] leading-relaxed text-body">
+        Free and open source — Bitbucket pull requests, Pipelines, and linked
+        Jira issues in one native window.
+      </p>
+      <div data-reveal style="transition-delay:140ms" class="mt-8 flex flex-wrap items-center justify-center gap-3">
+        <a href={download} class="rounded-lg bg-mint px-6 py-3 font-medium text-mint-ink transition-opacity hover:opacity-90">
+          Download GitDesktop
+        </a>
+        <a href={`${base}integrations/`} class="rounded-lg border border-line-2 px-6 py-3 font-medium text-ink transition-colors hover:bg-surface">
+          See the Bitbucket integration
+        </a>
+      </div>
+    </div>
+  </section>
+</SiteLayout>

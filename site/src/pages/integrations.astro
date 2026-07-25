@@ -74,7 +74,8 @@ const jiraFeatures = [
 <SiteLayout
   active="integrations"
   title="Integrations — GitHub, GitLab, Bitbucket & Jira | GitDesktop"
-  description="GitDesktop works with GitHub, GitLab, and Bitbucket as first-class forges — the full PR/MR loop, CI, issues, releases, and settings — plus linked Jira Cloud issues. Each on its own authenticated identity."
+  description="GitDesktop works with GitHub, GitLab, and Bitbucket — the full PR loop, CI, issues, and releases — plus linked Jira Cloud issues, each on its own identity."
+  breadcrumbs={[{ name: "Integrations", path: "/integrations/" }]}
   ogTitle="GitDesktop integrations — GitHub, GitLab, Bitbucket & Jira"
   ogDescription="One calm client across GitHub, GitLab, and Bitbucket, with linked Jira Cloud issues. The full loop for each, with the honest per-platform differences."
 >
@@ -170,7 +171,8 @@ const jiraFeatures = [
         </p>
         <p class="mt-4 max-w-[46ch] text-sm leading-relaxed text-muted">
           Especially handy for Bitbucket, whose native tracker Atlassian retires on
-          2026-08-20.
+          August 20, 2026 —
+          <a href={`${base}bitbucket-issues-sunset/`} class="text-mint underline-offset-4 hover:underline">what that means for your repos →</a>
         </p>
       </div>
       <div data-reveal style="transition-delay:80ms" class="min-w-0">
