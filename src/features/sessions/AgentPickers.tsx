@@ -6,7 +6,7 @@ import {
   UsersThreeIcon,
   WarningCircleIcon,
 } from "@phosphor-icons/react";
-import { type ReactNode, useRef } from "react";
+import { type ReactNode, useId, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -154,11 +154,15 @@ function Segmented<T extends string>({
   onChange,
   options,
   ariaLabel,
+  describedBy,
 }: {
   value: T;
   onChange: (v: T) => void;
   options: { value: T; label: string }[];
   ariaLabel: string;
+  /** Id of a caveat rendered beside the group (e.g. the Isolation readiness note),
+   *  so arrowing between options announces the warning with the selection. */
+  describedBy?: string;
 }) {
   const groupRef = useRef<HTMLDivElement>(null);
   // The tab stop. A value outside `options` (shouldn't happen) still leaves the
@@ -191,6 +195,7 @@ function Segmented<T extends string>({
       ref={groupRef}
       role="radiogroup"
       aria-label={ariaLabel}
+      aria-describedby={describedBy}
       className="flex overflow-hidden rounded-none border border-input"
     >
       {options.map((o, i) => (
@@ -322,6 +327,8 @@ export function ComposerOptions({
   };
 }) {
   const openSettings = useUiStore((s) => s.openSettings);
+  // Links the Isolation caveat to its radiogroup (announced with the selection).
+  const isolationNoteId = useId();
 
   const mcpListable = mcp && !mcp.disabledReason && mcp.servers.length > 0;
   const mcpCount = mcpListable
@@ -403,9 +410,11 @@ export function ComposerOptions({
                 value={isolation.value}
                 onChange={isolation.onChange}
                 options={ISOLATION_OPTIONS}
+                describedBy={isolation.note ? isolationNoteId : undefined}
               />
               {isolation.note && (
                 <p
+                  id={isolationNoteId}
                   className={cn(
                     "flex items-start gap-1.5 text-[11px]",
                     isolation.note.tone === "warn"

@@ -54,8 +54,8 @@ const NO_PROVIDERS: string[] = [];
 
 const RUNTIME_LABEL = { docker: "Docker", podman: "Podman" } as const;
 
-/** The always-visible reason a not-ready container disables Start — the same string
- *  the Send button's wrapper carries as a `title`. */
+/** FALLBACK reason a not-ready container disables Start, used only when the
+ *  isolation note hasn't produced a specific one (see `blockedReason`). */
 const CONTAINER_BLOCKED_TEXT =
   "Container isolation isn't ready — open Options for details.";
 
@@ -915,9 +915,7 @@ export function SessionComposer({
                         container-not-ready reason rides a wrapper span. */}
                     <span
                       className="inline-flex"
-                      title={
-                        containerBlocked ? CONTAINER_BLOCKED_TEXT : undefined
-                      }
+                      title={containerBlocked ? blockedReason : undefined}
                     >
                       <Button
                         size="sm"
