@@ -14,8 +14,8 @@ import {
 import { type PriorContext, resolvePriorContext } from "@/lib/ai/prior-context";
 import { buildReviewPrompt } from "@/lib/ai/prompt";
 import { isLocalProvider } from "@/lib/ai/providers";
-import { buildReviewTools } from "@/lib/ai/review-tools";
 import { reviewTimeoutSecs } from "@/lib/ai/review-timeout";
+import { buildReviewTools } from "@/lib/ai/review-tools";
 import { streamAi } from "@/lib/ai/stream";
 import type {
   AiSettings,

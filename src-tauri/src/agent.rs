@@ -69,7 +69,9 @@ fn timeout_message(noun: &str, timeout: Duration, hint: bool) -> String {
         human_duration(timeout.as_secs())
     );
     if hint {
-        msg.push_str(" You can raise the limit in Settings → AI.");
+        // "Adjust", not "raise" — a run that already used the largest offered
+        // option can only go down, and the hint must never be a dead end.
+        msg.push_str(" You can adjust the limit in Settings → AI.");
     }
     msg
 }
@@ -1860,7 +1862,7 @@ pub async fn agent_review(
     timeout_secs: Option<u64>,
     // Whether that setting governs THIS run — true for the AI-review flows, absent
     // (false) for generation / Debug-with-AI, which share the command but not the
-    // setting. Only gates the timeout message's "raise the limit" hint.
+    // setting. Only gates the timeout message's "adjust the limit" hint.
     timeout_configurable: Option<bool>,
     review_id: String,
     on_event: Channel<ReviewEvent>,
@@ -3015,7 +3017,7 @@ mod tests {
         let msg = timeout_message("review", Duration::from_secs(1200), true);
         assert_eq!(
             msg,
-            "The review timed out after 20 minutes. You can raise the limit in Settings → AI."
+            "The review timed out after 20 minutes. You can adjust the limit in Settings → AI."
         );
         assert!(msg.contains("Settings → AI."));
         // Same noun, no flag — generation / Debug-with-AI also run `agent_review`,

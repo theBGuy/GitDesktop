@@ -56,7 +56,7 @@ import {
   PROVIDER_LABELS,
   PROVIDERS_REQUIRING_KEY,
 } from "@/lib/ai/providers";
-import type { ReviewTimeout } from "@/lib/ai/review-timeout";
+import { REVIEW_TIMEOUTS, type ReviewTimeout } from "@/lib/ai/review-timeout";
 import type { AiProviderId, AiSettings } from "@/lib/ai/types";
 import { required, useAppForm, withForm } from "@/lib/form";
 import { deleteSecret, setSecret } from "@/lib/git/api";
@@ -300,18 +300,6 @@ const REVIEW_TIMEOUT_ITEMS: Record<ReviewTimeout, string> = {
   "45": "45 minutes",
   "60": "60 minutes",
 };
-
-/** Explicit render order — `Object.keys` puts integer-like keys first, which
- *  would bury "Auto" at the bottom of the list. */
-const REVIEW_TIMEOUT_ORDER: ReviewTimeout[] = [
-  "auto",
-  "10",
-  "15",
-  "20",
-  "30",
-  "45",
-  "60",
-];
 
 /** Ollama base-URL field — the URL the local/LAN Ollama server is reached at. */
 function OllamaConfig({
@@ -1014,7 +1002,7 @@ export const AiProviderSection = withForm({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {REVIEW_TIMEOUT_ORDER.map((id) => (
+                  {REVIEW_TIMEOUTS.map((id) => (
                     <SelectItem key={id} value={id}>
                       {REVIEW_TIMEOUT_ITEMS[id]}
                     </SelectItem>
