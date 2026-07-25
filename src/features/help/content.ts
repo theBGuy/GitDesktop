@@ -1518,18 +1518,19 @@ carries an **Isolation** control — **Worktree** or **Container** — for the s
 about to start. It opens on your Settings default, and picking the other one overrides it
 for that session alone (the Options badge counts it only when it differs from your default;
 in Best-of-N every arm shares the pick). Isolation is settled when the session starts, so it
-never changes under a running agent — start a new session to switch. Choose **Container** and
+never changes under a running agent — start a new session to switch; a running session shows
+the mode it got as a chip beside its branch in the header. Choose **Container** and
 GitDesktop checks readiness right there — Docker or Podman installed, the engine running, the
 agent image built — and keeps **Send** disabled until it is, naming what's missing (the
-composer says so outside the popover too, so a disabled **Send** is never a mystery). Where
-**Settings → AI** is where you'd fix it — no container runtime, or the agent image not built
-yet — it offers a jump straight there; a stopped engine you start yourself. Overriding *down*
-to **Worktree** when your default is a container says
-so plainly: that run happens on your host, where **Codex** still applies its own OS-enforced
-sandbox and the other agents stay inside the worktree by convention.
+composer says so outside the popover too, so a disabled **Send** is never a mystery). The
+states **Settings → AI** can fix — no container runtime, or the agent image not built yet —
+come with a jump straight there; a stopped engine you start yourself. Overriding *down* to
+**Worktree** when your default is a container says so plainly: that run happens on your host,
+where **Codex** still applies its own OS-enforced sandbox and the other agents stay inside
+the worktree by convention.
 
-A repo can also layer **extra tools** into
-that container: commit a \`.gitdesktop/agent.Dockerfile\` (it must start
+A repo can also layer **extra tools** into the agent container: commit a
+\`.gitdesktop/agent.Dockerfile\` (it must start
 \`FROM gitdesktop-agent:latest\`), and — after you review and confirm it in
 **Settings → AI** — GitDesktop builds it into a per-repo image this repo's container
 sessions then run in.

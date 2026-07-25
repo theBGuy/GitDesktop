@@ -898,7 +898,6 @@ export function SessionComposer({
                 opening the Options popover; an engine that isn't running has no
                 `settingsAction` (Settings can't start a daemon) and gets no button. */}
             <p
-              id={blockedId}
               role="status"
               // Mounted unconditionally: a live region created together with its
               // text announces unreliably, so the region has to pre-exist and only
@@ -918,7 +917,10 @@ export function SessionComposer({
                     className="mt-px size-3.5 shrink-0"
                     aria-hidden
                   />
-                  <span>{blockedReason}</span>
+                  {/* The id sits on the REASON alone so Send's aria-describedby
+                      doesn't read the remedy button's label as its description;
+                      role="status" on the parent still announces both together. */}
+                  <span id={blockedId}>{blockedReason}</span>
                   {isolationNote?.settingsAction ? (
                     // Same handler as the popover's button — it stashes the whole
                     // start-state before navigating, so a bare openSettings here
