@@ -420,8 +420,11 @@ export function SessionComposer({
   // gate above hasn't run — but start() reads settings itself and would happily
   // launch a container session. Hold Start for those few milliseconds rather than
   // let one slip past the gate. Deliberately silent: it's a load, not a problem.
-  // A settings load that FAILED is not pending — start() falls back to "worktree"
-  // there, which needs no gate, and holding Start forever would be the worse bug.
+  // A settings load that FAILED is deliberately not pending — holding Send forever
+  // would be the worse bug. Residual: start()'s own loadSettings() can succeed where
+  // the query errored and launch per the real setting while the row showed the
+  // worktree fallback — near-unreachable, it errs toward MORE confinement than
+  // displayed, and turn 1 re-checks readiness in Rust.
   const settingsPending = !session && !settings.data && !settings.isError;
   const canSubmit =
     !running &&
