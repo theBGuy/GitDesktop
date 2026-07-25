@@ -893,7 +893,10 @@ export function SessionComposer({
                 put you here, in which case the Options badge doesn't move and a
                 hover-only tooltip would be the sole explanation. Carries the
                 SPECIFIC reason (engine down, image missing, …) and is what the Send
-                button points `aria-describedby` at while blocked. */}
+                button points `aria-describedby` at while blocked. Reasons Settings
+                can fix carry the remedy here too, so it's reachable without ever
+                opening the Options popover; an engine that isn't running has no
+                `settingsAction` (Settings can't start a daemon) and gets no button. */}
             <p
               id={blockedId}
               role="status"
@@ -916,6 +919,19 @@ export function SessionComposer({
                     aria-hidden
                   />
                   <span>{blockedReason}</span>
+                  {isolationNote?.settingsAction ? (
+                    // Same handler as the popover's button — it stashes the whole
+                    // start-state before navigating, so a bare openSettings here
+                    // would silently lose the draft and every pick.
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="-mt-0.5 h-6 shrink-0 px-1.5 text-[11px] text-muted-foreground"
+                      onClick={openIsolationSettings}
+                    >
+                      Set up in Settings…
+                    </Button>
+                  ) : null}
                 </>
               ) : null}
             </p>
