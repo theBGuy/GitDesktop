@@ -899,8 +899,11 @@ as first-class grounding context, so a deliberate, documented decision isn't re-
 When rounds
 accumulate past the prompt budget, the newest comments win, and the full history is
 **distilled into a compact decision ledger** (via your generation model) rather than cut
-off; and if the budget leaves no room for it at all, the review is told the comments were **omitted**
-rather than losing them silently, so it never reads their absence as nothing on record.
+off; and if the budget leaves no room for it at all, the review is told the comments were
+**omitted**, so it never reads their absence as nothing on record. On a **general**
+re-review, polish noticed late on code that hasn't changed is listed separately as
+**non-blocking leftovers** — batch it with your next push or defer it — and once nothing
+substantive is left the review says so in a line instead of holding the round open.
 See *AI & automations* to pick the review model. The **Review context** size there
 controls how much diff and prior-discussion context reviews send — **Auto** fits it to the
 reviewing model's context window (probing Ollama live), or pick Compact / Standard /
