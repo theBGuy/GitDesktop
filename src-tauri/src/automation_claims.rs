@@ -208,11 +208,14 @@ fn claim_in_dir(dir: &Path, key: &str) -> std::io::Result<bool> {
 /// Best-effort liveness heartbeat: refresh the mtime of `key`'s claim file so a
 /// long-running automation keeps its claim "fresh" past [`STALE_CLAIM_AGE`]. All errors
 /// are ignored (fail-open philosophy — a failed heartbeat degrades to the old behavior,
-/// a reclaim after 30 quiet minutes). Opens WITHOUT `create`, so a claim that was
-/// already released or reclaimed is never resurrected by a late heartbeat — the open
-/// simply errs and is ignored. The write handle is required, not incidental: on Windows
-/// `set_modified` on a read-only handle fails with PermissionDenied (the tests'
-/// `backdate` helper documents the same constraint).
+/// a reclaim after 30 quiet minutes). Opens WITHOUT `create`, so a RELEASED claim is
+/// never resurrected by a late heartbeat — the open errs on the missing file and is
+/// ignored. A RECLAIMED claim is different: the filename derives from the run key, not
+/// the owning instance, so a late heartbeat from the old owner lands on (and refreshes)
+/// the new owner's file — harmless, since it only keeps the live owner's claim fresh.
+/// The write handle is required, not incidental: on Windows `set_modified` on a
+/// read-only handle fails with PermissionDenied (the tests' `backdate` helper documents
+/// the same constraint).
 fn touch_in_dir(dir: &Path, key: &str) {
     let _ = std::fs::OpenOptions::new()
         .write(true)

@@ -904,7 +904,8 @@ controls how much diff and prior-discussion context reviews send — **Auto** fi
 reviewing model's context window (probing Ollama live), or pick Compact / Standard /
 Expanded. **Review timeout** (shown when an agent CLI drives reviews or security audits)
 caps how long such a review may run before it's stopped: **Auto** allows 5 minutes (20 when
-the review is agentic), or pin a fixed limit that applies to every agent-CLI review.
+the review is agentic — always, for Codex), or pin a fixed limit that applies to every
+agent-CLI review.
 
 **One review at a time — queue the other.** A PR streams one AI review at a time,
 but you don't have to pick between a code review and a security audit: start one

@@ -104,10 +104,12 @@ const DIFF_MAX_BYTES = 200_000;
 
 /** How often a running automation refreshes its cross-instance claim file's mtime.
  *  Rust's `STALE_CLAIM_AGE` (automation_claims.rs) reclaims a claim after 30 minutes
- *  of silence, so 5 minutes (30/6) leaves a generous margin for timer drift and OS
- *  suspend while a long review — the Review-timeout setting allows up to 60 minutes —
- *  keeps its claim alive. Without it, a second instance would reclaim a LIVE run and
- *  post a duplicate paid review. */
+ *  of silence, so 5 minutes (30/6) leaves a generous margin for timer drift while a
+ *  long review — the Review-timeout setting allows up to 60 minutes — keeps its
+ *  claim alive. Without it, a second instance would reclaim a LIVE run and post a
+ *  duplicate paid review. (Timers don't fire during OS suspend, so a 30+ minute
+ *  sleep mid-run can still go stale on resume — the same bounded single-duplicate
+ *  residual as before the heartbeat.) */
 const CLAIM_HEARTBEAT_MS = 5 * 60 * 1000;
 
 /** The store key for a PR target, used to look up its review-history watermark. */
@@ -334,8 +336,10 @@ async function run(
     // refresh its claim file's mtime, so the Rust stale-reclaim window measures "this
     // instance went quiet" rather than "this review is slow". A 45/60-minute Review
     // timeout would otherwise outlive the 30-minute window and let a second instance
-    // reclaim a LIVE run. Best-effort, like claim/release. Cleared in the `finally`
-    // below so it never outlives the run on any path (success, error, cancel).
+    // reclaim a LIVE run. Best-effort, like claim/release. Declared here, ARMED as the
+    // `try`'s first statement below: an interval leaked by a throw outside the
+    // `finally` would refresh the claim forever, defeating both the 30-minute reclaim
+    // and the 30-day sweep (both mtime-keyed) for the life of the process.
     let heartbeat: ReturnType<typeof setInterval> | undefined;
     const stopHeartbeat = () => {
       if (heartbeat !== undefined) {
@@ -343,16 +347,6 @@ async function run(
         heartbeat = undefined;
       }
     };
-    if (claimKey) {
-      heartbeat = setInterval(() => {
-        void invoke("touch_automation_claim", {
-          repoKey: claimKey,
-          target: claimTarget,
-          headSha,
-          action,
-        }).catch(() => undefined);
-      }, CLAIM_HEARTBEAT_MS);
-    }
     // Release this instance's claim (best-effort) so a non-delivering terminal path
     // (failure/cancel/no-op) doesn't permanently suppress the automation for this
     // head across instances. A successfully DELIVERED review keeps its claim.
@@ -431,6 +425,18 @@ async function run(
       ).catch(() => undefined);
     };
     try {
+      // First statement inside the try, so the arm and the `finally`'s disarm can
+      // never be separated by a throw (see the heartbeat comment above).
+      if (claimKey) {
+        heartbeat = setInterval(() => {
+          void invoke("touch_automation_claim", {
+            repoKey: claimKey,
+            target: claimTarget,
+            headSha,
+            action,
+          }).catch(() => undefined);
+        }, CLAIM_HEARTBEAT_MS);
+      }
       const result = await generateReviewText(
         reviewCfg,
         action,

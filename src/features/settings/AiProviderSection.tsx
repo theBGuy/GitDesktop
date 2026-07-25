@@ -1011,8 +1011,8 @@ export const AiProviderSection = withForm({
               </Select>
               <p className="text-xs text-muted-foreground">
                 How long an agent-CLI review may run before it's stopped. Auto
-                allows 5 minutes — 20 when the review is agentic; a fixed limit
-                applies to every review.
+                allows 5 minutes — 20 when the review is agentic (always, for
+                Codex); a fixed limit applies to every review.
               </p>
             </div>
           )}
