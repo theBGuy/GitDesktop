@@ -50,18 +50,36 @@ const {
 const base = import.meta.env.BASE_URL;
 const site = Astro.site!;
 
+// Site-relative paths get the base joined (a no-op at base "/") so every URL
+// this head emits agrees with canonicalUrl under the documented /GitDesktop/
+// base contingency; already-composed helper output passes through untouched.
+const withBase = (p: string) =>
+  p.startsWith(base)
+    ? p
+    : base.replace(/\/$/, "") + (p.startsWith("/") ? p : `/${p}`);
+
+// The site's front door WITH the base — the anchor for every URL that means
+// "this site" rather than a path on it (Organization/WebSite url, the Home
+// crumb, and the #fragment @ids). site.href alone would name the account
+// root under the /GitDesktop/ contingency.
+const homeUrl = new URL(base, site).href;
+
 // Canonical from the PATH ONLY. Dropping the query string is what collapses the
 // ?ai=off / ?ai=0 view-toggle variants of every page onto a single URL — the
 // toggle rewrites the querystring via history.replaceState, so without this
-// every page has three crawlable spellings.
+// every page has three crawlable spellings. (Astro.url.pathname already
+// carries the base, so no withBase here.)
 const canonicalUrl = canonical ?? new URL(Astro.url.pathname, site).href;
-const ogImageUrl = new URL(ogImage, site).href;
+// ogImage may be absolute ("https://…") — only site-relative values compose.
+const ogImageUrl = /^https?:/i.test(ogImage)
+  ? ogImage
+  : new URL(withBase(ogImage), site).href;
 
 // Endpoints with a file extension 404 on a trailing slash in Astro 6, and
 // Cloudflare only ADDS slashes to extension-less paths — so these two must stay
 // slash-less even though every page route carries one.
-const sitemapUrl = new URL("sitemap-index.xml", site).href;
-const feedUrl = new URL("rss.xml", site).href;
+const sitemapUrl = new URL(withBase("/sitemap-index.xml"), site).href;
+const feedUrl = new URL(withBase("/rss.xml"), site).href;
 
 // Entity / knowledge-graph work, deliberately NOT rich-result chasing: no
 // FAQPage (rich results removed sitewide 2026-05-07), no aggregateRating (no
@@ -69,34 +87,27 @@ const feedUrl = new URL("rss.xml", site).href;
 const graph: Record<string, unknown>[] = [
   {
     "@type": "Organization",
-    "@id": new URL("#organization", site).href,
+    "@id": new URL("#organization", homeUrl).href,
     name: "GitDesktop",
-    url: site.href,
-    logo: new URL("app-icon.svg", site).href,
+    url: homeUrl,
+    logo: new URL(withBase("/app-icon.svg"), site).href,
     description: canonicalSentence,
     sameAs: ["https://github.com/theBGuy/GitDesktop"],
   },
   {
     "@type": "WebSite",
-    "@id": new URL("#website", site).href,
+    "@id": new URL("#website", homeUrl).href,
     name: "GitDesktop",
-    url: site.href,
-    publisher: { "@id": new URL("#organization", site).href },
+    url: homeUrl,
+    publisher: { "@id": new URL("#organization", homeUrl).href },
   },
 ];
-
-// Crumb paths arrive as root-absolute literals ("/blog/") or as already
-// base-composed helper output (postUrl/tagUrl). Join the base onto the former
-// so BreadcrumbList items agree with canonicalUrl under the documented
-// /GitDesktop/ base contingency; at base "/" this is a no-op.
-const withBase = (p: string) =>
-  p.startsWith(base) ? p : base.replace(/\/$/, "") + p;
 
 if (breadcrumbs && breadcrumbs.length > 0) {
   graph.push({
     "@type": "BreadcrumbList",
     itemListElement: [
-      { "@type": "ListItem", position: 1, name: "Home", item: site.href },
+      { "@type": "ListItem", position: 1, name: "Home", item: homeUrl },
       ...breadcrumbs.map((crumb, i) => ({
         "@type": "ListItem",
         position: i + 2,
@@ -123,7 +134,7 @@ if (ogType === "article" && publishedTime) {
     ...(articleAuthor && {
       author: { "@type": "Person", name: articleAuthor },
     }),
-    publisher: { "@id": new URL("#organization", site).href },
+    publisher: { "@id": new URL("#organization", homeUrl).href },
   });
 }
 

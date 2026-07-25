@@ -59,6 +59,10 @@ const releasedOn = rel.publishedAt
 // honest rating source exists, and fabricating one violates structured-data
 // policy), which also means no rich-result eligibility. That's the accepted
 // trade-off.
+
+// The trailing replace is the same < escape as Head.astro's graph;
+// rel.version is external build-time data (the live GitHub API, or
+// package.json on the fallback path — hence the rel.live gate below).
 const softwareLd = JSON.stringify({
   "@context": "https://schema.org",
   "@type": "SoftwareApplication",
@@ -73,8 +77,6 @@ const softwareLd = JSON.stringify({
   license: "https://www.apache.org/licenses/LICENSE-2.0",
   url: "https://gitdesktop.app/",
   sameAs: "https://github.com/theBGuy/GitDesktop",
-  // Same < escape as Head.astro's graph — rel.version comes from the
-  // GitHub API at build time.
 }).replace(/</g, "\\u003c");
 ---
 
