@@ -126,6 +126,18 @@ const SYSTEM_PROMPT =
   "Do NOT commit — the app commits each turn so the user can review it. When " +
   "finished with a turn, briefly summarize what you changed.";
 
+/** The handoff record that seeds the new-session composer. */
+export interface PendingTask {
+  repoPath: string;
+  prompt: string;
+  /** The composer's isolation pick, carried across a Settings round-trip: the
+   *  "Set up in Settings…" jump unmounts RepositoryView (App.tsx renders it behind
+   *  `view === "repo"`), so the composer's local state would otherwise be lost and
+   *  the session would silently fall back to the global setting. Absent (the plain
+   *  handoff case) = leave the composer's own pick alone. */
+  isolation?: "worktree" | "container";
+}
+
 interface SessionsState {
   /** All sessions, in creation order. Each runs in its own worktree. */
   sessions: AgentSession[];
@@ -142,10 +154,10 @@ interface SessionsState {
    *  cleared by the activation composer once it loads it. Lets the handoff cross
    *  the tab/Activity boundary without an imperative ref. `repoPath` scopes it so
    *  only that repo's composer picks it up. */
-  pendingTask: { repoPath: string; prompt: string } | null;
+  pendingTask: PendingTask | null;
   hydrate: () => Promise<void>;
   setActive: (id: string | null) => void;
-  setPendingTask: (task: { repoPath: string; prompt: string } | null) => void;
+  setPendingTask: (task: PendingTask | null) => void;
   start: (
     repoPath: string,
     prompt: string,

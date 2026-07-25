@@ -235,6 +235,9 @@ export function SessionComposer({
   const ref = useRef<HTMLTextAreaElement>(null);
   // Ties the disabled-Send explanation to the button via aria-describedby.
   const blockedId = useId();
+  // Latched while this composer stashes its own state for a Settings round-trip,
+  // so the consume effect doesn't eat the record before the unmount.
+  const stashingRef = useRef(false);
 
   const running = session?.running ?? false;
   const model = session ? session.model : startModel;
@@ -284,11 +287,21 @@ export function SessionComposer({
   // point SessionActivation has forced "Delegate" mode and mounted this composer.
   // biome-ignore lint/correctness/useExhaustiveDependencies: stable setters/ref only
   useEffect(() => {
-    if (session || !pendingTask || pendingTask.repoPath !== repoPath) return;
+    if (
+      session ||
+      stashingRef.current ||
+      !pendingTask ||
+      pendingTask.repoPath !== repoPath
+    )
+      return;
     setMention(null);
     setSlash(null);
     setHistIndex(null);
     setDraftCaretEnd(pendingTask.prompt);
+    // A record stashed by the "Set up in Settings…" jump also carries the
+    // isolation pick, so returning from Settings restores it rather than silently
+    // falling back to the global setting. A plain handoff omits it.
+    if (pendingTask.isolation) setStartIsolation(pendingTask.isolation);
     setPendingTask(null);
   }, [session, pendingTask, repoPath]);
 
@@ -374,6 +387,7 @@ export function SessionComposer({
   // actually set to run in a container AND the Agent tab is showing — an
   // <Activity>-hidden subtree still fetches.
   const agentTabShowing = useUiStore((s) => s.repoTab === "agent");
+  const openSettings = useUiStore((s) => s.openSettings);
   const containerStatus = useContainerStatus({
     nodeVersion: settings.data?.agentImageNodeVersion ?? "",
     providers: settings.data?.agentImageProviders ?? NO_PROVIDERS,
@@ -420,6 +434,27 @@ export function SessionComposer({
         agentInImage,
       });
   const blockedReason = isolationNote?.text ?? CONTAINER_BLOCKED_TEXT;
+  // The note's "Set up in Settings…" jump. Opening Settings unmounts
+  // RepositoryView (App.tsx renders it behind `view === "repo"`), which would take
+  // this composer's draft AND its isolation pick with it — a task typed, switched
+  // to Container, then sent to Settings to build the image would come back empty
+  // and silently back on the host. Stash both on the existing pendingTask record
+  // first; the activation composer re-seeds from it on remount.
+  const openIsolationSettings = () => {
+    // `openSettings` flips the view inside a view-transition callback (see
+    // lib/view-transition.ts — `doc.startViewTransition(() => flushSync(update))`),
+    // so the stash below commits a render BEFORE the unmount. Without this latch
+    // the consume effect would eat the record in that window and there'd be
+    // nothing left to restore. The ref dies with the unmount, so the remounted
+    // composer consumes normally.
+    stashingRef.current = true;
+    setPendingTask({
+      repoPath,
+      prompt: draft,
+      isolation: startIsolation ?? undefined,
+    });
+    openSettings("ai");
+  };
   // Servers the chosen agent can actually run (Codex = local/stdio only).
   const mcpServersForAgent = useMemo(
     () => mcpRegistry.filter((s) => mcpServerUsableBy(s, startAgent)),
@@ -890,6 +925,7 @@ export function SessionComposer({
                           startIsolation !== null &&
                           startIsolation !== globalIsolation,
                         note: isolationNote,
+                        onSettingsAction: openIsolationSettings,
                       }
                 }
                 mcp={composerMcp}
