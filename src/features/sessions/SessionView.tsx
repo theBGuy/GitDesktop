@@ -211,7 +211,10 @@ function SessionCanvas({
               <span className="text-muted-foreground" aria-hidden>
                 ·
               </span>
-              <IsolationChip isolation={session.isolation} />
+              <IsolationChip
+                isolation={session.isolation}
+                agent={session.agent}
+              />
               {prAudit && (
                 <>
                   <span className="text-muted-foreground" aria-hidden>
@@ -487,12 +490,15 @@ function SessionCanvas({
  * is fixed at creation and can now be overridden per session (the composer's Options
  * → Isolation row), so two Active sessions in the same repo can differ — the mode
  * has to be readable after the fact, not only at start. Mirrors the PrAuditChip
- * idiom: icon + text (never color alone), muted, with the caveat in the title.
+ * idiom: icon + text (never color alone), muted, with the caveat in the title. The
+ * host caveat is per-agent: only Codex brings its own OS-enforced sandbox there.
  */
 function IsolationChip({
   isolation,
+  agent,
 }: {
   isolation: AgentSession["isolation"];
+  agent: AgentSession["agent"];
 }) {
   const container = isolation === "container";
   const Icon = container ? CubeIcon : TreeStructureIcon;
@@ -502,7 +508,9 @@ function IsolationChip({
       title={
         container
           ? "Runs in an ephemeral container — file writes are confined by the kernel."
-          : "Runs on the host in a throwaway worktree — file writes are confined by convention, not the kernel."
+          : agent === "codex"
+            ? "Runs on the host in a throwaway worktree — Codex keeps its own OS-enforced sandbox."
+            : "Runs on the host in a throwaway worktree — file writes are confined by convention, not the kernel."
       }
     >
       <Icon weight="bold" className="size-3" />
