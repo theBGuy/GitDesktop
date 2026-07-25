@@ -1,0 +1,492 @@
+---
+// GitDesktop vs GitHub Desktop — the biggest winnable query for this site
+// ("github desktop alternative") against the slowest-moving competitor.
+//
+// Every row below is distilled from the local competitive audit, re-grounded
+// 2026-07-24 against GitHub Desktop stable 3.6.3 (released 2026-07-16 —
+// re-confirmed latest via the desktop/desktop releases API on 2026-07-25).
+// The verified-on stamp is rendered on the page; when a row changes upstream,
+// update the stamp in the same edit. A stale comparison is worse than none —
+// it's the first thing an HN thread checks.
+//
+// Row states are WORDS ("Yes" / "Partial" / "No"), never color or glyph alone.
+import { Image } from "astro:assets";
+import appGithubPr from "../../assets/app-github-pr.png";
+import SiteLayout from "../../layouts/SiteLayout.astro";
+
+const base = import.meta.env.BASE_URL;
+const repo = "https://github.com/theBGuy/GitDesktop";
+const download = `${base}download/`;
+
+const VERIFIED_ON = "July 25, 2026";
+const GHD_VERSION = "3.6.3";
+
+type State = "yes" | "partial" | "no";
+interface Cell {
+  state: State;
+  note?: string;
+}
+interface Row {
+  label: string;
+  ghd: Cell;
+  gd: Cell;
+}
+interface Group {
+  title: string;
+  rows: Row[];
+}
+
+// Distilled to the rows where the two clients genuinely diverge (plus a few
+// load-bearing parity rows). The full matrix behind this runs ~130 rows; both
+// clients cover the fundamentals, which the intro says in prose instead of
+// padding the table.
+const groups: Group[] = [
+  {
+    title: "Where you can use it",
+    rows: [
+      {
+        label: "Forges with full PR / CI / issue support",
+        ghd: { state: "partial", note: "GitHub only" },
+        gd: { state: "yes", note: "GitHub, GitLab & Bitbucket" },
+      },
+      {
+        label: "Linux",
+        ghd: { state: "no", note: "macOS & Windows" },
+        gd: { state: "yes", note: "Windows, macOS & Linux" },
+      },
+      {
+        label: "GitHub Enterprise",
+        ghd: { state: "yes" },
+        gd: { state: "yes", note: "via gh, per-host accounts" },
+      },
+      {
+        label: "Jira",
+        ghd: { state: "no" },
+        gd: { state: "yes", note: "linked Jira Cloud project per repo" },
+      },
+    ],
+  },
+  {
+    title: "Pull requests",
+    rows: [
+      {
+        label: "Read & review a PR in-app",
+        ghd: {
+          state: "partial",
+          note: "checks view; hands off to the browser",
+        },
+        gd: {
+          state: "yes",
+          note: "conversation, files, checks, approve / request changes",
+        },
+      },
+      {
+        label: "Merge a PR in-app",
+        ghd: { state: "no" },
+        gd: { state: "yes", note: "merge / squash / rebase" },
+      },
+      {
+        label: "Edit title, labels, reviewers",
+        ghd: { state: "no" },
+        gd: { state: "yes" },
+      },
+      {
+        label: "Local PRs with no remote at all",
+        ghd: { state: "no" },
+        gd: {
+          state: "yes",
+          note: "review & merge offline, promote to GitHub later",
+        },
+      },
+    ],
+  },
+  {
+    title: "CI",
+    rows: [
+      {
+        label: "PR checks rollup",
+        ghd: { state: "yes" },
+        gd: { state: "yes", note: "with a failing job's log peeked inline" },
+      },
+      {
+        label: "Browse all workflow runs",
+        ghd: { state: "no", note: "PR-scoped checks only" },
+        gd: { state: "yes", note: "dedicated Actions tab" },
+      },
+      {
+        label: "Dispatch, cancel, re-run workflows",
+        ghd: { state: "partial", note: "re-run only" },
+        gd: { state: "yes" },
+      },
+      {
+        label: "Failed-step logs in-app",
+        ghd: { state: "no" },
+        gd: { state: "yes" },
+      },
+    ],
+  },
+  {
+    title: "Issues & discussions",
+    rows: [
+      {
+        label: "Issues",
+        ghd: { state: "no", note: "opens github.com" },
+        gd: { state: "yes", note: "GitHub & GitLab in-app; local issues too" },
+      },
+      {
+        label: "GitHub Discussions",
+        ghd: { state: "no" },
+        gd: { state: "yes" },
+      },
+    ],
+  },
+  {
+    title: "History & safety",
+    rows: [
+      {
+        label: "File history & blame",
+        ghd: { state: "no", note: "opens github.com" },
+        gd: { state: "yes", note: "rename-following history, per-line blame" },
+      },
+      {
+        label: "Interactive rebase",
+        ghd: { state: "partial", note: "squash & reorder only" },
+        gd: {
+          state: "yes",
+          note: "pick / reword / squash / fixup / edit / drop",
+        },
+      },
+      {
+        label: "Predict a merge before running it",
+        ghd: { state: "no" },
+        gd: {
+          state: "yes",
+          note: "fast-forward / clean / conflicts, previewed in memory",
+        },
+      },
+      {
+        label: "Recover dropped stashes",
+        ghd: { state: "no" },
+        gd: { state: "yes", note: "a git fsck scan finds and restores them" },
+      },
+      {
+        label: "Force push",
+        ghd: { state: "partial", note: "plain force push" },
+        gd: {
+          state: "yes",
+          note: "--force-with-lease only, behind divergence detection",
+        },
+      },
+      {
+        label: "Git hooks management",
+        ghd: { state: "no" },
+        gd: {
+          state: "yes",
+          note: "view / edit / disable, templates, husky & pre-commit aware",
+        },
+      },
+      {
+        label: "Linked worktrees",
+        ghd: { state: "yes", note: "since 3.6" },
+        gd: { state: "yes", note: "plus worktree-aware branch switching" },
+      },
+    ],
+  },
+  {
+    title: "AI — or none at all",
+    rows: [
+      {
+        label: "AI without a Copilot relationship",
+        ghd: {
+          state: "no",
+          note: "Copilot access required (Copilot Free qualifies)",
+        },
+        gd: {
+          state: "yes",
+          note: "your own keys, local Ollama, or keyless CLI agents",
+        },
+      },
+      {
+        label: "AI code review & security audit",
+        ghd: { state: "no" },
+        gd: {
+          state: "yes",
+          note: "dedicated review model, postable as a PR comment",
+        },
+      },
+      {
+        label: "Keep files out of AI context",
+        ghd: { state: "no" },
+        gd: { state: "yes", note: "gitignore-style AI-ignore patterns" },
+      },
+      {
+        label: "Hide every AI surface",
+        ghd: { state: "no" },
+        gd: { state: "yes", note: "one setting, nothing left behind" },
+      },
+    ],
+  },
+  {
+    title: "Cost & code",
+    rows: [
+      {
+        label: "Price",
+        ghd: { state: "yes", note: "free" },
+        gd: { state: "yes", note: "free" },
+      },
+      {
+        label: "Open source",
+        ghd: { state: "yes", note: "MIT" },
+        gd: { state: "yes", note: "Apache-2.0" },
+      },
+    ],
+  },
+];
+
+// Rendering the state as text keeps meaning off color alone (WCAG) and off
+// glyphs alone (screen readers).
+const stateText: Record<State, string> = {
+  yes: "Yes",
+  partial: "Partial",
+  no: "No",
+};
+const stateClass: Record<State, string> = {
+  yes: "text-ink",
+  partial: "text-muted",
+  no: "text-faint",
+};
+
+const faqs = [
+  {
+    q: "Is GitDesktop a GitHub Desktop alternative?",
+    a: "Yes. GitDesktop is a free, open-source (Apache-2.0) GitHub Desktop alternative for Windows, macOS, and Linux. GitDesktop covers the same daily loop — staging, branches, history, diffs, sync — and adds the parts GitHub Desktop hands to the browser: reading, reviewing, and merging pull requests, browsing CI runs, and working issues, across GitHub, GitLab, and Bitbucket.",
+  },
+  {
+    q: "Does GitHub Desktop work with GitLab or Bitbucket?",
+    a: "No. GitHub Desktop can push and pull any git remote, but its hosted features — pull requests, checks, sign-in — are GitHub-only. GitDesktop runs the same pull-request, CI, and issue panels against GitHub, GitLab, and Bitbucket, each on its own authenticated identity.",
+  },
+  {
+    q: "Do you need GitHub Copilot for AI features?",
+    a: "In GitHub Desktop, yes — its commit messages and conflict resolution are Copilot-powered and require Copilot access, even when bringing your own key. In GitDesktop, no — AI runs on your own Anthropic, OpenAI, or OpenRouter key, a local Ollama model, or a keyless CLI agent, and one setting hides every AI surface entirely.",
+  },
+  {
+    q: "What about the GitHub Copilot app?",
+    a: "The GitHub Copilot app is GitHub's second desktop product: an agent-orchestration shell with no manual Git surface — no staging, branching, or diffs you drive yourself, and GitHub-only. GitDesktop does both jobs in one window: a full manual Git client and agent delegation, on any of the three forges.",
+  },
+];
+---
+
+<SiteLayout
+  title="GitDesktop vs GitHub Desktop — an honest comparison"
+  description="GitDesktop vs GitHub Desktop, verified July 2026: forges, the PR loop, CI, issues, recovery, and optional AI — plus what GitHub Desktop still does better."
+  ogTitle="GitDesktop vs GitHub Desktop"
+  ogDescription="Forges, the PR loop, CI, issues, recovery tooling, and optional AI — an honest, dated comparison."
+  breadcrumbs={[{ name: "GitDesktop vs GitHub Desktop", path: "/compare/github-desktop/" }]}
+>
+  <section class="border-b border-line">
+    <div class="mx-auto max-w-6xl px-5 py-16 md:py-20">
+      <p data-reveal class="text-sm text-faint"><span class="text-add">//</span> compare</p>
+      <h1
+        data-reveal
+        style="transition-delay:60ms"
+        class="mt-5 max-w-[24ch] text-[clamp(1.9rem,4.5vw,3rem)] font-semibold tracking-tight"
+      >
+        GitDesktop vs GitHub Desktop
+      </h1>
+      {/* Answer-first: the paragraph a search snippet or answer engine lifts. */}
+      <p
+        data-reveal
+        style="transition-delay:120ms"
+        class="mt-6 max-w-[62ch] text-base leading-relaxed text-body sm:text-lg"
+      >
+        GitDesktop is a free, open-source GitHub Desktop alternative that keeps
+        the same approachable daily loop and adds what GitHub Desktop sends to
+        the browser: the full pull-request loop, CI, and issues — across
+        <span class="text-ink">GitHub, GitLab, and Bitbucket</span> — with AI
+        that runs on your own models, or switches off entirely.
+      </p>
+      <p data-reveal style="transition-delay:180ms" class="mt-5 text-sm text-muted">
+        Verified against GitHub Desktop {GHD_VERSION} (stable) on {VERIFIED_ON}.
+        Something stale?
+        <a href={`${repo}/issues`} class="text-mint underline-offset-4 hover:underline"
+          >Open an issue</a
+        >.
+      </p>
+    </div>
+  </section>
+
+  <!-- Fairness first: the honest column is what makes the table credible. -->
+  <section class="border-b border-line">
+    <div class="mx-auto max-w-6xl px-5 py-14 md:py-16">
+      <h2 data-reveal class="text-balance text-2xl tracking-[-0.02em] sm:text-3xl">
+        Where GitHub Desktop still wins
+      </h2>
+      <ul data-reveal style="transition-delay:80ms" class="mt-8 max-w-[70ch] space-y-4">
+        <li class="flex items-start gap-2.5 leading-relaxed text-body">
+          <span class="mt-px select-none text-add" aria-hidden="true">+</span>
+          <span>
+            <span class="text-ink">Zero prerequisites.</span> GitHub Desktop bundles
+            its own Git and signs in with a browser OAuth flow. GitDesktop needs
+            system Git, plus <code class="text-ink">gh</code> or
+            <code class="text-ink">glab</code> for forge features — sign-in is
+            guided from inside the app, but it's still a real first-run step.
+          </span>
+        </li>
+        <li class="flex items-start gap-2.5 leading-relaxed text-body">
+          <span class="mt-px select-none text-add" aria-hidden="true">+</span>
+          <span>
+            <span class="text-ink">Simplicity as a feature.</span> Fewer surfaces,
+            fewer concepts. If a teammate is new to Git, GitHub Desktop's smaller
+            world is a gentler place to start.
+          </span>
+        </li>
+        <li class="flex items-start gap-2.5 leading-relaxed text-body">
+          <span class="mt-px select-none text-add" aria-hidden="true">+</span>
+          <span>
+            <span class="text-ink">Git LFS.</span> GitHub Desktop handles LFS repos
+            with more built-in affordance; GitDesktop relies on a system
+            <code class="text-ink">git-lfs</code> install working transparently,
+            with no dedicated UI yet.
+          </span>
+        </li>
+        <li class="flex items-start gap-2.5 leading-relaxed text-body">
+          <span class="mt-px select-none text-add" aria-hidden="true">+</span>
+          <span>
+            <span class="text-ink">A decade of first-party trust.</span> It's made
+            by GitHub, battle-tested by millions, and if your org only blesses
+            first-party tooling, that settles it.
+          </span>
+        </li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="border-b border-line bg-surface/30">
+    <div class="mx-auto max-w-6xl px-5 py-14 md:py-16">
+      <h2 data-reveal class="text-balance text-2xl tracking-[-0.02em] sm:text-3xl">
+        Feature by feature
+      </h2>
+      <p data-reveal class="mt-5 max-w-[66ch] leading-relaxed text-body">
+        Both clients cover the fundamentals — clone, stage by file, hunk, or
+        line, commit, branch, stash, sync, and resolve conflicts. The table
+        keeps to where they diverge.
+      </p>
+
+      <div data-reveal style="transition-delay:80ms" class="mt-10 overflow-x-auto">
+        <table class="w-full min-w-[640px] border-collapse text-[15px]">
+          <thead>
+            <tr class="border-b border-line-2 text-left">
+              <th scope="col" class="py-3 pr-6 font-normal text-faint">Capability</th>
+              <th scope="col" class="w-[26%] py-3 pr-6 font-medium text-ink">GitHub Desktop</th>
+              <th scope="col" class="w-[30%] py-3 font-medium text-ink">GitDesktop</th>
+            </tr>
+          </thead>
+          {
+            groups.map((group) => (
+              <tbody>
+                <tr>
+                  <th
+                    scope="colgroup"
+                    colspan="3"
+                    class="pb-2 pt-8 text-left text-sm font-normal text-faint"
+                  >
+                    <span class="text-add" aria-hidden="true">//</span> {group.title}
+                  </th>
+                </tr>
+                {group.rows.map((row) => (
+                  <tr class="border-b border-line align-top">
+                    <th scope="row" class="py-3.5 pr-6 text-left font-normal text-body">
+                      {row.label}
+                    </th>
+                    <td class="py-3.5 pr-6">
+                      <span class={stateClass[row.ghd.state]}>{stateText[row.ghd.state]}</span>
+                      {row.ghd.note && <span class="text-sm text-muted"> — {row.ghd.note}</span>}
+                    </td>
+                    <td class="py-3.5">
+                      <span class={stateClass[row.gd.state]}>{stateText[row.gd.state]}</span>
+                      {row.gd.note && <span class="text-sm text-muted"> — {row.gd.note}</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            ))
+          }
+        </table>
+      </div>
+
+      <p class="mt-6 max-w-[66ch] text-sm leading-relaxed text-muted">
+        Distilled from a ~130-row working matrix, re-checked against GitHub
+        Desktop's release notes and changelog. Rows where both clients are
+        simply fine were left out on purpose.
+      </p>
+    </div>
+  </section>
+
+  <section class="border-b border-line">
+    <div class="mx-auto max-w-6xl px-5 py-16 md:py-20">
+      <div class="max-w-2xl">
+        <h2 data-reveal class="text-balance text-2xl tracking-[-0.02em] sm:text-3xl">
+          The part GitHub Desktop hands to the browser
+        </h2>
+        <p data-reveal class="mt-5 leading-relaxed text-body">
+          The single biggest daily difference: a pull request's conversation,
+          changed files, CI checks, review actions, and the merge itself all
+          happen in the same window as your staging and history.
+        </p>
+      </div>
+      <figure data-reveal style="transition-delay:120ms" class="window mt-10">
+        <Image
+          src={appGithubPr}
+          alt="A GitHub pull request in GitDesktop: CI checks with per-job status, an automated AI review, and the merge action — none of which GitHub Desktop shows in-app"
+          widths={[720, 1080, 1440]}
+          sizes="(min-width: 1024px) 1100px, 94vw"
+          format="webp"
+          quality={82}
+          loading="lazy"
+        />
+      </figure>
+    </div>
+  </section>
+
+  <!-- Visible Q&A — extraction-shaped HTML on purpose (no FAQPage JSON-LD:
+       Google removed FAQ rich results sitewide in May 2026; retrieval reads
+       the visible text). -->
+  <section class="border-b border-line bg-surface/30">
+    <div class="mx-auto max-w-6xl px-5 py-14 md:py-16">
+      <h2 data-reveal class="text-balance text-2xl tracking-[-0.02em] sm:text-3xl">
+        Common questions
+      </h2>
+      <div data-reveal style="transition-delay:80ms" class="mt-8 grid gap-x-12 gap-y-10 lg:grid-cols-2">
+        {
+          faqs.map((f) => (
+            <div class="min-w-0">
+              <h3 class="text-lg text-ink">{f.q}</h3>
+              <p class="mt-3 max-w-[58ch] text-[15px] leading-relaxed text-body">{f.a}</p>
+            </div>
+          ))
+        }
+      </div>
+    </div>
+  </section>
+
+  <section class="relative overflow-hidden">
+    <div class="grid-bg pointer-events-none absolute inset-0 opacity-60"></div>
+    <div class="relative mx-auto max-w-6xl px-5 py-16 text-center md:py-20">
+      <h2 data-reveal class="text-balance text-2xl tracking-tight sm:text-3xl">
+        Try the whole loop.
+      </h2>
+      <p data-reveal style="transition-delay:80ms" class="mx-auto mt-5 max-w-[48ch] leading-relaxed text-body">
+        Free and open source. Keep GitHub Desktop installed — nothing here needs
+        an account, a migration, or a goodbye.
+      </p>
+      <div data-reveal style="transition-delay:140ms" class="mt-8 flex flex-wrap items-center justify-center gap-3">
+        <a href={download} class="rounded-lg bg-mint px-6 py-3 font-medium text-mint-ink transition-opacity hover:opacity-90">
+          Download GitDesktop
+        </a>
+        <a href={`${base}features/`} class="rounded-lg border border-line-2 px-6 py-3 font-medium text-ink transition-colors hover:bg-surface">
+          See every feature
+        </a>
+      </div>
+    </div>
+  </section>
+</SiteLayout>
