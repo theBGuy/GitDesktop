@@ -9,12 +9,13 @@ import pkg from "../../../package.json";
 //      asset names). Guarded by a timeout and a catch so a rate-limited or
 //      offline build (CI, Cloudflare) never fails — it falls back to…
 //   2. …the root package.json version (the same field tauri.conf.json reads,
-//      so it IS the released version) plus asset-name patterns verified
-//      against the live v0.5.2 release on 2026-07-25.
+//      so it IS the released version) with NO asset list — consumers gate
+//      direct asset links and version text on `live` (falling back to the
+//      releases page / empty text), because a guessed link 404s whenever a
+//      version bump lands before its release is published.
 //
-// Baked data goes stale between a release and the next site deploy — the fix
-// is a Cloudflare Pages Deploy Hook fired from release.yml on publish
-// (owner-side; see the plan).
+// Baked data goes stale between a release and the next site deploy — closed
+// by .github/workflows/site-rebuild.yml (deploy hook on release publish).
 
 const REPO = "theBGuy/GitDesktop";
 
@@ -37,15 +38,12 @@ function fallback(): ReleaseInfo {
     tag: `v${v}`,
     version: v,
     publishedAt: null,
-    // Patterns confirmed against the real release assets — note the rpm's
-    // divergent dash-and-release-number shape.
-    assets: [
-      `GitDesktop_${v}_x64-setup.exe`,
-      `GitDesktop_${v}_universal.dmg`,
-      `GitDesktop_${v}_amd64.AppImage`,
-      `GitDesktop_${v}_amd64.deb`,
-      `GitDesktop-${v}-1.x86_64.rpm`,
-    ],
+    // Deliberately empty — never guess asset names. release:prepare bumps
+    // package.json BEFORE the release is published, so a fabricated
+    // `releases/download/v<next>/…` link would 404 for every no-JS visitor
+    // of a build that raced that window. An empty list makes assetBySuffix
+    // return null and the download page fall back to the releases index.
+    assets: [],
     live: false,
   };
 }

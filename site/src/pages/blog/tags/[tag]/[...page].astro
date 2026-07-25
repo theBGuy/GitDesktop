@@ -9,32 +9,46 @@ import {
   type Post,
   postUrl,
   readingTime,
+  tagUrl,
 } from "../../../../lib/posts";
 
 // Static pages, not a client-side filter row: linkable, crawlable, and
 // keyboard-reachable for free, with no second stateful widget to wire up.
 export const getStaticPaths = (async ({ paginate }) => {
   const [posts, tags] = await Promise.all([getPosts(), getTags()]);
-  return tags.flatMap(({ tag }) =>
-    paginate(
-      posts.filter((p) => p.data.tags.includes(tag)),
-      { pageSize: 10, params: { tag }, props: { tag } },
-    ),
-  );
+  return tags.flatMap(({ tag }) => {
+    const tagged = posts.filter((p) => p.data.tags.includes(tag));
+    // aiTotal rides along so the Just-Git header count can be honest about
+    // the rows that view hides (the per-page notice recounts page.data).
+    return paginate(tagged, {
+      pageSize: 10,
+      params: { tag },
+      props: { tag, aiTotal: tagged.filter((p) => p.data.ai).length },
+    });
+  });
 }) satisfies GetStaticPaths;
 
 interface Props {
   page: Page<Post>;
   tag: string;
+  /** AI posts across the WHOLE tag, for the header's Just-Git count. */
+  aiTotal: number;
 }
 
-const { page, tag } = Astro.props;
+const { page, tag, aiTotal } = Astro.props;
 const base = import.meta.env.BASE_URL;
+// This page's hidden rows, for the same notice the blog index shows.
+const aiCount = page.data.filter((p) => p.data.ai).length;
 ---
 
 <SiteLayout
   active="blog"
   feed
+  breadcrumbs={[
+    { name: "Blog", path: "/blog/" },
+    { name: "Topics", path: "/blog/tags/" },
+    { name: tag, path: tagUrl(tag) },
+  ]}
   title={`${tag} — GitDesktop blog`}
   description={`Every GitDesktop post tagged ${tag}: engineering notes from building a native Git client for GitHub, GitLab and Bitbucket.`}
   ogTitle={`Posts tagged ${tag}`}
@@ -52,13 +66,36 @@ const base = import.meta.env.BASE_URL;
         {tag}
       </h1>
       <p class="mt-5 text-body">
-        {page.total} {page.total === 1 ? "post" : "posts"}.
+        <span data-view="ai">
+          {page.total} {page.total === 1 ? "post" : "posts"}.
+        </span>
+        <span data-view="git">
+          {page.total - aiTotal}{" "}
+          {page.total - aiTotal === 1 ? "post" : "posts"}.
+        </span>
       </p>
     </div>
   </section>
 
   <section>
     <div class="mx-auto max-w-6xl px-5 py-6 md:py-10">
+      {
+        aiCount > 0 && (
+          /* Same notice as the blog index — a list that silently drops rows
+             reads as broken in Just Git. */
+          <p data-view="git" class="pb-6 text-sm text-muted">
+            {aiCount} AI-related {aiCount === 1 ? "post is" : "posts are"}{" "}
+            hidden.{" "}
+            <button
+              type="button"
+              data-mode-btn="ai"
+              class="cursor-pointer text-mint underline decoration-line-2 underline-offset-4 transition-colors hover:decoration-mint"
+            >
+              Show them
+            </button>
+          </p>
+        )
+      }
       <ul class="divide-y divide-line border-y border-line">
         {
           page.data.map((post) => (

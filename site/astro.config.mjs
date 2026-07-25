@@ -1,6 +1,17 @@
+import { readdirSync } from "node:fs";
 import sitemap from "@astrojs/sitemap";
 import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "astro/config";
+
+// Slugs that are real posts, so the pagination filter below can't swallow a
+// post that happens to have an all-numeric slug (a "2026.md" year review
+// builds /blog/2026/ — indistinguishable from page 2026 of the index by URL
+// shape alone). Mirrors the content loader's `[^_]*.md` pattern.
+const postSlugs = new Set(
+  readdirSync(new URL("./src/content/blog", import.meta.url))
+    .filter((f) => f.endsWith(".md") && !f.startsWith("_"))
+    .map((f) => f.replace(/\.md$/, "")),
+);
 
 // Served on Cloudflare Pages at the apex domain https://gitdesktop.app/.
 // (Previously GitHub Pages at https://thebguy.github.io/GitDesktop/ — if you
@@ -29,8 +40,12 @@ export default defineConfig({
   integrations: [
     sitemap({
       // Paginated indexes are navigation, not destinations — every post they
-      // list is already in the sitemap under its own URL.
-      filter: (page) => !/\/blog\/(tags\/[^/]+\/)?\d+\/$/.test(page),
+      // list is already in the sitemap under its own URL. A trailing numeric
+      // segment is dropped only when it is NOT a real post slug.
+      filter: (page) => {
+        const m = page.match(/\/blog\/(?:tags\/[^/]+\/)?(\d+)\/$/);
+        return !m || postSlugs.has(m[1]);
+      },
     }),
   ],
 

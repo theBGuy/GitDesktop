@@ -49,6 +49,7 @@ const toc = headings.filter((h) => h.depth === 2 || h.depth === 3);
   ogType="article"
   publishedTime={data.pubDate}
   modifiedTime={data.updatedDate}
+  articleAuthor={data.author}
   canonical={data.canonical}
 >
   <article>
@@ -271,8 +272,17 @@ const toc = headings.filter((h) => h.depth === 2 || h.depth === 3);
         if (!btn || !status) return;
         btn.addEventListener("click", function () {
           var url = location.href;
+          // Never hardcode the platform modifier (repo rule): Apple keyboards
+          // say ⌘C, everything else Ctrl+C.
+          var isApple = /Mac|iP(hone|ad|od)/i.test(
+            (navigator.userAgentData && navigator.userAgentData.platform) ||
+              navigator.platform ||
+              ""
+          );
           function done(ok) {
-            status.textContent = ok ? "Link copied." : "Press Ctrl+C to copy: " + url;
+            status.textContent = ok
+              ? "Link copied."
+              : "Press " + (isApple ? "⌘C" : "Ctrl+C") + " to copy: " + url;
           }
           if (navigator.clipboard && navigator.clipboard.writeText) {
             navigator.clipboard.writeText(url).then(

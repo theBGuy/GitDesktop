@@ -7,6 +7,7 @@
 // Every URL-shaped tag derives from Astro.site + the current pathname, so
 // nothing here can go stale when a route moves.
 import jetbrainsMonoLatin from "@fontsource-variable/jetbrains-mono/files/jetbrains-mono-latin-wght-normal.woff2?url";
+import { canonicalSentence } from "../lib/brand";
 
 interface Props {
   title: string;
@@ -20,6 +21,8 @@ interface Props {
   /** Emitted only when ogType is "article". */
   publishedTime?: Date;
   modifiedTime?: Date;
+  /** With ogType "article" + publishedTime, adds a BlogPosting JSON-LD node. */
+  articleAuthor?: string;
   /** Overrides the derived canonical — syndicated reposts only. */
   canonical?: string;
   /** Adds the RSS autodiscovery link. Blog surfaces only. */
@@ -38,6 +41,7 @@ const {
   ogType = "website",
   publishedTime,
   modifiedTime,
+  articleAuthor,
   canonical,
   feed = false,
   breadcrumbs,
@@ -58,17 +62,6 @@ const ogImageUrl = new URL(ogImage, site).href;
 // slash-less even though every page route carries one.
 const sitemapUrl = new URL("sitemap-index.xml", site).href;
 const feedUrl = new URL("rss.xml", site).href;
-
-// The one canonical description sentence, repeated verbatim wherever the
-// project describes itself (homepage footer, README, GitHub About, releases).
-// "GitDesktop" collides with GitHub Desktop and a discontinued macOS client at
-// gitdesktop.com, so every clause is a discriminator no competitor shares.
-const canonicalSentence =
-  "GitDesktop is a free, open-source (Apache-2.0) desktop Git client for " +
-  "Windows, macOS, and Linux, built with Tauri 2 and React 19 by theBGuy. " +
-  "It works with GitHub, GitLab, and Bitbucket — staging, diffs, branches, " +
-  "history, and the full pull-request loop with code review, CI, and issues " +
-  "— with optional AI you can hide entirely.";
 
 // Entity / knowledge-graph work, deliberately NOT rich-result chasing: no
 // FAQPage (rich results removed sitewide 2026-05-07), no aggregateRating (no
@@ -104,6 +97,26 @@ if (breadcrumbs && breadcrumbs.length > 0) {
         item: new URL(crumb.path, site).href,
       })),
     ],
+  });
+}
+
+// Posts get the one node type that actually benefits them. Gated on the same
+// article signals PostLayout already sends; publisher reuses the Organization
+// node by @id rather than duplicating it.
+if (ogType === "article" && publishedTime) {
+  graph.push({
+    "@type": "BlogPosting",
+    headline: ogTitle,
+    description: ogDescription,
+    url: canonicalUrl,
+    mainEntityOfPage: canonicalUrl,
+    image: ogImageUrl,
+    datePublished: publishedTime.toISOString(),
+    dateModified: (modifiedTime ?? publishedTime).toISOString(),
+    ...(articleAuthor && {
+      author: { "@type": "Person", name: articleAuthor },
+    }),
+    publisher: { "@id": new URL("#organization", site).href },
   });
 }
 

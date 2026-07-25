@@ -25,10 +25,13 @@ jobs:
       - name: Trigger Cloudflare Pages rebuild
         env:
           HOOK: ${{ secrets.CLOUDFLARE_PAGES_DEPLOY_HOOK }}
+          # Env indirection, never `${{ }}` inside `run`: a crafted tag name
+          # would otherwise execute in this shell, right next to the hook URL.
+          TAG: ${{ github.event.release.tag_name }}
         run: |
           if [ -z "$HOOK" ]; then
             echo "CLOUDFLARE_PAGES_DEPLOY_HOOK not set — skipping (site will refresh on the next site commit instead)."
             exit 0
           fi
           curl -fsS -X POST "$HOOK" > /dev/null
-          echo "Pages rebuild triggered for ${{ github.event.release.tag_name }}."
+          echo "Pages rebuild triggered for $TAG."

@@ -115,7 +115,7 @@ const forges = [
           >
         </div>
         <p data-reveal style="transition-delay:240ms" class="mt-6 text-sm text-muted">
-          <span data-dl-version>{rel.tag + " · "}</span>Windows, macOS &amp; Linux · Apache-2.0 ·
+          <span data-dl-version>{rel.live ? rel.tag + " · " : ""}</span>Windows, macOS &amp; Linux · Apache-2.0 ·
           <button type="button" data-mode-btn="git" class="text-mint underline-offset-4 hover:underline">
             not into AI? hide it →
           </button>
@@ -124,6 +124,14 @@ const forges = [
 
       <div data-reveal style="transition-delay:220ms" class="mint-glow relative min-w-0">
         <figure class="window">
+          {/* The two heroes are DELIBERATELY asymmetric. This one is the LCP
+              image of the default (AI) view: eager + high priority. Its
+              Just-Git twin below is lazy, which display:none resolves to
+              "never fetched" — so a default visitor downloads exactly one
+              hero. The cost falls on the minority git view (this image still
+              prefetches for them); a static page can't pick per-visitor
+              priorities, and de-prioritizing the default view's LCP would be
+              the wrong trade. */}
           <Image
             src={appDiff}
             alt="GitDesktop staging a TypeScript diff line by line, with an AI-generated commit message in the composer"
@@ -189,7 +197,7 @@ const forges = [
           >
         </div>
         <p data-reveal style="transition-delay:240ms" class="mt-6 text-sm text-muted">
-          <span data-dl-version>{rel.tag + " · "}</span>Windows, macOS &amp; Linux · Apache-2.0 ·
+          <span data-dl-version>{rel.live ? rel.tag + " · " : ""}</span>Windows, macOS &amp; Linux · Apache-2.0 ·
           <button type="button" data-mode-btn="ai" class="text-mint underline-offset-4 hover:underline">
             curious about the AI? →
           </button>
@@ -198,6 +206,10 @@ const forges = [
 
       <div data-reveal style="transition-delay:220ms" class="mint-glow relative min-w-0">
         <figure class="window">
+          {/* Lazy on purpose — see the AI hero above: display:none + lazy
+              means the default view never fetches this image at all, while in
+              the git view it sits in the viewport and fetches the moment
+              layout resolves. */}
           <Image
             src={appStagingNoai}
             alt="GitDesktop showing a split diff with per-hunk stage controls — staging changes line by line"
@@ -804,7 +816,7 @@ const forges = [
         >
       </div>
       <p data-reveal style="transition-delay:200ms" class="mt-6 text-sm text-muted">
-        <span data-dl-version>{rel.tag + " · "}</span>Windows, macOS &amp; Linux
+        <span data-dl-version>{rel.live ? rel.tag + " · " : ""}</span>Windows, macOS &amp; Linux
       </p>
     </div>
   </section>

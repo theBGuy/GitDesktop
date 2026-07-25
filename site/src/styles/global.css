@@ -582,11 +582,16 @@ kbd {
   --astro-code-token-link: var(--color-mint);
 }
 
-.prose .table-wrap {
-  overflow-x: auto;
-}
+/* Markdown emits a bare <table>, so the table is its own scroll container —
+   under html's `overflow-x: clip` a wide table would otherwise be simply
+   unreachable, the exact failure the `.prose pre` note above describes.
+   `max-content` + `max-width` keeps narrow tables shrink-wrapped and wide
+   ones scrollable. */
 .prose table {
-  width: 100%;
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
   border-collapse: collapse;
   font-size: 0.9rem;
 }

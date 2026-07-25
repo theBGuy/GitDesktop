@@ -123,7 +123,7 @@ const softwareLd = JSON.stringify({
           >
         </div>
         <p id="dl-meta" class="mt-6 text-sm text-muted">
-          {rel.tag}{releasedOn} · Free · Windows, macOS &amp; Linux
+          {rel.live ? `${rel.tag}${releasedOn} · ` : ""}Free · Windows, macOS &amp; Linux
         </p>
       </div>
 

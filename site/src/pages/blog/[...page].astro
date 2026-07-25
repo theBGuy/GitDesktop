@@ -23,6 +23,7 @@ interface Props {
 
 const { page } = Astro.props;
 const tags = await getTags();
+const base = import.meta.env.BASE_URL;
 
 // Named so the "N AI posts hidden" line can state a real number rather than
 // leaving a Just-Git reader staring at a list that silently lost rows.
@@ -58,7 +59,7 @@ const aiCount = page.data.filter((p) => p.data.ai).length;
       </p>
       <p data-reveal style="transition-delay:180ms" class="mt-6 text-sm">
         <a
-          href="/rss.xml"
+          href={`${base}rss.xml`}
           class="text-mint underline decoration-line-2 underline-offset-4 transition-colors hover:decoration-mint"
         >
           Subscribe by RSS →
@@ -165,19 +166,38 @@ const aiCount = page.data.filter((p) => p.data.ai).length;
       {
         tags.length > 0 && (
           <div class="border-t border-line py-8">
-            <h2 class="text-sm text-faint">Topics</h2>
+            <h2 class="text-sm text-faint">
+              <a
+                href={`${base}blog/tags/`}
+                class="transition-colors hover:text-muted"
+              >
+                Topics →
+              </a>
+            </h2>
             <ul class="mt-4 flex flex-wrap gap-2">
-              {tags.map(({ tag, count }) => (
-                <li>
+              {tags.map(({ tag, count, aiCount }) => (
+                /* Same honesty rule as the list above: an all-AI tag vanishes
+                   in Just Git, a mixed tag shows the per-view count. */
+                <li data-view={aiCount === count ? "ai" : undefined}>
                   <a
                     href={tagUrl(tag)}
                     class="rounded-md border border-line px-2.5 py-1 text-sm text-muted transition-colors hover:border-line-2 hover:text-ink"
                   >
                     {tag}{" "}
-                    <span class="text-faint" aria-hidden="true">
-                      {count}
+                    <span data-view="ai">
+                      <span class="text-faint" aria-hidden="true">
+                        {count}
+                      </span>
+                      <span class="sr-only">({count} posts)</span>
                     </span>
-                    <span class="sr-only">({count} posts)</span>
+                    {aiCount < count && (
+                      <span data-view="git">
+                        <span class="text-faint" aria-hidden="true">
+                          {count - aiCount}
+                        </span>
+                        <span class="sr-only">({count - aiCount} posts)</span>
+                      </span>
+                    )}
                   </a>
                 </li>
               ))}

@@ -1,7 +1,7 @@
 ---
 layout: ../layouts/LegalLayout.astro
 title: "Privacy Policy — GitDesktop"
-description: "The limited, anonymous data GitDesktop collects, the third-party services your activity can reach, and your choices."
+description: "The limited, anonymous data GitDesktop collects, what the gitdesktop.app website measures, the third-party services your activity can reach, and your choices."
 ---
 
 # Privacy Policy
@@ -78,6 +78,12 @@ their own privacy policies, not ours:
 
 This site is static. It has no accounts, sets no cookies, and runs no
 advertising or cross-site tracking.
+
+<!-- Web Analytics is enabled account-side (Cloudflare dashboard → Web
+     Analytics, "Automatic setup" on the proxied zone). It is EDGE-derived: no
+     beacon script is injected into the served HTML, which is what keeps the
+     "no other third-party scripts" claim below literally true. If collection
+     is ever switched to beacon-based, update both claims. -->
 
 - **Traffic measurement.** The site uses **Cloudflare Web Analytics** —
   cookie-free, aggregate measurement (page views, referrers, performance

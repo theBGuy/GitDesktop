@@ -17,6 +17,7 @@ on:
       - "site/**"
       - "pnpm-lock.yaml"
       - "pnpm-workspace.yaml"
+      - "biome.json"
       - ".github/workflows/site.yml"
 
 permissions:
@@ -38,6 +39,10 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
+        # The filtered install still selects the workspace ROOT (pnpm ≥11
+        # always includes it), so root devDeps — notably biome for the lint
+        # step below — are present. Verified live: this workflow's first run
+        # ("Checked 30 files") plus an isolated pnpm-11 probe.
         run: pnpm install --frozen-lockfile --filter site
 
       - name: Build the marketing site

@@ -9,6 +9,10 @@ const tags = await getTags();
 <SiteLayout
   active="blog"
   feed
+  breadcrumbs={[
+    { name: "Blog", path: "/blog/" },
+    { name: "Topics", path: "/blog/tags/" },
+  ]}
   title="Topics — GitDesktop blog"
   description="Every topic covered on the GitDesktop blog: git internals, the pull-request loop, multi-forge parity, Tauri, and optional AI."
   ogTitle="Blog topics"
@@ -35,8 +39,11 @@ const tags = await getTags();
           <p class="py-16 text-center text-muted">No topics yet.</p>
         ) : (
           <ul class="divide-y divide-line border-y border-line">
-            {tags.map(({ tag, count }) => (
-              <li>
+            {tags.map(({ tag, count, aiCount }) => (
+              /* An all-AI tag vanishes in Just Git — its destination page
+                 would be an empty list — and mixed tags show the honest
+                 per-view count instead of advertising rows the view hides. */
+              <li data-view={aiCount === count ? "ai" : undefined}>
                 <a
                   href={tagUrl(tag)}
                   class="group flex items-baseline justify-between gap-6 py-5"
@@ -45,7 +52,15 @@ const tags = await getTags();
                     {tag}
                   </span>
                   <span class="text-sm text-muted">
-                    {count} {count === 1 ? "post" : "posts"}
+                    <span data-view="ai">
+                      {count} {count === 1 ? "post" : "posts"}
+                    </span>
+                    {aiCount < count && (
+                      <span data-view="git">
+                        {count - aiCount}{" "}
+                        {count - aiCount === 1 ? "post" : "posts"}
+                      </span>
+                    )}
                   </span>
                 </a>
               </li>

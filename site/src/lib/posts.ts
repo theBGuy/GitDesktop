@@ -25,17 +25,27 @@ export async function getPosts(): Promise<Post[]> {
   );
 }
 
-/** Every distinct tag across published posts, with counts, most-used first. */
-export async function getTags(): Promise<{ tag: string; count: number }[]> {
+/**
+ * Every distinct tag across published posts, with counts, most-used first.
+ * `aiCount` exists so Just-Git surfaces can show honest numbers
+ * (`count - aiCount`) and hide all-AI tags outright instead of advertising
+ * posts the view then hides.
+ */
+export async function getTags(): Promise<
+  { tag: string; count: number; aiCount: number }[]
+> {
   const posts = await getPosts();
-  const counts = new Map<string, number>();
+  const counts = new Map<string, { count: number; aiCount: number }>();
   for (const post of posts) {
     for (const tag of post.data.tags) {
-      counts.set(tag, (counts.get(tag) ?? 0) + 1);
+      const entry = counts.get(tag) ?? { count: 0, aiCount: 0 };
+      entry.count += 1;
+      if (post.data.ai) entry.aiCount += 1;
+      counts.set(tag, entry);
     }
   }
   return [...counts.entries()]
-    .map(([tag, count]) => ({ tag, count }))
+    .map(([tag, { count, aiCount }]) => ({ tag, count, aiCount }))
     .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
 }
 
@@ -45,12 +55,16 @@ export function readingTime(post: Post): number {
   return Math.max(1, Math.round(words / 200));
 }
 
+// "/" today; honors the same base convention as the layouts if the site
+// ever moves under a subpath (see the note in astro.config.mjs).
+const base = import.meta.env.BASE_URL;
+
 export function postUrl(post: Post): string {
-  return `/blog/${post.id}/`;
+  return `${base}blog/${post.id}/`;
 }
 
 export function tagUrl(tag: string): string {
-  return `/blog/tags/${tag}/`;
+  return `${base}blog/tags/${tag}/`;
 }
 
 /** UTC-pinned so a post never renders a day early west of Greenwich. */

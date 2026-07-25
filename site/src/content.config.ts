@@ -29,9 +29,19 @@ const blog = defineCollection({
         updatedDate: z.coerce.date().optional(),
         author: z.string().default("theBGuy"),
         // Required on purpose: a post that fits no pillar is a post that
-        // shouldn't ship. The build refuses it.
+        // shouldn't ship. The build refuses it. (Editorial gate only —
+        // nothing renders the value yet.)
         pillar: z.enum(PILLARS),
-        tags: z.array(z.string()).default([]),
+        // Tags become path segments (`/blog/tags/<tag>/`), so anything that
+        // isn't a lowercase slug would mangle the route. Refused at build
+        // time, same as the pillar gate above.
+        tags: z
+          .array(
+            z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, {
+              message: "tags must be lowercase slugs (a-z, 0-9, hyphens)",
+            }),
+          )
+          .default([]),
         heroImage: image().optional(),
         heroAlt: z.string().optional(),
         // Site-relative path to a 1200x630 card, e.g. "/og/my-post.png".
