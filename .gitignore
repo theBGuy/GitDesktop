@@ -35,3 +35,4 @@ dist-ssr
 /claude_strings.txt
 /conductor.md
 /.playwright-mcp/
+/.env.claude

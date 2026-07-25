@@ -298,10 +298,22 @@ export function SessionComposer({
     setSlash(null);
     setHistIndex(null);
     setDraftCaretEnd(pendingTask.prompt);
-    // A record stashed by the "Set up in Settings…" jump also carries the
-    // isolation pick, so returning from Settings restores it rather than silently
-    // falling back to the global setting. A plain handoff omits it.
-    if (pendingTask.isolation) setStartIsolation(pendingTask.isolation);
+    // A record stashed by the "Set up in Settings…" jump also carries the whole
+    // start-state, so the round-trip can't silently change what will run. A plain
+    // handoff carries none of it and the composer keeps its own values. Tested
+    // with `!== undefined` throughout: "" (default model / Auto effort) and null
+    // (follow the default MCP set) are real values, not absences. These are plain
+    // setState calls — the agent-change RESET (model + MCP) lives in AgentPicker's
+    // onChange handler, not an effect, so restoring an agent doesn't wipe the
+    // model or servers restored alongside it.
+    if (pendingTask.isolation !== undefined)
+      setStartIsolation(pendingTask.isolation);
+    if (pendingTask.agent !== undefined) setStartAgent(pendingTask.agent);
+    if (pendingTask.model !== undefined) setStartModel(pendingTask.model);
+    if (pendingTask.effort !== undefined) setStartEffort(pendingTask.effort);
+    if (pendingTask.mode !== undefined) setMode(pendingTask.mode);
+    if (pendingTask.mcpServers !== undefined)
+      setStartMcp(pendingTask.mcpServers);
     setPendingTask(null);
   }, [session, pendingTask, repoPath]);
 
@@ -451,7 +463,14 @@ export function SessionComposer({
     setPendingTask({
       repoPath,
       prompt: draft,
+      // null = no explicit pick, so there's nothing to restore — collapse to absent.
       isolation: startIsolation ?? undefined,
+      agent: startAgent,
+      model: startModel,
+      effort: startEffort,
+      mode,
+      // Verbatim: null here MEANS "follow the default set", so it must survive.
+      mcpServers: startMcp,
     });
     openSettings("ai");
   };

@@ -313,14 +313,15 @@ export function ComposerOptions({
   /** New-session isolation override. `isOverride` = the pick differs from the
    *  global setting (that's what the badge counts); `note` is the caller-computed
    *  readiness warning / host-downgrade disclosure. `onSettingsAction` runs the
-   *  note's "Set up in Settings…" jump — the caller owns it because navigating
-   *  unmounts the composer, so it has to stash its draft first. */
+   *  note's "Set up in Settings…" jump and is REQUIRED — navigating unmounts the
+   *  composer, so the caller must stash its start-state first; a convenience
+   *  fallback here would silently reintroduce that state loss. */
   isolation?: {
     value: Isolation;
     onChange: (v: Isolation) => void;
     isOverride: boolean;
     note?: IsolationNote;
-    onSettingsAction?: () => void;
+    onSettingsAction: () => void;
   };
   mcp?: {
     servers: McpServer[];
@@ -441,11 +442,7 @@ export function ComposerOptions({
                   variant="ghost"
                   size="sm"
                   className="h-7 justify-start text-muted-foreground"
-                  onClick={() =>
-                    isolation.onSettingsAction
-                      ? isolation.onSettingsAction()
-                      : openSettings("ai")
-                  }
+                  onClick={isolation.onSettingsAction}
                 >
                   Set up in Settings…
                 </Button>

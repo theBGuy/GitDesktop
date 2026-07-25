@@ -126,16 +126,31 @@ const SYSTEM_PROMPT =
   "Do NOT commit — the app commits each turn so the user can review it. When " +
   "finished with a turn, briefly summarize what you changed.";
 
-/** The handoff record that seeds the new-session composer. */
+/**
+ * The handoff record that seeds the new-session composer.
+ *
+ * Everything past `prompt` is the composer's start-state, carried across a Settings
+ * round-trip: the isolation note's "Set up in Settings…" jump unmounts
+ * RepositoryView (App.tsx renders it behind `view === "repo"`), so the composer's
+ * local state would otherwise be lost — you'd come back from adding an agent to the
+ * container image only to find the composer re-seeded to a different agent, and the
+ * task would run as something you didn't choose. A plain handoff ("Implement this
+ * issue") sets none of them and the composer keeps its own values.
+ */
 export interface PendingTask {
   repoPath: string;
   prompt: string;
-  /** The composer's isolation pick, carried across a Settings round-trip: the
-   *  "Set up in Settings…" jump unmounts RepositoryView (App.tsx renders it behind
-   *  `view === "repo"`), so the composer's local state would otherwise be lost and
-   *  the session would silently fall back to the global setting. Absent (the plain
-   *  handoff case) = leave the composer's own pick alone. */
+  /** Absent = no explicit pick was made, so there's nothing to restore. */
   isolation?: "worktree" | "container";
+  agent?: "claude" | "codex" | "copilot" | "opencode";
+  /** "" = the account default model. */
+  model?: string;
+  /** "" = Auto. */
+  effort?: string;
+  mode?: "single" | "ensemble";
+  /** Stashed verbatim — `null` is meaningful (follow the per-repo default set),
+   *  and is NOT the same as absent. */
+  mcpServers?: string[] | null;
 }
 
 interface SessionsState {
