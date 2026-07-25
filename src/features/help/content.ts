@@ -899,7 +899,9 @@ as first-class grounding context, so a deliberate, documented decision isn't re-
 When rounds
 accumulate past the prompt budget, the newest comments win, and the full history is
 **distilled into a compact decision ledger** (via your generation model) rather than cut
-off. See *AI & automations* to pick the review model. The **Review context** size there
+off; and if the budget leaves no room for it at all, the review is told the comments were **omitted**
+rather than losing them silently, so it never reads their absence as nothing on record.
+See *AI & automations* to pick the review model. The **Review context** size there
 controls how much diff and prior-discussion context reviews send — **Auto** fits it to the
 reviewing model's context window (probing Ollama live), or pick Compact / Standard /
 Expanded. **Review timeout** (shown when an agent CLI drives reviews or security audits)
