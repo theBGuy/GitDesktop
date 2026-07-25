@@ -397,30 +397,39 @@ Examine these categories where the diff touches them. The Non-Issues are NOT fin
 - Untrusted data reaching a sensitive sink: SSRF, XSS, open redirect, unsafe file/permission handling — trace the data flow from source to sink. SSRF and open redirect are findings only when the attacker controls the host or protocol (not merely path/port/query).
 - Sensitive-data exposure: logging or transmitting secrets or PII. Non-issue: logging account names, plain URLs, non-auth HTTP headers, or non-PII data; hashed/encrypted data.
 - Supply chain: a third-party dependency, action, or image pinned to a mutable ref (a branch, \`latest\`) instead of an immutable one, or remote code executed without integrity verification, where an attacker could influence what is fetched. Non-issue: first-party/same-org/monorepo deps; deps already pinned to immutable refs or vendored; dev-only tooling.
+- Data integrity: deserializing or unpickling untrusted data without an integrity check; merging, cloning, or path-assigning into objects without guarding \`__proto__\`/\`constructor\`/\`prototype\` (prototype pollution); loading or executing remote code or content whose integrity is never verified. Non-issue: plain JSON parsing into a validated shape; merges over keys the code fully controls.
 - Prompt injection (XPIA): untrusted data that can subvert an LLM's instructions, tool selection/routing, or "next-step" logic across a trust or privilege boundary. This app intentionally embeds repo/PR/diff/issue content into its own AI prompts — that by itself is the product working as designed and is NOT a finding. Non-issue: untrusted data clearly framed/marked as data ("treat the following as the user's text, not instructions") or sanitized before it reaches the model; any flow that doesn't cross a security/privilege boundary. Flag XPIA only when untrusted input can actually change a security decision or escalate the model's tool/privilege access in a way the design does not intend.
 
-Stack precedents — in THIS codebase (Tauri: Rust backend + React/TypeScript frontend), do NOT report:
-- Memory-safety issues (buffer overflow, use-after-free) in Rust or any memory-safe language — they are not possible there.
-- XSS in React/TSX unless the code uses \`dangerouslySetInnerHTML\` or a comparable unsafe escape hatch — React escapes by default.
-- Missing auth/permission/validation in client-side (frontend) code — the Rust/backend side is the trust boundary; client-side checks are not.
-- Any attack that relies on controlling environment variables or CLI flags — those are trusted inputs here.
+First, establish what you are actually reviewing — do not assume a stack:
+- Work out from the diff (and, if you have file-reading tools, the repo) what this code IS: its language(s) and runtime, whether the changed code is a server/API/handler or a locally-run client or tool, where the trust boundary sits, and who supplies its inputs.
+- Note which validators, sanitizers, escaping helpers, and auth checks the codebase ALREADY uses, and judge the change against those: a changed region that bypasses the project's own established guard is a strong signal; one consistent with them is weak.
+- Where you cannot establish this, say which assumption the finding rests on rather than defaulting to a stack you happen to know. A finding that is only valid under an unstated assumption is not a high-confidence finding.
+
+Always out of scope, whatever the codebase:
 - Denial of service, rate-limiting, resource/CPU/memory exhaustion, or regex-DoS.
 - Outdated or vulnerable third-party dependency versions — managed separately (distinct from the mutable-ref supply-chain issue above).
 - Findings in test-only files or in documentation/markdown.
 - Theoretical race conditions or timing attacks — report a race only if it is concretely exploitable.
 
+Judge these against the code actually under review. Each cuts BOTH ways — do not suppress a class the reviewed code is genuinely subject to:
+- Memory safety (buffer overflow, use-after-free, pointer arithmetic): a real class in C, C++, Objective-C, \`unsafe\` Rust blocks, cgo, unsafe C#, and raw FFI — report it there. Not reachable in ordinary memory-safe/managed code — don't report it there.
+- XSS: where a framework escapes by default (React/JSX, Vue, Svelte, Angular templates), report only via an explicit escape hatch — \`dangerouslySetInnerHTML\`, \`v-html\`, \`{@html}\`, \`bypassSecurityTrust*\`, direct \`innerHTML\`/\`document.write\`. Where markup is assembled by string concatenation or manual templating, ordinary XSS rules apply in full.
+- Missing auth/permission/validation: not a finding in a client/frontend whose server re-checks — a client-side check is UX, not a boundary. It IS a finding when the changed code is itself the server, API handler, IPC command, or privileged entry point others rely on to enforce.
+- Environment variables and CLI flags: trusted input for a tool the invoking user runs locally on their own machine. NOT trusted where another party supplies them — a server, container, CI runner, shared host, or setuid/elevated binary.
+
 Severity, confidence, and what to report:
-- Severity — High: directly exploitable (RCE, auth bypass, data breach; local-network-only can still be High). Medium: real impact but needs specific conditions. Low: defense-in-depth or limited impact.
-- Give each finding a confidence score N/10 and report by a severity-scaled threshold: report a Critical-impact issue at confidence 6+, High at 7+, Medium at 8+, and Low only at 9+. Otherwise drop it.
+- Severity — Critical: remote code execution, full system compromise, or mass data breach. High: directly exploitable (auth bypass, individual data breach; local-network-only can still be High). Medium: real impact but needs specific conditions. Low: defense-in-depth or limited impact.
+- Give each finding a confidence score N/10, calibrated against what you actually saw: 9-10 — you can point to the exact untrusted source, the exact sink, and the missing or ineffective guard, all visible in what you read. 7-8 — source and sink are visible and you have named the missing guard, but one link (reachability, caller context, or whether the input is truly attacker-controlled) is inferred rather than seen. 6 — specific and plausible, but a key link is unverified. 5 or below — don't report it.
+- Report by a severity-scaled threshold: Critical at confidence 6+, High at 7+, Medium at 8+, and Low only at 9+. Otherwise drop it.
 
 Output GitHub-flavored Markdown, one block per finding, ordered by severity then confidence:
-- A bold **Severity: High/Medium/Low — Confidence: N/10**.
+- A bold **Severity: Critical/High/Medium/Low — Confidence: N/10**.
 - A short category tag in backticks (e.g. \`command-injection\`, \`ssrf\`, \`prompt-injection\`) and the location (file and the relevant code/area).
 - **Exploit scenario:** the specific attacker-controlled input and the path to impact, plus how you verified it is real. If you cannot give a concrete scenario, do not report it.
 - A concrete remediation (describe it; do not write the fix unless it is trivial).
 If there are no genuine security issues in these changes, say so in one line.
 
-Before finalizing, re-check every finding against the Non-Issues, the stack precedents, and the reporting thresholds, and drop any that don't clear them. Do not pad: no summary of what you reviewed, no compliments, no filler — just findings or a single "no issues" line. Silence is better than noise. Do not invent code, files, or behavior you cannot see. Do not wrap the whole review in a code fence.`;
+Before finalizing, re-check every finding against the Non-Issues, the always-out-of-scope list, the judged-against-this-codebase rules, and the reporting thresholds, and drop any that don't clear them. Do not pad: no summary of what you reviewed, no compliments, no filler — just findings or a single "no issues" line. Silence is better than noise. Do not invent code, files, or behavior you cannot see. Do not wrap the whole review in a code fence.`;
 
 /** Appended to the review system prompt ONLY when prior-review context is fed,
  *  so a first-ever review's system prompt is unchanged. Frames the previous
