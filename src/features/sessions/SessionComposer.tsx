@@ -833,20 +833,31 @@ export function SessionComposer({
                 hover-only tooltip would be the sole explanation. Carries the
                 SPECIFIC reason (engine down, image missing, …) and is what the Send
                 button points `aria-describedby` at while blocked. */}
-            {containerBlocked && (
-              <p
-                id={blockedId}
-                role="status"
-                className="flex items-start gap-1.5 text-[11px] text-foreground"
-              >
-                <WarningCircleIcon
-                  weight="fill"
-                  className="mt-px size-3.5 shrink-0"
-                  aria-hidden
-                />
-                <span>{blockedReason}</span>
-              </p>
-            )}
+            <p
+              id={blockedId}
+              role="status"
+              // Mounted unconditionally: a live region created together with its
+              // text announces unreliably, so the region has to pre-exist and only
+              // its CONTENT change. `sr-only` (not `hidden`) keeps the empty state
+              // in the accessibility tree while taking it out of flow entirely, so
+              // the column's flex gap shows no phantom row.
+              className={
+                containerBlocked
+                  ? "flex items-start gap-1.5 text-[11px] text-foreground"
+                  : "sr-only"
+              }
+            >
+              {containerBlocked ? (
+                <>
+                  <WarningCircleIcon
+                    weight="fill"
+                    className="mt-px size-3.5 shrink-0"
+                    aria-hidden
+                  />
+                  <span>{blockedReason}</span>
+                </>
+              ) : null}
+            </p>
             <div className="flex items-center gap-2 border-t pt-2">
               {/* Provider + model stay inline for quick access; run mode, effort,
                   and MCP collapse into Options so the row never overflows. Best-of-N

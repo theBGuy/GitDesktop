@@ -2195,20 +2195,21 @@ pub async fn agent_session(
         let (runtime, runtime_name) = crate::agent_sandbox::detect_runtime().await.ok_or_else(|| {
             AppError::Command("Container isolation is on for this session, but Docker/Podman isn't available. Install and start it — or start a new session with Isolation set to Worktree (composer → Options), or turn container isolation off in Settings → AI.".to_string())
         })?;
-        // The binary being on PATH doesn't mean the engine is up — probe it here so a
-        // stopped daemon reports itself instead of surfacing as "image isn't built yet"
-        // (every check below needs the daemon).
-        if !crate::agent_sandbox::runtime_ready(&runtime).await {
-            let label = if runtime_name == "podman" {
-                "Podman"
-            } else {
-                "Docker"
-            };
-            return Err(AppError::Command(format!(
-                "{label} is installed but its engine isn't running. Start it, then try again."
-            )));
-        }
         if !crate::agent_sandbox::image_present(&runtime).await {
+            // `image inspect` needs the daemon, so a stopped engine fails here too — but
+            // this whole branch runs on EVERY turn, so the daemon probe is deliberately on
+            // the failure path only: a healthy session pays nothing, and a failing one
+            // still tells "engine stopped" apart from "image never built".
+            if !crate::agent_sandbox::runtime_ready(&runtime).await {
+                let label = if runtime_name == "podman" {
+                    "Podman"
+                } else {
+                    "Docker"
+                };
+                return Err(AppError::Command(format!(
+                    "{label} is installed but its engine isn't running. Start it, then try again."
+                )));
+            }
             return Err(AppError::Command(
                 "The agent container image isn't built yet. Open Settings → AI and click \"Build image\", then try again.".to_string(),
             ));

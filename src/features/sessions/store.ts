@@ -548,13 +548,14 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     // same way), so resolve it once here. Both agents honor the setting: on the
     // host each runs worktree-confined by its own OS sandbox (Codex via
     // `-s workspace-write`); "container" wraps either in a kernel boundary.
-    const setting =
-      (await loadSettings().catch(() => null))?.agentIsolation ?? "worktree";
     // Every agent honors the setting now — Copilot's container authenticates from a
     // `gh auth token` (no mountable creds file), so it no longer forces host-only.
-    // The composer's Isolation row can override the global setting for THIS session
-    // (absent = follow Settings → AI).
-    const isolation = isolationOverride ?? setting;
+    // The composer's Isolation row can override it for THIS session; the global
+    // setting is only read (`??` short-circuits the await) when it didn't.
+    const isolation =
+      isolationOverride ??
+      (await loadSettings().catch(() => null))?.agentIsolation ??
+      "worktree";
     let wt: Awaited<ReturnType<typeof createWorktree>>;
     try {
       wt = await createWorktree(repoPath);
