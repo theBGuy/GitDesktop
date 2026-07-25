@@ -45,7 +45,7 @@ import {
   type RunMode,
 } from "./AgentPickers";
 import { EnsembleRunDialog } from "./EnsembleRunDialog";
-import { type AgentSession, useSessionsStore } from "./store";
+import { type AgentSession, type PendingTask, useSessionsStore } from "./store";
 
 const MAX_MENTIONS = 8;
 
@@ -235,9 +235,11 @@ export function SessionComposer({
   const ref = useRef<HTMLTextAreaElement>(null);
   // Ties the disabled-Send explanation to the button via aria-describedby.
   const blockedId = useId();
-  // Latched while this composer stashes its own state for a Settings round-trip,
-  // so the consume effect doesn't eat the record before the unmount.
-  const stashingRef = useRef(false);
+  // The record this composer stashed for a Settings round-trip. The consume effect
+  // skips exactly that record (by identity) rather than latching shut, so if the
+  // composer ever stops unmounting on the jump (e.g. an <Activity> refactor) a
+  // LATER handoff record still consumes normally. Dies with the unmount today.
+  const stashedRef = useRef<PendingTask | null>(null);
 
   const running = session?.running ?? false;
   const model = session ? session.model : startModel;
@@ -289,8 +291,8 @@ export function SessionComposer({
   useEffect(() => {
     if (
       session ||
-      stashingRef.current ||
       !pendingTask ||
+      pendingTask === stashedRef.current ||
       pendingTask.repoPath !== repoPath
     )
       return;
@@ -459,12 +461,11 @@ export function SessionComposer({
   const openIsolationSettings = () => {
     // `openSettings` flips the view inside a view-transition callback (see
     // lib/view-transition.ts — `doc.startViewTransition(() => flushSync(update))`),
-    // so the stash below commits a render BEFORE the unmount. Without this latch
-    // the consume effect would eat the record in that window and there'd be
-    // nothing left to restore. The ref dies with the unmount, so the remounted
-    // composer consumes normally.
-    stashingRef.current = true;
-    setPendingTask({
+    // so the stash below commits a render BEFORE the unmount. Without the ref the
+    // consume effect would eat the record in that window and there'd be nothing
+    // left to restore; holding the record itself skips it by IDENTITY, so the
+    // remounted composer (fresh ref) consumes normally.
+    const task: PendingTask = {
       repoPath,
       prompt: draft,
       // null = no explicit pick, so there's nothing to restore — collapse to absent.
@@ -475,7 +476,9 @@ export function SessionComposer({
       mode,
       // Verbatim: null here MEANS "follow the default set", so it must survive.
       mcpServers: startMcp,
-    });
+    };
+    stashedRef.current = task;
+    setPendingTask(task);
     openSettings("ai");
   };
   // Servers the chosen agent can actually run (Codex = local/stdio only).
