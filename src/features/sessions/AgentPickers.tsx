@@ -284,8 +284,9 @@ function OptionField({
  * per-session isolation override, and the per-session MCP-server opt-in — lives
  * here so the action row never overflows or shifts as the box grows. Each control
  * renders only when the parent passes its props: run mode + isolation are
- * new-session only; effort + MCP drop out in best-of-N (each arm sets its own); MCP
- * also self-hides when no servers are registered. Isolation sits directly above MCP
+ * new-session only; effort drops out in best-of-N (each arm sets its own), while the
+ * MCP selection stays and is SHARED across every arm; MCP self-hides when no servers
+ * are registered. Isolation sits directly above MCP
  * because it gates it (Codex runs MCP only in a container), so the dependency reads
  * top-down. The trigger shows a count + summary tooltip of the non-default choices
  * so collapsing them stays discoverable. MCP rules (frozen at turn 1 for a new

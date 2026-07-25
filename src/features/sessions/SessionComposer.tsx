@@ -2,12 +2,14 @@ import { StopIcon, WarningCircleIcon } from "@phosphor-icons/react";
 import { AnimatePresence, m } from "motion/react";
 import {
   useEffect,
+  useId,
   useImperativeHandle,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import type { AgentKind } from "@/lib/ai/agent";
 import { estimateRunCost } from "@/lib/ai/cost";
@@ -100,13 +102,16 @@ function isolationNoteFor({
           : "Runs on the host for this session — file writes are confined by convention, not the kernel.",
     };
   }
-  if (probeFailed)
-    return {
-      tone: "warn",
-      text: "Couldn't check container status — the session will verify at start.",
-    };
-  // No probe result yet: say so rather than claim a state.
-  if (!status) return { tone: "muted", text: "Checking container status…" };
+  // A probe that failed with nothing to show for it. (Once there IS data, a later
+  // refetch failing — the recovery poll hitting a blip — shouldn't replace the
+  // specific reason Start is blocked with a vaguer one.)
+  if (!status)
+    return probeFailed
+      ? {
+          tone: "warn",
+          text: "Couldn't check container status — the session will verify at start.",
+        }
+      : { tone: "muted", text: "Checking container status…" };
   if (!status.runtime)
     return {
       tone: "warn",
@@ -128,8 +133,10 @@ function isolationNoteFor({
   // More specific than the generic "doesn't match" below — the backend rejects turn
   // 1 outright when the chosen agent isn't in the image, so name that agent. Still
   // only a warning: a stale image can legitimately carry MORE agents than the saved
-  // config lists, and blocking on that guess would be worse.
-  if (!agentInImage)
+  // config lists, and blocking on that guess would be worse. Skipped in best-of-N
+  // for the same reason as the downgrade copy — the arms pick their own agents, so
+  // naming the seed's would be as likely to mislead as to help.
+  if (!agentInImage && perAgentCopy)
     return {
       tone: "warn",
       text: `The agent image wasn't built with ${AGENT_LABELS[agent]} — add it under Settings → AI and rebuild.`,
@@ -226,6 +233,8 @@ export function SessionComposer({
   const [histIndex, setHistIndex] = useState<number | null>(null);
   const [histStash, setHistStash] = useState("");
   const ref = useRef<HTMLTextAreaElement>(null);
+  // Ties the disabled-Send explanation to the button via aria-describedby.
+  const blockedId = useId();
 
   const running = session?.running ?? false;
   const model = session ? session.model : startModel;
@@ -381,8 +390,36 @@ export function SessionComposer({
     isContainer &&
     !!probe &&
     (!probe.runtime || !probe.ready || !probe.imagePresent);
+  // Until settings resolve we don't yet know the global isolation, so the readiness
+  // gate above hasn't run — but start() reads settings itself and would happily
+  // launch a container session. Hold Start for those few milliseconds rather than
+  // let one slip past the gate. Deliberately silent: it's a load, not a problem.
+  // A settings load that FAILED is not pending — start() falls back to "worktree"
+  // there, which needs no gate, and holding Start forever would be the worse bug.
+  const settingsPending = !session && !settings.data && !settings.isError;
   const canSubmit =
-    !running && !creating && draft.trim().length > 0 && !containerBlocked;
+    !running &&
+    !creating &&
+    draft.trim().length > 0 &&
+    !containerBlocked &&
+    !settingsPending;
+  // The one line under the Isolation control — a container-readiness warning or the
+  // host-downgrade disclosure. Hoisted out of the JSX so the blocked strip and the
+  // best-of-N toast can name the SPECIFIC reason instead of the generic fallback.
+  const isolationNote = session
+    ? undefined
+    : isolationNoteFor({
+        effective: startIsolation ?? globalIsolation,
+        global: globalIsolation,
+        agent: startAgent,
+        // Best-of-N arms each pick their own agent, so no agent-specific claim
+        // (host sandbox, image membership) can be made.
+        perAgentCopy: mode !== "ensemble",
+        status: probe,
+        probeFailed,
+        agentInImage,
+      });
+  const blockedReason = isolationNote?.text ?? CONTAINER_BLOCKED_TEXT;
   // Servers the chosen agent can actually run (Codex = local/stdio only).
   const mcpServersForAgent = useMemo(
     () => mcpRegistry.filter((s) => mcpServerUsableBy(s, startAgent)),
@@ -498,9 +535,10 @@ export function SessionComposer({
   };
 
   const submit = () => {
-    // Container isolation that isn't ready: Enter must respect the same gate the
-    // Send button does (the Options popover explains why).
-    if (containerBlocked) return;
+    // Container isolation that isn't ready — or settings that haven't resolved, so
+    // readiness was never checked: Enter must respect the same gates the Send
+    // button does (the composer's warn line explains the first one).
+    if (containerBlocked || settingsPending) return;
     // Best-of-N mode: the primary action opens the arm/cost dialog instead of
     // starting one session (the dialog runs the fan-out).
     if (!session && mode === "ensemble") {
@@ -532,9 +570,14 @@ export function SessionComposer({
   const runEnsemble = (
     arms: { agent: AgentKind; model: string; effort: string }[],
   ) => {
-    // The probe can resolve blocked while the arm/cost dialog sits open — don't
-    // fan out N doomed arms (the composer's warn line explains it once it closes).
-    if (!pendingEnsemble || containerBlocked) return;
+    if (!pendingEnsemble) return;
+    // The probe can resolve blocked while the arm/cost dialog sits open. Confirming
+    // then would fan out N doomed arms — but the dialog has already closed itself,
+    // so say why rather than appear to do nothing.
+    if (containerBlocked) {
+      toast.error(blockedReason);
+      return;
+    }
     const mcp = mcpUsable
       ? effectiveMcp.filter((id) => mcpServersForAgent.some((s) => s.id === id))
       : undefined;
@@ -787,15 +830,21 @@ export function SessionComposer({
             />
             {/* Why Send is disabled, in layout flow — the global setting alone can
                 put you here, in which case the Options badge doesn't move and a
-                hover-only tooltip would be the sole explanation. */}
+                hover-only tooltip would be the sole explanation. Carries the
+                SPECIFIC reason (engine down, image missing, …) and is what the Send
+                button points `aria-describedby` at while blocked. */}
             {containerBlocked && (
-              <p className="flex items-start gap-1.5 text-[11px] text-foreground">
+              <p
+                id={blockedId}
+                role="status"
+                className="flex items-start gap-1.5 text-[11px] text-foreground"
+              >
                 <WarningCircleIcon
                   weight="fill"
                   className="mt-px size-3.5 shrink-0"
                   aria-hidden
                 />
-                <span>{CONTAINER_BLOCKED_TEXT}</span>
+                <span>{blockedReason}</span>
               </p>
             )}
             <div className="flex items-center gap-2 border-t pt-2">
@@ -829,17 +878,7 @@ export function SessionComposer({
                         isOverride:
                           startIsolation !== null &&
                           startIsolation !== globalIsolation,
-                        note: isolationNoteFor({
-                          effective: startIsolation ?? globalIsolation,
-                          global: globalIsolation,
-                          agent: startAgent,
-                          // Best-of-N arms each pick their own agent, so no
-                          // agent-specific host-sandbox claim can be made.
-                          perAgentCopy: mode !== "ensemble",
-                          status: probe,
-                          probeFailed,
-                          agentInImage,
-                        }),
+                        note: isolationNote,
                       }
                 }
                 mcp={composerMcp}
@@ -884,6 +923,9 @@ export function SessionComposer({
                         size="sm"
                         className="min-w-20"
                         disabled={!canSubmit}
+                        aria-describedby={
+                          containerBlocked ? blockedId : undefined
+                        }
                         onClick={submit}
                       >
                         {creating && !session

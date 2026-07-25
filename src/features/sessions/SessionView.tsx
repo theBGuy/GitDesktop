@@ -1,7 +1,9 @@
 import { Popover } from "@base-ui/react/popover";
 import {
+  CubeIcon,
   SparkleIcon,
   TerminalWindowIcon,
+  TreeStructureIcon,
   UsersThreeIcon,
 } from "@phosphor-icons/react";
 import { useMemo, useState } from "react";
@@ -206,6 +208,10 @@ function SessionCanvas({
               >
                 {session.branch}
               </span>
+              <span className="text-muted-foreground" aria-hidden>
+                ·
+              </span>
+              <IsolationChip isolation={session.isolation} />
               {prAudit && (
                 <>
                   <span className="text-muted-foreground" aria-hidden>
@@ -473,6 +479,35 @@ function SessionCanvas({
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+/**
+ * How this session is sandboxed, in the canvas header beside the branch. Isolation
+ * is fixed at creation and can now be overridden per session (the composer's Options
+ * → Isolation row), so two Active sessions in the same repo can differ — the mode
+ * has to be readable after the fact, not only at start. Mirrors the PrAuditChip
+ * idiom: icon + text (never color alone), muted, with the caveat in the title.
+ */
+function IsolationChip({
+  isolation,
+}: {
+  isolation: AgentSession["isolation"];
+}) {
+  const container = isolation === "container";
+  const Icon = container ? CubeIcon : TreeStructureIcon;
+  return (
+    <span
+      className="inline-flex shrink-0 items-center gap-1 text-muted-foreground"
+      title={
+        container
+          ? "Runs in an ephemeral container — file writes are confined by the kernel."
+          : "Runs on the host in a throwaway worktree — file writes are confined by convention, not the kernel."
+      }
+    >
+      <Icon weight="bold" className="size-3" />
+      {container ? "Container" : "Worktree"}
+    </span>
   );
 }
 
