@@ -1,0 +1,13 @@
+# gitdesktop.app
+#
+# Deliberately ONE group. Under RFC 9309 a crawler obeys only the most specific
+# group matching its own name and ignores `User-agent: *` entirely once a named
+# group exists — so enumerating bots here (GPTBot, ClaudeBot, PerplexityBot,
+# Google-Extended, …) would silently void every rule below for exactly those
+# crawlers. AI crawlers are welcome: GitDesktop is open source and being cited
+# is the point. Names stay in comments so this file never has to be re-reasoned.
+
+User-agent: *
+Allow: /
+
+Sitemap: https://gitdesktop.app/sitemap-index.xml

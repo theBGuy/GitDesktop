@@ -3,7 +3,7 @@ import { capabilities, GROUP_ORDER } from "../data/capabilities";
 import SiteLayout from "../layouts/SiteLayout.astro";
 
 const base = import.meta.env.BASE_URL;
-const download = `${base}download`;
+const download = `${base}download/`;
 
 const groups = GROUP_ORDER.map((group) => {
   const items = capabilities.filter((c) => c.group === group);

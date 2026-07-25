@@ -1,0 +1,131 @@
+---
+import type { GetStaticPaths, Page } from "astro";
+import SiteLayout from "../../../../layouts/SiteLayout.astro";
+import {
+  formatDate,
+  getPosts,
+  getTags,
+  isoDate,
+  type Post,
+  postUrl,
+  readingTime,
+} from "../../../../lib/posts";
+
+// Static pages, not a client-side filter row: linkable, crawlable, and
+// keyboard-reachable for free, with no second stateful widget to wire up.
+export const getStaticPaths = (async ({ paginate }) => {
+  const [posts, tags] = await Promise.all([getPosts(), getTags()]);
+  return tags.flatMap(({ tag }) =>
+    paginate(
+      posts.filter((p) => p.data.tags.includes(tag)),
+      { pageSize: 10, params: { tag }, props: { tag } },
+    ),
+  );
+}) satisfies GetStaticPaths;
+
+interface Props {
+  page: Page<Post>;
+  tag: string;
+}
+
+const { page, tag } = Astro.props;
+const base = import.meta.env.BASE_URL;
+---
+
+<SiteLayout
+  active="blog"
+  feed
+  title={`${tag} — GitDesktop blog`}
+  description={`Every GitDesktop post tagged ${tag}: engineering notes from building a native Git client for GitHub, GitLab and Bitbucket.`}
+  ogTitle={`Posts tagged ${tag}`}
+  ogDescription={`Engineering notes from building GitDesktop, tagged ${tag}.`}
+>
+  <section class="border-b border-line">
+    <div class="mx-auto max-w-6xl px-5 py-14 md:py-16">
+      <a
+        href={`${base}blog/`}
+        class="text-sm text-faint transition-colors hover:text-muted"
+      >
+        <span class="text-add">//</span> blog
+      </a>
+      <h1 class="mt-5 text-[clamp(1.75rem,4vw,2.75rem)] font-semibold tracking-tight">
+        {tag}
+      </h1>
+      <p class="mt-5 text-body">
+        {page.total} {page.total === 1 ? "post" : "posts"}.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <div class="mx-auto max-w-6xl px-5 py-6 md:py-10">
+      <ul class="divide-y divide-line border-y border-line">
+        {
+          page.data.map((post) => (
+            <li data-view={post.data.ai ? "ai" : undefined}>
+              <a href={postUrl(post)} class="group block py-7">
+                <div class="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm text-muted">
+                  <time datetime={isoDate(post.data.pubDate)}>
+                    {formatDate(post.data.pubDate)}
+                  </time>
+                  <span aria-hidden="true" class="text-faint">
+                    ·
+                  </span>
+                  <span>{readingTime(post)} min read</span>
+                </div>
+                <h2 class="mt-2 max-w-[36ch] text-xl font-semibold tracking-tight underline decoration-line-2 underline-offset-4 transition-colors group-hover:decoration-mint">
+                  {post.data.title}
+                </h2>
+                <p class="mt-3 max-w-[68ch] text-[15px] leading-relaxed text-body">
+                  {post.data.description}
+                </p>
+              </a>
+            </li>
+          ))
+        }
+      </ul>
+
+      {
+        (page.url.prev || page.url.next) && (
+          <nav
+            aria-label="Pagination"
+            class="flex items-center justify-between gap-4 py-8 text-sm"
+          >
+            {page.url.prev ? (
+              <a
+                href={page.url.prev}
+                class="text-mint underline decoration-line-2 underline-offset-4 transition-colors hover:decoration-mint"
+              >
+                ← Newer
+              </a>
+            ) : (
+              <span />
+            )}
+            <span class="text-muted">
+              Page {page.currentPage} of {page.lastPage}
+            </span>
+            {page.url.next ? (
+              <a
+                href={page.url.next}
+                class="text-mint underline decoration-line-2 underline-offset-4 transition-colors hover:decoration-mint"
+              >
+                Older →
+              </a>
+            ) : (
+              <span />
+            )}
+          </nav>
+        )
+      }
+
+      <p class="border-t border-line py-8 text-sm">
+        <a
+          href={`${base}blog/`}
+          class="text-mint underline decoration-line-2 underline-offset-4 transition-colors hover:decoration-mint"
+        >
+          ← All posts
+        </a>
+      </p>
+    </div>
+  </section>
+</SiteLayout>

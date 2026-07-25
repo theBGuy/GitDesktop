@@ -1,0 +1,20 @@
+# Cloudflare Pages headers.
+# https://developers.cloudflare.com/pages/configuration/headers/
+# Limits: 100 rules total, 2,000 characters per line.
+
+# Astro emits content-hashed filenames under /_astro/, so these bytes are
+# immutable by construction. Without this they inherit the Pages default
+# (public, max-age=14400, must-revalidate) and revalidate every four hours.
+/_astro/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# Keep preview deployments out of search results: *.pages.dev serves a
+# byte-identical copy of the whole site and would otherwise compete with the
+# apex domain for its own content. `:project` and `:version` are Cloudflare
+# placeholders — the first rule covers <project>.pages.dev, the second covers
+# the per-branch and per-commit aliases (<branch>.<project>.pages.dev).
+https://:project.pages.dev/*
+  X-Robots-Tag: noindex
+
+https://:version.:project.pages.dev/*
+  X-Robots-Tag: noindex

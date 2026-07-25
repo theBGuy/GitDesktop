@@ -8,7 +8,7 @@ import ForgeMark from "../components/ForgeMark.astro";
 import SiteLayout from "../layouts/SiteLayout.astro";
 
 const base = import.meta.env.BASE_URL;
-const download = `${base}download`;
+const download = `${base}download/`;
 
 const forges = [
   {
@@ -221,7 +221,7 @@ const jiraFeatures = [
         <a href={download} class="rounded-lg bg-mint px-6 py-3 font-medium text-mint-ink transition-opacity hover:opacity-90">
           Download GitDesktop
         </a>
-        <a href={`${base}features`} class="rounded-lg border border-line-2 px-6 py-3 font-medium text-ink transition-colors hover:bg-surface">
+        <a href={`${base}features/`} class="rounded-lg border border-line-2 px-6 py-3 font-medium text-ink transition-colors hover:bg-surface">
           See all features
         </a>
       </div>

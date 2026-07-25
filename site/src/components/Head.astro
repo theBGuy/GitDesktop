@@ -1,0 +1,97 @@
+---
+// The single <head> for every page on the site. Both layouts render this, which
+// is the entire point: SiteLayout and Layout had already drifted (the download
+// and legal pages never got the skip link, and neither head had a canonical),
+// and letting the blog hand-roll a third head would have tripled that drift.
+//
+// Every URL-shaped tag derives from Astro.site + the current pathname, so
+// nothing here can go stale when a route moves.
+interface Props {
+  title: string;
+  description: string;
+  ogTitle?: string;
+  ogDescription?: string;
+  /** Site-relative or absolute. Defaults to the product card. */
+  ogImage?: string;
+  ogImageAlt?: string;
+  ogType?: "website" | "article";
+  /** Emitted only when ogType is "article". */
+  publishedTime?: Date;
+  modifiedTime?: Date;
+  /** Overrides the derived canonical — syndicated reposts only. */
+  canonical?: string;
+  /** Adds the RSS autodiscovery link. Blog surfaces only. */
+  feed?: boolean;
+}
+
+const {
+  title,
+  description,
+  ogTitle = title,
+  ogDescription = description,
+  ogImage = "/og-default.png",
+  ogImageAlt = "GitDesktop — a native Git client showing a pull request with CI checks and an AI code review",
+  ogType = "website",
+  publishedTime,
+  modifiedTime,
+  canonical,
+  feed = false,
+} = Astro.props;
+
+const base = import.meta.env.BASE_URL;
+
+// Canonical from the PATH ONLY. Dropping the query string is what collapses the
+// ?ai=off / ?ai=0 view-toggle variants of every page onto a single URL — the
+// toggle rewrites the querystring via history.replaceState, so without this
+// every page has three crawlable spellings.
+const canonicalUrl = canonical ?? new URL(Astro.url.pathname, Astro.site).href;
+const ogImageUrl = new URL(ogImage, Astro.site).href;
+
+// Endpoints with a file extension 404 on a trailing slash in Astro 6, and
+// Cloudflare only ADDS slashes to extension-less paths — so these two must stay
+// slash-less even though every page route carries one.
+const sitemapUrl = new URL("sitemap-index.xml", Astro.site).href;
+const feedUrl = new URL("rss.xml", Astro.site).href;
+---
+
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="icon" type="image/svg+xml" href={`${base}app-icon.svg`} />
+
+<title>{title}</title>
+<meta name="description" content={description} />
+<link rel="canonical" href={canonicalUrl} />
+
+{/* --color-bg, oklch(0.145 0 0), converted rather than eyeballed. */}
+<meta name="theme-color" content="#0a0a0a" />
+
+<meta property="og:title" content={ogTitle} />
+<meta property="og:description" content={ogDescription} />
+<meta property="og:type" content={ogType} />
+<meta property="og:url" content={canonicalUrl} />
+<meta property="og:site_name" content="GitDesktop" />
+<meta property="og:locale" content="en_US" />
+<meta property="og:image" content={ogImageUrl} />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta property="og:image:alt" content={ogImageAlt} />
+
+{
+  ogType === "article" && publishedTime && (
+    <meta property="article:published_time" content={publishedTime.toISOString()} />
+  )
+}
+{
+  ogType === "article" && modifiedTime && (
+    <meta property="article:modified_time" content={modifiedTime.toISOString()} />
+  )
+}
+
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content={ogTitle} />
+<meta name="twitter:description" content={ogDescription} />
+<meta name="twitter:image" content={ogImageUrl} />
+<meta name="twitter:image:alt" content={ogImageAlt} />
+
+<link rel="sitemap" type="application/xml" href={sitemapUrl} />
+{feed && <link rel="alternate" type="application/rss+xml" title="GitDesktop blog" href={feedUrl} />}

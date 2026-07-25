@@ -5,6 +5,7 @@
 // footer. Every marketing page renders inside this so the two-view toggle and
 // nav stay identical everywhere. The AI spoke link is gated with data-view=ai,
 // matching the app's hide-AI setting.
+import Head from "../components/Head.astro";
 import "../styles/global.css";
 
 interface Props {
@@ -12,8 +13,17 @@ interface Props {
   description: string;
   ogTitle?: string;
   ogDescription?: string;
+  ogImage?: string;
+  ogImageAlt?: string;
+  ogType?: "website" | "article";
+  publishedTime?: Date;
+  modifiedTime?: Date;
+  canonical?: string;
+  feed?: boolean;
   /** Highlights the matching spoke link. */
-  active?: "integrations" | "ai" | "features";
+  active?: "integrations" | "ai" | "features" | "blog";
+  /** Posts hide the view toggle — see the comment above the toggle markup. */
+  showViewToggle?: boolean;
 }
 
 const {
@@ -21,22 +31,33 @@ const {
   description,
   ogTitle = title,
   ogDescription = description,
+  ogImage,
+  ogImageAlt,
+  ogType,
+  publishedTime,
+  modifiedTime,
+  canonical,
+  feed,
   active,
+  showViewToggle = true,
 } = Astro.props;
 
 const base = import.meta.env.BASE_URL;
 const repo = "https://github.com/theBGuy/GitDesktop";
-const download = `${base}download`;
+const download = `${base}download/`;
 
+// Trailing slashes are load-bearing: `trailingSlash: "always"` plus Cloudflare's
+// own 308-to-slash means a slash-less href costs every visitor a redirect hop.
 const spokes = [
   {
     id: "integrations",
     label: "Integrations",
-    href: `${base}integrations`,
+    href: `${base}integrations/`,
     ai: false,
   },
-  { id: "ai", label: "AI", href: `${base}ai`, ai: true },
-  { id: "features", label: "Features", href: `${base}features`, ai: false },
+  { id: "ai", label: "AI", href: `${base}ai/`, ai: true },
+  { id: "features", label: "Features", href: `${base}features/`, ai: false },
+  { id: "blog", label: "Blog", href: `${base}blog/`, ai: false },
 ];
 
 // The head/body scripts are injected via set:html so their `{ }` never read as
@@ -119,14 +140,19 @@ const toggleScript = `
 <!doctype html>
 <html lang="en">
   <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <link rel="icon" type="image/svg+xml" href={`${base}app-icon.svg`} />
-    <title>{title}</title>
-    <meta name="description" content={description} />
-    <meta property="og:title" content={ogTitle} />
-    <meta property="og:description" content={ogDescription} />
-    <meta property="og:type" content="website" />
+    <Head
+      title={title}
+      description={description}
+      ogTitle={ogTitle}
+      ogDescription={ogDescription}
+      ogImage={ogImage}
+      ogImageAlt={ogImageAlt}
+      ogType={ogType}
+      publishedTime={publishedTime}
+      modifiedTime={modifiedTime}
+      canonical={canonical}
+      feed={feed}
+    />
     <script is:inline set:html={modeScript}></script>
     <script is:inline set:html={revealScript}></script>
   </head>
@@ -140,11 +166,17 @@ const toggleScript = `
     <header class="sticky top-0 z-30 border-b border-line bg-bg/80 backdrop-blur-md">
       <nav class="mx-auto flex h-14 max-w-6xl items-center justify-between gap-3 px-5">
         <div class="flex shrink-0 items-center gap-4">
-          <a href={base} class="flex items-center gap-2.5 font-medium text-ink">
+          <a
+            href={base}
+            aria-label="GitDesktop home"
+            class="flex items-center gap-2.5 font-medium text-ink"
+          >
             <img src={`${base}app-icon.svg`} alt="" width="22" height="22" />
             <span class="hidden sm:inline">GitDesktop</span>
           </a>
-          <div class="hidden items-center gap-0.5 text-sm md:flex">
+          {/* lg, not md: at 768px the row already needed ~785px against ~713px
+              available, and the toggle labels visibly wrapped. */}
+          <div class="hidden items-center gap-0.5 text-sm lg:flex">
             {
               spokes.map((s) => (
                 <a
@@ -163,29 +195,39 @@ const toggleScript = `
           </div>
         </div>
 
-        <!-- View toggle — mirrors the app's "hide AI features" setting -->
-        <div
-          class="flex items-center rounded-full border border-line-2 bg-surface p-0.5 text-xs"
-          role="group"
-          aria-label="Choose how much to show"
-        >
-          <button
-            type="button"
-            data-mode-btn="ai"
-            aria-pressed="true"
-            class="flex items-center gap-1 rounded-full px-3 py-1 text-muted transition-colors aria-pressed:bg-surface-2 aria-pressed:text-ink"
-          >
-            <span class="text-mint" aria-hidden="true">✦</span> AI-native
-          </button>
-          <button
-            type="button"
-            data-mode-btn="git"
-            aria-pressed="false"
-            class="rounded-full px-3 py-1 text-muted transition-colors aria-pressed:bg-surface-2 aria-pressed:text-ink"
-          >
-            Just Git
-          </button>
-        </div>
+        {/* View toggle — mirrors the app's "hide AI features" setting. Hidden on
+            blog posts: its click handler scrolls to top unconditionally, which
+            throws a reader out of a long article, and "hide AI features" is a
+            promise about the product tour, not about editorial. */}
+        {
+          showViewToggle && (
+            <div
+              class="flex shrink-0 items-center rounded-full border border-line-2 bg-surface p-0.5 text-xs"
+              role="group"
+              aria-label="Choose how much to show"
+            >
+              <button
+                type="button"
+                data-mode-btn="ai"
+                aria-pressed="true"
+                class="flex items-center gap-1 whitespace-nowrap rounded-full px-3 py-1 text-muted transition-colors aria-pressed:bg-surface-2 aria-pressed:text-ink"
+              >
+                <span class="text-mint" aria-hidden="true">
+                  ✦
+                </span>{" "}
+                AI-native
+              </button>
+              <button
+                type="button"
+                data-mode-btn="git"
+                aria-pressed="false"
+                class="whitespace-nowrap rounded-full px-3 py-1 text-muted transition-colors aria-pressed:bg-surface-2 aria-pressed:text-ink"
+              >
+                Just Git
+              </button>
+            </div>
+          )
+        }
 
         <div class="flex shrink-0 items-center gap-1 text-sm">
           <a href={repo} class="hidden rounded px-3 py-1.5 text-muted transition-colors hover:text-ink sm:block">GitHub</a>
@@ -198,7 +240,9 @@ const toggleScript = `
       </nav>
     </header>
 
-    <main id="top">
+    {/* tabindex="-1" so the skip link actually moves FOCUS here, not just the
+        scroll position — without it the next Tab returns to the nav. */}
+    <main id="top" tabindex="-1">
       <slot />
     </main>
 
@@ -211,13 +255,14 @@ const toggleScript = `
           © 2026 theBGuy · Apache-2.0
         </p>
         <div class="flex flex-wrap items-center gap-x-6 gap-y-2">
-          <a href={`${base}integrations`} class="transition-colors hover:text-ink">Integrations</a>
-          <a data-view="ai" href={`${base}ai`} class="transition-colors hover:text-ink">AI</a>
-          <a href={`${base}features`} class="transition-colors hover:text-ink">Features</a>
+          <a href={`${base}integrations/`} class="transition-colors hover:text-ink">Integrations</a>
+          <a data-view="ai" href={`${base}ai/`} class="transition-colors hover:text-ink">AI</a>
+          <a href={`${base}features/`} class="transition-colors hover:text-ink">Features</a>
+          <a href={`${base}blog/`} class="transition-colors hover:text-ink">Blog</a>
           <a href={repo} class="transition-colors hover:text-ink">GitHub</a>
           <a href={`${repo}/releases`} class="transition-colors hover:text-ink">Releases</a>
-          <a href={`${base}privacy`} class="transition-colors hover:text-ink">Privacy</a>
-          <a href={`${base}terms`} class="transition-colors hover:text-ink">Terms</a>
+          <a href={`${base}privacy/`} class="transition-colors hover:text-ink">Privacy</a>
+          <a href={`${base}terms/`} class="transition-colors hover:text-ink">Terms</a>
         </div>
       </div>
     </footer>

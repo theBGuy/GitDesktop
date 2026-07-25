@@ -1,11 +1,19 @@
 ---
-import Layout from "./Layout.astro";
+// Privacy / terms. Renders through the one site shell, so these pages get the
+// canonical tag, the OG card, the skip link and the spoke nav that the old
+// second layout never had. The view toggle is hidden: "hide AI features" is a
+// promise about the product tour, and a legal document has no two readings.
+import SiteLayout from "./SiteLayout.astro";
 
 const { frontmatter } = Astro.props;
 ---
 
-<Layout title={frontmatter.title} description={frontmatter.description}>
+<SiteLayout
+  title={frontmatter.title}
+  description={frontmatter.description}
+  showViewToggle={false}
+>
   <article class="legal mx-auto max-w-3xl px-5 py-16 md:py-24">
     <slot />
   </article>
-</Layout>
+</SiteLayout>

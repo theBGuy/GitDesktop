@@ -22,7 +22,7 @@ const repo = "https://github.com/theBGuy/GitDesktop";
 const base = import.meta.env.BASE_URL;
 // The Download CTAs go to the on-site, OS-aware download page (not straight to
 // GitHub Releases).
-const download = `${base}download`;
+const download = `${base}download/`;
 
 // Home highlights are the "everything else" tail — capabilities that don't get
 // their own narrative section. Non-AI ones show in both views; AI ones are gated.
@@ -234,7 +234,7 @@ const forges = [
           go to us — they're yours, in your OS keychain.
         </p>
         <p class="mt-6 text-sm">
-          <a href={`${base}ai`} class="text-mint underline-offset-4 hover:underline">The full AI story →</a>
+          <a href={`${base}ai/`} class="text-mint underline-offset-4 hover:underline">The full AI story →</a>
         </p>
       </div>
     </div>
@@ -263,7 +263,7 @@ const forges = [
           an integrated terminal, and can be sandboxed in a Docker or Podman container.
         </p>
         <p class="mt-6 text-sm">
-          <a href={`${base}ai`} class="text-mint underline-offset-4 hover:underline">See agents, review &amp; MCP →</a>
+          <a href={`${base}ai/`} class="text-mint underline-offset-4 hover:underline">See agents, review &amp; MCP →</a>
         </p>
       </div>
 
@@ -389,7 +389,7 @@ const forges = [
         differ by platform, and we say so where they do.
       </p>
       <p data-reveal class="mt-6 text-sm">
-        <a href={`${base}integrations`} class="text-mint underline-offset-4 hover:underline">Explore integrations →</a>
+        <a href={`${base}integrations/`} class="text-mint underline-offset-4 hover:underline">Explore integrations →</a>
       </p>
     </div>
   </section>
@@ -417,7 +417,7 @@ const forges = [
           August 2026.
         </p>
         <p class="mt-6 text-sm">
-          <a href={`${base}integrations`} class="text-mint underline-offset-4 hover:underline">More on Jira &amp; forges →</a>
+          <a href={`${base}integrations/`} class="text-mint underline-offset-4 hover:underline">More on Jira &amp; forges →</a>
         </p>
       </div>
 
@@ -665,7 +665,7 @@ const forges = [
           default, so read-only stays the default.
         </p>
         <p class="mt-6 text-sm">
-          <a href={`${base}ai`} class="text-mint underline-offset-4 hover:underline">How the MCP server works →</a>
+          <a href={`${base}ai/`} class="text-mint underline-offset-4 hover:underline">How the MCP server works →</a>
         </p>
       </div>
 
@@ -724,7 +724,7 @@ const forges = [
         <h2 class="text-sm text-faint">
           <span class="text-add">//</span> everything else you'd reach for
         </h2>
-        <a href={`${base}features`} class="text-sm text-mint underline-offset-4 hover:underline">
+        <a href={`${base}features/`} class="text-sm text-mint underline-offset-4 hover:underline">
           See all features →
         </a>
       </div>

@@ -1,0 +1,114 @@
+---
+// This page is infrastructure, not decoration. Without a top-level 404.html in
+// the build output, Cloudflare Pages assumes the deploy is a single-page app and
+// answers EVERY unknown path with 200 + the homepage — which makes the URL space
+// unbounded, buckets the site as soft-404 in Search Console, and shadows
+// /robots.txt and /sitemap-index.xml (both were serving HTML before this existed).
+// https://developers.cloudflare.com/pages/configuration/serving-pages/
+import SiteLayout from "../layouts/SiteLayout.astro";
+
+const base = import.meta.env.BASE_URL;
+
+// `<path>` is a placeholder a developer reads correctly with no JS; the inline
+// script below specializes it to the path that actually 404'd.
+const notFound = `<span class="c">// nothing in this tree matches that path</span>
+$ git show HEAD:<span class="k" data-404-path>&lt;path&gt;</span>
+fatal: path '<span class="k" data-404-path>&lt;path&gt;</span>' does not exist in 'HEAD'`;
+
+const destinations = [
+  {
+    href: base,
+    label: "The tour",
+    detail: "What GitDesktop is, in one scroll.",
+  },
+  {
+    href: `${base}features/`,
+    label: "Every feature",
+    detail: "The full capability catalog, grouped and scannable.",
+  },
+  {
+    href: `${base}integrations/`,
+    label: "Integrations",
+    detail: "GitHub, GitLab, Bitbucket and Jira — each on its own identity.",
+  },
+  {
+    href: `${base}download/`,
+    label: "Download",
+    detail: "Windows, macOS and Linux builds.",
+  },
+];
+---
+
+<SiteLayout
+  title="Page not found — GitDesktop"
+  description="That page doesn't exist. Head back to the tour, the feature catalog, the integrations, or the download page."
+  ogTitle="Page not found — GitDesktop"
+  ogDescription="That path isn't tracked in this tree."
+>
+  <section class="border-b border-line">
+    <div class="mx-auto max-w-6xl px-5 py-16 md:py-20">
+      <p data-reveal class="text-sm text-faint"><span class="text-add">//</span> 404</p>
+      <h1
+        data-reveal
+        style="transition-delay:60ms"
+        class="mt-5 text-[clamp(2rem,5vw,3.25rem)] font-semibold tracking-tight"
+      >
+        Nothing tracked at that path.
+      </h1>
+      <p
+        data-reveal
+        style="transition-delay:120ms"
+        class="mt-6 max-w-[60ch] text-base leading-relaxed text-body sm:text-lg"
+      >
+        The link may be out of date, or the page may have moved. Everything below
+        still exists.
+      </p>
+
+      <div
+        data-reveal
+        style="transition-delay:180ms"
+        class="mt-10 max-w-[64ch] overflow-hidden rounded-xl border border-line-2 bg-surface"
+      >
+        <div class="terminal" set:html={notFound}></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="mx-auto max-w-6xl px-5 py-6 md:py-10">
+      <ul class="divide-y divide-line border-b border-line">
+        {
+          destinations.map((d) => (
+            <li>
+              <a
+                href={d.href}
+                class="group flex flex-col gap-1 py-5 transition-colors sm:flex-row sm:items-baseline sm:gap-8"
+              >
+                <span class="w-[16ch] shrink-0 font-medium text-ink underline decoration-line-2 underline-offset-4 transition-colors group-hover:decoration-mint">
+                  {d.label}
+                </span>
+                <span class="text-[15px] text-muted">{d.detail}</span>
+              </a>
+            </li>
+          ))
+        }
+      </ul>
+    </div>
+  </section>
+
+  <Fragment slot="scripts">
+    <script is:inline>
+      // Name the path that actually 404'd. textContent (never innerHTML) so a
+      // crafted URL can't inject markup; capped so a long path can't blow out
+      // the terminal block's layout.
+      (function () {
+        try {
+          var p = location.pathname + location.search;
+          if (p.length > 96) p = p.slice(0, 93) + "...";
+          var nodes = document.querySelectorAll("[data-404-path]");
+          for (var i = 0; i < nodes.length; i++) nodes[i].textContent = p;
+        } catch (e) {}
+      })();
+    </script>
+  </Fragment>
+</SiteLayout>

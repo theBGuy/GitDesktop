@@ -1,0 +1,285 @@
+---
+// A single post. Renders through SiteLayout with the view toggle OFF: its click
+// handler calls window.scrollTo({top:0}) unconditionally, which throws a reader
+// out of a 2,000-word article, and "hide AI features" is a promise about the
+// product tour, not about editorial. A post's AI-ness is declared up front by
+// the chip in the byline instead.
+import { Image } from "astro:assets";
+import {
+  formatDate,
+  isoDate,
+  type Post,
+  postUrl,
+  readingTime,
+  tagUrl,
+} from "../lib/posts";
+import SiteLayout from "./SiteLayout.astro";
+
+interface Props {
+  post: Post;
+  headings: { depth: number; slug: string; text: string }[];
+  prev?: Post;
+  next?: Post;
+}
+
+const { post, headings, prev, next } = Astro.props;
+
+const { data } = post;
+const base = import.meta.env.BASE_URL;
+const repo = "https://github.com/theBGuy/GitDesktop";
+const minutes = readingTime(post);
+
+// h2/h3 only: h4 in a table of contents is noise at this article length.
+const toc = headings.filter((h) => h.depth === 2 || h.depth === 3);
+---
+
+<SiteLayout
+  active="blog"
+  showViewToggle={false}
+  feed
+  title={`${data.title} — GitDesktop`}
+  description={data.description}
+  ogTitle={data.title}
+  ogDescription={data.description}
+  ogImage={data.ogImage}
+  ogType="article"
+  publishedTime={data.pubDate}
+  modifiedTime={data.updatedDate}
+  canonical={data.canonical}
+>
+  <article>
+    <header class="border-b border-line">
+      <div class="mx-auto max-w-6xl px-5 py-14 md:py-16">
+        <a
+          href={`${base}blog/`}
+          class="text-sm text-faint transition-colors hover:text-muted"
+        >
+          <span class="text-add">//</span> blog
+        </a>
+
+        <h1 class="mt-5 max-w-[24ch] text-[clamp(1.75rem,4vw,2.75rem)] font-semibold tracking-tight">
+          {data.title}
+        </h1>
+
+        <div class="mt-6 flex flex-wrap items-center gap-x-3 gap-y-2 text-sm text-muted">
+          <span>{data.author}</span>
+          <span aria-hidden="true" class="text-faint">·</span>
+          <time datetime={isoDate(data.pubDate)}>{formatDate(data.pubDate)}</time>
+          <span aria-hidden="true" class="text-faint">·</span>
+          <span>{minutes} min read</span>
+          {
+            data.ai && (
+              /* Text, never the glyph alone — meaning must not ride on colour
+                 or an icon by itself. */
+              <span class="key-chip">
+                <span class="text-mint" aria-hidden="true">
+                  ✦
+                </span>
+                AI
+              </span>
+            )
+          }
+        </div>
+
+        {
+          data.updatedDate && (
+            <p class="mt-2 text-sm text-muted">
+              Updated{" "}
+              <time datetime={isoDate(data.updatedDate)}>
+                {formatDate(data.updatedDate)}
+              </time>
+            </p>
+          )
+        }
+
+        {
+          data.tags.length > 0 && (
+            <ul class="mt-5 flex flex-wrap gap-2">
+              {data.tags.map((tag) => (
+                <li>
+                  <a
+                    href={tagUrl(tag)}
+                    class="rounded-md border border-line px-2.5 py-1 text-xs text-muted transition-colors hover:border-line-2 hover:text-ink"
+                  >
+                    {tag}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          )
+        }
+      </div>
+    </header>
+
+    <div class="mx-auto max-w-6xl px-5 py-12 md:py-16">
+      <div class="grid gap-12 xl:grid-cols-[minmax(0,1fr)_15rem]">
+        <div class="min-w-0">
+          {
+            data.heroImage && data.heroAlt && (
+              <figure class="window mb-12">
+                <Image src={data.heroImage} alt={data.heroAlt} loading="eager" />
+              </figure>
+            )
+          }
+
+          {
+            toc.length > 2 && (
+              /* Below xl the rail has nowhere to live without pushing the text
+                 column off-centre, so it collapses to a native disclosure. */
+              <details class="mb-10 rounded-lg border border-line px-4 py-3 xl:hidden">
+                <summary class="cursor-pointer text-sm text-muted">
+                  On this page
+                </summary>
+                <ul class="mt-3 space-y-2 text-sm">
+                  {toc.map((h) => (
+                    <li class={h.depth === 3 ? "pl-4" : undefined}>
+                      <a
+                        href={`#${h.slug}`}
+                        class="text-muted transition-colors hover:text-ink"
+                      >
+                        {h.text}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )
+          }
+
+          {/* No data-reveal on prose: the enhancer sets opacity:0 the moment
+              .js lands, with only a 1800ms timeout as the safety net, so a
+              reader arriving at a #heading deep link would stare at blank
+              paragraphs. */}
+          <div class="prose">
+            <slot />
+          </div>
+
+          <div
+            class="mt-14 flex flex-wrap items-center justify-between gap-4 border-t border-line pt-6 text-sm"
+          >
+            <button
+              type="button"
+              data-copy-link
+              class="rounded-md border border-line-2 px-3 py-1.5 text-muted transition-colors hover:text-ink"
+            >
+              Copy link
+            </button>
+            <a
+              href={`${repo}/discussions`}
+              class="text-muted underline decoration-line-2 underline-offset-4 transition-colors hover:text-ink"
+            >
+              Discuss on GitHub
+            </a>
+          </div>
+          <p role="status" aria-live="polite" class="mt-2 text-sm text-mint" data-copy-status></p>
+
+          {
+            (prev || next) && (
+              <nav
+                aria-label="More posts"
+                class="mt-12 grid gap-4 border-t border-line pt-8 sm:grid-cols-2"
+              >
+                {next ? (
+                  <a href={postUrl(next)} class="group">
+                    <span class="text-xs text-faint">Newer</span>
+                    <span class="mt-1 block text-ink underline decoration-line-2 underline-offset-4 transition-colors group-hover:decoration-mint">
+                      {next.data.title}
+                    </span>
+                  </a>
+                ) : (
+                  <span />
+                )}
+                {prev && (
+                  <a href={postUrl(prev)} class="group sm:text-right">
+                    <span class="text-xs text-faint">Older</span>
+                    <span class="mt-1 block text-ink underline decoration-line-2 underline-offset-4 transition-colors group-hover:decoration-mint">
+                      {prev.data.title}
+                    </span>
+                  </a>
+                )}
+              </nav>
+            )
+          }
+        </div>
+
+        {
+          toc.length > 2 && (
+            <aside class="hidden xl:block">
+              <nav
+                aria-label="On this page"
+                class="sticky top-20 border-l border-line pl-5 text-sm"
+              >
+                <p class="text-xs text-faint">On this page</p>
+                <ul class="mt-3 space-y-2">
+                  {toc.map((h) => (
+                    <li class={h.depth === 3 ? "pl-3" : undefined}>
+                      <a
+                        href={`#${h.slug}`}
+                        class="block text-muted transition-colors hover:text-ink"
+                      >
+                        {h.text}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </nav>
+            </aside>
+          )
+        }
+      </div>
+    </div>
+
+    <section class="relative overflow-hidden border-t border-line">
+      <div class="grid-bg pointer-events-none absolute inset-0 opacity-60"></div>
+      <div class="relative mx-auto max-w-6xl px-5 py-16 text-center md:py-20">
+        <h2 class="text-balance text-2xl tracking-tight sm:text-3xl">
+          Written while building GitDesktop.
+        </h2>
+        <p class="mx-auto mt-5 max-w-[48ch] leading-relaxed text-body">
+          A native Git client for GitHub, GitLab and Bitbucket — free and open
+          source, with AI you control or hide entirely.
+        </p>
+        <div class="mt-8 flex flex-wrap items-center justify-center gap-3">
+          <a
+            href={`${base}download/`}
+            class="rounded-lg bg-mint px-6 py-3 font-medium text-mint-ink transition-opacity hover:opacity-90"
+          >
+            Download GitDesktop
+          </a>
+          <a
+            href={`${base}blog/`}
+            class="rounded-lg border border-line-2 px-6 py-3 font-medium text-ink transition-colors hover:bg-surface"
+          >
+            All posts
+          </a>
+        </div>
+      </div>
+    </section>
+  </article>
+
+  <Fragment slot="scripts">
+    <script is:inline>
+      // Copy link. No share buttons anywhere on this site: it ships zero
+      // third-party script and the privacy policy says so.
+      (function () {
+        var btn = document.querySelector("[data-copy-link]");
+        var status = document.querySelector("[data-copy-status]");
+        if (!btn || !status) return;
+        btn.addEventListener("click", function () {
+          var url = location.href;
+          function done(ok) {
+            status.textContent = ok ? "Link copied." : "Press Ctrl+C to copy: " + url;
+          }
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(url).then(
+              function () { done(true); },
+              function () { done(false); }
+            );
+          } else {
+            done(false);
+          }
+        });
+      })();
+    </script>
+  </Fragment>
+</SiteLayout>

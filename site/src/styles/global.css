@@ -426,3 +426,211 @@ kbd {
   border-top: 1px solid var(--color-line);
   margin: 2.75rem 0;
 }
+
+/* --- Blog prose -------------------------------------------------------------
+   A SIBLING of .legal, not an extension: .legal covers only h1/h2/p/li/ul/a/
+   strong/code/hr, and widening it would shift privacy + terms every time the
+   blog needs a new element. Long-form is also the one place the mono-only rule
+   needs help — JetBrains Mono's advance is exactly 0.6em, so .legal's 72ch runs
+   691px, and mono forfeits the word-shape variance that gives the eye landmarks
+   across a return sweep. The fix is geometry, not a second font: the brand has
+   one family and a webfont on the page type where people stay longest is the
+   wrong place to break that. */
+.prose {
+  --measure: min(64ch, 100%);
+}
+
+.prose p,
+.prose li {
+  max-width: var(--measure);
+  line-height: 1.75;
+  color: var(--color-body);
+}
+
+/* Hold 16px below sm, where padding is the real constraint, not measure. */
+@media (min-width: 768px) {
+  .prose {
+    font-size: 1.0625rem;
+  }
+}
+
+.prose > * + * {
+  margin-top: 1.15rem;
+}
+
+.prose h2,
+.prose h3,
+.prose h4 {
+  color: var(--color-ink);
+  max-width: var(--measure);
+  text-wrap: balance;
+}
+.prose h2 {
+  font-size: 1.45rem;
+  margin-top: 3rem;
+  letter-spacing: -0.02em;
+}
+.prose h3 {
+  font-size: 1.15rem;
+  margin-top: 2.25rem;
+}
+/* The base reset stops at h3, so h4 would otherwise lose the brand treatment
+   entirely in a long post. */
+.prose h4 {
+  font-size: 1rem;
+  margin-top: 1.75rem;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+/* The sticky header is 57px; nothing else in this file sets scroll-margin, so
+   without this every TOC link and footnote backref lands UNDER the header. */
+.prose :is(h2, h3, h4)[id],
+.prose .footnotes li {
+  scroll-margin-top: 5rem;
+}
+
+/* Underlined, not mint-only: .legal underlines on :hover alone, which is
+   meaning by color alone. Survivable across two legal pages, not at blog link
+   density. */
+.prose a {
+  color: var(--color-mint);
+  text-decoration: underline;
+  text-decoration-color: oklch(0.82 0.12 178 / 0.45);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+.prose a:hover,
+.prose a:focus-visible {
+  text-decoration-color: var(--color-mint);
+}
+
+.prose strong {
+  color: var(--color-ink);
+  font-weight: 600;
+}
+.prose em {
+  font-style: italic;
+}
+
+.prose ul,
+.prose ol {
+  padding-left: 1.3rem;
+  max-width: var(--measure);
+}
+.prose ul {
+  list-style: disc;
+}
+.prose ol {
+  list-style: decimal;
+}
+.prose li + li {
+  margin-top: 0.4rem;
+}
+.prose li::marker {
+  color: var(--color-faint);
+}
+
+.prose blockquote {
+  border-left: 1px solid var(--color-line-2);
+  padding-left: 1.1rem;
+  color: var(--color-muted);
+  max-width: var(--measure);
+}
+
+.prose :not(pre) > code {
+  background: var(--color-surface-2);
+  padding: 0.12em 0.38em;
+  border-radius: 4px;
+  font-size: 0.88em;
+  color: var(--color-ink);
+}
+
+/* html sets `overflow-x: clip`, which — unlike hidden — creates NO scroll
+   container, so a wide table or an 80-column code line would be permanently
+   unreachable rather than scrollable. Same precedent as .terminal / .diff-peek. */
+.prose pre {
+  border: 1px solid var(--color-line);
+  border-radius: 9px;
+  padding: 1rem 1.15rem;
+  overflow-x: auto;
+  font-size: 0.84rem;
+  line-height: 1.7;
+  background: oklch(1 0 0 / 0.015);
+  tab-size: 2;
+}
+.prose pre code {
+  background: none;
+  padding: 0;
+  font-size: inherit;
+}
+
+/* Shiki's `css-variables` theme, mapped onto the tokens already in use so code
+   reads as the same system as .terminal. (Astro 5 renamed these from
+   --astro-code-color-text/-background.) */
+.prose pre.astro-code {
+  --astro-code-foreground: var(--color-body);
+  --astro-code-background: transparent;
+  --astro-code-token-comment: var(--color-faint);
+  --astro-code-token-keyword: var(--color-mint);
+  --astro-code-token-string: var(--color-add);
+  --astro-code-token-string-expression: var(--color-add);
+  --astro-code-token-function: var(--color-ink);
+  --astro-code-token-constant: var(--color-ink);
+  --astro-code-token-parameter: var(--color-body);
+  --astro-code-token-punctuation: var(--color-muted);
+  --astro-code-token-link: var(--color-mint);
+}
+
+.prose .table-wrap {
+  overflow-x: auto;
+}
+.prose table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+.prose th,
+.prose td {
+  border-bottom: 1px solid var(--color-line);
+  padding: 0.55rem 0.9rem 0.55rem 0;
+  text-align: left;
+  vertical-align: top;
+}
+.prose th {
+  color: var(--color-ink);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.prose figure {
+  max-width: 100%;
+}
+.prose figcaption {
+  margin-top: 0.6rem;
+  font-size: 0.82rem;
+  color: var(--color-muted);
+}
+.prose img {
+  border-radius: 9px;
+  border: 1px solid var(--color-line);
+}
+
+.prose hr {
+  border: 0;
+  border-top: 1px solid var(--color-line);
+  margin: 2.75rem 0;
+}
+
+.prose .footnotes {
+  margin-top: 3rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--color-line);
+  font-size: 0.9rem;
+  color: var(--color-muted);
+}
+.prose .footnotes h2 {
+  font-size: 0.85rem;
+  color: var(--color-muted);
+  margin-top: 0;
+}

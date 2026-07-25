@@ -1,5 +1,5 @@
 ---
-import Layout from "../layouts/Layout.astro";
+import SiteLayout from "../layouts/SiteLayout.astro";
 
 const repo = "https://github.com/theBGuy/GitDesktop";
 const releases = `${repo}/releases`;
@@ -20,9 +20,11 @@ const builds = [
 ];
 ---
 
-<Layout
-  title="Download GitDesktop"
-  description="Download GitDesktop for Windows, macOS, or Linux. Free, open-source, with signed auto-updates."
+<SiteLayout
+  title="Download GitDesktop for Windows, macOS & Linux"
+  description="Free, open-source native builds of GitDesktop for Windows, macOS, and Linux — installer, .dmg, AppImage, .deb and .rpm, with signed auto-updates."
+  ogTitle="Download GitDesktop"
+  ogDescription="Free and open source, for Windows, macOS and Linux."
 >
   <section class="border-b border-line">
     <div class="mx-auto max-w-6xl px-5 py-16 md:py-20">
@@ -206,4 +208,4 @@ const builds = [
         });
     })();
   </script>
-</Layout>
+</SiteLayout>

@@ -1,0 +1,50 @@
+name: site
+
+# Builds the marketing site on PRs that touch it. Nothing else did: frontend.yml
+# watches the root app only, rust-tests.yml covers src-tauri/**, and
+# changelog.yml only checks fragments — so until this job existed, a broken
+# site/ build first surfaced as a red Cloudflare Pages PRODUCTION deploy.
+#
+# site/ is a pnpm workspace member with NO lockfile of its own (pnpm-workspace.yaml
+# lists it; site/node_modules/astro is a symlink into the root store), which is why
+# the root pnpm-lock.yaml is a trigger path here. The content collection makes this
+# gate load-bearing: a zod schema violation, a duplicate route, a missing hero
+# image, or an uncoercible date in a blog post are all build-time failures.
+
+on:
+  pull_request:
+    paths:
+      - "site/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".github/workflows/site.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6.0.9
+
+      - name: Install Node
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --filter site
+
+      - name: Build the marketing site
+        run: pnpm --filter site build
+
+      # Check-only (biome ci never writes); `pnpm lint` locally is --write.
+      # Verified green against git's LF blobs — a Windows checkout reports CRLF
+      # format diffs on untouched files, but CI checks out LF.
+      - name: Lint and format check
+        run: pnpm exec biome ci ./site/

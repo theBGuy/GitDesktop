@@ -1,0 +1,190 @@
+---
+import type { GetStaticPaths, Page } from "astro";
+import SiteLayout from "../../layouts/SiteLayout.astro";
+import {
+  formatDate,
+  getPosts,
+  getTags,
+  isoDate,
+  type Post,
+  postUrl,
+  readingTime,
+  tagUrl,
+} from "../../lib/posts";
+
+export const getStaticPaths = (async ({ paginate }) => {
+  const posts = await getPosts();
+  return paginate(posts, { pageSize: 10 });
+}) satisfies GetStaticPaths;
+
+interface Props {
+  page: Page<Post>;
+}
+
+const { page } = Astro.props;
+const base = import.meta.env.BASE_URL;
+const tags = await getTags();
+
+// Named so the "N AI posts hidden" line can state a real number rather than
+// leaving a Just-Git reader staring at a list that silently lost rows.
+const aiCount = page.data.filter((p) => p.data.ai).length;
+---
+
+<SiteLayout
+  active="blog"
+  feed
+  title="Blog — notes from building GitDesktop"
+  description="Engineering notes from building a native Git client: merge previews, stash recovery, multi-forge parity, and AI you can switch off entirely."
+  ogTitle="The GitDesktop blog"
+  ogDescription="Engineering notes from building a native Git client."
+>
+  <section class="border-b border-line">
+    <div class="mx-auto max-w-6xl px-5 py-16 md:py-20">
+      <p data-reveal class="text-sm text-faint"><span class="text-add">//</span> blog</p>
+      <h1
+        data-reveal
+        style="transition-delay:60ms"
+        class="mt-5 text-[clamp(2rem,5vw,3.25rem)] font-semibold tracking-tight"
+      >
+        Notes from building it.
+      </h1>
+      <p
+        data-reveal
+        style="transition-delay:120ms"
+        class="mt-6 max-w-[62ch] text-base leading-relaxed text-body sm:text-lg"
+      >
+        Git internals, the pull-request loop across three forges, and what it
+        takes to make AI optional in a tool people trust with their work.
+      </p>
+      <p data-reveal style="transition-delay:180ms" class="mt-6 text-sm">
+        <a
+          href="/rss.xml"
+          class="text-mint underline decoration-line-2 underline-offset-4 transition-colors hover:decoration-mint"
+        >
+          Subscribe by RSS →
+        </a>
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <div class="mx-auto max-w-6xl px-5 py-6 md:py-10">
+      {
+        page.data.length === 0 ? (
+          <p class="py-16 text-center text-muted">
+            No posts yet. The first one is being written.
+          </p>
+        ) : (
+          <>
+            {aiCount > 0 && (
+              /* Only rendered in the Just-Git view, where those rows are gone:
+                 an index that silently drops half its entries reads as broken. */
+              <p data-view="git" class="pb-6 text-sm text-muted">
+                {aiCount} AI-related {aiCount === 1 ? "post is" : "posts are"}{" "}
+                hidden.{" "}
+                <button
+                  type="button"
+                  data-mode-btn="ai"
+                  class="cursor-pointer text-mint underline decoration-line-2 underline-offset-4 transition-colors hover:decoration-mint"
+                >
+                  Show them
+                </button>
+              </p>
+            )}
+
+            {/* A ruled list, not a card grid: this system reserves boxes and
+                shadows for .window, i.e. real product screenshots. */}
+            <ul class="divide-y divide-line border-y border-line">
+              {page.data.map((post) => (
+                <li data-view={post.data.ai ? "ai" : undefined}>
+                  <a href={postUrl(post)} class="group block py-7">
+                    <div class="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm text-muted">
+                      <time datetime={isoDate(post.data.pubDate)}>
+                        {formatDate(post.data.pubDate)}
+                      </time>
+                      <span aria-hidden="true" class="text-faint">
+                        ·
+                      </span>
+                      <span>{readingTime(post)} min read</span>
+                      {post.data.ai && (
+                        <span class="key-chip">
+                          <span class="text-mint" aria-hidden="true">
+                            ✦
+                          </span>
+                          AI
+                        </span>
+                      )}
+                    </div>
+                    <h2 class="mt-2 max-w-[36ch] text-xl font-semibold tracking-tight underline decoration-line-2 underline-offset-4 transition-colors group-hover:decoration-mint sm:text-2xl">
+                      {post.data.title}
+                    </h2>
+                    <p class="mt-3 max-w-[68ch] text-[15px] leading-relaxed text-body">
+                      {post.data.description}
+                    </p>
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </>
+        )
+      }
+
+      {
+        (page.url.prev || page.url.next) && (
+          <nav
+            aria-label="Pagination"
+            class="flex items-center justify-between gap-4 py-8 text-sm"
+          >
+            {page.url.prev ? (
+              <a
+                href={page.url.prev}
+                class="text-mint underline decoration-line-2 underline-offset-4 transition-colors hover:decoration-mint"
+              >
+                ← Newer posts
+              </a>
+            ) : (
+              <span />
+            )}
+            <span class="text-muted">
+              Page {page.currentPage} of {page.lastPage}
+            </span>
+            {page.url.next ? (
+              <a
+                href={page.url.next}
+                class="text-mint underline decoration-line-2 underline-offset-4 transition-colors hover:decoration-mint"
+              >
+                Older posts →
+              </a>
+            ) : (
+              <span />
+            )}
+          </nav>
+        )
+      }
+
+      {
+        tags.length > 0 && (
+          <div class="border-t border-line py-8">
+            <h2 class="text-sm text-faint">Topics</h2>
+            <ul class="mt-4 flex flex-wrap gap-2">
+              {tags.map(({ tag, count }) => (
+                <li>
+                  <a
+                    href={tagUrl(tag)}
+                    class="rounded-md border border-line px-2.5 py-1 text-sm text-muted transition-colors hover:border-line-2 hover:text-ink"
+                  >
+                    {tag}{" "}
+                    <span class="text-faint" aria-hidden="true">
+                      {count}
+                    </span>
+                    <span class="sr-only">({count} posts)</span>
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )
+      }
+    </div>
+  </section>
+</SiteLayout>
