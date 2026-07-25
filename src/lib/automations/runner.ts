@@ -112,6 +112,15 @@ const DIFF_MAX_BYTES = 200_000;
  *  residual as before the heartbeat.) */
 const CLAIM_HEARTBEAT_MS = 5 * 60 * 1000;
 
+/** Upper bound on heartbeats per run: 25 × 5 min = 125 minutes, past the backend's
+ *  7200s max kill clamp with margin. A run still unsettled by then is wedged — an
+ *  HTTP stream has no deadline at all, and a stalled fetch (e.g. a LAN Ollama box
+ *  asleep mid-stream) never settles, so its `finally` never runs. Stopping the
+ *  heartbeat lets the claim age out (`STALE_CLAIM_AGE` + this cap) so a second
+ *  instance can recover the head — the recovery the stale-reclaim exists for.
+ *  Every legitimately-running review is covered: CLI runs are hard-killed by 7200s. */
+const CLAIM_HEARTBEAT_MAX_BEATS = 25;
+
 /** The store key for a PR target, used to look up its review-history watermark. */
 function targetRef(event: PrAutomationEvent): string {
   return event.target.type === "remote"
@@ -428,7 +437,15 @@ async function run(
       // First statement inside the try, so the arm and the `finally`'s disarm can
       // never be separated by a throw (see the heartbeat comment above).
       if (claimKey) {
+        let beats = 0;
         heartbeat = setInterval(() => {
+          // Bounded so a wedged, never-settling run can't keep its claim fresh
+          // forever (see CLAIM_HEARTBEAT_MAX_BEATS).
+          if (beats >= CLAIM_HEARTBEAT_MAX_BEATS) {
+            stopHeartbeat();
+            return;
+          }
+          beats += 1;
           void invoke("touch_automation_claim", {
             repoKey: claimKey,
             target: claimTarget,
