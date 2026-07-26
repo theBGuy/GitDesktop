@@ -798,9 +798,10 @@ reviewers** field below the description — it pre-fills from any notes an agent
 MCP client with write access) deposited for the head branch via the GitDesktop MCP, and
 you can edit or clear it. When you create the PR, the notes post as its **first
 conversation comment** (under a *🗒️ Notes for reviewers* header, from your own account)
-before any automated review runs, and that review reads them as context — so a deliberate,
-documented decision isn't re-flagged. Notes present here also ground the **AI-generated**
-description{{/ai}}. Press {{key:mod+enter}} from any field to submit either the
+before any automated review runs, and that review reads them as context; on GitHub and
+GitLab the code reviews and security audits you start yourself read them too — so a
+deliberate, documented decision isn't re-flagged. Notes present here also ground the
+**AI-generated** description{{/ai}}. Press {{key:mod+enter}} from any field to submit either the
 **Create** or the **Edit** dialog.{{ai}} While a PR dialog is open, {{kbd:generate-commit-message}}
 runs its **Generate** for you.{{/ai}}
 

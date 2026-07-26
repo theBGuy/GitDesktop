@@ -27,11 +27,15 @@ export function safeSlice(s: string, max: number): string {
 
 /** The note appended in place of the text `capBody` cuts — split so its fixed
  *  length can be charged against the cap before the omitted count is known.
- *  "content", not "comment": the same note lands on inline findings and submitted
- *  review bodies, not only on conversation comments. Module-private — `capBody`
- *  and `stripTruncationNote` are the whole contract. */
+ *  Deliberately source-neutral in both halves, because four different things get
+ *  cut with it and only two of them live on a PR thread: our own comments and
+ *  third-party findings (on the thread), the prior-review text (local review
+ *  history — a review that was never posted has no thread copy at all), and the
+ *  distilled ledger (exists only in the digest store). Naming a thread would send
+ *  an agentic reviewer with forge tools looking for text that isn't there.
+ *  Module-private — `capBody` and `stripTruncationNote` are the whole contract. */
 const TRUNCATION_NOTE_HEAD = "[content truncated — ";
-const TRUNCATION_NOTE_TAIL = " more characters on the PR thread]";
+const TRUNCATION_NOTE_TAIL = " more characters omitted]";
 
 /**
  * Splits a trailing `capBody` note off `text`, returning the body without it and
@@ -410,9 +414,11 @@ export function budgetReviewExtras(input: {
         remaining -= only.length;
         return { result: { text: only, truncated: false }, dropped: false };
       }
-      // `OWN_BLOCK_INDENT`: own blocks render their body under a two-space
-      // continuation indent, so the re-cut note has to sit inside the list item
-      // rather than at column 0.
+      // `OWN_BLOCK_INDENT`: a per-comment block renders its body under a
+      // two-space continuation indent, so the re-cut note has to sit inside the
+      // list item rather than at column 0. The other single-block input, a
+      // distilled ledger, arrives bare (no `- (author …)` line, no indent) — the
+      // two spaces are simply inert there, not wrong.
       const { text: body, omitted } = stripTruncationNote(only);
       const text = capBody(body, cap, omitted, OWN_BLOCK_INDENT);
       remaining -= text.length;

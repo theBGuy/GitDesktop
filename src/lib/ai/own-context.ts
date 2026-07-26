@@ -259,11 +259,17 @@ export async function resolveOwnCommentsContext(
       // serving a stale-sized ledger, and the joined post-cap length so an IN-PLACE
       // edit to a comment (which moves neither the count nor the newest timestamp)
       // still invalidates. Existing cached digests miss once and re-distill.
+      //
+      // The `v2` prefix retires every ledger cached with the old truncation-note
+      // wording: `stripTruncationNote` only matches the current note, so a stale
+      // ledger re-cut by `fitOwn` would stack a second note under the first
+      // instead of restating one cumulative count. One re-distill per PR buys the
+      // self-heal — the same accepted cost as the fingerprint's last change.
       const newest = survivors.reduce(
         (max, it) => (it.createdAt > max ? it.createdAt : max),
         survivors[0].createdAt,
       );
-      const fingerprint = `${survivors.length}#${newest}#${budget}#${joinedLen}`;
+      const fingerprint = `v2#${survivors.length}#${newest}#${budget}#${joinedLen}`;
       const cacheKey = `${kind}#${ref}`;
 
       const cached = await getDigest(repoPath, kind, ref);
