@@ -667,7 +667,7 @@ export function buildReviewPrompt(
         // is inaccurate there — flag it as a truncated summary instead.
         ownSection += input.ownDistilled
           ? "\n[distilled summary truncated]"
-          : "\n[own comments truncated — the opening comment and newest follow-ups take precedence; middle comments are omitted first]";
+          : "\n[own comments truncated — the opening comment and the newest follow-ups take precedence; comments in between are omitted first, and any comment that was itself cut says so inline]";
       }
       promptParts.push(ownSection);
       renderedOwn = true;

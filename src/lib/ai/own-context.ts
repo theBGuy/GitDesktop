@@ -8,7 +8,6 @@ import {
   allocateBodyCaps,
   capBody,
   OWN_COMMENTS_CHAR_BUDGET,
-  safeSlice,
 } from "./truncate";
 
 /** What `buildReviewPrompt` needs about GitDesktop's OWN prior comments on a PR. */
@@ -35,13 +34,13 @@ export interface OwnCommentsContext {
  *  shorter comments leave slack. Head-kept: reviews front-load their blockers and
  *  a "fixed in `<sha>`" reply is short anyway.
  *
- *  When `OWN_BODY_CAP × count > budget` the allocation degenerates to
+ *  When `OWN_BODY_FLOOR × count > budget` the allocation degenerates to
  *  floor-for-all and the caps therefore over-allocate the section budget — that
  *  is by design, not a bug: these caps decide how the budget is SHARED, while
  *  `fitOwn` (truncate.ts) stays the hard enforcement — dropping the MIDDLE
  *  comments first, keeping the opening brief and the newest follow-ups — with
  *  distillation firing before it in the over-budget regime. */
-const OWN_BODY_CAP = 1_500;
+const OWN_BODY_FLOOR = 1_500;
 
 /**
  * Strips the branded wrapper from a GitDesktop-authored comment so only the
@@ -126,10 +125,11 @@ function isOwnAiReviewBody(body: string): boolean {
  *
  *  Two passes, because each body's cap depends on all the others: pass 1 strips
  *  the wrappers and drops the excluded/empty comments, then the surviving lengths
- *  are fair-shared across `budget` (see `allocateBodyCaps`) and pass 2 renders
- *  each body under its own cap. Capping per comment BEFORE knowing the section
- *  budget was the old bug — a single long brief was cut to the floor even with
- *  the budget almost entirely unspent. */
+ *  are fair-shared across `budget` net of the rendered scaffolding (see
+ *  `allocateBodyCaps` and the reserve below) and pass 2 renders each body under
+ *  its own cap. Capping per comment BEFORE knowing the section budget was the old
+ *  bug — a single long brief was cut to the floor even with the budget almost
+ *  entirely unspent. */
 function formatOwnComments(
   items: ExternalReviewItem[],
   budget: number,
@@ -140,21 +140,49 @@ function formatOwnComments(
   const ordered = [...items].sort((a, b) =>
     a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0,
   );
-  const cleaned: { item: ExternalReviewItem; body: string }[] = [];
+  const cleaned: { item: ExternalReviewItem; body: string; prefix: string }[] =
+    [];
   for (const it of ordered) {
     if (isOwnAiReviewBody(it.body)) continue;
     const body = condenseOwnComment(it.body);
     if (!body) continue;
-    cleaned.push({ item: it, body });
+    // Resolved once, so the reserve below is charged against exactly what pass 2
+    // renders.
+    cleaned.push({
+      item: it,
+      body,
+      prefix: `- (${it.author}${ownLocationTag(it)})\n  `,
+    });
   }
+
+  // Same scaffolding reserve as the external section: the caps govern BODY
+  // length, but each rendered block also carries its `- (author …)` line, the
+  // two-space continuation indent on every body newline, and the `\n\n` joiner to
+  // the next block — all of which count against the budget `fitOwn` and the
+  // distill trigger measure. Charging it here is what makes those two comparisons
+  // apples-to-apples; unreserved, the blocks were over-allocated by construction,
+  // so `fitOwn` trimmed comments that would have fit and the distill trigger
+  // fired on scaffolding. The newline term uses `body.slice(0, provisionalCap)`
+  // (round 1 allocates with no scaffolding) so a long multi-line comment can't
+  // reserve for newlines its cap will cut away; round 2's caps are ≤ round 1's,
+  // keeping the count an upper bound (+1 covers `capBody`'s note line), and the
+  // only failure mode is slightly under-using the budget.
+  const lengths = cleaned.map((c) => c.body.length);
+  const provisional = allocateBodyCaps(lengths, budget, OWN_BODY_FLOOR);
+  let scaffold = 0;
+  cleaned.forEach(({ prefix, body }, i) => {
+    scaffold +=
+      prefix.length + 2 + 2 * body.slice(0, provisional[i]).split("\n").length;
+  });
+
   const caps = allocateBodyCaps(
-    cleaned.map((c) => c.body.length),
-    budget,
-    OWN_BODY_CAP,
+    lengths,
+    Math.max(0, budget - scaffold),
+    OWN_BODY_FLOOR,
   );
-  const blocks = cleaned.map(({ item, body }, i) => {
+  const blocks = cleaned.map(({ body, prefix }, i) => {
     const capped = capBody(body, caps[i]);
-    return `- (${item.author}${ownLocationTag(item)})\n  ${capped.replace(/\n/g, "\n  ")}`;
+    return `${prefix}${capped.replace(/\n/g, "\n  ")}`;
   });
   return { blocks, survivors: cleaned.map((c) => c.item) };
 }
@@ -213,7 +241,12 @@ export async function resolveOwnCommentsContext(
   // asked (interactive/automation callers opt in) and only when the joined blocks
   // still exceed the section budget once each has been fair-shared down to its own
   // cap — i.e. only in the regime where the comments genuinely can't all fit, so
-  // one long-but-affordable brief no longer calls the model. Best-effort
+  // one long-but-affordable brief no longer calls the model. Both sides of that
+  // comparison now measure the same thing: `formatOwnComments` reserves the
+  // block scaffolding out of the budget, so `joinedLen` (bodies AND scaffolding)
+  // exceeding `budget` means the rendered section genuinely doesn't fit —
+  // previously the unreserved `- (author …)` lines and indents could push it over
+  // on their own and call the model for comments that actually fit. Best-effort
   // throughout: ANY failure (missing key, network, abort, empty output) falls back
   // silently to the raw recency-first blocks, so distillation can never fail or
   // delay-fail a review.
@@ -269,7 +302,10 @@ export async function resolveOwnCommentsContext(
 
 /** Safety net: hard-cap the distilled ledger at the resolved own-comments section
  *  budget (the model is asked to stay ~3500 chars, well under, but never trust
- *  that). The cap is the profile-scaled budget, not the fixed constant. */
+ *  that). The cap is the profile-scaled budget, not the fixed constant. Through
+ *  `capBody`, so the cut is disclosed in the same note format as every other one:
+ *  a bare `…` is invisible to `stripTruncationNote`, so a ledger cut here and
+ *  again by `fitOwn` would have disclosed only the second cut's count. */
 function capLedger(ledger: string, cap: number): string {
-  return ledger.length > cap ? `${safeSlice(ledger, cap)}…` : ledger;
+  return capBody(ledger, cap);
 }

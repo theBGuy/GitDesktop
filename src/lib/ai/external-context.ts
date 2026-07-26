@@ -175,11 +175,11 @@ function locationTag(item: ExternalReviewItem): string {
  *
  * Two passes, because each body's cap depends on all the others: pass 1 groups,
  * sorts and de-noises, dropping whatever condenses to nothing, then the surviving
- * lengths are fair-shared across `budget` (see `allocateBodyCaps`) — ALL
- * reviewers pooled, since the budget is section-wide — and pass 2 renders each
- * body under its own cap. Capping per item BEFORE knowing the section budget was
- * the old bug: a bot's 5K review body was cut to 1.5K even with most of the
- * external budget unspent.
+ * lengths are fair-shared across `budget` net of the rendered scaffolding (see
+ * `allocateBodyCaps` and the reserve below) — ALL reviewers pooled, since the
+ * budget is section-wide — and pass 2 renders each body under its own cap.
+ * Capping per item BEFORE knowing the section budget was the old bug: a bot's 5K
+ * review body was cut to 1.5K even with most of the external budget unspent.
  */
 function formatExternalFindings(
   items: ExternalReviewItem[],
@@ -207,34 +207,70 @@ function formatExternalFindings(
     reviewer: string;
     item: ExternalReviewItem;
     body: string;
+    /** The item's rendered line prefix, resolved in pass 1 so the scaffolding
+     *  reserve is charged against exactly what pass 2 emits. */
+    prefix: string;
   }[] = [];
   for (const [reviewer, list] of byReviewer) {
     const sorted = [...list].sort((a, b) => order[a.kind] - order[b.kind]);
     for (const it of sorted) {
       const body = condense(it.body);
       if (!body) continue;
-      cleaned.push({ reviewer, item: it, body });
+      let prefix: string;
+      if (it.kind === "inline") {
+        const tag = locationTag(it);
+        prefix = `- ${tag ? `${tag} — ` : ""}`;
+      } else if (it.kind === "review") {
+        prefix = "- (review) ";
+      } else {
+        prefix = "- (summary) ";
+      }
+      cleaned.push({ reviewer, item: it, body, prefix });
     }
   }
 
+  // The caps govern BODY length, but the rendered section also carries
+  // scaffolding: each line's prefix and the newline joining it to the next, two
+  // more characters for every newline inside a body (the `\n  ` continuation
+  // indent), and a `### <reviewer>` header plus blank-line joiner per group.
+  // Reserving it buys right-sized SHARES — without it the fair split is computed
+  // over a budget the render then blows past, so the bodies are collectively
+  // sized wrong. It is NOT a guarantee that the result fits `budget`: the floors
+  // can lift a cap back above any netted budget, and `fit` (truncate.ts) is the
+  // real enforcement point — it now cuts through `capBody`, so an overflow ends
+  // in a marked cut rather than a bare one.
+  //
+  // The newline term is charged against `body.slice(0, provisionalCap)`, not the
+  // whole body: a 40K walkthrough with 2,000 newlines would otherwise reserve
+  // ~4,000 characters for a body that will be cut to ~1,200, starving every other
+  // finding of its share. Round 1 allocates with no scaffolding to get those
+  // provisional caps; since a smaller budget never yields a LARGER share, round
+  // 2's caps are ≤ round 1's, so the measured newline count stays an upper bound
+  // (+1 covers the line `capBody` adds for its note) and the only failure mode is
+  // slightly under-using the budget.
+  const lengths = cleaned.map((c) => c.body.length);
+  const bodyFloors = cleaned.map((c) => floors[c.item.kind]);
+  const provisional = allocateBodyCaps(lengths, budget, bodyFloors);
+  let scaffold = 0;
+  cleaned.forEach(({ prefix, body }, i) => {
+    scaffold +=
+      prefix.length + 1 + 2 * body.slice(0, provisional[i]).split("\n").length;
+  });
+  for (const reviewer of new Set(cleaned.map((c) => c.reviewer))) {
+    scaffold += `### ${reviewer}\n`.length + 2;
+  }
+
   const caps = allocateBodyCaps(
-    cleaned.map((c) => c.body.length),
-    budget,
-    cleaned.map((c) => floors[c.item.kind]),
+    lengths,
+    Math.max(0, budget - scaffold),
+    bodyFloors,
   );
 
   const linesByReviewer = new Map<string, string[]>();
-  cleaned.forEach(({ reviewer, item, body }, i) => {
+  cleaned.forEach(({ reviewer, body, prefix }, i) => {
     const capped = capBody(body, caps[i]).replace(/\n/g, "\n  ");
     const lines = linesByReviewer.get(reviewer) ?? [];
-    if (item.kind === "inline") {
-      const tag = locationTag(item);
-      lines.push(`- ${tag ? `${tag} — ` : ""}${capped}`);
-    } else if (item.kind === "review") {
-      lines.push(`- (review) ${capped}`);
-    } else {
-      lines.push(`- (summary) ${capped}`);
-    }
+    lines.push(`${prefix}${capped}`);
     linesByReviewer.set(reviewer, lines);
   });
 

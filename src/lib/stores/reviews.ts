@@ -207,6 +207,19 @@ interface RunControl {
   lane: Limiter | null;
 }
 
+/** Per-run opt-outs for {@link startReview}'s soft context. One object rather than
+ *  a tail of same-typed booleans: transposing two positional flags would silently
+ *  suppress the WRONG context with no type error. Every field defaults to false
+ *  (nothing suppressed). */
+export interface ReviewIgnoreOptions {
+  /** Skip the previous review's findings + the "changes since" delta. */
+  ignorePrior?: boolean;
+  /** Skip third-party AI-reviewer findings (Copilot/CodeRabbit/…). */
+  ignoreExternal?: boolean;
+  /** Skip the author's "Notes for reviewers". */
+  ignoreNotes?: boolean;
+}
+
 /** A queued second review mode + the config captured when the user requested it.
  *  Same target/key as the in-flight run — only the mode and its settings differ. */
 interface QueuedRun {
@@ -214,9 +227,9 @@ interface QueuedRun {
   mode: ReviewMode;
   context: ReviewContext;
   title: string;
-  ignorePrior: boolean;
-  ignoreExternal: boolean;
-  ignoreNotes: boolean;
+  /** The opt-outs as they stood when the user queued this run — replayed verbatim
+   *  when it drains, so the queued run honors the toggles it was requested with. */
+  opts: ReviewIgnoreOptions;
 }
 
 const controls = new Map<string, RunControl>();
@@ -368,12 +381,12 @@ async function notifyReviewDone(
  * the Vercel AI SDK for HTTP providers or a local agent CLI for CLI providers.
  *
  * On a re-run, the PREVIOUS review's findings + a "changes since" delta ride
- * along as soft, re-verifiable context (unless `ignorePrior`); on a remote PR,
- * findings posted by third-party AI reviewers (Copilot/CodeRabbit) ride along
- * too (unless `ignoreExternal`). On a remote PR the author's "Notes for
- * reviewers" ride along as well (unless `ignoreNotes`) — the same author-gated
- * lift the automation runner uses, fed to BOTH modes. The result is persisted on
- * success so the NEXT run can build on it.
+ * along as soft, re-verifiable context; on a remote PR, findings posted by
+ * third-party AI reviewers (Copilot/CodeRabbit) ride along too, as do the
+ * author's "Notes for reviewers" — the same author-gated lift the automation
+ * runner uses, fed to BOTH modes. Each of the three is suppressed by its own flag
+ * in {@link ReviewIgnoreOptions} (`opts`), which defaults to suppressing nothing.
+ * The result is persisted on success so the NEXT run can build on it.
  */
 export async function startReview(
   target: ReviewTarget,
@@ -381,10 +394,13 @@ export async function startReview(
   ai: AiSettings,
   mode: ReviewMode,
   context: ReviewContext,
-  ignorePrior = false,
-  ignoreExternal = false,
-  ignoreNotes = false,
+  opts: ReviewIgnoreOptions = {},
 ): Promise<void> {
+  const {
+    ignorePrior = false,
+    ignoreExternal = false,
+    ignoreNotes = false,
+  } = opts;
   const key = reviewKey(target);
   // Single-flight per key — one review streams into the single per-PR entry at a
   // time. A request for the OTHER mode while a run is in flight isn't dropped: it's
@@ -400,9 +416,9 @@ export async function startReview(
         mode,
         context,
         title,
-        ignorePrior,
-        ignoreExternal,
-        ignoreNotes,
+        // The destructured defaults, not the raw `opts` — a queued run replays
+        // exactly the flags this call resolved.
+        opts: { ignorePrior, ignoreExternal, ignoreNotes },
       });
       useReviewStore.getState().patch(key, { queuedMode: mode });
     }
@@ -743,9 +759,7 @@ export async function startReview(
           next.ai,
           next.mode,
           next.context,
-          next.ignorePrior,
-          next.ignoreExternal,
-          next.ignoreNotes,
+          next.opts,
         );
       }
     }
@@ -924,20 +938,9 @@ export function useReviewRun(target: ReviewTarget) {
       ai: AiSettings,
       mode: ReviewMode,
       context: ReviewContext,
-      ignorePrior?: boolean,
-      ignoreExternal?: boolean,
-      ignoreNotes?: boolean,
+      opts?: ReviewIgnoreOptions,
     ) => {
-      void startReview(
-        target,
-        context.title,
-        ai,
-        mode,
-        context,
-        ignorePrior,
-        ignoreExternal,
-        ignoreNotes,
-      );
+      void startReview(target, context.title, ai, mode, context, opts);
     },
     [target],
   );

@@ -26,9 +26,37 @@ export function safeSlice(s: string, max: number): string {
 }
 
 /** The note appended in place of the text `capBody` cuts — split so its fixed
- *  length can be charged against the cap before the omitted count is known. */
-export const TRUNCATION_NOTE_HEAD = "[comment truncated — ";
-export const TRUNCATION_NOTE_TAIL = " more characters on the PR thread]";
+ *  length can be charged against the cap before the omitted count is known.
+ *  "content", not "comment": the same note lands on inline findings and submitted
+ *  review bodies, not only on conversation comments. Module-private — `capBody`
+ *  and `stripTruncationNote` are the whole contract. */
+const TRUNCATION_NOTE_HEAD = "[content truncated — ";
+const TRUNCATION_NOTE_TAIL = " more characters on the PR thread]";
+
+/**
+ * Splits a trailing `capBody` note off `text`, returning the body without it and
+ * the count it disclosed (0 when there is no note). Lets a second cut of an
+ * already-cut block re-state the CUMULATIVE omission instead of nesting a note
+ * inside a note or — worse — slicing the first note away and leaving the block
+ * looking complete. The note may be indented, since both callers render bodies
+ * with a `\n  ` continuation indent.
+ */
+function stripTruncationNote(text: string): { text: string; omitted: number } {
+  const nl = text.lastIndexOf("\n");
+  if (nl < 0) return { text, omitted: 0 };
+  const lastLine = text.slice(nl + 1).trimStart();
+  if (
+    !lastLine.startsWith(TRUNCATION_NOTE_HEAD) ||
+    !lastLine.endsWith(TRUNCATION_NOTE_TAIL)
+  )
+    return { text, omitted: 0 };
+  const digits = lastLine.slice(
+    TRUNCATION_NOTE_HEAD.length,
+    lastLine.length - TRUNCATION_NOTE_TAIL.length,
+  );
+  if (!/^\d+$/.test(digits)) return { text, omitted: 0 };
+  return { text: text.slice(0, nl), omitted: Number(digits) };
+}
 
 /**
  * Max-min fair share of `budget` across blocks of the given `lengths`: walking
@@ -85,20 +113,63 @@ export function allocateBodyCaps(
  * length (worst-case digit count) is charged against `cap`, so the result never
  * exceeds it. `safeSlice`, never a raw slice: a cut through a surrogate pair
  * makes the whole prompt unserializable.
+ *
+ * `priorOmitted` carries the count from an EARLIER cut of the same text (pair it
+ * with `stripTruncationNote`, which produces both the note-free body and that
+ * count): it is folded into the rendered number, so a twice-cut block discloses
+ * the cumulative omission under exactly one note. Non-zero `priorOmitted` also
+ * means the note is re-attached even when the body itself now fits — dropping it
+ * would make a cut block read as complete.
+ *
+ * `indent` prefixes the note line, for callers whose blocks carry a continuation
+ * indent (the own-comments blocks use two spaces); it is charged against `cap`
+ * like the rest of the note. `stripTruncationNote` trims it back off, so an
+ * indented note still round-trips through a later cut.
  */
-export function capBody(text: string, cap: number): string {
-  if (text.length <= cap) return text;
+export function capBody(
+  text: string,
+  cap: number,
+  priorOmitted = 0,
+  indent = "",
+): string {
+  if (priorOmitted <= 0 && text.length <= cap) return text;
   const reserve =
     1 + // the note's own line break
+    indent.length +
     TRUNCATION_NOTE_HEAD.length +
-    String(text.length).length + // omitted count ≤ the whole text
+    String(text.length + priorOmitted).length + // omitted count ≤ text + prior
     TRUNCATION_NOTE_TAIL.length;
   const keep = cap - reserve;
-  // Cap too small to hold the note at all — cut bare rather than overflow.
-  if (keep <= 0) return safeSlice(text, cap);
-  const head = safeSlice(text, keep);
-  const omitted = text.length - head.length;
-  return `${head}\n${TRUNCATION_NOTE_HEAD}${omitted}${TRUNCATION_NOTE_TAIL}`;
+  if (keep <= 0) {
+    // Cap too small to hold the note at all. This IS live, not defensive: `fitOwn`
+    // caps at `min(remaining, ownBudget)`, so a nearly-spent prompt budget (say
+    // 120 chars left) puts the pin's 35% reserve at ~42 — well under the ~59-char
+    // note. Disclosure is deliberately lossy here: the ellipsis marks the cut,
+    // a non-zero `priorOmitted` is DROPPED rather than rendered in some second
+    // note format, and the section-level "[own comments truncated …]" marker in
+    // prompt.ts is what tells the model the section was cut at all.
+    return cap >= 1 ? `${safeSlice(text, cap - 1)}…` : safeSlice(text, cap);
+  }
+  let head = safeSlice(text, keep);
+  // The text being cut may already CONTAIN notes — `fit` cuts a whole rendered
+  // section whose items were each capped — and the cut can land inside one,
+  // leaving `[content truncated — 1360 more characters on the` dangling in front
+  // of the note we are about to add. A note always occupies its own line, so drop
+  // a final line that is a partial one (an unterminated note, or a prefix of the
+  // opener). Cheap and one-directional: it only ever removes characters, and the
+  // omitted count below is computed from what actually survived.
+  const lastNl = head.lastIndexOf("\n");
+  if (lastNl >= 0) {
+    const lastLine = head.slice(lastNl + 1).trimStart();
+    const partialNote =
+      lastLine.length > 0 &&
+      (TRUNCATION_NOTE_HEAD.startsWith(lastLine) ||
+        (lastLine.startsWith(TRUNCATION_NOTE_HEAD) &&
+          !lastLine.endsWith(TRUNCATION_NOTE_TAIL)));
+    if (partialNote) head = head.slice(0, lastNl);
+  }
+  const omitted = text.length - head.length + priorOmitted;
+  return `${head}\n${indent}${TRUNCATION_NOTE_HEAD}${omitted}${TRUNCATION_NOTE_TAIL}`;
 }
 
 const LOW_VALUE_PATH =
@@ -201,6 +272,11 @@ export const OWN_COMMENTS_CHAR_BUDGET = 6_000;
 /** Cap for third-party AI-reviewer findings (lowest priority — noisier, theirs). */
 export const EXTERNAL_FINDINGS_CHAR_BUDGET = 8_000;
 
+/** The continuation indent own-comment blocks render their bodies under (see
+ *  `formatOwnComments` in own-context.ts) — `fitOwn`'s re-cuts pass it to
+ *  `capBody` so a re-stated note stays inside its list item. */
+const OWN_BLOCK_INDENT = "  ";
+
 export interface ReviewExtras {
   /** Budgeted delta diff (empty when absent or dropped for budget). */
   delta: BudgetedDiff;
@@ -211,10 +287,10 @@ export interface ReviewExtras {
   /** Prior findings dropped entirely for budget. */
   priorDropped: boolean;
   /** Budgeted GitDesktop's-own prior PR comments — everything when it all fits,
-   *  otherwise the OLDEST block (the PR-opening context brief) pinned plus a
+   *  otherwise the OLDEST block (typically the opening brief) pinned plus a
    *  contiguous NEWEST-first suffix of the rest, rendered in oldest-first order;
    *  the middle blocks are the ones that drop. `truncated` when any block was
-   *  excluded or head-sliced. */
+   *  excluded or head-sliced — a sliced block also says so inline. */
   own: { text: string; truncated: boolean };
   /** Own comments dropped entirely for budget. */
   ownDropped: boolean;
@@ -276,6 +352,12 @@ export function budgetReviewExtras(input: {
     }
   }
 
+  // THE enforcement point for the head-sliced sections, and therefore where the
+  // disclosure guarantee lives: the section formatters can only size their shares
+  // approximately (their own floors can lift a body back over any budget they
+  // netted, and `remaining` here — what the diff and delta actually left — is
+  // unknowable at format time), so whatever arrives oversized is cut HERE, and
+  // `capBody` makes that cut say so instead of ending mid-word or mid-note.
   const fit = (text: string | undefined, max: number) => {
     if (!text?.trim())
       return { result: { text: "", truncated: false }, dropped: false };
@@ -285,7 +367,7 @@ export function budgetReviewExtras(input: {
     const result =
       text.length <= cap
         ? { text, truncated: false }
-        : { text: safeSlice(text, cap), truncated: true };
+        : { text: capBody(text, cap), truncated: true };
     remaining -= result.text.length;
     return { result, dropped: false };
   };
@@ -308,9 +390,10 @@ export function budgetReviewExtras(input: {
 
   // Our own comments fit recency-first with the OLDEST block PINNED, rendered in
   // ORIGINAL oldest-first order. A pure newest-first suffix dropped `present[0]`
-  // first, but that block is by construction the PR-opening context brief — the
-  // one comment nothing later supersedes. Under pressure we therefore keep it (up
-  // to a reserve) and let the MIDDLE blocks drop instead.
+  // first, but that block is typically the opening brief — the context nothing
+  // later supersedes (only typically: it's just our oldest anchor-bearing comment,
+  // which an early thread reply can also be). Under pressure we therefore keep it
+  // (up to a reserve) and let the MIDDLE blocks drop instead.
   const fitOwn = (items: string[] | undefined, max: number) => {
     const present = items?.filter((t) => t.trim()) ?? [];
     if (present.length === 0)
@@ -320,15 +403,20 @@ export function budgetReviewExtras(input: {
       return { result: { text: "", truncated: false }, dropped: true };
 
     // A single block (also the distilled-ledger case) has no middle and no pin to
-    // apply: head-slice it, exactly as before.
+    // apply: head-keep it alone.
     if (present.length === 1) {
       const only = present[0];
-      const text = only.length <= cap ? only : safeSlice(only, cap);
+      if (only.length <= cap) {
+        remaining -= only.length;
+        return { result: { text: only, truncated: false }, dropped: false };
+      }
+      // `OWN_BLOCK_INDENT`: own blocks render their body under a two-space
+      // continuation indent, so the re-cut note has to sit inside the list item
+      // rather than at column 0.
+      const { text: body, omitted } = stripTruncationNote(only);
+      const text = capBody(body, cap, omitted, OWN_BLOCK_INDENT);
       remaining -= text.length;
-      return {
-        result: { text, truncated: text.length < only.length },
-        dropped: false,
-      };
+      return { result: { text, truncated: true }, dropped: false };
     }
 
     // Everything fits — take it whole, byte-identical to the pre-pin behavior.
@@ -338,15 +426,18 @@ export function budgetReviewExtras(input: {
       return { result: { text, truncated: false }, dropped: false };
     }
 
-    // Pressure regime. The pin gets at most ~a third of the cap: the opening brief
-    // records design intent nothing supersedes, but the newest follow-ups carry
-    // the live dispositions (refutations, "fixed in `<sha>`"), so the pin must
-    // never crowd out the majority of the recency signal.
+    // Pressure regime. The pin gets at most ~a third of the cap: the opening
+    // comment records design intent nothing later supersedes, but the newest
+    // follow-ups carry the live dispositions (refutations, "fixed in `<sha>`"), so
+    // the pin must never crowd out the majority of the recency signal.
     const reserve = Math.min(present[0].length, Math.floor(cap * 0.35));
-    let pinned =
-      present[0].length <= reserve
-        ? present[0]
-        : safeSlice(present[0], reserve);
+    let pinned: string;
+    if (present[0].length <= reserve) {
+      pinned = present[0];
+    } else {
+      const { text: body, omitted } = stripTruncationNote(present[0]);
+      pinned = capBody(body, reserve, omitted, OWN_BLOCK_INDENT);
+    }
     // Degenerate cap (a handful of characters): rather than render an empty pin,
     // fall back to the oldest block head-sliced to the whole cap.
     if (!pinned) pinned = safeSlice(present[0], cap);
@@ -361,9 +452,11 @@ export function budgetReviewExtras(input: {
       // slice it in rather than render the pin alone. Two ordinary comments (a
       // 510-char opener + a 5,560-char follow-up at a 6,000 cap) land here, and
       // dropping the follow-up would throw away every live disposition to keep an
-      // opening brief that fit ten times over. `safeSlice` can still come back
+      // opening comment that fit ten times over. `capBody` can still come back
       // empty at a tiny leftover, hence the guard.
-      const sliced = safeSlice(rest[rest.length - 1], restCap);
+      const newest = rest[rest.length - 1];
+      const { text: body, omitted } = stripTruncationNote(newest);
+      const sliced = capBody(body, restCap, omitted, OWN_BLOCK_INDENT);
       if (sliced) selected = [sliced];
     }
     const text = [pinned, ...selected].join("\n\n");
