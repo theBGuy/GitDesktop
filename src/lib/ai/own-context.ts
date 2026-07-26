@@ -123,6 +123,12 @@ function isOwnAiReviewBody(body: string): boolean {
  *  alongside the raw items that survived filtering (same order), so the caller can
  *  fingerprint the cache off the exact comments the blocks were built from.
  *
+ *  Also returns the SAME blocks rendered from the UNCAPPED bodies
+ *  (`uncappedBlocks`, and `uncappedLen` for their joined length): what the full
+ *  record would cost if nothing were trimmed. That is what the distill trigger
+ *  measures and what the distiller reads — the capped `blocks` can never exceed
+ *  the budget by construction, so they cannot answer "does this all fit?".
+ *
  *  Two passes, because each body's cap depends on all the others: pass 1 strips
  *  the wrappers and drops the excluded/empty comments, then the surviving lengths
  *  are fair-shared across `budget` net of the rendered scaffolding (see
@@ -135,6 +141,8 @@ function formatOwnComments(
   budget: number,
 ): {
   blocks: string[];
+  uncappedBlocks: string[];
+  uncappedLen: number;
   survivors: ExternalReviewItem[];
 } {
   const ordered = [...items].sort((a, b) =>
@@ -184,7 +192,18 @@ function formatOwnComments(
     const capped = capBody(body, caps[i]);
     return `${prefix}${capped.replace(/\n/g, "\n  ")}`;
   });
-  return { blocks, survivors: cleaned.map((c) => c.item) };
+  // The same blocks with NOTHING trimmed — the true cost of the whole record.
+  // Same `prefix` (resolved once above, so the two renders can never drift on the
+  // author/location line) and the same continuation indent; only the body differs.
+  const uncappedBlocks = cleaned.map(
+    ({ body, prefix }) => `${prefix}${body.replace(/\n/g, "\n  ")}`,
+  );
+  return {
+    blocks,
+    uncappedBlocks,
+    uncappedLen: uncappedBlocks.join("\n\n").length,
+    survivors: cleaned.map((c) => c.item),
+  };
 }
 
 /**
@@ -232,26 +251,38 @@ export async function resolveOwnCommentsContext(
   // passes it, but a future one that doesn't still gets a sane section size.
   const budget = opts?.ownBudgetChars ?? OWN_COMMENTS_CHAR_BUDGET;
 
-  const { blocks: ownItems, survivors } = formatOwnComments(own, budget);
+  const {
+    blocks: ownItems,
+    uncappedBlocks,
+    uncappedLen,
+    survivors,
+  } = formatOwnComments(own, budget);
   if (ownItems.length === 0) return {};
 
   // Over-budget own comments accumulate across review rounds until even
   // recency-first selection drops recorded decisions, so distill ALL of them
   // into a compact per-finding ledger via the app's generation model. Only when
-  // asked (interactive/automation callers opt in) and only when the joined blocks
-  // still exceed the section budget once each has been fair-shared down to its own
-  // cap — i.e. only in the regime where the comments genuinely can't all fit, so
-  // one long-but-affordable brief no longer calls the model. Both sides of that
-  // comparison now measure the same thing: `formatOwnComments` reserves the
-  // block scaffolding out of the budget, so `joinedLen` (bodies AND scaffolding)
-  // exceeding `budget` means the rendered section genuinely doesn't fit —
-  // previously the unreserved `- (author …)` lines and indents could push it over
-  // on their own and call the model for comments that actually fit. Best-effort
-  // throughout: ANY failure (missing key, network, abort, empty output) falls back
-  // silently to the raw recency-first blocks, so distillation can never fail or
-  // delay-fail a review.
+  // asked (interactive/automation callers opt in) and only when the comments
+  // genuinely can't all fit — measured on `uncappedLen`, the joined length of the
+  // blocks rendered with NOTHING trimmed, i.e. the true cost of the full record.
+  // Gating on the post-cap length instead was a live-caught DEAD ZONE: the
+  // fair-share allocator caps every body into `budget − scaffold` by construction,
+  // so the rendered blocks are ≤ budget by definition and the comparison could only
+  // ever fire in the floors regime (floor × count over budget, ~12 comments at the
+  // default profile). A real PR whose comments were being cut with truncation
+  // markers therefore never called the distiller at all. Uncapped-vs-budget fires
+  // exactly when the caps are costing content, and still spares a
+  // long-but-affordable single brief.
+  //
+  // The distiller reads `uncappedBlocks`, not the capped render: it applies its own
+  // per-block and total-input caps (with disclosure notes) to whatever it is given,
+  // so feeding it the pre-trimmed blocks would compress an already-lossy record and
+  // double-cut it. The capped `ownItems` remain the FALLBACK — no distill asked,
+  // under budget, or any failure. Best-effort throughout: ANY failure (missing key,
+  // network, abort, empty output) falls back silently to the raw recency-first
+  // blocks, so distillation can never fail or delay-fail a review.
   const joinedLen = ownItems.join("\n\n").length;
-  if (opts?.distill && joinedLen > budget) {
+  if (opts?.distill && uncappedLen > budget) {
     try {
       // Fingerprint the distilled comments so a repeat resolve with unchanged
       // comments hits the cache and never re-runs the model. Include the budget so
@@ -259,6 +290,14 @@ export async function resolveOwnCommentsContext(
       // serving a stale-sized ledger, and the joined post-cap length so an IN-PLACE
       // edit to a comment (which moves neither the count nor the newest timestamp)
       // still invalidates. Existing cached digests miss once and re-distill.
+      //
+      // `joinedLen` here stays measured off the CAPPED blocks on purpose, and the
+      // prefix stays `v2`: the trigger moving to `uncappedLen` changed WHEN we
+      // distill, not the ledger's text format, so re-keying would invalidate every
+      // cached ledger for no gain — don't "fix" this to v3. The capped length keeps
+      // exactly the edit-detection it always had (an edit that changes a body's
+      // length reshuffles the fair-share caps and moves the render; one landing
+      // wholly inside an already-cut tail can still hide, as before).
       //
       // The `v2` prefix retires every ledger cached with the old truncation-note
       // wording. Not because anything breaks on a re-cut — a cached note only ever
@@ -286,7 +325,7 @@ export async function resolveOwnCommentsContext(
 
       const settings = await loadSettings();
       const ledger = await distillOwnComments({
-        blocks: ownItems,
+        blocks: uncappedBlocks,
         signal: opts.signal,
         repoPath,
       });
