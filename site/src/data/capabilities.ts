@@ -426,7 +426,7 @@ export const capabilities: Capability[] = [
     group: "AI · generate & review",
     ai: true,
     label:
-      "Hand review context to the AI reviewer — per-branch notes deposited by your agent, posted with the PR",
+      "Hand review context to the AI reviewer — per-branch notes deposited by your agent, read by every review (automated or one you start) with a per-run opt-out",
   },
   {
     group: "AI · generate & review",

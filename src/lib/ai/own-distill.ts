@@ -1,11 +1,16 @@
 import { loadSettings } from "@/lib/settings/api";
 import { createAiClient } from "./client";
-import { safeSlice } from "./truncate";
+import { capBody, stripTruncationNote } from "./truncate";
 
 /** Per-block head cap before the blocks are joined into the distillation prompt —
- *  keeps one verbose review from crowding out later follow-ups. Head-kept:
- *  reviews front-load their blockers. This bounds each block, but NOT the total,
- *  which grows with block count — {@link DISTILL_INPUT_CAP} bounds the request. */
+ *  keeps one verbose review from crowding out later follow-ups. Head-kept WITH an
+ *  explicit truncation note (`capBody`), so the ledger model can tell a block was
+ *  clipped rather than reading a mid-sentence stop as the comment's end; reviews
+ *  front-load their blockers, so the head is the part worth keeping. A block may
+ *  already carry a note from its own per-comment cap — the count restated here is
+ *  CUMULATIVE across both cuts, never a note nested inside a note. This bounds
+ *  each block, but NOT the total, which grows with block count —
+ *  {@link DISTILL_INPUT_CAP} bounds the request. */
 const DISTILL_BLOCK_CAP = 6_000;
 
 /** Overall input cap for the joined distillation prompt. After per-block capping,
@@ -41,9 +46,12 @@ export async function distillOwnComments(input: {
   // overall input cap (walk from the array end, joined "\n\n" length ≤ cap),
   // dropping the oldest overflow — so the request stays bounded regardless of how
   // many review rounds have accumulated.
-  const capped = input.blocks.map((b) =>
-    b.length > DISTILL_BLOCK_CAP ? safeSlice(b, DISTILL_BLOCK_CAP) : b,
-  );
+  // `capBody` is a no-op for a block that already fits and carries no note, so it
+  // replaces the old length conditional outright.
+  const capped = input.blocks.map((b) => {
+    const { text, omitted } = stripTruncationNote(b);
+    return capBody(text, DISTILL_BLOCK_CAP, omitted);
+  });
   let keptCount = 0;
   let running = 0;
   for (let i = capped.length - 1; i >= 0; i--) {
@@ -52,11 +60,15 @@ export async function distillOwnComments(input: {
     running += cost;
     keptCount++;
   }
-  // If not even the newest block fits, include it alone, head-sliced to the cap.
+  // If not even the newest block fits, include it alone, head-kept to the cap —
+  // through the same strip/cap pair, so this cut discloses itself too and its
+  // count still folds in the block-cap cut above.
+  const newestAlone = () => {
+    const { text, omitted } = stripTruncationNote(capped[capped.length - 1]);
+    return capBody(text, DISTILL_INPUT_CAP, omitted);
+  };
   const selected =
-    keptCount === 0
-      ? [safeSlice(capped[capped.length - 1], DISTILL_INPUT_CAP)]
-      : capped.slice(capped.length - keptCount);
+    keptCount === 0 ? [newestAlone()] : capped.slice(capped.length - keptCount);
   const body = selected.join("\n\n");
 
   // Bound the model call: combine the caller's signal (a dock Cancel) with a 60s

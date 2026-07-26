@@ -33,7 +33,10 @@ export function safeSlice(s: string, max: number): string {
  *  history — a review that was never posted has no thread copy at all), and the
  *  distilled ledger (exists only in the digest store). Naming a thread would send
  *  an agentic reviewer with forge tools looking for text that isn't there.
- *  Module-private — `capBody` and `stripTruncationNote` are the whole contract. */
+ *  The constants stay module-private: `capBody` and `stripTruncationNote` are the
+ *  contract, so every producer and consumer of the note goes through the pair
+ *  rather than re-deriving its shape (own-distill.ts re-cuts blocks that already
+ *  carry one). */
 const TRUNCATION_NOTE_HEAD = "[content truncated — ";
 const TRUNCATION_NOTE_TAIL = " more characters omitted]";
 
@@ -45,7 +48,10 @@ const TRUNCATION_NOTE_TAIL = " more characters omitted]";
  * looking complete. The note may be indented, since both callers render bodies
  * with a `\n  ` continuation indent.
  */
-function stripTruncationNote(text: string): { text: string; omitted: number } {
+export function stripTruncationNote(text: string): {
+  text: string;
+  omitted: number;
+} {
   const nl = text.lastIndexOf("\n");
   if (nl < 0) return { text, omitted: 0 };
   const lastLine = text.slice(nl + 1).trimStart();

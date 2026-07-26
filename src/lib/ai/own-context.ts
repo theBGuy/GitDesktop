@@ -261,9 +261,13 @@ export async function resolveOwnCommentsContext(
       // still invalidates. Existing cached digests miss once and re-distill.
       //
       // The `v2` prefix retires every ledger cached with the old truncation-note
-      // wording: `stripTruncationNote` only matches the current note, so a stale
-      // ledger re-cut by `fitOwn` would stack a second note under the first
-      // instead of restating one cumulative count. One re-distill per PR buys the
+      // wording. Not because anything breaks on a re-cut — a cached note only ever
+      // sits at the ledger's END, and `fitOwn`'s head-cut either drops it with the
+      // tail or hits the partial-note guard, which keys off the note's HEAD (the
+      // half both wordings share) — but because a cached ledger that is NEVER
+      // re-cut carries the old "…on the PR thread" claim straight into the prompt,
+      // pointing an agentic reviewer at a thread that has no such text. That claim
+      // is exactly what the reworded note retired. One re-distill per PR buys the
       // self-heal — the same accepted cost as the fingerprint's last change.
       const newest = survivors.reduce(
         (max, it) => (it.createdAt > max ? it.createdAt : max),
