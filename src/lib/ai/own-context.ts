@@ -16,11 +16,11 @@ export interface OwnCommentsContext {
    *  follow-ups (refutations, "fixed in `<sha>`" replies) and thread replies,
    *  oldest first. Our own posted AI review/audit bodies are EXCLUDED (they're
    *  redundant with the prior-review section). Soft resolution context, never
-   *  ground truth. When the per-comment caps are costing MATERIAL content — the
-   *  full record overshoots what the section can render by more than a quarter of
-   *  the budget — and distillation succeeded, this is a SINGLE distilled
-   *  decision-ledger block (see `ownDistilled`) instead. Absent for local PRs, on
-   *  Bitbucket, and when none were found. */
+   *  ground truth. When the section can't render the whole record — the caps would
+   *  drop whole comments outright, or trim away more than a quarter of the budget —
+   *  and distillation succeeded, this is a SINGLE distilled decision-ledger block
+   *  (see `ownDistilled`) instead. Absent for local PRs, on Bitbucket, and when
+   *  none were found. */
   ownItems?: string[];
   /** True when `ownItems` is a machine-distilled decision ledger (one block)
    *  rather than the raw per-comment blocks — flips the prompt's own-section
@@ -52,6 +52,10 @@ const OWN_BODY_FLOOR = 1_500;
  *  the point of the memory — a broken config costs one 135–180s attempt per hour,
  *  not one per re-review — while letting every fixable cause heal on its own. */
 const DISTILL_RETRY_AFTER_MS = 60 * 60 * 1000;
+
+/** Share of the section budget the per-comment caps may swallow before a distilled
+ *  ledger beats the trimmed render — the trigger block below argues the number. */
+const DISTILL_TRIM_SHARE = 0.25;
 
 /**
  * Strips the branded wrapper from a GitDesktop-authored comment so only the
@@ -293,8 +297,8 @@ export async function resolveOwnCommentsContext(
   //     caps over-allocate past it by design (13 × 1,600-char comments at an 18K
   //     budget land here, and under a pure threshold test their ~3.9K overshoot read
   //     as "immaterial" while two decisions silently vanished).
-  //   • TRIMS (arm 2, `uncappedLen − cappedJoinedLen > budget × 0.25`). Everything
-  //     still fits; the fair-share caps just cut tails, and every cut discloses
+  //   • TRIMS (arm 2, `uncappedLen − cappedJoinedLen > budget × DISTILL_TRIM_SHARE`).
+  //     Everything fits; the fair-share caps just cut tails, and every cut discloses
   //     itself inline via `capBody`. Losing a tail is far cheaper than compressing
   //     the record, so here a threshold is right: only when the caps swallow more
   //     than a quarter of the budget is a ledger the better trade. PR #125's own
@@ -325,7 +329,10 @@ export async function resolveOwnCommentsContext(
   const cappedJoinedLen = ownItems.join("\n\n").length;
   const willDropBlocks = cappedJoinedLen > budget;
   const trimmedAway = uncappedLen - cappedJoinedLen;
-  if (opts?.distill && (willDropBlocks || trimmedAway > budget * 0.25)) {
+  if (
+    opts?.distill &&
+    (willDropBlocks || trimmedAway > budget * DISTILL_TRIM_SHARE)
+  ) {
     // Resolved BEFORE the try so the catch can record the failed attempt under the
     // very fingerprint that attempt was for.
     const newest = survivors.reduce(
@@ -352,7 +359,7 @@ export async function resolveOwnCommentsContext(
     // simply miss once and re-distill.
     const fingerprint = `v3#${survivors.length}#${newest}#${budget}#${cappedJoinedLen}#${uncappedLen}`;
     const cacheKey = `${kind}#${ref}`;
-    // Carried out of the try so a failure record can name the model it failed on;
+    // Carried out of the try so a failure memory can name the model it failed on;
     // stays empty when the attempt never got as far as loading settings.
     let attemptedModel = "";
     // Remember a dead end so the next re-review of these SAME comments doesn't
@@ -363,62 +370,54 @@ export async function resolveOwnCommentsContext(
     // like the success path — a store write must never turn a swallowed distill
     // failure into a thrown one.
     //
+    // MERGE, never replace. There is one digest per PR, and the failure memory
+    // carries its OWN fingerprint in `failed`, so spreading whatever is already
+    // there leaves a ledger cached for an earlier round intact and still
+    // cache-hittable. Replacing instead would blank a good ledger the moment any
+    // later round failed — permanently, since every new comment moves the token
+    // forward — and would let the loser of two concurrent runs (a manual review and
+    // an automation hold separate single-flight keys) overwrite the winner's ledger
+    // with an empty one.
+    //
     // NOT recorded when the CALLER aborted: a dock Cancel says nothing about whether
     // these comments can be distilled, and remembering it would suppress
-    // distillation for this PR until the record expires. The internal ceiling is a
+    // distillation for this PR until the window expires. The internal ceiling is a
     // separate signal composed inside `distillOwnComments`, so it never marks
     // `opts.signal` aborted — a timeout still records, which is the whole point.
-    //
-    // NOT recorded either when the store already holds a real ledger under a
-    // DIFFERENT fingerprint: one digest per PR, so writing would destroy it. That
-    // happens on an ordinary knob change — flip Review context, the budget moves,
-    // the token changes, this distill fails, and the old-budget ledger (still
-    // perfectly good, and a cache hit the moment the knob flips back) would be gone,
-    // re-paying a 135s call to rebuild what we just deleted. Keeping it costs only
-    // the failure memory for that one corner, which is exactly the pre-fix behavior
-    // and is bounded by the retry window anyway.
     const rememberFailure = async () => {
       if (opts.signal?.aborted) return;
       const existing = await getDigest(repoPath, kind, ref);
-      if (
-        existing &&
-        existing.fingerprint !== fingerprint &&
-        existing.ledger.trim()
-      )
-        return;
       await saveDigest(repoPath, {
-        schemaVersion: 1,
-        key: cacheKey,
-        fingerprint,
-        ledger: "",
-        model: attemptedModel,
-        createdAt: Date.now(),
-        failedAt: Date.now(),
+        ...(existing ?? {
+          schemaVersion: 1,
+          key: cacheKey,
+          fingerprint,
+          ledger: "",
+          model: "",
+          createdAt: Date.now(),
+        }),
+        failed: { fingerprint, at: Date.now(), model: attemptedModel },
       });
     };
     try {
       const cached = await getDigest(repoPath, kind, ref);
-      if (cached?.fingerprint === fingerprint) {
-        if (cached.ledger.trim()) {
-          return {
-            ownItems: [capLedger(cached.ledger, budget)],
-            ownDistilled: true,
-          };
-        }
-        // A remembered FAILURE for exactly these comments (empty ledger +
-        // `failedAt`), still inside the retry window. Re-running would re-pay the
-        // full ceiling — up to 180s on a CLI generation model — to fail again, so
-        // take the raw blocks straight away. Past the window we fall through and
-        // try once more; a change to the comments re-keys the fingerprint and
-        // retries immediately either way. An empty ledger WITHOUT `failedAt` isn't
-        // a failure memory at all (no record we write looks like that) — treat it
-        // as a miss and re-distill rather than serve nothing forever.
-        if (
-          cached.failedAt !== undefined &&
-          Date.now() - cached.failedAt < DISTILL_RETRY_AFTER_MS
-        ) {
-          return { ownItems };
-        }
+      if (cached?.fingerprint === fingerprint && cached.ledger.trim()) {
+        return {
+          ownItems: [capLedger(cached.ledger, budget)],
+          ownDistilled: true,
+        };
+      }
+      // No usable ledger, but we may have already tried these exact comments and
+      // failed — `failed` carries its own fingerprint precisely so this question is
+      // asked independently of whatever ledger the record holds. Inside the window,
+      // re-running would re-pay the full ceiling to fail again, so take the raw
+      // blocks straight away; past it we fall through and try once more, and a
+      // change to the comments re-keys and retries immediately either way.
+      if (
+        cached?.failed?.fingerprint === fingerprint &&
+        Date.now() - cached.failed.at < DISTILL_RETRY_AFTER_MS
+      ) {
+        return { ownItems };
       }
 
       const settings = await loadSettings();
@@ -431,6 +430,8 @@ export async function resolveOwnCommentsContext(
       });
       if (ledger?.trim()) {
         const capped = capLedger(ledger, budget);
+        // A fresh record, deliberately NOT spread over the old one: omitting
+        // `failed` is what clears a previous dead end once distillation heals.
         saveDigest(repoPath, {
           schemaVersion: 1,
           key: cacheKey,

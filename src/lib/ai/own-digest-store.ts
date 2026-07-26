@@ -8,9 +8,10 @@ import { storeName } from "@/lib/test-mode";
  * actually change. `fingerprint` couples the ledger to the raw comments it was
  * distilled from (their count and newest timestamp, the section budget, and BOTH
  * the joined capped-block length and the uncapped length the distiller actually
- * read); a mismatch forces a re-distill. A FAILED attempt is recorded too — an
- * empty `ledger` with `failedAt` set — so a thread that can't distill doesn't
- * re-pay the model ceiling on every re-review.
+ * read); a mismatch forces a re-distill. A FAILED attempt is remembered too, so a
+ * thread that can't distill doesn't re-pay the model ceiling on every re-review —
+ * and it rides ALONGSIDE any cached ledger in `failed`, with its own fingerprint,
+ * so remembering a dead end never destroys a still-valid one.
  * `ledger` is the model's own markdown — never parsed into structured data, and
  * always re-verified against the current diff by the reviewer that consumes it.
  */
@@ -33,25 +34,25 @@ export interface OwnCommentsDigest {
    *  `v3` when the uncapped length joined the token. Bump it again for either kind
    *  of change; records with a stale token simply miss once and re-distill. */
   fingerprint: string;
-  /** The distilled ledger markdown — the cached soft context. Empty on a FAILURE
-   *  record (see `failedAt`); readers must never serve an empty ledger as one. */
+  /** The distilled ledger markdown — the cached soft context. Empty when this
+   *  record only carries a failure memory and no ledger has ever succeeded. */
   ledger: string;
-  /** Generation model the ledger was produced with — or attempted with, on a
-   *  failure record; empty when the attempt failed before settings loaded
-   *  (diagnostic). */
+  /** Generation model the ledger was produced with (diagnostic). */
   model: string;
   createdAt: number;
-  /** When the FAILED distillation of these exact comments happened. Load-bearing,
-   *  not diagnostic: it both marks the record as a failure (paired with an empty
-   *  `ledger`) and anchors the retry window, so a re-review inside that window
-   *  skips the attempt instead of re-paying the model ceiling to fail again, while
-   *  one after it tries afresh — the usual causes (a missing generation key, a CLI
-   *  not logged in, a network blip) are properties of the MODEL and never move the
-   *  fingerprint, so without the clock a fixed config would still be locked out.
-   *  A reader that finds an empty `ledger` with no `failedAt` must NOT treat it as
-   *  a failure memory — we never write that shape. Absent on a successful ledger;
-   *  optional, so `schemaVersion` stays 1 and older records read as successes. */
-  failedAt?: number;
+  /** The last distillation that failed, kept ALONGSIDE `ledger` rather than in
+   *  place of it — its own `fingerprint` is what the retry check matches, so a
+   *  failure for this round's comments never invalidates a ledger cached for an
+   *  earlier round, and a merge can't overwrite a good ledger with an empty one.
+   *  `at` anchors the retry window: a re-review inside it skips the attempt instead
+   *  of re-paying the model ceiling to fail again, while one after it tries afresh —
+   *  the usual causes (a missing generation key, a CLI not logged in, a network
+   *  blip) are properties of the MODEL and never move the fingerprint, so without
+   *  the clock a fixed config would stay locked out. `model` is the one the attempt
+   *  was made with (diagnostic), empty when it failed before settings loaded.
+   *  Absent until something fails, and dropped again by the next success; optional,
+   *  so `schemaVersion` stays 1 and older records read as never-failed. */
+  failed?: { fingerprint: string; at: number; model: string };
 }
 
 // Records live in personal app-data, keyed by the repo's worktree-stable identity

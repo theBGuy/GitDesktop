@@ -905,8 +905,8 @@ from being restored — nothing is deleted, the next review simply leaves it out
 When rounds
 accumulate well past the prompt budget, the full history is
 **distilled into a compact decision ledger** (via your generation model) rather than cut
-off; a marginal overflow is simply trimmed — the opening comment and the newest
-follow-ups win, and every cut says so — and if the budget leaves no room for the
+off; a marginal overflow is simply trimmed — every comment stays, and each cut says how
+much it left out — and if the budget leaves no room for the
 comments at all, the review is told they were **omitted**, so it never reads their
 absence as nothing on record. On a **general**
 re-review, polish noticed late on code that hasn't changed is listed separately as
