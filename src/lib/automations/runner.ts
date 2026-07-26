@@ -774,6 +774,7 @@ async function generateReviewText(
           event.headSha,
           false,
           provider,
+          { budgetChars: budgetProfile.externalCharBudget },
         ),
         resolveOwnCommentsContext(
           event.repoPath,

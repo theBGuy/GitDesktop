@@ -896,6 +896,11 @@ it already refuted or marked fixed as resolved instead of raising it cold. It al
 any **Notes for reviewers** the author left — deposited per branch by an agent through the
 GitDesktop MCP, or typed into the Create PR dialog and posted as the PR's first comment —
 as first-class grounding context, so a deliberate, documented decision isn't re-flagged.
+Those notes reach **every** review of a GitHub or GitLab PR: the automated ones, and the
+code reviews and security audits you start yourself. Any of this context can also be **held
+back**: the panel offers *Ignore previous review*, *Ignore external reviews*, and *Ignore
+author notes*, each shown only when there's something to ignore and each one click away
+from being restored — nothing is deleted, the next review simply leaves it out.
 When rounds
 accumulate past the prompt budget, the newest comments win, and the full history is
 **distilled into a compact decision ledger** (via your generation model) rather than cut

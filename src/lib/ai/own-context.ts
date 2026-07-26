@@ -4,7 +4,12 @@ import { loadSettings } from "@/lib/settings/api";
 import { GD_COMMENT_ANCHOR } from "./comment-branding";
 import { getDigest, saveDigest } from "./own-digest-store";
 import { distillOwnComments } from "./own-distill";
-import { OWN_COMMENTS_CHAR_BUDGET, safeSlice } from "./truncate";
+import {
+  allocateBodyCaps,
+  capBody,
+  OWN_COMMENTS_CHAR_BUDGET,
+  safeSlice,
+} from "./truncate";
 
 /** What `buildReviewPrompt` needs about GitDesktop's OWN prior comments on a PR. */
 export interface OwnCommentsContext {
@@ -33,79 +38,10 @@ export interface OwnCommentsContext {
  *  When `OWN_BODY_CAP × count > budget` the allocation degenerates to
  *  floor-for-all and the caps therefore over-allocate the section budget — that
  *  is by design, not a bug: these caps decide how the budget is SHARED, while
- *  `fitOwn` (truncate.ts) stays the hard enforcement and drops oldest-first, with
+ *  `fitOwn` (truncate.ts) stays the hard enforcement — dropping the MIDDLE
+ *  comments first, keeping the opening brief and the newest follow-ups — with
  *  distillation firing before it in the over-budget regime. */
 const OWN_BODY_CAP = 1_500;
-
-/** The note appended in place of the text `capBody` cuts — split so its fixed
- *  length can be charged against the cap before the omitted count is known. */
-const TRUNCATION_NOTE_HEAD = "[comment truncated — ";
-const TRUNCATION_NOTE_TAIL = " more characters on the PR thread]";
-
-/**
- * Max-min fair share of `budget` across blocks of the given `lengths`: walking
- * shortest-first, each block may claim an equal share of what's left, a block
- * that fits under its share takes only what it needs and donates the slack to
- * the longer ones, and the first block to exceed its share freezes that share
- * for itself and every longer block. So a lone 6K brief inside an 18K budget
- * survives whole, while a dozen 6K comments converge on the floor.
- *
- * `floor` is a guaranteed minimum per block (`OWN_BODY_CAP`), so the returned
- * caps can sum past `budget` when `floor × n > budget` — deliberate, see
- * `OWN_BODY_CAP`. Returned in the caller's original index order.
- */
-function allocateBodyCaps(
-  lengths: number[],
-  budget: number,
-  floor: number,
-): number[] {
-  const caps = new Array<number>(lengths.length).fill(floor);
-  // Shortest-first: only that order lets a short block's slack reach the long
-  // ones (indices, so the result maps back to the caller's order).
-  const order = lengths
-    .map((_, i) => i)
-    .sort((a, b) => lengths[a] - lengths[b] || a - b);
-  let remaining = budget;
-  let remainingCount = order.length;
-  for (let k = 0; k < order.length; k++) {
-    // `remainingCount` is > 0 for every iteration, so this never divides by zero;
-    // a non-positive budget yields a non-positive share and thus the floor.
-    const share = Math.floor(remaining / remainingCount);
-    if (lengths[order[k]] > share) {
-      // This block and every longer one are capped at the frozen share.
-      for (let j = k; j < order.length; j++) {
-        caps[order[j]] = Math.max(floor, share);
-      }
-      break;
-    }
-    caps[order[k]] = Math.max(floor, share);
-    remaining -= lengths[order[k]];
-    remainingCount--;
-  }
-  return caps;
-}
-
-/**
- * Head-keeps `text` within `cap`, saying so explicitly when it cuts — a bare `…`
- * left the model guessing whether the author's list simply ended. The note's own
- * length (worst-case digit count) is charged against `cap`, so the result never
- * exceeds it. `safeSlice`, never a raw slice: a cut through a surrogate pair
- * makes the whole prompt unserializable.
- */
-function capBody(text: string, cap: number): string {
-  if (text.length <= cap) return text;
-  const reserve =
-    1 + // the note's own line break
-    TRUNCATION_NOTE_HEAD.length +
-    String(text.length).length + // omitted count ≤ the whole text
-    TRUNCATION_NOTE_TAIL.length;
-  const keep = cap - reserve;
-  // Cap too small to hold the note at all — cut bare rather than overflow.
-  if (keep <= 0) return safeSlice(text, cap);
-  const head = safeSlice(text, keep);
-  const omitted = text.length - head.length;
-  return `${head}\n${TRUNCATION_NOTE_HEAD}${omitted}${TRUNCATION_NOTE_TAIL}`;
-}
 
 /**
  * Strips the branded wrapper from a GitDesktop-authored comment so only the

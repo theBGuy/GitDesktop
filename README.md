@@ -285,9 +285,10 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
     timeout error itself points at the knob. HTTP/API reviews stream without a deadline.
   - **Notes for reviewers** — hand the reviewer context up front: an agent deposits
     per-branch notes via the GitDesktop MCP, or you type them in the Create PR dialog; on
-    create they post as the PR's first comment and reach the automated review as
-    first-class context (by default a draft's review waits until it's marked ready),
-    so a deliberate, documented decision isn't re-flagged
+    create they post as the PR's first comment and reach **every** review as first-class
+    context — the automated one (by default a draft's review waits until it's marked
+    ready) and the reviews you run yourself — so a deliberate, documented decision isn't
+    re-flagged; an **Ignore author notes** toggle in the review panel sets them aside
   - **Clearly machine-authored** — a branded header/footer and a robot-avatar
     "GitDesktop" bot on local PRs; with a GitLab project/group access token, posts as
     the real **GitLab project bot** rather than your own account

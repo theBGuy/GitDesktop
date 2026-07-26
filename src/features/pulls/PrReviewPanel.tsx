@@ -1,6 +1,7 @@
 import {
   ClockIcon,
   CopyIcon,
+  NotePencilIcon,
   RobotIcon,
   ShieldCheckIcon,
   SparkleIcon,
@@ -43,7 +44,11 @@ import {
 import type { AiProviderId, ReviewMode } from "@/lib/ai/types";
 import { copyText } from "@/lib/clipboard";
 import { quickTransition } from "@/lib/motion";
-import { useExternalReviews, useReviewHistory } from "@/lib/pulls/queries";
+import {
+  useExternalReviews,
+  useReviewerNotes,
+  useReviewHistory,
+} from "@/lib/pulls/queries";
 import type { PersistedReview } from "@/lib/pulls/reviews-history";
 import { useSecretPreview, useSettings } from "@/lib/settings/queries";
 import {
@@ -153,6 +158,13 @@ export function PrReviewPanel({
   const externalCount = external.data?.items.length ?? 0;
   const [ignoreExternal, setIgnoreExternal] = useState(false);
 
+  // The author's "Notes for reviewers" on this remote PR (author-gated in the
+  // resolver). The run re-resolves them itself; this only drives the row + its
+  // per-run opt-out. No notes (or a local/Bitbucket PR) ⇒ the row stays hidden.
+  const notes = useReviewerNotes(context.repoPath, prKind, prRef);
+  const hasNotes = Boolean(notes.data?.reviewNotes?.trim());
+  const [ignoreNotes, setIgnoreNotes] = useState(false);
+
   const globalReviewAi = settings.data?.reviewAi;
   // Optional dedicated config for security audits (Settings → AI). When set and
   // no in-panel override is active, the Security-audit button runs it; the
@@ -249,7 +261,17 @@ export function PrReviewPanel({
     if (!effective) return;
     // `ai_review_triggered` is emitted in startReview when the run actually begins
     // (so it counts a drained queued run and skips a dismissed one), not here.
-    generate(effective, mode, context, ignoredModes.has(mode), ignoreExternal);
+    generate(
+      effective,
+      mode,
+      context,
+      ignoredModes.has(mode),
+      ignoreExternal,
+      // Only suppress the notes while the toggle is actually ON SCREEN: the row
+      // hides when the query refetches into an error/empty result, and a stale
+      // `ignoreNotes` would then keep skipping them with no affordance to undo.
+      ignoreNotes && hasNotes,
+    );
   }
 
   async function post() {
@@ -548,6 +570,25 @@ export function PrReviewPanel({
             </div>
           );
         })}
+        {hasNotes && (
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
+            <NotePencilIcon className="size-3 shrink-0" />
+            <span className="min-w-0">
+              {ignoreNotes
+                ? "Ignoring the author's notes for reviewers."
+                : "Next review reads the author's notes for reviewers."}
+            </span>
+            <button
+              type="button"
+              aria-pressed={ignoreNotes}
+              disabled={generating}
+              className="cursor-pointer underline-offset-2 hover:underline disabled:opacity-50"
+              onClick={() => setIgnoreNotes((v) => !v)}
+            >
+              {ignoreNotes ? "Use author notes" : "Ignore author notes"}
+            </button>
+          </div>
+        )}
         {externalCount > 0 && (
           <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
             <RobotIcon className="size-3 shrink-0" />

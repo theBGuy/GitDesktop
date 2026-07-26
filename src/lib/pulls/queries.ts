@@ -3,6 +3,7 @@ import {
   externalReviewerNames,
   fetchExternalFindings,
 } from "@/lib/ai/external-context";
+import { resolveReviewerNotesContext } from "@/lib/ai/notes-context";
 import { useForgeStatus } from "@/lib/git/queries";
 import {
   createLocalPr,
@@ -142,6 +143,33 @@ export function useExternalReviews(repo: string, kind: PrKind, ref: string) {
       );
       return { items, reviewers: externalReviewerNames(items) };
     },
+    enabled,
+    staleTime: 60_000,
+    retry: false,
+  });
+}
+
+/** The author's "Notes for reviewers" on a remote PR — lifted from the marker
+ *  conversation comment (author-gated inside the resolver). Drives the Review
+ *  panel's per-run "Ignore author notes" row; the run re-resolves them itself.
+ *  Remote PRs only; best-effort (a failure just hides the row). */
+export function useReviewerNotes(repo: string, kind: PrKind, ref: string) {
+  // Same gating as `useExternalReviews`, for the same reasons: wait for the forge
+  // status to RESOLVE (an unknown provider must not run under a default-"github"
+  // assumption), and skip Bitbucket — the notes harvest reads the same conversation
+  // comments the external path does, so a Bitbucket round trip buys nothing.
+  const forge = useForgeStatus(repo);
+  const provider = forge.data?.provider;
+  const enabled =
+    forge.isSuccess &&
+    provider != null &&
+    provider !== "bitbucket" &&
+    kind === "remote" &&
+    repo !== "" &&
+    /^\d+$/.test(ref);
+  return useQuery({
+    queryKey: ["reviewer-notes", repo, ref, provider ?? "pending"],
+    queryFn: () => resolveReviewerNotesContext(repo, Number(ref)),
     enabled,
     staleTime: 60_000,
     retry: false,
