@@ -1,6 +1,6 @@
-- **Security audits no longer assume GitDesktop's own tech stack.** The audit prompt opened by
-  telling the model, as fact, that the code in front of it was Rust and React — then applied
-  exemptions written for that stack to every repository you audit. Anything reachable through
+- **Security audits no longer assume GitDesktop's own tech stack.** The audit prompt told the
+  model, as fact, that the code in front of it was Rust and React, and applied exemptions
+  written for that stack to every repository you audit. Anything reachable through
   environment variables or command-line flags was trusted outright (untrue for a server, a
   container, or a shared CI runner), and missing authorization was waved off in frontend code on
   the assumption that a separate backend was re-checking it. Each of those rules is now judged
