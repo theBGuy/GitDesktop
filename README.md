@@ -274,8 +274,8 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
   - **Iterative** — re-runs remember the last round, fold in other reviewers' findings,
     and ground against the prior discussion — including the triage replies and decisions
     GitDesktop itself posted — so a finding it already refuted or marked fixed is treated
-    as settled instead of re-raised; once rounds accumulate, that history is distilled
-    into a compact ledger so it stays in budget
+    as settled instead of re-raised; once rounds accumulate well past the context budget,
+    that history is distilled into a compact ledger instead of being trimmed
   - **Sized to your model** — a **Review context** setting scales the review's context
     budget to the reviewing model's window (Auto probes a local **Ollama** model's context
     length live), so a larger model sees more of the PR before agentic review is needed

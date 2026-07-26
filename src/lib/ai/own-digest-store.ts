@@ -6,8 +6,11 @@ import { storeName } from "@/lib/test-mode";
  * A distilled decision ledger for one PR's over-budget GitDesktop-own comments,
  * cached so re-review only re-runs the generation model when the comments
  * actually change. `fingerprint` couples the ledger to the raw comments it was
- * distilled from (their count and newest timestamp, the section budget, and the
- * joined capped-block length); a mismatch forces a re-distill.
+ * distilled from (their count and newest timestamp, the section budget, and BOTH
+ * the joined capped-block length and the uncapped length the distiller actually
+ * read); a mismatch forces a re-distill. A FAILED attempt is recorded too — an
+ * empty `ledger` with `failedAt` set — so a thread that can't distill doesn't
+ * re-pay the model ceiling on every re-review.
  * `ledger` is the model's own markdown — never parsed into structured data, and
  * always re-verified against the current diff by the reviewer that consumes it.
  */
@@ -16,22 +19,39 @@ export interface OwnCommentsDigest {
   /** `${kind}#${ref}` — one PR's ledger. */
   key: string;
   /** Invalidation token:
-   *  `v2#${count}#${newestCreatedAt}#${budget}#${joinedBlockChars}` — the
-   *  distilled comments' count and newest timestamp, the section budget they were
-   *  sized to, and the joined length of the capped blocks (which moves on an
-   *  in-place edit that changes neither of the first two). The leading version
-   *  tag retires ledgers whose cached TEXT is no longer what we would produce
-   *  today — it went to `v2` when the truncation note stopped claiming the omitted
-   *  characters are "on the PR thread", a claim that is false for a ledger and
-   *  would otherwise be served from cache into a prompt indefinitely. Bump it
-   *  again for any future change to what a cached ledger's text says; records with
-   *  a stale token simply miss once and re-distill. */
+   *  `v3#${count}#${newestCreatedAt}#${budget}#${cappedJoinedChars}#${uncappedChars}`
+   *  — the distilled comments' count and newest timestamp, the section budget they
+   *  were sized to, and two lengths: the joined capped blocks (the section render
+   *  this ledger was sized against) and the joined UNCAPPED blocks (what the
+   *  distiller actually read). Both are needed because an in-place edit moves
+   *  neither the count nor the newest timestamp, and an edit appended past a
+   *  block's cap moves only the uncapped one. The leading version tag retires
+   *  ledgers whose cached TEXT is no longer what we would produce today, or that
+   *  were keyed on a weaker token: it went to `v2` when the truncation note
+   *  stopped claiming the omitted characters are "on the PR thread" (false for a
+   *  ledger, and otherwise served from cache into a prompt indefinitely), and to
+   *  `v3` when the uncapped length joined the token. Bump it again for either kind
+   *  of change; records with a stale token simply miss once and re-distill. */
   fingerprint: string;
-  /** The distilled ledger markdown — the cached soft context. */
+  /** The distilled ledger markdown — the cached soft context. Empty on a FAILURE
+   *  record (see `failedAt`); readers must never serve an empty ledger as one. */
   ledger: string;
-  /** Generation model the ledger was produced with (diagnostic). */
+  /** Generation model the ledger was produced with — or attempted with, on a
+   *  failure record; empty when the attempt failed before settings loaded
+   *  (diagnostic). */
   model: string;
   createdAt: number;
+  /** When the FAILED distillation of these exact comments happened. Load-bearing,
+   *  not diagnostic: it both marks the record as a failure (paired with an empty
+   *  `ledger`) and anchors the retry window, so a re-review inside that window
+   *  skips the attempt instead of re-paying the model ceiling to fail again, while
+   *  one after it tries afresh — the usual causes (a missing generation key, a CLI
+   *  not logged in, a network blip) are properties of the MODEL and never move the
+   *  fingerprint, so without the clock a fixed config would still be locked out.
+   *  A reader that finds an empty `ledger` with no `failedAt` must NOT treat it as
+   *  a failure memory — we never write that shape. Absent on a successful ledger;
+   *  optional, so `schemaVersion` stays 1 and older records read as successes. */
+  failedAt?: number;
 }
 
 // Records live in personal app-data, keyed by the repo's worktree-stable identity

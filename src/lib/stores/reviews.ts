@@ -578,6 +578,15 @@ export async function startReview(
           distill: true,
           signal: preAbort.signal,
           ownBudgetChars: budgetProfile.ownCharBudget,
+          // Distillation can hold this harvest for minutes on a CLI generation
+          // model. Surface it in the dock's status row (same field the review
+          // stream drives) so the wait reads as work, not a hang. Gated on
+          // `cancelled` like every other patch: the callback fires after awaits
+          // inside the distiller, so an un-gated write could stamp the distilling
+          // line onto a cancelled row — or onto a successor run for the same PR.
+          onStatus: (s) => {
+            if (!control.cancelled) patch({ status: s });
+          },
         },
       ),
       // The notes are lifted from the marker comment the Create-PR dialog (or an
@@ -593,6 +602,12 @@ export async function startReview(
         : Promise.resolve({}),
     ]);
     if (control.cancelled) return;
+    // Clear any distillation status the harvest set — the next writer is the
+    // review stream's own `setStatus`, and a leftover line would otherwise sit
+    // there through prompt assembly. AFTER the cancel check, like every other
+    // post-await patch here: a cancel-then-rerun on the same PR would otherwise
+    // let this blank the successor run's status.
+    patch({ status: "" });
     // Agentic run: in repo-aware mode the reviewer explores. A CLI provider
     // reviews with the PR's files on disk and (for the tool-capable CLIs —
     // everything but codex) GitDesktop's own read-only MCP tools attached; an

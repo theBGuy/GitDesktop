@@ -285,9 +285,10 @@ export const OWN_COMMENTS_CHAR_BUDGET = 6_000;
 export const EXTERNAL_FINDINGS_CHAR_BUDGET = 8_000;
 
 /** The continuation indent own-comment blocks render their bodies under (see
- *  `formatOwnComments` in own-context.ts) — `fitOwn`'s re-cuts pass it to
- *  `capBody` so a re-stated note stays inside its list item. */
-const OWN_BLOCK_INDENT = "  ";
+ *  `formatOwnComments` in own-context.ts). Every re-cut of an already-rendered
+ *  block passes it to `capBody` so the re-stated note stays inside its list item:
+ *  `fitOwn` below, and own-distill.ts's per-block / input caps. */
+export const OWN_BLOCK_INDENT = "  ";
 
 export interface ReviewExtras {
   /** Budgeted delta diff (empty when absent or dropped for budget). */

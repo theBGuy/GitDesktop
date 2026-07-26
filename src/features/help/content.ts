@@ -903,10 +903,12 @@ back**: the panel offers *Ignore previous review*, *Ignore external reviews*, an
 author notes*, each shown only when there's something to ignore and each one click away
 from being restored — nothing is deleted, the next review simply leaves it out.
 When rounds
-accumulate past the prompt budget, the newest comments win, and the full history is
+accumulate well past the prompt budget, the full history is
 **distilled into a compact decision ledger** (via your generation model) rather than cut
-off; and if the budget leaves no room for it at all, the review is told the comments were
-**omitted**, so it never reads their absence as nothing on record. On a **general**
+off; a marginal overflow is simply trimmed — the opening comment and the newest
+follow-ups win, and every cut says so — and if the budget leaves no room for the
+comments at all, the review is told they were **omitted**, so it never reads their
+absence as nothing on record. On a **general**
 re-review, polish noticed late on code that hasn't changed is listed separately as
 **non-blocking leftovers** — batch it with your next push or defer it. Any re-review —
 review or security audit — wraps up in a line once nothing substantive is left, instead
