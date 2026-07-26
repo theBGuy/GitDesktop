@@ -902,17 +902,15 @@ code reviews and security audits you start yourself. Any of this context can als
 back**: the panel offers *Ignore previous review*, *Ignore external reviews*, and *Ignore
 author notes*, each shown only when there's something to ignore and each one click away
 from being restored — nothing is deleted, the next review simply leaves it out.
-When rounds
-accumulate well past the prompt budget, the full history is
-**distilled into a compact decision ledger** (via your generation model) rather than cut
-off; a marginal overflow is simply trimmed — every comment stays, and each cut says how
-much it left out — and if the budget leaves no room for the
-comments at all, the review is told they were **omitted**, so it never reads their
-absence as nothing on record. On a **general**
-re-review, polish noticed late on code that hasn't changed is listed separately as
-**non-blocking leftovers** — batch it with your next push or defer it. Any re-review —
-review or security audit — wraps up in a line once nothing substantive is left, instead
-of holding the round open.
+When rounds accumulate well past the prompt budget, the full history is **distilled
+into a compact decision ledger** (via your generation model) rather than cut off; a
+marginal overflow is simply trimmed — every comment stays, and each cut says how much
+it left out — and if the budget leaves no room for the comments at all, the review is
+told they were **omitted**, so it never reads their absence as nothing on record.
+On a **general** re-review, polish noticed late on code that hasn't changed is listed
+separately as **non-blocking leftovers** — batch it with your next push or defer it. Any
+re-review — review or security audit — wraps up in a line once nothing substantive is
+left, instead of holding the round open.
 See *AI & automations* to pick the review model. The **Review context** size there
 controls how much diff and prior-discussion context reviews send — **Auto** fits it to the
 reviewing model's context window (probing Ollama live), or pick Compact / Standard /

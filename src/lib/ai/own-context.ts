@@ -1,8 +1,7 @@
 import { forgePrExternalReviews } from "@/lib/git/api";
 import type { ExternalReviewItem } from "@/lib/git/types";
-import { loadSettings } from "@/lib/settings/api";
 import { GD_COMMENT_ANCHOR } from "./comment-branding";
-import { getDigest, saveDigest } from "./own-digest-store";
+import { getDigest, recordDigestFailure, saveDigest } from "./own-digest-store";
 import { distillOwnComments } from "./own-distill";
 import {
   allocateBodyCaps,
@@ -359,8 +358,9 @@ export async function resolveOwnCommentsContext(
     // simply miss once and re-distill.
     const fingerprint = `v3#${survivors.length}#${newest}#${budget}#${cappedJoinedLen}#${uncappedLen}`;
     const cacheKey = `${kind}#${ref}`;
-    // Carried out of the try so a failure memory can name the model it failed on;
-    // stays empty when the attempt never got as far as loading settings.
+    // The generation model this attempt used, reported by the distiller as soon as
+    // it resolves settings (one load, not two that could disagree mid-flight).
+    // Stays empty when the attempt threw before that point — genuinely unknown.
     let attemptedModel = "";
     // Remember a dead end so the next re-review of these SAME comments doesn't
     // re-pay the ceiling — up to 180s on a CLI generation model — to reach the same
@@ -370,14 +370,16 @@ export async function resolveOwnCommentsContext(
     // like the success path — a store write must never turn a swallowed distill
     // failure into a thrown one.
     //
-    // MERGE, never replace. There is one digest per PR, and the failure memory
-    // carries its OWN fingerprint in `failed`, so spreading whatever is already
-    // there leaves a ledger cached for an earlier round intact and still
-    // cache-hittable. Replacing instead would blank a good ledger the moment any
-    // later round failed — permanently, since every new comment moves the token
-    // forward — and would let the loser of two concurrent runs (a manual review and
-    // an automation hold separate single-flight keys) overwrite the winner's ledger
-    // with an empty one.
+    // MERGE, never replace — and the merge happens inside the store's serialized
+    // queue, in `recordDigestFailure`, not here. There is one digest per PR and the
+    // failure memory carries its OWN fingerprint in `failed`, so merging leaves a
+    // ledger cached for an earlier round intact and still cache-hittable; replacing
+    // would blank a good ledger the moment any later round failed — permanently,
+    // since every new comment moves the token forward. Doing the read HERE and the
+    // write there would reopen the same hole for concurrent runs (a manual review
+    // and an automation hold separate single-flight keys): the loser reads a
+    // pre-success snapshot, the winner's ledger lands, and the loser's stale spread
+    // erases it. Writers ride the chain — the repo's settings-store house pattern.
     //
     // NOT recorded when the CALLER aborted: a dock Cancel says nothing about whether
     // these comments can be distilled, and remembering it would suppress
@@ -386,17 +388,10 @@ export async function resolveOwnCommentsContext(
     // `opts.signal` aborted — a timeout still records, which is the whole point.
     const rememberFailure = async () => {
       if (opts.signal?.aborted) return;
-      const existing = await getDigest(repoPath, kind, ref);
-      await saveDigest(repoPath, {
-        ...(existing ?? {
-          schemaVersion: 1,
-          key: cacheKey,
-          fingerprint,
-          ledger: "",
-          model: "",
-          createdAt: Date.now(),
-        }),
-        failed: { fingerprint, at: Date.now(), model: attemptedModel },
+      await recordDigestFailure(repoPath, kind, ref, {
+        fingerprint,
+        at: Date.now(),
+        model: attemptedModel,
       });
     };
     try {
@@ -420,13 +415,14 @@ export async function resolveOwnCommentsContext(
         return { ownItems };
       }
 
-      const settings = await loadSettings();
-      attemptedModel = settings.ai.model;
       const ledger = await distillOwnComments({
         blocks: uncappedBlocks,
         signal: opts.signal,
         repoPath,
         onStatus: opts.onStatus,
+        onModel: (m) => {
+          attemptedModel = m;
+        },
       });
       if (ledger?.trim()) {
         const capped = capLedger(ledger, budget);
@@ -437,7 +433,7 @@ export async function resolveOwnCommentsContext(
           key: cacheKey,
           fingerprint,
           ledger: capped,
-          model: settings.ai.model,
+          model: attemptedModel,
           createdAt: Date.now(),
         }).catch(() => undefined);
         return { ownItems: [capped], ownDistilled: true };

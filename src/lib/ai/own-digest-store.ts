@@ -49,7 +49,9 @@ export interface OwnCommentsDigest {
    *  the usual causes (a missing generation key, a CLI not logged in, a network
    *  blip) are properties of the MODEL and never move the fingerprint, so without
    *  the clock a fixed config would stay locked out. `model` is the one the attempt
-   *  was made with (diagnostic), empty when it failed before settings loaded.
+   *  was made with (diagnostic) — empty when the attempt threw before the
+   *  distiller got as far as loading settings (a client-construction failure, say),
+   *  so the model it would have used is genuinely unknown.
    *  Absent until something fails, and dropped again by the next success; optional,
    *  so `schemaVersion` stays 1 and older records read as never-failed. */
   failed?: { fingerprint: string; at: number; model: string };
@@ -125,7 +127,12 @@ export async function getDigest(
 
 /** Upserts one PR's digest under its `${kind}#${ref}` key — replaces the prior
  *  record for that key (one digest per PR). Serialized + force-saved so an
- *  overlapping save can't reload a pre-flush snapshot. */
+ *  overlapping save can't reload a pre-flush snapshot.
+ *
+ *  For a FAILURE memory use {@link recordDigestFailure}, never this: a failure
+ *  must merge onto whatever is already stored, and doing the read on the caller's
+ *  side puts it outside the serialized queue — which is exactly how a concurrent
+ *  success gets overwritten by a stale spread. */
 export async function saveDigest(
   repoPath: string,
   record: OwnCommentsDigest,
@@ -139,6 +146,52 @@ export async function saveDigest(
     await store.set(key, bag);
     // Flush now instead of on autoSave's debounce, so the next serialized reload
     // can't re-read a pre-write disk snapshot and drop this change.
+    await store.save();
+  });
+}
+
+/**
+ * Records a FAILED distillation for one PR, merged onto whatever that PR's record
+ * already holds — a cached ledger survives untouched, and only `failed` changes.
+ *
+ * The whole read-modify-write runs INSIDE the serialized queue, which is the point
+ * of the function existing (the repo's settings-store house pattern: writers ride
+ * the chain). Doing the read on the caller's side leaves a window between it and
+ * the write — `getDigest` alone awaits `repoIdentity` plus two `store.get`s — and a
+ * concurrent success landing in that window is then clobbered by the loser's stale
+ * spread: the ledger is destroyed AND `failed` at the live fingerprint suppresses
+ * a re-distill for the retry window.
+ *
+ * `key` is re-asserted rather than inherited from the spread, so a record that
+ * somehow carries the wrong one is repaired rather than propagated.
+ */
+export async function recordDigestFailure(
+  repoPath: string,
+  kind: "remote" | "local",
+  ref: string,
+  failed: NonNullable<OwnCommentsDigest["failed"]>,
+): Promise<void> {
+  return serialize(async () => {
+    await reloadRaw();
+    const key = await keyFor(repoPath);
+    const store = await getStore();
+    const bag = (await store.get<Record<string, OwnCommentsDigest>>(key)) ?? {};
+    const recordKey = `${kind}#${ref}`;
+    const existing = bag[recordKey];
+    bag[recordKey] = {
+      // No record yet → a ledger-less skeleton, so the failure has somewhere to
+      // live without inventing a ledger that was never produced.
+      ...(existing ?? {
+        schemaVersion: 1,
+        fingerprint: failed.fingerprint,
+        ledger: "",
+        model: "",
+        createdAt: failed.at,
+      }),
+      key: recordKey,
+      failed,
+    };
+    await store.set(key, bag);
     await store.save();
   });
 }

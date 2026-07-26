@@ -72,8 +72,15 @@ export async function distillOwnComments(input: {
    *  harvest — a CLI generation model can hold the review at "starting" for
    *  minutes, and an unexplained stall reads as a hang. */
   onStatus?: (status: string) => void;
+  /** Reports the generation model this attempt will use, as soon as settings
+   *  resolve. Lets the caller record it (a failure memory names the model it
+   *  failed on) without loading settings a second time — two reads can disagree
+   *  if the user changes the model mid-flight. Never called when the settings
+   *  load itself throws, so the caller's default must mean "unknown". */
+  onModel?: (model: string) => void;
 }): Promise<string | null> {
   const settings = await loadSettings();
+  input.onModel?.(settings.ai.model);
   const client = await createAiClient(settings.ai);
 
   // Per-block head cap first, then keep the NEWEST contiguous suffix that fits the
