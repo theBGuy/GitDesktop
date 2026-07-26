@@ -3,6 +3,7 @@ import { distillReadme } from "./readme";
 import {
   budgetDiff,
   budgetReviewExtras,
+  capBody,
   type ReviewExtras,
   safeSlice,
 } from "./truncate";
@@ -295,11 +296,12 @@ export function buildPrPrompt(input: PrPromptInput): {
   promptParts.push(`## Files changed\n${fileSummary || "(none)"}`);
 
   // Author's "Notes for reviewers" — reflect the recorded decisions in the
-  // description, don't paste them verbatim. Same trim + 8000-char slice guard as
-  // the review prompt's notes section.
+  // description, don't paste them verbatim. Same trim + disclosed 8000-char cap as
+  // the review prompt's notes section: the model should know the notes were
+  // clipped rather than treat a mid-sentence stop as the author's last word.
   if (input.reviewNotes?.trim()) {
     promptParts.push(
-      `## Author's notes for reviewers (context — reflect the decisions, don't paste verbatim)\n${safeSlice(input.reviewNotes.trim(), 8000)}`,
+      `## Author's notes for reviewers (context — reflect the decisions, don't paste verbatim)\n${capBody(input.reviewNotes.trim(), 8000)}`,
     );
   }
 
@@ -598,11 +600,14 @@ export function buildReviewPrompt(
   }
   // Author's deliberate "Notes for reviewers" — author input like the description
   // above, NOT bot soft-context, so it lives OUTSIDE `budgetReviewExtras` and is
-  // capped only by the 8000-char slice (same guard idiom as the plan-prompt
-  // issueBody slice below). Mode-agnostic: it feeds both general and security runs.
+  // capped only by the 8000-char cap (same guard idiom as the plan-prompt
+  // issueBody slice below), through `capBody` so an over-long notes field says it
+  // was clipped instead of stopping mid-sentence — every other cut that reaches a
+  // review prompt discloses itself, and a manual run reaches this one.
+  // Mode-agnostic: it feeds both general and security runs.
   if (input.reviewNotes?.trim()) {
     promptParts.push(
-      `## Author's notes for reviewers\n${safeSlice(input.reviewNotes.trim(), 8000)}`,
+      `## Author's notes for reviewers\n${capBody(input.reviewNotes.trim(), 8000)}`,
     );
   }
   if (input.commitSubjects.length > 0) {

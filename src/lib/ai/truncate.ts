@@ -45,8 +45,10 @@ const TRUNCATION_NOTE_TAIL = " more characters omitted]";
  * the count it disclosed (0 when there is no note). Lets a second cut of an
  * already-cut block re-state the CUMULATIVE omission instead of nesting a note
  * inside a note or — worse — slicing the first note away and leaving the block
- * looking complete. The note may be indented, since both callers render bodies
- * with a `\n  ` continuation indent.
+ * looking complete. The note may be indented: `formatOwnComments` and
+ * `formatExternalFindings` both render bodies under a `\n  ` continuation indent,
+ * so a note produced inside one of their blocks carries it (own-distill.ts, which
+ * re-cuts blocks those renderers already produced, passes them in as they are).
  */
 export function stripTruncationNote(text: string): {
   text: string;

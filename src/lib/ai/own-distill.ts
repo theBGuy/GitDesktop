@@ -6,11 +6,11 @@ import { capBody, stripTruncationNote } from "./truncate";
  *  keeps one verbose review from crowding out later follow-ups. Head-kept WITH an
  *  explicit truncation note (`capBody`), so the ledger model can tell a block was
  *  clipped rather than reading a mid-sentence stop as the comment's end; reviews
- *  front-load their blockers, so the head is the part worth keeping. A block may
- *  already carry a note from its own per-comment cap — the count restated here is
- *  CUMULATIVE across both cuts, never a note nested inside a note. This bounds
- *  each block, but NOT the total, which grows with block count —
- *  {@link DISTILL_INPUT_CAP} bounds the request. */
+ *  front-load their blockers, so the head is the part worth keeping. A block that
+ *  exceeds this cap may already carry a note from its own per-comment cap — the
+ *  count restated here is CUMULATIVE across both cuts, never a note nested inside
+ *  a note. This bounds each block, but NOT the total, which grows with block
+ *  count — {@link DISTILL_INPUT_CAP} bounds the request. */
 const DISTILL_BLOCK_CAP = 6_000;
 
 /** Overall input cap for the joined distillation prompt. After per-block capping,
@@ -46,9 +46,14 @@ export async function distillOwnComments(input: {
   // overall input cap (walk from the array end, joined "\n\n" length ≤ cap),
   // dropping the oldest overflow — so the request stays bounded regardless of how
   // many review rounds have accumulated.
-  // `capBody` is a no-op for a block that already fits and carries no note, so it
-  // replaces the old length conditional outright.
+  // Only OVER-cap blocks go through the strip/re-cap pair. A block that already
+  // fits must pass through byte-identical: re-emitting it would move a legitimate
+  // note off `formatOwnComments`' continuation indent, and `stripTruncationNote`
+  // matches on SHAPE — a block whose last line merely quotes the note format (our
+  // own PR comments do this routinely) would be "stripped" and re-emitted with a
+  // fabricated omitted-count.
   const capped = input.blocks.map((b) => {
+    if (b.length <= DISTILL_BLOCK_CAP) return b;
     const { text, omitted } = stripTruncationNote(b);
     return capBody(text, DISTILL_BLOCK_CAP, omitted);
   });
@@ -62,7 +67,10 @@ export async function distillOwnComments(input: {
   }
   // If not even the newest block fits, include it alone, head-kept to the cap —
   // through the same strip/cap pair, so this cut discloses itself too and its
-  // count still folds in the block-cap cut above.
+  // count still folds in the block-cap cut above. Unreachable while
+  // DISTILL_BLOCK_CAP (6,000) < DISTILL_INPUT_CAP (48,000) — every capped block
+  // fits the loop's first iteration, so `keptCount` is at least 1 — kept so the
+  // fallback is correct if the constants ever converge.
   const newestAlone = () => {
     const { text, omitted } = stripTruncationNote(capped[capped.length - 1]);
     return capBody(text, DISTILL_INPUT_CAP, omitted);
