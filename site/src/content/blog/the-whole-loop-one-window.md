@@ -1,5 +1,5 @@
 ---
-title: "The whole loop, one window: why I built GitDesktop"
+title: "The whole loop, one window: why I built this Git client"
 description: "Pull requests that start before you push, branch updates without switching, and guardrails that aren't a pricing tier — the assumptions behind GitDesktop."
 pubDate: 2026-07-26
 author: theBGuy
@@ -76,7 +76,7 @@ Why should any of that require a remote repository?
 
 GitDesktop lets me prepare the entire review locally before deciding to publish
 it. Not because GitHub can't review code — because I believe the first reviewer
-should always be yourself.
+should always be you.
 
 ## Branches are no longer just branches
 
@@ -88,26 +88,27 @@ Migrations change.
 I've had moments where I switched back to an old feature branch just to update it
 and suddenly found hundreds of files appearing as untracked, because
 `.gitignore` had changed on another branch. Not because I intended to work there.
-Simply because Git required me to visit that branch before updating it.
+Simply because updating it meant checking it out first.
 
 Another time, I interrupted active development just to pull changes into a
 long-running epic. Everything restarted. The application reloaded. The context I
 was in disappeared. None of that had anything to do with the work I was actually
 trying to accomplish. I just wanted to bring another branch up to date.
 
-So GitDesktop lets me do exactly that: update another branch without leaving the
-one I'm currently working in. Not because it's impossible otherwise, but because
-switching contexts should be a choice — not a requirement.
+So GitDesktop lets me do exactly that: [update another branch](/features/)
+without leaving the one I'm currently working in. Not because it's impossible
+otherwise, but because switching contexts should be a choice — not a
+requirement.
 
 ## Guardrails shouldn't be a pricing tier
 
 Some of my favorite GitDesktop features exist because of incredibly ordinary
-mistakes. I've merge committed directly into development branches because muscle
-memory took over. I've deleted the wrong branch after promoting a release. None
-of these were knowledge problems. They were human problems.
+mistakes. I've made merge commits directly on development branches because
+muscle memory took over. I've deleted the wrong branch after promoting a
+release. None of these were knowledge problems. They were human problems.
 
 GitHub has branch protections, and they're great. But many of the protections I
-wanted either happen remotely or are tied to higher-tier workflows. That always
+wanted either happen remotely or are tied to higher-tier plans. That always
 felt backwards. The best safety features shouldn't only exist after you've
 already pushed your code somewhere, and they shouldn't only exist for large
 organizations. Sometimes you just want your tools to stop you from making an
@@ -182,4 +183,4 @@ build another Git client. It's been to build the one I never have to leave.
 *A version of this essay first appeared
 [on LinkedIn](https://www.linkedin.com/pulse/whole-loop-one-window-evan-goldberg-wbmre/).
 If there's a part of your workflow that always makes you think "why do I have to
-leave?", I'd genuinely like to hear it.*
+leave?" — I'd genuinely like to hear it.*
