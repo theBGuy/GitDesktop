@@ -14,11 +14,23 @@ import { capBody, OWN_BLOCK_INDENT, stripTruncationNote } from "./truncate";
  *  count — {@link DISTILL_INPUT_CAP} bounds the request. */
 const DISTILL_BLOCK_CAP = 6_000;
 
-/** Overall input cap for the joined distillation prompt. After per-block capping,
- *  keep only the NEWEST blocks (a contiguous suffix — same recency-first approach
- *  as truncate.ts's `fitOwn`) whose joined length fits, dropping the oldest
- *  overflow — so the total request stays bounded regardless of round count. */
+/** Overall input cap for the joined distillation prompt, so the total request stays
+ *  bounded regardless of round count. After per-block capping, selection mirrors
+ *  truncate.ts's `fitOwn`: the OLDEST block is pinned (the opening context brief
+ *  nothing later supersedes) and the rest is a contiguous NEWEST-first suffix, so
+ *  the MIDDLE is what drops rather than the record's beginning. A whole block that
+ *  drops leaves no `capBody` note behind — nothing inside the remaining text says
+ *  it existed — so the omission is disclosed by {@link omittedMarker}, charged
+ *  against this cap like any other block. */
 const DISTILL_INPUT_CAP = 48_000;
+
+/** Stands in for the whole comments the input cap dropped, so the ledger model
+ *  reads a record with an acknowledged gap instead of a shorter record it will
+ *  summarize as complete. Rendered between the pinned oldest block and the newest
+ *  follow-ups, which is where the gap actually is — "earlier" is relative to the
+ *  comments below it. */
+const omittedMarker = (count: number) =>
+  `- (${count} earlier GitDesktop comment(s) omitted for the distiller's input budget)`;
 
 // The ceiling on the distillation model call, so a hung generation model can
 // never stall review start — the abort throws and the caller falls back to the
@@ -102,27 +114,71 @@ export async function distillOwnComments(input: {
     const { text, omitted } = stripTruncationNote(b);
     return capBody(text, DISTILL_BLOCK_CAP, omitted, OWN_BLOCK_INDENT);
   });
-  let keptCount = 0;
-  let running = 0;
-  for (let i = capped.length - 1; i >= 0; i--) {
-    const cost = capped[i].length + (keptCount > 0 ? 2 : 0);
-    if (running + cost > DISTILL_INPUT_CAP) break;
-    running += cost;
-    keptCount++;
-  }
-  // If not even the newest block fits, include it alone, head-kept to the cap —
-  // through the same strip/cap pair, so this cut discloses itself too and its
-  // count still folds in the block-cap cut above. Unreachable while
-  // DISTILL_BLOCK_CAP (6,000) < DISTILL_INPUT_CAP (48,000) — every capped block
-  // fits the loop's first iteration, so `keptCount` is at least 1 — kept so the
-  // fallback is correct if the constants ever converge.
+  // Selection mirrors `fitOwn`: PIN the oldest block, fit a NEWEST-first suffix of
+  // the rest into what's left, and let the MIDDLE go. A pure newest-first suffix
+  // dropped the opening brief first — the design context nothing later supersedes,
+  // and the one block a summary can least afford to be missing.
+  const pin = capped[0];
+  const rest = capped.slice(1);
+  // Walk from the array end, charging each block plus the "\n\n" joiner to the one
+  // after it; stop at the first that doesn't fit (no skip-and-continue).
+  const newestSuffixCount = (budget: number) => {
+    let kept = 0;
+    let running = 0;
+    for (let i = rest.length - 1; i >= 0; i--) {
+      const cost = rest[i].length + (kept > 0 ? 2 : 0);
+      if (running + cost > budget) break;
+      running += cost;
+      kept++;
+    }
+    return kept;
+  };
+  const markerCost = (count: number) => omittedMarker(count).length + 2;
+
+  // If not even the pin plus the marker it might need fits, fall back to the newest
+  // block alone, head-kept to the cap — through the same strip/cap pair, so this cut
+  // discloses itself too and its count still folds in the block-cap cut above.
+  // Unreachable while DISTILL_BLOCK_CAP (6,000) < DISTILL_INPUT_CAP (48,000), which
+  // bounds the pin far under the cap — kept so the fallback is correct if the
+  // constants ever converge.
   const newestAlone = () => {
     const { text, omitted } = stripTruncationNote(capped[capped.length - 1]);
     return capBody(text, DISTILL_INPUT_CAP, omitted, OWN_BLOCK_INDENT);
   };
-  const selected =
-    keptCount === 0 ? [newestAlone()] : capped.slice(capped.length - keptCount);
-  const body = selected.join("\n\n");
+
+  let body: string;
+  const pinFloor =
+    pin.length + (rest.length > 0 ? 2 + markerCost(rest.length) : 0);
+  if (pinFloor > DISTILL_INPUT_CAP) {
+    body = newestAlone();
+  } else {
+    // Round 1 reserves nothing for the marker, so when the whole record fits the
+    // body is byte-identical to what an unpinned, unmarked walk would produce.
+    let keptCount = newestSuffixCount(
+      DISTILL_INPUT_CAP - pin.length - (rest.length > 0 ? 2 : 0),
+    );
+    let dropped = rest.length - keptCount;
+    if (dropped > 0) {
+      // Something has to go, so the marker is now part of the request and has to be
+      // paid for. Reserve against the WORST-CASE digit count (`dropped` can only be
+      // ≤ `rest.length`), the same trick `capBody` uses to charge its own note, so
+      // the marker we finally render always fits the room held for it — and round 2
+      // can only shrink `keptCount`, never grow it, so `dropped` stays positive.
+      keptCount = newestSuffixCount(
+        DISTILL_INPUT_CAP - pin.length - 2 - markerCost(rest.length),
+      );
+      dropped = rest.length - keptCount;
+    }
+    // `keptCount === 0` must not slice — `rest.slice(rest.length - 0)` is the WHOLE
+    // array, which would blow the cap wide open. The pin plus the marker is a
+    // legitimate body: it says what survived and admits everything else is gone.
+    const selected = keptCount > 0 ? rest.slice(rest.length - keptCount) : [];
+    body = [
+      pin,
+      ...(dropped > 0 ? [omittedMarker(dropped)] : []),
+      ...selected,
+    ].join("\n\n");
+  }
 
   // Bound the model call: combine the caller's signal (a dock Cancel) with the
   // provider-sized ceiling above — the abort throws, and the caller's try/catch

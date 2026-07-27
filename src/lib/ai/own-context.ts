@@ -319,8 +319,9 @@ export async function resolveOwnCommentsContext(
   // to the comments.
   //
   // The distiller reads `uncappedBlocks`, not the capped render: it applies its own
-  // per-block and total-input caps (with disclosure notes) to whatever it is given,
-  // so feeding it the pre-trimmed blocks would compress an already-lossy record and
+  // caps to whatever it is given — its per-block cap cuts with disclosure notes, and
+  // a whole block dropped by its input cap is disclosed by a marker block — so
+  // feeding it the pre-trimmed blocks would compress an already-lossy record and
   // double-cut it. The capped `ownItems` remain the FALLBACK — no distill asked,
   // immaterial trim, or any failure. Best-effort throughout: ANY failure (missing
   // key, network, abort, empty output) falls back silently to the raw recency-first
