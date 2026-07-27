@@ -29,10 +29,10 @@ import type { CommittedNameSource } from "./useGenerateBranchName";
  * Create-branch dialog: names a new branch (with optional AI generation from
  * the working-tree changes, or — when it branches from HEAD with a clean tree —
  * the current branch's committed work), picks its base, and switches to it.
- * Owns its own
- * form + the create mutation + the branch-name generator — the switcher only
- * decides whether it's open and hands down the data it renders. Seeds the base
- * on open so it reflects the branch you were on when you triggered it.
+ * Owns its own form + the create mutation + the branch-name generator — the
+ * switcher only decides whether it's open and hands down the data it renders.
+ * Seeds the base on open so it reflects the branch you were on when you
+ * triggered it.
  */
 export function CreateBranchDialog({
   repoPath,

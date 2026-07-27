@@ -1,11 +1,11 @@
 import { useCallback } from "react";
 import { toast } from "sonner";
 import { useAiStream } from "@/features/conversations/useAiStream";
+import { aiExcludePatterns } from "@/lib/ai/ignore";
 import { buildBranchNamePrompt, extractBranchName } from "@/lib/ai/prompt";
 import {
   gitBranchDiff,
   gitStagedDiff,
-  readRepoAiIgnore,
   readRepoInstructions,
 } from "@/lib/git/api";
 import { sanitizeRefName } from "@/lib/git/ref-name";
@@ -54,12 +54,10 @@ export function useGenerateBranchName(repoPath: string) {
       onName: (name: string) => void;
     }) => {
       const buffer = await run(async (settings) => {
-        const repoIgnore = await readRepoAiIgnore(repoPath);
-        const globalIgnore = settings.aiIgnorePatterns
-          .split("\n")
-          .map((line) => line.trim())
-          .filter((line) => line && !line.startsWith("#"));
-        const exclude = [...repoIgnore, ...globalIgnore];
+        const exclude = await aiExcludePatterns(
+          repoPath,
+          settings.aiIgnorePatterns,
+        );
 
         const [diff, repoInstructions] = await Promise.all([
           opts.useWorkingTree

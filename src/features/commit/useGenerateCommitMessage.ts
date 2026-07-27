@@ -1,11 +1,11 @@
 import { useCallback } from "react";
 import { toast } from "sonner";
 import { useAiStream } from "@/features/conversations/useAiStream";
+import { aiExcludePatterns } from "@/lib/ai/ignore";
 import { buildCommitPrompt, splitCommitMessage } from "@/lib/ai/prompt";
 import {
   gitRecentCommits,
   gitStagedDiff,
-  readRepoAiIgnore,
   readRepoInstructions,
 } from "@/lib/git/api";
 import { useUiStore } from "@/lib/stores/ui";
@@ -27,12 +27,10 @@ export function useGenerateCommitMessage(repoPath: string) {
     setGenerating(true);
     const buffer = await run(
       async (settings) => {
-        const repoIgnore = await readRepoAiIgnore(repoPath);
-        const globalIgnore = settings.aiIgnorePatterns
-          .split("\n")
-          .map((line) => line.trim())
-          .filter((line) => line && !line.startsWith("#"));
-        const exclude = [...repoIgnore, ...globalIgnore];
+        const exclude = await aiExcludePatterns(
+          repoPath,
+          settings.aiIgnorePatterns,
+        );
 
         const [staged, commits, repoInstructions] = await Promise.all([
           gitStagedDiff(repoPath, { maxBytes: RAW_DIFF_MAX_BYTES, exclude }),

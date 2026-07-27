@@ -17,9 +17,10 @@ import {
   extractResolvedContent,
   hasConflictMarkers,
 } from "@/lib/ai/conflict-prompt";
+import { aiExcludePatterns } from "@/lib/ai/ignore";
 import { PROVIDER_LABELS } from "@/lib/ai/providers";
 import { useAiTextStream } from "@/lib/ai/stream";
-import { readRepoAiIgnore, readRepoInstructions } from "@/lib/git/api";
+import { readRepoInstructions } from "@/lib/git/api";
 import {
   type ConflictSides,
   conflictSides,
@@ -35,14 +36,6 @@ type Phase = "loading" | "streaming" | "ready" | "blocked" | "idle";
 type ViewKey = "diff" | "proposed" | "ours" | "theirs" | "base";
 
 const baseName = (path: string) => path.split("/").pop() || path;
-
-/** Lines of a newline-joined ignore-pattern string, dropping blanks + comments. */
-function ignoreLines(patterns: string): string[] {
-  return patterns
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l && !l.startsWith("#"));
-}
 
 /**
  * Inline resolution surface for one conflicted file: asks the configured review
@@ -92,12 +85,14 @@ export function ConflictResolveView({
 
     let resolved: ConflictSides;
     try {
-      const globalIgnore = ignoreLines(settings.data?.aiIgnorePatterns ?? "");
-      const repoIgnore = await readRepoAiIgnore(repoPath).catch(() => []);
-      resolved = await conflictSides(repoPath, path, [
-        ...repoIgnore,
-        ...globalIgnore,
-      ]);
+      // An unreadable repo ignore file must not abort a resolution the global
+      // patterns alone can still serve.
+      const exclude = await aiExcludePatterns(
+        repoPath,
+        settings.data?.aiIgnorePatterns ?? "",
+        { tolerateRepoReadError: true },
+      );
+      resolved = await conflictSides(repoPath, path, exclude);
     } catch (e) {
       if (gen === genRef.current) {
         toastError(e);

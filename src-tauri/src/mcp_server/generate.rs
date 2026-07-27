@@ -1139,8 +1139,11 @@ impl GitDesktopMcp {
                        prompt the in-app AI feature builds (three-dot branch diff, the commit \
                        subjects the PR would introduce, a per-file summary, the repo's available \
                        labels when any, and project/user instructions). Defaults: base = the repo's \
-                       default branch, head = the current branch. This tool does NOT call a model; \
-                       complete the returned prompt with your own inference."
+                       default branch, head = the current branch. The user's AI-ignore patterns are \
+                       applied to the diff and the withheld file count is disclosed in the prompt. \
+                       This tool does NOT call a model; complete the returned prompt with your own \
+                       inference. Errors when the range has no changes, or when all of them match \
+                       those patterns."
     )]
     async fn generate_pr_description(
         &self,
@@ -1561,16 +1564,15 @@ impl GitDesktopMcp {
         // entirely of new files can still be named (mirrors the in-app call site).
         let untracked_paths = untracked_files(&self.repo).await.map_err(app_err)?;
 
-        // The base for the committed-work fallback below. Only that path reads the
-        // branch's commit subjects: on the working-tree path they'd describe the
-        // CURRENT branch, biasing the name toward the parent branch's story.
-        let base = committed_base_ref(&self.repo).await;
-
         // Nothing in progress → name the branch after what it has already committed.
         let (diff, untracked_paths, commit_subjects) = if diff.files.is_empty()
             && untracked_paths.is_empty()
         {
-            let Some(base) = base.as_deref() else {
+            // Resolve the base HERE, not above: only this path uses it, and the
+            // working-tree path shouldn't pay for its ref probes. That path also
+            // deliberately takes no commit subjects — they'd describe the CURRENT
+            // branch, biasing the name toward the parent branch's story.
+            let Some(base) = committed_base_ref(&self.repo).await else {
                 let msg = if diff.excluded_files > 0 {
                     "All in-progress changes match the AI ignore patterns — nothing to name a \
                      branch after."
@@ -1582,7 +1584,7 @@ impl GitDesktopMcp {
             };
             let mut committed = crate::git::compare::git_branch_diff(
                 self.repo.clone(),
-                base.to_string(),
+                base.clone(),
                 "HEAD".to_string(),
                 Some(RAW_DIFF_MAX_BYTES),
                 Some(exclude),
@@ -1620,7 +1622,7 @@ impl GitDesktopMcp {
             // is hidden is the safe direction — the number only tells the model the
             // diff isn't the whole story.
             committed.excluded_files += diff.excluded_files;
-            let subjects = branch_commit_subjects(&self.repo, base).await;
+            let subjects = branch_commit_subjects(&self.repo, &base).await;
             (committed, Vec::new(), subjects)
         } else {
             (diff, untracked_paths, Vec::new())
@@ -1700,8 +1702,10 @@ impl GitDesktopMcp {
                        branch range (branch diff, the commit subjects the PR would introduce, a \
                        per-file summary, the repo's labels when any, and project/user instructions) \
                        as one ready-to-complete message. Defaults: base = the repo's default branch, \
-                       head = the current branch. Your model completes it and the result is the \
-                       PR/MR title and description."
+                       head = the current branch. The user's AI-ignore patterns are applied to the \
+                       diff and the withheld file count is disclosed in the prompt. Your model \
+                       completes it and the result is the PR/MR title and description. Errors when \
+                       the range has no changes, or when all of them match those patterns."
     )]
     async fn pr_description_prompt(
         &self,

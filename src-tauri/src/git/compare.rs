@@ -111,9 +111,10 @@ pub async fn git_branch_diff(
     validate_ref(&compare)?;
     let range = format!("{base}...{compare}");
 
-    // Translate ignore patterns into git pathspec excludes so matching has
-    // exact gitignore-style glob semantics. ":(exclude)" needs at least one
-    // inclusive pathspec alongside it, hence the leading ".".
+    // Translate ignore patterns into git pathspec excludes — pathspec globs are
+    // close to gitignore semantics, but `*` also matches `/` (wildmatch without
+    // WM_PATHNAME), so `src/*.rs` hides nested files too. ":(exclude)" needs at
+    // least one inclusive pathspec alongside it, hence the leading ".".
     let mut pathspec: Vec<String> = Vec::new();
     for pattern in exclude.unwrap_or_default() {
         let pattern = pattern.trim();
@@ -742,12 +743,18 @@ mod tests {
         run(&repo, &["commit", "-qm", "seed"]).await;
         let base_sha = run(&repo, &["rev-parse", "HEAD"]).await.trim().to_string();
 
-        // Three changed files on top of the base: one of them is the one the
-        // user's ignore patterns will hide.
+        // Six changed files on top of the base, shaped to exercise the three
+        // pattern kinds a real AI-ignore list uses: a bare filename, a glob, and a
+        // directory — the glob and directory cases each with a NESTED member.
         std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("tools")).unwrap();
+        std::fs::create_dir_all(root.join("vendor").join("sub")).unwrap();
         std::fs::write(root.join("src").join("a.rs"), "fn a() {}\n").unwrap();
         std::fs::write(root.join("notes.md"), "notes\n").unwrap();
         std::fs::write(root.join("package-lock.json"), "{\"lock\": 1}\n").unwrap();
+        std::fs::write(root.join("tools").join("build.lock"), "locked\n").unwrap();
+        std::fs::write(root.join("vendor").join("lib.txt"), "vendored\n").unwrap();
+        std::fs::write(root.join("vendor").join("sub").join("x.txt"), "deep\n").unwrap();
         run(&repo, &["add", "-A"]).await;
         run(&repo, &["commit", "-qm", "work"]).await;
 
@@ -755,7 +762,7 @@ mod tests {
         let all = git_branch_diff(repo.clone(), base_sha.clone(), "HEAD".into(), None, None)
             .await
             .unwrap();
-        assert_eq!(all.files.len(), 3, "all three changed files are listed");
+        assert_eq!(all.files.len(), 6, "all six changed files are listed");
         assert!(all.text.contains("package-lock.json"));
         assert_eq!(all.excluded_files, 0);
 
@@ -770,7 +777,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(filtered.files.len(), 2);
+        assert_eq!(filtered.files.len(), 5);
         assert!(
             !filtered.files.iter().any(|f| f.path.contains("package-lock")),
             "the excluded file is absent from the file list"
@@ -781,6 +788,47 @@ mod tests {
         );
         assert!(filtered.text.contains("src/a.rs"), "other files survive");
         assert_eq!(filtered.excluded_files, 1);
+
+        // A GLOB pattern: `*` reaches into subdirectories, so a nested `.lock` is
+        // hidden too (`package-lock.json` is untouched — it doesn't end in `.lock`).
+        let globbed = git_branch_diff(
+            repo.clone(),
+            base_sha.clone(),
+            "HEAD".into(),
+            None,
+            Some(vec!["*.lock".into()]),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !globbed.files.iter().any(|f| f.path.ends_with(".lock")),
+            "both the root and the nested .lock are hidden"
+        );
+        assert!(!globbed.text.contains("tools/build.lock"));
+        assert!(
+            globbed.files.iter().any(|f| f.path == "package-lock.json"),
+            "a non-matching lock-ish name survives"
+        );
+        assert_eq!(globbed.files.len(), 5);
+        assert_eq!(globbed.excluded_files, 1);
+
+        // A DIRECTORY pattern hides the whole subtree, nested files included.
+        let dir = git_branch_diff(
+            repo.clone(),
+            base_sha.clone(),
+            "HEAD".into(),
+            None,
+            Some(vec!["vendor/".into()]),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !dir.files.iter().any(|f| f.path.starts_with("vendor/")),
+            "every file under the excluded directory is hidden, at any depth"
+        );
+        assert!(!dir.text.contains("vendor/sub/x.txt"));
+        assert_eq!(dir.files.len(), 4);
+        assert_eq!(dir.excluded_files, 2);
 
         // Blank and `#`-comment patterns are skipped, leaving no pathspec at all —
         // identical to the unfiltered call, including the zero count.
@@ -793,7 +841,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(noop.files.len(), 3);
+        assert_eq!(noop.files.len(), 6);
         assert_eq!(noop.excluded_files, 0);
         assert_eq!(noop.text, all.text);
     }

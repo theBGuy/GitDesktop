@@ -397,8 +397,12 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     [sortedBranches, bq],
   );
   // Both branch dialogs are always mounted, so their AI name-generation queries
-  // gate on one of them actually being open.
-  const branchDialogOpen = createOpen || renameTarget !== null;
+  // gate on one of them actually being open — and on AI being usable at all:
+  // without it the generate button renders nothing (or the setup button, which
+  // reads none of this), so a Hide-AI or unconfigured user would be paying for
+  // `git branch -r` plus two `git log` walks that feed nothing.
+  const branchDialogOpen =
+    (createOpen || renameTarget !== null) && aiEnabled && aiConfigured;
   // Branches that live on a remote but aren't checked out locally yet — fetched
   // while the menu is open, and while a branch dialog is open (it resolves the
   // committed-work base off this list, and the palette can open it without ever
@@ -436,7 +440,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     renameTarget ?? (createOpen ? (currentName ?? "HEAD") : null);
   // Whether the remote list has settled. Until it has, a missing `origin/<default>`
   // means "not loaded yet", not "absent" — resolving the local default here is
-  // exactly the stale ref this base resolution exists to avoid.
+  // exactly the stale ref this base resolution exists to avoid. An ERRORED list
+  // settles too, and can't be trusted either: that case is reported as an error
+  // state below rather than silently falling through to the local default.
   const remoteBranchesSettled = !remoteBranchesQuery.isPending;
   // The default branch names the comparison base, so its own lookup gates the
   // fallback too: a null `defaultName` while it's still loading must not read as
@@ -483,7 +489,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         (Boolean(defaultName) && !remoteBranchesSettled) ||
         (comparing && committedCompare.isPending)
       ? "pending"
-      : defaultBranch.isError || (comparing && committedCompare.isError)
+      : defaultBranch.isError ||
+          remoteBranchesQuery.isError ||
+          (comparing && committedCompare.isError)
         ? "error"
         : "ready";
   const committedFallback = useMemo(() => {

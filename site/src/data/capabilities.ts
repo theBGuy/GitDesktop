@@ -398,6 +398,12 @@ export const capabilities: Capability[] = [
   {
     group: "AI · generate & review",
     ai: true,
+    label:
+      "AI branch names — from your in-progress changes, or the branch's own committed work",
+  },
+  {
+    group: "AI · generate & review",
+    ai: true,
     label: "AI suggests PR/MR labels from your repo's existing set",
   },
   {

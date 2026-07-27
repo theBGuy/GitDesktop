@@ -11,12 +11,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { createAiClient } from "@/lib/ai/client";
+import { aiExcludePatterns } from "@/lib/ai/ignore";
 import { buildCommitPrompt } from "@/lib/ai/prompt";
 import { required, useAppForm } from "@/lib/form";
 import {
   gitBranchDiff,
   gitRecentCommits,
-  readRepoAiIgnore,
   readRepoInstructions,
 } from "@/lib/git/api";
 import { useRewriteCommits } from "@/lib/git/queries";
@@ -45,14 +45,12 @@ export function useGenerateSquashMessage(
     setGenerating(true);
     try {
       const settings = await loadSettings();
-      const repoIgnore = await readRepoAiIgnore(repoPath);
-      const globalIgnore = settings.aiIgnorePatterns
-        .split("\n")
-        .map((line) => line.trim())
-        .filter((line) => line && !line.startsWith("#"));
-      const exclude = [...repoIgnore, ...globalIgnore];
+      // Only the diff depends on the ignore patterns — chain those two and let
+      // the batch run them alongside the commits and instructions reads.
       const [diff, commits, repoInstructions] = await Promise.all([
-        gitBranchDiff(repoPath, base, head, 200_000, exclude),
+        aiExcludePatterns(repoPath, settings.aiIgnorePatterns).then((exclude) =>
+          gitBranchDiff(repoPath, base, head, 200_000, exclude),
+        ),
         gitRecentCommits(repoPath, 10),
         readRepoInstructions(repoPath),
       ]);
