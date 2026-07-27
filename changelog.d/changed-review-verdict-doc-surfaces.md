@@ -7,8 +7,9 @@
   documentation surfaces by path — README, changelog, changelog fragments, docs
   directories — so a user-facing change that leaves any of them stale comes back as one
   finding naming every affected surface, including ones the diff never touched, instead
-  of one surface per round. A repo's own `.gitdesktop/instructions.md` now reaches
-  reviews too, as conventions to judge the change against.
+  of one surface per round. Your **custom instructions** now reach reviews too — the
+  global ones from Settings and a repo's own `.gitdesktop/instructions.md` — as
+  conventions to judge the change against.
 - **The opening comment now keeps a guaranteed share of the budget, not just its
   place in the queue.** Being kept rather than dropped only settles which comments
   make it in; how much of each one survives is decided earlier, and there the opening

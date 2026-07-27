@@ -761,14 +761,14 @@ async function generateReviewText(
       : undefined;
 
   const isRemotePr = event.kind !== "commit" && event.target.type === "remote";
-  // Repo-level review context: the documentation-surface roster and the repo's
-  // own instructions file. Both read the local working tree — whatever branch is
-  // checked out (see `repoInstructionsClause`, guardrail 3) — and both apply to a
-  // commit or local-PR review as much as a remote one,
-  // so they sit OUTSIDE the remote-only harvest below — started here and awaited
-  // after it, so they still resolve concurrently with it. Neither promise can
-  // reject (the resolver swallows its own failures; the read has a `catch`), so
-  // holding it across the await below can't strand a rejection.
+  // Repo-level review context: the documentation-surface roster and the repo's own
+  // instructions file. Both read the local working tree — whatever branch is checked
+  // out (see `repoInstructionsClause`, guardrail 3) — and both apply to a commit or
+  // local-PR review as much as a remote one, so they sit OUTSIDE the remote-only
+  // harvest below: started here and awaited after it, so they still resolve
+  // concurrently with it. Neither promise can reject (the resolver swallows its own
+  // failures; the read has a `catch`), so holding it across the await below can't
+  // strand a rejection.
   const repoContext = Promise.all([
     resolveDocSurfacesContext(event.repoPath),
     readRepoInstructions(event.repoPath).catch(() => null),
