@@ -4,6 +4,10 @@ import { create } from "zustand";
 import { cancelAgentReview, providerKind } from "@/lib/ai/agent";
 import { resolveBudgetProfile } from "@/lib/ai/context-budget";
 import {
+  type DocSurfacesContext,
+  resolveDocSurfacesContext,
+} from "@/lib/ai/docs-context";
+import {
   type ExternalContext,
   resolveExternalContext,
 } from "@/lib/ai/external-context";
@@ -25,6 +29,7 @@ import type {
   ReviewMode,
 } from "@/lib/ai/types";
 import { track } from "@/lib/analytics";
+import { readRepoInstructions } from "@/lib/git/api";
 import type { DiffStatEntry } from "@/lib/git/types";
 import { notifyIfUnfocused } from "@/lib/notify";
 import { saveReview } from "@/lib/pulls/reviews-history";
@@ -556,10 +561,16 @@ export async function startReview(
     // the PR's review activity); kept separate so the battle-tested external path
     // is untouched — a shared-fetch dedup is a later efficiency win
     // (forge-dispatch-dedup backlog).
-    const [external, own, notes]: [
+    // Two repo-level reads ride along in the same batch: the documentation-surface
+    // roster and the repo's own instructions file. Both read the maintainer's
+    // working tree (not the PR head) and both apply to local PRs too, so neither
+    // is gated on `target.kind`.
+    const [external, own, notes, docs, repoInstructions]: [
       ExternalContext,
       OwnCommentsContext,
       { reviewNotes?: string },
+      DocSurfacesContext,
+      string | null,
     ] = await Promise.all([
       resolveExternalContext(
         target.repoPath,
@@ -601,6 +612,11 @@ export async function startReview(
       !ignoreNotes
         ? resolveReviewerNotesContext(target.repoPath, Number(target.ref))
         : Promise.resolve({}),
+      resolveDocSurfacesContext(target.repoPath),
+      // Best-effort like every other context read here — a repo with no
+      // `.gitdesktop/instructions.md` (or an unreadable one) simply contributes
+      // nothing to the prompt.
+      readRepoInstructions(target.repoPath).catch(() => null),
     ]);
     if (control.cancelled) return;
     // Clear any distillation status the harvest set — the next writer is the
@@ -657,10 +673,12 @@ export async function startReview(
         provider: context.provider,
         budgetProfile,
         agentic,
+        repoInstructions,
         ...prior,
         ...own,
         ...external,
         ...notes,
+        ...docs,
       },
       mode,
     );

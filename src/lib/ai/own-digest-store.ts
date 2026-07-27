@@ -20,7 +20,7 @@ export interface OwnCommentsDigest {
   /** `${kind}#${ref}` — one PR's ledger. */
   key: string;
   /** Invalidation token:
-   *  `v3#${count}#${newestCreatedAt}#${budget}#${cappedJoinedChars}#${uncappedChars}`
+   *  `v4#${count}#${newestCreatedAt}#${budget}#${cappedJoinedChars}#${uncappedChars}`
    *  — the distilled comments' count and newest timestamp, the section budget they
    *  were sized to, and two lengths: the joined capped blocks (the section render
    *  this ledger was sized against) and the joined UNCAPPED blocks (what the
@@ -30,9 +30,14 @@ export interface OwnCommentsDigest {
    *  ledgers whose cached TEXT is no longer what we would produce today, or that
    *  were keyed on a weaker token: it went to `v2` when the truncation note
    *  stopped claiming the omitted characters are "on the PR thread" (false for a
-   *  ledger, and otherwise served from cache into a prompt indefinitely), and to
-   *  `v3` when the uncapped length joined the token. Bump it again for either kind
-   *  of change; records with a stale token simply miss once and re-distill. */
+   *  ledger, and otherwise served from cache into a prompt indefinitely), to
+   *  `v3` when the uncapped length joined the token, and to `v4` when the
+   *  distiller's per-block cap became a share of its input cap rather than a flat
+   *  6,000 — on a short record the model now reads more of each block and produces
+   *  a different ledger, while every field above stays identical, so the same
+   *  token would otherwise keep serving a ledger produced under the old cap. Bump
+   *  it again for either kind of change; records with a stale token simply miss
+   *  once and re-distill. */
   fingerprint: string;
   /** The distilled ledger markdown — the cached soft context. Empty when this
    *  record only carries a failure memory and no ledger has ever succeeded. */

@@ -33,3 +33,34 @@ All commit messages and PR titles must follow **Conventional Commits** format.
 - **Multiple scopes** for cross-cutting changes: `feat(github,settings): add auth flow`
 - **Type guides later tooling** — `feat` and `fix` trigger changelog entries automatically
 - Use **lowercase** and **no period** in the description
+
+# Documentation: four surfaces, one change
+
+A **user-facing** change updates its documentation in the SAME change — never in a
+follow-up. This project keeps four documentation surfaces, and they are ONE concern:
+a change that leaves any of them stale is one gap with several locations, not one
+gap per file.
+
+1. **`README.md`** — add or extend the relevant bullet under *Highlights* and/or
+   *Features*.
+2. **Marketing site** — `site/src/pages/index.astro`: add the feature to the
+   `capabilities` list (`ai: true` only for AI features), and add or extend a
+   `FeatureRow` when it warrants its own section. The page has two synced views,
+   **AI-native** and **Just Git** — non-AI features belong in both, AI features in
+   the AI view only.
+3. **In-app user guide** — `src/features/help/content.ts`: update the matching
+   guide section (or add one for a whole new surface) and keep every claim true
+   against the code. Shortcuts are `{{kbd:action-id}}` / `{{key:…}}` tokens, never
+   literal keys; AI content is gated with the section's `ai: true` flag plus
+   `{{ai}}…{{/ai}}` inline markers.
+4. **Changelog fragment** — `changelog.d/<added|changed|fixed>-<slug>.md`, whose
+   body is the finished Keep a Changelog bullet, written for humans. Never edit
+   `## [Unreleased]` in `CHANGELOG.md` directly; fragments are assembled there at
+   release time.
+
+When a change alters **existing** behavior, grep all four surfaces for the old
+wording rather than updating the spots you remember — stale copies of the same
+claim hide across surfaces. A change too minor for the README, site, and guide may
+carry only the capability line and the changelog fragment, but that is a deliberate
+call to state, not a step to skip silently. A change with no user-facing effect
+(pure refactor, internal rename, test-only) needs none of them.

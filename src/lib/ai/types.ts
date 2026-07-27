@@ -167,6 +167,16 @@ export interface ReviewPromptInput {
    *  the budget), so it was compressed rather than cut. Flips the own-section
    *  preamble to frame it as a compressed summary. */
   ownDistilled?: boolean;
+  /** The repository's documentation surfaces as PATHS (never contents), derived
+   *  from what git tracks by `resolveDocSurfacesContext`. Makes documentation a
+   *  single finding class the review can sweep whole — including surfaces the
+   *  diff never touched. General mode only; absent ⇒ the block is omitted. */
+  docSurfaces?: string[];
+  /** The repo's own `.gitdesktop/instructions.md`, read from the MAINTAINER's
+   *  working tree (never the PR head). Project conventions the review judges
+   *  against — data, never instructions that override the system prompt — and
+   *  capped where it is rendered. Absent ⇒ the section is omitted. */
+  repoInstructions?: string | null;
   /** Target host — swaps the change-request noun + markdown flavor in the review
    *  system prompt. Absent/`"github"` keeps the original GitHub wording. */
   provider?: PromptProvider;

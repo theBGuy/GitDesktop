@@ -35,12 +35,72 @@ export interface OwnCommentsContext {
  *  a "fixed in `<sha>`" reply is short anyway.
  *
  *  When `OWN_BODY_FLOOR × count > budget` the allocation degenerates to
- *  floor-for-all and the caps therefore over-allocate the section budget — that
+ *  floor-for-all (for the FOLLOW-UPS — the oldest block keeps the reserve below)
+ *  and the caps therefore over-allocate the section budget — that
  *  is by design, not a bug: these caps decide how the budget is SHARED, while
  *  `fitOwn` (truncate.ts) stays the hard enforcement — dropping the MIDDLE
  *  comments first, keeping the opening brief and the newest follow-ups — with
  *  distillation firing before it in the over-budget regime. */
 const OWN_BODY_FLOOR = 1_500;
+
+/** Share of the section budget the OLDEST comment is guaranteed before the rest
+ *  fair-share what's left. Mirrors `fitOwn`'s pin policy (`truncate.ts`,
+ *  `Math.floor(cap * 0.35)`) so the same block is protected by the same fraction
+ *  at both stages.
+ *
+ *  Without it `allocateBodyCaps` treats the opening comment as just another
+ *  block, so the moment `OWN_BODY_FLOOR × count ≥ budget` the allocation
+ *  degenerates to floor-for-all and a 9,000-char opener collapses to 1,500 in ONE
+ *  step — the 14th own comment at the 3× profile, the 4th at 1×. That block is the
+ *  pre-empt artifact (the author's opening context comment): losing 83% of it
+ *  re-opens every finding it pre-empted, and the loss grows with round count. */
+const OPENER_RESERVE_SHARE = 0.35;
+
+/** Fair-share caps with the OLDEST block's share pre-reserved: a FLOOR under the
+ *  opener, never a ceiling.
+ *
+ *  The plain allocation runs first and is returned UNCHANGED whenever it already
+ *  gives the opener at least its reserve — which covers every case where the whole
+ *  record fits, so the un-pressured path stays byte-identical. Only when the plain
+ *  share falls under the reserve (the floors regime) is the reserve taken off the
+ *  top and the remainder fair-shared across the follow-ups.
+ *
+ *  `budget` is what this allocation has to spend (round 2 passes it net of the
+ *  rendered scaffolding); `sectionBudget` is the section's FULL budget and is what
+ *  the reserve fraction is taken from. Taking it from the netted figure instead
+ *  would trim the opener HERE for room the next stage was willing to give it:
+ *  `fitOwn` pins the same block at 35% of its own cap. Those two budgets are not
+ *  always equal — `fitOwn`'s cap is `min(remaining, ownBudget)` (truncate.ts), so
+ *  a large diff can leave it well under this `sectionBudget` — which is exactly
+ *  why the LARGER figure is the safe one to size against: over-allocating hands
+ *  `fitOwn` a block it re-cuts, with the cut disclosed in the usual note, whereas
+ *  under-allocating discards text no later stage can bring back.
+ *
+ *  Like `allocateBodyCaps`, the result can sum past `budget` — these caps decide
+ *  how the budget is SHARED; `fitOwn` remains the hard enforcement. */
+function allocateWithOpenerReserve(
+  lengths: number[],
+  budget: number,
+  sectionBudget: number,
+): number[] {
+  const plain = allocateBodyCaps(lengths, budget, OWN_BODY_FLOOR);
+  // A lone block has no follow-ups to take a share from, so there is nothing to
+  // reserve against.
+  if (lengths.length < 2) return plain;
+  const reserve = Math.min(
+    lengths[0],
+    Math.floor(sectionBudget * OPENER_RESERVE_SHARE),
+  );
+  if (plain[0] >= reserve) return plain;
+  return [
+    reserve,
+    ...allocateBodyCaps(
+      lengths.slice(1),
+      Math.max(0, budget - reserve),
+      OWN_BODY_FLOOR,
+    ),
+  ];
+}
 
 /** How long a remembered distillation FAILURE suppresses another attempt at the
  *  same comments. The failure record is keyed on the COMMENTS (the fingerprint),
@@ -146,10 +206,10 @@ function isOwnAiReviewBody(body: string): boolean {
  *  Two passes, because each body's cap depends on all the others: pass 1 strips
  *  the wrappers and drops the excluded/empty comments, then the surviving lengths
  *  are fair-shared across `budget` net of the rendered scaffolding (see
- *  `allocateBodyCaps` and the reserve below) and pass 2 renders each body under
- *  its own cap. Capping per comment BEFORE knowing the section budget was the old
- *  bug — a single long brief was cut to the floor even with the budget almost
- *  entirely unspent. */
+ *  `allocateWithOpenerReserve` and the scaffolding reserve below) and pass 2
+ *  renders each body under its own cap. Capping per comment BEFORE knowing the
+ *  section budget was the old bug — a single long brief was cut to the floor even
+ *  with the budget almost entirely unspent. */
 function formatOwnComments(
   items: ExternalReviewItem[],
   budget: number,
@@ -186,21 +246,24 @@ function formatOwnComments(
   // so `fitOwn` trimmed comments that would have fit and the distill trigger
   // fired on scaffolding. The newline term uses `body.slice(0, provisionalCap)`
   // (round 1 allocates with no scaffolding) so a long multi-line comment can't
-  // reserve for newlines its cap will cut away; round 2's caps are ≤ round 1's,
-  // keeping the count an upper bound (+1 covers `capBody`'s note line), and the
-  // only failure mode is slightly under-using the budget.
+  // reserve for newlines its cap will cut away; round 2's caps are ≤ round 1's
+  // (both rounds take the opener's reserve off the same section budget, and once
+  // round 1 has fallen back to the reserve the smaller round-2 budget can only
+  // keep it there, leaving every follow-up a smaller share), keeping the count an
+  // upper bound (+1 covers `capBody`'s note line), and the only failure mode is
+  // slightly under-using the budget.
   const lengths = cleaned.map((c) => c.body.length);
-  const provisional = allocateBodyCaps(lengths, budget, OWN_BODY_FLOOR);
+  const provisional = allocateWithOpenerReserve(lengths, budget, budget);
   let scaffold = 0;
   cleaned.forEach(({ prefix, body }, i) => {
     scaffold +=
       prefix.length + 2 + 2 * body.slice(0, provisional[i]).split("\n").length;
   });
 
-  const caps = allocateBodyCaps(
+  const caps = allocateWithOpenerReserve(
     lengths,
     Math.max(0, budget - scaffold),
-    OWN_BODY_FLOOR,
+    budget,
   );
   const blocks = cleaned.map(({ body, prefix }, i) => {
     const capped = capBody(body, caps[i]);
@@ -357,7 +420,16 @@ export async function resolveOwnCommentsContext(
     // `v3`'s extra field already makes a v2 string unmatchable — so bump it for a
     // text change, not merely because the token grew. Records with a stale token
     // simply miss once and re-distill.
-    const fingerprint = `v3#${survivors.length}#${newest}#${budget}#${cappedJoinedLen}#${uncappedLen}`;
+    //
+    // `v4`: the distiller's per-block cap stopped being the flat 6,000 and became a
+    // share of its input cap (`distillBlockCap`, own-distill.ts), so on a short
+    // record the model now reads MORE of each block and produces a different
+    // ledger. No field expresses that: `cappedJoinedLen` tracks the prompt-side
+    // render (unchanged whenever the opener's new reserve doesn't bind) and
+    // `uncappedLen` tracks the distiller's raw input (unchanged by definition) —
+    // so a ledger cached before this change would otherwise be served forever on
+    // exactly the records the change was meant to improve.
+    const fingerprint = `v4#${survivors.length}#${newest}#${budget}#${cappedJoinedLen}#${uncappedLen}`;
     const cacheKey = `${kind}#${ref}`;
     // The generation model this attempt used, reported by the distiller as soon as
     // it resolves settings (one load, not two that could disagree mid-flight).

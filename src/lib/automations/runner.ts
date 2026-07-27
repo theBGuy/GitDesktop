@@ -2,6 +2,7 @@ import { toast } from "sonner";
 import { createAiClient } from "@/lib/ai/client";
 import { buildAiCommentBody } from "@/lib/ai/comment-branding";
 import { resolveBudgetProfile } from "@/lib/ai/context-budget";
+import { resolveDocSurfacesContext } from "@/lib/ai/docs-context";
 import {
   type ExternalContext,
   resolveExternalContext,
@@ -23,6 +24,7 @@ import {
   forgeStatus,
   gitBranchDiff,
   gitCommitDiff,
+  readRepoInstructions,
 } from "@/lib/git/api";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import type { DiffStatEntry } from "@/lib/git/types";
@@ -759,6 +761,17 @@ async function generateReviewText(
       : undefined;
 
   const isRemotePr = event.kind !== "commit" && event.target.type === "remote";
+  // Repo-level review context: the documentation-surface roster and the repo's
+  // own instructions file. Both read the maintainer's working tree (never a PR
+  // head) and both apply to a commit or local-PR review as much as a remote one,
+  // so they sit OUTSIDE the remote-only harvest below — started here and awaited
+  // after it, so they still resolve concurrently with it. Neither promise can
+  // reject (the resolver swallows its own failures; the read has a `catch`), so
+  // holding it across the await below can't strand a rejection.
+  const repoContext = Promise.all([
+    resolveDocSurfacesContext(event.repoPath),
+    readRepoInstructions(event.repoPath).catch(() => null),
+  ]);
   // Resolve external + own + (when not event-carried) reviewer-notes context in
   // parallel — all three are independent, best-effort remote harvests.
   const [external, own, resolvedNotes]: [
@@ -796,6 +809,7 @@ async function generateReviewText(
             ),
       ])
     : [{}, {}, {}];
+  const [docs, repoInstructions] = await repoContext;
   if (signal.aborted) return null;
 
   // Event-carried notes take precedence over the lifted marker comment.
@@ -816,10 +830,12 @@ async function generateReviewText(
       })),
       provider,
       budgetProfile,
+      repoInstructions,
       ...prior,
       ...own,
       ...external,
       ...notes,
+      ...docs,
     },
     mode,
   );
