@@ -11,11 +11,12 @@ full human conventions live in [CONTRIBUTING.md](CONTRIBUTING.md), product inten
 don't wait to be asked:**
 
 1. **`README.md`** — add/extend the relevant bullet under *Highlights* and/or *Features*.
-2. **Marketing site** (`site/src/pages/index.astro`) — add the feature to the
-   `capabilities` list (set `ai: true` only for AI features), and add or extend a
-   `FeatureRow` when it warrants a section. The page has two synced views,
-   **AI-native** and **Just Git** — put non-AI features in both, AI features in the
-   AI view only. Then `cd site && pnpm build` to verify.
+2. **Marketing site** — add the capability to `site/src/data/capabilities.ts`, the
+   single source of truth for the catalog (set `ai: true` only for AI features;
+   `highlight: true` to surface it on the home page). Then add or extend a
+   `FeatureRow` in `site/src/pages/index.astro` when it warrants a section. That
+   page has two synced views, **AI-native** and **Just Git** — put non-AI features
+   in both, AI features in the AI view only. Then `cd site && pnpm build` to verify.
 3. **In-app user guide** (`src/features/help/content.ts`) — when a change adds or
    meaningfully alters a user-facing surface, update the matching guide section (or add a
    new one for a whole new surface), and keep it accurate (verify claims against the

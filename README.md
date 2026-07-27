@@ -612,7 +612,7 @@ display can't strand it off-screen.
   box on your network, not just `localhost`. Non-built-in hosts must be added to
   the **Allowed hosts** list (Settings → AI; one-click *Allow host* on the URL
   field), which GitDesktop enforces before every AI request.
-- **Custom instructions** (included in every generation):
+- **Custom instructions** (included in every generation and every AI review):
   - **Global** — Settings → AI instructions (e.g. "Follow Conventional Commits").
   - **Per-repo** — `.gitdesktop/instructions.md` in the repo. Takes precedence.
 - **AI ignore patterns** (keep files out of AI context; they still commit

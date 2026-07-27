@@ -917,9 +917,10 @@ substantive is left, instead of holding the round open, and ends with an explici
 so a round that fixed everything but raised a nit reads as done rather than as another
 round. A general review is also told which **documentation surfaces** the repository
 keeps (its README, changelog, and docs directories, by path), so it can name every stale
-one in a single finding instead of one per round. If the repository has a
-\`.gitdesktop/instructions.md\`, its conventions are given to the review as well — as
-context to judge the change against, never as instructions that can rewrite the review.
+one in a single finding instead of one per round. Your **custom instructions** reach
+reviews too — the global ones from Settings and the repo's own
+\`.gitdesktop/instructions.md\`, the same pair every generation gets — as conventions to
+judge the change against, never as instructions that can rewrite the review.
 See *AI & automations* to pick the review model. The **Review context** size there
 controls how much diff and prior-discussion context reviews send — **Auto** fits it to the
 reviewing model's context window (probing Ollama live), or pick Compact / Standard /
@@ -1620,9 +1621,9 @@ notes**, and **repository descriptions**.
 
 ## Instructions & privacy
 
-- **Instructions** steer every generation. Set **global** instructions in Settings (e.g.
-  "Follow Conventional Commits"), or add a per-repo \`.gitdesktop/instructions.md\` that
-  takes precedence.
+- **Instructions** steer every generation and every AI review. Set **global**
+  instructions in Settings (e.g. "Follow Conventional Commits"), or add a per-repo
+  \`.gitdesktop/instructions.md\` that takes precedence.
 - **AI-ignore patterns** keep sensitive or noisy files (lockfiles, vendored folders) out
   of the AI's context while still committing them normally — global in Settings, or
   per-repo via \`.gitdesktop/aiignore\`. No need to hand-edit it: {{secondaryclick}} a changed

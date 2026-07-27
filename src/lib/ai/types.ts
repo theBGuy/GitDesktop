@@ -178,6 +178,12 @@ export interface ReviewPromptInput {
    *  against — data, never instructions that override the system prompt — and
    *  capped where it is rendered. Absent ⇒ the section is omitted. */
   repoInstructions?: string | null;
+  /** The user's global AI instructions (Settings → AI instructions). Reviews take
+   *  BOTH sources, like every sibling prompt in prompt.ts — the settings pane and
+   *  the README both promise the two combine, and for a while reviews honored only
+   *  the per-repo file. Rendered beside `repoInstructions` under one framing, each
+   *  capped. Absent/empty ⇒ contributes nothing. */
+  globalInstructions?: string;
   /** Target host — swaps the change-request noun + markdown flavor in the review
    *  system prompt. Absent/`"github"` keeps the original GitHub wording. */
   provider?: PromptProvider;

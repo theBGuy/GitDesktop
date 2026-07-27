@@ -762,8 +762,9 @@ async function generateReviewText(
 
   const isRemotePr = event.kind !== "commit" && event.target.type === "remote";
   // Repo-level review context: the documentation-surface roster and the repo's
-  // own instructions file. Both read the maintainer's working tree (never a PR
-  // head) and both apply to a commit or local-PR review as much as a remote one,
+  // own instructions file. Both read the local working tree — whatever branch is
+  // checked out (see `repoInstructionsClause`, guardrail 3) — and both apply to a
+  // commit or local-PR review as much as a remote one,
   // so they sit OUTSIDE the remote-only harvest below — started here and awaited
   // after it, so they still resolve concurrently with it. Neither promise can
   // reject (the resolver swallows its own failures; the read has a `catch`), so
@@ -831,6 +832,9 @@ async function generateReviewText(
       provider,
       budgetProfile,
       repoInstructions,
+      // Both instruction sources, exactly as every sibling prompt takes them —
+      // already loaded above, so this costs no extra read.
+      globalInstructions: appSettings.globalInstructions,
       ...prior,
       ...own,
       ...external,

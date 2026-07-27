@@ -562,9 +562,10 @@ export async function startReview(
     // is untouched — a shared-fetch dedup is a later efficiency win
     // (forge-dispatch-dedup backlog).
     // Two repo-level reads ride along in the same batch: the documentation-surface
-    // roster and the repo's own instructions file. Both read the maintainer's
-    // working tree (not the PR head) and both apply to local PRs too, so neither
-    // is gated on `target.kind`.
+    // roster and the repo's own instructions file. Both read the local working
+    // tree — whatever branch is checked out (see `repoInstructionsClause`,
+    // guardrail 3) — and both apply to local PRs too, so neither is gated on
+    // `target.kind`.
     const [external, own, notes, docs, repoInstructions]: [
       ExternalContext,
       OwnCommentsContext,
@@ -674,6 +675,9 @@ export async function startReview(
         budgetProfile,
         agentic,
         repoInstructions,
+        // Both instruction sources, exactly as every sibling prompt takes them —
+        // already loaded above, so this costs no extra read.
+        globalInstructions: appSettings.globalInstructions,
         ...prior,
         ...own,
         ...external,

@@ -43,11 +43,12 @@ gap per file.
 
 1. **`README.md`** — add or extend the relevant bullet under *Highlights* and/or
    *Features*.
-2. **Marketing site** — `site/src/pages/index.astro`: add the feature to the
-   `capabilities` list (`ai: true` only for AI features), and add or extend a
-   `FeatureRow` when it warrants its own section. The page has two synced views,
-   **AI-native** and **Just Git** — non-AI features belong in both, AI features in
-   the AI view only.
+2. **Marketing site** — add the capability to `site/src/data/capabilities.ts`, the
+   single source of truth for the catalog (`ai: true` only for AI features;
+   `highlight: true` to surface it on the home page). Then add or extend a
+   `FeatureRow` in `site/src/pages/index.astro` when it warrants its own section.
+   That page has two synced views, **AI-native** and **Just Git** — non-AI features
+   belong in both, AI features in the AI view only.
 3. **In-app user guide** — `src/features/help/content.ts`: update the matching
    guide section (or add one for a whole new surface) and keep every claim true
    against the code. Shortcuts are `{{kbd:action-id}}` / `{{key:…}}` tokens, never

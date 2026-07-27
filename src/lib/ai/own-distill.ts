@@ -106,6 +106,13 @@ function distillBlockCap(blockCount: number): number {
 // remembered too. A genuinely hung model stays bounded, just at 180s instead of
 // 60s, with the same silent fallback.
 
+// Both ceilings were sized against a MEASURED 19.7K payload. `distillBlockCap`
+// now shares the input budget out instead of capping every block at 6,000, so a
+// 2- or 3-block record can hand the model close to the full 48K — the same
+// wall-clock budget over a wider input range. The measurement has not been
+// repeated at that size; re-measuring the CLI ceiling against a ~48K payload is a
+// recorded follow-up, not a constant change made on a guess.
+
 /** Distillation ceiling for an HTTP-API generation provider: it answers a ~20K
  *  prompt in seconds, so a minute is already generous. */
 const DISTILL_HTTP_TIMEOUT_MS = 60_000;
