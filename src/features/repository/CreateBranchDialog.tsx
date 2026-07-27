@@ -23,6 +23,7 @@ import {
   useSeedBase,
 } from "./BaseBranchCombobox";
 import { GenerateBranchNameButton } from "./GenerateBranchNameButton";
+import type { CommittedNameSource } from "./useGenerateBranchName";
 
 /**
  * Create-branch dialog: names a new branch (with optional AI generation from
@@ -42,6 +43,8 @@ export function CreateBranchDialog({
   headExists,
   entries,
   allBranchNames,
+  committedFallback,
+  committedPending,
   currentName,
   defaultName,
   onOpenSettings,
@@ -56,6 +59,12 @@ export function CreateBranchDialog({
   headExists: boolean;
   entries: FileEntry[];
   allBranchNames: string[];
+  /** The checked-out branch's committed work vs the default branch (compared
+   *  against HEAD) — the AI name-generation fallback when the working tree is
+   *  clean. Only applies when the new branch is based on HEAD; see below. */
+  committedFallback: CommittedNameSource | null;
+  /** Whether `committedFallback` is still resolving. */
+  committedPending: boolean;
   currentName: string | null;
   defaultName: string | null;
   onOpenSettings: (section: "ai") => void;
@@ -102,6 +111,11 @@ export function CreateBranchDialog({
   });
   // Drives the "Branches from …" copy in the dialog description.
   const createBase = useSelector(createForm.store, (s) => s.values.base);
+  // The committed fallback describes HEAD's work, so it only describes the new
+  // branch when the new branch starts at HEAD ("" ⇒ no start point ⇒ HEAD).
+  // Branching off origin/main carries none of it. The working-tree path is
+  // unaffected — uncommitted changes come along whatever the base.
+  const baseIsHead = createBase === "" || createBase === currentName;
 
   // NOTE: seeding resets must pass keepDefaultValues — otherwise reset()
   // rewrites the form's defaultValues, and react-form's per-render options
@@ -174,6 +188,9 @@ export function CreateBranchDialog({
             headExists={headExists}
             entries={entries}
             recentBranches={allBranchNames}
+            nameTarget="new-branch"
+            committedFallback={baseIsHead ? committedFallback : null}
+            committedPending={baseIsHead && committedPending}
             onName={(name) => createForm.setFieldValue("name", name)}
             onSetupAi={() => {
               onOpenChange(false);

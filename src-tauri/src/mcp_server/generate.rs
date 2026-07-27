@@ -695,6 +695,10 @@ struct BranchPieces {
     untracked_paths: Vec<String>,
     excluded_files: u32,
     recent_branches: Vec<String>,
+    /// Subjects of the commits this branch adds over its base, newest first —
+    /// the strongest naming signal when the work is already committed. Empty when
+    /// the base can't be resolved (or the branch adds no commits).
+    commit_subjects: Vec<String>,
     repo_instructions: Option<String>,
     global_instructions: String,
 }
@@ -736,6 +740,12 @@ fn assemble_branch_recipe(p: BranchPieces) -> Recipe {
         prompt_parts.push(format!(
             "## Existing branch names (convention reference)\n{}",
             p.recent_branches.join("\n")
+        ));
+    }
+    if !p.commit_subjects.is_empty() {
+        prompt_parts.push(format!(
+            "## Commits on this branch (newest first)\n{}",
+            p.commit_subjects.join("\n")
         ));
     }
     // Mirror the TS `budgeted.text || "(no text diff …)"` fallback.
@@ -786,6 +796,10 @@ struct PrPieces {
     diff_text: String,
     diff_truncated: bool,
     files: Vec<DiffStatEntry>,
+    /// How many changed files the user's AI ignore patterns hid from `files` /
+    /// `diff_text`, disclosed in the files section so the model knows the diff
+    /// isn't the whole story.
+    excluded_files: u32,
     commit_subjects: Vec<String>,
     base_branch: String,
     head_branch: String,
@@ -947,14 +961,21 @@ fn assemble_pr_recipe(p: PrPieces) -> Recipe {
                 .join("\n")
         ));
     }
-    prompt_parts.push(format!(
+    let mut files_section = format!(
         "## Files changed\n{}",
         if file_summary.is_empty() {
             "(none)"
         } else {
             &file_summary
         }
-    ));
+    );
+    if p.excluded_files > 0 {
+        files_section.push_str(&format!(
+            "\n[{} additional changed file(s) hidden by the user's AI ignore rules]",
+            p.excluded_files
+        ));
+    }
+    prompt_parts.push(files_section);
 
     let mut diff_section = format!("## Combined diff\n{}", budgeted.text);
     if budgeted.truncated || p.diff_truncated {
@@ -1132,9 +1153,11 @@ impl GitDesktopMcp {
                        tree (staged + unstaged vs HEAD, plus untracked file names): returns \
                        { system, prompt, note } — the same system + user prompt the in-app AI feature \
                        builds (worktree diff, file summary, existing branch names as a convention \
-                       reference, and project/user instructions). This tool does NOT call a model; \
-                       complete the returned prompt with your own inference and use the result as the \
-                       branch name."
+                       reference, and project/user instructions). When the working tree is clean it \
+                       falls back to the branch's COMMITTED work — the three-dot diff and commit \
+                       subjects vs the repo's default branch — so an already-committed branch can \
+                       still be named. This tool does NOT call a model; complete the returned prompt \
+                       with your own inference and use the result as the branch name."
     )]
     async fn generate_branch_name(&self) -> Result<CallToolResult, McpError> {
         let recipe = self.build_branch_recipe().await?;
@@ -1149,17 +1172,28 @@ impl GitDesktopMcp {
 // the recipe as JSON; the prompts render it as a single user PromptMessage. One
 // source of truth so a tool and its twin prompt can never drift.
 impl GitDesktopMcp {
+    /// The user's AI-ignore patterns for the bound repo: the repo's own ignore
+    /// file first, then the global setting's patterns — the merge every recipe
+    /// passes to the git layer as pathspec excludes. Takes the caller's already-read
+    /// `settings`, so one recipe call reads the settings store exactly once.
+    async fn ai_ignore_patterns(
+        &self,
+        settings: &crate::app_store::AiGenSettings,
+    ) -> Result<Vec<String>, McpError> {
+        let repo_ignore = crate::instructions::read_repo_ai_ignore(self.repo.clone())
+            .await
+            .map_err(app_err)?;
+        Ok(repo_ignore
+            .into_iter()
+            .chain(settings.ai_ignore_patterns.iter().cloned())
+            .collect())
+    }
+
     /// Gather + assemble the commit-message recipe (STAGED changes). Errors with
     /// `invalid_request` when nothing is staged.
     async fn build_commit_recipe(&self) -> Result<Recipe, McpError> {
         let settings = crate::app_store::read_ai_generation_settings();
-        let repo_ignore = crate::instructions::read_repo_ai_ignore(self.repo.clone())
-            .await
-            .map_err(app_err)?;
-        let exclude: Vec<String> = repo_ignore
-            .into_iter()
-            .chain(settings.ai_ignore_patterns.iter().cloned())
-            .collect();
+        let exclude = self.ai_ignore_patterns(&settings).await?;
 
         let staged = crate::git::diff::git_staged_diff(
             self.repo.clone(),
@@ -1201,6 +1235,9 @@ impl GitDesktopMcp {
     /// Gather + assemble the PR/MR-description recipe for a branch range, applying
     /// the in-app base/head defaults.
     async fn build_pr_recipe(&self, args: PrRecipeArgs) -> Result<Recipe, McpError> {
+        // One settings read per recipe: it feeds both the ignore-pattern merge and
+        // the user-instructions section below.
+        let settings = crate::app_store::read_ai_generation_settings();
         // Resolve base/head, applying the same defaults the in-app flow uses.
         let base = match args.base {
             Some(b) => b,
@@ -1222,11 +1259,17 @@ impl GitDesktopMcp {
         ensure_not_flag(&base, "base")?;
         ensure_not_flag(&head, "head")?;
 
+        // The user's AI-ignore patterns (repo ignore file first, then the global
+        // setting) — the same merge the commit/branch recipes do, so a file the user
+        // excluded never reaches the model.
+        let exclude = self.ai_ignore_patterns(&settings).await?;
+
         let diff = crate::git::compare::git_branch_diff(
             self.repo.clone(),
             base.clone(),
             head.clone(),
             Some(RAW_DIFF_MAX_BYTES),
+            Some(exclude),
         )
         .await
         .map_err(app_err)?;
@@ -1277,12 +1320,12 @@ impl GitDesktopMcp {
         let repo_instructions = crate::instructions::read_repo_instructions(self.repo.clone())
             .await
             .map_err(app_err)?;
-        let settings = crate::app_store::read_ai_generation_settings();
 
         Ok(assemble_pr_recipe(PrPieces {
             diff_text: diff.text,
             diff_truncated: diff.truncated,
             files: diff.files,
+            excluded_files: diff.excluded_files,
             commit_subjects,
             base_branch: base,
             head_branch: head,
@@ -1478,23 +1521,19 @@ impl GitDesktopMcp {
         out
     }
 
-    /// Gather + assemble the branch-name recipe (WHOLE working tree). Errors with
-    /// `invalid_request` when there are no in-progress changes.
+    /// Gather + assemble the branch-name recipe. The WHOLE working tree is the
+    /// primary source; when it's clean, the branch's COMMITTED work vs the default
+    /// branch is used instead (naming help is most wanted exactly then). Errors with
+    /// `invalid_request` — naming the true reason — when neither yields anything.
     async fn build_branch_recipe(&self) -> Result<Recipe, McpError> {
         let settings = crate::app_store::read_ai_generation_settings();
-        let repo_ignore = crate::instructions::read_repo_ai_ignore(self.repo.clone())
-            .await
-            .map_err(app_err)?;
-        let exclude: Vec<String> = repo_ignore
-            .into_iter()
-            .chain(settings.ai_ignore_patterns.iter().cloned())
-            .collect();
+        let exclude = self.ai_ignore_patterns(&settings).await?;
 
         // Whole-worktree diff vs HEAD (the TS uses git_staged_diff with worktree=true).
         let diff = crate::git::diff::git_staged_diff(
             self.repo.clone(),
             Some(RAW_DIFF_MAX_BYTES),
-            Some(exclude),
+            Some(exclude.clone()),
             Some(true),
         )
         .await
@@ -1504,15 +1543,82 @@ impl GitDesktopMcp {
         // entirely of new files can still be named (mirrors the in-app call site).
         let untracked_paths = untracked_files(&self.repo).await.map_err(app_err)?;
 
-        if diff.files.is_empty() && untracked_paths.is_empty() {
-            let msg = if diff.excluded_files > 0 {
-                "All in-progress changes match the AI ignore patterns — nothing to name a branch \
-                 after."
-            } else {
-                "No in-progress changes to name a branch after — make some edits first."
+        // Resolve the comparison base ONCE: it supplies the branch's own commit
+        // subjects (the strongest naming signal, worth one `git log` on either path)
+        // and the committed-work fallback below.
+        let base = committed_base_ref(&self.repo).await;
+        let commit_subjects = match &base {
+            Some(base) => crate::git::compare::git_compare_branches(
+                self.repo.clone(),
+                base.clone(),
+                "HEAD".to_string(),
+            )
+            .await
+            .map(|c| {
+                // `ahead` is `git log base..HEAD` order — already newest first.
+                c.ahead
+                    .into_iter()
+                    .take(BRANCH_FALLBACK_MAX_SUBJECTS)
+                    .map(|commit| commit.subject)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+            None => Vec::new(),
+        };
+
+        // Nothing in progress → name the branch after what it has already committed.
+        let (diff, untracked_paths) = if diff.files.is_empty() && untracked_paths.is_empty() {
+            let Some(base) = base.as_deref() else {
+                let msg = if diff.excluded_files > 0 {
+                    "All in-progress changes match the AI ignore patterns — nothing to name a \
+                     branch after."
+                } else {
+                    "No in-progress changes, and no default branch to compare committed work \
+                     against."
+                };
+                return Err(McpError::invalid_request(msg, None));
             };
-            return Err(McpError::invalid_request(msg, None));
-        }
+            let mut committed = crate::git::compare::git_branch_diff(
+                self.repo.clone(),
+                base.to_string(),
+                "HEAD".to_string(),
+                Some(RAW_DIFF_MAX_BYTES),
+                Some(exclude),
+            )
+            .await
+            .map_err(app_err)?;
+            if committed.files.is_empty() && committed.text.is_empty() {
+                // Name the side that actually hid something: claiming in-progress
+                // changes existed when the working tree was clean (or vice versa) is
+                // exactly the kind of confident-but-false reason an agent acts on.
+                let msg = match (diff.excluded_files > 0, committed.excluded_files > 0) {
+                    (true, true) => "All in-progress and committed changes match the AI ignore \
+                                     patterns — nothing to name a branch after."
+                        .to_string(),
+                    (false, true) => format!(
+                        "No in-progress changes, and all committed changes vs {base} match the AI \
+                         ignore patterns — nothing to name a branch after."
+                    ),
+                    (true, false) => format!(
+                        "All in-progress changes match the AI ignore patterns, and there are no \
+                         committed changes vs {base} — nothing to name a branch after."
+                    ),
+                    // Covers being ON the default branch and a fully-merged branch.
+                    (false, false) => format!(
+                        "No in-progress changes, and no committed changes vs {base} — nothing to \
+                         name a branch after."
+                    ),
+                };
+                return Err(McpError::invalid_request(msg, None));
+            }
+            // The committed diff has no untracked side. Fold the working tree's
+            // hidden files into the disclosure — they're also changes the model
+            // can't see (mirrors the TS fallback path).
+            committed.excluded_files += diff.excluded_files;
+            (committed, Vec::new())
+        } else {
+            (diff, untracked_paths)
+        };
 
         let branches = crate::git::branches::git_branches(self.repo.clone())
             .await
@@ -1536,6 +1642,7 @@ impl GitDesktopMcp {
             untracked_paths,
             excluded_files: diff.excluded_files,
             recent_branches: branches,
+            commit_subjects,
             repo_instructions,
             global_instructions: settings.global_instructions,
         }))
@@ -1602,8 +1709,11 @@ impl GitDesktopMcp {
         description = "Assemble GitDesktop's branch-name generation prompt from the WHOLE working \
                        tree (staged + unstaged vs HEAD, plus untracked file names; existing branch \
                        names as a convention reference, and project/user instructions) as one \
-                       ready-to-complete message. Your model completes it and the result is the \
-                       branch name. Errors if there are no in-progress changes."
+                       ready-to-complete message, falling back to the branch's COMMITTED work (the \
+                       three-dot diff and commit subjects vs the repo's default branch) when the \
+                       working tree is clean. Your model completes it and the result is the branch \
+                       name. Errors only when there is neither in-progress nor committed work to \
+                       name."
     )]
     async fn branch_name_prompt(&self) -> Result<GetPromptResult, McpError> {
         Ok(recipe_as_prompt(self.build_branch_recipe().await?))
@@ -1629,6 +1739,42 @@ async fn current_branch(repo: &str) -> Result<String, McpError> {
         ));
     }
     Ok(branch)
+}
+
+/// How many commit subjects the branch-name recipe feeds the model (newest first).
+const BRANCH_FALLBACK_MAX_SUBJECTS: usize = 30;
+
+/// Whether a fully-qualified ref resolves in `repo`. A spawn/timeout error counts
+/// as "absent" — the caller only ever uses this to pick a ref it can diff against.
+async fn ref_exists(repo: &str, full_ref: &str) -> bool {
+    crate::git::runner::run_git_raw(
+        Some(repo),
+        &["rev-parse", "--verify", "--quiet", full_ref],
+        crate::git::runner::DEFAULT_TIMEOUT,
+    )
+    .await
+    .map(|out| out.code == 0)
+    .unwrap_or(false)
+}
+
+/// The ref a branch's COMMITTED work is compared against for naming: the repo's
+/// default branch, preferring the remote-tracking `origin/<default>` over the local
+/// `<default>`. `git_default_branch` returns the SHORT LOCAL name even when it
+/// derived it from `origin/HEAD`, and that local branch may be stale (skewing the
+/// three-dot diff) or not exist at all — so verify both and prefer the remote.
+/// `None` = no default branch, or neither ref resolves ⇒ no fallback is possible.
+async fn committed_base_ref(repo: &str) -> Option<String> {
+    let default = crate::git::branches::git_default_branch(repo.to_string())
+        .await
+        .ok()
+        .flatten()?;
+    if ref_exists(repo, &format!("refs/remotes/origin/{default}")).await {
+        return Some(format!("origin/{default}"));
+    }
+    if ref_exists(repo, &format!("refs/heads/{default}")).await {
+        return Some(default);
+    }
+    None
 }
 
 /// Untracked (new) file paths, `git ls-files --others --exclude-standard`.
@@ -1752,6 +1898,7 @@ mod tests {
             untracked_paths: vec!["new.rs".to_string()],
             excluded_files: 0,
             recent_branches: vec!["feature/a".to_string(), "fix/b".to_string()],
+            commit_subjects: vec![],
             repo_instructions: None,
             global_instructions: String::new(),
         });
@@ -1767,6 +1914,42 @@ mod tests {
         assert!(recipe
             .prompt
             .ends_with("Generate the branch name for these changes."));
+        // No commits section when the list is empty.
+        assert!(!recipe.prompt.contains("## Commits on this branch"));
+    }
+
+    /// The committed-work signal: the commits section sits AFTER the existing branch
+    /// names and BEFORE the diff, one subject per line (mirrors the TS builder).
+    #[test]
+    fn branch_recipe_renders_commit_subjects_between_branches_and_diff() {
+        let recipe = assemble_branch_recipe(BranchPieces {
+            diff_text: "diff --git a/x.rs b/x.rs\n@@ -1 +1 @@\n-a\n+b\n".to_string(),
+            diff_truncated: false,
+            files: vec![file("x.rs", 1, 1, false)],
+            untracked_paths: vec![],
+            excluded_files: 2,
+            recent_branches: vec!["feature/a".to_string()],
+            commit_subjects: vec![
+                "fix: newest".to_string(),
+                "feat: older".to_string(),
+            ],
+            repo_instructions: None,
+            global_instructions: String::new(),
+        });
+        assert!(recipe
+            .prompt
+            .contains("## Commits on this branch (newest first)\nfix: newest\nfeat: older"));
+        let branches_at = recipe.prompt.find("## Existing branch names").unwrap();
+        let commits_at = recipe.prompt.find("## Commits on this branch").unwrap();
+        let diff_at = recipe.prompt.find("## Changes diff").unwrap();
+        assert!(
+            branches_at < commits_at && commits_at < diff_at,
+            "commits section sits between the branch names and the diff"
+        );
+        // The ignore-rules disclosure still rides along.
+        assert!(recipe
+            .prompt
+            .contains("[2 additional changed file(s) hidden by the user's AI ignore rules]"));
     }
 
     #[test]
@@ -1775,6 +1958,7 @@ mod tests {
             diff_text: "diff --git a/x.rs b/x.rs\n+a\n".to_string(),
             diff_truncated: false,
             files: vec![file("x.rs", 1, 0, false)],
+            excluded_files: 0,
             commit_subjects: vec!["feat: thing".to_string()],
             base_branch: "main".to_string(),
             head_branch: "feature/x".to_string(),
@@ -1799,12 +1983,40 @@ mod tests {
         assert!(!recipe.system.contains("## Labels"));
     }
 
+    /// The PR recipe discloses how many changed files the user's AI ignore rules hid,
+    /// in the files-summary section; a zero count adds no line.
+    #[test]
+    fn pr_recipe_reports_excluded_files() {
+        let pieces = |excluded: u32| PrPieces {
+            diff_text: "diff --git a/x.rs b/x.rs\n+a\n".to_string(),
+            diff_truncated: false,
+            files: vec![file("x.rs", 1, 0, false)],
+            excluded_files: excluded,
+            commit_subjects: vec![],
+            base_branch: "main".to_string(),
+            head_branch: "topic".to_string(),
+            available_labels: vec![],
+            candidate_issues: vec![],
+            jira_candidates: vec![],
+            repo_instructions: None,
+            global_instructions: String::new(),
+            provider: Some("github".to_string()),
+        };
+        let hidden = assemble_pr_recipe(pieces(4));
+        assert!(hidden
+            .prompt
+            .contains("## Files changed\nx.rs +1 -0\n[4 additional changed file(s) hidden by the user's AI ignore rules]"));
+        let none = assemble_pr_recipe(pieces(0));
+        assert!(!none.prompt.contains("hidden by the user's AI ignore rules"));
+    }
+
     #[test]
     fn pr_recipe_gitlab_swaps_noun_and_flavor() {
         let recipe = assemble_pr_recipe(PrPieces {
             diff_text: String::new(),
             diff_truncated: false,
             files: vec![],
+            excluded_files: 0,
             commit_subjects: vec![],
             base_branch: "main".to_string(),
             head_branch: "topic".to_string(),
@@ -1842,6 +2054,7 @@ mod tests {
             diff_text: String::new(),
             diff_truncated: false,
             files: vec![],
+            excluded_files: 0,
             commit_subjects: vec![],
             base_branch: "main".to_string(),
             head_branch: "topic".to_string(),
@@ -1867,6 +2080,7 @@ mod tests {
             diff_text: String::new(),
             diff_truncated: false,
             files: vec![],
+            excluded_files: 0,
             commit_subjects: vec![],
             base_branch: "main".to_string(),
             head_branch: "topic".to_string(),
@@ -1910,6 +2124,7 @@ mod tests {
             diff_text: "diff --git a/x.rs b/x.rs\n+a\n".to_string(),
             diff_truncated: false,
             files: vec![file("x.rs", 1, 0, false)],
+            excluded_files: 0,
             commit_subjects: vec![],
             base_branch: "main".to_string(),
             head_branch: "topic".to_string(),
@@ -1936,6 +2151,7 @@ mod tests {
             diff_text: "diff --git a/x.rs b/x.rs\n+a\n".to_string(),
             diff_truncated: false,
             files: vec![file("x.rs", 1, 0, false)],
+            excluded_files: 0,
             commit_subjects: vec![],
             base_branch: "main".to_string(),
             head_branch: "fix/123-crash".to_string(),
@@ -1985,6 +2201,7 @@ mod tests {
             diff_text: String::new(),
             diff_truncated: false,
             files: vec![],
+            excluded_files: 0,
             commit_subjects: vec![],
             base_branch: "main".to_string(),
             head_branch: "topic".to_string(),
@@ -2015,6 +2232,7 @@ mod tests {
             diff_text: String::new(),
             diff_truncated: false,
             files: vec![],
+            excluded_files: 0,
             commit_subjects: vec![],
             base_branch: "main".to_string(),
             head_branch: "topic".to_string(),
@@ -2121,6 +2339,7 @@ mod tests {
             diff_text: "diff --git a/x.rs b/x.rs\n+a\n".to_string(),
             diff_truncated: false,
             files: vec![file("x.rs", 1, 0, false)],
+            excluded_files: 0,
             commit_subjects: vec![],
             base_branch: "main".to_string(),
             head_branch: "feature/MYT-123-fix".to_string(),
@@ -2166,6 +2385,7 @@ mod tests {
             diff_text: "diff --git a/x.rs b/x.rs\n+a\n".to_string(),
             diff_truncated: false,
             files: vec![file("x.rs", 1, 0, false)],
+            excluded_files: 0,
             commit_subjects: vec![],
             base_branch: "main".to_string(),
             head_branch: "topic".to_string(),
@@ -2195,6 +2415,7 @@ mod tests {
             diff_text: String::new(),
             diff_truncated: false,
             files: vec![],
+            excluded_files: 0,
             commit_subjects: vec![],
             base_branch: "main".to_string(),
             head_branch: "topic".to_string(),
@@ -2335,5 +2556,60 @@ mod tests {
         for p in ["src/app.rs", "Cargo.toml", "lock.rs", "yarn.lockfile.md"] {
             assert!(!is_low_value_path(p), "expected NOT low-value: {p}");
         }
+    }
+
+    // ---- committed_base_ref (branch-name fallback base resolution) ----------
+
+    async fn git(repo: &str, args: &[&str]) -> String {
+        crate::git::runner::run_git_raw(Some(repo), args, crate::git::runner::DEFAULT_TIMEOUT)
+            .await
+            .unwrap()
+            .stdout_lossy()
+    }
+
+    /// Preference order: the remote-tracking `origin/<default>` wins when it exists,
+    /// the local `<default>` is the fallback, and neither ⇒ `None` (no fallback base).
+    #[tokio::test]
+    async fn committed_base_ref_prefers_remote_tracking() {
+        let base = tempfile::Builder::new()
+            .prefix("gd-basref-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo = base.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+
+        git(&repo_s, &["init", "-q"]).await;
+        git(&repo_s, &["config", "user.email", "t@t.local"]).await;
+        git(&repo_s, &["config", "user.name", "T"]).await;
+        // Pin the branch name regardless of the host's init.defaultBranch.
+        git(&repo_s, &["symbolic-ref", "HEAD", "refs/heads/main"]).await;
+        std::fs::write(repo.join("a.txt"), "hello\n").unwrap();
+        git(&repo_s, &["add", "-A"]).await;
+        git(&repo_s, &["commit", "-qm", "seed"]).await;
+
+        // Only the local branch exists → the local name.
+        assert_eq!(
+            committed_base_ref(&repo_s).await,
+            Some("main".to_string()),
+            "local default branch is the fallback base when there's no remote twin"
+        );
+
+        // Add the remote-tracking twin → it wins (the local one may be stale).
+        git(&repo_s, &["update-ref", "refs/remotes/origin/main", "HEAD"]).await;
+        assert_eq!(
+            committed_base_ref(&repo_s).await,
+            Some("origin/main".to_string()),
+            "the remote-tracking ref is preferred over the local branch"
+        );
+
+        // Neither a main/master branch nor an origin ref → no base at all.
+        git(&repo_s, &["branch", "-m", "main", "topic"]).await;
+        git(&repo_s, &["update-ref", "-d", "refs/remotes/origin/main"]).await;
+        assert_eq!(
+            committed_base_ref(&repo_s).await,
+            None,
+            "no resolvable default branch ⇒ no committed-work fallback"
+        );
     }
 }

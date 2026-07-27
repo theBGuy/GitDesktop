@@ -15,15 +15,19 @@ import { refNameWarning, sanitizeRefName } from "@/lib/git/ref-name";
 import type { FileEntry } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
 import { GenerateBranchNameButton } from "./GenerateBranchNameButton";
+import type { CommittedNameSource } from "./useGenerateBranchName";
 
 /**
  * Rename-branch dialog. Open when `target` is the branch being renamed (null =
  * closed). Owns its own form + the rename mutation; seeds the field with the
- * current name on open so the user edits from there.
+ * current name on open so the user edits from there. The target need not be the
+ * checked-out branch — every branch row's context menu opens this — so AI name
+ * generation reads the working tree only when it is.
  */
 export function RenameBranchDialog({
   repoPath,
   target,
+  currentName,
   onClose,
   aiEnabled,
   aiConfigured,
@@ -31,10 +35,15 @@ export function RenameBranchDialog({
   headExists,
   entries,
   allBranchNames,
+  committedFallback,
+  committedPending,
   onOpenSettings,
 }: {
   repoPath: string;
   target: string | null;
+  /** The checked-out branch — decides whether `target`'s working tree is its
+   *  own (null when HEAD is detached, which is never the rename target). */
+  currentName: string | null;
   onClose: () => void;
   aiEnabled: boolean;
   aiConfigured: boolean;
@@ -42,9 +51,16 @@ export function RenameBranchDialog({
   headExists: boolean;
   entries: FileEntry[];
   allBranchNames: string[];
+  /** The committed work of the branch being renamed, vs the default branch —
+   *  compared against `target` itself, not HEAD. */
+  committedFallback: CommittedNameSource | null;
+  /** Whether `committedFallback` is still resolving. */
+  committedPending: boolean;
   onOpenSettings: (section: "ai") => void;
 }) {
   const renameBranch = useRenameBranch(repoPath);
+  // Only the checked-out branch's own working tree describes it.
+  const targetIsCurrent = target !== null && target === currentName;
 
   const renameForm = useAppForm({
     defaultValues: { name: "" },
@@ -117,6 +133,9 @@ export function RenameBranchDialog({
             headExists={headExists}
             entries={entries}
             recentBranches={allBranchNames}
+            nameTarget={targetIsCurrent ? "checked-out-branch" : "other-branch"}
+            committedFallback={committedFallback}
+            committedPending={committedPending}
             onName={(name) => renameForm.setFieldValue("name", name)}
             onSetupAi={() => {
               onClose();

@@ -3,7 +3,12 @@ import { toast } from "sonner";
 import { useAiStream } from "@/features/conversations/useAiStream";
 import { buildPrPrompt, extractPrDraft } from "@/lib/ai/prompt";
 import type { PromptProvider } from "@/lib/ai/types";
-import { gitBranchDiff, readRepoInstructions } from "@/lib/git/api";
+import {
+  gitBranchDiff,
+  readRepoAiIgnore,
+  readRepoInstructions,
+} from "@/lib/git/api";
+import type { AppSettings } from "@/lib/settings/api";
 
 /** Raw diff bytes requested from the backend; prompt budgeting trims further. */
 const RAW_DIFF_MAX_BYTES = 200_000;
@@ -13,6 +18,9 @@ interface SuppliedDiff {
   text: string;
   truncated: boolean;
   files: { path: string; added: number; deleted: number; isBinary: boolean }[];
+  /** Changed files the user's AI-ignore patterns hid, when the supplier applies
+   *  them. Absent (remote-PR diffs) ⇒ nothing was hidden to disclose. */
+  excludedFiles?: number;
 }
 
 /** A repo label the model may propose from — name plus its stated purpose. The
@@ -57,13 +65,14 @@ interface PrDraft {
 export function useGeneratePrDescription(repoPath: string) {
   const { generating, cancel, run } = useAiStream(repoPath);
 
-  /** Shared streaming core: gets the diff from `getDiff`, budgets it into a PR
-   *  prompt, and streams the parsed title/body/labels draft to `onUpdate`.
-   *  `availableLabels` are the repo's existing label names the model may propose
-   *  from (validated in the parser — invented labels are dropped). */
+  /** Shared streaming core: gets the diff from `getDiff` (handed the loaded
+   *  settings, so a supplier can honor the user's AI-ignore patterns), budgets
+   *  it into a PR prompt, and streams the parsed title/body/labels draft to
+   *  `onUpdate`. `availableLabels` are the repo's existing label names the model
+   *  may propose from (validated in the parser — invented labels are dropped). */
   const runFromDiff = useCallback(
     async (
-      getDiff: () => Promise<SuppliedDiff>,
+      getDiff: (settings: AppSettings) => Promise<SuppliedDiff>,
       base: string,
       head: string,
       commitSubjects: string[],
@@ -83,17 +92,22 @@ export function useGeneratePrDescription(repoPath: string) {
       await run(
         async (settings) => {
           const [diff, repoInstructions] = await Promise.all([
-            getDiff(),
+            getDiff(settings),
             readRepoInstructions(repoPath),
           ]);
           if (diff.files.length === 0) {
-            toast.error("No changes between these branches to describe.");
+            toast.error(
+              (diff.excludedFiles ?? 0) > 0
+                ? "All changes between these branches match your AI ignore patterns — nothing to describe."
+                : "No changes between these branches to describe.",
+            );
             return null;
           }
           return buildPrPrompt({
             diffText: diff.text,
             diffTruncated: diff.truncated,
             files: diff.files,
+            excludedFiles: diff.excludedFiles,
             commitSubjects,
             baseBranch: base,
             headBranch: head,
@@ -145,7 +159,21 @@ export function useGeneratePrDescription(repoPath: string) {
       jiraCandidates?: JiraCandidate[],
     ) =>
       runFromDiff(
-        () => gitBranchDiff(repoPath, base, head, RAW_DIFF_MAX_BYTES),
+        async (settings) => {
+          const repoIgnore = await readRepoAiIgnore(repoPath);
+          const globalIgnore = settings.aiIgnorePatterns
+            .split("\n")
+            .map((line) => line.trim())
+            .filter((line) => line && !line.startsWith("#"));
+          const exclude = [...repoIgnore, ...globalIgnore];
+          return gitBranchDiff(
+            repoPath,
+            base,
+            head,
+            RAW_DIFF_MAX_BYTES,
+            exclude,
+          );
+        },
         base,
         head,
         commitSubjects,

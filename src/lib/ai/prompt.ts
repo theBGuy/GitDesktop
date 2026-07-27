@@ -112,6 +112,11 @@ export function buildBranchNamePrompt(input: BranchNamePromptInput): {
       `## Existing branch names (convention reference)\n${input.recentBranches.join("\n")}`,
     );
   }
+  if (input.commitSubjects.length > 0) {
+    promptParts.push(
+      `## Commits on this branch (newest first)\n${input.commitSubjects.join("\n")}`,
+    );
+  }
   const diffBody =
     budgeted.text ||
     "(no text diff — name the branch from the file list above)";
@@ -293,7 +298,11 @@ export function buildPrPrompt(input: PrPromptInput): {
       `## Commits in this ${abbrev}\n${input.commitSubjects.map((s) => `- ${s}`).join("\n")}`,
     );
   }
-  promptParts.push(`## Files changed\n${fileSummary || "(none)"}`);
+  let filesSection = `## Files changed\n${fileSummary || "(none)"}`;
+  if ((input.excludedFiles ?? 0) > 0) {
+    filesSection += `\n[${input.excludedFiles} additional changed file(s) hidden by the user's AI ignore rules]`;
+  }
+  promptParts.push(filesSection);
 
   // Author's "Notes for reviewers" — reflect the recorded decisions in the
   // description, don't paste them verbatim. Same trim + disclosed 8000-char cap as

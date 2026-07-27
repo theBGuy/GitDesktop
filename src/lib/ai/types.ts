@@ -66,6 +66,10 @@ export interface PrPromptInput {
   diffText: string;
   diffTruncated: boolean;
   files: { path: string; added: number; deleted: number; isBinary: boolean }[];
+  /** Changed files hidden from this context by the user's ignore patterns.
+   *  Absent/0 ⇒ no disclosure line (prompt unchanged) — the remote-PR path
+   *  supplies its own diff and applies no excludes. */
+  excludedFiles?: number;
   /** Subjects of the commits this PR would introduce (base..head). */
   commitSubjects: string[];
   baseBranch: string;
@@ -107,6 +111,9 @@ export interface BranchNamePromptInput {
   untrackedPaths: string[];
   /** Changed files hidden from this context by the user's ignore patterns. */
   excludedFiles: number;
+  /** Subjects of the commits already on this branch, newest first — the branch's
+   *  committed work. Empty when there are none (or when it isn't resolvable). */
+  commitSubjects: string[];
   /** Existing branch names, as a naming-convention / style reference. */
   recentBranches: string[];
   repoInstructions: string | null;

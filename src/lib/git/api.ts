@@ -991,17 +991,23 @@ export const gitBranchFileDiff = (
     filePath,
   });
 
+/** Three-dot `base...compare` diff. `exclude` takes gitignore-style patterns the
+ *  backend filters out of the text and file list (counting them in
+ *  `excludedFiles`): generation callers pass the user's AI-ignore patterns;
+ *  review callers deliberately omit them — a review wants the full diff. */
 export const gitBranchDiff = (
   repoPath: string,
   base: string,
   compare: string,
   maxBytes?: number,
+  exclude?: string[],
 ) =>
   invoke<StagedDiff>("git_branch_diff", {
     repoPath,
     base,
     compare,
     maxBytes: maxBytes ?? null,
+    exclude: exclude ?? null,
   });
 
 /** The literal `fromRef..toRef` diff — "what changed since the last review".
