@@ -93,10 +93,12 @@ pub async fn git_branch_diff_files(
 }
 
 /// The full combined `base...compare` diff text plus its file summary, for
-/// feeding AI PR description generation. Mirrors `git_staged_diff`, including its
-/// `exclude` handling: the caller's AI-ignore patterns become git pathspec
-/// excludes, and `excluded_files` reports how many changed files they hid.
-/// `exclude: None` behaves exactly as an unfiltered three-dot diff.
+/// feeding AI PR description generation. The `exclude` handling mirrors
+/// `git_staged_diff` exactly — the caller's AI-ignore patterns become git pathspec
+/// excludes and `excluded_files` reports how many changed files they hid, with
+/// `exclude: None` behaving as an unfiltered three-dot diff. Truncation deliberately
+/// differs: this cuts at a char boundary with a 1 MB default, not at a file boundary
+/// with the AI budget.
 #[tauri::command]
 pub async fn git_branch_diff(
     repo_path: String,

@@ -36,7 +36,7 @@ export function RenameBranchDialog({
   entries,
   allBranchNames,
   committedFallback,
-  committedPending,
+  committedStatus,
   onOpenSettings,
 }: {
   repoPath: string;
@@ -54,8 +54,9 @@ export function RenameBranchDialog({
   /** The committed work of the branch being renamed, vs the default branch —
    *  compared against `target` itself, not HEAD. */
   committedFallback: CommittedNameSource | null;
-  /** Whether `committedFallback` is still resolving. */
-  committedPending: boolean;
+  /** How the committed-work lookup stands (pending/error are surfaced rather
+   *  than read as "there is none"). */
+  committedStatus: "ready" | "pending" | "error";
   onOpenSettings: (section: "ai") => void;
 }) {
   const renameBranch = useRenameBranch(repoPath);
@@ -135,7 +136,9 @@ export function RenameBranchDialog({
             recentBranches={allBranchNames}
             nameTarget={targetIsCurrent ? "checked-out-branch" : "other-branch"}
             committedFallback={committedFallback}
-            committedPending={committedPending}
+            committedStatus={committedStatus}
+            // Renaming never picks a base — the fallback always applies here.
+            basedElsewhere={null}
             onName={(name) => renameForm.setFieldValue("name", name)}
             onSetupAi={() => {
               onClose();

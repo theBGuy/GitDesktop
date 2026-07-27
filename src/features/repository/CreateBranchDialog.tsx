@@ -27,7 +27,9 @@ import type { CommittedNameSource } from "./useGenerateBranchName";
 
 /**
  * Create-branch dialog: names a new branch (with optional AI generation from
- * the working-tree changes), picks its base, and switches to it. Owns its own
+ * the working-tree changes, or — when it branches from HEAD with a clean tree —
+ * the current branch's committed work), picks its base, and switches to it.
+ * Owns its own
  * form + the create mutation + the branch-name generator — the switcher only
  * decides whether it's open and hands down the data it renders. Seeds the base
  * on open so it reflects the branch you were on when you triggered it.
@@ -44,7 +46,7 @@ export function CreateBranchDialog({
   entries,
   allBranchNames,
   committedFallback,
-  committedPending,
+  committedStatus,
   currentName,
   defaultName,
   onOpenSettings,
@@ -63,8 +65,9 @@ export function CreateBranchDialog({
    *  against HEAD) — the AI name-generation fallback when the working tree is
    *  clean. Only applies when the new branch is based on HEAD; see below. */
   committedFallback: CommittedNameSource | null;
-  /** Whether `committedFallback` is still resolving. */
-  committedPending: boolean;
+  /** How the committed-work lookup stands (pending/error are surfaced rather
+   *  than read as "there is none"). */
+  committedStatus: "ready" | "pending" | "error";
   currentName: string | null;
   defaultName: string | null;
   onOpenSettings: (section: "ai") => void;
@@ -190,7 +193,10 @@ export function CreateBranchDialog({
             recentBranches={allBranchNames}
             nameTarget="new-branch"
             committedFallback={baseIsHead ? committedFallback : null}
-            committedPending={baseIsHead && committedPending}
+            // Resolved by definition when the fallback can't apply — the button
+            // explains the picked base instead of waiting on a lookup it won't use.
+            committedStatus={baseIsHead ? committedStatus : "ready"}
+            basedElsewhere={baseIsHead ? null : createBase}
             onName={(name) => createForm.setFieldValue("name", name)}
             onSetupAi={() => {
               onOpenChange(false);

@@ -190,10 +190,15 @@ export function SquashDialog({
               </Button>
             ) : (
               // Wrap so the title still shows when the button is disabled — a
-              // native-disabled button swallows the tooltip.
+              // native-disabled button swallows the tooltip. `runHead` is the
+              // collapsing step's tip, so without it there's no range to diff.
               <span
                 className="mr-auto"
-                title="Generate the commit message with AI"
+                title={
+                  runHead
+                    ? "Generate the commit message with AI"
+                    : "Nothing to generate from — this squash has no run of commits to combine"
+                }
               >
                 <Button
                   type="button"

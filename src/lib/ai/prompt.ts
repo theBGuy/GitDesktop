@@ -73,7 +73,7 @@ export function buildCommitPrompt(input: CommitPromptInput): {
   };
 }
 
-const BRANCH_SYSTEM = `You generate a single git branch name for a set of in-progress changes.
+const BRANCH_SYSTEM = `You generate a single git branch name for a set of code changes.
 Output ONLY the branch name — one line, nothing else: no quotes, no explanation, no markdown, no trailing period.
 Use lowercase kebab-case, 2-5 words, specific to what the change does (avoid generic names like "updates" or "changes").
 If the existing branch names below show a prefix convention (e.g. "feature/", "fix/", "chore/"), follow it; otherwise pick a fitting type prefix such as "feature/" or "fix/".

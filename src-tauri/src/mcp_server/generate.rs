@@ -54,7 +54,7 @@ Never reference issue or PR numbers, tickets, or links (e.g. \"Closes #123\") �
 Do not wrap the message in markdown fences. Do not add commentary before or after the message.";
 
 /// Mirrors `BRANCH_SYSTEM` in src/lib/ai/prompt.ts. KEEP IN SYNC.
-const BRANCH_SYSTEM: &str = "You generate a single git branch name for a set of in-progress changes.\n\
+const BRANCH_SYSTEM: &str = "You generate a single git branch name for a set of code changes.\n\
 Output ONLY the branch name — one line, nothing else: no quotes, no explanation, no markdown, no trailing period.\n\
 Use lowercase kebab-case, 2-5 words, specific to what the change does (avoid generic names like \"updates\" or \"changes\").\n\
 If the existing branch names below show a prefix convention (e.g. \"feature/\", \"fix/\", \"chore/\"), follow it; otherwise pick a fitting type prefix such as \"feature/\" or \"fix/\".\n\
@@ -696,8 +696,10 @@ struct BranchPieces {
     excluded_files: u32,
     recent_branches: Vec<String>,
     /// Subjects of the commits this branch adds over its base, newest first —
-    /// the strongest naming signal when the work is already committed. Empty when
-    /// the base can't be resolved (or the branch adds no commits).
+    /// the strongest naming signal when the work is already committed, and supplied
+    /// ONLY on that fallback path. Empty when the base can't be resolved, when the
+    /// branch adds no commits, and when the `git log` itself fails (best-effort) —
+    /// an empty list is never evidence that the branch has no commits.
     commit_subjects: Vec<String>,
     repo_instructions: Option<String>,
     global_instructions: String,
@@ -1274,6 +1276,22 @@ impl GitDesktopMcp {
         .await
         .map_err(app_err)?;
 
+        // An empty range must not yield a silent, contentless recipe: without this
+        // the agent would write a description from the commit subjects alone (and,
+        // with excludes, from files it was never shown). Mirrors the in-app toast
+        // and the commit/branch recipes' empty-input errors.
+        if diff.files.is_empty() {
+            let msg = if diff.excluded_files > 0 {
+                format!(
+                    "All changes between {base} and {head} match the AI ignore patterns — nothing \
+                     to describe."
+                )
+            } else {
+                format!("No changes between {base} and {head} to describe.")
+            };
+            return Err(McpError::invalid_request(msg, None));
+        }
+
         // The commits the PR would introduce = base..head "ahead" set (compare =
         // head), exactly as the in-app Create-PR flow derives `commitSubjects` from
         // `git_compare_branches(...).ahead`. Best-effort: an error yields no list.
@@ -1543,31 +1561,15 @@ impl GitDesktopMcp {
         // entirely of new files can still be named (mirrors the in-app call site).
         let untracked_paths = untracked_files(&self.repo).await.map_err(app_err)?;
 
-        // Resolve the comparison base ONCE: it supplies the branch's own commit
-        // subjects (the strongest naming signal, worth one `git log` on either path)
-        // and the committed-work fallback below.
+        // The base for the committed-work fallback below. Only that path reads the
+        // branch's commit subjects: on the working-tree path they'd describe the
+        // CURRENT branch, biasing the name toward the parent branch's story.
         let base = committed_base_ref(&self.repo).await;
-        let commit_subjects = match &base {
-            Some(base) => crate::git::compare::git_compare_branches(
-                self.repo.clone(),
-                base.clone(),
-                "HEAD".to_string(),
-            )
-            .await
-            .map(|c| {
-                // `ahead` is `git log base..HEAD` order — already newest first.
-                c.ahead
-                    .into_iter()
-                    .take(BRANCH_FALLBACK_MAX_SUBJECTS)
-                    .map(|commit| commit.subject)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default(),
-            None => Vec::new(),
-        };
 
         // Nothing in progress → name the branch after what it has already committed.
-        let (diff, untracked_paths) = if diff.files.is_empty() && untracked_paths.is_empty() {
+        let (diff, untracked_paths, commit_subjects) = if diff.files.is_empty()
+            && untracked_paths.is_empty()
+        {
             let Some(base) = base.as_deref() else {
                 let msg = if diff.excluded_files > 0 {
                     "All in-progress changes match the AI ignore patterns — nothing to name a \
@@ -1613,11 +1615,15 @@ impl GitDesktopMcp {
             }
             // The committed diff has no untracked side. Fold the working tree's
             // hidden files into the disclosure — they're also changes the model
-            // can't see (mirrors the TS fallback path).
+            // can't see (mirrors the TS fallback path). The sum is an UPPER BOUND:
+            // a file hidden in both diffs is counted twice. Over-disclosing how much
+            // is hidden is the safe direction — the number only tells the model the
+            // diff isn't the whole story.
             committed.excluded_files += diff.excluded_files;
-            (committed, Vec::new())
+            let subjects = branch_commit_subjects(&self.repo, base).await;
+            (committed, Vec::new(), subjects)
         } else {
-            (diff, untracked_paths)
+            (diff, untracked_paths, Vec::new())
         };
 
         let branches = crate::git::branches::git_branches(self.repo.clone())
@@ -1755,6 +1761,32 @@ async fn ref_exists(repo: &str, full_ref: &str) -> bool {
     .await
     .map(|out| out.code == 0)
     .unwrap_or(false)
+}
+
+/// Subjects of the commits `HEAD` adds over `base` (`git log base..HEAD`), newest
+/// first as git emits them, capped at [`BRANCH_FALLBACK_MAX_SUBJECTS`]. Deliberately
+/// scoped rather than reusing `git_compare_branches`: that one also walks the
+/// `behind` side, which this caller would discard, and the MCP server has no query
+/// cache to amortize it. Best-effort — a git failure yields an empty list rather
+/// than failing the recipe.
+async fn branch_commit_subjects(repo: &str, base: &str) -> Vec<String> {
+    let max = BRANCH_FALLBACK_MAX_SUBJECTS.to_string();
+    let range = format!("{base}..HEAD");
+    let Ok(out) = crate::git::runner::run_git(
+        Some(repo),
+        &["log", "--format=%s", "-n", &max, &range],
+        crate::git::runner::DEFAULT_TIMEOUT,
+    )
+    .await
+    else {
+        return Vec::new();
+    };
+    out.stdout_lossy()
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// The ref a branch's COMMITTED work is compared against for naming: the repo's
@@ -2565,6 +2597,44 @@ mod tests {
             .await
             .unwrap()
             .stdout_lossy()
+    }
+
+    /// The scoped subjects log returns `base..HEAD` newest-first, and an empty list
+    /// when HEAD adds nothing over the base (never an error).
+    #[tokio::test]
+    async fn branch_commit_subjects_are_newest_first() {
+        let base_dir = tempfile::Builder::new()
+            .prefix("gd-subjects-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo = base_dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+
+        git(&repo_s, &["init", "-q"]).await;
+        git(&repo_s, &["config", "user.email", "t@t.local"]).await;
+        git(&repo_s, &["config", "user.name", "T"]).await;
+        std::fs::write(repo.join("a.txt"), "seed\n").unwrap();
+        git(&repo_s, &["add", "-A"]).await;
+        git(&repo_s, &["commit", "-qm", "seed"]).await;
+        let base_sha = git(&repo_s, &["rev-parse", "HEAD"]).await.trim().to_string();
+
+        // Nothing on top of the base yet.
+        assert!(
+            branch_commit_subjects(&repo_s, &base_sha).await.is_empty(),
+            "an empty range yields an empty list, not an error"
+        );
+
+        for (n, msg) in [("1", "feat: first"), ("2", "fix: second")] {
+            std::fs::write(repo.join(format!("f{n}.txt")), "x\n").unwrap();
+            git(&repo_s, &["add", "-A"]).await;
+            git(&repo_s, &["commit", "-qm", msg]).await;
+        }
+        assert_eq!(
+            branch_commit_subjects(&repo_s, &base_sha).await,
+            vec!["fix: second".to_string(), "feat: first".to_string()],
+            "git log order — newest first"
+        );
     }
 
     /// Preference order: the remote-tracking `origin/<default>` wins when it exists,

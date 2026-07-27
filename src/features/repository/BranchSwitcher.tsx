@@ -427,12 +427,21 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   }, [remoteBranchesQuery.data, localNames, bq]);
   // The ref the branch dialogs are naming, and whose committed work the AI
   // fallback describes: the rename target (which need NOT be checked out — every
-  // branch row's menu opens it), or HEAD for a new branch. Null ⇒ both closed.
-  const namedRef = renameTarget ?? (createOpen ? "HEAD" : null);
+  // branch row's menu opens it), or the checked-out branch for a new one. Null ⇒
+  // both closed. The create side names the BRANCH, not the literal "HEAD", so the
+  // comparison's cache key changes when you switch branches — keyed on "HEAD" it
+  // would serve the previous branch's commits to a fast Generate. A detached HEAD
+  // has no branch name to key on and keeps the literal.
+  const namedRef =
+    renameTarget ?? (createOpen ? (currentName ?? "HEAD") : null);
   // Whether the remote list has settled. Until it has, a missing `origin/<default>`
   // means "not loaded yet", not "absent" — resolving the local default here is
   // exactly the stale ref this base resolution exists to avoid.
   const remoteBranchesSettled = !remoteBranchesQuery.isPending;
+  // The default branch names the comparison base, so its own lookup gates the
+  // fallback too: a null `defaultName` while it's still loading must not read as
+  // "this repo has no default branch".
+  const defaultBranchSettled = !defaultBranch.isPending;
   // Base for the fallback. Prefer the remote-tracking ref: a stale local default
   // skews the three-dot diff, and when origin/HEAD resolved the default name the
   // local twin may not even exist. Null (⇒ no fallback) when neither side has it.
@@ -460,16 +469,23 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     namedRef,
   );
   // Mirrors `useCompareBranches`' own enabled condition, so a query that never
-  // runs (e.g. renaming the default branch: base === compare) isn't read as
-  // "still loading" forever.
+  // runs isn't read as "still loading" forever. base === compare survives only
+  // when no `origin/<default>` exists and the named ref IS the local default —
+  // with the remote ref preferred, `origin/main` vs `main` does run.
   const comparing =
     committedBase !== null && namedRef !== null && committedBase !== namedRef;
-  // Neither enable the affordance nor let it claim there's no committed work
-  // while the inputs that would prove it are still in flight.
-  const committedPending =
-    branchDialogOpen &&
-    ((Boolean(defaultName) && !remoteBranchesSettled) ||
-      (comparing && committedCompare.isPending));
+  // Never let the affordance claim there's no committed work on evidence it
+  // doesn't have: while any input is in flight say so, and say so distinctly
+  // when the lookup failed outright.
+  const committedStatus: "ready" | "pending" | "error" = !branchDialogOpen
+    ? "ready"
+    : !defaultBranchSettled ||
+        (Boolean(defaultName) && !remoteBranchesSettled) ||
+        (comparing && committedCompare.isPending)
+      ? "pending"
+      : defaultBranch.isError || (comparing && committedCompare.isError)
+        ? "error"
+        : "ready";
   const committedFallback = useMemo(() => {
     const ahead = committedCompare.data?.ahead ?? [];
     if (!committedBase || !namedRef || ahead.length === 0) return null;
@@ -601,6 +617,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // branch is being renamed.
   function openRename(branch: string) {
     setOpen(false);
+    // The two branch dialogs are mutually exclusive: their palette actions can
+    // fire while the other is open, and both feed the SAME committed-work
+    // lookup — leaving both open would name a new branch from the rename
+    // target's diff.
+    setCreateOpen(false);
     setRenameTarget(branch);
   }
 
@@ -703,6 +724,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
 
   function openCreate() {
     setOpen(false);
+    // Mutually exclusive with the rename dialog — see `openRename`.
+    setRenameTarget(null);
     setCreateOpen(true);
   }
 
@@ -1793,7 +1816,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         entries={status.data?.entries ?? []}
         allBranchNames={allBranches.map((b) => b.name)}
         committedFallback={committedFallback}
-        committedPending={committedPending}
+        committedStatus={committedStatus}
         currentName={currentName}
         defaultName={defaultName}
         onOpenSettings={openSettings}
@@ -1811,7 +1834,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         entries={status.data?.entries ?? []}
         allBranchNames={allBranches.map((b) => b.name)}
         committedFallback={committedFallback}
-        committedPending={committedPending}
+        committedStatus={committedStatus}
         onOpenSettings={openSettings}
       />
 

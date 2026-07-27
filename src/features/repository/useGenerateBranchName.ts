@@ -117,8 +117,9 @@ export function useGenerateBranchName(repoPath: string) {
             diffTruncated: committed.truncated,
             files: committed.files,
             untrackedPaths: [],
-            // Both sides' hidden files, so the count covers the in-progress
-            // changes this path skipped over as well as the committed ones.
+            // Both sides' hidden files. A file hidden in BOTH diffs counts
+            // twice — deliberately: the sum errs toward disclosing more than is
+            // hidden, never less, and there's no per-path list to dedupe on.
             excludedFiles: committed.excludedFiles + (diff?.excludedFiles ?? 0),
             commitSubjects: fallback.subjects,
             recentBranches: opts.recentBranches,
@@ -147,8 +148,12 @@ export function useGenerateBranchName(repoPath: string) {
           message = opts.useWorkingTree
             ? `No in-progress changes, and no net changes vs ${fallback.base} to name a branch after.`
             : `No net changes vs ${fallback.base} to name this branch after.`;
-        } else {
+        } else if (opts.useWorkingTree) {
           message = "No in-progress changes to name a branch after.";
+        } else {
+          // Defensive: the caller disables the affordance in this state, and
+          // with no working tree read there are no in-progress changes to cite.
+          message = "Nothing to name this branch after.";
         }
         toast.error(message);
         return null;

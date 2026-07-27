@@ -40,7 +40,8 @@ export function GenerateBranchNameButton({
   recentBranches,
   nameTarget,
   committedFallback,
-  committedPending,
+  committedStatus,
+  basedElsewhere,
   onName,
   onSetupAi,
 }: {
@@ -58,10 +59,15 @@ export function GenerateBranchNameButton({
    *  when it has none, when no default branch resolves, or when the host dialog
    *  suppresses it (a create whose base isn't the branch you're on). */
   committedFallback: CommittedNameSource | null;
-  /** Whether `committedFallback` is still being resolved — a null fallback
-   *  doesn't yet mean there's no committed work, so the button must say it's
-   *  still checking rather than claim there's nothing. */
-  committedPending: boolean;
+  /** How the committed-work lookup stands. Only `"ready"` makes a null
+   *  `committedFallback` mean "there is none" — while it's `"pending"` or
+   *  `"error"` the button must say so instead of claiming there's nothing. */
+  committedStatus: "ready" | "pending" | "error";
+  /** The base a new branch will start from, when that base ISN'T the branch
+   *  you're on — the committed fallback can't apply (the new branch contains
+   *  none of that work), and the disabled state must say THAT rather than
+   *  claim there's no committed work. Null whenever the fallback does apply. */
+  basedElsewhere: string | null;
   onName: (name: string) => void;
   /** Close the host dialog and open AI settings. */
   onSetupAi: () => void;
@@ -80,11 +86,15 @@ export function GenerateBranchNameButton({
       ? "Suggest a name from your in-progress changes"
       : committedFallback
         ? "Suggest a name from this branch's committed changes"
-        : committedPending
+        : committedStatus === "pending"
           ? "Checking this branch's committed work…"
-          : useWorkingTree
-            ? "No in-progress changes and no committed work vs the default branch — nothing to name a branch after"
-            : "This branch has no commits the default branch doesn't — nothing to name it after";
+          : committedStatus === "error"
+            ? "Couldn't check this branch's committed work"
+            : basedElsewhere
+              ? `Branching from ${basedElsewhere} — a name can only come from your in-progress changes`
+              : useWorkingTree
+                ? "No in-progress changes and no committed work vs the default branch — nothing to name a branch after"
+                : "This branch has no commits the default branch doesn't — nothing to name it after";
   return (
     <div className="flex justify-end">
       {!aiConfigured ? (

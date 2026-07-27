@@ -429,9 +429,11 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   (reversible) or **delete** them together. The current branch, the default branch, and
   protected branches are never included.
 {{ai}}- **Generate a branch name with AI** from your working-tree changes when creating
-  or renaming one. With a clean working tree it falls back to the branch's own
-  committed work — its diff and commit subjects vs. the default branch — so a branch
-  whose work is already committed can still be renamed from what it actually does.
+  or renaming one. Whenever the working tree can't describe the branch being named —
+  it's clean, or you're renaming a branch you aren't on — it names it from that
+  branch's own committed work instead: its diff and commit subjects vs. the default
+  branch. (Creating from a base other than the branch you're on uses your in-progress
+  changes only, since the new branch won't carry that committed work.)
 {{/ai}}- Switching with **uncommitted changes** prompts you to bring them along or stash
   and switch.
 - {{Secondaryclick}} a branch to **merge**, **squash and merge**, **rebase**, or **update it
