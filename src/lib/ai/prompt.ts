@@ -462,7 +462,7 @@ You are also given findings from a PREVIOUS review of an earlier version of this
 END every re-review with exactly one of these two lines, copied verbatim, as the very last line of your output:
 Verdict: blocking issues remain
 Verdict: no blocking issues — remaining items are non-blocking; merge when ready
-Take the first when anything you reported this round should hold the merge — a **blocker** finding, or a security finding you would not ship. Take the second otherwise: a round that raises only should-fix items (by their own definition not merge-blocking), nits, optional polish, or items you could not verify is a no-blocking-issues round, and so is a round with no findings at all. This line is unconditional — give it even when you had nothing further to raise — and write nothing after it.`;
+Take the first when anything you reported this round should hold the merge — a finding you would not ship as it stands. Take the second otherwise: a round is a no-blocking-issues round when every item it raises is non-blocking under whatever severity scale this review uses, and so is a round with no findings at all. Items you could not verify are not blocking on their own. This line is unconditional — give it even when you had nothing further to raise — and write nothing after it.`;
 
 /** Appended ONLY on a GENERAL re-review — never in security mode, and only
  *  alongside a prior review. Routes polish noticed late on unchanged code into
@@ -534,13 +534,16 @@ Stay grounded in what you can actually see. You have these paths, not their text
  *     instructions file would swamp the system prompt.
  *  2. Framed as DATA that informs findings, never instructions that override the
  *     review contract.
- *  3. The read is the caller's (`readRepoInstructions(repoPath)`) — the
- *     maintainer's own working tree, never a fetched PR head, so nothing a fork
- *     PR pushes can rewrite the reviewer's prompt. (On a commit or local-PR
- *     review that working tree may itself BE the branch under review; that is
- *     still the maintainer's own checkout, so no trust boundary is crossed — the
- *     guarantee that matters is that a REMOTE PR's head, which its author
- *     controls, is never the source.)
+ *  3. The read is the caller's (`readRepoInstructions(repoPath)`) — a plain LOCAL
+ *     working-tree read. Nothing is ever FETCHED from a PR head: the file is
+ *     whatever the tree currently holds. That is deliberately weaker than "the
+ *     maintainer's own file", and the difference is real — checking out a PR's
+ *     branch (including a fork's) is a supported flow, so a review run while that
+ *     branch is checked out reads THAT branch's instructions file. The mitigation
+ *     is the cap above plus the data-never-instructions framing below, which puts
+ *     this in the same exposure class as the sibling prompt injections — they read
+ *     the same file on the same terms, and uncapped. A ref-pinned read is a
+ *     recorded follow-up, not a property this clause may claim today.
  *  4. Deliberately OUTSIDE `budgetReviewExtras`. That budget shares out the
  *     PROMPT's soft context (delta, prior findings, own/external comments)
  *     against whatever the authoritative diff leaves; this is a SYSTEM-prompt

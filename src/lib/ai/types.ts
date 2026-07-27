@@ -172,8 +172,9 @@ export interface ReviewPromptInput {
    *  single finding class the review can sweep whole — including surfaces the
    *  diff never touched. General mode only; absent ⇒ the block is omitted. */
   docSurfaces?: string[];
-  /** The repo's own `.gitdesktop/instructions.md`, read from the MAINTAINER's
-   *  working tree (never the PR head). Project conventions the review judges
+  /** The repo's own `.gitdesktop/instructions.md`, read from the LOCAL working
+   *  tree — never fetched from a PR head, though a checked-out PR branch is that
+   *  tree (see `repoInstructionsClause`). Project conventions the review judges
    *  against — data, never instructions that override the system prompt — and
    *  capped where it is rendered. Absent ⇒ the section is omitted. */
   repoInstructions?: string | null;

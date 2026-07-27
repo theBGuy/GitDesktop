@@ -9,8 +9,10 @@
   finding naming every affected surface, including ones the diff never touched, instead
   of one surface per round. A repo's own `.gitdesktop/instructions.md` now reaches
   reviews too, as conventions to judge the change against.
-- **The opening comment survives a long PR.** Once enough of GitDesktop's own comments
-  piled up on a pull request, the author's opening context comment collapsed to a
-  fraction of itself in a single step, re-opening everything it had pre-empted. It now
-  keeps a guaranteed share of the review's comment budget, and the decision-ledger
-  distiller reads more of it on shorter records.
+- **The opening comment now keeps a guaranteed share of the budget, not just its
+  place in the queue.** Being kept rather than dropped only settles which comments
+  make it in; how much of each one survives is decided earlier, and there the opening
+  comment was treated as just another block — so on a long thread it was squeezed to
+  the same per-comment minimum as a one-line "fixed in `<sha>`" reply. It is now
+  allotted its share before the rest divide up what remains, and the decision-ledger
+  distiller reads more of every comment on shorter threads.

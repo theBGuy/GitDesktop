@@ -10,15 +10,14 @@ import {
 
 /** FLOOR for the per-block head cap ({@link distillBlockCap} computes the cap
  *  actually applied) before the blocks are joined into the distillation prompt —
- *  keeps one verbose review from crowding out later follow-ups. Head-kept WITH
- *  an explicit truncation note (`capBody`), so the ledger model can tell a
- *  block was clipped rather than reading a mid-sentence stop as the comment's
- *  end; reviews front-load their blockers, so the head is
- *  the part worth keeping. A block that exceeds its cap may already carry a note
- *  from its own per-comment cap — the count restated here is CUMULATIVE across
- *  both cuts, never a note nested inside a note. This bounds each block, but NOT
- *  the total, which grows with block count — {@link DISTILL_INPUT_CAP} bounds the
- *  request. */
+ *  keeps one verbose review from crowding out later follow-ups. Head-kept WITH an
+ *  explicit truncation note (`capBody`), so the ledger model can tell a block was
+ *  clipped rather than reading a mid-sentence stop as the comment's end; reviews
+ *  front-load their blockers, so the head is the part worth keeping. A block that
+ *  exceeds its cap may already carry a note from its own per-comment cap — the
+ *  count restated here is CUMULATIVE across both cuts, never a note nested inside
+ *  a note. This bounds each block, but NOT the total, which grows with block
+ *  count — {@link DISTILL_INPUT_CAP} bounds the request. */
 const DISTILL_BLOCK_CAP = 6_000;
 
 /** Overall input cap for the joined distillation prompt, so the total request stays
@@ -52,7 +51,7 @@ const markerCost = (count: number) => omittedMarker(count).length + 2;
  *  A flat 6,000 meant the ledger model never read more than 6,000 chars of the
  *  opening brief even on a short record with 42,000 chars of the input budget going
  *  unspent — and the opening brief is precisely the block a summary can least afford
- *  to be missing. Sharing the budget instead gives a 3-comment record ~15,900 chars
+ *  to be missing. Sharing the budget instead gives a 3-comment record 15,972 chars
  *  per block.
  *
  *  The netting is what makes that safe, and it is NOT decoration. A naive
@@ -179,12 +178,15 @@ export async function distillOwnComments(input: {
   // If not even the pin plus the marker it might need fits, fall back to the newest
   // block alone, head-kept to the cap — through the same strip/cap pair, so this cut
   // discloses itself too and its count still folds in the block-cap cut above.
-  // Still unreachable under the scaled per-block cap, and now by construction:
-  // `distillBlockCap` charges the joiners AND `markerCost(n)` before dividing, so
-  // `n × cap + 2(n − 1) + markerCost(n) ≤ DISTILL_INPUT_CAP` — the pin is one of
-  // those n shares, so pin + 2 + marker can't exceed the cap. (Where the floor
-  // binds instead, n ≥ 8 puts the pin at 6,000, further under still.) Kept so the
-  // fallback is correct if the constants ever converge.
+  // Still unreachable under the scaled per-block cap, by either of its two
+  // regimes. In the SHARE regime (n ≤ 7) `distillBlockCap` charges the joiners AND
+  // `markerCost(n)` before dividing, so `n × cap + 2(n − 1) + markerCost(n) ≤
+  // DISTILL_INPUT_CAP` holds and the pin — one of those n shares — leaves room for
+  // its own joiner and marker with the other n−1 shares to spare. In the FLOOR
+  // regime (n ≥ 8) that sum exceeds the input cap by design (this is where the
+  // walk drops middle blocks, disclosed by the marker), but the pin itself is
+  // pinned at 6,000, further under the cap than any share. Kept so the fallback is
+  // correct if the constants ever converge.
   const newestAlone = (cap: number) => {
     const { text, omitted } = stripTruncationNote(capped[capped.length - 1]);
     return capBody(text, cap, omitted, OWN_BLOCK_INDENT);

@@ -36,17 +36,19 @@ export interface OwnCommentsContext {
  *
  *  When `OWN_BODY_FLOOR × count > budget` the allocation degenerates to
  *  floor-for-all (for the FOLLOW-UPS — the oldest block keeps the reserve below)
- *  and the caps therefore over-allocate the section budget — that
- *  is by design, not a bug: these caps decide how the budget is SHARED, while
- *  `fitOwn` (truncate.ts) stays the hard enforcement — dropping the MIDDLE
- *  comments first, keeping the opening brief and the newest follow-ups — with
- *  distillation firing before it in the over-budget regime. */
+ *  and the caps therefore over-allocate the section budget — that is by design,
+ *  not a bug: these caps decide how the budget is SHARED, while `fitOwn`
+ *  (truncate.ts) stays the hard enforcement — dropping the MIDDLE comments first,
+ *  keeping the opening brief and the newest follow-ups — with distillation firing
+ *  before it in the over-budget regime. */
 const OWN_BODY_FLOOR = 1_500;
 
 /** Share of the section budget the OLDEST comment is guaranteed before the rest
  *  fair-share what's left. Mirrors `fitOwn`'s pin policy (`truncate.ts`,
  *  `Math.floor(cap * 0.35)`) so the same block is protected by the same fraction
- *  at both stages.
+ *  at both stages — of different bases, though, when the diff has eaten into
+ *  `fitOwn`'s remaining budget (the paragraph on `sectionBudget` below works
+ *  through why sizing against the larger base is the safe side of that).
  *
  *  Without it `allocateBodyCaps` treats the opening comment as just another
  *  block, so the moment `OWN_BODY_FLOOR × count ≥ budget` the allocation
@@ -73,8 +75,9 @@ const OPENER_RESERVE_SHARE = 0.35;
  *  always equal — `fitOwn`'s cap is `min(remaining, ownBudget)` (truncate.ts), so
  *  a large diff can leave it well under this `sectionBudget` — which is exactly
  *  why the LARGER figure is the safe one to size against: over-allocating hands
- *  `fitOwn` a block it re-cuts, with the cut disclosed in the usual note, whereas
- *  under-allocating discards text no later stage can bring back.
+ *  `fitOwn` a block it re-cuts, disclosed by the truncation note or, at a
+ *  degenerate cap, by the section-level `[own comments truncated …]` marker,
+ *  whereas under-allocating discards text no later stage can bring back.
  *
  *  Like `allocateBodyCaps`, the result can sum past `budget` — these caps decide
  *  how the budget is SHARED; `fitOwn` remains the hard enforcement. */

@@ -11,12 +11,16 @@ export interface DocSurfacesContext {
 
 /** Conventional documentation DIRECTORIES, matched by path prefix — present as
  *  soon as the repo tracks anything under them. Covers the common changelog-
- *  fragment conventions (towncrier-style `changelog.d/`, changesets'
- *  `.changeset/`, covector's `.changes/`) alongside plain docs trees; a config
- *  file inside one still marks the surface present, which is right — the
- *  reviewer's question is whether THIS change carries its fragment. */
+ *  fragment conventions, each under the tool's own default directory: scriv's
+ *  `changelog.d/`, towncrier's `newsfragments/`, changesets' `.changeset/`, and
+ *  covector's `.changes/` — alongside plain docs trees. A config file inside one
+ *  still marks the surface present, which is right: the reviewer's question is
+ *  whether THIS change carries its fragment. (Each tool's directory is
+ *  configurable; these are the defaults, and a project that has moved its
+ *  fragments elsewhere says so through its `.gitdesktop/instructions.md`.) */
 const DOC_DIR_CANDIDATES = [
   "changelog.d/",
+  "newsfragments/",
   ".changeset/",
   ".changes/",
   "docs/",
@@ -27,17 +31,52 @@ const DOC_DIR_CANDIDATES = [
  *  READMEs shouldn't push a dozen lines into the system prompt. */
 const MAX_SURFACES = 8;
 
-/** Whether a tracked path is a ROOT-level documentation file. Deliberately
- *  GENERIC — `README.*` and `CHANGELOG.*` in any extension — because this
- *  runs against whatever repository the user is reviewing, not against
- *  GitDesktop. A project's own surfaces (a marketing site, an in-app guide) are
- *  its own business and reach the review through its
- *  `.gitdesktop/instructions.md`, never through a hardcoded path here.
- *  Case-insensitive: `readme.md` and `Readme.md` are the same surface. */
-function isRootDocFile(path: string): boolean {
-  if (path.includes("/")) return false;
-  const lower = path.toLowerCase();
-  return lower.startsWith("readme.") || lower.startsWith("changelog.");
+/** Longest surface path we will render. With {@link ROOT_DOC_FILE} anchored to a
+ *  fixed extension set nothing legitimate comes close (the longest match is
+ *  `changelog.markdown`), so this is purely a backstop — see
+ *  {@link sanitizeSurface}. */
+const MAX_SURFACE_LEN = 120;
+
+/** A ROOT-level documentation file. Deliberately GENERIC in NAME — this runs
+ *  against whatever repository the user is reviewing, not against GitDesktop, so
+ *  a project's own surfaces (a marketing site, an in-app guide) reach the review
+ *  through its `.gitdesktop/instructions.md` rather than a hardcoded path here.
+ *
+ *  Constrained in EXTENSION, though, and that part matters: a bare
+ *  `readme.`/`changelog.` prefix test also matched `changelog.config.js`,
+ *  `changelog.json`, `changelog.yml`, and `changelog.config.cjs` —
+ *  commitizen/conventional-changelog CONFIG, not a documentation surface, and
+ *  listing one invites a finding about a "stale changelog" that is really a tool
+ *  config. The extension set is the plain-text documentation formats a README or
+ *  CHANGELOG is actually written in; a repo using something else is covered by its
+ *  instructions file.
+ *
+ *  The optional middle segment keeps TRANSLATED surfaces (`README.de.md`,
+ *  `README.zh-CN.md`, `readme.pt_BR.md`), which the prefix test used to catch and
+ *  which the reserved directory slots below are sized against — narrowing to a
+ *  bare `readme.<ext>` would have dropped them silently. It cannot re-admit the
+ *  config files, because the decision is made by the FINAL extension either way.
+ *  Anchored at both ends and case-insensitive, so `Readme.MD` matches while
+ *  `README.md.bak` does not. */
+const ROOT_DOC_FILE =
+  /^(readme|changelog)(\.[a-z0-9_-]{1,12})?\.(md|markdown|mdown|rst|txt|adoc)$/i;
+
+/** Strips anything that could let a FILENAME misrepresent itself once rendered
+ *  into the system prompt's roster — control characters (a newline would forge a
+ *  second bullet) and Unicode format characters (a bidi override can reorder what
+ *  the line appears to say) — then bounds the length.
+ *
+ *  Defense in depth, not a live hole: `git ls-files` reads whatever tree is
+ *  CHECKED OUT, and checking out a fork PR's branch is a supported flow, so the
+ *  filenames here are not always the maintainer's own. But POSIX filenames may
+ *  contain newlines, and {@link ROOT_DOC_FILE} is anchored (`$` matches only the
+ *  true end of input in JS, with no `m` flag), so a name carrying a newline or
+ *  any other control character cannot match it in the first place. This keeps the
+ *  guarantee at the point of RENDERING, where it stays true if the pattern is
+ *  ever loosened. The directory entries need none of this — they are module
+ *  constants, never repo input. */
+function sanitizeSurface(path: string): string {
+  return path.replace(/[\p{Cc}\p{Cf}]/gu, "").slice(0, MAX_SURFACE_LEN);
 }
 
 /**
@@ -47,10 +86,14 @@ function isRootDocFile(path: string): boolean {
  * class-sweep rule can only name files "visible in the diff" and therefore
  * structurally cannot mention a surface the author forgot entirely.
  *
- * Reads the MAINTAINER's checkout (`git ls-files` against `repoPath`), never
- * the PR head, so a fork PR can't add a path to the reviewer's prompt. One
- * subprocess per review, best-effort like every other context resolver: any
- * failure yields `{}` and the prompt is unchanged.
+ * Reads the LOCAL working tree (`git ls-files` against `repoPath`) — nothing is
+ * fetched from a PR head. That is not the same as "always the maintainer's own
+ * files": checking out a PR's branch is a supported flow, and a review run while
+ * it is checked out sees that branch's tree. What reaches the prompt is bounded
+ * accordingly — a fixed set of path shapes, sanitized, names only, no contents
+ * (see {@link sanitizeSurface}). One subprocess per review, best-effort like
+ * every other context resolver: any failure yields `{}` and the prompt is
+ * unchanged.
  */
 export async function resolveDocSurfacesContext(
   repoPath: string,
@@ -67,8 +110,11 @@ export async function resolveDocSurfacesContext(
   for (const entry of tracked) {
     const path = entry.trim();
     if (!path) continue;
-    if (isRootDocFile(path)) {
-      files.add(path);
+    if (ROOT_DOC_FILE.test(path)) {
+      // Sanitized on the way IN, so the set dedupes on what will actually be
+      // rendered; an entry sanitized down to nothing is no longer a path.
+      const safe = sanitizeSurface(path);
+      if (safe) files.add(safe);
       continue;
     }
     for (const dir of DOC_DIR_CANDIDATES) {
