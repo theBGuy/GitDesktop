@@ -10,15 +10,25 @@ export interface DocSurfacesContext {
 }
 
 /** Conventional documentation DIRECTORIES, matched by path prefix — present as
- *  soon as the repo tracks anything under them. */
-const DOC_DIR_CANDIDATES = ["changelog.d/", "docs/"];
+ *  soon as the repo tracks anything under them. Covers the common changelog-
+ *  fragment conventions (towncrier-style `changelog.d/`, changesets'
+ *  `.changeset/`, covector's `.changes/`) alongside plain docs trees; a config
+ *  file inside one still marks the surface present, which is right — the
+ *  reviewer's question is whether THIS change carries its fragment. */
+const DOC_DIR_CANDIDATES = [
+  "changelog.d/",
+  ".changeset/",
+  ".changes/",
+  "docs/",
+  "doc/",
+];
 
 /** Defensive ceiling on the rendered roster: a repo with a dozen translated
  *  READMEs shouldn't push a dozen lines into the system prompt. */
 const MAX_SURFACES = 8;
 
 /** Whether a tracked path is a ROOT-level documentation file. Deliberately
- *  GENERIC — `README.*` in any extension, plus `CHANGELOG.md` — because this
+ *  GENERIC — `README.*` and `CHANGELOG.*` in any extension — because this
  *  runs against whatever repository the user is reviewing, not against
  *  GitDesktop. A project's own surfaces (a marketing site, an in-app guide) are
  *  its own business and reach the review through its
@@ -27,7 +37,7 @@ const MAX_SURFACES = 8;
 function isRootDocFile(path: string): boolean {
   if (path.includes("/")) return false;
   const lower = path.toLowerCase();
-  return lower.startsWith("readme.") || lower === "changelog.md";
+  return lower.startsWith("readme.") || lower.startsWith("changelog.");
 }
 
 /**
