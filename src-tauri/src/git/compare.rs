@@ -802,7 +802,7 @@ mod tests {
         .unwrap();
         assert!(
             !globbed.files.iter().any(|f| f.path.ends_with(".lock")),
-            "both the root and the nested .lock are hidden"
+            "the nested .lock is hidden — pathspec `*` reaches into subdirectories"
         );
         assert!(!globbed.text.contains("tools/build.lock"));
         assert!(

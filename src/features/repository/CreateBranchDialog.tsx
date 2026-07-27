@@ -62,8 +62,9 @@ export function CreateBranchDialog({
   entries: FileEntry[];
   allBranchNames: string[];
   /** The checked-out branch's committed work vs the default branch (compared
-   *  against HEAD) — the AI name-generation fallback when the working tree is
-   *  clean. Only applies when the new branch is based on HEAD; see below. */
+   *  against the checked-out branch by name) — the AI name-generation fallback
+   *  when the working tree is clean. Only applies when the new branch is based
+   *  on HEAD; see below. */
   committedFallback: CommittedNameSource | null;
   /** How the committed-work lookup stands (pending/error are surfaced rather
    *  than read as "there is none"). */

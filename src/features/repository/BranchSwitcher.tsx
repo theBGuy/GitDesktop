@@ -452,7 +452,14 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // skews the three-dot diff, and when origin/HEAD resolved the default name the
   // local twin may not even exist. Null (⇒ no fallback) when neither side has it.
   const committedBase = useMemo(() => {
-    if (!branchDialogOpen || !defaultName || !remoteBranchesSettled)
+    // An errored remote list must not fall through to the local default — that
+    // base can't be trusted, so no base ⇒ no fallback ⇒ the error state renders.
+    if (
+      !branchDialogOpen ||
+      !defaultName ||
+      !remoteBranchesSettled ||
+      remoteBranchesQuery.isError
+    )
       return null;
     const onOrigin = (remoteBranchesQuery.data ?? []).some(
       (b) => b.remote === "origin" && b.name === defaultName,
@@ -463,6 +470,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     branchDialogOpen,
     defaultName,
     remoteBranchesSettled,
+    remoteBranchesQuery.isError,
     remoteBranchesQuery.data,
     localNames,
   ]);
