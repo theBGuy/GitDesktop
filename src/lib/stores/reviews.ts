@@ -74,7 +74,8 @@ export type ReviewPhase =
 /** State of one review run, keyed by repo + PR in the store. */
 export interface ReviewEntry {
   phase: ReviewPhase;
-  /** Transient sub-status line shown while a CLI agent works. */
+  /** Transient sub-status line shown while a CLI agent works or the context
+   *  harvest distills. */
   status: string;
   /** The mode of the run that produced `text` (drives the "post" label). */
   mode: ReviewMode;

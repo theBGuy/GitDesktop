@@ -360,7 +360,8 @@ export async function resolveOwnCommentsContext(
     const cacheKey = `${kind}#${ref}`;
     // The generation model this attempt used, reported by the distiller as soon as
     // it resolves settings (one load, not two that could disagree mid-flight).
-    // Stays empty when the attempt threw before that point — genuinely unknown.
+    // Stays empty if that load threw, or when the provider runs on its
+    // account-default model.
     let attemptedModel = "";
     // Remember a dead end so the next re-review of these SAME comments doesn't
     // re-pay the ceiling — up to 180s on a CLI generation model — to reach the same

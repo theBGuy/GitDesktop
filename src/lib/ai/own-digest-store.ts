@@ -49,9 +49,10 @@ export interface OwnCommentsDigest {
    *  the usual causes (a missing generation key, a CLI not logged in, a network
    *  blip) are properties of the MODEL and never move the fingerprint, so without
    *  the clock a fixed config would stay locked out. `model` is the one the attempt
-   *  was made with (diagnostic) — empty when the attempt threw before the
-   *  distiller got as far as loading settings (a client-construction failure, say),
-   *  so the model it would have used is genuinely unknown.
+   *  was made with (diagnostic) — empty when the settings load itself threw, or
+   *  when the provider runs on its account-default model (a blank
+   *  `settings.ai.model`, the default for codex-cli and selectable on the other
+   *  agent CLIs).
    *  Absent until something fails, and dropped again by the next success; optional,
    *  so `schemaVersion` stays 1 and older records read as never-failed. */
   failed?: { fingerprint: string; at: number; model: string };
