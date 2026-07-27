@@ -284,6 +284,28 @@ export const OWN_COMMENTS_CHAR_BUDGET = 6_000;
 /** Cap for third-party AI-reviewer findings (lowest priority — noisier, theirs). */
 export const EXTERNAL_FINDINGS_CHAR_BUDGET = 8_000;
 
+/**
+ * How many blocks a contiguous NEWEST-first suffix of `blocks` fits into
+ * `budget`: walk from the array end backwards, charging each block's length plus
+ * a 2-char "\n\n" joiner for every block after the first, and stop at the first
+ * block that doesn't fit (no skip-and-continue).
+ *
+ * Shared so the two recency-first selections can't drift: `fitOwn` below, sizing
+ * the prompt's own-comments section, and own-distill.ts, sizing the distiller's
+ * input. They pick over the same rendered blocks with the same joiner.
+ */
+export function newestSuffixCount(blocks: string[], budget: number): number {
+  let keptCount = 0;
+  let running = 0;
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const cost = blocks[i].length + (keptCount > 0 ? 2 : 0);
+    if (running + cost > budget) break;
+    running += cost;
+    keptCount++;
+  }
+  return keptCount;
+}
+
 /** The continuation indent own-comment blocks render their bodies under (see
  *  `formatOwnComments` in own-context.ts). Every re-cut of an already-rendered
  *  block passes it to `capBody` so the re-stated note stays inside its list item:
@@ -383,22 +405,6 @@ export function budgetReviewExtras(input: {
         : { text: capBody(text, cap), truncated: true };
     remaining -= result.text.length;
     return { result, dropped: false };
-  };
-
-  // How many blocks a contiguous NEWEST-first suffix of `blocks` fits into
-  // `budget`: walk from the array end backwards, charging each block's length
-  // plus a 2-char "\n\n" joiner for every block after the first, and stop at the
-  // first block that doesn't fit (no skip-and-continue).
-  const newestSuffixCount = (blocks: string[], budget: number) => {
-    let keptCount = 0;
-    let running = 0;
-    for (let i = blocks.length - 1; i >= 0; i--) {
-      const cost = blocks[i].length + (keptCount > 0 ? 2 : 0);
-      if (running + cost > budget) break;
-      running += cost;
-      keptCount++;
-    }
-    return keptCount;
   };
 
   // Our own comments fit recency-first with the OLDEST block PINNED, rendered in

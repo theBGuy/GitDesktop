@@ -1,7 +1,12 @@
 import { loadSettings } from "@/lib/settings/api";
 import { createAiClient } from "./client";
 import { isCliProvider } from "./providers";
-import { capBody, OWN_BLOCK_INDENT, stripTruncationNote } from "./truncate";
+import {
+  capBody,
+  newestSuffixCount,
+  OWN_BLOCK_INDENT,
+  stripTruncationNote,
+} from "./truncate";
 
 /** Per-block head cap before the blocks are joined into the distillation prompt —
  *  keeps one verbose review from crowding out later follow-ups. Head-kept WITH an
@@ -120,19 +125,6 @@ export async function distillOwnComments(input: {
   // and the one block a summary can least afford to be missing.
   const pin = capped[0];
   const rest = capped.slice(1);
-  // Walk from the array end, charging each block plus the "\n\n" joiner to the one
-  // after it; stop at the first that doesn't fit (no skip-and-continue).
-  const newestSuffixCount = (budget: number) => {
-    let kept = 0;
-    let running = 0;
-    for (let i = rest.length - 1; i >= 0; i--) {
-      const cost = rest[i].length + (kept > 0 ? 2 : 0);
-      if (running + cost > budget) break;
-      running += cost;
-      kept++;
-    }
-    return kept;
-  };
   const markerCost = (count: number) => omittedMarker(count).length + 2;
 
   // If not even the pin plus the marker it might need fits, fall back to the newest
@@ -141,20 +133,29 @@ export async function distillOwnComments(input: {
   // Unreachable while DISTILL_BLOCK_CAP (6,000) < DISTILL_INPUT_CAP (48,000), which
   // bounds the pin far under the cap — kept so the fallback is correct if the
   // constants ever converge.
-  const newestAlone = () => {
+  const newestAlone = (cap: number) => {
     const { text, omitted } = stripTruncationNote(capped[capped.length - 1]);
-    return capBody(text, DISTILL_INPUT_CAP, omitted, OWN_BLOCK_INDENT);
+    return capBody(text, cap, omitted, OWN_BLOCK_INDENT);
   };
 
   let body: string;
   const pinFloor =
     pin.length + (rest.length > 0 ? 2 + markerCost(rest.length) : 0);
   if (pinFloor > DISTILL_INPUT_CAP) {
-    body = newestAlone();
+    // This branch drops EVERY block but the newest, which is exactly the loss the
+    // marker exists to disclose — the cap's guarantee is unconditional, so it holds
+    // here too. The marker is charged out of the cap before the survivor is sized,
+    // so the total still fits.
+    const gone = capped.length - 1;
+    body =
+      gone > 0
+        ? `${omittedMarker(gone)}\n\n${newestAlone(DISTILL_INPUT_CAP - markerCost(gone))}`
+        : newestAlone(DISTILL_INPUT_CAP);
   } else {
     // Round 1 reserves nothing for the marker, so when the whole record fits the
     // body is byte-identical to what an unpinned, unmarked walk would produce.
     let keptCount = newestSuffixCount(
+      rest,
       DISTILL_INPUT_CAP - pin.length - (rest.length > 0 ? 2 : 0),
     );
     let dropped = rest.length - keptCount;
@@ -165,6 +166,7 @@ export async function distillOwnComments(input: {
       // the marker we finally render always fits the room held for it — and round 2
       // can only shrink `keptCount`, never grow it, so `dropped` stays positive.
       keptCount = newestSuffixCount(
+        rest,
         DISTILL_INPUT_CAP - pin.length - 2 - markerCost(rest.length),
       );
       dropped = rest.length - keptCount;
