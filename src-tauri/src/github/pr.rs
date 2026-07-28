@@ -1985,8 +1985,8 @@ pub struct PrDetails {
 /// A merge/pull request's approval summary — who has approved and whether the
 /// viewer has. Provider-neutral, produced by GitLab and Bitbucket: GitHub
 /// surfaces approval through the review flow (`reviewDecision` + the Review menu),
-/// not a bodyless toggle, so its forge arm errors and the
-/// approve/unapprove control gates on `implemented.mrApprove` (false for GitHub).
+/// not a bodyless toggle, so its forge arm errors and the approve/unapprove
+/// control gates on `implemented.mrApprove` (false for GitHub).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApprovalState {

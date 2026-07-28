@@ -1607,7 +1607,7 @@ pub async fn forge_pr_approve(repo_path: String, number: u64, lens: Option<Strin
     }
 }
 
-/// Revoke the viewer's approval of a merge request, behind the abstraction.
+/// Revoke the viewer's approval of a merge/pull request, behind the abstraction.
 /// GitLab and Bitbucket; GitHub approvals go through the review flow, so its arm
 /// errors.
 #[tauri::command]

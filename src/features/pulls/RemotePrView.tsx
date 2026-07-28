@@ -519,10 +519,10 @@ export function RemotePrView({
 
   // GitLab + Bitbucket approve/unapprove — one toggle keyed on whether the viewer
   // approved. GitLab's `user_can_approve` is unreliable on Free (false even when
-  // approving works), so
-  // don't pre-disable; permission errors surface via toast. The approval status lives
-  // in a SEPARATE query, so flip it optimistically — otherwise the label lags a full
-  // approve-POST + refetch. Success invalidation reconciles; errors roll back.
+  // approving works), so don't pre-disable; permission errors surface via toast.
+  // The approval status lives in a SEPARATE query, so flip it optimistically —
+  // otherwise the label lags a full approve-POST + refetch. Success invalidation
+  // reconciles; errors roll back.
   async function toggleApproval() {
     const approved = approvals.data?.viewerHasApproved ?? false;
     const action = approved ? unapprovePr : approvePr;
