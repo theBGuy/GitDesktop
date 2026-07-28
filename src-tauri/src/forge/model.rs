@@ -36,7 +36,8 @@ pub struct Capabilities {
 
 impl Capabilities {
     /// The static capability profile for a provider (refined per-repo later, e.g.
-    /// a Bitbucket repo with issues disabled). Mirrors the §6 parity matrix.
+    /// a Bitbucket repo with issues disabled). Mirrors the parity matrix in
+    /// `docs/multi-provider-support.md` §6.
     pub const fn for_provider(provider: Provider) -> Self {
         match provider {
             // GitHub is the reference implementation: everything on.
@@ -147,12 +148,12 @@ pub struct Implemented {
     /// Editing AND deleting an issue conversation comment — one flag for both ops.
     /// False for Bitbucket (its native tracker is being retired).
     pub issue_comment_edit: bool,
-    /// Approving / unapproving a merge request via the bodyless toggle. GitLab-only:
-    /// GitHub surfaces approval through the older review flow (the Review menu), not
-    /// this control, so it's the one write GitHub leaves `false` (see `all`).
+    /// Approving / unapproving a merge request via the bodyless toggle. GitLab and
+    /// Bitbucket share it; GitHub surfaces approval through the review flow (the
+    /// Review menu) instead — one of the three writes GitHub leaves `false` (see `all`).
     pub mr_approve: bool,
     /// Merging a merge/pull request (strategy + delete-source-branch). A shared
-    /// control — GitHub via `gh pr merge`, GitLab via `glab` — so it's true for both.
+    /// control on all three providers.
     pub mr_merge: bool,
     /// Arming/cancelling GitLab auto-merge (merge-when-pipeline-succeeds).
     /// GitLab-only — this app has no in-app GitHub PR auto-merge control.
@@ -753,7 +754,7 @@ mod tests {
         let i = Implemented::for_provider(Provider::GitHub);
         assert!(i.pull_requests && i.issues && i.ci && i.releases && i.insights);
         assert!(i.repo_actions && i.publish);
-        // The GitHub `false`s all have their analogue elsewhere: approve /
+        // The GitHub `false`s mostly have their analogue elsewhere: approve /
         // request-changes live in GitHub's Review menu, draft toggle in
         // `gh pr ready [--undo]` gated on canWrite, and the rest are GitLab- or
         // Bitbucket-unique surfaces.

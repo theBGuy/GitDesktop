@@ -845,7 +845,8 @@ const GH_SEARCH_CAP: u64 = 1000;
 
 /// Map the neutral `sort` (`"best" | "stars" | "updated"`) onto the extra `gh api`
 /// `-f` args for `search/repositories`. `"best"` omits sort (GitHub's best-match
-/// default); the others pin `order=desc`. Unknown values fall back to no sort.
+/// default); the others pin `order=desc`. Unknown values fall back to no sort —
+/// callers validate first, so the empty slice is defensive.
 fn github_sort_args(sort: &str) -> Vec<&'static str> {
     match sort {
         "stars" => vec!["-f", "sort=stars", "-f", "order=desc"],

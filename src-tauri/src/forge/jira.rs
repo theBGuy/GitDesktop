@@ -1499,7 +1499,7 @@ async fn board_points_override(creds: &JiraCredentials, project_key: &str) -> Op
 }
 
 /// Discover the site's agile custom-field map: `/rest/api/3/field` → [`resolve_field_ids`]
-/// + the field-NAME map for error translation, then a best-effort story-points override
+/// plus the field-NAME map for error translation, then a best-effort story-points override
 /// from the project's board configuration (`project_key` empty skips it). Persists the
 /// entry even when both ids are `None` (a site without agile fields must not be re-probed).
 /// A FAILED `/field` fetch persists nothing and returns `None` — the caller records the
