@@ -111,9 +111,10 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 
 /** Merge two id-bearing arrays: `keep` first, then old records whose id isn't
  *  already present. First occurrence of an id wins — within `old` as well as
- *  across the two arrays — and `undefined` is an id like any other, so
- *  idless objects all collide and only the first one survives. Non-object old
- *  entries are dropped (undedupable). */
+ *  across the two arrays — and `undefined` is an id like any other, so an idless
+ *  record suppresses every later idless old one. `keep` itself passes through
+ *  verbatim (never deduped); non-object old entries are dropped (they can't be
+ *  deduplicated). */
 function mergeIds(keep: unknown[], old: unknown[]): unknown[] {
   const seen = new Set(
     keep.filter((r): r is { id: unknown } => isRecord(r)).map((r) => r.id),

@@ -34,15 +34,22 @@ export function repoIdentity(repoPath: string): Promise<string> {
 }
 
 /** Merge two id-bearing lists, dropping duplicates by `id`; `keep`'s items come
- *  first and win on a shared id. Used to fold a legacy path-keyed record list into
- *  the identity key's list during migration. */
+ *  first and win on a shared id, and first occurrence wins within `extra` too.
+ *  `keep` itself passes through verbatim (never deduped). Used to fold a legacy
+ *  path-keyed record list into the identity key's list during migration. */
 export function mergeById<T extends { id: string }>(
   keep: T[] | undefined,
   extra: T[],
 ): T[] {
   const base = keep ?? [];
   const seen = new Set(base.map((x) => x.id));
-  return [...base, ...extra.filter((x) => !seen.has(x.id))];
+  const rest: T[] = [];
+  for (const x of extra) {
+    if (seen.has(x.id)) continue;
+    seen.add(x.id);
+    rest.push(x);
+  }
+  return [...base, ...rest];
 }
 
 // In-flight/settled fold per (store, path), so the legacy migration runs at most

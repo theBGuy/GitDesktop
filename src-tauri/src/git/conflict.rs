@@ -67,9 +67,10 @@ async fn stage_blob(repo: &str, stage: u8, path: &str) -> AppResult<Option<Strin
 }
 
 /// Whether the path matches any of the user's AI-ignore `exclude` patterns,
-/// using git's own gitignore-style pathspec matching (the same engine the staged
-/// diff uses): list the path with `:(exclude)` magic pathspecs applied — if it
-/// drops out of the listing, a pattern matched it.
+/// using git's own pathspec matching (the same engine the staged diff uses;
+/// close to but not identical to gitignore semantics): list the path with
+/// `:(exclude)` magic pathspecs applied — if it drops out of the listing, a
+/// pattern matched it.
 async fn is_ai_ignored(repo: &str, path: &str, exclude: &[String]) -> AppResult<bool> {
     let patterns: Vec<&str> = exclude
         .iter()
