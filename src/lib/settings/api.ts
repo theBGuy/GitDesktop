@@ -12,35 +12,29 @@ export interface RecentRepo {
   lastOpenedAt: string;
   /** User-chosen display name shown in place of the folder name. */
   alias?: string;
-  /** Owner (from the origin remote) the repo list groups under. Stored so the
-   *  list can group synchronously and never reflows while the async owners
-   *  query resolves; backfilled from `gitRepoOwners` and refreshed in the
-   *  background. Absent until first resolved; empty remote clears it. */
+  /** Owner (from the origin remote) the repo list groups under. Stored so the list groups
+   *  synchronously and never reflows while the async owners query resolves; refreshed in
+   *  the background. Absent until first resolved; an empty remote clears it. */
   owner?: string;
   /** The origin remote's host (e.g. "gitlab.com"), stored alongside `owner` so
    *  the context menu names the right provider from the first frame. */
   host?: string;
-  /** The provider that host routes to ("github" / "gitlab" / "bitbucket") —
-   *  resolved backend-side (it knows glab's self-managed hosts) and stored so
-   *  labels are right from the first frame. Absent until first resolved. */
+  /** The provider that host routes to ("github"/"gitlab"/"bitbucket") — resolved
+   *  backend-side (it knows glab's self-managed hosts) and stored so labels are right from
+   *  the first frame. Absent until first resolved. */
   provider?: string;
   /** The persisted result of the visibility probe ("public" | "private" |
    *  "internal"). Absent = never resolved (the repo list shows no badge, which
    *  must never read as "public"). Cleared when the provider is cleared, so a
    *  stale badge never outlives the remote it was probed from. */
   visibility?: string;
-  /** Whether the repo is a fork on its provider, resolved in the SAME probe as
-   *  `visibility` (no extra API call) and badged beside it. Tri-state so the
-   *  probe converges — after one successful probe no repo re-probes:
-   *  `undefined` = never probed (the backfill will fire); `false` = probed, not
-   *  a fork (no glyph, no re-probe); `true` = a fork (glyph). Only `true` on
-   *  positive API evidence, so the badge's absence never reads as "fork". Shares
-   *  `visibility`'s lifecycle: cleared when the provider is cleared, so a stale
-   *  badge never outlives the remote it was probed from. */
+  /** Whether the repo is a fork, resolved in the SAME probe as `visibility` (no extra API
+   *  call). Tri-state so the probe converges: `undefined` = never probed (backfill fires),
+   *  `false` = probed, not a fork (no re-probe), `true` = a fork. Only `true` on positive
+   *  API evidence, so absence never reads as "fork". Cleared with `visibility`. */
   isFork?: boolean;
-  /** The upstream repo this fork was made from, as an "owner/repo" slug, when
-   *  the provider supplies it. Powers the "Fork of <parent>" label; absent when
-   *  `isFork` is false or the parent slug wasn't available. Cleared alongside
+  /** The upstream repo this fork was made from, as an "owner/repo" slug, when the provider
+   *  supplies it. Powers the "Fork of <parent>" label; cleared alongside
    *  `isFork`/`visibility`. */
   forkParent?: string;
 }
@@ -79,11 +73,9 @@ export interface CustomLanguage {
 }
 
 /**
- * A user-defined agent slash command, surfaced in the agent composer's `/`
- * menu alongside the built-ins and the repo's own `.claude/commands`. The
- * `prompt` is a template — `$ARGUMENTS` (and `$1`..`$9`) are substituted with
- * whatever the user types after the command, expanded client-side before the
- * prompt reaches the agent.
+ * A user-defined agent slash command, surfaced in the agent composer's `/` menu alongside
+ * the built-ins and the repo's own `.claude/commands`. `$ARGUMENTS` (and `$1`..`$9`) are
+ * expanded client-side before the prompt reaches the agent.
  */
 export interface CustomCommand {
   /** Stable id (uuid) used for list keys. */
@@ -105,16 +97,13 @@ export interface McpKeyValue {
 }
 
 /**
- * A managed MCP (Model Context Protocol) server the user has registered. Agent
- * sessions can opt into a subset of these; GitDesktop passes *exactly* the
- * opted-in servers to the CLI in strict / only-these mode, so a run never
- * silently inherits whatever MCP servers happen to be on the machine.
- *
- * The CLIs are the MCP *hosts* — GitDesktop only generates their config. Secret
- * values (tokens in env/headers) are stored in the OS keychain keyed by
- * `mcp-server/<id>/<entry-key>` and never written to settings.json; `secretKeys`
- * lists which env (stdio) / header (http) names are secret so they're resolved
- * from the keychain at session-launch time.
+ * A managed MCP (Model Context Protocol) server the user has registered. GitDesktop passes
+ * *exactly* the opted-in servers to the CLI in strict / only-these mode, so a run never
+ * silently inherits whatever MCP servers happen to be on the machine. The CLIs are the MCP
+ * *hosts* — GitDesktop only generates their config. Secret values live in the OS keychain
+ * keyed by `mcp-server/<id>/<entry-key>` and are never written to settings.json;
+ * `secretKeys` names which env (stdio) / header (http) entries are secret, resolved at
+ * session-launch time.
  */
 export interface McpServer {
   /** Stable id (uuid) — list key, per-session opt-in reference, keychain namespace. */
@@ -126,20 +115,15 @@ export interface McpServer {
   description: string;
   /** Offered to new sessions by default when true. */
   enabled: boolean;
-  /** Where this server is available: "global" (or absent) = every repo; otherwise
-   *  a repo's worktree-stable identity key (`repoIdentity` — the git common dir,
-   *  shared by a repo's main checkout and all its worktrees) = only sessions in
-   *  that repo. Values written before identity-keying are a raw checkout path and
-   *  are still honored on read (and folded onto the identity on the next write).
-   *  Organization only — un-scoped servers are still never auto-inherited (strict
-   *  mode gags un-registered ones). */
+  /** Where this server is available: "global" (or absent) = every repo; otherwise a repo's
+   *  worktree-stable identity key (`repoIdentity`, the git common dir — shared by a repo's
+   *  main checkout and all its worktrees). Legacy raw-checkout-path values are still
+   *  honored on read and folded onto the identity on write. Organization only — strict mode
+   *  still gags un-registered servers. */
   scope?: string;
-  /** Per-repo overrides of a GLOBAL server's state, keyed by the repo's
-   *  worktree-stable identity key (see `scope`; legacy raw-path keys still honored
-   *  on read, folded on write): "on" (available + on by default), "optional"
-   *  (available, off by default), "off" (not offered in that repo). Absent for a
-   *  repo = inherit `enabled`. Only meaningful for global servers; repo-scoped
-   *  ones use `enabled` directly. */
+  /** Per-repo overrides of a GLOBAL server's state, keyed by the repo's worktree-stable
+   *  identity (legacy raw-path keys honored on read, folded on write): "on" / "optional" /
+   *  "off". Absent for a repo = inherit `enabled`. Meaningless for repo-scoped servers. */
   repoOverrides?: Record<string, "on" | "optional" | "off">;
   /** "stdio" = a local subprocess; "http" = a remote streamable-HTTP server. */
   transport: "stdio" | "http";
@@ -188,10 +172,9 @@ export interface AppSettings {
    *  reviewing model. `"auto"` fits the model's context window (probing Ollama
    *  live); the others force a fixed multiple of the default budget. */
   reviewContextSize?: ReviewContextSize;
-  /** How long an agent-CLI review may run before it's stopped — applies to
-   *  interactive PR reviews, automated first reviews, and security audits.
-   *  Absent (settings written before this shipped) reads as `"auto"`, the
-   *  backend's tier defaults. */
+  /** How long an agent-CLI review may run before it's stopped (interactive, automated, and
+   *  security audits alike). Absent — settings written before this shipped — reads as
+   *  `"auto"`, the backend's tier defaults. */
   reviewTimeout?: ReviewTimeout;
   /** Hide every AI surface (commit/PR helpers, review panel, AI settings).
    *  Provider config and API keys are kept, just not shown. */
@@ -214,11 +197,10 @@ export interface AppSettings {
   globalInstructions: string;
   /** gitignore-style globs (one per line) excluded from AI context. */
   aiIgnorePatterns: string;
-  /** Extra network hosts (`host` or `host:port`) the app may reach for AI
-   *  inference, beyond the built-in provider hosts and localhost — e.g. a LAN
-   *  Ollama or a self-hosted OpenAI-compatible server. The shared AI `fetch`
-   *  wrapper blocks any other host; the Tauri HTTP capability is opened to
-   *  `http(s)://*` as a coarse backstop, so this list is the effective gate. */
+  /** Extra network hosts (`host` or `host:port`) the app may reach for AI inference, beyond
+   *  the built-in provider hosts and localhost. The shared AI `fetch` wrapper blocks any
+   *  other host and is the effective gate — the Tauri HTTP capability is opened to
+   *  `http(s)://*` only as a coarse backstop. */
   aiAllowedHosts: string[];
   /** Path to a program used by "Open in editor" (empty = not configured). */
   externalEditor: string;
@@ -254,16 +236,11 @@ export interface AppSettings {
   autoFetch: boolean;
   /** How often the background fetch runs, in minutes. */
   autoFetchInterval: AutoFetchInterval;
-  /** Run the automated first review when a draft PR is created. Off by default:
-   *  the automated review then waits until the draft is marked ready for review.
-   *  Read undefined-safe (absent on settings stored before this field existed →
-   *  `false`) via the DEFAULT_SETTINGS spread in loadSettings. */
+  /** Run the automated first review when a draft PR is created. Off by default — the review
+   *  then waits until the draft is marked ready for review. */
   reviewDraftPrs: boolean;
-  /** Default new pull requests to draft: the Create-PR dialog's "Create as
-   *  draft" checkbox starts ticked. Off by default (unchanged behavior); the
-   *  user can still untick it per-dialog. Read undefined-safe (absent on
-   *  settings stored before this field existed → `false`) via the
-   *  DEFAULT_SETTINGS spread in loadSettings. */
+  /** Default new pull requests to draft: the Create-PR dialog's "Create as draft" checkbox
+   *  starts ticked. Off by default; still overridable per dialog. */
   createPrsAsDraft: boolean;
   /** First-run nudge toward the user guide; set once the user opens or dismisses it. */
   seenGuideNudge: boolean;
@@ -285,23 +262,17 @@ export interface AppSettings {
   /** Managed MCP servers an agent session can opt into. Empty = MCP stays off. */
   mcpServers: McpServer[];
   recentRepos: RecentRepo[];
-  /** Color theme (Settings → Appearance). "system" follows the OS scheme;
-   *  "light"/"dark" force it; "slate" is a softer dark variant that lifts
-   *  surfaces off pure black and ink off pure white to reduce eye strain. Absent
-   *  on settings stored before this field existed → "system" via the
-   *  DEFAULT_SETTINGS spread in loadSettings (byte-identical prior behavior).
-   *  Applied outside the bulk settings form (apply-on-change), like diffViewMode. */
+  /** Color theme (Settings → Appearance). "system" follows the OS scheme; "slate" is a
+   *  softer dark variant that lifts surfaces off pure black to reduce eye strain. Applied
+   *  outside the bulk settings form (apply-on-change), like diffViewMode. */
   theme: ThemeSetting;
   diffViewMode: "unified" | "split";
-  /** Which conversation-list sections the user has collapsed, keyed
-   *  `"<feature>:<kind>"` — `pulls:local`, `pulls:remote`, `issues:local`,
-   *  `issues:remote`. A missing key means the section is expanded (the default).
-   *  Global (not per-repo) and feature-scoped, so the remote key collapses the
-   *  provider section across every repo regardless of its host. */
+  /** Which conversation-list sections the user collapsed, keyed `"<feature>:<kind>"`
+   *  (`pulls:local`, `issues:remote`, …); a missing key = expanded. Global and
+   *  feature-scoped, so the remote key collapses that section across every repo. */
   collapsedConversationSections: string[];
-  /** ISO-8601 expiry the user optionally entered when connecting a Bitbucket
-   *  (Atlassian) API token, so GitDesktop can warn before it lapses. Bitbucket
-   *  never reports it, so it's user-supplied; null = not provided. Cleared on
+  /** ISO-8601 expiry the user optionally entered for a Bitbucket (Atlassian) API token —
+   *  Bitbucket never reports one, so it's user-supplied. null = not provided; cleared on
    *  disconnect. */
   bitbucketTokenExpiresAt: string | null;
 }
@@ -369,10 +340,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
 };
 
 /**
- * The AI config a review should use for `mode`. Security audits use the dedicated
- * `securityReviewAi` when the user configured one, falling back to `reviewAi`
- * otherwise; every other mode always uses `reviewAi`. Centralizes the fallback so
- * the automation runner and the manual review panel agree on which model runs.
+ * The AI config a review should use for `mode`: security audits use `securityReviewAi` when
+ * the user configured one, else `reviewAi`. Centralized so the automation runner and the
+ * manual review panel can't disagree on which model runs.
  */
 export function effectiveReviewAi(
   settings: AppSettings,
@@ -395,6 +365,9 @@ function getStore(): Promise<Store> {
   return storePromise;
 }
 
+/** Loads settings, healing an older or partial saved object against DEFAULT_SETTINGS:
+ *  any field absent (stored before that field shipped) reads as its default. Nested
+ *  ai/reviewAi/notifications objects are merged, not replaced. */
 export async function loadSettings(): Promise<AppSettings> {
   const store = await getStore();
   const saved = await store.get<Partial<AppSettings>>("settings");
@@ -427,18 +400,14 @@ export async function saveSettings(settings: AppSettings): Promise<void> {
 }
 
 /**
- * Serializes every `recentRepos` read-modify-write (load → modify → save)
- * through one module-level promise chain, so concurrent mutators can't clobber
- * each other. Each of the wrapped helpers below is a NON-atomic
- * loadSettings→modify→saveSettings; run two at once and they interleave —
- * A loads, B loads, A saves, B saves B's stale snapshot → A's write is lost.
- * That lost-update race is real: the visibility backfill fires up to three
- * concurrent persists while `persistRepoOwners` and `addRecentRepo` write the
- * same store, and it silently dropped persisted visibility for several repos.
+ * Serializes every `recentRepos` read-modify-write through one module-level promise chain,
+ * so concurrent mutators can't clobber each other. Each wrapped helper is a NON-atomic
+ * load→modify→save; run two at once and the later save wins with a stale snapshot. That
+ * lost-update race is real — the visibility backfill fires concurrent persists alongside
+ * `persistRepoOwners` / `addRecentRepo` and silently dropped persisted visibility.
  *
- * The no-op-when-unchanged guards inside each helper MUST stay inside this
- * critical section (they re-read fresh state under the lock) — do not hoist
- * them out or "simplify" this chain away.
+ * The no-op-when-unchanged guards inside each helper MUST stay inside this critical section
+ * (they re-read fresh state under the lock) — do not hoist them out.
  */
 let recentRepoWrites: Promise<unknown> = Promise.resolve();
 function serializedRecentRepoWrite<T>(fn: () => Promise<T>): Promise<T> {
@@ -456,16 +425,12 @@ export function addRecentRepo(repo: {
     // Windows paths are case-insensitive; compare them that way to dedupe
     const samePath = (a: string, b: string) =>
       a.toLowerCase() === b.toLowerCase();
-    // Reopening a repo must PRESERVE everything backfilled onto its previous
-    // entry — not just the alias, but the derived forge metadata (owner/host/
-    // provider/visibility/isFork/forkParent). Rebuilding the moved-to-front
-    // record as `{...repo, ...}` wiped those every open, so a fresh clone lost
-    // its fork badge / provider label until the repo list next rendered and
-    // re-backfilled. Spreading `previous` first, then `repo`, keeps the derived
-    // fields while letting the fresh `path`/`name` win (Windows case refresh); a
-    // brand-new repo (no `previous`) starts with just its own fields, unchanged.
-    // Any staleness self-corrects: the open-time visibility probe re-persists
-    // owner + visibility on every open (see probeAndPersistVisibility).
+    // Reopening a repo must PRESERVE everything backfilled onto its previous entry — the
+    // alias AND the derived forge metadata (owner/host/provider/visibility/isFork/
+    // forkParent). Spread `previous` first, then `repo`, so the derived fields survive
+    // while the fresh `path`/`name` win (Windows case refresh); a brand-new repo starts
+    // with just its own fields. Staleness self-corrects — the open-time visibility probe
+    // re-persists owner + visibility on every open.
     const previous = settings.recentRepos.find((r) =>
       samePath(r.path, repo.path),
     );
@@ -482,18 +447,14 @@ export function addRecentRepo(repo: {
 }
 
 /**
- * Stores resolved repo owners (+ hosts) onto the matching recent-repo records
- * so the repo list groups synchronously (no async-driven reflow on open) and
- * the context menu names the right provider from the first frame. Touches only
- * records whose stored values actually changed; an empty remote clears them.
- * No-op when nothing changed, so it never loops with its own settings refetch.
+ * Stores resolved repo owners (+ hosts) onto the matching recent-repo records so the repo
+ * list groups synchronously and the context menu names the right provider from the first
+ * frame. Touches only records whose stored values changed (an empty remote clears them) —
+ * a no-op write would loop with its own settings refetch.
  *
- * Matching is by worktree-stable identity ({@link repoIdentity}, git common
- * dir), not raw checkout path, so a probe from one checkout of a repo updates
- * EVERY recentRepos row for the same underlying repo (its other worktrees'
- * rows) — the rows keep their own `.path` identity; only the probed fields fan
- * out. `repoIdentity` falls back to the raw path on a git error, so a repo that
- * can't be resolved matches by path exactly as before.
+ * Matched by worktree-stable identity ({@link repoIdentity}, git common dir), not raw
+ * checkout path, so a probe from one checkout updates EVERY row for the same underlying
+ * repo; rows keep their own `.path`. Falls back to the raw path on a git error.
  */
 export function persistRepoOwners(
   owners: {
@@ -506,11 +467,9 @@ export function persistRepoOwners(
   if (owners.length === 0) return Promise.resolve();
   return serializedRecentRepoWrite(async () => {
     const settings = await loadSettings();
-    // Index the incoming probes by the repo IDENTITY of their path, and resolve
-    // each existing row's identity too, so a row matches an entry for a sibling
-    // worktree of the same repo (not just the exact checkout that was probed).
-    // repoIdentity is promise-memoized per path, so the per-row fan-out costs
-    // one IPC round per path per session, not per probe.
+    // Index the probes by repo IDENTITY and resolve each existing row's identity too, so a
+    // row matches an entry for a sibling worktree of the same repo. repoIdentity is
+    // promise-memoized per path — one IPC round per path per session, not per probe.
     const byIdentity = new Map(
       await Promise.all(
         owners.map(async (o) => [await repoIdentity(o.path), o] as const),
@@ -526,10 +485,9 @@ export function persistRepoOwners(
       const owner = resolved.owner || undefined;
       const host = resolved.host || undefined;
       const provider = resolved.provider || undefined;
-      // Visibility (and fork provenance, probed in the same round-trip) come
-      // from the provider; when the provider is being cleared (remote removed),
-      // the stored values can't outlive it — drop them too so a stale badge
-      // never lingers on a now-local-only repo.
+      // Visibility and fork provenance come from the provider; when the provider is being
+      // cleared (remote removed) they can't outlive it — drop them so no stale badge
+      // lingers on a now-local-only repo.
       const visibility = provider ? r.visibility : undefined;
       const isFork = provider ? r.isFork : undefined;
       const forkParent = provider ? r.forkParent : undefined;
@@ -551,18 +509,11 @@ export function persistRepoOwners(
 }
 
 /**
- * Stores the resolved repo visibility ("public" | "private" | "internal") plus
- * fork provenance (`isFork` / `forkParent`, gathered in the same probe) onto the
- * matching recent-repo records so the repo list shows the right badges
- * synchronously next open. A null `visibility` clears all three fields (the repo
- * has no resolvable remote anymore). Touches only records whose stored values
- * actually changed; no-op when nothing changed, so it never loops with its own
- * settings refetch (mirrors {@link persistRepoOwners}).
- *
- * Matched by worktree-stable identity ({@link repoIdentity}), like
- * {@link persistRepoOwners}, so a probe from one checkout updates every
- * recentRepos row for the same underlying repo (its other worktrees). Falls back
- * to the raw path when git can't resolve it — exactly today's behavior.
+ * Stores the resolved repo visibility plus fork provenance (`isFork` / `forkParent`, from
+ * the same probe) onto the matching recent-repo records. A null `visibility` clears all
+ * three (no resolvable remote anymore). Touches only changed records, so it never loops
+ * with its own settings refetch. Matched by worktree-stable identity like
+ * {@link persistRepoOwners}, falling back to the raw path when git can't resolve it.
  */
 export function persistRepoVisibility(
   entries: {
@@ -591,12 +542,10 @@ export function persistRepoVisibility(
       const resolved = byIdentity.get(rowIdentities[i]);
       if (!resolved) return r;
       const visibility = resolved.visibility || undefined;
-      // Fork provenance shares visibility's lifecycle: a null visibility (remote
-      // gone) clears the fork badge too, so it never outlives the probe. On a
-      // successful probe `isFork` is persisted as a REAL boolean (`false`
-      // included) so the probe converges — a non-fork stores `false` and never
-      // re-probes; only `undefined` (never probed / cleared) triggers a refetch.
-      // `forkParent` stays undefined-when-absent (a non-fork has no upstream).
+      // Fork provenance shares visibility's lifecycle: a null visibility (remote gone)
+      // clears the fork badge too. On a successful probe `isFork` persists as a REAL
+      // boolean (`false` included) so the probe converges — only `undefined` re-probes.
+      // `forkParent` stays undefined-when-absent.
       const isFork = visibility ? (resolved.isFork ?? false) : undefined;
       const forkParent = visibility
         ? resolved.forkParent || undefined
@@ -640,29 +589,16 @@ export function removeRecentRepo(path: string): Promise<void> {
 }
 
 /**
- * Repoints a recent-repo row from `oldPath` to `newPath` when the folder was
- * moved on disk. Rides the same serialized RMW chain as the other recent-repo
- * writes (the lost-update race above is real).
+ * Repoints a recent-repo row from `oldPath` to `newPath` when the folder moved on disk.
+ * Rides the same serialized RMW chain as the other recent-repo writes.
  *
- * This ONLY rewrites the row's `path` — it deliberately leaves `name`,
- * `lastOpenedAt`, list order, and every derived field (alias/owner/host/
- * provider/visibility/isFork/forkParent) untouched. The `name`/`lastOpenedAt`
- * refresh and the move-to-front happen in the standard `addRecentRepo` call that
- * follows in the open flow; carrying the derived fields verbatim avoids
- * reintroducing the wipe-on-reopen class fixed in `addRecentRepo` (see the
- * comment there). Any staleness (the user pointed at a different repo) self-
- * corrects: the open-time visibility probe re-persists owner + visibility on
- * every open (see probeAndPersistVisibility).
+ * It rewrites ONLY the row's `path` — `name`, `lastOpenedAt`, list order, and every derived
+ * field stay untouched; the follow-up `addRecentRepo` in the open flow refreshes them, and
+ * carrying the derived fields verbatim avoids the wipe-on-reopen class fixed there.
  *
- * Cases:
- *   - No row at `oldPath` (removed concurrently): no-op — the follow-up
- *     `addRecentRepo` creates a fresh entry anyway.
- *   - A row ALREADY exists at `newPath` (the user previously opened the repo at
- *     its new location, so a broken old row and a live new row coexist): MERGE —
- *     drop the old row, keep the new-path row in place, and carry the old row's
- *     alias onto it only when the new row has none. Never leave two rows for one
- *     path.
- *   - Otherwise: rewrite the old row in place as `{ ...old, path: newPath }`.
+ * Cases: no row at `oldPath` → no-op (the follow-up add creates one). A row ALREADY at
+ * `newPath` → MERGE: drop the old row, keep the new-path row in place, adopt the old alias
+ * only when the new row has none — never two rows for one path. Otherwise: rewrite in place.
  */
 export function relocateRecentRepo(
   oldPath: string,
@@ -683,8 +619,7 @@ export function relocateRecentRepo(
       samePath(r.path, newPath),
     );
     const recentRepos = existing
-      ? // Merge: keep the live new-path row in place, drop the broken old row,
-        // and adopt the old alias only when the new row has none of its own.
+      ? // Merge: keep the new-path row, drop the old, adopt its alias only if none.
         settings.recentRepos
           .filter((r) => !samePath(r.path, oldPath))
           .map((r) =>
@@ -701,11 +636,10 @@ export function relocateRecentRepo(
 }
 
 /**
- * Sets (or clears, with null) the optional Bitbucket token expiry date. Rides the
- * same serialized load→modify→save chain as the recent-repo writes above: it's a
- * top-level settings RMW that writes the whole `settings` object, so running it
- * unserialized would interleave with a concurrent `addRecentRepo` / visibility
- * backfill and lose one of the two writes (the documented lost-update race).
+ * Sets (or clears, with null) the optional Bitbucket token expiry date. Rides the same
+ * serialized chain as the recent-repo writes: it's a top-level settings RMW writing the
+ * whole `settings` object, so unserialized it would interleave with a concurrent
+ * `addRecentRepo` / visibility backfill and lose one of the two writes.
  */
 export function setBitbucketTokenExpiresAt(
   value: string | null,

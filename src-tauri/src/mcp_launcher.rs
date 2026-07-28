@@ -1,31 +1,20 @@
 //! Managed copy of the app executable used to run the MCP server.
 //!
-//! The "Use GitDesktop as an MCP server" config points external clients at
-//! `gitdesktop mcp …`, which — until now — ran the *installed* binary
-//! (`C:\Program Files\gitdesktop\gitdesktop.exe`). That has two Windows-only
-//! failure modes:
+//! "Use GitDesktop as an MCP server" points external clients at `gitdesktop mcp
+//! …`. Running the INSTALLED binary has two Windows-only failure modes: a live
+//! MCP process locks the install-dir exe (an `.msi` upgrade fails with "Files in
+//! Use"), and the NSIS auto-updater's `KillProcess "gitdesktop.exe"` matches on
+//! the BARE FILENAME, silently killing running MCP servers.
 //!
-//! * A live MCP server process **locks the install-dir exe**, so an `.msi`
-//!   upgrade fails with "Files in Use".
-//! * The passive NSIS auto-updater does `KillProcess "gitdesktop.exe"`, which
-//!   matches on the **bare filename** — so it silently kills running MCP
-//!   servers.
-//!
-//! Fix: run MCP from a *managed copy* at
+//! So MCP runs from a managed copy at
 //! `%LOCALAPPDATA%\com.thebguy.gitdesktop\bin\gitdesktop-mcp.exe`. Both
-//! properties are load-bearing — the path (outside the install dir) defeats the
-//! file lock, and the distinct filename defeats kill-by-name.
+//! properties are load-bearing: the path (outside the install dir) defeats the
+//! lock, the distinct filename defeats kill-by-name. Safe because MCP dispatch
+//! is argv[0]-independent (`main.rs` checks `argv[1] == "mcp"`).
 //!
-//! This is safe because MCP dispatch is `argv[0]`-independent: `main.rs` checks
-//! only `argv[1] == "mcp"`, and `McpArgs::from_env()` does `.skip(1)`. The copy
-//! therefore behaves exactly like the installed exe when invoked as
-//! `gitdesktop-mcp mcp …`.
-//!
-//! **Management is active** only on Windows *release* builds (or under the
-//! `GD_MCP_LAUNCHER_DIR` override, which exists so dev/live validation can
-//! exercise the machinery). In debug builds, on macOS/Linux, or when there's no
-//! local-data dir, management is INACTIVE and the launcher path is simply
-//! `current_exe()` — dev and Unix behavior are unchanged.
+//! Management is ACTIVE only on Windows release builds, or under the
+//! `GD_MCP_LAUNCHER_DIR` override (which exists so dev/live validation can
+//! exercise it). Otherwise the launcher path is simply `current_exe()`.
 
 use std::path::{Path, PathBuf};
 
@@ -74,15 +63,10 @@ enum Resolution {
     Inactive(PathBuf),
 }
 
-/// The managed bin directory, if management is active for this build/env.
-///
-/// Precedence (mirrors `oplog.rs`'s override → real-path resolver):
-/// 1. `GD_MCP_LAUNCHER_DIR` set (non-empty) → that dir (ALL builds).
-/// 2. Windows AND release build → `dirs::data_local_dir()/<identifier>/bin`.
-///    `data_local_dir()` (Local), NOT `data_dir()` (Roaming) — a ~50MB exe must
-///    not roam.
-/// 3. Otherwise (debug, non-Windows, or no local-data dir) → `None`: management
-///    is inactive.
+/// The managed bin directory, if management is active for this build/env:
+/// `GD_MCP_LAUNCHER_DIR` (all builds) → Windows release
+/// `data_local_dir()/<identifier>/bin` → `None` (inactive). `data_local_dir()`
+/// (Local), NOT `data_dir()` (Roaming) — a ~50MB exe must not roam.
 pub(crate) fn managed_bin_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os(LAUNCHER_DIR_ENV) {
         if !dir.is_empty() {
@@ -110,10 +94,9 @@ fn current_exe() -> AppResult<PathBuf> {
     std::env::current_exe().map_err(AppError::Io)
 }
 
-/// The resolved launcher path WITHOUT ensuring/creating the managed copy — a
-/// read-only view over [`resolve`] for callers (e.g. the global-install status
-/// probe) that only need the path to compare against, never to run. Performs
-/// zero filesystem writes; when management is inactive this is `current_exe()`.
+/// The resolved launcher path WITHOUT ensuring/creating the managed copy — for
+/// callers that only compare against it. Zero filesystem writes; equals
+/// `current_exe()` when management is inactive.
 pub(crate) fn resolved_launcher_path() -> AppResult<PathBuf> {
     match resolve()? {
         Resolution::Managed(dest) => Ok(dest),
@@ -196,12 +179,9 @@ fn sweep_strays(dir: &Path) {
     }
 }
 
-/// Copy `source` → `dest` and write the freshness marker, using Windows-safe
-/// file semantics. `dest`'s parent must be the managed bin dir.
-///
-/// Each step exists for a concrete Windows reason (see inline notes). The marker
-/// is written LAST, after the exe rename succeeds, so its presence is proof the
-/// copy completed.
+/// Copy `source` → `dest` and write the freshness marker with Windows-safe file
+/// semantics. The marker is written LAST, after the exe rename succeeds, so its
+/// presence proves the copy completed.
 fn copy_into_place(source: &Path, dest: &Path, want: &Marker) -> AppResult<()> {
     let dir = dest
         .parent()
@@ -210,22 +190,18 @@ fn copy_into_place(source: &Path, dest: &Path, want: &Marker) -> AppResult<()> {
     std::fs::create_dir_all(dir).map_err(AppError::Io)?;
     // 2. Sweep prior-crash strays before adding our own.
     sweep_strays(dir);
-    // 3. Stream-copy the source into a unique same-dir temp (fs::copy streams —
-    //    never reads the ~50MB exe into memory). Same-dir keeps step 5's rename
-    //    same-volume. fs::copy's documented contract also copies the source's
-    //    PERMISSION BITS on every platform (Unix impl fchmods the destination),
-    //    so under the `GD_MCP_LAUNCHER_DIR` override on Unix the copy inherits
-    //    the source exe's +x — no explicit chmod needed.
+    // 3. Stream-copy into a unique same-dir temp: `fs::copy` streams (never loads
+    //    the ~50MB exe) and copies permission bits, so a Unix override copy keeps
+    //    +x. Same-dir keeps step 5's rename same-volume.
     let tmp = unique_sibling(dest, "tmp");
     if let Err(e) = std::fs::copy(source, &tmp) {
         let _ = std::fs::remove_file(&tmp);
         return Err(AppError::Io(e));
     }
-    // 4. If a dest exe already exists, move it ASIDE first. Two Windows facts
-    //    make this mandatory: (a) `fs::rename` FAILS if the target exists (no
-    //    POSIX overwrite), and (b) a RUNNING image can be renamed/moved but NOT
-    //    deleted or replaced — rename-aside works even while an old MCP server
-    //    is still running that copy.
+    // 4. Move an existing dest exe ASIDE first: on Windows `fs::rename` FAILS if
+    //    the target exists (no POSIX overwrite), and a RUNNING image can be
+    //    renamed but never deleted or replaced — so rename-aside works even while
+    //    an old MCP server is still running that copy.
     let mut moved_old: Option<PathBuf> = None;
     if dest.exists() {
         let old = unique_sibling(dest, "old");
@@ -257,15 +233,11 @@ fn copy_into_place(source: &Path, dest: &Path, want: &Marker) -> AppResult<()> {
 }
 
 /// Ensure the managed launcher exists and is fresh for `version`, returning its
-/// absolute path.
-///
-/// * Management inactive → returns `current_exe()` immediately (no writes).
-/// * Active and already fresh → returns the dest path (no writes).
-/// * Active and stale/absent → runs the copy recipe, then returns the dest.
+/// absolute path (inactive ⇒ `current_exe()`; fresh ⇒ no writes; stale ⇒ copy).
 ///
 /// On ANY failure while management is active, returns an actionable error —
-/// **never** falls back to the installed exe's path, since a silent fallback
-/// would quietly reintroduce the file-lock/kill-by-name bugs this exists to fix.
+/// NEVER falls back to the installed exe's path, which would quietly
+/// reintroduce the file-lock / kill-by-name bugs this exists to fix.
 pub fn ensure(version: &str) -> AppResult<PathBuf> {
     match resolve()? {
         Resolution::Inactive(exe) => Ok(exe),
@@ -287,15 +259,12 @@ pub fn ensure(version: &str) -> AppResult<PathBuf> {
     }
 }
 
-/// If a managed launcher is already present, re-copy it when stale — otherwise
-/// no-op. Lazy (absent ⇒ no-op, so users who never used MCP never get the copy)
-/// and best-effort (errors swallowed: a stale copy still serves already-running
-/// sessions, and the next launch retries). Never panics, never blocks on I/O
-/// beyond the copy itself.
+/// Re-copy the managed launcher when present and stale; no-op when absent
+/// (lazy: users who never used MCP never get the copy). Best-effort — errors are
+/// swallowed, and the next launch retries.
 ///
-/// Only wired up on Windows (the `#[cfg(windows)]` setup hook in `lib.rs` —
-/// management is inactive elsewhere), so gate compilation to Windows + tests to
-/// keep non-Windows lib builds dead-code-free.
+/// Only wired up on Windows (the `#[cfg(windows)]` setup hook in `lib.rs`), so
+/// compilation is gated to Windows + tests to keep other builds dead-code-free.
 #[cfg(any(windows, test))]
 pub fn refresh_if_present(version: &str) {
     let Ok(Resolution::Managed(dest)) = resolve() else {
@@ -312,9 +281,7 @@ pub fn refresh_if_present(version: &str) {
 
 /// The env-free core of [`refresh_if_present`], parameterized on
 /// `source`/`dest`/`want` so tests drive it against a temp dir without touching
-/// process-global env. No-ops when `dest` is absent (lazy: never used ⇒ nothing
-/// to refresh), re-copies when stale, and swallows copy errors best-effort (a
-/// stale copy still serves already-running sessions; the next launch retries).
+/// process-global env.
 #[cfg(any(windows, test))]
 fn refresh_dest_if_stale(source: &Path, dest: &Path, want: &Marker) {
     if !dest.exists() {

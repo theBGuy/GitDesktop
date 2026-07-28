@@ -123,11 +123,10 @@ function StatusChip({
 }
 
 /**
- * Interactive status picker: the chip becomes a DropdownMenu trigger. Transitions
- * are fetched lazily on open (never on mount). Each menu item is a target status
- * (labeled by its to-status name, dot-toned by category); a self-transition back
- * to the current status renders as a checked, non-interactive current row.
- * Selecting one fires the optimistic `jira_issue_transition_to` mutation. Only
+ * Interactive status picker: the chip becomes a DropdownMenu trigger, with
+ * transitions fetched lazily on open (never on mount). Each item is a target
+ * status; a self-transition back to the current status renders as a checked,
+ * non-interactive row. Selecting fires the optimistic transition mutation. Only
  * rendered when `transitionIssues` is permitted (the static chip covers the rest).
  */
 function StatusMenu({
@@ -196,8 +195,7 @@ function StatusMenu({
         ) : (
           (transitions.data ?? []).map((t) => {
             const { Icon, tone } = statusPresentation(t.toStatusCategory);
-            // A self-transition (lands back on the current status) is shown as the
-            // checked, non-interactive current row.
+            // A self-transition → checked, non-interactive current row.
             const isCurrent = t.toStatusName === name;
             if (isCurrent) {
               return (
@@ -256,11 +254,11 @@ const UNASSIGN: ForgeUserRef = {
 
 /**
  * Single-assignee picker for the meta row (Jira issues have exactly one
- * assignee). A compact combobox: the debounced query drives `jira_user_search`,
- * arrow keys walk the results (Base UI Combobox), and an "Unassign" entry clears
- * it. Selecting fires the optimistic assign mutation; the trigger placeholder
- * reflects the live (optimistically-patched) assignee. Only rendered when
- * `assignIssues` is permitted.
+ * assignee): a compact combobox whose debounced query drives `jira_user_search`
+ * and whose results are arrow-key walkable (Base UI Combobox — no hand-rolled
+ * roving nav), plus an "Unassign" entry. Selecting fires the optimistic assign
+ * mutation; the trigger placeholder reflects the live (optimistically-patched)
+ * assignee. Only rendered when `assignIssues` is permitted.
  */
 export function JiraAssigneePicker({
   repoPath,
@@ -286,11 +284,10 @@ export function JiraAssigneePicker({
   }, [query]);
 
   const users = useJiraUserSearch(link, issueKey, debounced, open);
-  // Offer Unassign first when someone is currently assigned; the search results
-  // follow. Drop
+  // Offer Unassign first when someone is assigned; search results follow. Drop
   // users the backend couldn't resolve an accountId for (id === "") — they're
-  // unassignable by definition, and picking one would POST `{accountId: ""}`
-  // and 400 (and an empty id also slips past the no-op guard when clearing).
+  // unassignable, and picking one would POST `{accountId: ""}` → 400 (an empty
+  // id also slips past the no-op guard when clearing).
   const items: ForgeUserRef[] = [
     ...(assignee ? [UNASSIGN] : []),
     ...(users.data ?? []).filter((u) => u.id !== ""),
@@ -363,12 +360,11 @@ export function JiraAssigneePicker({
 }
 
 /**
- * Compact priority picker (meta-row). A DropdownMenu, mirroring StatusMenu: the
- * trigger shows the current priority name (or "Priority…" when empty); options
- * are fetched lazily on open (never on mount). Each row renders the priority's
- * icon through the vendored Avatar primitives (initial fallback, like
- * IssueTypeMeta). Selecting fires the optimistic set-priority mutation. Only
- * rendered when `editIssues` is permitted.
+ * Compact priority picker (meta row), mirroring StatusMenu: options fetched
+ * lazily on open (never on mount), each row rendering the priority icon through
+ * the vendored Avatar primitives (initial fallback, like IssueTypeMeta).
+ * Selecting fires the optimistic set-priority mutation. Only rendered when
+ * `editIssues` is permitted.
  */
 export function JiraPriorityMenu({
   repoPath,
@@ -417,9 +413,8 @@ export function JiraPriorityMenu({
           <DropdownMenuItem disabled>Loading priorities…</DropdownMenuItem>
         ) : priorities.isError ? (
           <DropdownMenuItem
-            // Base UI item: onClick fires the action (Radix-style onSelect
-            // TYPECHECKS — it's the DOM text-selection event — but never fires
-            // on click); closeOnClick={false} keeps the menu open for retry.
+            // Base UI item: onClick fires the action (onSelect never does, see
+            // StatusMenu); closeOnClick={false} keeps the menu open for retry.
             closeOnClick={false}
             onClick={() => priorities.refetch()}
           >
@@ -432,11 +427,9 @@ export function JiraPriorityMenu({
             <DropdownMenuCheckboxItem
               key={p.id}
               checked={p.name === priorityName}
-              // Base UI checkbox item: onClick fires the action (onSelect never
-              // does); it toggles the check itself so we drive the mutation here.
-              // closeOnClick: checkbox items default to staying OPEN (multi-
-              // toggle semantics) — priority is single-select, close like
-              // StatusMenu does.
+              // Base UI checkbox item: onClick drives the mutation (onSelect never
+              // fires) and it toggles its own check. closeOnClick because checkbox
+              // items default to staying OPEN — priority is single-select.
               closeOnClick
               onClick={() => apply(p)}
             >
@@ -456,13 +449,12 @@ export function JiraPriorityMenu({
 }
 
 /**
- * Jira-local labels editor. Jira labels are freeform, colorless strings, so this
- * is a Popover with the same interaction grammar as LabelsPopover (draft while
- * open, commit ONE set-labels mutation on close when changed) but adapted to
- * strings: a filter input that doubles as a "create" field, a checkbox list from
- * `useJiraLabels`, and an "Add …" row that creates a new label from the query.
- * Whitespace-containing input is rejected inline (Jira constraint) via a field
- * warning — never a dead disabled control. Only rendered when `editIssues`.
+ * Jira-local labels editor. Jira labels are freeform, colorless STRINGS, so this
+ * is a Popover with LabelsPopover's grammar (draft while open, commit ONE
+ * set-labels mutation on close when changed) adapted to strings: a filter input
+ * that doubles as a create field, a checkbox list from `useJiraLabels`, and an
+ * "Add …" row. Whitespace input is rejected inline (Jira constraint) via a field
+ * warning, never a dead disabled control. Only rendered when `editIssues`.
  */
 export function JiraLabelsPopover({
   repoPath,
@@ -530,11 +522,10 @@ export function JiraLabelsPopover({
     });
   }
 
-  // Commit-on-close (INCLUDING Escape) is deliberate: it mirrors the app's
-  // established labels idiom (conversations/LabelsPopover — "committed as one
-  // batched mutation on close") and GitHub's own labels UX. Changing to an
-  // explicit Save/Discard would diverge the two labels editors — if the idiom
-  // changes, both change together as their own change.
+  // Commit-on-close (INCLUDING Escape) is deliberate — it mirrors the app's
+  // labels idiom (conversations/LabelsPopover) and GitHub's own labels UX,
+  // deliberately NOT the explicit Save/Discard grammar used elsewhere. If that
+  // idiom ever changes, both editors change together.
   function handleOpenChange(o: boolean) {
     if (o) {
       setDraft(new Set(labels));
@@ -644,10 +635,9 @@ export function JiraLabelsPopover({
                   </button>
                 )}
                 <div className="mt-1 max-h-56 overflow-y-auto">
-                  {/* Honest error copy + retry when the fetch failed and there are
-                    no local (drafted/checked) options to fall back on. Any
-                    drafted labels still merge into `options` below and stay
-                    toggleable even while the fetch is failing. */}
+                  {/* Honest error copy + retry only when the fetch failed AND
+                    there are no local (drafted/checked) options to fall back
+                    on. */}
                   {options.length === 0 && !canCreate && known.isError ? (
                     <button
                       type="button"
@@ -726,12 +716,12 @@ export function JiraLabelsPopover({
 }
 
 /**
- * One comment in the detail's comment list. On the viewer's OWN comments (matched
- * by accountId) it grows an always-visible compact "⋯" actions menu (never
- * hover-revealed): Edit swaps the body for a MarkdownEditor pre-filled with the
- * comment's markdown (mod+enter submits, matching the composer); Delete confirms
- * before firing. The menu is absent entirely when neither permission is granted.
- * Editing state is local, so a background refetch never wipes an open draft.
+ * One comment in the detail's comment list. With permission it grows an
+ * always-visible compact "⋯" menu (never hover-revealed): Edit swaps the body
+ * for a MarkdownEditor pre-filled with the comment's markdown (mod+enter
+ * submits); Delete confirms first. The menu is absent entirely when neither
+ * permission is granted. Editing state is LOCAL, so a background refetch never
+ * wipes an open draft.
  */
 function JiraCommentItem({
   repoPath,
@@ -768,9 +758,9 @@ function JiraCommentItem({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const editorRef = useRef<MarkdownEditorHandle>(null);
 
-  // Focus the editor when entering edit mode — one frame LATE, because the
-  // actions DropdownMenu returns focus to its trigger as it closes, which
-  // lands AFTER the textarea's autoFocus mount and steals it (caught live).
+  // Focus the editor one frame LATE: the actions DropdownMenu returns focus to
+  // its trigger as it closes, landing AFTER the textarea's autoFocus mount and
+  // stealing it.
   useEffect(() => {
     if (!editing) return;
     const raf = requestAnimationFrame(() => editorRef.current?.focus());
@@ -936,12 +926,11 @@ function JiraCommentItem({
 }
 
 /**
- * One worklog entry. Read-only for everyone; on the viewer's OWN entries (matched
- * by accountId) and with the matching permission it grows an always-visible
- * Edit/Delete pair (never hover-revealed). Edit is an inline row: duration + note
- * inputs prefilled, Enter commits, Esc cancels. The note is send-only-when-changed
- * (unchanged ⇒ duration-only update); EMPTYING a previously non-empty note is
- * blocked with an explanatory warning (Jira can't remove a note). Delete confirms.
+ * One worklog entry. Read-only for everyone; with the matching permission it
+ * grows an always-visible Edit/Delete pair (never hover-revealed). Edit is an
+ * inline row (duration + note prefilled, Enter commits, Esc cancels). The note
+ * is send-only-when-changed; EMPTYING a previously non-empty note is blocked
+ * with a warning — Jira cannot remove a note once set. Delete confirms.
  */
 function JiraWorklogItem({
   repoPath,
@@ -1168,13 +1157,12 @@ function JiraWorklogItem({
 }
 
 /**
- * The permission-gated "Time tracking" section for the issue rail. Rendered ONLY
- * when the feature is enabled on the project (`timeTracking !== null`) — feature
- * disabled ⇒ no section at all, regardless of permissions. Shows the
- * Original/Remaining/Spent figures with a spent-vs-original progress bar (values
- * always spelled out so meaning never rests on the bar color), then — gated per
- * permission — log-work inputs, original/remaining estimate editors, and the
- * worklog list. All mutations are non-optimistic; the section re-fetches on
+ * The permission-gated "Time tracking" section. Rendered ONLY when the feature
+ * is enabled on the project (`timeTracking !== null`) — disabled ⇒ no section at
+ * all, regardless of permissions. Shows Original/Remaining/Spent with a
+ * spent-vs-original bar (values always spelled out, so meaning never rests on
+ * bar color), then — per permission — log-work inputs, estimate editors, and the
+ * worklog list. Mutations are NON-optimistic and the section re-fetches on
  * settle, so a typed value may differ from the server-derived truth that lands.
  */
 export function JiraTimeTrackingSection({
@@ -1263,7 +1251,7 @@ export function JiraTimeTrackingSection({
       <p className="text-[11px] font-medium text-muted-foreground">
         Time tracking
       </p>
-      {/* Display (always) — the three figures + optional progress bar. */}
+      {/* Display (always) — not permission-gated, unlike every block below. */}
       <div className="space-y-1">
         <div className="flex items-center justify-between gap-2 text-xs">
           <span className="text-muted-foreground">Original</span>
@@ -1352,10 +1340,8 @@ export function JiraTimeTrackingSection({
         </div>
       )}
 
-      {/* Estimates (when permitted). Commit on blur/Enter; uncontrolled-while-
-          focused (key + defaultValue), matching the GitLab TimeTrackingControls
-          idiom. Grammar-validated before send; a redundant same-value edit is
-          skipped. Server derivation may change what lands — that's expected. */}
+      {/* Estimates (when permitted) — see JiraEstimateInput: commit on
+          blur/Enter, grammar-validated, redundant same-value edits skipped. */}
       {canEditEstimates && (
         <div className="space-y-1.5 pt-0.5">
           <JiraEstimateInput
@@ -1425,10 +1411,9 @@ export function JiraTimeTrackingSection({
 /**
  * One estimate input (original or remaining). Uncontrolled-while-focused: `key`
  * on the display string + `defaultValue` reset it whenever the server value
- * changes, exactly the GitLab TimeTrackingControls idiom. Commits on blur/Enter
- * when the trimmed value both changed and is a valid Jira duration; an invalid
- * grammar surfaces an inline warning and blocks the commit. A Clear button
- * (present only when a value is set) clears the estimate (`null`).
+ * changes (the GitLab TimeTrackingControls idiom). Commits on blur/Enter when
+ * the trimmed value both changed and is a valid Jira duration; invalid grammar
+ * surfaces an inline warning and blocks the commit. Clear sets it to `null`.
  */
 function JiraEstimateInput({
   label,
@@ -1446,7 +1431,7 @@ function JiraEstimateInput({
   onSet: (estimate: string | null) => void;
 }) {
   // Local invalid flag so the warning renders while the field is focused (the
-  // input itself stays uncontrolled). Reset whenever the server value changes.
+  // input itself stays uncontrolled).
   const [invalid, setInvalid] = useState(false);
 
   function commit(raw: string) {
@@ -1510,8 +1495,7 @@ function JiraEstimateInput({
 
 /**
  * Detail view for one Jira issue: header (key + summary + status chip), a muted
- * meta row (type, priority, assignee, reporter, due date / resolution), agile
- * fields, label chips, time tracking, the description and comments rendered as
+ * meta row, agile fields, label chips, time tracking, description + comments as
  * markdown, and a "View in Jira" link-out. Every write affordance (transition,
  * assign, due date, priority, labels, comment, time tracking) is gated on the
  * caller's Jira project permissions — anything not permitted simply isn't

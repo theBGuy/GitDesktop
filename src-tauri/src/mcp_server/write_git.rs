@@ -1,23 +1,19 @@
-//! Local-git WRITE tools (opt-in via `--allow-git-write`, destructive ops also need
+//! Local-git WRITE tools (opt-in via `--allow-git-write`; destructive ops also need
 //! `--allow-destructive`).
 //!
-//! Three groups live here, all in the git-ops domain:
-//! - RECOVERABLE mutations (stage/commit/branch/push/pull/fetch/stash/merge/rebase/
-//!   revert/cherry-pick/tag), gated on [`GitDesktopMcp::ensure_git_write`] and annotated
-//!   non-destructive.
-//! - UNGATED reads (list_stashes, preview_merge) — reads always available, no annotations.
-//! - DESTRUCTIVE mutations (delete_branch/discard/reset/force_push/delete_remote_branch/
-//!   drop_stash/delete_tag), gated on [`GitDesktopMcp::ensure_destructive`] (needs BOTH
-//!   `--allow-git-write` and `--allow-destructive`) and annotated `destructive_hint`.
+//! Three groups: RECOVERABLE mutations gated on [`GitDesktopMcp::ensure_git_write`];
+//! two UNGATED reads (list_stashes, preview_merge); and DESTRUCTIVE mutations gated on
+//! [`GitDesktopMcp::ensure_destructive`], which requires BOTH flags.
 //!
-//! Every tool delegates to the matching `git_*_core` in `crate::git::*`, which routes
-//! its mutations through `self.state`'s per-repo lock (`run_git_mutating`) so concurrent
-//! MCP calls don't fight over `.git/index.lock`. User-supplied branch/rev/path strings
-//! are rejected with [`ensure_not_flag`] before they reach git argv; `delete_branch`,
-//! `delete_remote_branch`, `checkout_branch`, `create_branch` (name), and `rename_branch`
-//! (both `from` and `to`) additionally refuse `gd/session/*` agent-session branches —
-//! mutating one breaks session Resume, and creating/renaming INTO that namespace would
-//! yield an invisible (UI-filtered) branch.
+//! Mutations delegate to the matching `git_*_core`, which routes through `self.state`'s
+//! per-repo lock (`run_git_mutating`) so concurrent MCP calls don't fight over
+//! `.git/index.lock`. User-supplied branch/rev/path strings go through
+//! [`ensure_not_flag`] before reaching git argv, and the branch-TARGETING tools —
+//! create_branch (name), checkout_branch, rename_branch (from AND to), push (branch),
+//! delete_branch, delete_remote_branch — additionally refuse `gd/session/*`: mutating or
+//! publishing one breaks session Resume, and creating or renaming INTO that namespace
+//! yields an invisible (UI-filtered) branch. (merge_branch / rebase_branch take a branch
+//! name but only READ it, so they carry no such guard.)
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content};
@@ -334,8 +330,6 @@ impl GitDesktopMcp {
     ) -> Result<CallToolResult, McpError> {
         self.ensure_git_write()?;
         ensure_not_flag(&args.name, "branch name")?;
-        // Refuse the gd/session/* prefix: every UI surface filters it, so a branch
-        // created there would be invisible (namespace pollution).
         ensure_not_session_branch(&args.name)?;
         if let Some(from) = &args.from {
             ensure_not_flag(from, "start point")?;
@@ -346,9 +340,6 @@ impl GitDesktopMcp {
             args.name.clone(),
             args.checkout,
             args.from,
-            // Opt-in --no-track: agents basing on a remote-tracking ref should set
-            // this so the branch publishes under its own name instead of
-            // fast-forwarding the tracked ref on a later push.
             args.no_track,
         )
         .await
@@ -392,8 +383,6 @@ impl GitDesktopMcp {
         self.ensure_git_write()?;
         ensure_not_flag(&args.from, "branch name")?;
         ensure_not_flag(&args.to, "branch name")?;
-        // Protect agent-session branches: renaming one breaks session Resume, and
-        // renaming INTO gd/session/* would create an invisible (filtered) branch.
         ensure_not_session_branch(&args.from)?;
         ensure_not_session_branch(&args.to)?;
         crate::git::branches::git_rename_branch_core(
@@ -423,9 +412,7 @@ impl GitDesktopMcp {
         self.ensure_git_write()?;
         if let Some(b) = &args.branch {
             ensure_not_flag(b, "branch name")?;
-            // Protect agent-session branches: they're filtered from every UI
-            // surface, so pushing one would publish an invisible branch and
-            // could break session Resume semantics.
+            // Pushing a gd/session/* branch would publish a branch every UI surface hides.
             ensure_not_session_branch(b)?;
         }
         if let Some(r) = &args.remote {
@@ -869,11 +856,9 @@ mod tests {
         }
     }
 
-    /// With ALL flags false, EVERY tool in this module that is gated must return its
-    /// gate error before doing any work. Recoverable tools name --allow-git-write;
-    /// destructive tools name --allow-git-write too (both flags missing). The two
-    /// ungated reads (list_stashes, preview_merge) are intentionally NOT here — they
-    /// have no gate. Params carry throwaway values — the gate fires first.
+    /// With ALL flags false, every gated tool must error before doing work. Destructive
+    /// tools name --allow-git-write (both flags missing). The two ungated reads
+    /// (list_stashes, preview_merge) are deliberately absent. Params are throwaway.
     #[tokio::test]
     async fn all_gated_tools_error_when_no_flags() {
         let h = GitDesktopMcp::with_options("/tmp/x".to_string(), false, false, false, false);
@@ -890,7 +875,6 @@ mod tests {
             }};
         }
 
-        // Recoverable tools: gated on --allow-git-write.
         assert_gated!(h.stage_files(Parameters(args_stage())), "--allow-git-write");
         assert_gated!(
             h.unstage_files(Parameters(args_stage())),
@@ -980,7 +964,7 @@ mod tests {
             "--allow-git-write"
         );
 
-        // Destructive tools: both flags missing, so --allow-git-write is named.
+        // Destructive tools: with BOTH flags missing, --allow-git-write is the one named.
         assert_gated!(
             h.delete_branch(Parameters(BranchNameArgs { name: "b".into() })),
             "--allow-git-write"
@@ -1087,9 +1071,8 @@ mod tests {
         assert!(ensure_not_session_branch("wip/gd/session/x").is_ok());
     }
 
-    /// create_branch (name) and rename_branch (to) must also refuse the gd/session/*
-    /// namespace, so an agent can't create an invisible (UI-filtered) branch. The guard
-    /// fires before any repo access, so no real repo is needed.
+    /// create_branch (name) and rename_branch (to) must refuse the gd/session/* namespace
+    /// so an agent can't create an invisible branch. The guard fires before any repo access.
     #[tokio::test]
     async fn session_branch_guard_refuses_creating_and_renaming_into_namespace() {
         // git_write enabled (4th positional), everything else off.
@@ -1152,14 +1135,10 @@ mod tests {
         assert_eq!(explicit.remote.as_deref(), Some("upstream"));
     }
 
-    /// The session-branch guard is wired into the branch-mutating tools even when the
-    /// gate is open: a gd/session/* target is refused with the actionable message
-    /// BEFORE any git runs. Covers delete_branch, rename_branch, delete_remote_branch,
-    /// and checkout_branch.
+    /// With the gates OPEN, a gd/session/* target is still refused BEFORE any git runs —
+    /// delete_branch, rename_branch, delete_remote_branch, checkout_branch.
     #[tokio::test]
     async fn branch_tools_refuse_session_branch_when_gated_open() {
-        // Fully-permissioned handler so the gate is open and the session guard is the
-        // thing under test.
         let h = GitDesktopMcp::with_options("/tmp/x".to_string(), false, false, true, true);
 
         let err = h

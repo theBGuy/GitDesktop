@@ -1,7 +1,6 @@
-//! Throwaway `git worktree`s for agent sessions. Every write-capable agent run
-//! happens inside one of these — an isolated branch checkout in a directory
-//! *outside* the repo, so the user's working tree, index, and current branch are
-//! never touched no matter what the agent does. See `docs/agent-sessions.md`.
+//! Throwaway `git worktree`s for agent sessions: every write-capable agent run
+//! happens in an isolated branch checkout OUTSIDE the repo, so the user's working
+//! tree, index, and current branch are never touched no matter what the agent does.
 
 use std::path::PathBuf;
 
@@ -140,14 +139,12 @@ pub async fn git_worktree_list(repo_path: String) -> AppResult<Vec<WorktreeInfo>
 }
 
 /// Lists the repo's **user** worktrees for the worktree manager — every checkout
-/// except the ones agent sessions own (those are app-internal and protected).
-/// The main worktree is always included (first, undeletable).
-///
-/// Prunes first: a worktree whose directory was deleted out-of-band (in Explorer,
-/// say) leaves a stale admin entry + a branch lock. Since such entries are also
-/// filtered from the list, the manager would otherwise have no way to clear them,
-/// so every list self-heals. Git never prunes a *locked* worktree, so a worktree
-/// on a temporarily-disconnected drive is safe if the user locked it.
+/// except the app-internal agent-session ones; the main worktree is always first
+/// and undeletable. Prunes first so stale admin entries (directory deleted
+/// out-of-band) self-heal — such an entry also holds a branch lock, and it's
+/// filtered from the list, so the manager could never clear it otherwise. Git never
+/// prunes a *locked* worktree, so one on a temporarily-disconnected drive is safe if
+/// the user locked it.
 #[tauri::command]
 pub async fn git_worktree_list_user(
     app: AppHandle,
@@ -194,13 +191,11 @@ pub async fn git_worktree_list_user(
     Ok(user)
 }
 
-/// Creates a **user** worktree at `path` for the worktree manager. With
-/// `new_branch`, branches a fresh `branch` off `base_ref` (default HEAD) and
-/// checks it out there (`worktree add -b <branch> <path> <base>`); otherwise it
-/// checks out the *existing* `branch` (`worktree add <path> <branch>`). Distinct
-/// from `git_worktree_create`, which makes app-internal `gd/session/*` worktrees
-/// under app-data. Fails loudly (git's own message) when the branch is already
-/// checked out elsewhere — git forbids double-checkout — rather than `--force`-ing.
+/// Creates a **user** worktree at `path`. With `new_branch`, branches `branch` off
+/// `base_ref` (default HEAD) and checks it out (`worktree add -b`); otherwise checks
+/// out the EXISTING `branch`. Distinct from `git_worktree_create`, which makes
+/// app-internal `gd/session/*` worktrees under app-data. Never `--force`s: a branch
+/// already checked out elsewhere fails loudly with git's own message.
 #[tauri::command]
 pub async fn git_worktree_add_user(
     state: State<'_, AppState>,
@@ -375,14 +370,12 @@ pub async fn git_worktree_repair(
     Ok(())
 }
 
-/// True when the worktree at `path` still holds uncommitted or untracked changes
-/// worth protecting. Used to decide whether a *non-forced* removal that git
-/// refused is safe to finish ourselves: a clean worktree (ignored files like
-/// `node_modules` don't count under `--porcelain`) is safe to delete, whereas real
-/// changes must be preserved. If git can't inspect the worktree at all — its admin
-/// files were already torn down partway through a failed remove — there's nothing
-/// left to protect, so treat it as clean. A spawn failure / timeout is treated
-/// conservatively as "maybe dirty" so we never delete blindly on an unknown state.
+/// True when the worktree at `path` holds uncommitted or untracked work worth
+/// protecting — the gate for finishing a non-forced removal git refused. Ignored
+/// files (`node_modules`) don't count under `--porcelain`. git failing to inspect
+/// the worktree at all (admin files already torn down mid-remove) → false, nothing
+/// left to protect; a spawn failure/timeout → true, so an unknown state is never
+/// deleted blindly.
 async fn worktree_has_uncommitted_changes(path: &str) -> bool {
     match run_git_raw(Some(path), &["status", "--porcelain"], DEFAULT_TIMEOUT).await {
         Ok(out) if out.code == 0 => !out.stdout_lossy().trim().is_empty(),
@@ -407,20 +400,17 @@ pub async fn git_worktree_remove(
         args.push("--force");
     }
     args.push(&path);
-    // `git worktree remove` also deletes the working directory, but its recursive delete
-    // mishandles Windows reparse points: a worktree with installed deps (pnpm links
-    // `node_modules/*` into `.pnpm/` with junctions/symlinks) fails with
-    // `failed to delete '<path>': Invalid argument`, leaving the worktree half-removed. On a
-    // forced removal, finish the job ourselves — `std::fs::remove_dir_all` deletes reparse
-    // points as links (hardened for exactly this since Rust 1.63) where git can't — then
-    // reconcile git's now-dangling admin entry with `prune`.
+    // `git worktree remove` deletes the directory itself, but its recursive delete
+    // mishandles Windows reparse points: a worktree with pnpm-installed deps
+    // (`node_modules/*` junctioned into `.pnpm/`) fails with `failed to delete
+    // '<path>': Invalid argument`, half-removed. Finish it ourselves —
+    // `std::fs::remove_dir_all` deletes reparse points as links (hardened since Rust
+    // 1.63) — then `prune` to reconcile git's dangling admin entry.
     if let Err(git_err) = run_git_mutating(&state, &repo_path, &args, DEFAULT_TIMEOUT).await {
-        // On a NON-forced removal, git may have refused for one of two reasons: it's
-        // protecting real uncommitted work (Keep passes `force=false` precisely so a
-        // worktree with unsaved changes is never silently discarded), or its own
-        // recursive delete choked on a Windows reparse point (see above) after already
-        // passing the clean check. Only finish the delete ourselves when there's nothing
-        // to protect — otherwise surface git's error so the user keeps their changes.
+        // A NON-forced refusal has two causes: git is protecting real uncommitted work
+        // (Keep passes force=false precisely for that), or its recursive delete choked
+        // on a reparse point after the clean check passed. Only finish the delete when
+        // there's nothing to protect; otherwise surface git's error.
         if !force && worktree_has_uncommitted_changes(&path).await {
             return Err(git_err);
         }
@@ -438,9 +428,9 @@ pub async fn git_worktree_remove(
                 )));
             }
         }
-        // Reconcile git's admin entry best-effort: on current git it's already gone (git drops
-        // `.git/worktrees/<id>` before deleting the directory, which is the step that failed), so
-        // a prune hiccup must never turn a successful removal into a reported failure.
+        // Best-effort reconcile: current git drops `.git/worktrees/<id>` BEFORE deleting
+        // the directory (the step that failed), so the admin entry is already gone — a
+        // prune hiccup must never turn a successful removal into a reported failure.
         let _ = run_git_mutating(&state, &repo_path, &["worktree", "prune"], DEFAULT_TIMEOUT).await;
     }
     // The branch can only be deleted once it's no longer checked out (i.e. after
@@ -539,13 +529,11 @@ pub async fn git_worktree_squash(
     Ok(true)
 }
 
-/// Re-creates a worktree for a previously *kept* session, checking out its
-/// EXISTING branch (not a fresh `-b` one) at `path`, so the user can resume work
-/// where they left off. Prunes first in case a stale admin entry lingers from
-/// the worktree's prior removal. The branch must not be checked out elsewhere
-/// (Keep removes the worktree before this is ever called), and `base` is
-/// unchanged on the frontend so the cumulative `base..HEAD` diff still spans all
-/// turns.
+/// Re-creates a worktree for a previously *kept* session on its EXISTING branch
+/// (not a fresh `-b`), so the user resumes where they left off. Prunes first in case
+/// a stale admin entry lingers from the prior removal; the branch must not be checked
+/// out elsewhere (Keep removes the worktree first). `base` is unchanged frontend-side
+/// so the cumulative `base..HEAD` diff still spans all turns.
 #[tauri::command]
 pub async fn git_worktree_resume(
     state: State<'_, AppState>,
@@ -662,7 +650,6 @@ fn parse_worktree_list(porcelain: &str) -> Vec<WorktreeInfo> {
     };
     for line in porcelain.lines() {
         if let Some(p) = line.strip_prefix("worktree ") {
-            // A new stanza starts; emit the previous one first.
             flush(&mut path, &mut branch, &mut out);
             path = Some(p.to_string());
         } else if let Some(b) = line.strip_prefix("branch ") {
@@ -909,11 +896,9 @@ prunable gitdir file points to non-existent location
         );
     }
 
-    /// The safety gate for finishing a non-forced worktree removal ourselves:
-    /// a clean checkout (ignored `node_modules` don't count) → false so we may
-    /// delete it; real uncommitted/untracked work → true so we bail and keep it;
-    /// a path git can't read as a repo (a half-torn-down worktree) → false, since
-    /// there's nothing left to protect.
+    /// The non-forced-removal safety gate: a clean checkout (ignored `node_modules`
+    /// don't count) → false; real uncommitted/untracked work → true; a path git can't
+    /// read as a repo → false.
     #[tokio::test]
     async fn worktree_has_uncommitted_changes_gates_on_real_work() {
         let _base = tempfile::Builder::new()

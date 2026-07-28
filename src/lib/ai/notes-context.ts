@@ -13,9 +13,9 @@ import { forgePrExternalReviews, forgePrView } from "@/lib/git/api";
  * The lifted comment MUST be the PR author's own: the notes section carries
  * author-level trust in the security review prompt (a documented accepted-risk
  * disposition), so an ungated lift would let any commenter on a public-repo PR
- * post a marker-headed comment and be treated as the author (round-1 security
- * finding, PR #91). Dialog- and MCP-posted notes are the author's own login, so
- * they pass; do not remove this gate.
+ * post a marker-headed comment and be treated as the author. Dialog- and
+ * MCP-posted notes are the author's own login, so they pass; do not remove this
+ * gate.
  */
 
 /** Wire format: the "Notes for reviewers" dialog posts a conversation comment
@@ -60,9 +60,9 @@ export async function resolveReviewerNotesContext(
   // Newest conversation comment BY THE PR AUTHOR whose first non-empty line
   // carries the notes anchor. Reader is looser than the poster on the marker text
   // (see the anchor's doc), but authorship is a hard security gate: the notes feed
-  // an author-trusted prompt section (round-1 finding, PR #91). Case-insensitive
-  // to tolerate forge login-casing drift — a stricter compare can only DROP the
-  // author's own notes, never let a non-author through.
+  // an author-trusted prompt section. Case-insensitive to tolerate forge
+  // login-casing drift — a stricter compare can only DROP the author's own notes,
+  // never let a non-author through.
   let newest: (typeof items)[number] | undefined;
   for (const it of items) {
     if (it.kind !== "comment") continue;

@@ -36,11 +36,9 @@ function capHead(text: string, max: number): string {
  *  KEEP IN SYNC with `HUNK_MAX_LINES` in src-tauri/src/mcp_server/mod.rs. */
 const HUNK_MAX_LINES = 24;
 
-/** Caps a review-thread diff hunk to its last `maxLines` lines (GitHub's
- *  `diffHunk` ends at the anchored line, so the tail is the relevant context),
- *  prefixing a marker when it overflows. Mirrors `cap_hunk_lines` in
- *  src-tauri/src/mcp_server/mod.rs — an already-short (or empty) hunk is
- *  returned unchanged. */
+/** Caps a review-thread diff hunk to its last `maxLines` lines — GitHub's
+ *  `diffHunk` ends at the anchored line, so the tail is the relevant context.
+ *  Mirrors `cap_hunk_lines` in src-tauri/src/mcp_server/mod.rs. */
 function capHunkLines(hunk: string, maxLines: number): string {
   // Mirror Rust `str::lines()` (mcp_server/mod.rs): strip one trailing line
   // terminator, then split on \r?\n so CRLF and a final newline can't shift the
@@ -50,20 +48,15 @@ function capHunkLines(hunk: string, maxLines: number): string {
   return `…[hunk truncated]\n${lines.slice(lines.length - maxLines).join("\n")}`;
 }
 
-/** Drop the always-default empty fields from one comment/thread object,
- *  returning a shallow copy without them. Removes a key ONLY when it holds its
- *  empty default; every other key (load-bearing `false`s like
- *  `isResolved`/`viewerDidAuthor`, and the `id` write tools consume even when
- *  empty) is kept. Explicit per-key list on purpose — a generic "remove falsy"
- *  strip would eat those load-bearing `false`s.
- *
- *  KEEP IN SYNC: src-tauri/src/mcp_server/read_forge.rs
- *  (`strip_empty_comment_defaults`) mirrors this drop-list character-for-character.
- *
- *  INVARIANT: the param is deliberately `object`, not `<T extends Record<string,
- *  unknown>>`. Callers pass interface types (`PrThreadOut` etc.) that have no index
- *  signature and so do not extend `Record<string, unknown>`; the generic form fails
- *  tsc. */
+/** Drop the always-default empty fields from one comment/thread object (shallow
+ *  copy). Removes a key ONLY when it holds its empty default; the explicit
+ *  per-key list is on purpose — a generic "remove falsy" strip would eat
+ *  load-bearing `false`s (`isResolved`/`viewerDidAuthor`) and the empty `id`
+ *  write tools consume. KEEP IN SYNC: `strip_empty_comment_defaults` in
+ *  src-tauri/src/mcp_server/read_forge.rs mirrors this drop-list
+ *  character-for-character. Param is `object`, not a `Record<string, unknown>`
+ *  generic — callers pass index-signature-less interfaces (`PrThreadOut`) that
+ *  fail the generic form under tsc. */
 function stripEmptyCommentDefaults(obj: object): Record<string, unknown> {
   const out: Record<string, unknown> = { ...obj };
   // (key, empty-default) pairs — remove the key only on an exact match.
@@ -117,10 +110,9 @@ function formatCommits(commits: CommitSummary[]): string {
 
 const READ_FILE_CAP = 200_000;
 const FORGE_DIFF_CAP = 100_000;
-// `git_file_base64` allows files up to 20 MB. We atob+decode the WHOLE base64
-// payload in the renderer before applying READ_FILE_CAP, so guard on the raw
-// base64 length first to avoid a large renderer allocation for a file we'd only
-// cap to 200k anyway. Base64 length ≈ 4/3 × bytes, so ~1.4M chars ≈ a 1 MB file.
+// The whole base64 payload is atob+decoded in the renderer before READ_FILE_CAP
+// applies, so cap the raw base64 first (git_file_base64 allows up to 20 MB).
+// Base64 ≈ 4/3 × bytes ⇒ ~1.4M chars ≈ a 1 MB file.
 const READ_FILE_BASE64_MAX = 1_400_000;
 
 /**
@@ -147,10 +139,9 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
         try {
           const bad = unsafePath(path);
           if (bad) return `Error: ${bad}`;
-          // Always read at a rev (the PR head by default) — never the working
-          // tree, which a plain path join could use to reach in-repo-but-
-          // sensitive files (`.git/config`, `.env`) a rev read can't. A review
-          // always has a head in practice.
+          // Always read at a rev (PR head by default), never the working tree — a path
+          // join into the tree could reach sensitive in-repo files (`.git/config`, `.env`)
+          // that a rev read can't.
           const rev = ref ?? ctx.headSha;
           if (!rev)
             return "Error: no PR head available — pass an explicit ref to read at.";
@@ -285,7 +276,6 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
     }),
   };
 
-  // Remote-PR-only tools: only meaningful when there's a forge PR number.
   if (ctx.prNumber !== undefined) {
     const prNumber = ctx.prNumber;
     tools.pull_request_diff = tool({
@@ -364,8 +354,8 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
       execute: async ({ include_diff_hunk }, { abortSignal }) => {
         try {
           if (abortSignal?.aborted) return "Error: cancelled";
-          // Origin-pinned (package B2 recorded gap): the AI PR-review tools read
-          // the fork's own PR; upstream-lens AI review is a follow-up.
+          // Origin-pinned: these tools read the fork's own PR (upstream-lens AI review is
+          // a follow-up).
           const [pr, reviewThreads] = await Promise.all([
             forgePrView(ctx.repoPath, prNumber, "origin"),
             forgePrReviewThreads(ctx.repoPath, prNumber, "origin"),
@@ -379,12 +369,9 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
               ? capHunkLines(t.diffHunk, HUNK_MAX_LINES)
               : "",
           }));
-          // KEEP IN SYNC: src-tauri/src/mcp_server/read_forge.rs (the
-          // list_pull_request_comments MCP tool) composes the same shape — the
-          // diffHunk cap AND the empty-field pruning below.
-          // Prune always-default empty fields from every comment/thread object
-          // so agent consumers (this same JSON feeds the AI review) don't pay
-          // tokens for e.g. `authorAvatarUrl:""` or `isMinimized:false`.
+          // KEEP IN SYNC: src-tauri/src/mcp_server/read_forge.rs composes the same shape
+          // (diffHunk cap + the empty-field pruning below), so agent consumers don't pay
+          // tokens for `authorAvatarUrl:""` / `isMinimized:false`.
           const composed = {
             number: prNumber,
             comments: pr.comments.map(stripEmptyCommentDefaults),

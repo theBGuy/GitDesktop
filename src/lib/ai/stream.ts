@@ -31,9 +31,8 @@ export interface CliStreamOpts {
   /** Reasoning/effort level for the run ("" = provider default). Optional — only
    *  the repo-aware flows that expose a picker (e.g. Plan) set it. */
   effort?: string;
-  /** Attach GitDesktop's own read-only MCP server to the run (reviews only), so an
-   *  agentic reviewer can pull the full PR diff and read files at any ref. Default
-   *  off keeps every other CLI flow (Debug with AI, generation) byte-identical. */
+  /** Attach GitDesktop's own read-only MCP server to the run (reviews only), so an agentic
+   *  reviewer can pull the full PR diff and read files at any ref. Default off. */
   mcpSelf?: boolean;
   /** Kill-timeout override for the run, in seconds. Review flows resolve it from
    *  the user's Review-timeout setting; generation / Debug-with-AI callers omit
@@ -136,32 +135,26 @@ export async function runCliStream({
           } else if (event.kind === "status") {
             setStatus(event.text);
           } else if (event.kind === "tool") {
-            // Make the agent's exploration visible in the panel's status line
-            // (previously silent between the CLI's own status events).
             setStatus(toolStatusLine(event.tool, event.target));
           } else if (event.kind === "done") {
             settled = true;
             onCost?.(event.costUsd);
-            // An errored run keeps whatever streamed (partial text + the error is
-            // today's UX) — no replace/strip.
+            // An errored run keeps whatever streamed — partial text plus the error, no strip.
             if (event.isError) {
               reject(new Error("The run ended with an error."));
               return;
             }
-            // The terminal event's text IS the agent's final answer — the
-            // authoritative review body. The accumulated delta buffer additionally
-            // holds any tool-using narration ("Let me check…") that streamed ahead
-            // of it; adopting the buffer here (the old length heuristic) leaked that
-            // narration into the review. So: the final answer wins (falling back to
-            // the buffer only for a degenerate empty terminal event), and the
-            // narration is peeled off as separate "thoughts" for a disclosure.
+            // The terminal event's text IS the agent's final answer. The delta buffer
+            // additionally holds any tool-using narration ("Let me check…") that streamed
+            // ahead of it, and adopting the buffer here leaks that narration into the review
+            // — so the final answer wins (buffer only as a fallback for a degenerate empty
+            // terminal event) and the narration is peeled off as separate "thoughts".
             const final = event.text.trim() ? event.text : buffer;
             setText(final);
-            // Peel narration ONLY on a genuine suffix match (deltas may prepend a
-            // separator before the final answer, so the buffer ends with it). A
-            // mismatched buffer is NOT narration — it's a fallen-short delta stream
-            // (coalesced deltas on a non-agentic run) or a drifted wire format; a
-            // spurious "thoughts" copy of the review body is worse than no thoughts.
+            // Peel narration ONLY on a genuine suffix match (deltas may prepend a separator
+            // before the final answer). A mismatched buffer is NOT narration — it's a
+            // fallen-short delta stream or a drifted wire format, and a spurious "thoughts"
+            // copy of the review body is worse than no thoughts.
             if (
               event.text.trim() &&
               buffer !== event.text &&
@@ -202,9 +195,8 @@ export interface StreamAiOpts {
   repoPath: string;
   /** PR head SHA for a CLI repo-aware worktree; omit for non-PR flows. */
   headSha?: string;
-  /** Attach GitDesktop's own read-only MCP server to the run (reviews only).
-   *  Omitted by non-review callers (Debug with AI, generation), keeping them
-   *  byte-identical. */
+  /** Attach GitDesktop's own read-only MCP server to the run (reviews only); omitted by
+   *  non-review callers (Debug with AI, generation). */
   mcpSelf?: boolean;
   /** Kill-timeout override in seconds for a CLI review run, from the user's
    *  Review-timeout setting. CLI path only — the HTTP branch ignores it; other
@@ -213,9 +205,9 @@ export interface StreamAiOpts {
   /** True only for the AI-review flows the Review-timeout setting governs; drives
    *  the timed-out message's settings hint. CLI path only. */
   timeoutConfigurable?: boolean;
-  /** Native AI-SDK review tools for an HTTP-provider agentic review — the model
-   *  explores via a tool loop (no MCP, no worktree). HTTP agentic reviews only;
-   *  CLI and non-review callers omit it, keeping their path byte-identical. */
+  /** Native AI-SDK review tools for an HTTP-provider agentic review — the model explores
+   *  via a tool loop (no MCP, no worktree). HTTP agentic reviews only; CLI and non-review
+   *  callers omit it. */
   reviewTools?: ToolSet;
   setText: (text: string) => void;
   setStatus: (status: string) => void;
@@ -298,9 +290,8 @@ export async function streamAi({
     system,
     prompt,
     abortSignal: abort.signal,
-    // Only reached for HTTP providers — CLI providers returned early above.
-    // Passing repoPath regardless keeps every stream call carrying it, so the
-    // invariant stays grep-clean.
+    // HTTP-only path (CLI returned early); repoPath is passed regardless so every stream
+    // call carries it and the invariant stays grep-clean.
     repoPath,
   })) {
     buffer += chunk;

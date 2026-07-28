@@ -61,10 +61,9 @@ export interface SessionTurn {
   status: TurnStatus;
   /** Transient tool-activity note while running. */
   statusText: string;
-  /** The interleaved render of this turn — prose runs + tool steps in order
-   *  (`narration` is the same prose, concatenated, kept for persistence/parsing).
-   *  In-memory only, like `statusText`; absent on a reloaded session (the renderer
-   *  falls back to `narration`). */
+  /** The interleaved render of this turn — prose runs + tool steps in order (`narration` is
+   *  the same prose concatenated, kept for persistence/parsing). In-memory only; absent on a
+   *  reloaded session, where the renderer falls back to `narration`. */
   segments?: TranscriptSegment[];
   /** This turn's checkpoint commit (null = the turn changed nothing). */
   commitHash: string | null;
@@ -101,10 +100,9 @@ export interface AgentSession {
    *  session) — lets a host session resume the right conversation (each shares its
    *  CLI home). Unset for Claude / Copilot / container / pre-turn-1. */
   nativeSessionId?: string;
-  /** If this session is one arm of a best-of-N ensemble (the same task run several
-   *  ways), the shared id of that ensemble — set at creation, identical across
-   *  members. In-memory only for now: siblings group within a run, not across an
-   *  app restart (the sessions themselves persist; only the grouping is ephemeral). */
+  /** If this session is one arm of a best-of-N ensemble, the shared id of that ensemble —
+   *  set at creation, identical across members. In-memory only: siblings group within a run,
+   *  not across an app restart (the sessions persist; only the grouping is ephemeral). */
   ensembleId?: string;
   /** A turn is currently streaming for THIS session (sessions run independently). */
   running: boolean;
@@ -130,12 +128,10 @@ const SYSTEM_PROMPT =
  * The handoff record that seeds the new-session composer.
  *
  * Everything past `prompt` is the composer's start-state, carried across a Settings
- * round-trip: the isolation note's "Set up in Settings…" jump unmounts
- * RepositoryView (App.tsx renders it behind `view === "repo"`), so the composer's
- * local state would otherwise be lost — you'd come back from adding an agent to the
- * container image only to find the composer re-seeded to a different agent, and the
- * task would run as something you didn't choose. A plain handoff ("Implement this
- * issue") sets none of them and the composer keeps its own values.
+ * round-trip: the isolation note's "Set up in Settings…" jump unmounts RepositoryView
+ * (App.tsx renders it behind `view === "repo"`), so the composer's local state would
+ * otherwise be lost and the task could run as an agent the user didn't choose. A plain
+ * handoff sets none of them and the composer keeps its own values.
  */
 export interface PendingTask {
   repoPath: string;
@@ -164,11 +160,9 @@ interface SessionsState {
   busyId: string | null;
   /** Whether persisted sessions have been loaded + reconciled (gates persisting). */
   hydrated: boolean;
-  /** A task to seed the new-session ("Delegate") composer with — set by a handoff
-   *  ("Implement this issue" / "Implement now" from the plan canvas), consumed and
-   *  cleared by the activation composer once it loads it. Lets the handoff cross
-   *  the tab/Activity boundary without an imperative ref. `repoPath` scopes it so
-   *  only that repo's composer picks it up. */
+  /** A task to seed the new-session ("Delegate") composer — set by a handoff, consumed and
+   *  cleared by the activation composer. Crosses the tab/Activity boundary without an
+   *  imperative ref; `repoPath` scopes it to that repo's composer. */
   pendingTask: PendingTask | null;
   hydrate: () => Promise<void>;
   setActive: (id: string | null) => void;
@@ -185,11 +179,10 @@ interface SessionsState {
      *  Isolation row). Absent = follow Settings → AI. */
     isolation?: "worktree" | "container",
   ) => Promise<string | null>;
-  /** Best-of-N: start one session per `arm` on the SAME task, sharing one ensemble
-   *  id, so they can be reviewed side by side and the best one kept. Each arm runs
-   *  its own agent/model/effort — diversity is the point (different providers attack
-   *  a task differently). Returns the new session ids (selects the first). The cost
-   *  guardrail is the caller's job. */
+  /** Best-of-N: start one session per `arm` on the SAME task, sharing one ensemble id, so
+   *  they can be reviewed side by side and the best kept. Each arm runs its own
+   *  agent/model/effort — diversity is the point. Returns the new ids (selects the first);
+   *  the cost guardrail is the caller's job. */
   startEnsemble: (
     repoPath: string,
     prompt: string,
@@ -279,11 +272,10 @@ function removeSession(get: Get, set: SetState, id: string) {
 }
 
 /**
- * Runs session `id`'s LAST (already-appended) turn: streams the agent into it,
- * then commits the turn as a checkpoint. Each `set` maps over the CURRENT
- * sessions array and touches only this id, so concurrent sessions don't clobber
- * each other. Every write re-checks the session still exists (it may have been
- * discarded mid-stream).
+ * Runs session `id`'s LAST (already-appended) turn: streams the agent into it, then commits
+ * the turn as a checkpoint. Each `set` maps over the CURRENT sessions array and touches only
+ * this id, so concurrent sessions don't clobber each other; every write re-checks the
+ * session still exists (it may have been discarded mid-stream).
  */
 async function runTurn(
   get: Get,
@@ -305,11 +297,10 @@ async function runTurn(
     nativeSessionId,
   } = s0;
 
-  // Resolve the session's opted-in MCP server ids to their CURRENT registry
-  // definitions (re-read each turn, so editing a server applies next turn). Drop
-  // any no longer OFFERED in this session's repo — re-scoping a server away or
-  // setting it per-repo "off" stops it applying, matching what the picker would
-  // now offer. The backend resolves secret env/header values from the keychain.
+  // Resolve the session's opted-in MCP ids against the CURRENT registry (re-read each turn,
+  // so editing a server applies next turn) and drop any no longer OFFERED in this repo —
+  // re-scoping a server away or setting it per-repo "off" stops it applying, matching what
+  // the picker would now offer. The backend resolves secrets from the keychain.
   const mcpIds = s0.mcpServers ?? [];
   // Scope/override lookup keys for the session's repo (its worktree-stable
   // identity + the raw checkout path), so a server scoped/overridden from a
@@ -358,10 +349,9 @@ async function runTurn(
         t.error,
       ),
     );
-    // "Watching" = window focused, the Agent tab on screen, AND this is the
-    // selected session; then the streamed result is already visible, so stay
-    // quiet. Notifying otherwise covers the multi-session case and a user on
-    // another tab. A user Cancel is intentional, so it's never announced.
+    // "Watching" = focused + Agent tab on screen + this session selected; then the streamed
+    // result is already visible, so stay quiet. Notifying otherwise covers multi-session and
+    // other-tab cases. A user Cancel is intentional, so it's never announced.
     if (isWatchingAgentSurface(get().activeId, id)) return;
     if (t.status === "error" && t.error === "Cancelled.") return;
     const label =
@@ -433,11 +423,10 @@ async function runTurn(
           patchTurn({
             costUsd: ev.costUsd,
             statusText: "",
-            // Codex delivers its whole message in the done event, not as `delta`s
-            // (parse_codex_line accumulates and surfaces it at turn end), so adopt
-            // `ev.text` when nothing was streamed — otherwise the turn shows blank.
-            // Add it as a text segment too so the interleaved transcript shows the
-            // message after its tool steps. Streaming agents already have both.
+            // Codex delivers its whole message in the done event, not as `delta`s, so adopt
+            // `ev.text` when nothing was streamed — otherwise the turn shows blank. Added as
+            // a text segment too so the transcript shows it after its tool steps; streaming
+            // agents already have both.
             ...(ev.text && !last.narration
               ? {
                   narration: ev.text,
@@ -532,10 +521,9 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       const alive = idled.filter(
         (s) => s.kept || live[s.repoPath]?.has(normPath(s.worktreePath)),
       );
-      // A non-kept session whose repo WAS reachable but whose worktree is gone
-      // is confirmed dead — delete its transcript so it doesn't reaccumulate.
-      // (Sessions in an unreachable repo are kept on disk; they return when the
-      // repo is back, rather than being silently lost.)
+      // A non-kept session whose repo WAS reachable but whose worktree is gone is confirmed
+      // dead — delete its transcript. Sessions in an unreachable repo are kept on disk and
+      // return when the repo is back, rather than being silently lost.
       for (const s of idled) {
         if (
           !s.kept &&
@@ -571,14 +559,12 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     const task = prompt.trim();
     if (!task || get().creating) return null;
     set({ creating: true });
-    // Isolation is fixed for the life of the session (every turn must run the
-    // same way), so resolve it once here. Both agents honor the setting: on the
-    // host each runs worktree-confined by its own OS sandbox (Codex via
-    // `-s workspace-write`); "container" wraps either in a kernel boundary.
-    // Every agent honors the setting now — Copilot's container authenticates from a
-    // `gh auth token` (no mountable creds file), so it no longer forces host-only.
-    // The composer's Isolation row can override it for THIS session; the global
-    // setting is only read (`??` short-circuits the await) when it didn't.
+    // Isolation is fixed for the life of the session (every turn must run the same way), so
+    // resolve it once. On the host every agent is worktree-confined by its own OS sandbox
+    // (Codex via `-s workspace-write`); "container" adds a kernel boundary. Every agent
+    // honors it — Copilot's container authenticates from `gh auth token` (no mountable creds
+    // file). The composer's Isolation row overrides for THIS session; the global setting is
+    // only read (`??` short-circuits the await) when it didn't.
     const isolation =
       isolationOverride ??
       (await loadSettings().catch(() => null))?.agentIsolation ??
@@ -635,9 +621,8 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       }),
     );
     persist(appendTurn(wt.id, 0, task, model));
-    // Fire the first turn in the background (don't block the caller on it) and
-    // return the new session id so a caller — e.g. the plan "Implement" — can link
-    // to it.
+    // Fire the first turn in the background and return the new session id so a caller (e.g.
+    // the plan "Implement") can link to it.
     void runTurn(get, set, wt.id, task, false);
     return wt.id;
   },
@@ -817,10 +802,9 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     const s = get().sessions.find((x) => x.id === id);
     if (!s || s.kept || s.running || get().busyId) return;
     set({ busyId: id });
-    // The container home holds a credentials copy and is independent of the
-    // worktree, so clean it (idempotently) up front — a failed worktree removal
-    // shouldn't leave it behind. A running test container bind-mounts the worktree,
-    // so stop it (awaited) before removing the dir so its mount can't block removal.
+    // The container home holds a credentials copy and is independent of the worktree, so clean
+    // it (idempotently) up front — a failed worktree removal shouldn't leave it. A running test
+    // container bind-mounts the worktree, so stop it (awaited) before removing the dir.
     if (s.isolation === "container") {
       persist(cleanupContainerSandbox(id));
       await stopTestContainer(s.worktreePath).catch(() => undefined);
@@ -846,11 +830,9 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
   },
 }));
 
-// Persistence is now event-sourced: each action appends the one transcript
-// event it produced (see the `persist(...)` calls above), so there's no
-// whole-list debounced write to maintain.
+// Persistence is event-sourced: each action appends the one transcript event it
+// produced (the `persist(...)` calls above) — no whole-list write to maintain.
 
-// Load persisted sessions + reconcile orphaned worktrees once at startup.
-// (Sessions survive a reload/restart: their worktrees + Claude transcripts live
-// on disk, so a follow-up message resumes right where it left off.)
+// Load persisted sessions + reconcile orphaned worktrees once at startup (sessions survive a
+// restart: worktrees + CLI transcripts live on disk, so a follow-up message resumes).
 void useSessionsStore.getState().hydrate();

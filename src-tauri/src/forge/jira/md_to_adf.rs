@@ -1,18 +1,14 @@
 //! Markdown → Atlassian Document Format (ADF).
 //!
-//! The write-path counterpart to [`super::adf`]: it turns the markdown a user types
-//! (in a comment, or an issue description) into the ADF JSON document Jira's write
-//! endpoints require. It covers the same subset the reader renders, kept symmetric where
-//! it matters: paragraphs, headings (`#`..`######`), bullet + ordered lists (nested by
-//! two-space indent), fenced code blocks, and the inline marks `**strong**`, `*em*` /
-//! `_em_`, `` `code` ``, `[text](url)`, `~~strike~~`.
+//! The write-path counterpart to [`super::adf`]: the markdown a user types becomes the ADF
+//! JSON Jira's write endpoints require. Covers the reader's subset — paragraphs, headings,
+//! bullet/ordered lists (nested by two-space indent), fenced code blocks, and the inline
+//! marks `**strong**`, `*em*`/`_em_`, `` `code` ``, `[text](url)`, `~~strike~~`.
 //!
 //! Two hard rules:
-//! 1. **Never drop content, never panic.** An unsupported construct degrades to plain
-//!    text rather than vanishing — the block still ships as a paragraph.
-//! 2. **The top-level `content` array is never empty.** Jira rejects an empty document
-//!    (`content: []`); empty or whitespace-only input yields a single empty paragraph
-//!    node so the request still validates.
+//! 1. **Never drop content, never panic.** An unsupported construct degrades to plain text.
+//! 2. **The top-level `content` array is never empty** — Jira rejects `content: []`; empty
+//!    input yields a single empty paragraph so the request still validates.
 
 use serde_json::{json, Value};
 
@@ -164,8 +160,7 @@ fn heading_parts(line: &str) -> Option<(u64, &str)> {
 /// not a list item. Pure.
 fn list_marker(line: &str) -> Option<ListMarker> {
     let indent = line.len() - line.trim_start().len();
-    // Only spaces count as indentation for nesting (tabs are treated as one space-equiv
-    // by trim, but we key nesting off the leading-space count).
+    // Nesting is keyed off the leading-whitespace count (a tab counts as one).
     let content = &line[indent..];
     // Bullet: one of - * + then a space.
     for bullet in ['-', '*', '+'] {
@@ -239,9 +234,9 @@ fn parse_list(lines: &[&str], start: usize, base_indent: usize) -> (Value, usize
         // A marker indented more than this list is handled as a nested list under the
         // current item (below), not as a sibling — so a sibling must match this indent.
         if marker.indent > this_indent {
-            // Defensive: a deeper marker with no preceding shallower item at this indent.
-            // Treat it as starting a nested list absorbed by the previous item if any,
-            // else start this list at the deeper indent.
+            // Defensive — the normal nested case is absorbed below. A deeper marker with
+            // no item yet at this level restarts the list at that indent; otherwise end
+            // this list (the deeper run then parses as a sibling).
             if items.is_empty() {
                 let (node, next) = parse_list(lines, i, marker.indent);
                 return (node, next);

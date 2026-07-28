@@ -1,10 +1,8 @@
 //! The GitHub [`Forge`](super::Forge) implementation.
 //!
-//! GitHub already works and ships, and `gh` handles Enterprise hosts and
-//! multi-account auth for free — so this impl is a **thin adapter** over the
-//! existing `github::*` (gh-CLI-backed) code, never a rewrite. Phase 0 only maps
-//! `gh_status` → the neutral [`ForgeStatus`]; later phases add the PR/issue/CI
-//! methods, each delegating to the matching `gh_*` function.
+//! `gh` already handles Enterprise hosts and multi-account auth, so this is a **thin
+//! adapter** over the existing `github::*` (gh-CLI-backed) code, never a rewrite —
+//! each function delegates to the matching `gh_*`.
 
 use serde_json::Value;
 
@@ -46,8 +44,6 @@ pub(crate) fn from_gh_status(gh: GhStatus) -> ForgeStatus {
 
 impl Forge for GitHubForge {
     async fn status(&self, repo_path: &str) -> AppResult<ForgeStatus> {
-        // Delegate to the existing gh-backed status (Enterprise- and
-        // multi-account-aware) and normalize its result.
         Ok(from_gh_status(gh_status(repo_path.to_string()).await?))
     }
 }
@@ -69,8 +65,7 @@ fn from_gh_repo(r: GhRepo) -> ForgeRepo {
     }
 }
 
-/// The signed-in GitHub user's repositories, for the clone browser — delegates to
-/// the existing `gh_list_repos` and normalizes.
+/// The signed-in GitHub user's repositories, for the clone browser.
 pub async fn list_repos() -> AppResult<ForgeRepoList> {
     let gh = gh_list_repos().await?;
     Ok(ForgeRepoList {
@@ -81,9 +76,7 @@ pub async fn list_repos() -> AppResult<ForgeRepoList> {
 
 // ── Pull requests ────────────────────────────────────────────────────────────
 //
-// Thin delegates to the existing gh-backed commands. The frontend already speaks
-// `PrInfo`/`PrDetails`, so the GitHub path is byte-identical to calling `gh_pr_*`
-// directly — the abstraction adds the dispatch seam without changing GitHub.
+// Thin delegates to the existing gh-backed `gh_pr_*` commands.
 
 pub async fn list_prs(
     repo_path: &str,
@@ -223,10 +216,8 @@ pub async fn poll_prs(repo_path: &str) -> AppResult<Vec<crate::github::pr::PrPol
 
 // ── Merge requests (write) ───────────────────────────────────────────────────
 //
-// Thin delegates to the existing gh-backed PR mutations — comment, close/reopen,
-// title/body edit, and the duplicate probe. Merge dispatches straight to
-// `gh_pr_merge` inside `forge_pr_merge` (no delegate here); full reviews stay
-// GitHub-only and aren't fronted.
+// Thin delegates to the gh-backed PR mutations. Merge has no delegate here —
+// `forge_pr_merge` dispatches straight to `gh_pr_merge`.
 
 pub async fn edit_pr(
     repo_path: &str,
@@ -295,8 +286,6 @@ pub async fn reopen_pr(repo_path: &str, number: u64, lens: Option<String>) -> Ap
 }
 
 // ── Issues (read) ────────────────────────────────────────────────────────────
-//
-// Thin delegates to the existing gh-backed issue commands, mirroring the PR ones.
 
 pub async fn list_issues(
     repo_path: &str,
@@ -316,9 +305,6 @@ pub async fn view_issue(
 }
 
 // ── CI / Actions ─────────────────────────────────────────────────────────────
-//
-// Thin delegates to the existing gh-backed Actions commands, mirroring the
-// PR/issue ones — reads plus the re-run / cancel / dispatch writes.
 
 pub async fn list_runs(
     repo_path: &str,
@@ -368,9 +354,8 @@ pub async fn dispatch_ci(
 
 // ── Releases ─────────────────────────────────────────────────────────────────
 //
-// Thin delegates to the existing gh-backed release commands — reads plus the
-// create / edit / delete / asset writes. (Notes generation and asset download
-// stay GitHub-only `gh_*` commands: GitLab has no analogue.)
+// Notes generation and asset download stay GitHub-only `gh_*` commands — GitLab has
+// no analogue, so they are deliberately not fronted here.
 
 pub async fn list_releases(repo_path: &str) -> AppResult<Vec<crate::github::release::ReleaseInfo>> {
     crate::github::release::gh_release_list(repo_path.to_string()).await
@@ -453,9 +438,8 @@ pub async fn delete_release_asset(repo_path: &str, tag: &str, asset_name: &str) 
 
 // ── Issues (write) ───────────────────────────────────────────────────────────
 //
-// Thin delegates to the existing gh-backed issue mutations. The still-unfronted
-// remainder of the issue write surface (pin, sub-issues, close reason, …) stays
-// GitHub-only.
+// The still-unfronted remainder of the issue write surface (pin, sub-issues, close
+// reason, …) stays GitHub-only.
 
 pub async fn comment_issue(
     repo_path: &str,
@@ -530,11 +514,11 @@ pub async fn delete_issue(repo_path: &str, number: u64, lens: Option<String>) ->
     crate::github::issue::gh_issue_delete(repo_path.to_string(), number, lens).await
 }
 
-// ── Milestones (read + write) ──────────────────────────────────────────────────
+// ── Milestones (read) ──────────────────────────────────────────────────────────
 //
-// Thin delegates for the milestone picker's option list and the issue milestone
-// write. GitHub keys on the milestone number; the GitLab impl keys on its global
-// milestone id — both travel as the neutral `Milestone.number`.
+// GitHub keys on the milestone number, the GitLab impl on its global milestone id —
+// both travel as the neutral `Milestone.number`. (The write, `set_issue_milestone`,
+// lives below under Reactions.)
 
 pub async fn milestones(
     repo_path: &str,
@@ -545,9 +529,9 @@ pub async fn milestones(
 
 // ── Repository actions & publish ───────────────────────────────────────────────
 //
-// Thin delegates for View/star and publish. Fork keeps calling `gh_repo_fork`
-// directly (its remote-rewiring flow is GitHub-only; GitLab forks via a web
-// link-out), and the admin/branch-rule sub-surfaces stay on their gh_* commands.
+// Fork keeps calling `gh_repo_fork` directly (its remote-rewiring flow is GitHub-only;
+// GitLab forks via a web link-out), and the admin/branch-rule sub-surfaces stay on
+// their own gh_* commands.
 
 pub async fn repo_url(repo_path: &str) -> AppResult<String> {
     crate::github::pr::gh_repo_url(repo_path.to_string()).await
@@ -586,10 +570,9 @@ pub async fn publish_repo(
 
 // ── Reactions ──────────────────────────────────────────────────────────────────
 //
-// Thin delegates to the gh-backed reaction reads and the node-id-keyed toggle.
 // GitHub subjects are GraphQL node ids, so the add/remove delegates ignore the
-// target/number the GitLab arm needs — the frontend carries both (the shared-
-// control different-identifiers pattern).
+// target/number the GitLab arm needs — the frontend carries both (the shared-control
+// different-identifiers pattern).
 
 pub async fn issue_reactions(
     repo_path: &str,
@@ -637,10 +620,8 @@ pub async fn set_issue_milestone(
 
 // ── Labels & assignees (read + write) ─────────────────────────────────────────
 //
-// Thin delegates to the existing gh-backed label/assignee commands. Labels are a
-// shared control on both issues and MRs (GitHub keys them by GraphQL node id); issue
-// assignees are a shared issue control. GitHub is byte-identical to calling the
-// `gh_*` commands directly — the abstraction only adds the dispatch seam.
+// Labels are a shared control on both issues and MRs (GitHub keys them by GraphQL
+// node id); issue assignees are a shared issue control.
 
 pub async fn repo_labels(
     repo_path: &str,
@@ -739,31 +720,22 @@ pub async fn create_issue(
     .await
 }
 
-/// The one-shot `git -c` credential entries that authenticate a private GitHub
-/// repo via gh's token with an ABSOLUTE gh path — so it works even when git's
-/// ambient `!gh` helper can't find gh on a GUI-launch minimal PATH (macOS
-/// launchd), or when gh was configured for SSH and never installed the HTTPS
-/// helper. One-shot per `git` invocation; nothing written to git config, no token
-/// in the remote URL. Mirrors gitlab::clone_credential_config.
-///
-/// Returns the `[reset, helper]` pair (see [`github_credential_entries`]) ONLY
-/// when gh is present AND has a STORED token for `host`; when gh is present but has
-/// no stored token for that host, returns an empty Vec so git's ambient behavior is
-/// preserved unchanged (a user relying on git-credential-manager / the OS keychain
-/// must not be broken). The stored-token check is a local read — it proves the
-/// token EXISTS, not that it's valid; a revoked token still passes, which is why
-/// [`crate::git::remote::run_git_mutating_with_creds`] carries the ambient
-/// fallback. Missing gh → `Err(GhNotFound)`, unchanged — callers'
-/// `.unwrap_or_default()` keeps the fail-open, strict `?` clone sites stay
-/// fail-closed on a missing CLI.
+/// One-shot `git -c` credential entries that authenticate a private GitHub repo with
+/// gh's token via an ABSOLUTE gh path — works even when git's ambient `!gh` helper
+/// can't find gh (macOS launchd's minimal GUI PATH) or gh never installed the HTTPS
+/// helper. Nothing is written to git config; no token enters the URL. Returns the
+/// `[reset, helper]` pair ONLY when gh has a STORED token for `host` — otherwise an
+/// empty Vec, so ambient helpers (keychain, git-credential-manager) still run. That
+/// check proves the token EXISTS, not that it's valid; the ambient fallback in
+/// [`crate::git::remote::run_git_mutating_with_creds`] covers a revoked one. Missing
+/// gh → `Err(GhNotFound)`, so `.unwrap_or_default()` callers stay fail-open.
+/// Mirrors `gitlab::clone_credential_config`.
 pub async fn clone_credential_config(clone_url: &str) -> AppResult<Vec<String>> {
     let gh = crate::agent::resolve_named(&["gh"], None)
         .await
         .ok_or(AppError::GhNotFound)?;
     let host = crate::forge::remote_host(clone_url).unwrap_or_else(|| "github.com".to_string());
     if !gh_authenticated(&host).await {
-        // gh is installed but has no token for this host — inject nothing so git's
-        // ambient credential helpers (keychain, git-credential-manager) still run.
         return Ok(Vec::new());
     }
     Ok(github_credential_entries(&host, &gh.display().to_string()))
@@ -773,17 +745,13 @@ pub async fn clone_credential_config(clone_url: &str) -> AppResult<Vec<String>> 
 /// `[reset, helper]` pair. Pure/format-only.
 ///
 /// entry[0] SEVERS git's accumulated helper chain for this URL: `-c
-/// credential.https://<host>.helper=` sets the key to the EMPTY string, which git
-/// treats as "clear the list of helpers so far" (gitcredentials(7); this is the
-/// same blank entry `gh auth setup-git` writes before its own). The trailing `=`
-/// is load-bearing — `-c name=` sets the empty string, whereas `-c name` without
-/// the `=` would set boolean `true` and break the reset. entry[1] then installs
-/// gh as the sole helper, so an ambient helper earlier in the config chain (e.g.
-/// macOS `osxkeychain` in Apple Git's system gitconfig) can't shadow gh's identity.
-/// Order matters: reset FIRST — consumers prefix `-c` pairs in Vec order.
+/// credential.https://<host>.helper=` sets the EMPTY string, which git treats as
+/// "clear the helpers so far" (gitcredentials(7)). The trailing `=` is load-bearing —
+/// `-c name` without it sets boolean true and breaks the reset. entry[1] installs gh
+/// as the sole helper so an ambient one earlier in the chain (macOS `osxkeychain`)
+/// can't shadow it. Order matters: reset FIRST — consumers prefix `-c` in Vec order.
 fn github_credential_entries(host: &str, gh_path: &str) -> Vec<String> {
     vec![
-        // Reset: empty value clears the accumulated helper list for this URL.
         format!("credential.https://{host}.helper="),
         github_credential_entry(host, gh_path),
     ]
@@ -794,18 +762,14 @@ fn github_credential_entry(host: &str, gh_path: &str) -> String {
     format!("credential.https://{host}.helper=!\"{gh_path}\" auth git-credential")
 }
 
-/// Whether gh has a STORED token for `host` — the auth gate deciding whether to
-/// inject the credential helper. Runs `gh auth token --hostname <host>`, which is
-/// local-only (no network): exit 0 iff a token exists for that host (from gh's
-/// config file, the system keyring, or `GH_TOKEN` — the very sources `gh auth
-/// git-credential` answers from). This proves the token EXISTS, not that it's
-/// valid — a revoked token still passes; the ambient fallback in
-/// [`crate::git::remote::run_git_mutating_with_creds`] covers that case. Memoized
-/// per-host with a 60s TTL: auth state changes rarely, and 60s bounds staleness
-/// after the user signs in/out mid-session.
+/// Whether gh has a STORED token for `host` — the gate deciding whether to inject the
+/// credential helper. `gh auth token --hostname <host>` is local-only (no network):
+/// exit 0 iff a token exists in gh's config, the keyring, or `GH_TOKEN` — the same
+/// sources `gh auth git-credential` answers from. It proves the token EXISTS, not that
+/// it's valid. Memoized per host for 60s to bound staleness after a sign-in/out.
 ///
-/// SECURITY: `gh auth token`'s stdout IS the user's token — this reads only the
-/// exit code and drops the output; the token is never logged or formatted anywhere.
+/// SECURITY: `gh auth token`'s stdout IS the user's token — only the exit code is
+/// read; the output is dropped and never logged or formatted anywhere.
 async fn gh_authenticated(host: &str) -> bool {
     if let Some(hit) = auth_cache_get(host, GH_AUTH_TTL) {
         return hit;
@@ -824,16 +788,12 @@ async fn gh_authenticated(host: &str) -> bool {
             authed
         }
         // A spawn/timeout hiccup, NOT absence: `resolve_named` already proved gh
-        // exists, so an Err here is transient. Optimistically inject (uncached) —
-        // on the NETWORK path run_git_mutating_with_creds's ambient fallback makes
-        // this safe both ways: if gh is genuinely signed out its helper returns
-        // nothing and the fallback restores ambient, whereas a pessimistic `false`
-        // would silently reopen the stale-keychain bug for that op. The CLONE path
-        // (repo.rs extra_config) takes this optimistic inject UNPROTECTED — a
-        // signed-out gh + a transient probe error there severs ambient and the
-        // clone hard-fails; accepted: it needs the spawn to fail right after
-        // resolve_named succeeded, and it self-heals on re-clone (a clean probe
-        // then returns false → no injection → ambient runs).
+        // exists. Inject optimistically (uncached) — on the network path
+        // `run_git_mutating_with_creds`'s ambient fallback makes it safe either way,
+        // whereas a pessimistic `false` would reopen the stale-keychain bug. The CLONE
+        // path (repo.rs extra_config) takes this UNPROTECTED: a signed-out gh plus a
+        // transient probe error there severs ambient and the clone hard-fails —
+        // accepted, since it self-heals on re-clone.
         Err(_) => true,
     }
 }
@@ -851,9 +811,8 @@ fn gh_auth_cache() -> &'static GhAuthCache {
     GH_AUTH_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
-/// The cached auth result for `host` only if an entry exists AND it was probed less
-/// than `ttl` ago. Pure over the module-level cache; the lock is held only long
-/// enough to copy the value out.
+/// The cached auth result for `host`, only if an entry exists AND was probed less
+/// than `ttl` ago.
 fn auth_cache_get(host: &str, ttl: std::time::Duration) -> Option<bool> {
     let guard = gh_auth_cache().lock().unwrap();
     let (probed_at, authed) = guard.get(host)?;
@@ -874,11 +833,10 @@ fn auth_cache_put(host: &str, authed: bool) {
 
 // ── Explore: repo search / fork-by-name / star / README ───────────────────────
 //
-// The Explore view's GitHub backend, over `gh api`. Search uses GitHub's
-// `search/repositories` endpoint; fork/star/readme use the REST repo endpoints.
-// All owner/name values are grammar-validated before interpolation (argv/path
-// injection guard), and search payloads are parsed tolerantly via `serde_json::Value`
-// (a malformed item is skipped, not fatal).
+// The Explore view's GitHub backend, over `gh api`. All owner/name values are
+// grammar-validated before interpolation (argv/path injection guard), and search
+// payloads are parsed tolerantly via `serde_json::Value` (a malformed item is
+// skipped, not fatal).
 
 /// GitHub caps its search result set at 1000 items regardless of the client, and
 /// this backend requests 30 per page.
@@ -887,8 +845,7 @@ const GH_SEARCH_CAP: u64 = 1000;
 
 /// Map the neutral `sort` (`"best" | "stars" | "updated"`) onto the extra `gh api`
 /// `-f` args for `search/repositories`. `"best"` omits sort (GitHub's best-match
-/// default); the others pin `order=desc`. Any other value is rejected by the caller
-/// before this is reached, but we return an empty slice defensively.
+/// default); the others pin `order=desc`. Unknown values fall back to no sort.
 fn github_sort_args(sort: &str) -> Vec<&'static str> {
     match sort {
         "stars" => vec!["-f", "sort=stars", "-f", "order=desc"],
@@ -898,10 +855,8 @@ fn github_sort_args(sort: &str) -> Vec<&'static str> {
     }
 }
 
-/// Whether another search page is available, given the 1-based `page` just fetched
-/// and the reported `total_count`. GitHub hard-caps search at 1000 results, so the
-/// effective end is `min(total, 1000)`; more pages exist while what we've consumed
-/// (`page * 30`) is still short of it. Pure, so it's unit-testable.
+/// Whether another search page exists after the 1-based `page` just fetched. GitHub
+/// hard-caps search at 1000 results, so the effective end is `min(total, 1000)`.
 fn github_has_more(page: u32, total_count: u64) -> bool {
     let consumed = u64::from(page) * GH_SEARCH_PER_PAGE;
     consumed < total_count.min(GH_SEARCH_CAP)
@@ -996,8 +951,6 @@ pub async fn fork_repo(owner: &str, name: &str) -> AppResult<ForgeForkResult> {
     validate_owner(owner)?;
     validate_repo_name(name)?;
     let source = format!("{owner}/{name}");
-    // Fork creation. An already-existing fork exits 0 ("… already exists"), so a
-    // clean success and the idempotent case both land here; a real failure errors.
     run_gh(
         None,
         &["repo", "fork", &source, "--clone=false", "--remote=false"],
@@ -1030,8 +983,6 @@ pub async fn fork_repo(owner: &str, name: &str) -> AppResult<ForgeForkResult> {
         // 404 (no such repo) or a transient error: fall through to the forks list.
         _ => None,
     };
-    // Fallback: the candidate wasn't the fork (renamed on collision, or absent).
-    // List the source's forks and pick the one owned by the viewer.
     let repo = match verified {
         Some(repo) => repo,
         None => find_viewer_fork(owner, name, &login)
@@ -1053,8 +1004,7 @@ pub async fn fork_repo(owner: &str, name: &str) -> AppResult<ForgeForkResult> {
         .unwrap_or("")
         .to_string();
     let web_url = repo.get("html_url").and_then(Value::as_str).map(str::to_string);
-    // Readiness: fork creation is async (202). Poll the commits endpoint (5×2s);
-    // first success = ready. A timeout is not an error — the fork exists.
+    // Fork creation is async (202) — poll until cloneable; a timeout isn't an error.
     let ready = poll_fork_ready(&full_name).await;
     Ok(ForgeForkResult {
         full_name,
@@ -1173,8 +1123,6 @@ pub async fn repo_readme(owner: &str, name: &str) -> AppResult<Option<String>> {
     )
     .await?;
     if out.code != 0 {
-        // A 404 (no README) is absence, not an error. Any other non-zero exit is a
-        // real failure worth surfacing (rate limit, auth, network).
         if gh_stderr_is_404(&out.stderr) {
             return Ok(None);
         }
@@ -1292,7 +1240,6 @@ mod tests {
         assert_eq!(entries.len(), 2);
         // entry[0] resets the helper chain: empty value, nothing after the `=`.
         assert_eq!(entries[0], "credential.https://github.com.helper=");
-        // entry[1] is byte-identical to the historical single helper entry.
         assert_eq!(
             entries[1],
             "credential.https://github.com.helper=!\"/abs/gh\" auth git-credential"

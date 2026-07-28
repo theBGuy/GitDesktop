@@ -28,13 +28,11 @@ import { cn } from "@/lib/utils";
 import { synthesizeThreadHunk } from "./suggestion-utils";
 
 /** Platform-correct submit-shortcut hint (⌘+Enter on macOS, Ctrl+Enter else) —
- *  never hardcode the modifier (house platform-mod-key rule). Exported so
- *  RemotePrView shares the one definition. */
+ *  never hardcode the modifier. Exported so RemotePrView shares one definition. */
 export const SUBMIT_HINT = formatBinding("mod+enter");
 
-/** Sets a hover title only when the element is actually clipped — the file-group
- *  header truncates, so the full path shows on hover only when it doesn't fit
- *  (house measured-tooltip idiom). Measures `currentTarget`, not an inner span. */
+/** Sets a hover title only when the element is actually clipped (measures
+ *  `currentTarget`, not an inner span) — the file-group header truncates. */
 const clipTitle = (value: string) => (e: MouseEvent<HTMLElement>) => {
   const el = e.currentTarget;
   el.title = el.scrollWidth > el.clientWidth ? value : "";
@@ -145,17 +143,14 @@ export type BodySegment = MdSegment | SuggestionSegment;
 
 /**
  * Split a comment body into ordered markdown / suggestion segments — the render
- * data behind GitHub's "Suggested changeset" (the card renders `md` runs through
- * {@link Markdown} and each `suggestion` through {@link SuggestionBlock}). A pure
- * function (no thread coupling), exported for testability alongside
- * {@link threadToMarkdown}; that function keeps copying the RAW body.
+ * data behind GitHub's "Suggested changeset". Pure (no thread coupling), exported
+ * for testability; copying still uses the RAW body.
  *
- * Fence scan is line-based and fence-depth aware, with the SAME semantics the old
- * markdown transform used: only a ```suggestion / ```suggestion:-N+M fence opened
- * at TOP LEVEL becomes a suggestion segment; a ```suggestion nested inside a
- * longer ````-quoted example stays verbatim markdown; an unterminated suggestion
- * fence runs to EOF. Bodies are LF (GitHub/GitLab normalize). Consecutive
- * markdown lines coalesce into one `md` segment; empty `md` runs are dropped.
+ * The fence scan is line-based and fence-depth aware: only a ```suggestion /
+ * ```suggestion:-N+M fence opened at TOP LEVEL becomes a suggestion segment; one
+ * nested inside a longer ````-quoted example stays verbatim markdown; an
+ * unterminated suggestion fence runs to EOF. Bodies are LF (GitHub/GitLab
+ * normalize). Consecutive markdown lines coalesce; empty `md` runs are dropped.
  */
 export function splitSuggestionSegments(body: string): BodySegment[] {
   const segments: BodySegment[] = [];
@@ -214,7 +209,6 @@ export function splitSuggestionSegments(body: string): BodySegment[] {
         replacement,
         ...(above || below ? { glRange: { above, below } } : {}),
       });
-      // Advance past the close fence (or to EOF for an unterminated fence).
       i = closed ? j + 1 : j;
       continue;
     }
@@ -231,11 +225,11 @@ export function splitSuggestionSegments(body: string): BodySegment[] {
 }
 
 /** The original new-side lines a suggestion replaces, plus the 1-based start line
- *  for the apply write — recovered from the thread's anchored hunk. Null when they
- *  can't be recovered (Bitbucket, no hunk, or a range the hunk doesn't fully
- *  cover): the caller degrades to a replacement-only block with no Apply.
- *  GitHub range = `[startLine>0 ? startLine : line, line]`; GitLab's `glRange`
- *  shifts it `above` lines up / `below` lines down around the anchored line. */
+ *  for the apply write. Null when they can't be recovered (no hunk — the thread's
+ *  own or one synthesized from the file's diff section — or a range that hunk
+ *  doesn't fully cover): the caller degrades to a replacement-only block with no
+ *  Apply. GitHub range = `[startLine>0 ? startLine : line, line]`; GitLab's
+ *  `glRange` shifts it `above` up / `below` down around the anchored line. */
 function recoverOriginals(
   thread: ReviewThreadOut,
   parsed: HunkLine[] | null,
@@ -243,29 +237,23 @@ function recoverOriginals(
   provider: ForgeProvider,
 ): { lines: string[]; startLine: number } | null {
   const anchor = thread.line;
-  // The two providers' bare-fence (no `:-N+M`) semantics DIFFER, and only the
-  // fence author's provider disambiguates them:
-  //  • GitHub: a bare fence in a ranged review comment replaces the WHOLE range
-  //    `startLine..line` (documented GitHub behavior) — base = startLine.
-  //  • GitLab: fence offsets are ALWAYS anchor-relative; a bare fence means
-  //    exactly `:-0+0` — it replaces ONLY the anchored (end) line, regardless of
-  //    the comment's line_range (the range is anchor/display metadata, not fence
-  //    scope). So on GitLab a bare fence must be treated as an anchor-based range.
-  // We normalize a GitLab bare fence to an explicit `{above:0, below:0}` glRange
-  // so the shared base logic below anchors it; GitHub keeps `undefined` → the
-  // startLine base. (Bitbucket has no Apply/recover path — parsed is null there.)
+  // Bare-fence (no `:-N+M`) semantics DIFFER per forge, and only the fence author's
+  // provider disambiguates them:
+  //  • GitHub: a bare fence in a ranged review comment replaces the WHOLE
+  //    `startLine..line` range (documented GitHub behavior) — base = startLine.
+  //  • GitLab: fence offsets are ALWAYS anchor-relative; a bare fence means exactly
+  //    `:-0+0` — it replaces ONLY the anchored (end) line, whatever the comment's
+  //    line_range says.
+  // So normalize a GitLab bare fence to `{above:0, below:0}` and let the shared base
+  // logic anchor it; every other provider keeps `undefined` → the startLine base.
   const effectiveGlRange =
     glRange ?? (provider === "gitlab" ? { above: 0, below: 0 } : undefined);
   const above = effectiveGlRange?.above ?? 0;
   const below = effectiveGlRange?.below ?? 0;
-  // The base the fence range extends from. A GitLab `suggestion:-N+M` fence's
-  // range is ANCHOR-relative (`above`/`below` count up/down from the anchored
-  // end line), so whenever a fence range is present the base is `anchor` — never
-  // `startLine`. Only the bare-fence GitHub path, where the thread carries its
-  // own `startLine` and there's no anchor-relative fence, uses `startLine`.
-  // (History: GitLab threads never had `startLine > 0` until multi-line ranges
-  // landed; `startLine - above` would now double-count the range and Apply to
-  // the wrong lines.)
+  // The base the fence range extends from. A GitLab `suggestion:-N+M` range is
+  // ANCHOR-relative, so whenever a fence range is present the base is `anchor`, never
+  // `startLine` (subtracting `above` from startLine would double-count the range and
+  // Apply to the wrong lines). Only the bare-fence GitHub path uses `startLine`.
   const base = effectiveGlRange
     ? anchor
     : thread.startLine > 0
@@ -313,11 +301,10 @@ function parseHunk(hunk: string): HunkLine[] | null {
 }
 
 /**
- * One rendered diff row — the shared row shape behind {@link HunkExcerpt} and
- * {@link SuggestionBlock}: a fixed-width gutter (the new-side line number, or a
- * +/- marker for suggestion rows) and the mono content. Semantic tokens carry the
- * add/del/context color; the gutter marker/number keeps the meaning legible
- * without relying on color (house "never color alone" rule).
+ * One rendered diff row — the shared shape behind {@link HunkExcerpt} and
+ * {@link SuggestionBlock}: a fixed-width gutter (new-side line number, or a +/-
+ * marker) and mono content. The gutter marker/number keeps add/del legible without
+ * relying on color (house "never color alone" rule).
  */
 function DiffRow({
   kind,
@@ -348,12 +335,11 @@ function DiffRow({
 
 /**
  * The anchored code context above a thread's comments — GitHub's "Comment on
- * lines …" excerpt. Honest render: mono + diff +/- coloring via semantic tokens
- * (never color alone — the +/- characters carry the meaning), no syntax
- * highlighting (the fragment lacks full-file context). Capped height, scrolled
- * to the bottom on mount (the anchored line is the hunk's tail). `ph-no-capture`
- * because the Conversation ScrollArea is NOT redacted (only the diff pane is),
- * and this shows user code.
+ * lines …" excerpt. Mono + diff +/- coloring via semantic tokens (the +/-
+ * characters carry the meaning), no syntax highlighting (the fragment lacks
+ * full-file context). Capped height, scrolled to the bottom on mount (the anchored
+ * line is the hunk's tail). `ph-no-capture` because the Conversation ScrollArea is
+ * NOT redacted (only the diff pane is) and this shows user code.
  */
 function HunkExcerpt({ hunk, label }: { hunk: string; label: string }) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -377,8 +363,7 @@ function HunkExcerpt({ hunk, label }: { hunk: string; label: string }) {
             key={`${i}-${ln.number ?? "d"}`}
             kind={ln.kind}
             gutter={ln.number ?? ""}
-            // The raw hunk line keeps its leading +/- /space marker (as before),
-            // so the +/- meaning stays legible in the content, not just color.
+            // Keep the leading +/-/space marker so the meaning isn't color-alone.
             text={ln.text}
           />
         ))}
@@ -387,9 +372,8 @@ function HunkExcerpt({ hunk, label }: { hunk: string; label: string }) {
   );
 }
 
-/** Gating inputs + the write for a suggestion's Apply affordance. Absent (the card
- *  receives no `apply` prop) = no Apply shown at all — the graceful default for the
- *  diff-anchor call site and any surface that hasn't wired the working-tree write. */
+/** Gating inputs + the write for a suggestion's Apply affordance. Absent (no
+ *  `apply` prop) = no Apply shown at all. */
 export interface SuggestionApply {
   /** The PR head branch — Apply only makes sense while it's checked out. */
   headRefName: string;
@@ -405,17 +389,15 @@ export interface SuggestionApply {
 }
 
 /**
- * One ```suggestion block rendered as GitHub's "Suggested change": a bordered
- * card (visually consistent with {@link HunkExcerpt}) whose body is the red/green
- * line diff — the originals as `-` rows, the replacement as `+` rows — plus an
- * Apply affordance that writes the suggestion to the local working tree.
+ * One ```suggestion block as GitHub's "Suggested change": a bordered card whose
+ * body is the red/green line diff (originals as `-` rows, replacement as `+`),
+ * plus an Apply that writes the suggestion to the local working tree.
  *
- * Apply shows ONLY when the originals were recovered (implies GitHub + full hunk
- * coverage) AND an `apply` prop is present. When originals aren't recoverable
- * (GitLab/Bitbucket, or an uncovered range) it degrades to a labeled
- * replacement-only block with no Apply — never less than before. Every disabled
- * state explains WHY via a wrapping `<span title>` (a native-disabled button
- * swallows its own tooltip).
+ * Apply shows only when the originals were recovered — the thread's own hunk
+ * (GitHub) or one synthesized from the file's diff section (GitLab/Bitbucket) must
+ * fully cover the range — AND an `apply` prop is present; otherwise it degrades to
+ * a labeled replacement-only block. Every disabled state explains WHY via a
+ * wrapping `<span title>` (a native-disabled button swallows its own tooltip).
  */
 function SuggestionBlock({
   thread,
@@ -468,7 +450,6 @@ function SuggestionBlock({
     }
   }
 
-  // Determine the Apply affordance state (only relevant once originals recovered).
   const onWrongBranch =
     apply != null && apply.currentBranch !== apply.headRefName;
   const disabledReason = applied
@@ -547,17 +528,15 @@ export function ReviewThreadCard({
   compact?: boolean;
   /** Fired when the header button gains focus (keeps list activeIndex in sync). */
   onRowFocus?: () => void;
-  /** True when this card is the target of a pending "reveal" request (a timeline
-   *  "View thread" jump). The card scrolls ITSELF into view the moment its root
-   *  node exists (a layout effect on its own ref) — mount-driven, not frame-timed,
-   *  so a card that only just mounted after its resolved-group expander opened
-   *  still scrolls on the first click. Then it calls `onRevealed`. */
+  /** True when this card is the target of a pending "reveal" (a timeline "View
+   *  thread" jump). The card scrolls ITSELF via a layout effect on its own ref, so a
+   *  card that only just mounted still scrolls on the first click; then it calls
+   *  `onRevealed`. */
   revealTarget?: boolean;
   /** Cleared by the card once it has scrolled itself into view for a reveal. */
   onRevealed?: () => void;
-  /** The fence author's forge — disambiguates bare-fence Apply scope for
-   *  suggestions (GitHub = whole range, GitLab = anchored line only). Defaults to
-   *  "github" so unwired callers keep byte-identical GitHub behavior. */
+  /** The fence author's forge — disambiguates bare-fence Apply scope (GitHub =
+   *  whole range, GitLab = anchored line only). Defaults to "github". */
   provider?: ForgeProvider;
   /** Gating inputs + the write for the per-suggestion Apply affordance. Absent =
    *  no Apply is shown (the diff-anchor call site and any unwired surface). */
@@ -571,13 +550,10 @@ export function ReviewThreadCard({
   const [replyBody, setReplyBody] = useState("");
   const [replyPending, setReplyPending] = useState(false);
   const [resolvePending, setResolvePending] = useState(false);
-  // Mount-driven reveal: when this card is the reveal target, scroll its own root
-  // into view. A layout effect keyed on `revealTarget` fires synchronously after
-  // the DOM commit — so for a card that only just mounted (its resolved-group
-  // expander opened this same click), `rootRef` already points at the live node;
-  // for an already-mounted card, the effect re-runs when `revealTarget` flips
-  // true. Both paths scroll on the first click, no frame racing. Cleared via
-  // `onRevealed` only after the scroll actually runs (rootRef is set).
+  // Mount-driven reveal: a layout effect keyed on `revealTarget` fires after the DOM
+  // commit, so `rootRef` is live even for a card that mounted on this same click (its
+  // resolved-group expander just opened) — no frame racing. Cleared via `onRevealed`
+  // only once the scroll actually ran.
   const rootRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     if (!revealTarget) return;
@@ -586,17 +562,16 @@ export function ReviewThreadCard({
     node.scrollIntoView({ block: "nearest", behavior: "auto" });
     onRevealed?.();
   }, [revealTarget, onRevealed]);
-  // Suggestion blocks applied in THIS view, keyed `${commentId}:${blockIndex}`,
-  // so the Apply button becomes a disabled "Applied ✓" and a confusing re-click
-  // is prevented (the backend content-verify would reject a real re-apply anyway).
+  // Suggestion blocks applied in THIS view, keyed `${commentId}:${blockIndex}` — a
+  // confusing re-click is prevented (the backend content-verify would reject a real
+  // re-apply).
   const [appliedBlocks, setAppliedBlocks] = useState<Set<string>>(
     () => new Set(),
   );
-  // The hunk this thread renders/gates Apply against: the provider's own
-  // `diffHunk` when present (GitHub), else a hunk synthesized from the file's
-  // current unified-diff section (GitLab/Bitbucket, whose API returns none) so
-  // the excerpt + Apply work the same. Outdated threads keep the degraded render
-  // — never synthesize against a diff the thread may no longer match.
+  // The hunk this thread renders/gates Apply against: the provider's own `diffHunk`
+  // when present (GitHub), else one synthesized from the file's current diff section
+  // (GitLab/Bitbucket return none). Outdated threads keep the degraded render — never
+  // synthesize against a diff the thread may no longer match.
   const effectiveHunk =
     thread.diffHunk !== ""
       ? thread.diffHunk
@@ -608,9 +583,8 @@ export function ReviewThreadCard({
   // comments to recover the originals it replaces (null when there's no hunk).
   const parsedHunk = effectiveHunk !== "" ? parseHunk(effectiveHunk) : null;
   const anchorLabel = lineLabel(thread.startLine, thread.line);
-  // The anchored-code excerpt only makes sense in the conversation (non-compact)
-  // context; inside a diff the card already sits under the real lines. Absent
-  // when there's no hunk at all — graceful degradation.
+  // The excerpt only makes sense outside a diff (in compact mode the card already
+  // sits under the real lines); absent when there's no hunk.
   const showExcerpt = !compact && effectiveHunk !== "";
 
   async function submitReply() {
@@ -740,9 +714,8 @@ export function ReviewThreadCard({
                     ? () => onDeleteComment(c.id)
                     : undefined
                 }
-                // Splice real SuggestionBlocks between markdown segments — quote
-                // and copy still act on the RAW body (Thread passes `thread.body`
-                // to both), so only the on-screen render changes.
+                // Splice SuggestionBlocks between markdown segments — quote and copy
+                // still act on the RAW body, so only the render changes.
                 renderBody={(body) => (
                   <div className="space-y-3">
                     {splitSuggestionSegments(body).map((seg, i) =>
@@ -878,13 +851,12 @@ function ResolvedExpander({
 }
 
 /**
- * The grouped, keyboard-navigable list of file:line review threads — grouped by
- * file, unresolved-open / resolved-behind-an-expander, with every per-thread
- * affordance (reply, resolve, apply, copy, edit/delete). Rendered both inline
- * under a review event in the Conversation timeline (that review's own threads)
- * and inside {@link ReviewThreadsBlock} (the residual/standalone threads). Owns
- * its own expand + arrow/Enter nav state, so each instance navigates on its own.
- * The caller guards emptiness — this renders only with a non-empty `threads`.
+ * The grouped, keyboard-navigable list of file:line review threads — by file,
+ * unresolved-open / resolved-behind-an-expander, with every per-thread affordance
+ * (reply, resolve, apply, copy, edit/delete). Rendered both inline under a review
+ * event in the timeline and inside {@link ReviewThreadsBlock}. Owns its own expand
+ * + arrow/Enter nav state, so each instance navigates on its own. The caller guards
+ * emptiness.
  */
 export function ReviewThreadList({
   threads,
@@ -900,21 +872,19 @@ export function ReviewThreadList({
   onRevealed,
 }: {
   threads: ReviewThreadOut[];
-  /** The forge the threads came from — disambiguates bare-fence Apply scope for
-   *  suggestions (GitHub = whole range, GitLab = anchored line only), threaded to
-   *  every card. Defaults to "github" so an unwired caller is byte-identical. */
+  /** The forge the threads came from — disambiguates bare-fence Apply scope,
+   *  threaded to every card. Defaults to "github". */
   provider?: ForgeProvider;
   /** Gating inputs + the write for the per-suggestion Apply affordance, threaded
    *  straight to every card. Absent = no Apply shown. */
   apply?: SuggestionApply;
   /** File-section lookup for synthesizing a hunk on hunk-less providers, threaded
-   *  to every card. Absent = no synthesis (unchanged GitHub behavior). */
+   *  to every card. Absent = no synthesis. */
   fileDiffLookup?: (path: string) => string | undefined;
-  /** A thread id the parent wants revealed (e.g. a timeline "View thread" jump).
-   *  When it matches one of THIS list's threads, the list opens that thread's
-   *  resolved-group expander (if resolved) + expands the card, then scrolls it
-   *  into view — so a resolved/collapsed target isn't a dead click. Ignored when
-   *  the id isn't in this list (only the owning list acts). */
+  /** A thread id the parent wants revealed (e.g. a timeline "View thread" jump). When
+   *  it matches one of THIS list's threads, the list opens that thread's
+   *  resolved-group expander + expands the card so a resolved/collapsed target isn't
+   *  a dead click. Ignored when the id isn't in this list. */
   revealThreadId?: string | null;
   /** Called once this list has acted on `revealThreadId`, so the parent can clear
    *  the request and it never re-fires. Only the list that owns the id calls it. */
@@ -955,16 +925,12 @@ export function ReviewThreadList({
       return next;
     });
 
-  // A reveal request from the parent (e.g. a timeline "View thread" jump). Only
-  // the list that owns the id acts: this effect just opens the STATE needed for
-  // the target card to mount+expand — the resolved-group expander and the card's
-  // expansion (resolved cards aren't mounted until the expander is open). It does
-  // NOT scroll or clear: the card scrolls ITSELF once mounted (its own layout
-  // effect keyed on `revealTarget`) and clears via `onRevealed`, so the scroll is
-  // mount-driven, not frame-timed — the resolved+collapsed target reveals on the
-  // first click. `threads`/`onRevealed` get fresh identities every parent render,
-  // so this effect re-runs on unrelated renders; the ref makes the state opens
-  // idempotent per distinct request id (and resets when the request clears).
+  // A reveal request from the parent: only the list that owns the id acts. This
+  // effect only opens the STATE the target card needs to mount+expand (resolved cards
+  // aren't mounted until their expander opens) — the card scrolls ITSELF and clears
+  // via `onRevealed`, so the scroll is mount-driven, not frame-timed.
+  // `threads`/`onRevealed` get fresh identities every parent render, so the ref keeps
+  // the state opens idempotent per request id (and resets when it clears).
   const handledRevealRef = useRef<string | null>(null);
   useEffect(() => {
     if (!revealThreadId) {
@@ -1118,12 +1084,11 @@ export function ReviewThreadList({
 
 /**
  * The residual "Review comments" block for the Conversation tab: the threads NOT
- * shown inline under a review — all threads on GitLab/Bitbucket (which don't
- * model reviews, so nothing is claimed → byte-identical to before), plus
- * standalone line comments on GitHub. Renders nothing when there are none (or
- * while loading — the data arrives after the PR body, so a spinner would only
- * cause layout shift); a quiet muted line on error. `heading` lets the caller
- * retitle it (e.g. "Other line comments") when reviews DID claim threads above.
+ * shown inline under a review — all threads on GitLab/Bitbucket (which don't model
+ * reviews), plus standalone line comments on GitHub. Renders nothing when there are
+ * none or while loading (the data arrives after the PR body, so a spinner would
+ * only cause layout shift); a quiet muted line on error. `heading` lets the caller
+ * retitle it when reviews DID claim threads above.
  */
 export function ReviewThreadsBlock({
   threads,
@@ -1142,19 +1107,17 @@ export function ReviewThreadsBlock({
 }: {
   threads: ReviewThreadOut[] | undefined;
   isError: boolean;
-  /** Section heading — "Review comments" by default; the caller passes e.g.
-   *  "Other line comments" when some threads render inline under reviews above,
-   *  so this residual block reads as the leftover rather than a duplicate. */
+  /** Section heading — "Review comments" by default; callers pass e.g. "Other line
+   *  comments" when some threads render inline under reviews above. */
   heading?: string;
-  /** The forge the threads came from — disambiguates bare-fence Apply scope for
-   *  suggestions (GitHub = whole range, GitLab = anchored line only), threaded to
-   *  every card. Defaults to "github" so an unwired caller is byte-identical. */
+  /** The forge the threads came from — disambiguates bare-fence Apply scope,
+   *  threaded to every card. Defaults to "github". */
   provider?: ForgeProvider;
   /** Gating inputs + the write for the per-suggestion Apply affordance, threaded
    *  straight to every card. Absent = no Apply shown. */
   apply?: SuggestionApply;
-  /** File-section lookup for synthesizing a hunk on hunk-less providers, threaded
-   *  to every card. Absent = no synthesis (unchanged GitHub behavior). */
+  /** File-section lookup for synthesizing a hunk on hunk-less providers. Absent =
+   *  no synthesis. */
   fileDiffLookup?: (path: string) => string | undefined;
   /** A thread id to reveal (timeline "View thread" jump) — passed straight to the
    *  inner list, which acts only if the id is one of these residual threads. */

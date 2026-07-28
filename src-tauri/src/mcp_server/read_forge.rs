@@ -1,6 +1,6 @@
 //! Forge / CI READ tools (always available; no opt-in flag).
 //!
-//! The 10 read-only tools that hit the repository's forge — PRs, issues, and CI runs
+//! The read-only tools that hit the repository's forge — PRs, issues, and CI runs
 //! /logs — routed through the forge abstraction (`crate::forge::forge_*`), which
 //! dispatches by the repo's git host, so one tool set serves GitHub, GitLab, and
 //! Bitbucket. Each requires the matching authenticated CLI/credential (GitHub `gh`,

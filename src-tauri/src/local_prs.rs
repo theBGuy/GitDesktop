@@ -7,41 +7,28 @@
 //!
 //! ## Storage-dir mirroring contract (the make-or-break detail)
 //!
-//! The frontend loads the store as `load("local-prs.json", { autoSave: true })`.
+//! The frontend loads `load("local-prs.json", { autoSave: true })`.
 //! `tauri-plugin-store` v2 resolves a relative store path against
-//! `BaseDirectory::AppData` (`resolve_store_path` in the plugin's `store.rs`:
-//! `app.path().resolve(path, BaseDirectory::AppData)`). Tauri's `AppData` resolver
-//! (`tauri`'s `path/desktop.rs::app_data_dir`) is `dirs::data_dir()/<identifier>`,
-//! and our identifier is `com.thebguy.gitdesktop` (tauri.conf.json). So the file is:
-//!
-//! ```text
-//!   Windows: %APPDATA%\com.thebguy.gitdesktop\local-prs.json
-//!            (dirs::data_dir() = the Roaming AppData dir)
-//!   macOS:   ~/Library/Application Support/com.thebguy.gitdesktop/local-prs.json
-//!   Linux:   $XDG_DATA_HOME (or ~/.local/share)/com.thebguy.gitdesktop/local-prs.json
-//! ```
-//!
-//! We resolve it here with the SAME `dirs::data_dir()` the Tauri path layer uses,
-//! joined with the identifier — so the two processes always agree on the file.
-//! (Verified against a real store file: `%APPDATA%\com.thebguy.gitdesktop\
-//! local-prs.json` exists with the expected `{ [repoPath]: LocalPr[] }` shape.)
-//! Always the real `local-prs.json` name — the frontend's cold-start `coldstart-`
-//! alias is a GUI-only concern the server never participates in.
+//! `BaseDirectory::AppData` (its `store.rs::resolve_store_path`), and Tauri's `AppData`
+//! resolver is `dirs::data_dir()/<identifier>` with our identifier
+//! `com.thebguy.gitdesktop` — i.e. `%APPDATA%\com.thebguy.gitdesktop\local-prs.json`
+//! on Windows, `~/Library/Application Support/<id>/` on macOS, `$XDG_DATA_HOME` (or
+//! `~/.local/share`)`/<id>/` on Linux. We resolve it here with the SAME
+//! `dirs::data_dir()`, so the two processes always agree on the file. Always the real
+//! `local-prs.json` name — the frontend's cold-start `coldstart-` alias is GUI-only.
 //!
 //! ## Value-based round-trip (never drop unknown fields)
 //!
-//! The whole file is read as a `serde_json::Value`, and only the target repo key's
-//! array is mutated — record-by-record as `Value`s. We NEVER deserialize existing
-//! records into a struct and re-serialize them, because that would silently drop any
-//! field a future GUI version adds. NEW records are built from a typed struct (so the
-//! shape is guaranteed correct) then converted to `Value`. Writes are atomic (temp
-//! file in the same dir + rename over the target).
+//! The file is read as a `serde_json::Value` and only the target repo key's array is
+//! mutated, record-by-record as `Value`s. Existing records are NEVER deserialized into
+//! a struct and re-serialized — that would silently drop any field a future GUI version
+//! adds. NEW records are built from a typed struct then converted. Writes are atomic
+//! (temp file in the same dir + rename).
 //!
 //! ## Statelessness
 //!
 //! The GUI holds this store in memory (`autoSave`), so every call here does a FRESH
-//! read → modify → atomic write. We never cache across calls: the contract is
-//! "never write from stale memory".
+//! read → modify → atomic write. Never write from stale memory.
 
 use std::path::{Path, PathBuf};
 
@@ -292,19 +279,15 @@ pub fn set_approved(repo: &str, id: &str, approved: bool) -> AppResult<Value> {
     })
 }
 
-/// Fold any local-PR records still stored under a legacy checkout-PATH key into
-/// the repo's worktree-stable identity key, one time. `identity` is
-/// [`crate::git::repo::repo_identity`]'s output (the absolute common git dir);
-/// `legacy` is the raw `--repo` path the server was launched with. Before identity
-/// keying, records were stored under the checkout path, so a repo opened via a
-/// worktree (or a differently spelled path) got its own disjoint entry — the same
-/// split that made the GUI's PRs invisible to the MCP ("no local PRs found"). This
-/// migrates that entry onto the identity key (merging by `id` when the identity
-/// key already holds records — identity's own come first) and removes the legacy
-/// one. Callers pass `identity` as the `repo` arg to every other fn here, so once
-/// this has run the reads/writes land on the shared key. Idempotent: a no-op once
-/// no distinct legacy key remains (already consolidated, or `--repo` already
-/// resolved to the identity).
+/// Fold any local-PR records still stored under a legacy checkout-PATH key into the
+/// repo's worktree-stable identity key, one time. `identity` is
+/// [`crate::git::repo::repo_identity`]'s output (the absolute common git dir); `legacy`
+/// is the raw `--repo` path the server was launched with. A repo opened via a worktree
+/// (or a differently spelled path) otherwise gets its own disjoint entry, making the
+/// GUI's PRs invisible to the MCP. Merges by `id` when the identity key already holds
+/// records (identity's own win) and removes the legacy key. Callers pass `identity` as
+/// the `repo` arg to every other fn here. Idempotent: a no-op once no distinct legacy
+/// key remains.
 pub fn consolidate(identity: &str, legacy: &str) -> AppResult<()> {
     let path = store_path()?;
     let mut store = read_store(&path)?;
@@ -417,8 +400,7 @@ mod tests {
     #[test]
     fn unknown_fields_survive_a_comment_round_trip() {
         // A record carrying a field this Rust code has never heard of must survive a
-        // mutation byte-meaningfully (the acceptance criterion for never dropping
-        // unknown fields a future GUI adds).
+        // mutation untouched.
         let (_tmp, path) = tmp_store();
         let repo = r"C:\repo\one";
         let mut store = Map::new();
@@ -547,8 +529,8 @@ mod tests {
         let mut store = Map::new();
         store.insert(r"C:\repo\one".to_string(), json!([{ "id": "pr-1" }]));
         assert!(existing_key(&store, r"C:\repo\two").is_none());
-        // (Exercised end-to-end below via a temp file; here we just assert the key logic
-        // the read fns rely on.)
+        // (The public read fns aren't called here; `list_and_get_read_records_tolerantly`
+        // exercises the same read logic over a temp store file.)
     }
 
     #[test]

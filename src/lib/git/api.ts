@@ -225,7 +225,6 @@ export const gitStagedDiff = (
     repoPath,
     maxBytes: opts.maxBytes ?? null,
     exclude: opts.exclude ?? null,
-    // Only send the flag when set, matching the prior two-function behaviour.
     ...(opts.worktree ? { worktree: true } : {}),
   });
 
@@ -494,10 +493,9 @@ export const gitListTags = (repoPath: string) =>
 
 // ── Releases ────────────────────────────────────────────────────────────────
 //
-// Reads AND writes go through the provider-neutral `forge_release_*` (GitHub via
-// `gh`, GitLab via `glab`); the GitHub path is byte-identical to the old
-// `gh_release_*`. The GitHub-only pieces stay `gh_*`: notes generation (GitHub's
-// changelog API) and asset download (GitLab assets are links the browser opens).
+// Reads and writes go through the provider-neutral `forge_release_*`. Two pieces stay
+// `gh_*`: notes generation (GitHub's changelog API) and asset download (GitLab assets
+// are links the browser opens).
 
 export const forgeReleaseList = (repoPath: string) =>
   invoke<ReleaseInfo[]>("forge_release_list", { repoPath });
@@ -638,12 +636,11 @@ export const openInTerminal = (
 export const forgeRepoUrl = (repoPath: string) =>
   invoke<string>("forge_repo_url", { repoPath });
 
-/** The repo's visibility probe result: the visibility (exactly "public" |
- *  "private" | "internal", lowercase) plus fork provenance, gathered in a single
- *  backend round-trip. `isFork` is set only on positive API evidence; `parent`
- *  is the upstream "owner/repo" slug when the provider supplies it. Rejects on
- *  any undeterminable visibility (no remote, no auth, API failure); callers treat
- *  a rejection as "leave the persisted values alone". */
+/** A repo's visibility probe: visibility (lowercase "public" | "private" | "internal")
+ *  plus fork provenance, in one round-trip. `isFork` is set only on positive API
+ *  evidence; `parent` is the upstream slug when supplied. Rejects when visibility is
+ *  undeterminable (no remote / no auth / API failure) — callers treat a rejection as
+ *  "leave the persisted values alone". */
 export interface RepoVisibility {
   visibility: string;
   isFork: boolean;
@@ -856,11 +853,9 @@ export const gitUpdateBranchFrom = (
 
 export type MergeStrategy = "merge" | "squash" | "rebase" | "fast_forward";
 
-/** Outcome of starting or finishing a local-PR merge. `merged` means it committed;
- *  `conflicts` means it paused with conflicts in an isolated worktree for the user
- *  to resolve — the worktree fields feed the finish (`gitFinishLocalPrMerge`) /
- *  abort (`gitAbortLocalPrMerge`) commands, which point the conflict editor at the
- *  worktree without touching the user's branch or working tree. */
+/** Outcome of starting or finishing a local-PR merge: `merged` committed; `conflicts`
+ *  paused in an isolated worktree for the user to resolve, without touching their
+ *  branch or working tree (the worktree fields feed finish/abort). */
 export interface LocalPrMergeOutcome {
   status: "merged" | "conflicts";
   conflicts: string[];
@@ -1066,12 +1061,10 @@ export const gitReviewWorktree = (repoPath: string, sha: string) =>
 export const gitRemoveWorktree = (repoPath: string, worktreePath: string) =>
   invoke<void>("git_remove_worktree", { repoPath, worktreePath });
 
-/** Reclaims leaked local-PR conflict-resolution worktrees: removes every hidden
- *  `gd-resolve-*` worktree whose path is NOT in `keepPaths`. Pass the worktree
- *  paths of all currently-active paused merges (each local PR's
- *  `pendingMerge.worktreePath`) so a genuinely in-progress resolve is spared;
- *  the backend normalizes paths, so pass them as they came from the merge
- *  outcome. Best-effort housekeeping, run once on repo open. */
+/** Reclaims leaked local-PR conflict worktrees: removes every hidden `gd-resolve-*`
+ *  worktree whose path is NOT in `keepPaths`. Pass every active paused merge's
+ *  `pendingMerge.worktreePath` (as it came from the merge outcome) so an in-progress
+ *  resolve is spared. Best-effort housekeeping, run once on repo open. */
 export const gitCleanupOrphanedResolveWorktrees = (
   repoPath: string,
   keepPaths: string[],
@@ -1081,8 +1074,8 @@ export const gitCleanupOrphanedResolveWorktrees = (
     keepPaths,
   });
 
-/** Provider-neutral hosted-integration status (GitHub today; GitLab/Bitbucket as
- *  their impls land) — the gate hosted panels read for any provider. */
+/** Provider-neutral hosted-integration status (GitHub, GitLab, Bitbucket) — the gate
+ *  hosted panels read for any provider. */
 export const forgeStatus = (repoPath: string) =>
   invoke<ForgeStatus>("forge_status", { repoPath });
 
@@ -1156,10 +1149,9 @@ export const forgeProviderFeatures = (provider: ForgeProvider) =>
 
 // ── Bitbucket account (Atlassian API token) ──────────────────────────────────
 //
-// Bitbucket Cloud auth is an Atlassian API token used with the account email
-// (HTTP Basic); the token lives in the OS keychain, never returned by anything.
-// In cold-start test mode there's no keychain, so `forgeBbAccount` reports
-// "not connected" (null) rather than reaching for a Tauri command.
+// Bitbucket Cloud auth is an Atlassian API token used with the account email (HTTP
+// Basic); the token lives in the OS keychain and is never returned. Cold-start test
+// mode has no keychain, so `forgeBbAccount` reports "not connected".
 
 /** Validate an Atlassian API token against GET /2.0/user and, on success, save
  *  it to the keychain. Throws (nothing saved) on an invalid token or a network
@@ -1178,9 +1170,9 @@ export const forgeBbAccount = () =>
 
 // ── Forge session health & reconnect ─────────────────────────────────────────
 //
-// A session (a gh/glab account, or the Bitbucket token) can go dead mid-flow;
-// these probe its health and drive an in-app reconnect (gh's device flow /
-// glab's `--web` flow) instead of sending the user to a terminal.
+// Probe a session (gh/glab account or the Bitbucket token) and drive an in-app
+// reconnect (gh's device flow / glab's `--web`) instead of sending the user to a
+// terminal.
 
 /** The health of the forge session backing THIS repo (its provider only). */
 export const forgeSessionHealth = (repoPath: string) =>
@@ -1309,13 +1301,11 @@ export type PrStateFilter = "open" | "closed";
 export const ghPrList = (repoPath: string, state: PrStateFilter) =>
   invoke<PrInfo[]>("gh_pr_list", { repoPath, state });
 
-/** The CI rollup for a PR-list page, keyed by number — provider-neutral (the backend
- *  routes to GitHub/GitLab/Bitbucket). `prs` carries each row's number plus its head
- *  SHA (the Bitbucket arm needs the SHA; GitHub/GitLab ignore it). `sampleUrl` is any
- *  PR html url from the same page; it fixes which repo the numbers belong to
- *  (load-bearing for forks, where the list resolves to the parent while origin points
- *  at the fork). Fetched separately from the list so the list paints fast and the row
- *  icons hydrate after. */
+/** The CI rollup for a PR-list page, keyed by number (provider-neutral). `prs` carries
+ *  each row's number plus head SHA (the Bitbucket arm needs the SHA). `sampleUrl` is any
+ *  PR html url from the same page and is load-bearing for forks: it fixes which repo the
+ *  numbers belong to when the list resolves to the parent while origin points at the
+ *  fork. */
 export const forgePrListCi = (
   repoPath: string,
   prs: { number: number; headSha: string }[],
@@ -1334,12 +1324,10 @@ export const forgePrTimeline = (
   lens: RemoteLens,
 ) => invoke<PrTimelineEvent[]>("forge_pr_timeline", { repoPath, number, lens });
 
-// Provider-neutral merge/pull request reads — the backend resolves the repo's
-// provider and dispatches (GitHub `gh`, GitLab `glab`), returning the same neutral
-// `PrInfo`/`PrDetails` shapes. The write mutations that shipped for both providers
-// (comment/state/merge/labels/edit/reactions/…) have their own `forge*` wrappers
-// below; only the still-GitHub-only writes (the Review menu, ready-for-review,
-// comment edit/delete/hide) stay on `gh_*`.
+// Provider-neutral merge/pull request reads — the backend resolves the repo's provider
+// and dispatches, returning the same neutral `PrInfo`/`PrDetails` shapes. Neutral
+// `forge*` wrappers cover the writes below; the Review menu (`gh_pr_review`) and comment
+// hide/unhide (`gh_pr_minimize_comment`) are the remaining GitHub-only ones.
 export const forgePrList = (
   repoPath: string,
   state: PrStateFilter,
@@ -1442,11 +1430,10 @@ export const forgePrPoll = (repoPath: string) =>
 
 export type IssueStateFilter = "open" | "closed";
 
-// Provider-neutral issue reads — like the PR reads above, the backend resolves the
-// repo's provider and dispatches (GitHub `gh`, GitLab `glab`), returning the same
-// neutral `IssueInfo`/`IssueDetails` shapes. The writes go neutral per-action as
-// each lands (comment/state/labels/assignees/create/edit/milestone/reactions); the
-// rest (pin/lock/transfer/delete, sub-issues) stay `gh_issue_*`.
+// Provider-neutral issue reads — the backend resolves the repo's provider and
+// dispatches, returning the same neutral `IssueInfo`/`IssueDetails` shapes. Most writes
+// are neutral too; the GitHub-only ones keep their `gh_issue_*` names (pin/unpin, issue
+// type, sub-issues/dependencies, linked branch) — trust the prefix, not this list.
 export const forgeIssueList = (
   repoPath: string,
   state: IssueStateFilter,
@@ -1505,7 +1492,8 @@ export const forgeIssueSetAssignees = (
     lens,
   });
 
-/** Set an MR's assignees — GitLab-only (GitHub PRs have no assignee picker). */
+/** Set a merge/pull request's assignees — GitHub + GitLab (`implemented.mrAssignees`);
+ *  Bitbucket has no PR assignee concept. */
 export const forgeMrSetAssignees = (
   repoPath: string,
   number: number,
@@ -1546,11 +1534,10 @@ export const forgeGlIssueSetDueDate = (
   dueDate: string | null,
 ) => invoke<void>("forge_gl_issue_set_due_date", { repoPath, number, dueDate });
 
-// GitLab time tracking (estimate + spent) on issues and MRs — GitLab-only,
-// gated on `implemented.timeTracking`. Durations are GitLab's human format
-// ("3h", "1d 2h 30m"); the server validates and rejects bad input. Every write
-// returns the fresh {@link GitLabTimeStats}, so callers write it straight into
-// the time-stats cache with no refetch.
+// GitLab time tracking (estimate + spent) on issues and MRs — `implemented.timeTracking`.
+// Durations use GitLab's human format ("3h", "1d 2h 30m"); the server validates. Every
+// write returns the fresh {@link GitLabTimeStats}, so callers write it straight into the
+// cache.
 export const forgeGlIssueTimeStats = (repoPath: string, number: number) =>
   invoke<GitLabTimeStats>("forge_gl_issue_time_stats", { repoPath, number });
 
@@ -1805,10 +1792,9 @@ export const ghDiscussionReopen = (repoPath: string, discussionId: string) =>
 export const ghDiscussionDelete = (repoPath: string, discussionId: string) =>
   invoke<void>("gh_discussion_delete", { repoPath, discussionId });
 
-// Issue comment, close/reopen, and title/body edit are provider-neutral (GitHub
-// via `gh`, GitLab via `glab`); the GitHub path is byte-identical to the old
-// `gh_issue_*`. The still-GitHub-only issue writes (pin/lock/transfer/delete,
-// sub-issues) stay `gh_issue_*`.
+// Issue comment, close/reopen, title/body edit, lock, transfer and delete are all
+// provider-neutral. The remaining GitHub-only writes keep the `gh_issue_*` prefix
+// (pin/unpin, issue type, sub-issues/dependencies, linked branch).
 export const forgeIssueComment = (
   repoPath: string,
   number: number,
@@ -2061,12 +2047,9 @@ export const ghPrReview = (
   body: string,
 ) => invoke<void>("gh_pr_review", { repoPath, number, action, body });
 
-// MR comment, close/reopen, title/body edit, and merge are provider-neutral
-// (GitHub via `gh`, GitLab via `glab`); the GitHub path is byte-identical to the
-// old `gh_pr_*`. Full reviews stay GitHub-only (`gh_pr_review`).
-// `asBot` posts the comment as the configured GitLab review-bot identity instead
-// of the signed-in user (GitLab-only; other providers ignore it). Omitted (null)
-// leaves existing callers unchanged.
+// MR comment, close/reopen, title/body edit and merge are provider-neutral; full
+// reviews stay GitHub-only (`gh_pr_review`). `asBot` posts as the configured GitLab
+// review-bot identity instead of the signed-in user (other providers ignore it).
 export const forgePrComment = (
   repoPath: string,
   number: number,
@@ -2461,8 +2444,8 @@ export const forgeGlProtectedBranchDelete = (repoPath: string, name: string) =>
 export const forgeGlMemberProjects = (repoPath: string) =>
   invoke<string[]>("forge_gl_member_projects", { repoPath });
 
-// ── Bitbucket settings surface (wave 3) — Bitbucket repos only; the GitHub /
-//    GitLab dialogs keep their own provider-shaped sections.
+// ── Bitbucket settings surface — Bitbucket repos only; the GitHub / GitLab dialogs
+//    keep their own provider-shaped sections.
 
 /** The viewer's Bitbucket workspaces — the publish target picker (account-scoped). */
 export const forgeBbWorkspaces = () =>
@@ -2620,7 +2603,7 @@ export const forgeBbHookUpdate = (
 export const forgeBbHookDelete = (repoPath: string, uuid: string) =>
   invoke<void>("forge_bb_hook_delete", { repoPath, uuid });
 
-// ── Bitbucket PR tasks + environments (wave 4) ───────────────────────────────
+// ── Bitbucket PR tasks + environments ────────────────────────────────────────
 
 /** A PR's task checklist, in list order (Bitbucket-only — `implemented.prTasks`). */
 export const forgeBbPrTasks = (repoPath: string, number: number) =>
@@ -2682,11 +2665,9 @@ export interface CommitAuthorAvatar {
   avatarUrl: string;
 }
 
-/** Batch-resolve commit-author `email → GitHub avatar URL` for one recent-commits
- *  page (the History surfaces' fourth avatar tier, for human authors whose email
- *  is neither a GitHub no-reply nor has a Gravatar). GitHub-only; deliberately
- *  partial (one page) and never errors — an empty repo / offline / non-github
- *  repo resolves to `[]`, so callers keep initials. */
+/** Batch-resolves commit-author `email → GitHub avatar URL` for one recent-commits page.
+ *  GitHub-only, deliberately partial (one page), and never errors — empty repo / offline
+ *  / non-GitHub resolves to `[]` so callers keep initials. */
 export const ghCommitAuthorAvatars = (repoPath: string) =>
   invoke<CommitAuthorAvatar[]>("gh_commit_author_avatars", { repoPath });
 

@@ -49,8 +49,8 @@ export function ReviewerNotesField({
   const regionId = useId();
   // The exact value we last applied from a deposit. While the field still equals
   // this (or is empty), it's "pristine" and safe to re-seed; once the user edits
-  // it to anything else, seeding stands down (the PR #40 `userPicked` lesson — an
-  // effect that re-fires must never override an explicit edit).
+  // it to anything else, seeding stands down — an effect that re-fires must never
+  // override an explicit edit.
   const lastSeedRef = useRef<string | null>(null);
   // The deposit currently reflected in the field, so the provenance line + Clear
   // only show for a prefilled (not hand-typed) value. Cleared the moment the user
@@ -61,9 +61,9 @@ export function ReviewerNotesField({
   const value = field.state.value;
 
   // Apply the resolved deposit to the field, but ONLY while pristine (empty, or
-  // still exactly the last value we seeded) — never over a hand-typed edit (the
-  // PR #40 `userPicked` lesson). Read as a non-retriggering effect event so the
-  // seed reacts to the deposit/branch, not to every keystroke in `value`.
+  // still exactly the last value we seeded) — never over a hand-typed edit. Read
+  // as a non-retriggering effect event so the seed reacts to the deposit/branch,
+  // not to every keystroke in `value`.
   const applyDeposit = useEffectEvent(
     (body: string, savedAt: string | null) => {
       const pristine = value === "" || value === lastSeedRef.current;

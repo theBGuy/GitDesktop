@@ -25,11 +25,9 @@ import { pushNotification, repoNameFromPath } from "@/lib/stores/notifications";
 import { errorMessage, invoke } from "@/lib/tauri/invoke";
 import { loadPersistedResearch, savePersistedResearch } from "./persistence";
 
-/** Where a saved Research report is written, relative to the repo root: under the
- *  app's committed `.gitdesktop/` metadata folder (alongside instructions.md and
- *  branch-rules.json), so it shows in Changes and is the user's to commit — we
- *  never commit it (scaffold-local-files). A working artifact the user can later
- *  promote to a polished `docs/` design doc. */
+/** Where a saved Research report is written, relative to the repo root: the app's committed
+ *  `.gitdesktop/` metadata folder, so it shows in Changes and is the user's to commit — we
+ *  never commit it. */
 const RESEARCH_REPORT_DIR = ".gitdesktop/research";
 
 /** Which research persona drives a turn. "brainstorm" diverges (breadth, options);
@@ -81,11 +79,9 @@ export interface ResearchGenerateArgs extends ResearchSeed {
 }
 
 /**
- * One concurrent research run — a **web-enabled read-only agent conversation**.
- * Turn 1 explores (repo + web) and streams a cited markdown report; a follow-up
- * resumes the SAME conversation so the agent keeps its sources in context and digs
- * deeper incrementally. Kept in the list so switching away never loses it — the
- * keyed analogue of a session/plan. Never writes: the per-CLI read-only toolset
+ * One concurrent research run — a web-enabled READ-ONLY agent conversation. Turn 1 explores
+ * (repo + web) and streams a cited markdown report; a follow-up resumes the SAME conversation
+ * so the agent keeps its sources in context. Never writes: the per-CLI read-only toolset
  * (read + web tools, no Edit/Write/Bash) is the hard guarantee.
  */
 export interface ResearchRun {
@@ -123,10 +119,9 @@ export interface ResearchRun {
   text: string;
   /** Transient tool-activity note (e.g. "Searching the web…"). */
   status: string;
-  /** The interleaved render of the latest turn — prose runs + tool steps in order
-   *  (`text` is the same prose, concatenated, kept for parsing the report).
-   *  Persisted with the run (absent only on runs saved before this field existed →
-   *  the transcript falls back to `text`). */
+  /** The interleaved render of the latest turn — prose runs + tool steps in order (`text` is
+   *  the same prose, kept for parsing the report). Persisted; absent only on runs saved
+   *  before this field existed → the transcript falls back to `text`. */
   segments?: TranscriptSegment[];
   /** Parsed report (title + markdown), set when the turn completes. */
   report: ResearchReport | null;
@@ -155,11 +150,9 @@ interface ResearchState {
   setPendingResearchSeed: (seed: ResearchSeed | null) => void;
   /** Start a new research run (creates it, selects it, streams turn 1). Returns its id. */
   start: (args: ResearchGenerateArgs) => string;
-  /** Send a free-form follow-up — resumes the conversation so the agent digs
-   *  deeper. `depth` is the persona for this turn (the follow-up composer can
-   *  switch it mid-session); a change re-injects the new persona inline. `model` is
-   *  the model for this and following turns (also switchable mid-session, like the
-   *  agent sessions). No-op if the run is missing, mid-turn, or the message is blank. */
+  /** Send a free-form follow-up — resumes the conversation so the agent digs deeper. `depth`
+   *  is the persona for this turn (switchable mid-session; a change re-injects it inline) and
+   *  `model` applies from this turn on. No-op if the run is missing, mid-turn, or blank. */
   sendFollowUp: (
     id: string,
     message: string,
@@ -219,9 +212,9 @@ function cleanReportText(text: string): string {
 }
 
 /**
- * Assemble the whole research session into one Markdown document for saving or
- * handing to Plan: the latest report first, then each earlier turn (its question +
- * report) kept for full transparency. Pre-report narration is stripped throughout.
+ * Assemble the whole research session into one Markdown document for saving or handing to
+ * Plan: the latest report first, then each earlier turn (its question + report), kept for
+ * transparency. Pre-report narration is stripped throughout.
  */
 export function assembleSessionReport(run: ResearchRun): string {
   const reportOf = (text: string, report: ResearchReport | null) =>
@@ -242,10 +235,9 @@ export function assembleSessionReport(run: ResearchRun): string {
 }
 
 /**
- * Distill the whole research session (every turn's tool steps — prior history +
- * the current turn) into a {@link ContextPack}, so a "Turn into a Plan" handoff can
- * carry forward what research already read, searched, and fetched. Turns saved
- * before segments existed contribute nothing (graceful degradation → empty pack).
+ * Distill every turn's tool steps (prior history + the current turn) into a
+ * {@link ContextPack}, so a "Turn into a Plan" handoff carries what research already read,
+ * searched, and fetched. Turns saved before segments existed contribute nothing (empty pack).
  */
 export function researchRunContextPack(run: ResearchRun): ContextPack {
   return extractContextPack([
@@ -255,11 +247,9 @@ export function researchRunContextPack(run: ResearchRun): ContextPack {
 }
 
 /**
- * Read-only research surface. Each run is a **resumable web-enabled read-only
- * agent conversation** (the `agent_session` backend with `readOnly: true` and
- * `web: true` — read + web tools only, no worktree, runs in the live repo). Turn
- * 1 explores and streams a cited report; a follow-up resumes the same
- * conversation. Never writes: the per-CLI read-only toolset is the hard guarantee.
+ * Read-only research surface: each run is a resumable web-enabled agent conversation (the
+ * `agent_session` backend with `readOnly: true` + `web: true` — no worktree, runs in the live
+ * repo). See {@link ResearchRun} for the per-run model.
  */
 export const useResearchStore = create<ResearchState>((set, get) => {
   /** Patch one run by id — touches only that run, so concurrent runs streaming
@@ -300,9 +290,8 @@ export const useResearchStore = create<ResearchState>((set, get) => {
     };
     let finalText = "";
     let errored = false;
-    // Announce a finished run (success OR failure) the way plans/sessions do —
-    // but stay quiet when the user is actually looking at this run (focused +
-    // Agent tab + selected); a focused user on another tab still gets it.
+    // Announce a finished run (success OR failure), but stay quiet when the user is looking
+    // at this run (focused + Agent tab + selected); another tab still gets it.
     const notifyDone = (failed: boolean) => {
       const run = get().runs.find((r) => r.id === id);
       if (!run) return;
@@ -409,8 +398,6 @@ export const useResearchStore = create<ResearchState>((set, get) => {
       notifyDone(true);
       return;
     }
-    // reportPath was already cleared at turn start, so a fresh report always
-    // offers a fresh save.
     patch(id, {
       generating: false,
       report: { title, report },
@@ -552,12 +539,10 @@ export const useResearchStore = create<ResearchState>((set, get) => {
 
     distillPlanBrief: async (id) => {
       const run0 = get().runs.find((r) => r.id === id);
-      // No-op unless idle: a mid-turn or already-distilling run has nothing stable
-      // to resume against. The caller falls back to the raw assembly on null.
-      // Claude-only: the distill runs on a FORKED session (`--fork-session`) so it
-      // never pollutes the conversation; no other CLI has a fork mechanism, so
-      // distilling them would append to their transcript — the raw fallback (null) is
-      // the correct, regression-free behavior there.
+      // No-op unless idle — a mid-turn or already-distilling run has nothing stable to resume
+      // against. Claude-only: the distill runs on a FORKED session (`--fork-session`) so it
+      // never pollutes the conversation; no other CLI can fork, so distilling them would append
+      // to their transcript — the raw fallback (null) is the correct behavior there.
       if (
         !run0 ||
         run0.generating ||
@@ -579,9 +564,9 @@ export const useResearchStore = create<ResearchState>((set, get) => {
       };
       let finalText = "";
       let errored = false;
-      // Captured in `finally` BEFORE clearing `distilling` — superseded() reads
-      // `cur.distilling`, so re-evaluating it AFTER the clear would always report
-      // "stale" and discard every successful distill (the raw fallback would mask it).
+      // Captured in `finally` BEFORE `distilling` is cleared: superseded() reads
+      // `cur.distilling`, so evaluating it after the clear would discard every successful
+      // distill (the raw fallback would mask it).
       let wasSuperseded = true;
       try {
         await runAgentSession({
@@ -609,11 +594,9 @@ export const useResearchStore = create<ResearchState>((set, get) => {
             if (ev.kind === "delta") {
               finalText += ev.text;
             } else if (ev.kind === "done") {
-              // The distill has web tools, so its streamed deltas are working
-              // narration ("Let me search…") ahead of the synthesized report. The
-              // terminal event's text is the authoritative final answer — adopt it
-              // whenever present (falling back to the deltas only for a degenerate
-              // empty terminal event) so the narration never leaks into the report.
+              // The distill has web tools, so its deltas are working narration ahead of the
+              // synthesized report — the terminal event's text is the authoritative answer.
+              // Adopt it whenever present (deltas only for a degenerate empty terminal event).
               if (ev.text.trim()) finalText = ev.text;
               // The distill IS the latest turn, so its cost is the run's latest cost.
               if (ev.costUsd != null) patch(id, { costUsd: ev.costUsd });
@@ -627,9 +610,7 @@ export const useResearchStore = create<ResearchState>((set, get) => {
         // A killed/failed process (incl. cancel) — fall through to the null return.
         errored = true;
       } finally {
-        // Evaluate staleness ONCE here, then clear the flag — clearing `distilling`
-        // itself makes superseded() true, so we must capture the verdict first.
-        // (Cancel clears the flag mid-flight → wasSuperseded is true here → null.)
+        // Capture the verdict BEFORE clearing the flag (clearing it makes superseded() true).
         wasSuperseded = superseded();
         if (!wasSuperseded) patch(id, { distilling: false });
       }
@@ -660,10 +641,9 @@ export const useResearchStore = create<ResearchState>((set, get) => {
     restart: (id) => {
       const run = get().runs.find((r) => r.id === id);
       if (!run || run.generating || run.distilling) return;
-      // Fresh conversation (the stopped one was killed): a new session id so the
-      // old turn — if it's still resolving — is detected as stale and bails, then
-      // re-run turn 1 from the original topic + persona. Reset the persona to the
-      // run's ORIGINAL mode (a mid-session switch doesn't carry into a restart).
+      // Fresh conversation (the stopped one was killed): a new session id so a still-resolving
+      // old turn is detected as stale and bails, then re-run turn 1 from the original topic +
+      // persona (a mid-session persona switch doesn't carry into a restart).
       const depth = run.origin?.depth ?? run.depth;
       patch(id, {
         sessionId: crypto.randomUUID(),
@@ -696,10 +676,9 @@ export const useResearchStore = create<ResearchState>((set, get) => {
   };
 });
 
-// Persist the research list to disk, debounced so a streaming run's rapid text
-// updates coalesce into roughly one write a second (latest snapshot wins, and
-// captures the native session id mid-stream so a resume survives a restart).
-// Gated on `hydrated` so the initial empty state never clobbers what's on disk.
+// Persist the research list to disk, debounced so a streaming run's rapid updates coalesce
+// (latest snapshot wins, and it captures the native session id mid-stream so a resume survives
+// a restart). Gated on `hydrated` so the initial empty state never clobbers disk.
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 useResearchStore.subscribe((state, prev) => {
   if (!state.hydrated || state.runs === prev.runs) return;

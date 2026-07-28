@@ -1,18 +1,13 @@
 //! Forge remote-WRITE tools (opt-in via `--allow-remote-write`).
 //!
-//! REAL forge writes, routed through the forge abstraction (`crate::forge::forge_*`),
-//! which dispatches by the repo's git host — so they act on the bound repository's
-//! GitHub, GitLab, or Bitbucket remote under the matching authenticated identity
-//! (GitHub `gh`, GitLab `glab`, Bitbucket a stored API token), and hit the network.
-//! Coverage varies by provider (Bitbucket's native issue tracker is deprecated, its
-//! releases/labels/assignees/milestones aren't wired, and some approval/draft surfaces
-//! are provider-specific); each tool routes through the forge layer, which returns an
-//! actionable error where a provider can't do the thing rather than failing silently.
-//! Gated on `allow_remote_write` (via [`GitDesktopMcp::ensure_remote_write`]) — a
-//! SEPARATE opt-in from `--allow-write` (which only gates the app-data-only local-PR
-//! tools); enabling one never grants the other. All are annotated non-read-only, and
-//! non-destructive EXCEPT `merge_pull_request` (a merge isn't trivially reversible),
-//! though every one DOES post/create/mutate publicly under the user's identity.
+//! REAL, publicly visible writes, routed through `crate::forge::forge_*`, which
+//! dispatches by the repo's git host (GitHub `gh`, GitLab `glab`, Bitbucket a stored
+//! token). Coverage varies by provider; the forge layer returns an actionable error
+//! where a provider can't do the thing rather than failing silently.
+//!
+//! Gated on `allow_remote_write` ([`GitDesktopMcp::ensure_remote_write`]) — a SEPARATE
+//! opt-in from `--allow-write`; enabling one never grants the other. Only
+//! `merge_pull_request` is annotated destructive (a merge isn't trivially reversible).
 
 use std::collections::HashMap;
 
@@ -301,10 +296,9 @@ struct ReactionArgs {
     subject_id: String,
 }
 
-/// GitHub's ReactionContent vocabulary — the neutral set both the GitHub and GitLab
-/// forge arms accept (GitLab maps each onto an award emoji). Validated at the tool
-/// layer so an unknown value is rejected with the full valid list before any network
-/// call. Mirrors `github::issue::validate_reaction_content` / gitlab's
+/// GitHub's ReactionContent vocabulary — the neutral set both forge arms accept (GitLab
+/// maps each onto an award emoji). Validated here so an unknown value is rejected before
+/// any network call. Mirrors `github::issue::validate_reaction_content` and gitlab's
 /// `reaction_to_award`.
 const VALID_REACTIONS: &[&str] = &[
     "THUMBS_UP",
@@ -436,7 +430,6 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<CommentIssueArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
-        // Append the attribution footer so the comment is identifiable as ours.
         let body = format!("{}{GD_COMMENT_FOOTER}", args.body);
         crate::forge::forge_issue_comment(self.repo.clone(), args.number, body, None)
             .await
@@ -503,7 +496,6 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<CommentPullRequestArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
-        // Append the attribution footer so the comment is identifiable as ours.
         let body = format!("{}{GD_COMMENT_FOOTER}", args.body);
         crate::forge::forge_pr_comment(self.repo.clone(), args.number, body, None, None)
             .await
@@ -582,9 +574,8 @@ impl GitDesktopMcp {
             "strategy": strategy,
             "deleted_branch": args.delete_branch,
         });
-        // The PR merged; a cleanup_warning means only the post-merge head-branch
-        // deletion failed. Surface it as a caveat on the success result rather
-        // than as a tool error (the merge is not reversible from here anyway).
+        // The merge succeeded; a cleanup_warning means only the branch deletion failed —
+        // surface it as a caveat, not a tool error (the merge isn't reversible from here).
         if let Some(warning) = outcome.cleanup_warning {
             result["cleanup_warning"] = serde_json::Value::String(warning);
         }
@@ -754,10 +745,8 @@ impl GitDesktopMcp {
                 .find(|l| l.name == name)
                 .map(|l| l.id.clone())
         };
-        // Resolve names→ids for the GitHub arm. An empty id means the label wasn't found
-        // in the repo (GitHub can't apply it) — but GitLab's repo labels carry no id, so
-        // only treat a missing NAME (not a missing id) as the error, letting GitLab
-        // proceed by name.
+        // GitLab labels carry no id, so treat only a missing NAME as an error — a known
+        // name with an empty id still proceeds by name.
         let mut add_ids = Vec::new();
         let mut remove_ids = Vec::new();
         for name in &args.add {
@@ -904,8 +893,6 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<ReplyToReviewThreadArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
-        // Append the attribution footer so the reply is identifiable as ours (same as
-        // comment_pull_request).
         let body = format!("{}{GD_COMMENT_FOOTER}", args.body);
         crate::forge::forge_pr_thread_reply(self.repo.clone(), args.number, args.thread_id, body)
             .await
@@ -1105,8 +1092,6 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<CreateReviewThreadArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
-        // Append the attribution footer so the comment is identifiable as ours (same
-        // as reply_to_review_thread).
         let body = format!("{}{GD_COMMENT_FOOTER}", args.body);
         let side = if args.side.is_empty() {
             "new".to_string()
@@ -1354,7 +1339,6 @@ impl GitDesktopMcp {
             crate::github::discussion::gh_discussion_view(self.repo.clone(), args.number)
                 .await
                 .map_err(app_err)?;
-        // Append the attribution footer so the comment is identifiable as ours.
         let body = format!("{}{GD_COMMENT_FOOTER}", args.body);
         crate::github::discussion::gh_discussion_add_comment(
             self.repo.clone(),
@@ -1415,7 +1399,6 @@ impl GitDesktopMcp {
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
         super::read_forge::ensure_github(&self.repo).await?;
-        // close is keyed by the discussion's node id — resolve it from the number.
         let discussion =
             crate::github::discussion::gh_discussion_view(self.repo.clone(), args.number)
                 .await
@@ -1468,11 +1451,9 @@ mod tests {
     use super::*;
     use rmcp::handler::server::wrapper::Parameters;
 
-    /// Table-driven gate check: with ALL flags false, EVERY forge remote-write tool
-    /// must return the `--allow-remote-write` gate error before touching the network.
-    /// Same shape as `write_local`'s test — a Wave-2 module copies this pattern.
-    ///
-    /// Params carry throwaway values — the gate fires first, so they are never read.
+    /// With ALL flags false, EVERY forge remote-write tool must return the
+    /// `--allow-remote-write` gate error before touching the network. Params carry
+    /// throwaway values — the gate fires first, so they are never read.
     #[tokio::test]
     async fn all_write_tools_gated_on_allow_remote_write() {
         let h = GitDesktopMcp::with_options("/tmp/x".to_string(), false, false, false, false);

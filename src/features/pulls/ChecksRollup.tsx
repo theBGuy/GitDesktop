@@ -31,11 +31,7 @@ import {
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { cn } from "@/lib/utils";
 
-/**
- * Tone + glyph for a CI check, so pass/fail isn't conveyed by color alone.
- * Moved here from RemotePrView — it's checks-specific and only this component
- * uses it now.
- */
+/** Tone + glyph for a CI check, so pass/fail is never conveyed by color alone. */
 function checkPresentation(status: string): {
   tone: string;
   Icon: typeof CheckCircleIcon;
@@ -86,13 +82,11 @@ function checkPresentation(status: string): {
   };
 }
 
-/** A GitHub Actions check that hasn't finished yet — it has a parsed run id, the
- *  repo is GitHub, no `completedAt`, AND its status still reads as pending. The
- *  bucket check guards against a StatusContext whose `targetUrl` is coincidentally
- *  an Actions-run URL (so a runId parses) but whose state is already SUCCESS/
- *  FAILURE and carries no timestamps — without it, such a check would read as
- *  "running". Only these fetch run detail for the live step checklist; GitLab
- *  checks also carry run/job ids (pipeline/job ids) but have no steps, so gating on
+/** A GitHub Actions check that hasn't finished: a parsed run id, GitHub, no
+ *  `completedAt`, AND a still-pending status. The bucket check guards a
+ *  StatusContext whose `targetUrl` coincidentally parses as an Actions-run URL but
+ *  is already SUCCESS/FAILURE with no timestamps — without it such a check reads as
+ *  "running". GitLab checks carry run/job ids too but have no steps, so gating on
  *  the provider avoids wasted `forge_ci_run_view` spawns. */
 function isRunningActionsCheck(
   check: PrCheckOut,
@@ -263,9 +257,8 @@ function CheckRow({
   /** Unique row identity (the sorted index) for `data-row` + roving focus —
    *  GitHub allows two checks with the same `name`, so name can't be the id. */
   rowId: string;
-  /** The resolved run job for a running Actions check (from the rollup's shared
-   *  run-detail queries); undefined until the run detail resolves, or for a
-   *  non-running / non-Actions check. */
+  /** The resolved run job for a running Actions check; undefined until run detail
+   *  resolves, or for a non-running / non-Actions check. */
   runJob: RunJob | undefined;
   /** Whether this is a still-running GitHub Actions check (drives the inline
    *  current-step peek + the expanded step checklist). */
@@ -287,9 +280,8 @@ function CheckRow({
       : undefined
     : undefined;
 
-  // The row's shared inner content (icon + name + duration). Rendered inside a
-  // focusable button for interactive rows (Actions → toggles logs; else the
-  // details link opens) and a plain div for a URL-less check.
+  // The row's shared inner content — inside a focusable button for interactive
+  // rows, a plain div for a URL-less check.
   const inner = (
     <>
       {isActionsCheck &&
@@ -377,9 +369,8 @@ function CheckRow({
       </div>
       {isActionsCheck && logsOpen && (
         <div className="px-3 pb-2 pl-10">
-          {/* A running Actions check shows its live step checklist (logs are
-              useless mid-run); if its job can't be resolved yet or it has no
-              steps, and for every completed check, fall back to the log tail. */}
+          {/* A running check shows its live step checklist (logs are useless
+              mid-run); everything else falls back to the log tail. */}
           {isRunning && runJob && runJob.steps.length > 0 ? (
             <RunSteps job={runJob} />
           ) : (
@@ -391,11 +382,10 @@ function CheckRow({
   );
 }
 
-/** A headless per-run fetcher: mounts one `useRunDetail` query for a running
- *  Actions run and lifts its jobs to the parent so each row can resolve its own
- *  job (React Query dedupes by run-id key, so N rows sharing a run cost one fetch).
- *  Mounted only while the rollup is open; `useRunDetail` refetches every 5s while
- *  the run stays active. Renders nothing. */
+/** Headless per-run fetcher: one `useRunDetail` query for a running Actions run,
+ *  lifting its jobs to the parent so each row resolves its own job (React Query
+ *  dedupes by run-id key, so N rows sharing a run cost one fetch). Mounted only
+ *  while the rollup is open; refetches every 5s while the run stays active. */
 function RunDetailFetcher({
   repoPath,
   runId,
@@ -415,15 +405,12 @@ function RunDetailFetcher({
 }
 
 /**
- * The PR's CI checks, as a disclosure rollup: a summary line
- * (`✓ N passed · ✕ M failed · ● K pending`, each count with its own icon + word
- * so meaning is never color-alone) that expands to a keyboard-navigable,
- * height-capped list with failures first. Checks with a fetchable run/job (GitHub
- * Actions, GitLab pipeline jobs) peek their log inline; external checks (Bitbucket
- * build statuses, etc.) link out. Auto-expanded when anything failed.
- *
- * Renders nothing when there are no checks (a PR whose provider reports none, or a
- * GitHub PR with no CI) — RemotePrView also guards, but this stays defensive.
+ * The PR's CI checks as a disclosure rollup: a summary line
+ * (`✓ N passed · ✕ M failed · ● K pending` — each count with its own icon + word, so
+ * meaning is never color-alone) expanding to a keyboard-navigable, height-capped
+ * list with failures first. Checks with a fetchable run/job (GitHub Actions, GitLab
+ * pipeline jobs) peek their log inline; external checks (Bitbucket build statuses,
+ * etc.) link out. Auto-expanded when anything failed. Renders nothing with no checks.
  */
 export function ChecksRollup({
   checks,
@@ -486,11 +473,10 @@ export function ChecksRollup({
     ),
   ];
 
-  // Roving focus: the "active" row is whichever row element currently holds DOM
-  // focus, keyed by `data-row` = the row's sorted index (a check `name` isn't
-  // unique — GitHub allows two same-named checks). ArrowUp/Down step from
-  // wherever focus is; `listKeyboardNav` moves focus + scrolls into view; the
-  // rows are their own focusable buttons, so there's no separate selection state.
+  // Roving focus: the "active" row is whichever element holds DOM focus, keyed by
+  // `data-row` = the sorted index (a check `name` isn't unique — GitHub allows two
+  // same-named checks). The rows are their own focusable buttons, so no selection
+  // state.
   const rowId = (i: number) => String(i);
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     const focusedId =
@@ -502,10 +488,8 @@ export function ChecksRollup({
     listKeyboardNav({
       items: sorted,
       activeIndex,
-      // No selection model — focus movement + scroll-into-view is all done by
-      // `rowKey` below (the rows are their own focusable buttons). Identity is
-      // the sorted index (`indexOf` on the distinct array element), not the
-      // check name, so two same-named checks stay individually focusable.
+      // No selection model — `rowKey` does focus movement + scroll-into-view;
+      // identity is the sorted index, not the name.
       onActivate: () => undefined,
       rowKey: (c) => rowId(sorted.indexOf(c)),
     })(e);
@@ -581,9 +565,8 @@ export function ChecksRollup({
       </button>
       {open && (
         <>
-          {/* One run-detail query per distinct running Actions run, mounted only
-              while the rollup is open (collapsed → no fetch). Headless — they lift
-              jobs into `jobsByRun` for the rows to read. */}
+          {/* Headless: one run-detail query per distinct running Actions run, only
+              while open. */}
           {runningRunIds.map((id) => (
             <RunDetailFetcher
               key={id}
@@ -597,19 +580,14 @@ export function ChecksRollup({
             onKeyDown={onKeyDown}
           >
             {sorted.map((c, i) => {
-              // Key + data-row on the sorted index — `c.name` isn't unique (GitHub
-              // allows two checks with the same name), which would collide keys and
-              // make the second row unfocusable.
               const running = isRunningActionsCheck(c, provider);
               const runJob = running
                 ? jobForCheck(c, c.runId ? jobsByRun[c.runId] : undefined)
                 : undefined;
               // `useRunDetail` polls at 5s but usePrDetails only refetches on
-              // focus, so when a run finishes the check's `completedAt` stays
-              // stale (→ `running` true) until a focus event. Treat the resolved
-              // job as authoritative: once it reports a non-active status, drop
-              // the live UI immediately, reverting the row to the log tail before
-              // the PR payload catches up.
+              // focus, so a finished run keeps a stale `completedAt` (→ `running`
+              // true) until a focus event. Treat the resolved job as authoritative:
+              // once it reports a non-active status, drop the live UI immediately.
               const jobDone = runJob ? !isRunActive(runJob.status) : false;
               const live = running && !jobDone;
               return (

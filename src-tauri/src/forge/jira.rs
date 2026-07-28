@@ -1,21 +1,14 @@
-//! Jira Cloud (read path) — a per-repo LINKED issue provider, orthogonal to the git
-//! host detection every `forge_issue_*` command dispatches on. Jira can never be
-//! detected from a git remote (no repo has a Jira remote), so it is *configured*: the
-//! frontend stores a per-repo `{site, projectKey}` link and passes `site`/`project_key`
-//! into these commands, keeping Rust stateless about linkage. See
-//! `docs/jira-issue-integration.md` for the architectural rationale.
+//! Jira Cloud — a per-repo LINKED issue provider, orthogonal to the git-host detection
+//! every `forge_issue_*` command dispatches on. No repo has a Jira remote, so linkage is
+//! *configured*: the frontend stores a per-repo `{site, projectKey}` and passes
+//! `site`/`project_key` in, keeping Rust stateless about it. See
+//! `docs/jira-issue-integration.md`.
 //!
-//! This module mirrors the Bitbucket provider's shape ([`super::bitbucket`] +
-//! [`super::http`]) but Jira-local: a per-tenant base URL (`https://<site>/rest/api/3/`)
-//! instead of a constant, HTTP Basic auth (`email:api_token`), and Jira's error
-//! envelope (`{errorMessages, errors}`). Auth tokens are stored in the OS keyring under
-//! `forge/<site>/{email,token}` — the raw token never crosses IPC.
-//!
-//! Bodies are ADF (a JSON tree), converted to markdown by [`adf`] on the read path and
-//! built from markdown by [`md_to_adf`] on the write path. Phase 1 covered the reads
-//! (account connect/validate, project search, issue list, issue detail); phase 2 adds the
-//! writes: comment, transition (close/reopen), create, assign, plus the user search and
-//! per-project permission probe those write surfaces drive.
+//! Shaped like [`super::bitbucket`] but Jira-local: a per-tenant base URL
+//! (`https://<site>/rest/api/3/`), HTTP Basic auth (`email:api_token`), and Jira's
+//! `{errorMessages, errors}` envelope. Tokens live in the OS keyring under
+//! `forge/<site>/{email,token}` and never cross IPC. Bodies are ADF: read via [`adf`],
+//! written via [`md_to_adf`].
 
 mod adf;
 mod md_to_adf;
@@ -67,15 +60,11 @@ const KEY_API_BASE: &str = "api_base";
 
 /// Which Atlassian API base a site's stored token authenticates against.
 ///
-/// **Scoped vs classic tokens (support-doc + live-verified 2026-07-10):** Atlassian's
-/// "Manage API tokens" doc (support.atlassian.com) states that API tokens created WITH
-/// scopes must call the gateway `https://api.atlassian.com/ex/jira/{cloudId}` — a scoped
-/// token CANNOT authenticate site-direct against `https://<site>.atlassian.net` (it 401s
-/// there). Classic *unscoped* tokens use the site-direct base. Atlassian is steering all
-/// users to scoped tokens, so the gateway base is the path most new tokens need. Both
-/// bases use the same Basic auth header; only the URL differs. Do NOT collapse this back
-/// to site-direct only — a fresh Jira-scoped token AND a scoped Bitbucket token both 401
-/// site-direct (live-proven against thebguy.atlassian.net, 2026-07-10).
+/// Scoped API tokens CANNOT authenticate site-direct (`https://<site>.atlassian.net`) —
+/// they 401 there and must use the gateway `https://api.atlassian.com/ex/jira/{cloudId}`;
+/// classic unscoped tokens use site-direct. Atlassian is steering everyone to scoped
+/// tokens, so do NOT collapse this back to site-direct only. Both bases take the same
+/// Basic auth header; only the URL differs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum JiraApiBase {
     /// Classic unscoped token — `https://<site>/rest/api/3/`.
@@ -251,8 +240,6 @@ fn is_valid_duration(s: &str) -> bool {
             return false;
         }
         let num = &token[..num.len()];
-        // The numeric part: `\d+(\.\d+)?` — one or more digits, optionally a single dot
-        // followed by one or more digits. No leading/trailing dot, no sign, no exponent.
         let mantissa = match num.split_once('.') {
             Some((int, frac)) => {
                 if int.is_empty() || frac.is_empty() {
@@ -296,12 +283,10 @@ fn translate_field_key(key: &str, resolve: impl Fn(&str) -> Option<String>) -> S
 }
 
 impl JiraErrorEnvelope {
-    /// The best human message. Prefer the top-level `errorMessages` (Jira's general
-    /// failures), then fall back to the field-level `errors` map — but surface ALL field
-    /// entries joined as `field: msg`, not just the first, so a create that fails on
-    /// several mandatory custom fields names every one of them (rather than dropping all
-    /// but one). Field keys are sorted so the message is deterministic. `resolve` maps a
-    /// `customfield_NNNNN` id to its display name (in-process, no I/O). Empty when neither
+    /// The best human message: `errorMessages` first, else ALL field-level `errors` joined
+    /// as `field: msg` (not just the first — a create failing several mandatory fields must
+    /// name every one), sorted by field key for determinism. `resolve` maps a
+    /// `customfield_NNNNN` id to its display name (in-process, no I/O). `None` when neither
     /// half carries text.
     fn best_message(&self, resolve: impl Fn(&str) -> Option<String>) -> Option<String> {
         if let Some(msg) = self
@@ -315,12 +300,10 @@ impl JiraErrorEnvelope {
         self.field_errors_joined(resolve)
     }
 
-    /// Join every non-empty `errors` entry as `field: msg`, sorted by field key for a
-    /// deterministic message. Each key is run through [`translate_field_key`] so a known
-    /// `customfield_NNNNN` renders its display name (unknown ids stay raw). `None` when
-    /// there are no field errors. Pure (testable): `resolve` is the only external input and
-    /// performs no I/O. NOTE the sort is on the RAW keys (deterministic and independent of
-    /// whether a name map is warm), then each is translated for display.
+    /// Join every non-empty `errors` entry as `field: msg`, sorted by RAW field key (so the
+    /// message is deterministic whether or not a name map is warm), then translate each key
+    /// through [`translate_field_key`] for display. `None` when there are no field errors.
+    /// Pure — `resolve` does no I/O.
     fn field_errors_joined(&self, resolve: impl Fn(&str) -> Option<String>) -> Option<String> {
         let mut pairs: Vec<(&String, &String)> = self
             .errors
@@ -341,12 +324,10 @@ impl JiraErrorEnvelope {
     }
 }
 
-/// Turn a non-2xx response body + status into an [`AppError::Jira`], with the
-/// 401/403/429 special-casing the design requires. `body` is the raw response text
-/// (never contains our credentials — those live only in the request header). Field-error
-/// keys are rendered raw (no name translation) — this variant is used where no site is in
-/// scope (base resolution / connect). [`http_error_for`] translates `customfield_NNNNN`
-/// keys for a known site.
+/// Turn a non-2xx response body + status into an [`AppError::Jira`], special-casing
+/// 401/403/429. `body` is the raw response text (never contains our credentials — those
+/// live only in the request header). Field-error keys render RAW here (no site resolved);
+/// [`http_error_for`] translates `customfield_NNNNN` keys for a known site.
 fn http_error(status: u16, body: &str) -> AppError {
     http_error_with_resolver(status, body, |_| None)
 }
@@ -434,9 +415,10 @@ async fn raw_request(
 }
 
 /// GET a Jira endpoint expecting JSON, deserializing into `T` against the creds' resolved
-/// base. `Accept: application/json`, HTTP Basic auth. Non-2xx → [`http_error`]; a parse
-/// failure of a 2xx body → `Jira("could not parse …")` carrying the serde error verbatim
-/// (never mapped into a specific-cause message).
+/// base. `Accept: application/json`, HTTP Basic auth. Non-2xx → [`http_error_for`] (field
+/// keys translated for the creds' site); a parse failure of a 2xx body →
+/// `Jira("could not parse …")` carrying the serde error verbatim (never mapped into a
+/// specific-cause message).
 async fn get_json<T: serde::de::DeserializeOwned>(
     creds: &JiraCredentials,
     path: &str,
@@ -466,9 +448,9 @@ async fn post_json<T: serde::de::DeserializeOwned>(
         .map_err(|e| AppError::Jira(format!("could not parse Jira {what}: {e}")))
 }
 
-/// Send a write with an optional JSON body, expecting a no-content (or don't-care) 2xx
-/// response — used for the transition POST and assignee PUT, which return 204. The 2xx
-/// body is discarded; a non-2xx maps through [`http_error`] (so field errors surface).
+/// Send a write with an optional JSON body, expecting a no-content (or don't-care) 2xx.
+/// The 2xx body is discarded; a non-2xx maps through [`http_error_for`] so field errors
+/// surface.
 async fn send_no_content(
     creds: &JiraCredentials,
     method: reqwest::Method,
@@ -634,9 +616,7 @@ async fn resolve_viewer_account_id(creds: &JiraCredentials, site: &str) -> Optio
 }
 
 /// The `/_edge/tenant_info` response — an UNAUTHENTICATED endpoint on the site host that
-/// returns the tenant's `cloudId` (verified live 2026-07-10: `GET
-/// https://<site>/_edge/tenant_info` returned a real cloudId for thebguy.atlassian.net
-/// with no auth). Only `cloudId` is read.
+/// returns the tenant's `cloudId`. Only `cloudId` is read.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TenantInfo {
@@ -710,22 +690,16 @@ fn decide_after_direct(status: u16) -> DirectProbeStep {
 }
 
 /// Resolve the API base for a token at credential-save time: probe `/myself` site-direct;
-/// on a 401 specifically, resolve the site's `cloudId` and retry via the gateway;
-/// whichever succeeds is the site's mode. Returns the resolved `(base, JiraAccountInfo)`.
-///
-/// Scoped tokens 401 site-direct and must use the gateway (support-doc + live-verified,
-/// see [`JiraApiBase`]); classic unscoped tokens work site-direct. A non-401 direct
-/// failure (403/network/parse) is returned as-is — only a 401 triggers the gateway
-/// retry, because only a 401 is the "wrong base for this token type" signal.
-///
-/// `email`/`token` are the candidate credentials (not yet stored). Errors from the
-/// gateway retry are returned to the caller, which decides the final failure copy.
+/// on a 401 ONLY, resolve the site's `cloudId` and retry via the gateway (a 401 is the
+/// "wrong base for this token type" signal — scoped tokens 401 site-direct, see
+/// [`JiraApiBase`]). Any other direct failure (403/network/parse) is returned as-is.
+/// `email`/`token` are candidates, not yet stored; gateway-retry errors reach the caller,
+/// which owns the final failure copy.
 async fn resolve_base(
     site: &str,
     email: &str,
     token: &str,
 ) -> AppResult<(JiraApiBase, JiraAccountInfo)> {
-    // Try site-direct first.
     let direct = JiraCredentials {
         email: email.to_string(),
         token: token.to_string(),
@@ -804,9 +778,7 @@ pub async fn set_account(site: &str, email: &str, token: &str) -> AppResult<Jira
             "an email and API token are both required".into(),
         ));
     }
-    // Resolve the base (probes direct, falls back to gateway on a 401) before writing.
-    // On failure, the manual-entry path frames the auth error as a possibly-wrong-product
-    // or expired token; a non-auth error passes through unchanged.
+    // Resolve the base (direct, gateway on a 401) BEFORE writing anything.
     let (base, info) = resolve_base(&site, &email, &token)
         .await
         .map_err(specialize_manual_error)?;
@@ -841,21 +813,16 @@ fn bitbucket_creds_present(email: &Option<String>, token: &Option<String>) -> bo
     matches!((email, token), (Some(e), Some(t)) if !e.is_empty() && !t.is_empty())
 }
 
-/// Connect a Jira account for a site by REUSING the stored Bitbucket credentials
-/// (Bitbucket Cloud shares the Atlassian API-token mechanism). This must happen
-/// Rust-side because tokens never cross IPC — the frontend can't read the Bitbucket
-/// token to hand it to `jira_set_account`.
+/// Connect a Jira account for a site by REUSING the stored Bitbucket credentials (Bitbucket
+/// Cloud shares the Atlassian API-token mechanism). Rust-side because tokens never cross
+/// IPC — the frontend can't read the Bitbucket token to hand it to `jira_set_account`.
 ///
-/// Flow: normalize + validate the site; read the stored Bitbucket creds
-/// (`forge/bitbucket.org/{email,token}`) on a blocking thread and GUARD their presence
-/// BEFORE any network call; resolve the API base (`/myself` site-direct, falling back to
-/// the gateway on a 401 — see [`resolve_base`]) with those creds; on success ONLY,
-/// persist the pair + resolved base under the SITE host (so `load_credentials(site)` finds
-/// them — NOT under the bitbucket.org entry) and return the account info. The token is
-/// never returned or logged. Because the stored Bitbucket token may not reach Jira on
-/// either base, a final auth failure (401 or 403 — a product-scoped token returns 401,
-/// live-verified 2026-07-10) gets reuse-specific copy pointing at the manual-entry
-/// fallback.
+/// Reads `forge/bitbucket.org/{email,token}` and guards their presence BEFORE any network
+/// call, resolves the API base with them ([`resolve_base`]), and on success ONLY persists
+/// the pair + base under the SITE host (not the bitbucket.org entry) so
+/// `load_credentials(site)` finds them. A stored Bitbucket token often can't reach Jira at
+/// all, so a final 401 or 403 gets reuse-specific copy ([`specialize_reuse_error`]). The
+/// token is never returned or logged.
 pub async fn set_account_from_bitbucket(site: &str) -> AppResult<JiraAccountInfo> {
     use crate::forge::http::{BB_HOST, KEY_EMAIL as BB_KEY_EMAIL, KEY_TOKEN as BB_KEY_TOKEN};
 
@@ -881,11 +848,8 @@ pub async fn set_account_from_bitbucket(site: &str) -> AppResult<JiraAccountInfo
     let email = bb_email.unwrap_or_default();
     let token = bb_token.unwrap_or_default();
 
-    // Resolve the base (probes /myself site-direct, falls back to the gateway on a 401)
-    // with the Bitbucket creds. If BOTH bases fail, an auth failure (401 OR 403) means the
-    // token can't reach Jira — a real product-scoped Atlassian token returns 401
-    // (live-verified 2026-07-10), so both codes are specialized into one "enter a Jira
-    // token manually" message rather than the misleading generic "expired/revoked" copy.
+    // Resolve the base with the Bitbucket creds. If BOTH bases fail, 401 AND 403 both mean
+    // "this token can't reach Jira" — specialize rather than show the generic 401 copy.
     let (base, info) = resolve_base(&site, &email, &token)
         .await
         .map_err(specialize_reuse_error)?;
@@ -895,19 +859,14 @@ pub async fn set_account_from_bitbucket(site: &str) -> AppResult<JiraAccountInfo
     Ok(info)
 }
 
-/// Specialize an AUTH error (401 or 403) from the Bitbucket-reuse probe into one
-/// actionable message pointing at the manual-entry fallback. Any non-auth error passes
-/// through unchanged.
+/// Specialize an AUTH error (401 or 403) from the Bitbucket-reuse probe into one actionable
+/// message pointing at manual entry; non-auth errors pass through unchanged.
 ///
-/// Live-verified (thebguy.atlassian.net, 2026-07-10): a real product-scoped Atlassian
-/// token (Bitbucket-only) returns **401** on Jira's `/rest/api/3/myself`, not the 403 a
-/// scope-mismatch would suggest — so both codes mean "this token can't reach Jira" here,
-/// and the generic 401 "expired or revoked — reconnect" copy would be misleading (the
-/// token is alive; it's product-scoped). Do NOT narrow this back to 403 only. The
-/// original status marker (`(401)`/`(403)`) is preserved in the message so support keeps
-/// the code. This specialization is scoped to the reuse command ALONE —
-/// `jira_set_account` / `jira_validate` keep the generic 401 copy for genuinely
-/// expired/revoked tokens.
+/// A product-scoped Atlassian token (Bitbucket-only) returns **401** on Jira's
+/// `/rest/api/3/myself`, not the 403 a scope mismatch would suggest — so both codes mean
+/// "this token can't reach Jira" and the generic "expired or revoked" copy would mislead.
+/// Do NOT narrow this back to 403 only. The status marker is preserved, and the
+/// specialization is scoped to this command (`set_account`/`validate` keep the generic copy).
 fn specialize_reuse_error(err: AppError) -> AppError {
     let code = match &err {
         AppError::Jira(msg) if msg.contains("(401)") => "401",
@@ -1338,7 +1297,7 @@ fn detail_custom_fields_suffix(map: &crate::jira_field_maps::SiteFieldMap) -> St
     suffix
 }
 
-// ── Custom-field discovery (agile fields — phase 4) ─────────────────────────────
+// ── Custom-field discovery (agile fields) ──────────────────────────────────────
 
 /// Schema keys the story-points / sprint discovery matches against Jira's `/field`
 /// metadata. Live-confirmed on a 2026 tenant.
@@ -1374,22 +1333,15 @@ struct JiraFieldSchema {
 }
 
 /// Resolve the sprint + story-points custom-field ids from the `/field` metadata array.
-/// Returns `(storyPointsFieldId, sprintFieldId)`. Pure so the resolution rules are
-/// unit-tested against captured fixtures.
+/// Returns `(storyPointsFieldId, sprintFieldId)`. Pure so the rules are unit-testable.
 ///
-/// - **Sprint**: the entry whose `schema.custom == "…:gh-sprint"`.
-/// - **Story points**, in order:
-///   1. `schema.custom == "…:jsw-story-points"` (live-confirmed);
-///   2. else a name-match of "Story point estimate" / "Story Points" (case-insensitive)
-///      among entries whose `schema.type == "number"`;
-///   3. else `None`.
+/// - **Sprint**: `schema.custom == "…:gh-sprint"`.
+/// - **Story points**: `schema.custom == "…:jsw-story-points"`, else a case-insensitive
+///   name match of "Story point estimate" / "Story Points" among `schema.type == "number"`
+///   entries, else `None`. NEVER a bare number-type match — a decoy ("Budget") must not win.
 ///
-/// NEVER a bare number-type match — a decoy number field ("Budget") must not win.
-///
-/// Both returned ids are grammar-validated against `^customfield_[0-9]+$`
-/// ([`crate::jira_field_maps::is_valid_field_id`]) — a hostile id from `/field` (e.g.
-/// `customfield_10016&extra=1`, which would inject query params when spliced unencoded into
-/// a request URL) is rejected here, degrading to `None`.
+/// Both ids are grammar-validated ([`crate::jira_field_maps::is_valid_field_id`]) because
+/// they are spliced UNENCODED into request URLs; a hostile id degrades to `None`.
 fn resolve_field_ids(fields: &[JiraFieldMeta]) -> (Option<String>, Option<String>) {
     let valid = |id: Option<String>| id.filter(|s| crate::jira_field_maps::is_valid_field_id(s));
 
@@ -1546,14 +1498,12 @@ async fn board_points_override(creds: &JiraCredentials, project_key: &str) -> Op
     board_config_points_override(&config)
 }
 
-/// Discover the site's agile custom-field map: fetch `/rest/api/3/field`, resolve the
-/// sprint + story-points ids ([`resolve_field_ids`]), capture the in-process field-NAME
-/// map for error translation, then best-effort-override the story-points id from the
-/// project's board configuration. Persists the resolved entry (even when both ids are
-/// `None` — a site legitimately without agile fields shouldn't be re-probed). On a FAILED
-/// `/field` fetch, persists NOTHING and returns `None` (the caller marks an in-process
-/// empty marker so this process doesn't hammer per call). `project_key` may be empty (the
-/// board override is then skipped).
+/// Discover the site's agile custom-field map: `/rest/api/3/field` → [`resolve_field_ids`]
+/// + the field-NAME map for error translation, then a best-effort story-points override
+/// from the project's board configuration (`project_key` empty skips it). Persists the
+/// entry even when both ids are `None` (a site without agile fields must not be re-probed).
+/// A FAILED `/field` fetch persists nothing and returns `None` — the caller records the
+/// in-process failed marker.
 async fn discover_field_map(
     creds: &JiraCredentials,
     site: &str,
@@ -1561,10 +1511,8 @@ async fn discover_field_map(
 ) -> Option<crate::jira_field_maps::SiteFieldMap> {
     let fields: Vec<JiraFieldMeta> = get_json(creds, "field", "fields").await.ok()?;
 
-    // The customfield_* id→name map for error translation. Captured from THIS /field
-    // response and PERSISTED on the entry (so restarts / the headless MCP get warm
-    // translation without a network round-trip), and also set in-process now for immediate
-    // warmth this call.
+    // The customfield_* id→name map for error translation: persisted on the entry (warm on
+    // restarts / the headless MCP) and set in-process now.
     let names = field_name_map(&fields);
     crate::jira_field_maps::set_name_map(site, names.clone());
 
@@ -1584,7 +1532,6 @@ async fn discover_field_map(
         field_names: Some(names),
         resolved_at: now_iso(),
     };
-    // A successful /field fetch persists the entry even when both ids are None.
     crate::jira_field_maps::put(site, entry.clone());
     Some(entry)
 }
@@ -1598,13 +1545,11 @@ fn discovery_failed() -> &'static std::sync::Mutex<std::collections::HashSet<Str
     DISCOVERY_FAILED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
 }
 
-/// Per-site async locks that COALESCE concurrent discovery: while one `resolve_site_map`
-/// for a cold site runs discovery, other racers for the SAME site await the same lock and
-/// then hit the cache the winner filled — so one `/field` probe serves all of them. Keyed
-/// per SITE, so different sites never serialize against each other. The outer std mutex
-/// guards only the registry lookup and is released before any `.await` (never held across
-/// one — `await_holding_lock` safe); the per-site [`tokio::sync::Mutex`] is the one held
-/// across discovery.
+/// Per-site async locks that COALESCE concurrent discovery: racers for the same site await
+/// the lock and then hit the cache the winner filled, so one `/field` probe serves all.
+/// Keyed per site, so different sites never serialize. The outer std mutex guards only the
+/// registry lookup and is released before any `.await`; the inner [`tokio::sync::Mutex`] is
+/// the one held across discovery.
 static DISCOVERY_LOCKS: OnceLock<
     std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
 > = OnceLock::new();
@@ -1640,8 +1585,7 @@ async fn resolve_site_map(
         return crate::jira_field_maps::SiteFieldMap::default();
     }
 
-    // Coalesce: hold the per-site async lock across discovery so racers for this site queue
-    // and then re-check the cache the winner filled instead of each probing `/field`.
+    // Coalesce: racers for this site queue here, then re-check the cache.
     let lock = discovery_lock_for(site);
     let _guard = lock.lock().await;
 
@@ -1692,9 +1636,7 @@ pub async fn issue_list(
     // Grammar-validate the key and build the JQL BEFORE any network call.
     let jql = build_list_jql(project_key, state)?;
     let creds = load_credentials(&site).await?;
-    // Resolve the site's agile custom-field map (lazy discovery; failure degrades to the
-    // skeleton fields — never an error). The list uses the project key for the board
-    // override; issue keys always belong to this project.
+    // Lazy field-map discovery; failure degrades to the skeleton fields, never an error.
     let map = resolve_site_map(&creds, &site, project_key).await;
     let body = json!({
         "jql": jql,
@@ -1719,8 +1661,8 @@ pub struct JiraComment {
     pub author: Option<ForgeUserRef>,
     pub body_md: String,
     pub created_at: String,
-    /// The comment's `updated` timestamp, or `None` when Jira omits it. B5 shows an
-    /// "(edited)" cue when this differs from `created_at`.
+    /// The comment's `updated` timestamp, or `None` when Jira omits it — the issue view
+    /// shows an "(edited)" cue when it differs from `created_at`.
     pub updated_at: Option<String>,
 }
 
@@ -1795,11 +1737,9 @@ pub struct JiraIssueDetails {
     pub description_md: String,
     pub comments: Vec<JiraComment>,
     pub url: String,
-    /// The CALLER's Jira accountId (from a per-site in-process cache filled by one
-    /// `GET /myself` per process per site), or `None` when it couldn't be resolved. This
-    /// is UX gating ONLY — B5 hides the edit/delete-own-comment affordances on `None`.
-    /// Jira enforces comment ownership server-side (EDIT_OWN/DELETE_OWN) regardless, so a
-    /// stale or missing value can never grant a write the server wouldn't allow.
+    /// The CALLER's Jira accountId (per-site in-process cache, one `GET /myself` per
+    /// process), or `None`. UX gating ONLY — Jira enforces comment ownership server-side
+    /// (EDIT_OWN/DELETE_OWN), so a stale or missing value can never grant a write.
     pub viewer_account_id: Option<String>,
     /// `None` = time tracking disabled on the project (the `timetracking` field is absent
     /// or JSON-null); `Some` with all-None members = enabled but nothing tracked yet.
@@ -1894,9 +1834,7 @@ fn map_worklog(w: &Value) -> JiraWorklog {
 }
 
 /// Map the issue's `fields.worklog.worklogs[]` (the embedded first page) onto neutral
-/// worklogs — every field of a malformed worklog degrades to an empty default rather
-/// than erroring, so one bad entry can't sink the list. No pagination beyond the
-/// embedded page.
+/// worklogs. Defensive like [`map_worklog`]; no pagination beyond the embedded page.
 fn map_worklogs(fields: &Value) -> Vec<JiraWorklog> {
     fields
         .get("worklog")
@@ -1950,9 +1888,8 @@ pub async fn issue_view(site: &str, key: &str) -> AppResult<JiraIssueDetails> {
         )));
     }
     let creds = load_credentials(&site).await?;
-    // Resolve the site's agile custom-field map (lazy discovery; failure degrades to the
-    // skeleton fields — never an error). Derive the project key from the issue key's prefix
-    // for the board-config override.
+    // Lazy field-map discovery (never errors); the issue key's prefix is the project key
+    // for the board override.
     let map = resolve_site_map(&creds, &site, project_key_of_issue(key)).await;
     let custom = detail_custom_fields_suffix(&map);
     let path = format!(
@@ -2046,7 +1983,7 @@ pub async fn issue_view(site: &str, key: &str) -> AppResult<JiraIssueDetails> {
     })
 }
 
-// ── Writes (phase 2): comment / transition / create / assign ───────────────────
+// ── Writes: comment / transition / create / assign ─────────────────────────────
 
 /// Add a comment to a Jira issue. The markdown `body_md` is converted to ADF (via
 /// [`md_to_adf`]) and posted to `POST /issue/<key>/comment`; the returned comment object
@@ -2123,15 +2060,13 @@ struct JiraTransitionsResponse {
     transitions: Vec<JiraTransition>,
 }
 
-/// Pick the transition id for a `direction` ("close" | "reopen") from the available
-/// transitions. Pure (unit-tested) so the selection logic is isolated from the network.
+/// Pick the transition id for a `direction` ("close" | "reopen"). Pure (unit-tested).
 ///
-/// - **close** → the first transition whose destination `statusCategory.key == "done"`.
-/// - **reopen** → prefer a transition to `"new"`; fall back to `"indeterminate"`.
+/// - **close** → first transition whose destination `statusCategory.key == "done"`.
+/// - **reopen** → prefer `"new"`, else `"indeterminate"`.
 ///
-/// Returns `Ok(Some(id))` on a match, `Ok(None)` when no suitable transition exists (the
-/// caller turns that into a workflow/permission error), or an `InvalidArgument` for an
-/// unknown direction.
+/// `Ok(None)` when nothing suitable exists (the caller raises the workflow/permission
+/// error); `InvalidArgument` for an unknown direction.
 fn pick_transition_id(
     transitions: &[JiraTransition],
     direction: &str,
@@ -2146,8 +2081,7 @@ fn pick_transition_id(
     match direction {
         "close" => Ok(first_with_category(transitions, "done")),
         "reopen" => {
-            // Prefer a transition back to a "new" (To Do) status; fall back to any
-            // "indeterminate" (In Progress) transition.
+            // "new" = To Do, "indeterminate" = In Progress.
             Ok(first_with_category(transitions, "new")
                 .or_else(|| first_with_category(transitions, "indeterminate")))
         }
@@ -2589,7 +2523,7 @@ pub async fn permissions(site: &str, project_key: &str) -> AppResult<JiraProject
     Ok(parse_permissions(&body))
 }
 
-// ── Writes (phase 5): due date / priority / labels / comment edit-delete + pickers ──
+// ── Writes: due date / priority / labels / comment edit-delete + pickers ───────
 
 /// One Jira priority for the priority picker (`GET /rest/api/3/priority`).
 #[derive(Deserialize, Serialize)]
@@ -2627,12 +2561,10 @@ pub async fn labels(site: &str) -> AppResult<Vec<String>> {
     Ok(page.values)
 }
 
-/// Set (or clear) an issue's due date. `due_date = Some("YYYY-MM-DD")` sets it; `None`
-/// clears it (`PUT /issue/<key>` with `{fields:{duedate: null}}`). The date grammar is
-/// validated (shape only — Jira validates the calendar date) BEFORE any network call; a
-/// bad shape is an `InvalidArgument`. A project whose screen lacks the due-date field
-/// surfaces through the existing error envelope (the phase-4 field-name translation makes
-/// it readable) — not special-cased here.
+/// Set (or clear) an issue's due date. `Some("YYYY-MM-DD")` sets; `None` clears
+/// (`{fields:{duedate: null}}`). The date GRAMMAR is validated before any network call
+/// (shape only — Jira validates the calendar). A project whose screen lacks the field
+/// surfaces through the normal error envelope.
 pub async fn issue_set_due_date(site: &str, key: &str, due_date: Option<&str>) -> AppResult<()> {
     let site = normalize_site(site)?;
     if !is_valid_issue_key(key) {
@@ -2715,14 +2647,13 @@ pub async fn issue_set_labels(site: &str, key: &str, labels: &[String]) -> AppRe
     .await
 }
 
-/// Edit one of your own comments on an issue. The markdown `body_md` is converted to ADF
-/// (via [`md_to_adf`]) and PUT to `/issue/<key>/comment/<id>`; the returned comment object
-/// is mapped back to a neutral [`JiraComment`]. A whitespace-only body is rejected, and the
-/// comment id is grammar-validated (digits only), BOTH before any network call.
+/// Edit one of your own comments (`PUT /issue/<key>/comment/<id>`); `body_md` → ADF via
+/// [`md_to_adf`], the response mapped back to a neutral [`JiraComment`]. A whitespace-only
+/// body and a non-digit comment id are both rejected before any network call.
 ///
-/// Editing round-trips ADF→md→ADF, so exotic nodes the writer can't emit (mentions,
-/// panels) are dropped — acceptable for OWN comments, consistent with phase 5 excluding
-/// replies/mentions. Ownership is enforced server-side by EDIT_OWN_COMMENTS.
+/// Editing round-trips ADF→md→ADF, so nodes the writer can't emit (mentions, panels) are
+/// DROPPED — acceptable for own comments. Ownership is enforced server-side by
+/// EDIT_OWN_COMMENTS.
 pub async fn comment_edit(
     site: &str,
     key: &str,
@@ -2778,16 +2709,14 @@ pub async fn comment_delete(site: &str, key: &str, comment_id: &str) -> AppResul
     .await
 }
 
-// ── Writes (phase 6): time tracking (estimates + worklogs) ──────────────────────
+// ── Writes: time tracking (estimates + worklogs) ───────────────────────────────
 
 /// Set (or clear) an issue's ORIGINAL estimate via a PARTIAL `timetracking` update
-/// (`PUT /issue/<key>` with `{fields:{timetracking:{originalEstimate: <val>}}}`).
-/// `estimate = Some(d)` sets it (the duration grammar is validated BEFORE any network
-/// call — shape only, Jira enforces semantics); `None` CLEARS it by sending the EMPTY
-/// STRING `""` — NOT `null`, which Jira treats as a silent no-op (live-probed). The issue
-/// key is grammar-validated first. The server derives the remaining estimate (setting the
-/// original with no worklogs auto-initializes remaining; clearing while worklogs exist
-/// snaps original := remaining) — nothing is recomputed here.
+/// (`PUT /issue/<key>`). `Some(d)` sets it (duration grammar validated before any network
+/// call); `None` CLEARS it by sending the EMPTY STRING — `null` is a silent no-op on
+/// `timetracking` (probed). The server derives the remaining estimate (setting the original
+/// with no worklogs initializes remaining; clearing with worklogs snaps original :=
+/// remaining) — nothing is recomputed here.
 pub async fn issue_set_original_estimate(
     site: &str,
     key: &str,
@@ -2877,15 +2806,13 @@ pub async fn worklog_add(
     Ok(map_worklog(&resp))
 }
 
-/// Edit one of your own worklog entries (`PUT /issue/<key>/worklog/<id>`). The `time_spent`
-/// grammar and the digits-only worklog id are validated BEFORE any network call.
+/// Edit one of your own worklog entries (`PUT /issue/<key>/worklog/<id>`); the duration
+/// grammar and the digits-only id are validated before any network call.
 ///
-/// A worklog note is REPLACE-ONLY via this API (live-probed): a duration-only PUT (no
-/// `comment` member) PRESERVES the existing note, and `comment: null` is a silent no-op —
-/// so there is no way to REMOVE a note through the API. `comment_md = None` omits the
-/// member (preserve); `Some(non-empty)` replaces it; `Some(empty-after-trim)` is rejected
-/// as an `InvalidArgument` BEFORE any network call rather than silently doing nothing. The
-/// returned worklog object is mapped to a neutral [`JiraWorklog`].
+/// A note is REPLACE-ONLY (probed): a duration-only PUT PRESERVES the existing note and
+/// `comment: null` is a silent no-op, so a note can never be REMOVED via the API. `None`
+/// omits the member (preserve), `Some(non-empty)` replaces, `Some(blank)` is an
+/// `InvalidArgument` rather than a silent no-op.
 pub async fn worklog_update(
     site: &str,
     key: &str,
@@ -2959,9 +2886,9 @@ pub async fn worklog_delete(site: &str, key: &str, worklog_id: &str) -> AppResul
     .await
 }
 
-/// PUT JSON to a Jira endpoint and deserialize the 2xx body into `T` — the comment-edit
-/// endpoint returns the updated comment object (unlike the 204-returning property PUTs,
-/// which use [`send_no_content`]). Same error handling as [`post_json`].
+/// PUT JSON to a Jira endpoint and deserialize the 2xx body into `T` (comment edit and
+/// worklog update return the updated object; the 204-returning PUTs use
+/// [`send_no_content`]). Same error handling as [`post_json`].
 async fn put_json<T: serde::de::DeserializeOwned>(
     creds: &JiraCredentials,
     path: &str,
@@ -3392,10 +3319,9 @@ mod tests {
 
     #[test]
     fn specialize_reuse_error_rewrites_401_and_403_passes_others_through() {
-        // Both auth codes are rewritten to the product-scoped, enter-manually framing,
-        // preserving the status marker. A real product-scoped Bitbucket token returns
-        // 401 on Jira (live-verified 2026-07-10), so 401 must be rewritten too — NOT
-        // left as the generic "expired/revoked" copy.
+        // Both auth codes get the product-scoped, enter-manually framing with the status
+        // marker preserved — a product-scoped Bitbucket token returns 401 on Jira, so 401
+        // must NOT keep the generic "expired/revoked" copy.
         for code in ["401", "403"] {
             let base = http_error(code.parse().unwrap(), "");
             match specialize_reuse_error(base) {
@@ -3754,16 +3680,12 @@ mod tests {
 
     // ── From-live-JSON regression guards (camelCase shape mismatches) ────────────
     //
-    // These parse the EXACT camelCase JSON a real Jira Cloud tenant returns
-    // (thebguy.atlassian.net / project MYT, 2026-07-11) through the real structs —
-    // catching the class of bug the hand-built / snake_case fixtures above missed: a
-    // struct field whose name differs from the wire key.
+    // These parse the EXACT camelCase JSON a real Jira Cloud tenant returns through the
+    // real structs — catching a struct field whose name differs from the wire key.
 
     #[test]
     fn transitions_response_parses_live_camelcase_and_picks_done() {
-        // Verbatim shape from GET /issue/MYT-5/transitions. Before the
-        // `#[serde(rename_all = "camelCase")]` on JiraTransitionTo, `statusCategory` was
-        // dropped, `category_of` returned None for every entry, and close found nothing.
+        // Verbatim shape from GET /issue/<key>/transitions.
         let body = r#"{
             "transitions": [
                 { "id": "11", "name": "Start Progress",
@@ -3773,9 +3695,9 @@ mod tests {
             ]
         }"#;
         let parsed: JiraTransitionsResponse = serde_json::from_str(body).unwrap();
-        // The done category must actually deserialize (the crux of bug 1).
+        // The done category must actually deserialize.
         assert_eq!(category_of(&parsed.transitions[1]), Some("done"));
-        // The destination status name (`to.name`) must also deserialize (phase-3 addition).
+        // The destination status name (`to.name`) must also deserialize.
         assert_eq!(
             to_status_name_of(&parsed.transitions[0]),
             Some("In Progress")
@@ -3857,9 +3779,8 @@ mod tests {
 
     #[test]
     fn createmeta_response_parses_live_issue_types_key() {
-        // Verbatim shape from GET /issue/createmeta/MYT/issuetypes. Before the
-        // `rename = "issueTypes"`, the array (under `issueTypes`, not `values`) parsed
-        // empty and the create picker claimed the project had no issue types.
+        // Verbatim shape from GET /issue/createmeta/<key>/issuetypes — the array is under
+        // `issueTypes`, NOT `values`.
         let body = r#"{
             "maxResults": 50,
             "startAt": 0,
@@ -3884,7 +3805,7 @@ mod tests {
         assert!(types[1].subtask);
     }
 
-    // ── Phase 4: agile custom-field discovery + extraction ───────────────────────
+    // ── Agile custom-field discovery + extraction ────────────────────────────────
 
     /// A verbatim-shaped `GET /rest/api/3/field` slice: the jsw-story-points entry, the
     /// gh-sprint entry, a "Budget" number decoy, and a schema-less system field. Parsed
@@ -3928,10 +3849,10 @@ mod tests {
 
     #[test]
     fn resolve_field_ids_rejects_hostile_id_at_discovery() {
-        // A hostile field id from /field (URL-injection payload) is rejected at the
-        // discovery layer — the first of the two enforcement layers (persisted-load is the
-        // second, tested in jira_field_maps). It matches the sprint schema marker but its id
-        // fails the customfield_ grammar → sprint resolves to None, never spliced into a URL.
+        // A hostile field id from /field (URL-injection payload): the entry MATCHES the
+        // sprint schema marker, but its id fails the customfield_ grammar → resolves to
+        // None, never spliced into a URL. (The persisted-load layer is tested in
+        // jira_field_maps.)
         let body = r#"[
             { "id": "customfield_10016&evil=1", "name": "Sprint", "custom": true,
               "schema": { "type": "array", "custom": "com.pyxis.greenhopper.jira:gh-sprint" } },
@@ -4268,7 +4189,7 @@ mod tests {
         );
     }
 
-    // ── Phase 5: property writes / pickers / comment edit-delete ─────────────────
+    // ── Property writes / pickers / comment edit-delete ──────────────────────────
 
     #[test]
     fn priorities_parse_live_bare_array_with_iconurl_casing() {

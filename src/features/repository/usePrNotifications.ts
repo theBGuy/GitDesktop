@@ -34,11 +34,10 @@ export function usePrNotifications(repoPath: string) {
   const anyNotif = Boolean(
     prefs && (prefs.prChecks !== "off" || prefs.prActivity || prefs.prReviews),
   );
-  // A pr-sync rule needs this head-OID poll to spot new commits on remote PRs;
-  // otherwise the poll only earns its keep when a PR notification is enabled, so
-  // the default (no notifications, no pr-sync rule) makes no background call.
-  // Resolve the repo's identity so a worktree checkout sees the same rules as main
-  // (falls back to the raw path while identity is still resolving / for legacy keys).
+  // The poll only earns its keep when a notification, pr-sync, or pr-open rule wants
+  // it — the default (none of those) makes no background call.
+  // Rules are keyed by repo IDENTITY so a worktree checkout sees the same rules as
+  // main; the raw path is the fallback while identity resolves / for legacy keys.
   const repoId = useRepoIdentity(repoPath).data;
   const hasPrSync = automations.data
     ? effectiveActions(
@@ -47,10 +46,9 @@ export function usePrNotifications(repoPath: string) {
         "pr-sync",
       ).length > 0
     : false;
-  // A pr-open rule also needs this poll — it's how we catch up PRs opened OUTSIDE
-  // the app (gh/web/bots), whose in-app pr-open event never fired. Without this,
-  // a user with ONLY a pr-open rule (no notifications, no pr-sync) would never
-  // poll and the catch-up would be dead.
+  // A pr-open rule also needs the poll: it's how PRs opened OUTSIDE the app
+  // (gh/web/bots) get their missed initial review — with only a pr-open rule and no
+  // notifications, nothing else would poll and the catch-up would be dead.
   const hasPrOpen = automations.data
     ? effectiveActions(
         automations.data,
@@ -58,11 +56,11 @@ export function usePrNotifications(repoPath: string) {
         "pr-open",
       ).length > 0
     : false;
-  // The head-OID poll (and pr-sync) run through the provider-neutral `forge_pr_poll`,
-  // so the poller works for any ready hosted repo (GitHub/GitLab/Bitbucket). For
-  // GitLab/Bitbucket the check-rollup and review-decision fields come back empty, so
-  // those notification branches simply never fire there (a documented v1 limit) —
-  // opened/merged/closed activity and remote pr-sync work on all three.
+  // `forge_pr_poll` is provider-neutral, so the poller works on any ready hosted repo.
+  // GitLab/Bitbucket return empty check-rollup, review-decision, comment and
+  // review-request fields, so those notification branches never fire there (a
+  // documented v1 limit); opened/merged/closed activity and remote pr-sync work on
+  // all three.
   const enabled =
     repoPath !== "" &&
     forgeFeatureReady(gh.data, "pullRequests") &&
@@ -94,12 +92,10 @@ export function usePrNotifications(repoPath: string) {
     const before = prev.current;
     prev.current = snapshot;
 
-    // pr-sync: auto re-review open remote PRs whose head advanced — the path
-    // that covers PRs whose head branch isn't local (forks / pushed elsewhere).
-    // Only when a pr-sync rule exists (so no fan-out for notification-only
-    // users); deduped by head in `maybeFireSync`, and the runner gates whether
-    // to actually review (opt-in per PR + per-mode watermark). Body/commit
-    // subjects aren't in the poll payload — the PR diff is the source of truth.
+    // pr-sync: auto re-review open remote PRs whose head advanced — covers PRs whose
+    // head branch isn't local (forks / pushed elsewhere). Gated on hasPrSync so
+    // notification-only users get no fan-out. The poll payload has no body/commit
+    // subjects — the PR diff is the source of truth.
     if (hasPrSync) {
       for (const pr of snapshot.values()) {
         if (pr.state === "OPEN" && pr.headSha) {
@@ -118,10 +114,10 @@ export function usePrNotifications(repoPath: string) {
       }
     }
 
-    // pr-open catch-up: give your own PRs opened outside the app (gh/web/bots)
-    // their missed initial review. Built from the same open+headSha snapshot,
-    // carrying author/createdAt/isDraft; the function itself does the recency /
-    // ownership / draft / already-reviewed gating and fires at most one per tick.
+    // pr-open catch-up for your own PRs opened outside the app (gh/web/bots), built
+    // from the same open+headSha snapshot plus author/createdAt/isDraft.
+    // `maybeCatchUpMissedOpen` owns the recency/ownership/draft/already-reviewed
+    // gating and fires at most one per tick.
     if (hasPrOpen) {
       const candidates = [...snapshot.values()]
         .filter((pr) => pr.state === "OPEN" && pr.headSha)
@@ -146,25 +142,23 @@ export function usePrNotifications(repoPath: string) {
     if (!before || !prefs) return;
     const login = gh.data?.login ?? null;
     const repoName = repoNameFromPath(repoPath);
-    // The GitHub host of THIS repo, captured now so an author avatar in the global
-    // inbox resolves against the row's own repo host, not the active repo's. Mirrors
-    // `useForgeGhHost`: the host on GitHub, `null` off it (GitLab/Bitbucket logins
-    // aren't avatar-derivable). Stored per-notification via `authorGhHost`.
+    // THIS repo's GitHub host, captured now so an author avatar in the global inbox
+    // resolves against the row's own repo host, not the active repo's. Mirrors
+    // `useForgeGhHost`: null off GitHub (GitLab/Bitbucket logins aren't avatar-derivable).
     const ghHost =
       gh.data?.provider === "github" ? gh.data.host || "github.com" : null;
-    // Record an event in BOTH channels: the persistent inbox (always — so a
-    // focused user still gets a durable record, since notifyIfUnfocused no-ops
-    // while focused) and an OS notification (unfocused only). The same pref
-    // gates both, so turning a category off keeps it out of the inbox too.
+    // Both channels: the persistent inbox always (notifyIfUnfocused no-ops while
+    // focused, so a focused user still gets a durable record) and an OS notification
+    // when unfocused. One pref gates both, so turning a category off also hides it
+    // from the inbox.
     const record = (
       kind: string,
       tone: NotificationTone,
       title: string,
       pr: PrPollInfo,
       dedupeKey: string,
-      // Only the events that know an author pass one (pr-opened). The poll payload
-      // carries no avatar URL, so the row resolves the avatar from the login against
-      // this repo's captured `ghHost` (login-derived photo on GitHub; bot handles via
+      // Only events that know an author pass one (pr-opened). No avatar URL in the
+      // poll payload — the row derives it from the login + `ghHost` (bot handles via
       // the bot-avatar API; initials off GitHub / on failure).
       authorLogin?: string,
     ) => {
@@ -231,7 +225,6 @@ export function usePrNotifications(repoPath: string) {
       }
 
       if (prefs.prReviews && mine && old) {
-        // Approve / changes-requested is a review DECISION change.
         if (
           old.reviewDecision !== pr.reviewDecision &&
           (pr.reviewDecision === "APPROVED" ||
@@ -248,9 +241,8 @@ export function usePrNotifications(repoPath: string) {
             `decision:${pr.number}:${pr.reviewDecision}`,
           );
         } else if (
-          // A plain "commented" review: the review count rose but the decision
-          // didn't change (an approve/changes-requested is caught just above).
-          // Skip your OWN review (same `last:1` caveat noted on comments below).
+          // A plain "commented" review: count rose, decision unchanged. Skip your
+          // OWN (same `last:1` caveat as comments below).
           pr.reviewCount > old.reviewCount &&
           pr.lastReviewAuthor !== login
         ) {
@@ -262,14 +254,12 @@ export function usePrNotifications(repoPath: string) {
             `review:${pr.number}:${pr.reviewCount}`,
           );
         }
-        // A new conversation comment on your PR — a SEPARATE event from the
-        // review decision above, so this is an independent `if`, NOT chained onto
-        // it: a reviewer who both decides AND leaves a standalone comment (or two
-        // people acting in the same poll) should yield both notifications, never
-        // a dropped one. Self-suppressed via `lastCommentAuthor` — which is the
-        // author of the LATEST comment only (a `last:1` poll slice), so if someone
-        // else and you both comment in the same ~60s window and yours lands last,
-        // theirs is missed. An accepted rarity, not worth a full per-comment scan.
+        // A SEPARATE event from the review decision above — an independent `if`, not
+        // chained, so a reviewer who both decides and comments (or two people in one
+        // poll) yields both notifications. Self-suppression reads `lastCommentAuthor`,
+        // which is the author of the LATEST comment only (the poll's `comments(last:1)`
+        // slice), so if someone else comments in the same ~60s window and yours lands
+        // last, theirs is missed — an accepted rarity.
         if (
           pr.commentCount > old.commentCount &&
           pr.lastCommentAuthor !== login
@@ -284,7 +274,8 @@ export function usePrNotifications(repoPath: string) {
         }
       }
 
-      // Review requested FROM you, on a PR you don't own.
+      // Review requested FROM you — no author guard needed; a forge won't request
+      // review from the PR's own author.
       if (
         prefs.prReviews &&
         login !== null &&
@@ -297,9 +288,8 @@ export function usePrNotifications(repoPath: string) {
           "info",
           `Review requested on #${pr.number}`,
           pr,
-          // Per-viewer event — scope the dedupe to your login so a remove +
-          // re-add of a DIFFERENT reviewer can't collide, and the key reads
-          // honestly (the fire condition above is login-specific).
+          // Per-viewer event — scope the dedupe to your login so a remove + re-add
+          // of a DIFFERENT reviewer can't collide.
           `review-req:${pr.number}:${login}`,
         );
       }

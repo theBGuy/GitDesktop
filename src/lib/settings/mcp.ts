@@ -16,12 +16,11 @@ export function serverScope(server: McpServer): string {
 }
 
 /** The scope / override keys that identify "the current repo", most-preferred
- *  LAST. A worktree-stable identity key ({@link repoIdentity}) and the raw
- *  checkout path both appear so scope/override lookups match a value stored under
- *  either — new writes land under the identity key, legacy ones under the raw
- *  path stay honored (read-both). Callers build this via `useRepoKeys`
- *  (queries.ts); pass `[repoPath]` while the identity is still resolving (exactly
- *  today's raw-path behavior), and `[]` when no repo is open. */
+ *  LAST. Holds both the worktree-stable identity ({@link repoIdentity}) and the raw
+ *  checkout path, so lookups match a value stored under either — new writes land on
+ *  the identity, legacy raw-path ones stay honored. Callers build this via
+ *  `useRepoKeys` (queries.ts): `[repoPath]` while the identity resolves, `[]` when
+ *  no repo is open. */
 export type RepoKeys = readonly string[];
 
 /** The override/scope value that wins for `repoKeys`, preferring the LATER key
@@ -102,14 +101,12 @@ export function scopeRepoPath(scope: string): string {
 }
 
 /** Fold a written server's LEGACY raw-path scope/override keys onto the repo's
- *  worktree-stable identity key, so a value set from one checkout is honored from
- *  a sibling worktree. Resolves {@link repoIdentity} for `scope` (when repo-scoped)
- *  and for each `repoOverrides` key; rewrites each under its identity, and where a
- *  value already exists under the identity key that value WINS (conservative
- *  merge). A key that already IS its identity (or whose git can't be resolved, so
- *  identity === the raw key) folds to a no-op. Call at write time (dialog save /
- *  override toggle) on the single server being written — never a global sweep, so
- *  legacy entries stay harmless until touched (reads already match both). */
+ *  worktree-stable identity, so a value set from one checkout is honored from a
+ *  sibling worktree. Resolves {@link repoIdentity} for `scope` (when repo-scoped) and
+ *  each `repoOverrides` key; an existing identity value WINS over a legacy one, and a
+ *  key that already IS its identity folds to a no-op. Call at write time on the single
+ *  server being written — never a global sweep, so untouched legacy entries stay
+ *  harmless (reads already match both forms). */
 export async function foldServerScopeKeys(
   server: McpServer,
 ): Promise<McpServer> {
@@ -124,8 +121,6 @@ export async function foldServerScopeKeys(
 
   const overrides = server.repoOverrides;
   if (overrides && Object.keys(overrides).length > 0) {
-    // Resolve every non-global override key to its identity, then rebuild the map
-    // under identity keys. An existing identity value wins over a legacy one.
     const keys = Object.keys(overrides);
     const ids = await Promise.all(
       keys.map(async (key) =>
@@ -134,9 +129,8 @@ export async function foldServerScopeKeys(
           : await repoIdentity(key).catch(() => key),
       ),
     );
-    // Seed the folded map with entries already stored under their identity key
-    // (`id === key`) FIRST, so a legacy raw-path value never clobbers one that's
-    // already on the identity — the identity value wins regardless of key order.
+    // Seed with entries already on their identity key (`id === key`) FIRST, so a
+    // legacy raw-path value can't clobber one regardless of key order.
     const folded: Record<string, McpRepoState> = {};
     keys.forEach((key, i) => {
       if (ids[i] === key) folded[key] = overrides[key];
@@ -153,12 +147,10 @@ export async function foldServerScopeKeys(
 
 /** Whether an (agent, isolation) combination can run MCP servers at all.
  *  Claude / Copilot / opencode: BOTH host and container — each CLI auto-approves MCP
- *  tool calls non-interactively (`--mcp-config` / `--additional-mcp-config` +
- *  `--allow-all-tools` / `OPENCODE_CONFIG` + `--dangerously-skip-permissions`), and
- *  the container delivers the same config into the CLI's mounted home. Codex: container
- *  only — host `codex exec` cancels every MCP tool call (stdin EOF → "declined", an
- *  upstream limitation), while a container session bypasses approvals so they run.
- *  Shared by the composer (gating) and the store (persist). */
+ *  tool calls non-interactively, and the container delivers the same config into the
+ *  CLI's mounted home. Codex: container only — host `codex exec` cancels every MCP
+ *  tool call (stdin EOF → "declined", an upstream limitation), while a container
+ *  session bypasses approvals. Shared by the composer (gating) and the store. */
 export function mcpSupportedFor(agent: string, isContainer: boolean): boolean {
   if (agent === "codex") return isContainer;
   return agent === "claude" || agent === "copilot" || agent === "opencode";

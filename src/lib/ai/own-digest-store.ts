@@ -26,18 +26,11 @@ export interface OwnCommentsDigest {
    *  this ledger was sized against) and the joined UNCAPPED blocks (what the
    *  distiller actually read). Both are needed because an in-place edit moves
    *  neither the count nor the newest timestamp, and an edit appended past a
-   *  block's cap moves only the uncapped one. The leading version tag retires
-   *  ledgers whose cached TEXT is no longer what we would produce today, or that
-   *  were keyed on a weaker token: it went to `v2` when the truncation note
-   *  stopped claiming the omitted characters are "on the PR thread" (false for a
-   *  ledger, and otherwise served from cache into a prompt indefinitely), to
-   *  `v3` when the uncapped length joined the token, and to `v4` when the
-   *  distiller's per-block cap became a share of its input cap rather than a flat
-   *  6,000 — on a short record the model now reads more of each block and produces
-   *  a different ledger, while every field above stays identical, so the same
-   *  token would otherwise keep serving a ledger produced under the old cap. Bump
-   *  it again for either kind of change; records with a stale token simply miss
-   *  once and re-distill. */
+   *  block's cap moves only the uncapped one. BUMP the leading version tag for any
+   *  change that makes the cached TEXT differ from what we would produce today —
+   *  distiller prompt, per-block or input caps, truncation-note wording — since
+   *  every field above can stay identical while the ledger changes; a stale tag
+   *  simply misses once and re-distills. */
   fingerprint: string;
   /** The distilled ledger markdown — the cached soft context. Empty when this
    *  record only carries a failure memory and no ledger has ever succeeded. */

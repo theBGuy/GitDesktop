@@ -77,13 +77,10 @@ pub async fn gh_status(repo_path: String) -> AppResult<GhStatus> {
         Err(_) => (false, Vec::new()),
     };
 
-    // gh auto-detects the repo's host from its remote, so this resolves
-    // nameWithOwner + the canonical URL on github.com OR an Enterprise server.
-    // Pin the origin slug positionally (`gh repo view <slug>` — the `repo` family
-    // takes the target positionally, not via `-R`): on a fork with an `upstream`
-    // remote a bare `gh repo view` auto-resolves to the PARENT, so the status
-    // "repo" field would name the upstream instead of the fork. Best-effort: an
-    // unparseable origin just leaves repo/host unresolved (same as before).
+    // Pin the origin slug POSITIONALLY (`gh repo view <slug>` — the `repo` family
+    // has no `-R`): a bare `gh repo view` on a fork with an `upstream` remote
+    // resolves to the PARENT, so repo/host would name the upstream. Best-effort:
+    // an unparseable origin leaves both unresolved.
     let view = if authenticated {
         match crate::github::gh_origin_slug(&repo_path).await {
             Ok(slug) => run_gh_raw(
@@ -381,9 +378,8 @@ pub async fn gh_publish_repo(
     }
     run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await?;
 
-    // `gh repo create` can't set topics, so apply them with a follow-up edit.
-    // Best-effort: the repo + push already succeeded, so a topic hiccup must not
-    // fail the publish. The new repo is `origin`, so no repo arg is needed.
+    // `gh repo create` can't set topics — apply them with a follow-up edit on origin.
+    // Best-effort: the repo + push already landed, so a topic failure can't fail it.
     let topics: Vec<String> = topics
         .into_iter()
         .map(|t| t.trim().to_string())
@@ -500,10 +496,9 @@ pub struct PrInfo {
     /// `created_at`, Bitbucket `created_on`) so the list row can show its age.
     #[serde(default)]
     pub created_at: String,
-    /// The PR head commit's SHA. Populated ONLY by the Bitbucket list arm (from
-    /// `source.commit.hash`, short hash is fine) to feed its per-commit CI-status
-    /// probe — Bitbucket has no batch pipeline endpoint. GitHub and GitLab leave it
-    /// "" (their CI arms query by PR number / MR iid and never read this).
+    /// The PR head commit's SHA. Populated ONLY by the Bitbucket list arm, to feed
+    /// its per-commit CI probe (Bitbucket has no batch pipeline endpoint). GitHub
+    /// and GitLab query by number/iid and leave this "".
     #[serde(default)]
     pub head_sha: String,
 }
@@ -529,8 +524,6 @@ pub async fn gh_pr_review(
             )));
         }
     };
-    // Resolve the lens slug (`gh pr … --repo OWNER/REPO`) so a fork's PR resolves
-    // against the chosen remote, not the parent gh auto-detects from `upstream`.
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let body = body.trim();
     let mut args = vec!["pr", "review", &n, flag, "--repo", &slug];
@@ -554,7 +547,6 @@ pub async fn gh_pr_comment(
         return Err(AppError::InvalidArgument("a comment is required".into()));
     }
     let n = number.to_string();
-    // Resolve the lens slug so the comment lands on the chosen repo's PR.
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     run_gh(
         Some(&repo_path),
@@ -578,21 +570,17 @@ pub struct PrMergeOutcome {
     pub cleanup_warning: Option<String>,
 }
 
-/// Merges the PR with the given strategy ("merge"/"squash"/"rebase"). When
-/// `delete_branch` is set, only the *remote* head branch is removed afterwards —
-/// the local branch and HEAD are left untouched.
+/// Merges the PR with the given strategy ("merge"/"squash"/"rebase"). With
+/// `delete_branch`, only the *remote* head branch is removed — local branch and
+/// HEAD are untouched.
 ///
-/// We deliberately do NOT pass `gh pr merge --delete-branch`: that also deletes
-/// the user's **local** branch and switches HEAD to the default branch, which
-/// surprised users and diverged from the other providers (GitLab's
-/// `should_remove_source_branch` and Bitbucket's `close_source_branch` are
-/// server-side, so they only ever touch the remote). Instead we merge, then
-/// delete just the remote ref via the API — remote-only, like the others.
+/// Deliberately NOT `gh pr merge --delete-branch`: that also deletes the LOCAL
+/// branch and moves HEAD to the default branch, diverging from GitLab/Bitbucket
+/// (whose deletion is server-side and remote-only). We merge, then DELETE the
+/// remote ref via the API.
 ///
-/// The merge itself is hard: a failure returns `Err`. Head-branch cleanup is
-/// best-effort: once the merge has landed, a cleanup failure is folded into a
-/// successful [`PrMergeOutcome`] as a `cleanup_warning` rather than surfacing as
-/// a red merge error for a PR that already merged.
+/// Merge failure = `Err`. Cleanup failure after a landed merge = a
+/// `cleanup_warning` on a successful [`PrMergeOutcome`], never an error.
 #[tauri::command]
 pub async fn gh_pr_merge(
     repo_path: String,
@@ -612,7 +600,6 @@ pub async fn gh_pr_merge(
             )));
         }
     };
-    // Resolve the lens slug so the merge targets the chosen repo's PR.
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     run_gh(
         Some(&repo_path),
@@ -620,9 +607,7 @@ pub async fn gh_pr_merge(
         GH_NETWORK_TIMEOUT,
     )
     .await?;
-    // The merge has landed. From here, any cleanup failure is disclosed as a
-    // warning on a successful outcome — never an error — so the UI can't show a
-    // red "merge failed" toast for a PR that already merged.
+    // Merge landed: from here a cleanup failure is a warning on success, never an error.
     let cleanup_warning = if delete_branch {
         gh_delete_remote_head_branch(&repo_path, number, lens.as_deref())
             .await
@@ -658,11 +643,9 @@ struct RawRepoName {
 }
 
 /// Deletes only the *remote* head branch of a just-merged PR (see `gh_pr_merge`).
-/// Best-effort and disclosing: the merge already succeeded, so every error path
-/// here (head lookup, parse, or the DELETE itself) produces a "Merged #N, but …"
-/// message that `gh_pr_merge` folds into a successful outcome's `cleanup_warning`
-/// rather than a merge failure. A branch that is already gone (e.g. a repo that
-/// auto-deletes head branches on merge) counts as success.
+/// Best-effort and disclosing: every failure here becomes a "Merged #N, but …"
+/// message folded into a successful outcome's `cleanup_warning`. An
+/// already-gone branch (repo auto-deletes head branches) counts as success.
 async fn gh_delete_remote_head_branch(
     repo_path: &str,
     number: u64,
@@ -717,15 +700,12 @@ async fn gh_delete_remote_head_branch(
         return Ok(());
     };
 
-    // Best-effort prune of the LOCAL remote-tracking ref for this branch. The
-    // GitHub API delete never touches local git, so `refs/remotes/origin/<branch>`
-    // lingers (marked `[gone]`) until the next pruning fetch — long enough for the
-    // sync bar to keep offering stale Push/Pull. Deleting it now flips the branch
-    // to "Publish" on the next status refresh. Skipped for a cross-repository PR:
-    // a fork's head branch has no `origin` tracking ref of ours to prune. We use
-    // `run_git_raw` (no AppState) for this single atomic ref deletion rather than
-    // threading state through the signature — the same idempotent-prune model
-    // `git_delete_remote_branch_core` already uses.
+    // Prune the LOCAL remote-tracking ref too: the API delete never touches local
+    // git, so `refs/remotes/origin/<branch>` lingers `[gone]` until a pruning fetch
+    // and the sync bar keeps offering stale Push/Pull. Skipped for a cross-repo PR
+    // (a fork head has no origin tracking ref of ours).
+    // `run_git_raw` (no AppState): a single idempotent ref delete, same model as
+    // `git_delete_remote_branch_core`.
     let prune_local_tracking = || async {
         if !head.is_cross_repository {
             let _ = run_git_raw(
@@ -779,7 +759,6 @@ async fn gh_delete_remote_head_branch(
 #[tauri::command]
 pub async fn gh_pr_close(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     let n = number.to_string();
-    // Resolve the lens slug so the PR closes on the chosen repo.
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     run_gh(
         Some(&repo_path),
@@ -794,7 +773,6 @@ pub async fn gh_pr_close(repo_path: String, number: u64, lens: Option<String>) -
 #[tauri::command]
 pub async fn gh_pr_reopen(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     let n = number.to_string();
-    // Resolve the lens slug so the PR reopens on the chosen repo.
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     run_gh(
         Some(&repo_path),
@@ -805,13 +783,10 @@ pub async fn gh_pr_reopen(repo_path: String, number: u64, lens: Option<String>) 
     Ok(())
 }
 
-/// Edits the body of an existing conversation comment, addressed by its GraphQL
-/// node id (from `gh pr view` / `gh issue view`). The `updateIssueComment`
-/// mutation operates on `IssueComment` nodes, which back BOTH pull-request and
-/// issue conversation comments — so this one fn serves both forge dispatch arms.
-/// GitHub only lets the comment's author edit it, so it's offered solely on the
-/// viewer's own comments. Plain fn (called by the forge dispatch); no longer a
-/// Tauri command.
+/// Edits a conversation comment by its GraphQL node id. `updateIssueComment`
+/// operates on `IssueComment` nodes, which back BOTH PR and issue conversation
+/// comments — so one fn serves both forge arms. GitHub allows only the author to
+/// edit, so it's offered solely on the viewer's own comments.
 pub async fn edit_comment(repo_path: &str, comment_id: &str, body: &str) -> AppResult<()> {
     if body.trim().is_empty() {
         return Err(AppError::InvalidArgument("a comment is required".into()));
@@ -854,12 +829,10 @@ pub async fn delete_comment(repo_path: &str, comment_id: &str) -> AppResult<()> 
     Ok(())
 }
 
-/// Edits the body of a file:line-anchored REVIEW-thread comment, addressed by its
-/// GraphQL node id (from `gh_pr_review_threads`). These are `PullRequestReviewComment`
-/// nodes — a DISTINCT type from the `IssueComment` nodes [`edit_comment`] handles, so
-/// they take their own `updatePullRequestReviewComment` mutation (the IssueComment
-/// mutations reject a review-comment id). GitHub only lets the author edit, so it's
-/// offered solely on the viewer's own comments. Plain fn (called by the forge dispatch).
+/// Edits a file:line-anchored REVIEW-thread comment by its GraphQL node id (from
+/// `gh_pr_review_threads`). These are `PullRequestReviewComment` nodes — a
+/// DISTINCT type from [`edit_comment`]'s `IssueComment`s, which reject a
+/// review-comment id — hence `updatePullRequestReviewComment`.
 pub async fn edit_review_comment(repo_path: &str, comment_id: &str, body: &str) -> AppResult<()> {
     if body.trim().is_empty() {
         return Err(AppError::InvalidArgument("a comment is required".into()));
@@ -965,8 +938,6 @@ pub async fn gh_pr_unminimize_comment(repo_path: String, comment_id: String) -> 
 #[tauri::command]
 pub async fn gh_pr_checkout(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     let n = number.to_string();
-    // Resolve the lens slug so the PR number checks out from the chosen repo, not the
-    // parent gh would auto-resolve from an `upstream` remote.
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     run_gh(
         Some(&repo_path),
@@ -1043,19 +1014,16 @@ pub async fn gh_repo_fork(repo_path: String, contribute_to_parent: bool) -> AppR
     Ok(fork_url)
 }
 
-/// Marks a draft PR as ready for review (the one-way Tauri command; kept
-/// backward-compatible). Delegates to [`gh_pr_set_ready`] with `ready = true`.
+/// Marks a draft PR ready for review — the one-way Tauri command; delegates to
+/// [`gh_pr_set_ready`] with `ready = true`.
 #[tauri::command]
 pub async fn gh_pr_ready(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     gh_pr_set_ready(&repo_path, number, true, lens.as_deref()).await
 }
 
-/// Sets a pull request's draft state via `gh pr ready`: `ready = true` marks a
-/// draft ready for review; `ready = false` appends `--undo` to convert an open PR
-/// back to a draft ("Convert a pull request to draft"). Lens-aware, so a fork's PR
-/// resolves against the chosen remote rather than the parent gh auto-detects. gh's
-/// own error for plans that don't support draft conversion ("If supported by your
-/// plan") passes through as the actionable message — deliberately not pre-gated.
+/// Sets a PR's draft state via `gh pr ready`; `ready = false` appends `--undo`
+/// to convert an open PR back to a draft. Lens-aware. gh's plan-gating error
+/// ("If supported by your plan") passes through — deliberately not pre-gated.
 pub(crate) async fn gh_pr_set_ready(
     repo_path: &str,
     number: u64,
@@ -1109,11 +1077,8 @@ pub async fn gh_pr_list(
             )));
         }
     };
-    // `gh pr list` defaults to 30; thread an explicit `--limit` when the caller asks
-    // for a different cap (existing callers pass `None` → gh's default is untouched).
-    // Clamp to gh's accepted `--limit` range (1..=1000): `--limit 0` errors at runtime,
-    // and this keeps the MCP `limit` behavior consistent with the other providers, which
-    // clamp to their own page ceilings rather than erroring.
+    // gh defaults to 30. Clamp to gh's accepted 1..=1000 (`--limit 0` errors at
+    // runtime); `None` leaves gh's default untouched.
     let limit_str;
     if let Some(n) = limit {
         limit_str = n.clamp(1, 1000).to_string();
@@ -1166,13 +1131,11 @@ fn rollup_state_to_ci(state: Option<&str>) -> String {
     }
 }
 
-/// Parse `(host, owner, name)` from a PR html url like
-/// `https://github.com/biomejs/biome/pull/10937`. The url is the empirical truth
-/// for which repo the PR numbers belong to — for a fork, the PR list resolves to
-/// the PARENT repo while origin points at the fork, so we must not re-derive the
-/// repo from the checkout. Strict: exactly two path segments (owner, name) each
-/// matching `[A-Za-z0-9._-]+` and NOT starting with `-` (flag-injection guard),
-/// immediately followed by `/pull/`. Anything else is an error.
+/// Parse `(host, owner, name)` from a PR html url. The url is the empirical truth
+/// for which repo the PR numbers belong to — on a fork the PR list resolves to the
+/// PARENT while origin is the fork, so the repo must NOT be re-derived from the
+/// checkout. Strict: two valid segments immediately followed by `/pull/`, and a
+/// `-`-prefixed segment is rejected (flag-injection guard).
 fn parse_pr_url_repo(url: &str) -> AppResult<(String, String, String)> {
     let host = host_from_url(url)
         .ok_or_else(|| AppError::InvalidArgument(format!("not a PR url: {url}")))?;
@@ -1200,15 +1163,12 @@ fn parse_pr_url_repo(url: &str) -> AppResult<(String, String, String)> {
     Ok((host, owner.to_string(), name.to_string()))
 }
 
-/// The precomputed CI rollup for a set of PR numbers in ONE repo, keyed by number
-/// — the GitHub arm of `forge_pr_list_ci`. The PR list (`gh_pr_list`) intentionally
-/// fetches no rollup (a full `statusCheckRollup` expansion 504s on large repos), so
-/// the row icons hydrate separately from this cheap follow-up. `numbers` come from a
-/// single list page and `sample_url` is any PR html url from that same page (it fixes
-/// the owner/name/host — load-bearing for forks). Queries by number aliases in chunks
-/// of ≤50, each chunk one `gh api graphql` call. Tolerant: a chunk that errors or fails
-/// to parse is simply omitted (its rows show no icon) — one bad chunk never fails the
-/// whole call.
+/// The precomputed CI rollup for a set of PR numbers in ONE repo — the GitHub arm
+/// of `forge_pr_list_ci`. `gh_pr_list` deliberately fetches no rollup (a full
+/// `statusCheckRollup` expansion 504s on large repos), so row icons hydrate here.
+/// `sample_url` is any PR html url from the SAME list page: it fixes
+/// owner/name/host, which is load-bearing for forks. Queries ≤50 numbers per call;
+/// a chunk that errors is omitted rather than failing the whole call.
 pub async fn gh_pr_list_ci(
     repo_path: &str,
     numbers: Vec<u64>,
@@ -1250,8 +1210,7 @@ pub async fn gh_pr_list_ci(
         args.push("-f");
         args.push(&name_arg);
 
-        // Per-chunk tolerance: a network error / non-zero exit / parse failure
-        // just drops this chunk's numbers (their icons stay absent).
+        // Per-chunk tolerance: any failure drops this chunk's icons.
         let Ok(out) = run_gh_raw(Some(repo_path), &args, GH_NETWORK_TIMEOUT).await else {
             continue;
         };
@@ -1276,8 +1235,7 @@ pub async fn gh_pr_list_ci(
             if node.is_null() {
                 continue;
             }
-            // `statusCheckRollup` is null when the PR has no checks → "none". The
-            // pointer walks the last-commit rollup; a null/absent state maps to "none".
+            // Null rollup (no checks configured) → "none".
             let state = node
                 .pointer("/commits/nodes/0/commit/statusCheckRollup/state")
                 .and_then(|s| s.as_str());
@@ -1308,8 +1266,7 @@ pub async fn gh_pr_edit(
     if title.is_empty() {
         return Err(AppError::InvalidArgument("a PR title is required".into()));
     }
-    // Resolve the lens slug so the PR is edited on the chosen repo
-    // (`gh api` has no `-R` flag, so build a literal `repos/<slug>/…` path).
+    // Lens slug into a literal `repos/<slug>/…` path — `gh api` has no `-R` flag.
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let endpoint = format!("repos/{slug}/pulls/{number}");
     run_gh(
@@ -1621,18 +1578,12 @@ struct RawLogin {
 }
 
 /// One entry of `gh pr view --json reviewRequests` — a *pending* requested
-/// reviewer (users who already submitted a review show in the reviews surface,
-/// not here). Each is a `User` (`login`), a `Bot` (`login`, e.g. GitHub
-/// Copilot), or a `Team`; `__typename` disambiguates. We keep Users and Bots
-/// (both carry a `login`); teams have none. Verified live:
-/// `{"__typename":"User","login":"…"}` and
-/// `{"__typename":"Bot","login":"copilot-pull-request-reviewer"}`.
+/// reviewer. Each is a `User`, a `Bot` (e.g. Copilot), or a `Team`, disambiguated
+/// by `__typename`; we keep Users and Bots (both carry a `login`), teams have none.
 ///
-/// The Bot arm depends on the gh CLI version: gh's own internal GraphQL query
-/// (`prReviewRequests` in cli/cli `api/query_builder.go`) added `...on Bot` in
-/// v2.94.0 "to support Copilot as a reviewer on github.com". Older gh has no Bot
-/// arm, so a Copilot request arrives with an empty `login` — requiring a
-/// non-empty login below degrades those to today's behavior (no chip, no error).
+/// gh only added the `...on Bot` arm to its internal query in v2.94.0, so on older
+/// gh a Copilot request arrives with an empty `login` — requiring a non-empty
+/// login below degrades those to no chip, no error.
 #[derive(Deserialize)]
 struct RawReviewRequest {
     #[serde(rename = "__typename", default)]
@@ -1745,8 +1696,7 @@ struct RawCheck {
 /// that isn't an Actions run URL (Vercel, Netlify, empty, absent) yields
 /// `(None, None)`.
 fn parse_actions_run_job(url: &str) -> (Option<String>, Option<String>) {
-    // Find "/actions/runs/" then read the following all-digit run id, and an
-    // optional "/job/<digits>" immediately after. Substring scan (no regex dep).
+    // Substring scan (no regex dep).
     let Some(rest) = url.split_once("/actions/runs/").map(|(_, r)| r) else {
         return (None, None);
     };
@@ -1765,21 +1715,16 @@ fn parse_actions_run_job(url: &str) -> (Option<String>, Option<String>) {
     (Some(run_id), job_id)
 }
 
-/// Whether a timestamp string is a real time worth keeping. `gh` serializes a
-/// null GraphQL timestamp as Go's zero value (`"0001-01-01T00:00:00Z"`), so a
-/// still-running check "has" a `completedAt` — and a PENDING review "has" a
-/// `submittedAt` — unless that sentinel is dropped along with the empty string.
-/// Dropping both is what lets the frontend tell a finished check from an
-/// in-progress one, and skip rendering a pending review's absent submit time
-/// (its `date &&` guard treats `""` as absent) instead of a year-0001 date.
+/// Whether a timestamp is a real time. `gh` serializes a null GraphQL timestamp as
+/// Go's zero value (`"0001-01-01T00:00:00Z"`), so a still-running check "has" a
+/// `completedAt` and a PENDING review "has" a `submittedAt` unless that sentinel is
+/// dropped along with "".
 fn real_check_time(s: &str) -> bool {
     !s.is_empty() && !s.starts_with("0001-01-01")
 }
 
-/// A timeline date from the `gh pr view` Go-serialized path, cleared to `""`
-/// when it's absent or the Go-zero sentinel (see `real_check_time`), so the
-/// frontend's `date &&` guards skip rendering it rather than showing a
-/// year-0001 date.
+/// A `gh pr view` date, cleared to `""` when absent or the Go-zero sentinel (see
+/// `real_check_time`) so the frontend's `date &&` guards skip it.
 fn real_time_or_empty(s: String) -> String {
     if real_check_time(&s) { s } else { String::new() }
 }
@@ -2077,13 +2022,10 @@ struct RepoMergeSettings {
     rebase_merge_allowed: Option<bool>,
 }
 
-/// Fetch the repository's server-side merge-method settings for the repo the PR
-/// LIVES IN. `pr_url` is the PR's html url — for a fork's outgoing PR this is the
-/// PARENT/base repo (a PR url is always on the base repo), so we derive owner/name
-/// from it rather than from origin (which is the fork). Best-effort by contract:
-/// the caller treats any `Err` as "unknown" (all fields `None`) and never fails the
-/// PR view over it. Owner/name are passed as GraphQL variables (validated by
-/// [`parse_pr_url_repo`]), never interpolated into the query.
+/// The repository's server-side merge-method settings for the repo the PR LIVES IN.
+/// `pr_url` is the PR's html url — always the BASE repo, so a fork's outgoing PR
+/// reports the parent's settings, not origin's. Best-effort by contract: the caller
+/// treats any `Err` as "unknown" (all fields `None`).
 async fn gh_repo_merge_settings(repo_path: &str, pr_url: &str) -> AppResult<RepoMergeSettings> {
     let (host, owner, name) = parse_pr_url_repo(pr_url)?;
     let hostname_arg = (host != "github.com").then_some(host);
@@ -2151,11 +2093,9 @@ pub async fn gh_pr_view(
 
     let login = |a: Option<RawLogin>| a.map(|x| x.login).unwrap_or_default();
 
-    // `gh pr view --json files` caps at GitHub's GraphQL 100-file connection
-    // limit, so a larger PR's rail would list only the first 100. When we hit
-    // that cap, complete the list from the paginated REST files API (a PR with
-    // exactly 100 files just makes one redundant call). Best-effort: if the REST
-    // completion fails, keep the 100 GraphQL entries rather than failing the view.
+    // `gh pr view --json files` caps at GitHub's GraphQL 100-item connection limit;
+    // complete from the paginated REST files API when we hit it. Best-effort: a REST
+    // failure keeps the 100 GraphQL entries rather than failing the view.
     let files: Vec<PrFileOut> = if raw.files.len() >= 100 {
         match gh_pr_files_paginated(&repo_path, number, lens.as_deref()).await {
             Ok(complete) => complete
@@ -2251,8 +2191,7 @@ pub async fn gh_pr_view(
                     viewer_did_author: false,
                     is_minimized: false,
                     minimized_reason: String::new(),
-                    // A review row keeps its own id in `id`; `review_id` is for
-                    // thread-comment rows to point back at their owning review.
+                    // Reviews carry their own id in `id` (see `PrThreadOut::review_id`).
                     review_id: String::new(),
                 })
                 .collect(),
@@ -2271,8 +2210,6 @@ pub async fn gh_pr_view(
                 viewer_did_author: false,
                 is_minimized: false,
                 minimized_reason: String::new(),
-                // A review row keeps its own id in `id`; `review_id` is for
-                // thread-comment rows to point back at their owning review.
                 review_id: String::new(),
             })
             .collect()
@@ -2320,12 +2257,9 @@ pub async fn gh_pr_view(
             .collect()
     };
 
-    // Repository-level merge-method settings (allow merge / squash / rebase). The
-    // `gh pr view --json` surface can't return these, so it's one extra `gh api
-    // graphql` call, best-effort: on any failure the three fields stay `None` and the
-    // picker gates exactly as before (raw server error on merge as the fallback). The
-    // repo is derived from the PR's own url, so a fork's PR reports its BASE repo's
-    // settings — the repo the merge actually lands in.
+    // Repo-level merge-method settings — one extra `gh api graphql` call the
+    // `gh pr view --json` surface can't supply. Best-effort: on failure all three
+    // stay `None` and the picker gates exactly as before.
     let merge_settings = gh_repo_merge_settings(&repo_path, &raw.url)
         .await
         .unwrap_or_default();
@@ -2336,8 +2270,7 @@ pub async fn gh_pr_view(
         title: raw.title,
         body: raw.body,
         author: login(raw.author),
-        // GitHub carries no avatar URL in the API; the frontend derives it from
-        // the login, so leave it empty here.
+        // GitHub avatar is login-derived on the frontend.
         author_avatar_url: String::new(),
         state: raw.state,
         is_draft: raw.is_draft,
@@ -2359,8 +2292,7 @@ pub async fn gh_pr_view(
                     .into_iter()
                     .find(|s| !s.is_empty())
                     .unwrap_or_default();
-                // CheckRun `detailsUrl` OR StatusContext `targetUrl`, whichever
-                // is present (drop an empty string so an absent link stays None).
+                // Drop an empty string so an absent link stays None.
                 let details_url = c
                     .details_url
                     .or(c.target_url)
@@ -2414,7 +2346,7 @@ pub async fn gh_pr_view(
                 crate::forge::model::ForgeUserRef {
                     id: r.login,
                     label,
-                    // GitHub avatar is derived from the login on the frontend.
+                    // GitHub avatar is login-derived on the frontend.
                     avatar_url: String::new(),
                     is_bot,
                 }
@@ -2443,7 +2375,6 @@ async fn current_requested_reviewer_logins(
         #[serde(default)]
         review_requests: Vec<RawReviewRequest>,
     }
-    // Inherit the lens so the PR resolves against the same repo as the write below.
     let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
     let out = run_gh(
         Some(repo_path),
@@ -2472,7 +2403,6 @@ async fn current_requested_reviewer_logins(
 /// The PR author's login (`gh pr view --json author`) — excluded from the reviewer
 /// candidates, because GitHub rejects requesting a review from the author.
 async fn pr_author_login(repo_path: &str, number: u64, lens: Option<&str>) -> AppResult<String> {
-    // Inherit the lens so the PR resolves against the same repo as its candidates.
     let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
     let out = run_gh(
         Some(repo_path),
@@ -2498,12 +2428,10 @@ async fn pr_author_login(repo_path: &str, number: u64, lens: Option<&str>) -> Ap
 
 /// Replace a PR's requested USER reviewers with `desired` (logins) by diffing
 /// against the current pending user requests and running one `gh pr edit
-/// --add-reviewer … --remove-reviewer …`. **Team** and **bot** (e.g. Copilot)
-/// requests are never touched (they're not in the diff), so managing people here
-/// can't drop a team or a bot. GitHub
-/// rejects requesting a review from the PR author, and a reviewer who already
-/// submitted needs a *re-request* — those failures surface as the gh error rather
-/// than being swallowed (`run_gh` carries the stderr).
+/// --add-reviewer … --remove-reviewer …`. **Team** and **bot** requests are never
+/// in the diff, so they can't be dropped. GitHub rejects requesting a review from
+/// the PR author, and an already-submitted reviewer needs a *re-request*; both
+/// surface as gh's error rather than being swallowed.
 pub async fn set_pr_reviewers(
     repo_path: &str,
     number: u64,
@@ -2530,9 +2458,8 @@ pub async fn set_pr_reviewers(
     let num = number.to_string();
     let add_csv = add.join(",");
     let remove_csv = remove.join(",");
-    // Resolve the lens slug so the PR reviewers are edited on the chosen repo
-    // (`current_requested_reviewer_logins` above inherits the same lens, so the
-    // diff and the write agree on which repo's PR they target).
+    // Same lens as `current_requested_reviewer_logins` above, so the diff and the
+    // write agree on which repo's PR they target.
     let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
     let mut args: Vec<&str> = vec!["pr", "edit", &num, "--repo", &slug];
     if !add.is_empty() {
@@ -2570,7 +2497,7 @@ pub async fn reviewer_candidates(
         .map(|l| crate::forge::model::ForgeUserRef {
             id: l.clone(),
             label: l,
-            // GitHub avatar is derived from the login on the frontend.
+            // GitHub avatar is login-derived on the frontend.
             avatar_url: String::new(),
             is_bot: false,
         })
@@ -2632,13 +2559,10 @@ pub async fn gh_pr_reactions(
     Ok(IssueReactions { body, comments })
 }
 
-/// One activity-timeline event on a PR, serialized as a tagged union keyed on
-/// `kind` (camelCase). Feeds the Conversation tab's activity timeline
-/// (force-pushes, label changes, review requests, state changes, renames). The
-/// backend maps a GitHub `timelineItems` `__typename` onto one of these variants;
-/// any node it can't classify is skipped rather than panicking the batch. Every
-/// `actor`/`date`/oid field defaults to `""` when GitHub returns null (ghost or
-/// deleted actors, gone commits).
+/// One activity-timeline event on a PR, a tagged union keyed on `kind` (camelCase)
+/// feeding the Conversation tab. The backend maps a GitHub `timelineItems`
+/// `__typename` onto a variant; an unclassifiable node is skipped, never a panic.
+/// Every `actor`/`date`/oid defaults to `""` for GitHub nulls.
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum PrTimelineEventOut {
@@ -2702,10 +2626,8 @@ pub enum PrTimelineEventOut {
 const PR_TIMELINE_QUERY: &str = r#"query($owner:String!,$name:String!,$number:Int!){ repository(owner:$owner,name:$name){ pullRequest(number:$number){ timelineItems(last:100, itemTypes:[HEAD_REF_FORCE_PUSHED_EVENT, LABELED_EVENT, UNLABELED_EVENT, REVIEW_REQUESTED_EVENT, READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT, CLOSED_EVENT, REOPENED_EVENT, MERGED_EVENT, RENAMED_TITLE_EVENT]){ nodes{ __typename ... on HeadRefForcePushedEvent{ actor{login} createdAt beforeCommit{oid} afterCommit{oid} } ... on LabeledEvent{ actor{login} createdAt label{name color} } ... on UnlabeledEvent{ actor{login} createdAt label{name color} } ... on ReviewRequestedEvent{ actor{login} createdAt requestedReviewer{ __typename ... on User{login} ... on Team{slug} } } ... on ReadyForReviewEvent{ actor{login} createdAt } ... on ConvertToDraftEvent{ actor{login} createdAt } ... on ClosedEvent{ actor{login} createdAt } ... on ReopenedEvent{ actor{login} createdAt } ... on MergedEvent{ actor{login} createdAt commit{oid} } ... on RenamedTitleEvent{ actor{login} createdAt previousTitle currentTitle } } } } } }"#;
 
 /// Map one `timelineItems` node onto a `PrTimelineEventOut`, or `None` when the
-/// `__typename` is missing/unrecognized (guarded so a single odd node doesn't
-/// break the batch). Every string field defaults to `""` for null values — a
-/// ghost actor, a gone force-push commit, an absent title — per the module's
-/// nullability discipline (no `unwrap_or_default()` on a `from_value` result).
+/// `__typename` is missing/unrecognized (so one odd node can't break the batch).
+/// Every string field defaults to `""` for nulls — ghost actor, gone commit, absent title.
 fn map_timeline_node(node: &serde_json::Value) -> Option<PrTimelineEventOut> {
     let s = |p: &str| {
         node.pointer(p)
@@ -2773,14 +2695,11 @@ fn map_timeline_node(node: &serde_json::Value) -> Option<PrTimelineEventOut> {
     }
 }
 
-/// The PR's activity timeline — force-pushes, label changes, review requests, and
-/// state changes (ready/draft/close/reopen/merge/rename) — for the Conversation
-/// tab. GitHub's arm of the provider-neutral `forge_pr_timeline` dispatch (no longer
-/// a Tauri command — the dispatcher owns the `#[tauri::command]` seam). Nodes arrive
-/// oldest→newest and that order is preserved. GitHub does NOT emit the `Approved`/
-/// `ChangesRequested`/`Unapproved` kinds — its approvals/reviews already render as
-/// review cards, so `map_timeline_node` has no arms for them. Same decoupled design
-/// as `gh_pr_reactions`: it loads in parallel and leaves `gh_pr_view` untouched.
+/// The PR's activity timeline — force-pushes, label changes, review requests, state
+/// changes — for the Conversation tab; GitHub's arm of `forge_pr_timeline`. Nodes
+/// arrive oldest→newest and that order is preserved. GitHub never emits the
+/// `Approved`/`ChangesRequested`/`Unapproved` kinds (its reviews render as cards),
+/// so `map_timeline_node` has no arms for them.
 pub async fn pr_timeline(
     repo_path: &str,
     number: u64,
@@ -2814,18 +2733,15 @@ pub async fn pr_timeline(
         .unwrap_or_default())
 }
 
-/// The PR's full unified diff (`gh pr diff`), capped for the webview. The
-/// frontend splits it per file for the diff viewer.
+/// The PR's full unified diff (`gh pr diff`), capped for the webview; the frontend
+/// splits it per file.
 ///
-/// Past 300 files GitHub refuses the `.diff` media type with HTTP 406
-/// `too_large`, so `gh pr diff` fails outright. When we recognize that specific
-/// failure we fall back to reconstructing a unified diff from the paginated
-/// files API (`gh_pr_diff_from_files`) instead of failing the whole view. Any
-/// other error propagates raw.
+/// Past 300 files GitHub refuses the `.diff` media type with HTTP 406 `too_large`
+/// and `gh pr diff` fails outright — on that specific failure we reconstruct from
+/// the paginated files API (`gh_pr_diff_from_files`). Any other error propagates raw.
 #[tauri::command]
 pub async fn gh_pr_diff(repo_path: String, number: u64, lens: Option<String>) -> AppResult<String> {
-    // Resolve the lens slug so the PR diff resolves against the chosen repo (the
-    // files-API fallback below inherits the lens via `gh_pr_diff_from_files`).
+    // Lens slug for the diff; the files-API fallback inherits it via `gh_pr_diff_from_files`.
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let out = match run_gh(
         Some(&repo_path),
@@ -2856,17 +2772,14 @@ fn validate_commit_oid(oid: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// The unified diff of ONE commit in a PR (`gh api repos/<slug>/commits/{oid}`
-/// with the `application/vnd.github.diff` media type). Pinned to the origin slug
-/// so a fork reads its own commit, not the parent's. Returns the raw unified diff
-/// string, capped like `gh_pr_diff`. Plain fn (called by the forge dispatch).
+/// The unified diff of ONE commit (`gh api repos/<slug>/commits/{oid}` with the
+/// `application/vnd.github.diff` media type), capped like `gh_pr_diff`.
 ///
-/// INVARIANT — origin-pin the whole commit cluster (this + `commit_comments`),
-/// even for an upstream-only SHA the History tab surfaces on a fork. GitHub's
-/// fork-network storage serves ANY network SHA via the fork's own commits
-/// endpoint, so the pin does not 404 (probed live on a real fork, 2026-07-16),
-/// and the comments namespace deliberately becomes the fork's own thread rather
-/// than the parent's.
+/// Origin-pinned (this fn takes no `lens`) even for an upstream-only SHA the History
+/// tab surfaces on a fork: GitHub's fork-network storage serves ANY network SHA via
+/// the fork's own commits endpoint, so the pin does not 404. NOTE the cluster is NOT
+/// uniform — `commit_comments`/`commit_comment_create` are lens-resolved (default
+/// origin) while `commit_comment_edit`/`_delete` are origin-pinned.
 pub async fn commit_diff(repo_path: &str, oid: &str) -> AppResult<String> {
     validate_commit_oid(oid)?;
     let slug = crate::github::gh_origin_slug(repo_path).await?;
@@ -2927,8 +2840,7 @@ pub async fn commit_comments(
     lens: Option<&str>,
 ) -> AppResult<Vec<CommitCommentOut>> {
     validate_commit_oid(sha)?;
-    // Resolve the lens slug so the commit's comments read from the chosen repo's
-    // namespace (default origin — a fork reads its own, not the parent's).
+    // Lens-resolved, default origin: a fork reads its OWN comment namespace, not the parent's.
     let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
     let viewer = current_login(repo_path).await;
     let endpoint = format!("repos/{slug}/commits/{sha}/comments");
@@ -2975,13 +2887,9 @@ pub async fn commit_comments(
 
 /// Post a comment on a commit (`POST repos/<slug>/commits/{sha}/comments`). A
 /// whole-commit comment sends only `body`; an anchored one adds `path` + `position`
-/// (GitHub's diff-position — the frontend computes it; `line` is ignored for GitHub).
-///
-/// INVARIANT — origin-pin the whole commit-comment cluster (this + edit/delete).
-/// A comment created here MUST land on the user's own repo, not the parent: on a
-/// fork, GitHub's fork-network storage lets you comment on any network SHA via the
-/// fork's endpoint (probed live, 2026-07-16), and the resulting thread is the
-/// fork's own — so create/read/edit/delete all agree on the fork's namespace.
+/// (GitHub's diff-position, computed by the frontend — `line` is ignored here).
+/// Lens-resolved (default origin): on a fork, GitHub's fork-network storage lets you
+/// comment on any network SHA and the thread is that repo's own.
 pub async fn commit_comment_create(
     repo_path: &str,
     sha: &str,
@@ -2994,8 +2902,6 @@ pub async fn commit_comment_create(
         return Err(AppError::InvalidArgument("a comment is required".into()));
     }
     validate_commit_oid(sha)?;
-    // Resolve the lens slug so the commit comment lands in the chosen repo's
-    // namespace (default origin — a fork's comment lands on the fork, not the parent).
     let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
     let endpoint = format!("repos/{slug}/commits/{sha}/comments");
     let mut payload = serde_json::json!({ "body": body });
@@ -3132,7 +3038,6 @@ pub async fn thread_create(
         payload["start_line"] = serde_json::Value::from(start);
         payload["start_side"] = serde_json::Value::String(gh_side.to_string());
     }
-    // Resolve the lens slug so the review thread lands on the chosen repo's PR.
     let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
     let endpoint = format!("repos/{slug}/pulls/{number}/comments");
     run_gh_input(
@@ -3145,14 +3050,11 @@ pub async fn thread_create(
     Ok(())
 }
 
-/// Submit a review in ONE atomic call (`POST repos/{o}/{r}/pulls/{n}/reviews` via
-/// `--input -`). `verdict` is `"comment"`/`"approve"`/`"request_changes"` → the
-/// GitHub `event` (COMMENT / APPROVE / REQUEST_CHANGES). The summary is omitted when
-/// None/empty (GitHub docs claim body is required for COMMENT — we let a 422 surface
-/// verbatim rather than substitute placeholder text). Inline comments carry
-/// path/line/side (+ start_line/start_side for multi-line ranges). The guards
-/// (verdict validity, request_changes needs a summary) run in the dispatch before
-/// this is reached. Returns the posted/total counts (GitHub is atomic → all or none).
+/// Submit a review in ONE atomic call (`POST repos/{o}/{r}/pulls/{n}/reviews`).
+/// `verdict` → GitHub `event` (COMMENT/APPROVE/REQUEST_CHANGES). The summary is
+/// omitted when empty — GitHub's docs claim body is required for COMMENT, so we let
+/// its 422 surface verbatim rather than substituting placeholder text. Verdict
+/// guards run in the dispatch. GitHub is atomic → posted == total.
 pub async fn review_submit(
     repo_path: &str,
     number: u64,
@@ -3192,7 +3094,6 @@ pub async fn review_submit(
     if !arr.is_empty() {
         payload["comments"] = serde_json::Value::Array(arr);
     }
-    // Resolve the lens slug so the review is submitted on the chosen repo's PR.
     let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
     let endpoint = format!("repos/{slug}/pulls/{number}/reviews");
     run_gh_input(
@@ -3253,12 +3154,10 @@ async fn gh_pr_files_paginated(
     number: u64,
     lens: Option<&str>,
 ) -> AppResult<Vec<GhPrFile>> {
-    // Inherit the caller's lens: `gh_pr_view` resolves PR numbers against one repo,
-    // so this top-up must resolve to the SAME repo, not the parent gh would
-    // auto-detect from an `upstream` remote. `--paginate` on an array endpoint emits
-    // one JSON array PER PAGE concatenated, which a single `from_str::<Vec<_>>` can't
-    // parse — `--slurp` wraps the pages into one outer array of arrays, which we then
-    // flatten. (gh 2.44+ supports `--slurp`.)
+    // Inherit the caller's lens — this top-up must resolve to the SAME repo
+    // `gh_pr_view` resolved the PR number against. `--paginate` alone emits one JSON
+    // array PER PAGE (unparseable as a single Vec); `--slurp` wraps them into an
+    // array of arrays, which we flatten. (gh 2.44+.)
     let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
     let endpoint = format!("repos/{slug}/pulls/{number}/files");
     let out = run_gh(
@@ -3285,21 +3184,17 @@ async fn gh_pr_files_paginated(
 
 // --- PR-view list top-ups: commits / reviews / conversation comments -------
 //
-// `gh pr view --json {commits,reviews,comments}` reads GraphQL connections that
-// cap at 100 items, so a PR with >100 of any silently shows the first 100 as if
-// complete. Each helper below completes the list from the corresponding
-// paginated REST endpoint (best-effort — the caller keeps the 100 GraphQL
-// entries if the REST top-up fails), and a pure `*_to_out` mapper turns each REST
-// row into the same Out shape the GraphQL arm produces (so both paths agree).
+// `gh pr view --json {commits,reviews,comments}` reads GraphQL connections capped
+// at 100, so a PR with more silently shows the first 100 as complete. Each helper
+// completes the list from REST (best-effort), and a pure `*_to_out` mapper turns a
+// REST row into the same Out shape the GraphQL arm produces.
 
 /// One entry from `repos/{owner}/{repo}/pulls/<n>/commits`. Fields optional +
 /// defaulted so one malformed row can't sink the reconstruction.
 #[derive(Deserialize, Default)]
 struct GhPrRestCommit {
-    /// The commit's `oid` (its sha) — the PR-view commit shape keys commits on
-    /// `oid`, matching the GraphQL arm (which also maps GraphQL `oid` → `oid`).
-    /// A commit's node id plays no role in the Out shape (unlike reviews and
-    /// comments, whose GraphQL `node_id` is load-bearing), so it isn't read.
+    /// The commit's sha → the Out `oid`, matching the GraphQL arm. (Unlike reviews
+    /// and comments, a commit's `node_id` plays no role in the Out shape.)
     #[serde(default)]
     sha: String,
     #[serde(default)]
@@ -3368,10 +3263,8 @@ struct GhPrRestComment {
 }
 
 /// Map a REST commit row to the PR-view commit shape, mirroring the GraphQL arm:
-/// the message splits into a headline (first line) and body (everything after the
-/// first blank line — GraphQL's messageHeadline/messageBody semantics), the
-/// authored date is the git author date, and the display author is the git
-/// author name, falling back to the GitHub account login.
+/// message split by [`split_commit_message`], git author date, and the git author
+/// name falling back to the GitHub account login.
 fn rest_commit_to_out(c: GhPrRestCommit) -> PrCommitOut {
     let (headline, message_body) = split_commit_message(&c.commit.message);
     let git_name = c.commit.author.name;
@@ -3381,8 +3274,6 @@ fn rest_commit_to_out(c: GhPrRestCommit) -> PrCommitOut {
         git_name
     };
     PrCommitOut {
-        // The commit's node id keeps the row in the GraphQL id space; `oid` is
-        // the sha (GraphQL's `oid`).
         oid: c.sha,
         headline,
         message_body,
@@ -3391,16 +3282,11 @@ fn rest_commit_to_out(c: GhPrRestCommit) -> PrCommitOut {
     }
 }
 
-/// Split a full commit message into (headline, body) with GraphQL
-/// messageHeadline/messageBody semantics: the headline is the first line; the
-/// body is everything after the first blank line (empty when there is no blank
-/// line, i.e. no body).
+/// Split a commit message into (headline, body) with GraphQL
+/// messageHeadline/messageBody semantics: headline = first line; body = everything
+/// after the first blank line (no blank line ⇒ no body, even if wrapped).
 fn split_commit_message(message: &str) -> (String, String) {
     let headline = message.lines().next().unwrap_or("").to_string();
-    // Body = text after the first blank line. If there is no blank line, there
-    // is no body (a wrapped-but-unblanked second line is still part of no body,
-    // matching GraphQL, which treats only a blank-line-separated remainder as
-    // messageBody).
     let body = message
         .split_once("\n\n")
         .map(|(_, rest)| rest.trim_end_matches('\n').to_string())
@@ -3423,8 +3309,6 @@ fn rest_review_to_out(r: GhPrRestReview) -> PrThreadOut {
         viewer_did_author: false,
         is_minimized: false,
         minimized_reason: String::new(),
-        // A review row keeps its own id in `id`; `review_id` points thread-comment
-        // rows back at their owning review.
         review_id: String::new(),
     }
 }
@@ -3460,8 +3344,7 @@ async fn gh_pr_commits_paginated(
     number: u64,
     lens: Option<&str>,
 ) -> AppResult<Vec<PrCommitOut>> {
-    // Inherit the caller's lens: `gh_pr_view` resolves PR numbers against one repo,
-    // so this top-up must resolve to the SAME repo, not the parent.
+    // Inherit the caller's lens — the SAME repo `gh_pr_view` resolved the number against (else 404).
     let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
     let endpoint = format!("repos/{slug}/pulls/{number}/commits");
     let out = run_gh(
@@ -3495,8 +3378,7 @@ async fn gh_pr_reviews_paginated(
     number: u64,
     lens: Option<&str>,
 ) -> AppResult<Vec<PrThreadOut>> {
-    // Inherit the caller's lens: must resolve to the same repo `gh_pr_view`
-    // resolved the PR number against, or it would 404.
+    // Inherit the caller's lens — the SAME repo `gh_pr_view` resolved the number against (else 404).
     let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
     let endpoint = format!("repos/{slug}/pulls/{number}/reviews");
     let out = run_gh(
@@ -3532,8 +3414,7 @@ async fn gh_pr_comments_paginated(
     number: u64,
     lens: Option<&str>,
 ) -> AppResult<Vec<PrThreadOut>> {
-    // Inherit the caller's lens: must resolve to the same repo `gh_pr_view`
-    // resolved the PR number against, or it would 404.
+    // Inherit the caller's lens — the SAME repo `gh_pr_view` resolved the number against (else 404).
     let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
     let endpoint = format!("repos/{slug}/issues/{number}/comments");
     let out = run_gh(
@@ -3554,8 +3435,7 @@ async fn gh_pr_comments_paginated(
     let pages: Vec<Vec<GhPrRestComment>> = serde_json::from_str(&out.stdout_lossy())
         .map_err(|e| AppError::Gh(format!("could not parse the PR comment list: {e}")))?;
     // Resolve the viewer login once, only now that this top-up fired. Best-effort:
-    // if the probe fails, default `viewer_did_author` to false (no edit affordance)
-    // rather than failing the top-up.
+    // a failed probe leaves `viewer_did_author` false (no edit affordance).
     let viewer_login = run_gh(
         Some(repo_path),
         &["api", "user", "-q", ".login"],
@@ -3587,13 +3467,10 @@ async fn gh_pr_diff_from_files(
     Ok(text)
 }
 
-/// Rebuild a full unified diff from GitHub files-API entries, mirroring the
-/// GitLab reconstruction (`forge::gitlab::reconstruct_file_diff`) so the frontend
-/// splitter — which keys on `diff --git`/`+++ b/<path>` — parses it exactly like
-/// `gh pr diff` output. GitHub's `patch` carries only the `@@` hunks, so we
-/// synthesize the `diff --git`/`---`/`+++` headers; a file with no `patch`
-/// (binary or individually-huge) gets a `Binary files … differ` placeholder so it
-/// still appears in the list rather than vanishing.
+/// Rebuild a full unified diff from GitHub files-API entries in the same git-style
+/// format `gh pr diff` produces, so the frontend splitter (which keys on
+/// `diff --git` / `+++ b/<path>`) parses both identically. GitHub's `patch` carries
+/// only the `@@` hunks, so the `diff --git`/`---`/`+++` headers are synthesized here.
 fn reconstruct_pr_diff(files: &[GhPrFile]) -> String {
     let mut out = String::new();
     for f in files {
@@ -3604,8 +3481,7 @@ fn reconstruct_pr_diff(files: &[GhPrFile]) -> String {
         let is_added = f.status == "added";
         let is_removed = f.status == "removed";
         let is_renamed = f.status == "renamed";
-        // The a/ side is the pre-change path — the previous filename on a rename,
-        // otherwise the file's own path.
+        // a/ side = pre-change path (previous filename on a rename).
         let old_path = if is_renamed {
             f.previous_filename.as_deref().unwrap_or(new_path)
         } else {
@@ -3658,12 +3534,10 @@ fn reconstruct_pr_diff(files: &[GhPrFile]) -> String {
     out
 }
 
-/// One external (third-party) review item harvested from a GitHub PR — a
-/// submitted review body, a line-anchored inline review comment, or a
-/// conversation comment — with each author's bot flag. Surfaced so an AI
-/// re-review can fold in what tools like GitHub Copilot or CodeRabbit already
-/// flagged (as soft, re-verifiable context, never ground truth). The frontend
-/// decides which authors count as AI reviewers and how to format them.
+/// One external (third-party) review item harvested from a GitHub PR — a submitted
+/// review body, a line-anchored inline review comment, or a conversation comment —
+/// with each author's bot flag. The frontend decides which authors count as AI
+/// reviewers and how to format them.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExternalReviewItem {
@@ -3693,16 +3567,12 @@ pub struct ExternalReviewItem {
     pub created_at: String,
 }
 
-/// Map the `reviewThreads/nodes` array of the external-reviews query onto
-/// `ExternalReviewItem`s — the pure core of `gh_pr_external_reviews`'s
-/// inline/reply harvest, factored out so its subtle empty-opener promotion rule
-/// is unit-testable without a `gh` round trip. Per thread: the first NON-EMPTY
-/// comment is the opener (`inline`); every non-empty comment after it is a
-/// `reply`, inheriting the thread's path/line/isResolved/isOutdated with its own
-/// author/body/createdAt/commit. Empty-bodied comments are skipped, and because
-/// `saw_opener` flips only after the first PUSHED item, an empty-bodied opener
-/// promotes the first real comment to `inline` rather than orphaning replies with
-/// no opener. Threads (or comment sets) that yield nothing contribute nothing.
+/// Map the `reviewThreads/nodes` array onto `ExternalReviewItem`s — the pure core of
+/// `gh_pr_external_reviews`'s inline/reply harvest. Per thread: the first NON-EMPTY
+/// comment is the opener (`inline`); every non-empty comment after it is a `reply`
+/// inheriting the thread's path/line/isResolved/isOutdated. Empty bodies are skipped,
+/// so an empty-bodied opener PROMOTES the first real comment rather than orphaning
+/// replies with no opener.
 fn external_items_from_thread_nodes(nodes: &[serde_json::Value]) -> Vec<ExternalReviewItem> {
     let str_at = |v: &serde_json::Value, p: &str| {
         v.pointer(p).and_then(|x| x.as_str()).unwrap_or("").to_string()
@@ -3719,10 +3589,8 @@ fn external_items_from_thread_nodes(nodes: &[serde_json::Value]) -> Vec<External
         else {
             continue;
         };
-        // Outdated threads carry `"line": null` (key present, value null), and
-        // `pointer` returns `Some(Null)` for that — so convert to `u64` BEFORE
-        // the `originalLine` fallback, else a null `line` swallows the fallback
-        // and reports line 0 (see `gh_pr_review_threads` for the same trap).
+        // Convert to `u64` BEFORE the `originalLine` fallback — a present-but-null
+        // `line` would otherwise swallow it (see `gh_pr_review_threads`).
         let line = t
             .pointer("/line")
             .and_then(|x| x.as_u64())
@@ -3737,11 +3605,7 @@ fn external_items_from_thread_nodes(nodes: &[serde_json::Value]) -> Vec<External
             .pointer("/isOutdated")
             .and_then(|x| x.as_bool())
             .unwrap_or(false);
-        // The first non-empty comment is the thread's opener (`inline`); the
-        // rest are `reply`. Keying on the raw index would tag replies "reply"
-        // with no `inline` opener when the opener's body is empty — so flip
-        // `saw_opener` only after the first pushed item, promoting the first
-        // real comment.
+        // `saw_opener` flips only after the first PUSHED item (see the doc above).
         let mut saw_opener = false;
         for c in comments {
             let body = str_at(c, "/body");
@@ -3776,17 +3640,12 @@ fn external_items_from_thread_nodes(nodes: &[serde_json::Value]) -> Vec<External
     items
 }
 
-/// All review activity on a PR — submitted reviews, inline review-thread
-/// comments (each thread's opener plus the follow-up replies beneath it), and
-/// conversation comments — in one GraphQL round trip, each tagged with its
-/// author's bot flag. This harvest returns ALL replies; the frontend then filters:
-/// the external-context path drops every `reply` item, and the own-context path
-/// keeps only replies carrying GitDesktop's own footer anchor. So the replies that
-/// actually reach the re-review context are the ones GitDesktop itself posted
-/// (agent/MCP triage dispositions) — a teammate's manual GitHub reply is harvested
-/// here but does not survive into the prompt. That anchored triage "deferred by
-/// design" note under a bot's inline finding is that finding's context, and
-/// without it the re-review re-flags what GitDesktop already dispositioned.
+/// All review activity on a PR — submitted reviews, inline review-thread comments
+/// (opener + replies), and conversation comments — in one GraphQL round trip, each
+/// tagged with its author's bot flag. This harvest returns ALL replies; the frontend
+/// narrows them (external-context drops every `reply`; own-context keeps only replies
+/// carrying GitDesktop's footer anchor), so only GitDesktop's own triage dispositions
+/// reach the re-review prompt.
 #[tauri::command]
 pub async fn gh_pr_external_reviews(
     repo_path: String,
@@ -3846,16 +3705,8 @@ pub async fn gh_pr_external_reviews(
         }
     }
 
-    // Inline review-thread comments — the line-anchored findings (Copilot's and
-    // CodeRabbit's specific suggestions). Node 0 of each thread is its opener (the
-    // reviewer's finding), mapped as `inline`. The follow-up replies beneath it
-    // (nodes 1..) are mapped as `reply` items and ALL harvested here — the frontend
-    // narrows them: only replies GitDesktop itself posted (they carry the
-    // GitDesktop footer anchor) reach the re-review's own-comments context, so an
-    // anchored triage "deferred by design" note under a finding is that finding's
-    // context and the re-review won't re-flag what GitDesktop already dispositioned.
-    // Replies inherit the thread's path/line/resolved/outdated and are pushed right
-    // after their opener so items stay thread-grouped in order.
+    // Inline review-thread findings (opener + its replies, thread-grouped in order)
+    // — see `external_items_from_thread_nodes` for the opener rule.
     if let Some(nodes) = pr
         .and_then(|p| p.pointer("/reviewThreads/nodes"))
         .and_then(|v| v.as_array())
@@ -3894,15 +3745,12 @@ pub async fn gh_pr_external_reviews(
     Ok(items)
 }
 
-/// Fetches the remaining replies of a single review thread whose inner
-/// `comments(first:50)` connection had more than 50 (`hasNextPage`). Keyed on the
-/// thread's GraphQL node id, resuming from `after` (the inner `endCursor`). Both
-/// the node id and the cursor are server-opaque, so they travel as GraphQL
-/// VARIABLES (`-f`), never `format!`-embedded — the injection-safe idiom the rest
-/// of this file uses. Bounded at 5 extra pages (500 more replies, the repo's
-/// 500-cap idiom): past that the tail is truncated rather than looping. `map` is
-/// the same per-comment mapper the main query uses, so shapes agree. Best-effort:
-/// callers keep the first 50 on any error rather than failing the threads read.
+/// Fetches the remaining replies of a review thread whose inner `comments(first:50)`
+/// connection reported `hasNextPage`. Node id and cursor are server-opaque, so both
+/// travel as GraphQL VARIABLES, never `format!`-embedded. Bounded at 5 extra pages
+/// (500 replies) — past that the tail truncates rather than looping. `map` is the
+/// main query's per-comment mapper, so shapes agree. Best-effort: callers keep the
+/// first 50 on any error.
 async fn gh_thread_comment_replies_topup(
     repo_path: &str,
     thread_id: &str,
@@ -3955,15 +3803,11 @@ async fn gh_thread_comment_replies_topup(
     Ok(extra)
 }
 
-/// File:line-anchored review threads on a PR — GitHub's `reviewThreads` mapped
-/// onto the neutral `ReviewThreadOut`. Each thread carries its full reply chain
-/// (oldest first). Empty-comment threads are skipped. Line falls back to the
-/// original line, then 0 (an outdated thread whose anchor moved has a null line).
-/// Follows the `reviewThreads` cursor up to 5 pages (500 threads) so a PR with
-/// many threads isn't silently truncated — parity with the Bitbucket comments read.
-/// A thread with more than 50 replies is topped up per-thread via
-/// [`gh_thread_comment_replies_topup`] (only when its inner `hasNextPage`, so the
-/// common case adds no extra requests).
+/// File:line-anchored review threads on a PR — GitHub's `reviewThreads` mapped onto
+/// the neutral `ReviewThreadOut`, each with its full reply chain (oldest first).
+/// Empty-comment threads are skipped; line falls back to `originalLine`, then 0.
+/// Follows the cursor up to 5 pages (500 threads). A thread with >50 replies is
+/// topped up via [`gh_thread_comment_replies_topup`].
 #[tauri::command]
 pub async fn gh_pr_review_threads(
     repo_path: String,
@@ -3987,9 +3831,8 @@ pub async fn gh_pr_review_threads(
     let bool_at = |v: &serde_json::Value, p: &str| {
         v.pointer(p).and_then(|x| x.as_bool()).unwrap_or(false)
     };
-    // One review-thread comment JSON node → the neutral `PrThreadOut`. Shared by
-    // the main query and the >50-reply top-up so both map identically (the same
-    // field set the inner `comments{nodes{…}}` selection above requests).
+    // One review-thread comment node → the neutral `PrThreadOut`. Shared with the
+    // >50-reply top-up so both map identically.
     let map_comment = |c: &serde_json::Value| PrThreadOut {
         author: str_at(c, "/author/login"),
         author_avatar_url: String::new(),
@@ -4039,13 +3882,8 @@ pub async fn gh_pr_review_threads(
                 if comments.is_empty() {
                     continue;
                 }
-                // >50-reply thread: the inner `comments(first:50)` connection didn't
-                // fetch the tail. Top it up with a follow-up query keyed on the
-                // thread's node id (both id and cursor are server-opaque → GraphQL
-                // VARIABLES, never format!-embedded). Rare, so this adds ZERO extra
-                // requests for the common ≤50-reply case. Best-effort per the top-up
-                // policy: on any failure keep the first 50 rather than failing the
-                // whole threads read.
+                // >50 replies: top up from the thread's node id (see
+                // `gh_thread_comment_replies_topup`). Best-effort — keep the first 50 on error.
                 let inner_has_next = bool_at(t, "/comments/pageInfo/hasNextPage");
                 let inner_cursor = str_at(t, "/comments/pageInfo/endCursor");
                 if inner_has_next && !inner_cursor.is_empty() {
@@ -4082,10 +3920,8 @@ pub async fn gh_pr_review_threads(
                 // The diff excerpt lives on the individual comments; the thread's
                 // opener (first comment) carries the anchor hunk.
                 let diff_hunk = str_at(t, "/comments/nodes/0/diffHunk");
-                // The owning review's node id comes off the first comment's
-                // `pullRequestReview`, which is nullable — `str_at` maps a
-                // present-but-null value to "" (it converts to `&str` before use, so
-                // the `Some(Null)` pointer trap can't swallow anything here).
+                // The owning review's id, off the first comment's nullable
+                // `pullRequestReview` (`str_at` maps null → "").
                 let review_id = str_at(t, "/comments/nodes/0/pullRequestReview/id");
                 threads.push(ReviewThreadOut {
                     id: str_at(t, "/id"),
@@ -4219,34 +4055,28 @@ fn rest_pull_to_pr_info(p: GhPrRestPull) -> PrInfo {
 }
 
 /// Build the REST endpoint for the upstream-lens duplicate probe:
-/// `repos/<parent_slug>/pulls?head=<fork_owner>:<head>&state=open`. `fork_owner`
-/// and `head` are the only untrusted query VALUES, so each is percent-encoded via
-/// the shared [`encode_query_value`](crate::forge::encode_query_value) (escapes
-/// `&`, `%`, `#`, `+`, `?`, `=`, space, `/`, `:`, … — everything outside the
-/// RFC-3986 unreserved set) so a legal-but-hostile refname like `feat&state=all`
-/// can't inject query parameters. The `:` separator is added LITERALLY between the
-/// two encoded parts because GitHub's `?head=owner:branch` filter needs a real
-/// colon there; `parent_slug` is a validated `owner/repo` remote path whose `/` is
-/// a real path segment, so it stays unencoded. Pure — unit-tested.
+/// `repos/<parent_slug>/pulls?head=<fork_owner>:<head>&state=open`. `fork_owner` and
+/// `head` are the only untrusted VALUES, so each is percent-encoded via
+/// [`encode_query_value`](crate::forge::encode_query_value) — a legal-but-hostile
+/// refname like `feat&state=all` can't inject a query parameter. The `:` separator
+/// stays LITERAL (GitHub's filter needs a real colon); `parent_slug` is a validated
+/// `owner/repo` path. Pure — unit-tested.
 fn upstream_pulls_endpoint(parent_slug: &str, fork_owner: &str, head: &str) -> String {
     let owner = crate::forge::encode_query_value(fork_owner);
     let head = crate::forge::encode_query_value(head);
     format!("repos/{parent_slug}/pulls?head={owner}:{head}&state=open")
 }
 
-/// Open PRs whose head is `head` (there's at most one per base). Lets the UI
-/// offer "View pull request" instead of "Create" once one already exists.
+/// Open PRs whose head is `head` (at most one per base) — lets the UI offer "View
+/// pull request" instead of "Create".
 ///
-/// `lens`: `None`/`Some("origin")` probes the fork's own PRs (consistent with
-/// `gh_pr_list`); `Some("upstream")` probes the PARENT repo — the fork
-/// contribution flow's "did I already open this upstream?" check.
+/// `lens`: `None`/`Some("origin")` probes the fork's own PRs; `Some("upstream")`
+/// probes the PARENT (the fork-contribution "did I already open this?" check).
 ///
-/// The upstream arm does NOT use `gh pr list --head`: verified live 2026-07-16,
-/// `gh pr list --head "owner:branch"` silently returns `[]` even when the PR
-/// exists (it doesn't support the owner-prefixed head form). We hit REST instead
-/// — `GET repos/<parent>/pulls?head=<fork_owner>:<head>&state=open` — which
-/// matches cross-fork heads correctly. The caller passes a BARE branch name; we
-/// compose the `owner:` prefix here from the fork's origin owner.
+/// The upstream arm does NOT use `gh pr list --head`: it silently returns `[]` for
+/// the owner-prefixed `owner:branch` head form even when the PR exists. We hit REST
+/// instead (`GET repos/<parent>/pulls?head=<fork_owner>:<head>&state=open`), which
+/// matches cross-fork heads; the `owner:` prefix is composed here from origin.
 #[tauri::command]
 pub async fn gh_prs_for_branch(
     repo_path: String,
@@ -4311,9 +4141,8 @@ pub async fn gh_pr_create(
     assignees: Vec<String>,
     lens: Option<String>,
 ) -> AppResult<PrRef> {
-    // The command shell derefs the managed `State` to a plain `&AppState` and
-    // delegates to the core, so off-Tauri callers (the MCP server, via
-    // `forge_pr_create_core`) can create a PR with an `AppState` they own.
+    // Shell: deref the managed `State` and delegate, so off-Tauri callers (the MCP
+    // server, via `forge_pr_create_core`) can pass an `AppState` they own.
     gh_pr_create_core(
         &state, repo_path, base, head, title, body, draft, labels, assignees, lens,
     )
@@ -4324,19 +4153,14 @@ pub async fn gh_pr_create(
 /// the Tauri runtime (the MCP server routes here through `forge_pr_create_core`).
 ///
 /// `lens` selects the target repo:
-/// - `None`/`Some("origin")`: a same-repo PR **on the fork itself**, created with
-///   an explicit `-R <origin-slug>`. This is a deliberate behavior change from
-///   Part A (#56): the create call used to be UNPINNED, so on a fork `gh` would
-///   auto-resolve to the PARENT — meaning `gh_prs_for_branch`/`gh_pr_list` checked
-///   the fork while create silently targeted upstream. Pinning origin here closes
-///   that disclosed asymmetry: origin lens = honest, explicit same-repo PR.
-/// - `Some("upstream")`: the real fork contribution flow — push `head` to origin
-///   (origin IS the fork), then `gh pr create -R <parent> --head <fork_owner>:<head>`.
-///   Labels/assignees/reviewers are rejected up front (v1 keeps the cross-repo
-///   create minimal; the post-create edit is skipped on this path). Per gh's own
-///   docs (`gh pr create --help`, verified 2026-07-16) the `<user>:<branch>` head
-///   form does NOT support an organization as `<user>` (cli/cli#10093); gh's error
-///   is the disclosure surface if the fork owner is an org.
+/// - `None`/`Some("origin")`: a same-repo PR **on the fork itself**, created with an
+///   explicit `-R <origin-slug>` — so create targets the same repo
+///   `gh_prs_for_branch`/`gh_pr_list` check.
+/// - `Some("upstream")`: the fork contribution flow — push `head` to origin (origin
+///   IS the fork), then `gh pr create -R <parent> --head <fork_owner>:<head>`.
+///   Labels/assignees/reviewers are rejected up front (v1 keeps this minimal). Per
+///   gh's docs the `<user>:<branch>` head form does NOT support an org as `<user>`
+///   (cli/cli#10093); gh's error is the disclosure surface.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn gh_pr_create_core(
     state: &AppState,
@@ -4409,8 +4233,7 @@ pub(crate) async fn gh_pr_create_core(
         return Ok(PrRef { number, url });
     }
 
-    // Origin lens (default). Pin the origin slug so this is a same-repo PR on the
-    // fork, explicit and honest (see the doc comment above).
+    // Origin lens (default): pin origin so this is a same-repo PR on the fork.
     let origin_slug = crate::github::gh_lens_slug(&repo_path, None).await?;
 
     // gh can only open a PR for a branch that exists on the remote.
@@ -4441,24 +4264,18 @@ pub(crate) async fn gh_pr_create_core(
     if draft {
         args.push("--draft");
     }
-    // Labels/assignees are applied AFTER create (below), NOT via `gh pr create
-    // --label/--assignee`: gh 2.94 records EACH value TWICE on the PR's activity
-    // timeline when it's passed at create time (it sets them in the create
-    // mutation AND re-applies them in a follow-up), so the feed shows doubled
-    // "added the X label" rows. `gh pr edit --add-label/--add-assignee` applies
-    // each exactly once. (Reproduced empirically 2026-07-10.)
+    // Labels/assignees are applied AFTER create, NOT via `gh pr create
+    // --label/--assignee`: gh 2.94 records each value TWICE on the activity timeline
+    // when passed at create time (create mutation + follow-up re-apply), so the feed
+    // shows doubled "added the X label" rows. `gh pr edit --add-*` applies once.
     let out = run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await?;
 
     let (number, url) = scrape_pr_ref(&out.stdout_lossy());
 
-    // Apply labels + assignees once, post-create. Address the PR by NUMBER when the
-    // URL scrape yielded one (unambiguous, and the only form `gh pr edit` accepts for
-    // a cross-fork `OWNER:BRANCH` head), else fall back to the head BRANCH — so this
-    // still never depends on the scrape succeeding (the old `gh pr create --label`
-    // argv applied labels unconditionally; keep that guarantee). Values come from the
-    // repo's own pickers, so they resolve; an unknown one would fail this edit AFTER
-    // the PR exists (surfaced, not silent). Pinned to the origin slug to match the
-    // create call above.
+    // Address the PR by NUMBER when the URL scrape yielded one (unambiguous, and the
+    // only form `gh pr edit` accepts for a cross-fork `OWNER:BRANCH` head), else by
+    // head BRANCH — so this never depends on the scrape succeeding. An unknown value
+    // fails this edit AFTER the PR exists (surfaced below, not silent).
     if !labels.is_empty() || !assignees.is_empty() {
         let pr_id = if number != 0 {
             number.to_string()
@@ -4474,9 +4291,8 @@ pub(crate) async fn gh_pr_create_core(
             edit_args.push("--add-assignee");
             edit_args.push(assignee);
         }
-        // The PR already exists; on a rare edit failure (network, or a value the
-        // pickers wouldn't offer) disclose the partial state — with the PR's
-        // location when known — so the caller doesn't read it as "create failed".
+        // The PR already exists — disclose the partial state (with its location when
+        // known) so the caller doesn't read this as "create failed".
         let at = if url.is_empty() {
             String::new()
         } else {
@@ -4494,12 +4310,10 @@ pub(crate) async fn gh_pr_create_core(
     Ok(PrRef { number, url })
 }
 
-/// Pre-mutation guard for the upstream-lens PR create: the v1 cross-repo flow is
-/// minimal (no post-create `gh pr edit`), so any labels or assignees are rejected
-/// up front rather than silently dropped. Pure, so it's unit-testable and runs
-/// before the branch push. (Reviewers aren't a param here — the `forge_pr_create`
-/// dispatch rejects create-time reviewers for GitHub before reaching this core —
-/// but the message names them so the surface reads consistently.)
+/// Pre-mutation guard for the upstream-lens PR create: the v1 cross-repo flow has no
+/// post-create `gh pr edit`, so labels/assignees are rejected before the branch push
+/// rather than silently dropped. (Reviewers are rejected earlier, in the dispatch, but
+/// the message names them so the surface reads consistently.)
 fn reject_upstream_create_metadata(labels: &[String], assignees: &[String]) -> AppResult<()> {
     if !labels.is_empty() || !assignees.is_empty() {
         return Err(AppError::InvalidArgument(
@@ -4650,7 +4464,7 @@ mod tests {
             "Ada Lovelace",
             "2026-01-02T03:04:05Z",
         ));
-        // sha → oid (GraphQL `oid`); node id keeps the row in the GraphQL id space.
+        // sha → oid, matching the GraphQL arm.
         assert_eq!(out.oid, "abc123");
         assert_eq!(out.headline, "Fix bug");
         assert_eq!(out.message_body, "Detailed explanation.");
@@ -4934,9 +4748,7 @@ github.acme.com
 
     #[test]
     fn real_time_or_empty_clears_go_zero_and_passes_real() {
-        // A Go-zero sentinel (a pending review's null submittedAt through gh) and
-        // an empty string both clear to "" so the frontend's `date &&` guard skips
-        // rendering rather than showing a year-0001 date.
+        // Go-zero sentinel and "" both clear to "" (see `real_time_or_empty`).
         assert_eq!(real_time_or_empty("0001-01-01T00:00:00Z".into()), "");
         assert_eq!(real_time_or_empty(String::new()), "");
         // A real ISO timestamp passes through untouched.

@@ -1,22 +1,19 @@
 //! One-click "add `gitdesktop-mcp` to your PATH" launcher.
 //!
-//! The "Use GitDesktop as an MCP server" config points external clients at the
-//! command `gitdesktop-mcp mcp …`. That bare command only resolves if the
-//! launcher is reachable on the shell's `PATH` — otherwise users must hardcode
-//! an absolute path (Personal variant) or set `GITDESKTOP_BIN` (Shareable
-//! variant). This module makes the bare command work in one click:
+//! The MCP client config points at the bare command `gitdesktop-mcp mcp …`,
+//! which only resolves if the launcher is on the shell's `PATH` — otherwise the
+//! user must hardcode an absolute path or set `GITDESKTOP_BIN`.
 //!
-//! * **Windows** — append the managed launcher's bin dir (holding
-//!   `gitdesktop-mcp.exe`, see `mcp_launcher.rs`) to the *user* `PATH`
+//! * **Windows** — append the managed launcher's bin dir to the *user* `PATH`
 //!   (`HKCU\Environment`, no admin) and broadcast `WM_SETTINGCHANGE` so new
-//!   terminals pick it up without a logout. A legacy install-dir entry from a
-//!   pre-launcher version is migrated away in the same write.
+//!   terminals pick it up without a logout.
 //! * **macOS / Linux** — symlink `gitdesktop-mcp` → the app binary into
-//!   `~/.local/bin` (management is inactive on Unix; the name still matches the
-//!   shareable config's fallback). A legacy `gitdesktop` link we own is migrated.
+//!   `~/.local/bin`.
 //!
-//! Every install is reversible via [`path_launcher_remove`], and we only ever
-//! remove what we created (a user-`PATH` entry we added / a symlink we own).
+//! Both migrate away the legacy pre-rename install — on Windows the install-dir
+//! PATH entry (in the same write), on Unix a `gitdesktop` symlink we own. Every
+//! install is reversible via [`path_launcher_remove`], and we only ever remove
+//! what we created.
 
 use crate::error::{AppError, AppResult};
 use serde::Serialize;
@@ -84,13 +81,9 @@ mod platform {
     use winreg::types::FromRegValue;
     use winreg::{RegKey, RegValue};
 
-    /// The directory we put on PATH. When the managed MCP launcher is active,
-    /// this is its bin dir (`%LOCALAPPDATA%\…\bin`, holding only
-    /// `gitdesktop-mcp.exe` and its `gitdesktop-mcp.version.json` marker — no
-    /// bare-`gitdesktop` copy exists), so the resolvable command is
-    /// `gitdesktop-mcp`. Otherwise the app's own install directory (dev builds
-    /// keep today's behavior). Adding it to PATH makes the launcher resolvable
-    /// case-insensitively.
+    /// The directory we put on PATH: the managed MCP launcher's bin dir when
+    /// active (it holds only `gitdesktop-mcp.exe` + its marker, so the resolvable
+    /// command is `gitdesktop-mcp`), else the app's install dir (dev builds).
     fn launcher_dir() -> AppResult<String> {
         if let Some(dir) = crate::mcp_launcher::managed_bin_dir() {
             return Ok(dir.to_string_lossy().into_owned());
@@ -145,11 +138,9 @@ mod platform {
         })
     }
 
-    /// `current` PATH with every entry equal to `dir` removed. Other segments —
-    /// including any pre-existing empty one — are kept verbatim, so that an
-    /// install+remove round-trips the user's PATH byte-for-byte (we reverse only
-    /// what we added). Removing our own entry never leaves an empty segment
-    /// behind, so no `;;` artifact is introduced.
+    /// `current` PATH with every entry equal to `dir` removed. All other segments —
+    /// including a pre-existing empty one — are kept verbatim, so install+remove
+    /// round-trips the user's PATH byte-for-byte.
     pub(super) fn path_with_dir_removed(current: &str, dir: &str) -> String {
         let target = norm(dir);
         current
@@ -167,12 +158,10 @@ mod platform {
             .map_err(AppError::Io)
     }
 
-    /// Read the PATH raw value from an opened Environment key, decoded to a
-    /// `String`, alongside its registry type so a write can preserve
-    /// `REG_EXPAND_SZ` (keeping any `%VAR%` entries expandable). A missing value
-    /// reads as empty + `REG_EXPAND_SZ` (the type Windows uses to create PATH).
-    /// Takes the key as a parameter so it round-trips against a scratch key in
-    /// tests without ever touching the live `HKCU\Environment`.
+    /// Read the PATH raw value from an opened Environment key, with its registry
+    /// type so a write can preserve `REG_EXPAND_SZ` (keeping `%VAR%` entries
+    /// expandable). A missing value reads as empty + `REG_EXPAND_SZ`. Takes the key
+    /// as a param so tests can round-trip a scratch key.
     pub(super) fn read_path_value(env: &RegKey) -> AppResult<(String, winreg::enums::RegType)> {
         match env.get_raw_value("Path") {
             Ok(raw) => {
@@ -205,8 +194,10 @@ mod platform {
             .map_err(AppError::Io)
     }
 
-    /// Whether the exe dir appears in the *persisted* (registry) user+system
-    /// PATH — i.e. whether a new terminal would resolve `gitdesktop` to us.
+    /// Whether the launcher dir appears in the *persisted* (registry) user+system
+    /// PATH — i.e. whether a new terminal would resolve our launcher command
+    /// (`gitdesktop-mcp` from the managed bin dir; bare `gitdesktop` when
+    /// management is inactive and this is the install dir).
     fn persisted_path_contains_exe_dir(dir: &str) -> bool {
         let target = norm(dir);
         crate::agent::registry_path_dirs()
@@ -214,17 +205,14 @@ mod platform {
             .any(|p| norm(&p.to_string_lossy()) == target)
     }
 
-    /// Tell Explorer (and thus terminals launched afterward) that the
-    /// environment changed, so the edited PATH is picked up without a logout.
+    /// Tell Explorer (and terminals launched afterward) that the environment
+    /// changed, so the edited PATH applies without a logout.
     ///
-    /// Runs on a **detached thread**, deliberately. These commands are invoked
-    /// synchronously on Tauri's main (UI) thread, and `SendMessageTimeoutW`
-    /// against `HWND_BROADCAST` blocks the caller until every top-level window
-    /// acknowledges — *including our own window, whose UI thread is the caller*.
-    /// Broadcasting inline therefore froze the app ("Not Responding") for the
-    /// full timeout. Off-thread, the UI thread stays free to answer the
-    /// broadcast immediately and the command returns the instant the (already
-    /// persisted) registry write is done. Best-effort: we don't await the nudge.
+    /// Runs on a **detached thread**, deliberately: these commands run on Tauri's
+    /// main (UI) thread, and `SendMessageTimeoutW` to `HWND_BROADCAST` blocks
+    /// until every top-level window acknowledges — including our own, whose UI
+    /// thread is the caller. Inline, that froze the app for the full timeout.
+    /// Best-effort.
     fn broadcast_env_change() {
         std::thread::spawn(|| {
             use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -257,10 +245,9 @@ mod platform {
     pub(super) fn status_impl() -> AppResult<PathLauncherStatus> {
         let dir = launcher_dir()?;
         let (user_path, _) = read_path_value(&open_user_env(KEY_READ)?)?;
-        // A leftover pre-migration entry pointing at the install folder means the
-        // shared MCP config's bare `gitdesktop` command still resolves to the
-        // install-dir exe (locks the .msi, killed by name). Nudge the user to
-        // re-run Add to PATH, which migrates it.
+        // A leftover pre-migration entry points at the install folder (locks the
+        // .msi, killed by name) — nudge the user to re-run Add to PATH, which
+        // migrates it.
         let warning = old_entry(&dir)
             .filter(|old| path_contains(&user_path, old))
             .map(|_| {
@@ -357,21 +344,18 @@ mod platform {
         Ok(PathBuf::from(home).join(".local").join("bin"))
     }
 
-    /// The canonical launcher symlink. Named `gitdesktop-mcp` to match the
-    /// shareable client-config command `${GITDESKTOP_BIN:-gitdesktop-mcp}`
-    /// (`GitDesktopAsServer.tsx`), so a config authored on any platform — and
-    /// committed into a team repo — resolves on a teammate who used Add to PATH.
-    /// The symlink still targets the app binary directly: MCP dispatch is
-    /// argv[0]-independent (`main.rs` checks `argv[1]`), so `gitdesktop-mcp mcp …`
-    /// works regardless of the link name.
+    /// The canonical launcher symlink, named `gitdesktop-mcp` to match the
+    /// shareable config's `${GITDESKTOP_BIN:-gitdesktop-mcp}`
+    /// (`GitDesktopAsServer.tsx`), so a config committed to a team repo resolves
+    /// for a teammate. It targets the app binary directly — MCP dispatch is
+    /// argv[0]-independent.
     fn link_path() -> AppResult<PathBuf> {
         Ok(user_bin_dir()?.join("gitdesktop-mcp"))
     }
 
-    /// The legacy launcher symlink from before the rename (`gitdesktop`). We
-    /// migrate it away — but only when it's ours (targets *this* exe) — so a
-    /// shared config's bare `gitdesktop-mcp` fallback isn't shadowed by a stale
-    /// `gitdesktop`-named link that no longer matches.
+    /// The legacy pre-rename symlink (`gitdesktop`). Migrated away — but only when
+    /// it's ours (targets *this* exe) — so it can't shadow the `gitdesktop-mcp`
+    /// fallback a shared config relies on.
     fn legacy_link_path() -> AppResult<PathBuf> {
         Ok(user_bin_dir()?.join("gitdesktop"))
     }
@@ -413,9 +397,8 @@ mod platform {
         let bin = user_bin_dir()?;
         let link = link_path()?;
         let is_managed = owned_by_us(&link, &exe);
-        // A leftover legacy `gitdesktop` link we own means an earlier install
-        // used the old name; nudge the user to re-run Add to PATH (which
-        // migrates it) so the shared config's `gitdesktop-mcp` fallback resolves.
+        // A legacy link we own means an earlier install used the old name — nudge
+        // the user to re-run Add to PATH, which migrates it.
         let legacy_present = owned_by_us(&legacy_link_path()?, &exe);
         let warning = if legacy_present {
             Some(
@@ -515,10 +498,8 @@ mod platform {
             }
             _ => {} // already gone
         }
-        // Also remove the legacy `gitdesktop` link when it's ours (ownership-
-        // checked) — both are links GitDesktop created, so both are ours to
-        // reverse. Best-effort: a legacy link owned by a different install is
-        // left untouched.
+        // Also remove the legacy link when it's ours; one owned by a different
+        // install is left untouched.
         let legacy = legacy_link_path()?;
         if owned_by_us(&legacy, &exe) {
             let _ = std::fs::remove_file(&legacy);

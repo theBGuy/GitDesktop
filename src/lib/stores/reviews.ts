@@ -109,25 +109,22 @@ export interface ReviewEntry {
    *  resolved — drives the panel's rewrite/indeterminate note. Undefined on a
    *  first run or when prior context was ignored. */
   deltaState?: ReviewDeltaState;
-  /** The finished run's prompt carried a truncated diff AND the run had no tools
-   *  to compensate (not agentic) — drives the panel's "enable agentic review"
-   *  upgrade nudge. A tool-bearing run handles its own coverage, so this stays
-   *  false there. */
+  /** The finished run's prompt carried a truncated diff AND the run had no tools to
+   *  compensate — drives the panel's "enable agentic review" nudge. A tool-bearing run
+   *  handles its own coverage, so this stays false there. */
   truncatedCoverage?: boolean;
   /** The agentic run's streamed working narration, set once at settle (arrives via
    *  a single patch, so it lives on the entry, not the per-token `texts` map). The
    *  panel shows it behind a "Thought process" disclosure; the dock ignores it. */
   thoughts?: string;
-  /** The OTHER review mode a user queued behind this in-flight run (interim
-   *  single-output-surface queue) — drives the panel's "runs next" chip. Set only
-   *  while this entry is running/queued; cleared when the queued run starts or is
-   *  dismissed. */
+  /** The OTHER review mode a user queued behind this in-flight run — drives the panel's
+   *  "runs next" chip. Set only while this entry is running/queued; cleared when the
+   *  queued run starts or is dismissed. */
   queuedMode?: ReviewMode;
-  /** Re-fires this run through the automation pipeline — set ONLY on automation
-   *  rows (by {@link registerAutomationRun}). Its presence is the discriminator
-   *  that a stopped (cancelled/error) row belongs in the dock's Stopped group: a
-   *  manual panel run also reaches "cancelled"/"error" but never carries a rerun,
-   *  so it's kept out. */
+  /** Re-fires this run through the automation pipeline — set ONLY on automation rows
+   *  (by {@link registerAutomationRun}). Its presence is the discriminator that a
+   *  stopped row belongs in the dock's Stopped group: a manual run also reaches
+   *  cancelled/error but never carries a rerun. */
   rerun?: () => void;
 }
 
@@ -241,12 +238,11 @@ interface QueuedRun {
 const controls = new Map<string, RunControl>();
 
 /**
- * A second review mode queued behind an in-flight run, keyed by reviewKey — the
- * interim single-output-surface queue. Kept OUT of {@link RunControl} on purpose:
- * `cancelReview` detaches the control immediately, so a control-bound queue couldn't
- * be cleared by `dismissQueuedReview` in the cancel→settle window (the "dismissed"
- * run would still drain). Keying it here lets Dismiss drop it — and the settle drain
- * read it — regardless of the control's lifecycle.
+ * A second review mode queued behind an in-flight run, keyed by reviewKey — the interim
+ * single-output-surface queue. Kept OUT of {@link RunControl} on purpose:
+ * `cancelReview` detaches the control immediately, so a control-bound queue couldn't be
+ * cleared by `dismissQueuedReview` in the cancel→settle window. Keying it here lets
+ * Dismiss drop it — and the settle drain read it — regardless of the control's lifecycle.
  */
 const queuedRuns = new Map<string, QueuedRun>();
 
@@ -257,11 +253,9 @@ let reviewSeq = 0;
 const MAX_STOPPED_ROWS = 8;
 
 /**
- * After a transition to a stopped state, cap the retained stopped automation
- * rows — keep at most {@link MAX_STOPPED_ROWS} entries that are automation
- * (`auto:` key) AND in a stopped phase (cancelled/error), evicting the oldest by
- * `seq`. Manual panel runs and live/finished rows are never touched. Called from
- * both terminal stopped paths (cancelReview's auto arm + a run handle's fail).
+ * After a transition to a stopped state, keep at most {@link MAX_STOPPED_ROWS} entries
+ * that are automation (`auto:` key) AND stopped (cancelled/error), evicting the oldest
+ * by `seq`. Manual panel runs and live/finished rows are never touched.
  */
 function enforceStoppedCap(): void {
   const { entries } = useReviewStore.getState();
@@ -282,16 +276,14 @@ const clamp = (v: number, lo: number, hi: number) =>
   Math.min(hi, Math.max(lo, v));
 
 /**
- * Two independent concurrency lanes so kicking off reviews on several PRs at
- * once doesn't overload the machine. Runs over a lane's cap enter the `queued`
- * phase and start FIFO as slots free up; the lanes are separate so a local
- * backlog never blocks a cloud run (or vice versa).
+ * Two independent concurrency lanes so kicking off reviews on several PRs at once
+ * doesn't overload the machine. Runs over a lane's cap enter the `queued` phase and
+ * start FIFO as slots free; separate lanes so a local backlog never blocks a cloud run.
  *
- * - The **local** lane (CLI agent subprocesses + local Ollama inference) is
- *   bound by the machine, so its cap scales conservatively with CPU cores.
- * - The **cloud** lane (Anthropic/OpenAI/OpenRouter streaming) spawns no
- *   process and isn't machine-bound, so it's far higher — its real ceiling is
- *   the provider's own rate limit, which is the user's to manage.
+ * - **local** (CLI agent subprocesses + local Ollama) is machine-bound, so its cap
+ *   scales conservatively with CPU cores.
+ * - **cloud** (streaming HTTP providers) spawns no process, so it's far higher — its
+ *   real ceiling is the provider's rate limit, which is the user's to manage.
  */
 interface Limiter {
   max: number;
@@ -346,11 +338,10 @@ async function notifyReviewDone(
   mode: ReviewMode,
   ok: boolean,
   target: ReviewTarget,
-  /** Failure reason (from `errorMessage`), carried into the failed row's
-   *  subtitle so the durable inbox record says WHY. Ignored on success. No
-   *  Re-run action here (unlike the automation path): a manual re-fire closure
-   *  would capture a stale AiSettings snapshot, whereas the panel's Run button
-   *  re-resolves fresh config. */
+  /** Failure reason (from `errorMessage`), carried into the failed row's subtitle so the
+   *  durable inbox record says WHY. Ignored on success. No Re-run action here (unlike
+   *  automation): a manual re-fire closure would capture a stale AiSettings snapshot,
+   *  whereas the panel's Run button re-resolves fresh config. */
   error?: string,
 ): Promise<void> {
   try {
@@ -380,19 +371,17 @@ async function notifyReviewDone(
 }
 
 /**
- * Starts an AI review (general or security) for a PR, keyed so the run is
- * decoupled from the view that triggered it. The run, its result, and its
- * Cancel affordance all survive navigating away — the run lives in this module
- * + the store (surfaced by the activity dock), not in a component. Routes to
- * the Vercel AI SDK for HTTP providers or a local agent CLI for CLI providers.
+ * Starts an AI review (general or security) for a PR, keyed so the run is decoupled
+ * from the view that triggered it: the run, its result, and its Cancel all survive
+ * navigating away, because they live in this module + the store (surfaced by the
+ * activity dock), not in a component. Routes to the Vercel AI SDK for HTTP providers or
+ * a local agent CLI for CLI providers.
  *
- * On a re-run, the PREVIOUS review's findings + a "changes since" delta ride
- * along as soft, re-verifiable context; on a remote PR, findings posted by
- * third-party AI reviewers (Copilot/CodeRabbit) ride along too, as do the
- * author's "Notes for reviewers" — the same author-gated lift the automation
- * runner uses, fed to BOTH modes. Each of the three is suppressed by its own flag
- * in {@link ReviewIgnoreOptions} (`opts`), which defaults to suppressing nothing.
- * The result is persisted on success so the NEXT run can build on it.
+ * On a re-run the PREVIOUS review's findings + a "changes since" delta ride along as
+ * soft, re-verifiable context; on a remote PR so do third-party AI findings, our own
+ * prior GitDesktop comments, and the author's "Notes for reviewers". Prior, external and
+ * notes are each suppressed by their own flag in {@link ReviewIgnoreOptions}. The result
+ * is persisted on success so the NEXT run can build on it.
  */
 export async function startReview(
   target: ReviewTarget,
@@ -481,16 +470,13 @@ export async function startReview(
 
   try {
     if (control.cancelled) return;
-    // Wall-clock start, stamped once the run leaves the queue and actually
-    // begins — the queue wait is excluded. One value feeds both the live entry
-    // (the dock's ticking elapsed) and the persisted history record below, so
-    // they measure the same span.
+    // Wall-clock start, stamped once the run leaves the queue — the queue wait is
+    // excluded. One value feeds both the live entry and the persisted record, so they
+    // measure the same span.
     const startedAtMs = Date.now();
     patch({ phase: "running", startedAt: startedAtMs });
     // Count a review when it actually starts — covers manual runs AND a drained queued
-    // run, and skips a queued-then-dismissed one (which never reaches here). The panel
-    // used to fire this at click time via `run()`, so a dismissed queue over-counted
-    // and a drained run went uncounted.
+    // run, and skips a queued-then-dismissed one (which never reaches here).
     const tierModel = ai.model.toLowerCase();
     track({
       name: "ai_review_triggered",
@@ -535,10 +521,9 @@ export async function startReview(
     if (control.cancelled) return;
     patch({ deltaState: prior.deltaState });
     // Scale the prompt's character budgets to the reviewing model (per the user's
-    // Review-context knob) — best-effort, never throws, never blocks. Resolved
-    // BEFORE the own/external harvest so the own-comments distillation trigger +
-    // ledger cap key off the SAME scaled budget as the rest of the prompt; reused
-    // verbatim at buildReviewPrompt below (single resolution, used twice).
+    // Review-context knob) — best-effort, never throws. Resolved BEFORE the own/external
+    // harvest so the own-comments distill trigger + ledger cap key off the SAME scaled
+    // budget, and reused verbatim at buildReviewPrompt (one resolution, used twice).
     const appSettings = await loadSettings();
     const budgetProfile = await resolveBudgetProfile(
       ai,
@@ -548,24 +533,21 @@ export async function startReview(
     // CLI providers only; the HTTP path ignores it.
     const timeoutSecs = reviewTimeoutSecs(appSettings.reviewTimeout);
     if (control.cancelled) return;
-    // Own-comments distillation runs a generation-model call that can outlast a
-    // dock Cancel; the CLI/HTTP review stream only gets an abort handle later (via
-    // `onAbort` at streamAi). Wire an AbortController in NOW so `cancelReview`'s
-    // `control.abort?.abort()` reaches the distill immediately — `control.abort` is
-    // null at this point, and streamAi reassigns it once the stream opens.
+    // Own-comments distillation runs a generation-model call that can outlast a dock
+    // Cancel, and the review stream only gets an abort handle later (via `onAbort`).
+    // Wire an AbortController in NOW so `cancelReview`'s `control.abort?.abort()`
+    // reaches the distill; streamAi reassigns `control.abort` once the stream opens.
     const preAbort = new AbortController();
     control.abort = preAbort;
-    // Third-party AI-reviewer findings, GitDesktop's own prior comments, AND the
-    // author's "Notes for reviewers" on the remote PR — all best-effort,
-    // remote-only soft context. Resolved concurrently (independent harvests of
-    // the PR's review activity); kept separate so the battle-tested external path
-    // is untouched — a shared-fetch dedup is a later efficiency win
-    // (forge-dispatch-dedup backlog).
-    // Two repo-level reads ride along in the same batch: the documentation-surface
-    // roster and the repo's own instructions file. Both read the local working
-    // tree — whatever branch is checked out (see `repoInstructionsClause`,
-    // guardrail 3) — and both apply to local PRs too, so neither is gated on
-    // `target.kind`.
+    // Third-party AI findings, GitDesktop's own prior comments, AND the author's "Notes
+    // for reviewers" — all best-effort, remote-only soft context, resolved concurrently
+    // (independent harvests of the PR's review activity). Kept as separate fetches; a
+    // shared-fetch dedup is a later efficiency win.
+    //
+    // The doc-surface roster and the repo's instructions file ride along here: both
+    // read the local working tree — whatever branch is checked out (see
+    // `repoInstructionsClause`, guardrail 3) — and both apply to local PRs, so
+    // neither is gated on `target.kind` the way the notes fetch above is.
     const [external, own, notes, docs, repoInstructions]: [
       ExternalContext,
       OwnCommentsContext,
@@ -591,22 +573,20 @@ export async function startReview(
           distill: true,
           signal: preAbort.signal,
           ownBudgetChars: budgetProfile.ownCharBudget,
-          // Distillation can hold this harvest for minutes on a CLI generation
-          // model. Surface it in the dock's status row (same field the review
-          // stream drives) so the wait reads as work, not a hang. Gated on
-          // `cancelled` like every other patch: the callback fires after awaits
-          // inside the distiller, so an un-gated write could stamp the distilling
-          // line onto a cancelled row — or onto a successor run for the same PR.
+          // Distillation can hold this harvest for minutes on a CLI model. Surface it in
+          // the dock's status row so the wait reads as work, not a hang. Gated on
+          // `cancelled` like every other patch here: the callback fires after awaits
+          // inside the distiller, so an un-gated write could stamp a cancelled row — or
+          // a successor run for the same PR.
           onStatus: (s) => {
             if (!control.cancelled) patch({ status: s });
           },
         },
       ),
-      // The notes are lifted from the marker comment the Create-PR dialog (or an
-      // MCP client) posted, author-gated inside the resolver. Mode-agnostic —
-      // they ground a security audit exactly as they do a general review, the
-      // same as the automation runner. Bitbucket is skipped for the same reason
-      // the panel's query is: its conversation harvest yields nothing here.
+      // Notes are lifted from the marker comment the Create-PR dialog (or an MCP client)
+      // posted, author-gated inside the resolver. Mode-agnostic — they ground a security
+      // audit exactly as a general review. Bitbucket's conversation harvest yields
+      // nothing here, so it's skipped.
       target.kind === "remote" &&
       /^\d+$/.test(target.ref) &&
       context.provider !== "bitbucket" &&
@@ -614,17 +594,14 @@ export async function startReview(
         ? resolveReviewerNotesContext(target.repoPath, Number(target.ref))
         : Promise.resolve({}),
       resolveDocSurfacesContext(target.repoPath),
-      // Best-effort like every other context read here — a repo with no
-      // `.gitdesktop/instructions.md` (or an unreadable one) simply contributes
-      // nothing to the prompt.
+      // Best-effort like every other read here: a missing or unreadable
+      // `.gitdesktop/instructions.md` contributes nothing rather than failing review.
       readRepoInstructions(target.repoPath).catch(() => null),
     ]);
     if (control.cancelled) return;
-    // Clear any distillation status the harvest set — the next writer is the
-    // review stream's own `setStatus`, and a leftover line would otherwise sit
-    // there through prompt assembly. AFTER the cancel check, like every other
-    // post-await patch here: a cancel-then-rerun on the same PR would otherwise
-    // let this blank the successor run's status.
+    // Clear any distillation status the harvest set — the next writer is the review
+    // stream's own `setStatus`. AFTER the cancel check, like every other post-await
+    // patch: otherwise a cancel-then-rerun would blank the successor's status.
     patch({ status: "" });
     // Agentic run: in repo-aware mode the reviewer explores. A CLI provider
     // reviews with the PR's files on disk and (for the tool-capable CLIs —
@@ -675,8 +652,7 @@ export async function startReview(
         budgetProfile,
         agentic,
         repoInstructions,
-        // Both instruction sources, exactly as every sibling prompt takes them —
-        // already loaded above, so this costs no extra read.
+        // Both instruction sources, exactly as every sibling prompt takes them.
         globalInstructions: appSettings.globalInstructions,
         ...prior,
         ...own,
@@ -717,10 +693,9 @@ export async function startReview(
       endedAt: Date.now(),
     });
     void notifyReviewDone(title, mode, true, target);
-    // Persist the finished review so the NEXT run can use it as soft context.
-    // The final text is read from the store (covers both the CLI and HTTP
-    // paths); a cancelled run returns above, so no mid-stream fragment is ever
-    // stored. Best-effort — a persistence failure must not surface to the user.
+    // Persist the finished review so the NEXT run can use it as soft context. The final
+    // text is read from the store (covers CLI and HTTP paths); a cancelled run returns
+    // above, so no mid-stream fragment is stored. Best-effort.
     const finalText = useReviewStore.getState().texts[key] ?? "";
     // The agentic run's narration, peeled off at settle — persisted as display-only
     // metadata (omitted when empty; the next run's soft context reads `text` alone).
@@ -759,10 +734,9 @@ export async function startReview(
     }
   } catch (e) {
     if (!control.cancelled) {
-      // CLI failures reject with a plain AppError object (not an Error), so
-      // `String(e)` would print "[object Object]" — use the shared extractor.
-      // Computed once: the store patch AND the inbox notification's subtitle both
-      // read the same reason.
+      // CLI failures reject with a plain AppError object (not an Error), so `String(e)`
+      // would print "[object Object]" — use the shared extractor. Computed once: the
+      // store patch and the inbox subtitle read the same reason.
       const message = errorMessage(e);
       patch({
         phase: "error",
@@ -781,12 +755,10 @@ export async function startReview(
     }
     // Only the owning run releases its handle — a cancel may have replaced us.
     if (controls.get(key) === control) controls.delete(key);
-    // Drain the queued second mode once this run settles — on ANY terminal outcome
-    // incl. user-cancel (it's independent work the user asked for; the chip's Dismiss
-    // is the only way to stop it). Only when the key is now unclaimed: a normal settle
-    // and a bare cancel both free it, but if a DIFFERENT run has since claimed the key
-    // (a cancel followed by a fresh review on the same PR), that run owns the queue now
-    // — draining here would resurrect our successor onto it, so leave queuedRuns be.
+    // Drain the queued second mode on ANY terminal outcome incl. user-cancel (it's
+    // independent work the user asked for; the chip's Dismiss is the only stop). Only
+    // when the key is now unclaimed — if a DIFFERENT run has since claimed it (cancel
+    // then fresh review), that run owns the queue and draining would resurrect ours.
     if (!controls.has(key)) {
       const next = queuedRuns.get(key);
       queuedRuns.delete(key);
@@ -824,12 +796,10 @@ export function cancelReview(key: string): void {
     if (i >= 0) control.lane.waiting.splice(i, 1);
     control.wakeQueued();
   }
-  // Automation rows (`auto:` keys) persist a "Cancelled" stopped row in the dock
-  // (keeping their `rerun`, so Re-run/Dismiss work) — that stopped row IS the
-  // cancel feedback now (the runner's toast still fires too). The runner sees
-  // this patched "cancelled" phase and skips its own settle/remove for the row.
-  // Both arms patch identically; the auto arm additionally caps retained stopped
-  // rows so a long session can't accumulate them without bound.
+  // Automation rows (`auto:` keys) persist a "Cancelled" stopped row in the dock,
+  // keeping their `rerun` so Re-run/Dismiss work — that row IS the cancel feedback. The
+  // runner sees this patched "cancelled" phase and skips its own settle/remove. Both
+  // arms patch identically; the auto arm additionally caps retained stopped rows.
   useReviewStore
     .getState()
     .patch(key, { phase: "cancelled", status: "", endedAt: Date.now() });
@@ -843,14 +813,12 @@ export function resetReview(key: string): void {
 }
 
 /**
- * Drops a review mode queued behind an in-flight run (the interim single-flight
- * queue) before it starts — the chip's Dismiss action. Safe to call when nothing
- * is queued.
+ * Drops a review mode queued behind an in-flight run before it starts — the chip's
+ * Dismiss action. Safe to call when nothing is queued.
  */
 export function dismissQueuedReview(key: string): void {
   // Drop the queued run regardless of the control's lifecycle — reachable even after
-  // `cancelReview` has detached the control (the cancel→settle window, where a
-  // control-bound queue would leak and drain despite the chip being dismissed).
+  // `cancelReview` has detached the control (the cancel→settle window).
   queuedRuns.delete(key);
   // Only clear the chip when the entry actually exists: patch() would otherwise
   // synthesize a phantom idle entry (EMPTY_ENTRY) that useReviewTasks renders.
@@ -860,20 +828,19 @@ export function dismissQueuedReview(key: string): void {
 }
 
 /**
- * Registers an automation-triggered review run in the store so it surfaces in
- * the header ActivityDock (and ActivityStrip) exactly like a manual run — a
- * "Running…" row with a working Cancel — instead of a floating persistent toast.
+ * Registers an automation-triggered review run in the store so it surfaces in the header
+ * ActivityDock (and ActivityStrip) exactly like a manual run — a "Running…" row with a
+ * working Cancel.
  *
  * Unlike {@link startReview}, the runner drives its own diff/prompt/stream and
- * sequencing, so this handle is intentionally minimal: it registers a running
- * entry + a control whose `abort` is the runner's own AbortController (so the
- * dock's Cancel aborts the HTTP stream / kills the CLI subprocess for free via
- * {@link cancelReview}), and hands back the few operations the runner needs.
- * Automation rows are never persisted to a finished state — every terminal path
- * calls `settle()` to remove the row, so its `target` is display metadata only.
+ * sequencing, so this handle is intentionally minimal: it registers a running entry + a
+ * control whose `abort` is the runner's own AbortController (so the dock's Cancel aborts
+ * the stream / kills the CLI subprocess via {@link cancelReview}), and hands back the few
+ * operations the runner needs. A clean terminal path calls `settle()` to remove the row;
+ * `fail()` instead keeps it as a stopped "Failed" row.
  *
- * The key lives in a dedicated `auto:<n>` namespace off `reviewSeq`, which can
- * never collide with a panel run's `reviewKey` (`kind:repoPath#ref`).
+ * The key lives in a dedicated `auto:<n>` namespace off `reviewSeq`, which can never
+ * collide with a panel run's `reviewKey` (`kind:repoPath#ref`).
  */
 export function registerAutomationRun(opts: {
   title: string;
@@ -932,9 +899,8 @@ export function registerAutomationRun(opts: {
       // Only delete our own control — a dock Cancel may already have removed it.
       if (controls.get(key) === control) controls.delete(key);
     },
-    // A genuine failure (not a user cancel): persist a "Failed" stopped row (the
-    // entry keeps its `rerun`) instead of removing it, then cap retained stopped
-    // rows. Deletes only our own control, mirroring settle's own-control guard.
+    // A genuine failure (not a user cancel): keep a "Failed" stopped row (the entry
+    // keeps its `rerun`) instead of removing it, then cap retained stopped rows.
     fail(message) {
       useReviewStore.getState().patch(key, {
         phase: "error",

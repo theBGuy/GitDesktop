@@ -33,15 +33,13 @@ fn sweep_stale_temps(dir: &Path, file_name: &str) {
     }
 }
 
-/// Write `contents` to `path` atomically: write a uniquely-named temp file in the same
-/// directory, then rename it over the target so a concurrent reader (another GUI or MCP
-/// process) never sees a partial or truncated file. Creates the parent directory if it
-/// doesn't exist yet.
+/// Write `contents` to `path` atomically: unique temp file in the same directory, then
+/// rename over the target, so a concurrent reader (another GUI or MCP process) never
+/// sees a partial file. Creates the parent directory if needed.
 ///
 /// `std::fs::rename` replaces an existing destination on every platform (on Windows via
-/// `MoveFileEx` with `MOVEFILE_REPLACE_EXISTING`), so this reliably overwrites a file
-/// that's already there. On a genuine IO failure (target locked, permissions) it removes
-/// the temp file rather than leaking it, then surfaces the error.
+/// `MoveFileEx` + `MOVEFILE_REPLACE_EXISTING`). On IO failure (target locked,
+/// permissions) the temp file is removed rather than leaked.
 pub fn atomic_write(path: &Path, contents: &[u8]) -> AppResult<()> {
     let dir = path.parent().ok_or_else(|| {
         AppError::Command(format!("path {} has no parent directory", path.display()))
@@ -169,8 +167,7 @@ pub async fn delete_repo_folder(path: String) -> AppResult<()> {
         // subprocess holding a handle to the folder, which makes Windows abort
         // the move. A few short waits let those processes exit.
         const ATTEMPTS: usize = 3;
-        // "Recycle Bin" is Windows-only terminology; macOS and Linux call the
-        // OS trash "Trash". Pick the right one at compile time.
+        // Platform-correct name for the OS trash (used in the user-facing message).
         #[cfg(windows)]
         const TRASH_NAME: &str = "Recycle Bin";
         #[cfg(not(windows))]
@@ -359,18 +356,15 @@ async fn launch_custom_command(command: &str, path: &str) -> AppResult<()> {
         ));
     }
 
-    // SECURITY: resolve the program to an ABSOLUTE path BEFORE building the
-    // Command with `current_dir(path)`. On Windows, `Command` resolves a bare
-    // program name against the child's current_dir (the repository!) ahead of
-    // PATH — so an unresolved bare token plus `current_dir(repo)` would execute a
-    // repo-committed `wt.exe` sitting next to a trusted-looking template.
+    // SECURITY: resolve the program to an ABSOLUTE path BEFORE building the Command
+    // with `current_dir(path)`. On Windows, `Command` resolves a bare program name
+    // against the child's current_dir (the repository!) ahead of PATH — so an
+    // unresolved bare token would execute a repo-committed `wt.exe`.
     //
-    // `resolve_named` only PATH-searches when its `bin_path` override is None; a
-    // Some(non-empty) value is taken as an explicit path and merely exists-checked
-    // (it never falls through to the lookup). So route by shape: a path-like first
-    // token (`./bin/wt`, `C:\tools\wt.exe`) is exists-checked as given, and a bare
-    // name (`wt`, `wezterm`, `tmux`) goes through the real PATH/PATHEXT/login-shell
-    // lookup — the whole reason the resolver is mandated here.
+    // `resolve_named` only PATH-searches when `bin_path` is None; a Some(non-empty)
+    // value is taken as an explicit path and merely exists-checked. So route by shape:
+    // a path-like first token is exists-checked as given, a bare name goes through the
+    // real PATH/PATHEXT/login-shell lookup.
     let bin_path = first_token_is_pathlike(first).then_some(first.as_str());
     let resolved = crate::agent::resolve_named(&[first.as_str()], bin_path)
         .await
@@ -379,12 +373,9 @@ async fn launch_custom_command(command: &str, path: &str) -> AppResult<()> {
                 "terminal command not found: {first}"
             ))
         })?;
-    // A PATH/PATHEXT hit is already absolute, but a RELATIVE path-like token
-    // (`./bin/wt`) is exists-checked by `resolve_named` against the APP's cwd yet
-    // returned verbatim — and we are about to `current_dir(repo)` the child, so on
-    // Unix the OS would exec that relative path against the REPO dir instead: a
-    // different file than the one checked. Pin it to the app cwd now so the checked
-    // path and the executed path are byte-identical.
+    // A relative path-like token (`./bin/wt`) was exists-checked against the APP's cwd
+    // but returned verbatim; `current_dir(repo)` below would make the OS exec it
+    // against the REPO dir. Pin it so checked path == executed path (`ensure_absolute`).
     let resolved = ensure_absolute(resolved, &std::env::current_dir().map_err(AppError::Io)?);
 
     // SECURITY: reject batch files on the RESOLVED path — a bare `foo` on PATH
@@ -419,16 +410,13 @@ fn launch_terminal_windows(kind: &str, program: &str, path: &str) -> AppResult<(
     use std::process::Command;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-    // Console shells (cmd/powershell/wsl) are launched through cmd's `start`
-    // so the shell allocates a fresh, fully wired console for them. Spawning
-    // them directly with CREATE_NEW_CONSOLE leaves their stdio bound to our
-    // parent's handles, so the window opens but can't take keyboard input.
-    // `start` inherits the intermediary cmd's working dir, which we set here.
-    //
-    // The title argument must be non-empty: `start ""` leaves the new console
-    // with an empty title, which makes Node/libuv abort ("Assertion failed:
-    // process_title"). We build the line by hand and wrap it in outer quotes
-    // so `cmd /c` strips exactly that pair, leaving start's own quoting intact.
+    // Console shells (cmd/powershell/wsl) launch through cmd's `start` so the shell
+    // gets a fresh, fully wired console; spawning them with CREATE_NEW_CONSOLE leaves
+    // their stdio bound to our parent's handles, so the window opens but takes no
+    // keyboard input. `start` inherits the intermediary cmd's working dir, set here.
+    // The title argument must be non-empty: `start ""` leaves an empty console title,
+    // which makes Node/libuv abort ("Assertion failed: process_title"). The line is
+    // built by hand and wrapped in outer quotes so `cmd /c` strips exactly that pair.
     let console = |exe: &str, args: &[String]| -> AppResult<()> {
         let mut inner = format!("start \"GitDesktop\" \"{exe}\"");
         for a in args {

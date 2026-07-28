@@ -14,15 +14,12 @@ use crate::state::AppState;
 
 /// Refuses when the working tree has **tracked** changes (staged or unstaged).
 ///
-/// Compound ops whose failure/rollback path does `reset --hard` (local-PR merge,
-/// cherry-pick-onto) call this FIRST, so a rollback can never discard the user's
-/// uncommitted work — they must commit or stash it. This closes the hole where
-/// the protective `switch <target>` is a no-op because the target equals the
-/// current branch, letting a dirty tree flow into the destructive reset (a real
-/// data-loss incident). Mirrors the inline guard in `rewrite_commits` /
-/// `git_rebase_edit`. Untracked files are intentionally allowed: `reset --hard`
-/// never removes them (no data-loss surface), and a merge that would clobber one
-/// is refused by git itself.
+/// Compound ops whose failure path does `reset --hard` (local-PR merge,
+/// cherry-pick-onto) MUST call this before their first mutation: a protective
+/// `switch <target>` is a no-op when target IS the current branch, so a dirty
+/// tree would otherwise flow into the destructive reset. Untracked files are
+/// deliberately allowed — `reset --hard` never removes them, and a merge that
+/// would clobber one is refused by git itself.
 async fn ensure_clean_tree(repo: &str) -> AppResult<()> {
     let status = run_git(
         Some(repo),
@@ -163,14 +160,11 @@ pub async fn git_discard(
     Ok(())
 }
 
-/// Discards selected lines from an untracked (new) file by removing just those
-/// 1-based line numbers and rewriting the file in place. A new file's diff is
-/// all additions, so "discard line N" means "delete physical line N" — there's
-/// no index/patch to reverse-apply (reverse-applying a new-file patch would
-/// delete the whole file). The file stays untracked; discarding every line
-/// leaves it empty (whole-file removal is `git_discard`'s recycle-bin path).
-/// `split_inclusive('\n')` keeps each kept line's exact terminator, so CRLF and
-/// a missing final newline are preserved.
+/// Discards selected 1-based lines from an untracked (new) file by deleting them
+/// in place. A new file's diff is all additions, so there is no index/patch to
+/// reverse-apply (reverse-applying a new-file patch would delete the whole file).
+/// The file stays untracked; discarding every line leaves it empty (whole-file
+/// removal is `git_discard`'s recycle-bin path).
 #[tauri::command]
 pub async fn git_discard_untracked_lines(
     repo_path: String,
@@ -618,20 +612,17 @@ pub(crate) async fn git_stash_paths_core(
 
     // A native `git stash push -- <paths>` always snapshots the WHOLE index into
     // the stash's index-commit (`^2`), so any OTHER staged file rides along and can
-    // resurrect on `pop --index`. To capture only the selection we hold the per-repo
-    // lock across the whole compound sequence and, while holding the guard, use the
-    // lock-free `run_git` for every step — `repo_lock` is a non-reentrant
-    // `tokio::sync::Mutex`, so `run_git_mutating` (which re-acquires it) would
-    // deadlock (mirrors the `git_splice_*` precedent above).
+    // resurrect on `pop --index`. To capture only the selection, hold the per-repo
+    // lock across the whole compound sequence and use the lock-free `run_git` for
+    // every step while holding it — `repo_lock` is a non-reentrant
+    // `tokio::sync::Mutex`, so `run_git_mutating` would re-acquire it and deadlock.
     let lock = state.repo_lock(&repo_path).await;
     let _guard = lock.lock().await;
 
     // Refuse during a merge (unmerged index): a native `git stash push` can't write
-    // the index while a conflict is in flight, and the selective slow-path can't
-    // snapshot it (`git write-tree` fails on unmerged entries). Guard BOTH paths up
-    // front — a non-empty `ls-files --unmerged` means a conflict is in progress —
-    // so we never make a partial mutation or a stash. (The slow path's `write-tree`
-    // below is the same refuse-guard as defense in depth.)
+    // the index mid-conflict, and the selective slow path can't snapshot it either
+    // (`git write-tree` fails on unmerged entries). Guarding both paths here is what
+    // keeps us from leaving a partial mutation or a stash.
     let unmerged = run_git(
         Some(&repo_path),
         &["ls-files", "--unmerged"],
@@ -661,15 +652,13 @@ pub(crate) async fn git_stash_paths_core(
         .map(str::to_string)
         .collect();
 
-    // Enumerate the staged files MATCHED by the selection pathspecs, via git's own
-    // pathspec resolution (`diff --cached -- <paths>`). This makes `unselected_staged`
-    // definitionally consistent with what `stash push -- <paths>` will actually sweep:
-    // a directory arg (e.g. "src") matches its files recursively, globs expand, and
-    // case handling on case-insensitive filesystems resolves exactly as the stash
-    // pathspec does — an exact string match against the enumeration would misclassify
-    // all of these. A pathspec matching nothing staged contributes nothing (exits 0).
-    // Chunk the paths at 100 for the Windows argv limit (same as the reset/restore
-    // loops) and union the results.
+    // Enumerate the staged files MATCHED by the selection via git's own pathspec
+    // resolution (`diff --cached -- <paths>`), so `unselected_staged` is
+    // definitionally consistent with what `stash push -- <paths>` will sweep —
+    // directory args, globs and case-insensitive filesystems all resolve identically
+    // (an exact string match against the enumeration would misclassify them).
+    // Chunked at 100 for the Windows argv limit; a pathspec matching nothing staged
+    // contributes nothing and still exits 0 (so `run_git`'s error-on-nonzero doesn't trip).
     let mut selected_staged: std::collections::HashSet<String> = std::collections::HashSet::new();
     for chunk in paths.chunks(100) {
         let mut args = vec!["diff", "--cached", "--no-renames", "-z", "--name-only", "--"];
@@ -690,7 +679,6 @@ pub(crate) async fn git_stash_paths_core(
         .map(String::as_str)
         .collect();
 
-    // Args for the native pathspec stash of the selection.
     let mut stash_args = vec!["stash", "push", "--include-untracked", "--"];
     stash_args.extend(paths.iter().map(String::as_str));
 
@@ -701,13 +689,11 @@ pub(crate) async fn git_stash_paths_core(
         return Ok(());
     }
 
-    // Snapshot the full index so we can restore the unselected files' exact staged
-    // blobs afterward. This still aborts the sequence pre-mutation on any failure
-    // (defense in depth — a `write-tree` failure means the index can't be safely
-    // captured), but the error propagates raw: the up-front `ls-files --unmerged`
-    // guard already reported the merge case with a friendly message, so a failure
-    // reaching here is likely something else (corruption/permissions) that must not
-    // be masked as a merge.
+    // Snapshot the full index so the unselected files' exact staged blobs can be
+    // restored afterward. A `write-tree` failure aborts pre-mutation and propagates
+    // RAW: the `ls-files --unmerged` guard above already reported the merge case, so
+    // a failure reaching here is something else (corruption/permissions) and must
+    // not be mislabeled as a merge.
     let full_tree = run_git(Some(&repo_path), &["write-tree"], DEFAULT_TIMEOUT)
         .await?
         .stdout_lossy()
@@ -913,7 +899,6 @@ pub struct UnignoreRule {
 /// (not line number) keeps it safe if the file shifted since it was read.
 #[tauri::command]
 pub async fn git_unignore_rules(repo_path: String, rules: Vec<UnignoreRule>) -> AppResult<()> {
-    // Group the patterns to remove by their source gitignore file.
     let mut by_source: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
     for r in rules {
@@ -1044,15 +1029,12 @@ pub(crate) async fn replace_file_lines(
         )));
     }
 
-    // Hold the repo's mutating lock across the WHOLE dirty-check → read → verify
-    // → write → stage sequence, not just the final `git add`. Otherwise two
-    // concurrent Apply IPC calls on different ranges of the same file interleave:
-    // the second reads the pre-first content, verifies its own range, and writes
-    // its splice over the first's just-written file — silently discarding it.
-    // `repo_lock` is a `tokio::sync::Mutex`, so the guard is safe to hold across
-    // `.await`; but that means we must NOT call `run_git_mutating` below (it
-    // re-acquires this very lock and would deadlock) — use the lock-free `run_git`
-    // for the git steps while we already hold the guard.
+    // Hold the repo's mutating lock across the WHOLE dirty-check → read → verify →
+    // write → stage sequence, not just the final `git add`: otherwise two concurrent
+    // Apply calls on different ranges of one file interleave and the second silently
+    // overwrites the first's write. `repo_lock` is a `tokio::sync::Mutex` (safe to
+    // hold across `.await`) but non-reentrant — use the lock-free `run_git` below,
+    // never `run_git_mutating`, which would deadlock.
     let lock = state.repo_lock(repo_path).await;
     let _guard = lock.lock().await;
 
@@ -1092,10 +1074,8 @@ pub(crate) async fn replace_file_lines(
     let raw = tokio::fs::read_to_string(&canon_target)
         .await
         .map_err(AppError::Io)?;
-    // Mirror the BOM/EOL/trailing-newline idiom from `git_unignore_rules`: strip
-    // a leading BOM for processing and restore it, and preserve the file's line
-    // ending (`lines()` drops both \n and \r\n, so a naive join would rewrite a
-    // CRLF file to LF).
+    // Same BOM/EOL idiom as `git_unignore_rules`: strip a leading BOM and restore
+    // it, and preserve the file's line ending (`lines()` drops both \n and \r\n).
     let (has_bom, content) = match raw.strip_prefix('\u{feff}') {
         Some(rest) => (true, rest),
         None => (false, raw.as_str()),
@@ -1120,7 +1100,6 @@ pub(crate) async fn replace_file_lines(
         )));
     }
 
-    // Splice the replacement in place of the expected range.
     let mut next_lines: Vec<&str> = Vec::with_capacity(
         existing.len() - expected_lines.len() + replacement_lines.len(),
     );
@@ -1140,9 +1119,7 @@ pub(crate) async fn replace_file_lines(
         .map_err(AppError::Io)?;
 
     // Stage only when asked AND the file was otherwise clean, so the index gains
-    // exactly this edit (never sweeping in pre-existing local changes). We call
-    // the lock-free `run_git` here (not `run_git_mutating`) because we already
-    // hold the repo lock above — re-acquiring it would deadlock.
+    // exactly this edit. Lock-free `run_git` — we already hold the repo lock.
     let staged = stage_when_clean && !had_local_changes;
     if staged {
         run_git(
@@ -1321,9 +1298,8 @@ pub async fn git_stash_files(repo_path: String, index: u32) -> AppResult<Vec<Sta
     stash_files_at(&repo_path, &format!("stash@{{{index}}}")).await
 }
 
-/// One file's diff from a stash. Tracked changes diff the stash against its
-/// base; untracked files live in the stash's third parent (`^3`, created by
-/// `--include-untracked`), so an empty tracked diff falls back to that.
+/// One file's diff from a stash — see [`stash_file_diff_at`] for the `^1`/`^3`
+/// tracked-vs-untracked resolution.
 #[tauri::command]
 pub async fn git_stash_file_diff(
     repo_path: String,
@@ -1339,7 +1315,6 @@ pub async fn git_stash_file_diff(
 /// ones not already live, and reports each with its file count, newest first.
 #[tauri::command]
 pub async fn git_orphaned_stashes(repo_path: String) -> AppResult<Vec<OrphanedStash>> {
-    // Candidate dangling commits.
     let fsck = run_git(
         Some(&repo_path),
         &["fsck", "--no-progress"],
@@ -1510,13 +1485,11 @@ fn validate_branch_arg(name: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// Merges a branch into the current one. With `squash`, the combined changes
-/// are left staged so the user writes the commit themselves. Otherwise `no_ff`
-/// forces a merge commit even when a fast-forward is possible, and `strategy`
-/// ("ours"/"theirs", anything else = none) auto-resolves conflicting hunks in
-/// favor of the current/incoming side via `-X`. Conflicts (when not
-/// auto-resolved) leave the repo in a normal merge-conflict state visible in
-/// the changes list.
+/// Merges a branch into the current one. With `squash` the combined changes are
+/// left staged so the user writes the commit. Otherwise `no_ff` forces a merge
+/// commit even when a fast-forward is possible, and `strategy` ("ours"/"theirs",
+/// anything else = none) auto-resolves conflicting hunks toward the current /
+/// incoming side via `-X`. Unresolved conflicts leave a normal merge-conflict state.
 #[tauri::command]
 pub async fn git_merge(
     state: State<'_, AppState>,
@@ -1567,14 +1540,13 @@ pub struct MergePreview {
     pub conflicts: Vec<String>,
 }
 
-/// Predicts the outcome of merging `branch` into the current branch **without
-/// touching the working tree or index**. Uses merge-base for the
-/// already-merged and fast-forward cases, then `git merge-tree --write-tree`
-/// (git 2.38+, file names need 2.40+) for a real in-memory merge — honoring
-/// `strategy` ("ours"/"theirs" → `-X`) so the prediction matches what the merge
-/// will actually do (content conflicts auto-resolve; structural ones still show
-/// as conflicts). Degrades to "unknown" (so the UI hides the preview) on older
-/// git or any error.
+/// Predicts merging `branch` into the current branch **without touching the
+/// working tree or index**: merge-base for the up-to-date / fast-forward cases,
+/// then `git merge-tree --write-tree` (needs git 2.38+; file names need 2.40+) for
+/// a real in-memory merge, honoring `strategy` ("ours"/"theirs" → `-X`) so the
+/// prediction matches the real merge — content conflicts auto-resolve, structural
+/// ones still report as conflicts. Older git or any error degrades to "unknown"
+/// so the UI hides the preview.
 #[tauri::command]
 pub async fn git_merge_preview(
     repo_path: String,
@@ -1723,14 +1695,13 @@ pub async fn git_rebase_onto(
 }
 
 /// The outcome of a local-PR merge attempt (`git_merge_local_pr` /
-/// `git_finish_local_pr_merge`). The frontend package consumes this verbatim, so
-/// the `#[serde(rename_all = "camelCase")]` shape is a frozen contract.
+/// `git_finish_local_pr_merge`). The frontend consumes this verbatim, so the
+/// `#[serde(rename_all = "camelCase")]` shape is a frozen contract.
 ///
-/// Conflicts are now resolved in an isolated DETACHED worktree (GitHub-style):
-/// the user's current branch and uncommitted work are never touched, so there is
-/// no branch to switch back to — the old `original_ref`/`detached` fields are
-/// gone. On a conflict the tree lives in a throwaway worktree (`worktree_id` /
-/// `worktree_path`); the frontend points its conflict editor at that path.
+/// Conflicts are resolved in an isolated DETACHED worktree (GitHub-style): the
+/// user's current branch and uncommitted work are never touched, so on a conflict
+/// the tree lives in a throwaway worktree (`worktree_id` / `worktree_path`) that
+/// the frontend points its conflict editor at.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalPrMergeOutcome {
@@ -1740,7 +1711,8 @@ pub struct LocalPrMergeOutcome {
     /// Unmerged paths **in the resolve worktree** (empty when merged). From
     /// `diff --name-only --diff-filter=U` run with cwd = the worktree.
     pub conflicts: Vec<String>,
-    /// Base's tip captured at the start of the op (informational).
+    /// A commit sha for display only: base's tip at the start of the op on the
+    /// initial call, the resolved/merged commit on finish.
     pub base_tip: String,
     /// The resolve worktree's id — set only on `"conflicts"`, threaded to
     /// finish/abort so they can find and tear it down. `None` when merged.
@@ -1775,13 +1747,11 @@ async fn unmerged_paths(repo_path: &str) -> Vec<String> {
     }
 }
 
-/// A short, stable hash of the repo path, matching `worktree.rs::repo_hash` so
-/// resolve worktrees land under the SAME `<app_data>/worktrees/<repo-hash>` root
-/// as agent-session worktrees. That placement is what makes the user-facing
-/// worktree manager hide them: `git_worktree_list_user` filters out anything
-/// under the app-data worktrees root (`is_session_worktree`'s app-data-root
-/// check). Kept in sync by hand (worktree.rs is out of this package's scope);
-/// both hash the lower-cased path with `DefaultHasher` for the identical value.
+/// A short, stable hash of the repo path, kept in sync BY HAND with
+/// `worktree.rs::repo_hash` (both hash the lower-cased path with `DefaultHasher`).
+/// Resolve worktrees must land under the same `<app_data>/worktrees/<repo-hash>`
+/// root, because that placement is what makes `git_worktree_list_user` hide them
+/// from the user-facing worktree manager (`is_session_worktree`'s app-data check).
 fn repo_hash(repo_path: &str) -> String {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -1881,19 +1851,12 @@ fn orphaned_resolve_worktrees(all_paths: &[String], keep: &[String]) -> Vec<Stri
 
 /// Advances `base` to `new_sha` after the merge landed in the resolve worktree,
 /// picking the safe mechanic for wherever `base` is checked out:
-///
-/// - `base` is the MAIN repo's current branch → `merge --ff-only <new_sha>` in
-///   the main repo. The tree was gated clean upfront, so this fast-forwards the
-///   working tree to the merged result. A failure propagates (commit-or-stash).
-/// - `base` is checked out in ANOTHER worktree → route the fast-forward INTO
-///   that worktree (`git -C <that worktree> merge --ff-only`) so its index and
-///   working tree advance consistently. A bare `update-ref` here would desync
-///   that worktree (phantom reverts), which is why we can't just move the ref.
-///   If that worktree is dirty the ff-only fails and we surface a clean error
-///   naming it — `base` stays unchanged.
-/// - `base` is checked out nowhere (the common case — the main tree is on a
-///   different branch) → move the ref directly with `update-ref`, leaving every
-///   working tree untouched.
+/// - the MAIN repo's current branch → `merge --ff-only` there (the tree was gated
+///   clean upfront); a failure propagates as commit-or-stash.
+/// - checked out in ANOTHER worktree → run the ff-only INSIDE that worktree so its
+///   index and working tree advance too. A bare `update-ref` would desync it
+///   (phantom reverts). A dirty one fails cleanly and `base` stays unchanged.
+/// - checked out nowhere → `update-ref`, no working tree touched.
 async fn finalize_base(
     state: &AppState,
     repo_path: &str,
@@ -1933,9 +1896,8 @@ async fn finalize_base(
         .map(|(path, _)| path);
 
     if let Some(worktree) = owning_worktree {
-        // Route the fast-forward into the worktree that has `base` checked out, so
-        // its index + working tree advance too. Fails cleanly (base untouched) if
-        // that tree is dirty or it isn't actually a fast-forward.
+        // Route the fast-forward INTO the worktree holding `base` so its index and
+        // working tree advance too; fails cleanly (base untouched) if it's dirty.
         return run_git_mutating(
             state,
             &worktree,
@@ -1964,23 +1926,19 @@ async fn finalize_base(
     Ok(())
 }
 
-/// Merges `head` into `base` for a local PR using one of three strategies,
-/// matching GitHub's merge options:
+/// Merges `head` into `base` for a local PR, matching GitHub's merge options:
 /// - "merge"  → a `--no-ff` merge commit carrying `message`
-/// - "squash" → squash all of head's commits into one commit with `message`
-/// - "rebase" → replay head's commits onto base (cherry-pick range, no merge
-///   commit), preserving their individual messages
+/// - "squash" → head's commits squashed into one commit with `message`
+/// - "rebase" → head's commits replayed onto base (cherry-pick range, no merge
+///   commit), preserving their individual messages — `message` is unused
 ///
-/// GitHub-style **isolated** conflict resolution: the merge runs in a hidden
-/// DETACHED worktree checked out at `base`'s tip, so the user's current branch
-/// and uncommitted work are NEVER touched. On a **clean** merge, `base` is
-/// advanced to the resolved commit (`finalize_base`) and the worktree torn down —
-/// `status: "merged"`. On a **conflict** the worktree is kept and returned
-/// (`worktree_id` / `worktree_path`) so the frontend can drive resolution there,
-/// then call `git_finish_local_pr_merge` or `git_abort_local_pr_merge`. Only when
-/// `base` IS the current branch AND the main tree is dirty is a clean-tree
-/// required (advancing that branch unavoidably touches the tree); otherwise the
-/// main tree needn't be clean.
+/// The merge runs in a hidden DETACHED worktree at `base`'s tip, so the user's
+/// branch and uncommitted work are NEVER touched. Clean ⇒ `base` is advanced
+/// (`finalize_base`), the worktree torn down, `status: "merged"`. Conflict ⇒ the
+/// worktree is kept and returned so the frontend drives resolution there, then
+/// calls `git_finish_local_pr_merge` / `git_abort_local_pr_merge`. A clean main
+/// tree is required ONLY when `base` IS the current branch (advancing it
+/// unavoidably touches the tree).
 #[tauri::command]
 pub async fn git_merge_local_pr(
     state: State<'_, AppState>,
@@ -2125,8 +2083,7 @@ pub(crate) async fn merge_local_pr(
 
     match result {
         Ok(()) => {
-            // Clean: the worktree HEAD is the merged commit. Advance base to it,
-            // tear the worktree down, close the oplog.
+            // Clean: the worktree HEAD is the merged commit.
             let new_sha = run_git(Some(&worktree_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
                 .await?
                 .stdout_lossy()
@@ -2205,13 +2162,10 @@ pub async fn git_finish_local_pr_merge(
 ) -> AppResult<LocalPrMergeOutcome> {
     validate_branch_arg(&base)?;
 
-    // Where the main tree is now. When `base` IS the current branch,
-    // `finalize_base` will `merge --ff-only` into the main tree at the end — so
-    // re-guard a clean tree HERE (the user may have dirtied it during
-    // resolution, after `git_merge_local_pr`'s upfront check). This surfaces the
-    // "commit or stash" message up front instead of a raw late ff-only failure.
-    // When base != current, base is advanced via `update-ref` and the main tree
-    // is never touched, so no clean-tree requirement.
+    // When `base` IS the current branch, `finalize_base` ends in a `merge --ff-only`
+    // into the main tree — re-guard clean HERE, since the user may have dirtied it
+    // during resolution (after `git_merge_local_pr`'s upfront check). Otherwise base
+    // moves by `update-ref` and the main tree is never touched.
     let current = run_git(
         Some(&repo_path),
         &["rev-parse", "--abbrev-ref", "HEAD"],
@@ -2338,17 +2292,13 @@ pub async fn git_abort_local_pr_merge(
     Ok(())
 }
 
-/// Sweeps orphaned resolve worktrees (`gd-resolve-<uuid>`) — the detached
-/// worktrees a paused local-PR merge leaves under the app-data root. The only
-/// live handle to one is a local PR's `pendingMerge`; if the app crashed
-/// mid-resolve, or the PR / its `pendingMerge` was lost, the worktree orphans
-/// with no UI path to remove it (being detached, the user-facing worktree
-/// manager excludes it). The frontend calls this on repo open, passing the paths
-/// of every STILL-ACTIVE `pendingMerge` worktree as `keep_paths`; every other
-/// `gd-resolve-*` worktree is torn down (`worktree remove --force` + `prune`).
-///
-/// Best-effort per worktree — one removal failure (e.g. a file locked by another
-/// process) never aborts the sweep. Always returns `Ok(())`.
+/// Sweeps orphaned resolve worktrees (`gd-resolve-<uuid>`) left under the app-data
+/// root by a paused local-PR merge. The only live handle to one is a local PR's
+/// `pendingMerge`, so a crash mid-resolve (or a lost PR) orphans it with no UI path
+/// to remove it — being detached, the user-facing worktree manager excludes it. The
+/// frontend calls this on repo open with every STILL-ACTIVE `pendingMerge` path as
+/// `keep_paths`; every other `gd-resolve-*` worktree is torn down. Best-effort per
+/// worktree; always returns `Ok(())`.
 #[tauri::command]
 pub async fn git_cleanup_orphaned_resolve_worktrees(
     state: State<'_, AppState>,
@@ -2443,10 +2393,8 @@ pub async fn git_conflict_preview(
             conflicts: Vec::new(),
         }),
         1 => {
-            // Line 1 is the merged-tree OID; conflicted file names follow, ending
-            // at the blank line before any informational messages. Empty stdout
-            // means git refused the merge (no tree OID) — an "unknown", not a
-            // zero-file conflict.
+            // Same output shape as `git_merge_preview`: line 1 is the tree OID, then
+            // the conflicted names. Empty stdout ⇒ git refused ⇒ "unknown".
             let text = mt.stdout_lossy();
             if text.trim().is_empty() {
                 return Ok(unknown());
@@ -2467,17 +2415,13 @@ pub async fn git_conflict_preview(
     }
 }
 
-/// Rewrites the unpushed tip of the current branch (`base..HEAD`): each step
-/// becomes one commit. The full interactive-rebase vocabulary maps onto steps:
-/// a single-hash step with no message is a **pick** (plain cherry-pick,
-/// original message kept); a single-hash step with a message is a **reword**; a
-/// multi-hash step *with* a message is a **squash** (those commits collapse into
-/// one with that message); a multi-hash step *without* a message is a **fixup**
-/// (collapse but reuse the first/leader commit's message and authorship via
-/// `commit -C`). Omitting a commit from every step **drops** it; the step order
-/// is the new history order. Drives reorder, squash, and the Edit-history
-/// editor. Refuses on a dirty tree or merge commits in range; any conflict rolls
-/// everything back untouched.
+/// Rewrites the unpushed tip of the current branch (`base..HEAD`) — one commit per
+/// step, in step order. The interactive-rebase vocabulary maps onto step shape: one
+/// hash + no message = **pick**; one hash + message = **reword**; many hashes +
+/// message = **squash**; many hashes + no message = **fixup** (reuses the leader
+/// commit's message and authorship via `commit -C`). Omitting a commit **drops** it.
+/// Refuses on a dirty tree or merge commits in range; any conflict rolls everything
+/// back untouched.
 #[tauri::command]
 pub async fn git_rewrite_commits(
     state: State<'_, AppState>,
@@ -2650,14 +2594,13 @@ pub(crate) async fn rewrite_commits(
     op_result
 }
 
-/// Rewrites the unpushed tip via a **real, resumable** `git rebase -i` — used
-/// when the plan contains an `edit` (the atomic replay engine can't pause).
-/// Generates a todo (pick/edit the leader, fixup the folds, and set
-/// reword/squash messages with a non-interactive `exec ... commit --amend -F`),
-/// injects it with `sequence.editor`, and never opens an editor. When git stops
-/// at an `edit` (or a conflict before one) the rebase is left in progress and
-/// the conflict/op banner takes over (continue/abort); that's a normal outcome,
-/// not an error.
+/// Rewrites the unpushed tip via a **real, resumable** `git rebase -i` — used when
+/// the plan contains an `edit` (the atomic replay engine can't pause). Generates
+/// the todo (pick/edit the leader, fixup the folds, reword/squash messages via a
+/// non-interactive `exec … commit --amend -F`) and injects it with
+/// `sequence.editor`, so no editor ever opens. Stopping at an `edit` (or at a
+/// conflict before one) leaves the rebase in progress for the banner to take over —
+/// a normal outcome, not an error.
 #[tauri::command]
 pub async fn git_rebase_edit(
     repo_path: String,

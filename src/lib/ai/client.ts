@@ -21,10 +21,9 @@ export class MissingApiKeyError extends Error {
 
 /**
  * Resolves `settings` to a ready model: reads the saved API key (or an unsaved
- * override), throwing {@link MissingApiKeyError} when a key-requiring provider
- * has none, then builds the guarded-fetch model. Shared by {@link createAiClient}
- * and {@link runAgenticStream}; `apiKeyOverride`/`allowedHostsOverride` behave as
- * documented on `createAiClient`.
+ * override), throwing {@link MissingApiKeyError} when a key-requiring provider has
+ * none, then builds the guarded-fetch model. Shared by {@link createAiClient} and
+ * {@link runAgenticStream}.
  */
 export async function resolveModel(
   settings: AiSettings,
@@ -47,17 +46,16 @@ export async function resolveModel(
 }
 
 /**
- * Builds a client for `settings`. `apiKeyOverride` lets a caller (e.g. the
- * Settings "Test connection" button) try a key that's been typed but not yet
- * saved to the keychain; when empty, the saved key is used. `allowedHostsOverride`
- * is the analogous override for the AI host allowlist — Settings passes the
- * unsaved draft list so a just-added custom host can be tested before Save;
- * omitted elsewhere so the guarded fetch reads the saved list.
+ * Builds a client for `settings`. `apiKeyOverride` lets a caller (Settings' "Test
+ * connection") try a key typed but not yet saved to the keychain; empty ⇒ the saved
+ * key. `allowedHostsOverride` is the analogous override for the AI host allowlist, so
+ * a just-added custom host can be tested before Save; omitted elsewhere ⇒ the guarded
+ * fetch reads the saved list.
  *
  * CLI providers (claude/codex/copilot/opencode) route to the agent-CLI subprocess
  * path instead — a Tier-1 (no-tools) adapter over `runAgentReview`. Both overrides
- * are HTTP-only and ignored for those (CLIs authenticate via their own login and
- * make no guarded HTTP fetch); each `stream` call must carry `repoPath`.
+ * are HTTP-only and ignored there (CLIs authenticate via their own login and make
+ * no guarded fetch); each `stream` call must carry `repoPath`.
  */
 export async function createAiClient(
   settings: AiSettings,
@@ -78,16 +76,12 @@ export async function createAiClient(
 
   return {
     async *stream(req: AiStreamRequest) {
-      // Ollama's server-side default context window is version/config-dependent
-      // and unobservable from the client; without an explicit `num_ctx` a
-      // budgeted prompt larger than that default is SILENTLY truncated (worst on
-      // the biggest models, whose prompts the Auto budget scales up the most). We
-      // size `num_ctx` to THIS request's need — not the model's full architectural
-      // window — so the KV-cache allocation stays proportional to actual usage
-      // (requesting the full window would risk OOM on smaller boxes). Probe
-      // failure → omit `providerOptions` entirely (status quo: server default
-      // applies). Excludes ollama-cloud: its managed host owns its defaults and we
-      // can't verify it honours `num_ctx`.
+      // Ollama's server-side default context window is version/config-dependent and
+      // unobservable from the client; without an explicit `num_ctx` a budgeted prompt
+      // larger than it is SILENTLY truncated. Size `num_ctx` to THIS request's need,
+      // not the model's full window, so the KV-cache allocation stays proportional
+      // (the full window risks OOM on small boxes). Probe failure → omit entirely.
+      // Excludes ollama-cloud: its managed host owns its defaults.
       const providerOptions = await ollamaProviderOptions(settings, req);
       const result = streamText({
         model,
@@ -120,18 +114,13 @@ export async function createAiClient(
 }
 
 /**
- * Computes the `providerOptions` payload that pins Ollama's request context
- * window (`num_ctx`) to what THIS request actually needs, or `null` to omit it.
- *
- * Only applies to the self-hosted `ollama` provider (never `ollama-cloud`: its
- * managed host owns its defaults and we can't verify it honours `num_ctx`).
- * Returns `null` — status quo, server default applies — for any other provider
- * or when the window probe fails. The `num_ctx` is the request's estimated
- * prompt tokens plus response headroom, floored at a common default (4,096) and
- * capped at the model's architectural window so it never requests more than the
- * model supports. It MAY set a window smaller than a generous server default —
- * that's harmless because the estimate still covers this request's own need; the
- * byte-based estimate below is what guarantees that coverage for multi-byte text.
+ * Computes the `providerOptions` payload pinning Ollama's request context window
+ * (`num_ctx`) to what THIS request needs, or `null` to omit it (status quo: server
+ * default). Self-hosted `ollama` only — never `ollama-cloud`, whose managed host owns
+ * its defaults. The window is the estimated prompt tokens plus response headroom,
+ * floored at 4,096 and capped at the model's architectural window. It MAY end up
+ * smaller than a generous server default; harmless, because the estimate still covers
+ * this request.
  */
 async function ollamaProviderOptions(
   settings: AiSettings,
@@ -177,24 +166,21 @@ export interface AgenticStreamOpts {
 const AGENTIC_MAX_STEPS = 24;
 
 /**
- * Drives one HTTP-provider agentic review: a native AI-SDK tool loop over
- * `opts.tools`, accumulating the model's prose into `setText` and surfacing each
- * tool step in `setStatus`. Unlike the plain {@link createAiClient} stream, this
- * consumes `fullStream` so tool-call/-result/-error events are visible; tool
- * failures arrive as parts and don't throw (the model sees the error and adapts),
- * while an in-stream provider `error` part is thrown to fail the run honestly.
+ * Drives one HTTP-provider agentic review: a native AI-SDK tool loop over `opts.tools`,
+ * accumulating prose into `setText` and surfacing each tool step in `setStatus`.
+ * Consumes `fullStream` (unlike the plain stream) so tool events are visible; tool
+ * failures arrive as parts and don't throw (the model sees the error and adapts), while
+ * an in-stream provider `error` part is thrown to fail the run honestly.
  */
 export async function runAgenticStream(opts: AgenticStreamOpts): Promise<void> {
   const model = await resolveModel(opts.settings);
 
-  // On local Ollama, pin `num_ctx` to the FULL probed architectural window — the
-  // deliberate REVERSAL of the non-agentic stream's request-sized rationale. A
-  // tool loop grows unboundedly: tool results accumulate across up to
-  // AGENTIC_MAX_STEPS, so there's no fixed prompt size to size the window against.
-  // For a run the user explicitly opted into (Agentic review), a visible
-  // allocation failure beats silently truncating the very tool results the mode
-  // exists to fetch. Only the self-hosted `ollama` provider (never ollama-cloud —
-  // gated on the exact id); probe failure → omit providerOptions (server default).
+  // On local Ollama, pin `num_ctx` to the FULL probed window — the deliberate REVERSAL
+  // of the non-agentic stream's request-sized rationale. A tool loop grows unboundedly
+  // (results accumulate across up to AGENTIC_MAX_STEPS), so there's no fixed prompt
+  // size to size against, and for a mode the user opted into a visible allocation
+  // failure beats silently truncating the tool results the mode exists to fetch.
+  // Self-hosted `ollama` only; probe failure → omit (server default).
   let agenticProviderOptions:
     | { ollama: { options: { num_ctx: number } } }
     | undefined;
@@ -225,11 +211,9 @@ export async function runAgenticStream(opts: AgenticStreamOpts): Promise<void> {
   }
 
   let buffer = "";
-  // Set when a text block ends or a tool step ran; the next `text-start`/
-  // `text-delta` clears any stale status and, if prior text exists, inserts a
-  // paragraph break so successive text blocks / step texts don't concatenate
-  // mid-word. Cleared on the first text emitted after it, so the normal
-  // single-block flow (deltas with no prior break) never gets a spurious break.
+  // Set when a text block ends or a tool step ran; the next `text-start`/`text-delta`
+  // clears any stale status and, if prior text exists, inserts a paragraph break so
+  // successive blocks don't concatenate mid-word. Cleared on the first text after it.
   let pendingBreak = false;
   // Terminal state, captured on `finish` so a zero-text run can explain itself.
   let finishReason = "unknown";
@@ -289,10 +273,9 @@ export async function runAgenticStream(opts: AgenticStreamOpts): Promise<void> {
           throw new Error(annotateToolError(errorMessage(part.error)));
         }
         case "abort": {
-          // Real per the installed SDK: ai@6's TextStreamPart union includes
-          // `type: 'abort'` (node_modules/ai/dist/index.d.ts ~L2599). An abort
-          // may ALSO surface as a thrown AbortError mid-await — the catch below
-          // handles that shape. Either way: clean cancellation, not an error.
+          // `type: 'abort'` is real in the installed ai@6 TextStreamPart union; an
+          // abort may ALSO surface as a thrown AbortError mid-await (the catch below).
+          // Either way: clean cancellation, not an error.
           return;
         }
         default:
@@ -304,29 +287,23 @@ export async function runAgenticStream(opts: AgenticStreamOpts): Promise<void> {
     throw new Error(annotateToolError(errorMessage(e)));
   }
 
-  // A clean finish that produced no prose (e.g. the model spent all its steps
-  // on tool calls, or ended on `length`/`tool-calls`) would otherwise resolve
-  // silently → the panel shows the never-ran placeholder. Fail honestly so the
-  // error path surfaces it (nothing gets persisted). An abort returns above.
+  // A clean finish that produced no prose (all steps spent on tool calls, or ended on
+  // `length`/`tool-calls`) would resolve silently → the panel shows the never-ran
+  // placeholder. Fail honestly so nothing gets persisted. An abort returns above.
   if (!buffer.trim()) {
     throw new Error(
       `The review ended after ${toolSteps} tool step(s) without producing a conclusion (${finishReason}). Try again, or turn off Agentic review for a single-pass response.`,
     );
   }
 
-  // A tool-using run streams its exploration narration ("Let me check the call
-  // sites…") ahead of the final review. The prose after the LAST tool step is the
-  // conclusion — the authoritative body; the prose before it is narration, peeled
-  // off into "thoughts" for a disclosure. When the conclusion is empty (all prose
-  // preceded the last tool step — a heuristic miss), leave the full buffer as the
-  // body and emit no thoughts, never dropping content.
+  // A tool-using run streams exploration narration ahead of the final review. Prose
+  // after the LAST tool step is the conclusion (the authoritative body); prose before
+  // it is narration, peeled into "thoughts". An empty conclusion (a heuristic miss)
+  // leaves the full buffer as the body, never dropping content.
   //
-  // Known limitation (accepted): a model that interleaves real findings with
-  // verification tool calls ("X is broken … [reads file] … and Y too") gets the
-  // pre-tool findings demoted into the disclosure — content preserved, placement
-  // imperfect. This mirrors the CLI providers' native semantics (Claude's `result`
-  // is likewise only the final post-tool message), and models overwhelmingly
-  // conclude after exploring, so the last-tool split is the right default.
+  // Accepted limitation: a model that interleaves findings with verification calls gets
+  // its pre-tool findings demoted into the disclosure — content preserved, placement
+  // imperfect. This mirrors the CLI providers' native semantics.
   if (conclusionStart > 0) {
     const conclusion = buffer.slice(conclusionStart).trim();
     if (conclusion) {

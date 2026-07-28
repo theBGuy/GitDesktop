@@ -1,17 +1,14 @@
 //! Managed MCP-server config generation for agent sessions.
 //!
-//! GitDesktop is not an MCP client — the CLIs are the hosts. This module only
-//! turns the user's registered, session-opted-in servers into the config file a
-//! CLI consumes, resolving any secret env/header values from the OS keychain at
-//! launch time (so secrets never live in settings.json, argv, or the worktree).
+//! GitDesktop is not an MCP client — the CLIs are the hosts. This module turns the
+//! user's session-opted-in servers into the config file a CLI consumes, resolving
+//! secret env/header values from the OS keychain at launch time (so secrets never
+//! live in settings.json, argv, or the worktree).
 //!
-//! Host sessions are wired for **Claude**, **GitHub Copilot**, and **opencode** —
-//! each consumes a different config shape (`build_claude_config` /
-//! `build_copilot_config` / `build_opencode_config`) delivered a different way
-//! (Claude `--mcp-config`, Copilot `--additional-mcp-config @file`, opencode the
-//! `OPENCODE_CONFIG` env var). **Codex** MCP is container-only (`build_codex_config`)
-//! — host Codex runs fine, it just can't approve MCP tool calls;
-//! container delivery for the other CLIs is a later tier.
+//! Each host takes a different shape and delivery: Claude `--mcp-config`, Copilot
+//! `--additional-mcp-config @file`, opencode the `OPENCODE_CONFIG` env var. **Codex**
+//! is container-only (`build_codex_config`) — host `codex exec` declines every MCP
+//! tool call.
 
 use std::path::{Path, PathBuf};
 
@@ -51,17 +48,14 @@ pub struct McpServerSpec {
     pub secret_keys: Vec<String>,
 }
 
-/// Build the single `McpServerSpec` that exposes GitDesktop ITSELF as a read-only
-/// MCP server for a CLI PR review (`gitdesktop mcp --repo <repo_path>`), so the
-/// review agent can pull the full PR diff / read files at any ref / blame / list
-/// PR comments instead of relying on the budget-truncated diff in the prompt.
+/// The `McpServerSpec` exposing GitDesktop ITSELF as a read-only MCP server for a CLI
+/// PR review (`gitdesktop mcp --repo <path>`), so the review agent can pull the full
+/// diff / read files at any ref / blame instead of the budget-truncated prompt diff.
 ///
-/// The command is the CURRENT executable resolved at call time — NOT the update-safe
-/// managed launcher (`mcp_launcher.rs`). That launcher exists so a persisted GLOBAL
-/// config entry keeps working after the app updates and its exe is replaced; here the
-/// config is regenerated per review run, so `current_exe()` is always fresh and the
-/// managed copy is unnecessary. No env/url/headers/secrets: it's a plain stdio server
-/// launched read-only (no `--allow-write` / `--allow-remote-write`).
+/// Uses `current_exe()` at call time, NOT the update-safe managed launcher
+/// (`mcp_launcher.rs`): that launcher exists for a PERSISTED global config entry that
+/// must survive an app update, whereas this config is regenerated per review run.
+/// Read-only — no env/url/headers/secrets, no `--allow-write`/`--allow-remote-write`.
 pub fn self_server_spec(repo_path: &str) -> AppResult<McpServerSpec> {
     let exe = std::env::current_exe()
         .map_err(|e| AppError::Command(format!("resolve current executable: {e}")))?;
@@ -115,10 +109,10 @@ fn resolve_entries(spec: &McpServerSpec) -> AppResult<Map<String, Value>> {
     Ok(out)
 }
 
-/// Claude's `--tools` allowlist entries that expose every opted-in server's
-/// tools: `mcp__<server>` admits all tools from that server. Loading a server via
-/// `--mcp-config` is NOT enough — `--tools` is a strict allowlist, so without
-/// these the server connects but its tools can never be called (caught live).
+/// Claude's `--tools` allowlist entries exposing every opted-in server's tools:
+/// `mcp__<server>` admits all of that server's tools. Loading a server via
+/// `--mcp-config` is NOT enough — `--tools` is a strict allowlist, so without these
+/// the server connects but its tools can never be called.
 pub fn tool_allow_patterns(specs: &[McpServerSpec]) -> Vec<String> {
     specs.iter().map(|s| format!("mcp__{}", s.name)).collect()
 }
@@ -146,14 +140,12 @@ pub fn build_claude_config(specs: &[McpServerSpec]) -> AppResult<Value> {
     Ok(json!({ "mcpServers": servers }))
 }
 
-/// Build GitHub Copilot CLI's `{ "mcpServers": { name: {…} } }` document, passed
-/// per-session via `--additional-mcp-config @<path>` (it *augments* — never mutates
-/// — the user's `~/.copilot/mcp-config.json`). A stdio server uses `"type": "local"`
-/// (the config-file spelling; the CLI's `--transport` flag spells the same thing
-/// "stdio"), an http server `"type": "http"`. `"tools": ["*"]` exposes every tool;
-/// `--allow-all-tools` (already passed for non-interactive runs) auto-approves them,
-/// so no per-tool allowlist is needed — unlike Claude. Secrets are resolved into the
-/// `env` / `headers` map from the keychain, never argv.
+/// Build GitHub Copilot CLI's `{ "mcpServers": { name: {…} } }` document, passed per
+/// session via `--additional-mcp-config @<path>` (it *augments*, never mutates, the
+/// user's `~/.copilot/mcp-config.json`). stdio is `"type": "local"` (the config-file
+/// spelling of the CLI's `--transport stdio`), http is `"type": "http"`. `"tools":
+/// ["*"]` exposes every tool and `--allow-all-tools` auto-approves them, so no
+/// per-tool allowlist is needed — unlike Claude. Secrets resolve into env/headers.
 pub fn build_copilot_config(specs: &[McpServerSpec]) -> AppResult<Value> {
     let mut servers = Map::new();
     for spec in specs {
@@ -182,20 +174,17 @@ pub fn build_copilot_config(specs: &[McpServerSpec]) -> AppResult<Value> {
 /// `build_opencode_config`). Selected with `opencode run --agent <this>`.
 pub const GD_RESEARCH_AGENT: &str = "gd-research";
 
-/// Build opencode's config document, pointed at per-session via the `OPENCODE_CONFIG`
-/// env var. opencode *merges* config layers (it never replaces), so this adds our
-/// servers (and the Research agent) on top of the user's global config without
-/// disturbing it. A stdio server is `"type": "local"` with a single `command`
-/// ARRAY (the binary + args, joined — opencode has no separate args field) and an
-/// `environment` map; an http server is `"type": "remote"` with `url` + `headers`.
-/// `enabled: true` is explicit. Tools are auto-exposed and `--dangerously-skip-permissions`
-/// (already passed) auto-approves them, so no allowlist is needed.
+/// Build opencode's config, pointed at per session via `OPENCODE_CONFIG`. opencode
+/// MERGES config layers, so this adds our servers (and the Research agent) on top of
+/// the user's global config. stdio = `"type": "local"` with a single `command` ARRAY
+/// (binary + args joined — opencode has no args field) and an `environment` map; http
+/// = `"type": "remote"`. Tools are auto-exposed and `--dangerously-skip-permissions`
+/// auto-approves them, so no allowlist is needed.
 ///
-/// `research` adds a read-only **web** agent (`GD_RESEARCH_AGENT`): the builtin
-/// `plan` agent is read-only but has NO web tools, and opencode has no permission
-/// CLI flags, so a read-only-with-web profile must be defined in config — edit/bash
-/// denied, webfetch/websearch allowed. (`websearch` also needs Exa enabled — the
-/// opencode provider or `OPENCODE_ENABLE_EXA`; `webfetch` always works.)
+/// `research` adds the read-only WEB agent (`GD_RESEARCH_AGENT`): the builtin `plan`
+/// agent is read-only but has NO web tools, and opencode has no permission CLI flags,
+/// so this profile must be defined in config. (`websearch` also needs Exa enabled via
+/// the opencode provider or `OPENCODE_ENABLE_EXA`; `webfetch` always works.)
 pub fn build_opencode_config(specs: &[McpServerSpec], research: bool) -> AppResult<Value> {
     let mut servers = Map::new();
     for spec in specs {
@@ -307,11 +296,9 @@ fn config_root(app: &tauri::AppHandle) -> AppResult<PathBuf> {
         .join("mcp"))
 }
 
-/// The generated-config filenames a host session can leave in `<app_data>/mcp`,
-/// one per CLI shape. Each turn references its file explicitly (Claude's
-/// `--mcp-config`, Copilot's `@file`, opencode's `OPENCODE_CONFIG`), so a stale
-/// file from a de-selected turn is simply never read — but cleanup still removes
-/// all of them when a session is discarded.
+/// The generated-config filenames a host session can leave in `<app_data>/mcp`, one
+/// per CLI shape. Each turn references its own file explicitly, so a stale file from
+/// a de-selected turn is never read — but cleanup removes all of them.
 const HOST_CONFIG_FILES: [&str; 3] = ["json", "copilot.json", "opencode.json"];
 
 /// Validate the session id + servers, serialize `config`, and write it to a stable
@@ -414,13 +401,13 @@ pub fn cleanup_host_config(app: &tauri::AppHandle, session_id: &str) {
 
 // --- Codex MCP (container only) --------------------------------------------------
 //
-// Codex reads MCP servers from its `~/.codex/config.toml`, NOT a `--mcp-config`
-// flag. A container session's `~/.codex` is a per-session mounted home seeded
-// with only the user's `auth.json`, so writing our `config.toml` there makes the
-// opted-in servers the ONLY MCP source (strict) and keeps secrets in the file,
-// never in argv. Host Codex is unsupported on purpose: `codex exec` cancels every
-// MCP tool call (stdin EOF → "declined", upstream); the container already passes
-// `--dangerously-bypass-approvals-and-sandbox`, so its tool calls run.
+// Codex reads MCP servers from `~/.codex/config.toml`, NOT a `--mcp-config` flag. A
+// container session's `~/.codex` is a per-session mounted home seeded with only the
+// user's `auth.json`, so writing our `config.toml` there makes the opted-in servers
+// the ONLY MCP source and keeps secrets out of argv. Host Codex is unsupported on
+// purpose: `codex exec` cancels every MCP tool call (stdin EOF → "declined").
+// The container arm passes `--dangerously-bypass-approvals-and-sandbox`, so its
+// tool calls run.
 
 /// A TOML basic-string literal for an arbitrary value — escapes quotes, backslashes
 /// and control chars, so a secret with special characters can't break the file.
@@ -498,11 +485,10 @@ pub fn build_codex_config(specs: &[McpServerSpec]) -> AppResult<String> {
 
 // --- discovery (import, not inherit) -----------------------------------------
 //
-// Reads the MCP servers the user has ALREADY configured for Claude — the open
-// repo's `.mcp.json` and the global `~/.claude.json` — so the Settings panel can
-// offer them as a reviewed import into the managed registry. This is the only
-// place GitDesktop reads those files; sessions never inherit them (that's what
-// `--strict-mcp-config` enforces). Read-only: the source files are never written.
+// Reads the MCP servers the user already configured for Claude (the open repo's
+// `.mcp.json` and the global `~/.claude.json`) so Settings can offer them as a
+// reviewed import. Sessions never INHERIT them — `--strict-mcp-config` enforces that.
+// Read-only: the source files are never written.
 
 /// One server found in an existing config, with where it came from. `config` is
 /// the raw server object (Claude `.mcp.json` shape) for the frontend to convert.
@@ -563,11 +549,10 @@ pub async fn discover_mcp_servers(
 
 // --- config-helper backend (write the `gitdesktop` server into `.mcp.json`) ------
 //
-// The GUI "Use GitDesktop as an MCP server" helper calls this to add the
-// `gitdesktop` server entry to a project's `.mcp.json` — the SAME file shape
-// `discover_mcp_servers` reads (top-level `"mcpServers"`). It merges: every sibling
-// server and any unknown top-level key is preserved. This writes ONLY the local
-// `.mcp.json`; no git operation is ever involved.
+// The GUI "Use GitDesktop as an MCP server" helper adds the `gitdesktop` entry to a
+// project's `.mcp.json` — the same shape `discover_mcp_servers` reads. It MERGES:
+// every sibling server and unknown top-level key is preserved. No git operation is
+// ever involved.
 
 /// Result of [`mcp_json_write`]. `written` is whether the file was actually written;
 /// `existed` is whether a `gitdesktop` entry was already present (so the GUI can
@@ -604,8 +589,6 @@ pub async fn mcp_json_write(
         ));
     }
 
-    // Parse the existing file as a Value so unknown keys round-trip. Missing → start
-    // from an empty document; malformed → error (do NOT clobber the user's file).
     let mut doc: Value = match std::fs::read(&path) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| {
             AppError::Command(format!(
@@ -676,11 +659,9 @@ async fn run_client_cli(bin: &str, args: &[&str]) -> AppResult<(String, String, 
     use tokio::process::Command;
 
     // Resolve through the shared resolver (PATH + candidate dirs + the LIVE registry
-    // PATH on Windows, macOS login shell) rather than a bare `Command::new(bin)`, which
-    // only searches the app's *inherited* PATH — a `claude`/`copilot` installed to a
-    // registry-PATH-only dir (or added to PATH after the app launched) would otherwise
-    // read as "not found". Mirrors every other CLI runner; see the resolver gotcha in
-    // agent.rs (`resolve_named`).
+    // PATH on Windows, macOS login shell) rather than a bare `Command::new(bin)`,
+    // which only searches the app's INHERITED PATH — a CLI installed to a
+    // registry-PATH-only dir would otherwise read as "not found". See `resolve_named`.
     let program = crate::agent::resolve_named(&[bin], None).await.ok_or_else(|| {
         AppError::Command(format!(
             "`{bin}` was not found on PATH. Install it, or copy the snippet into the config manually."
@@ -777,9 +758,8 @@ async fn claude_global_install(
     if code == 0 {
         return Ok(McpGlobalInstallResult { written: true, existed: overwrite });
     }
-    // Fold both streams — a CLI may print the duplicate-name / error text to
-    // stdout, and either detecting a benign "already exists" or surfacing a real
-    // failure must not depend on which stream it chose.
+    // Fold both streams — either CLI may print the duplicate-name / error text to
+    // stdout or stderr.
     let out = format!("{stdout}{stderr}");
     if is_already_exists(&out) {
         return Ok(McpGlobalInstallResult { written: false, existed: true });
@@ -796,9 +776,7 @@ async fn copilot_global_install(
     overwrite: bool,
 ) -> AppResult<McpGlobalInstallResult> {
     if overwrite {
-        // `copilot mcp remove` takes NO scope flag — it only ever manages the user
-        // config (`~/.copilot/mcp-config.json`), which is exactly where `add`
-        // writes, so there's no scope to mismatch. A "not found" remove is harmless.
+        // A "not found" remove is harmless (see `copilot_global_remove`).
         let _ = copilot_global_remove().await;
     }
     // `copilot mcp add gitdesktop -- <command> <args...>` — everything after `--`
@@ -809,8 +787,7 @@ async fn copilot_global_install(
     if code == 0 {
         return Ok(McpGlobalInstallResult { written: true, existed: overwrite });
     }
-    // Fold both streams (see claude_global_install) — don't depend on which one
-    // the CLI uses for the duplicate-name / error text.
+    // Fold both streams (see `claude_global_install`).
     let out = format!("{stdout}{stderr}");
     if is_already_exists(&out) {
         return Ok(McpGlobalInstallResult { written: false, existed: true });
@@ -829,7 +806,7 @@ async fn copilot_global_install(
 // older install path (old-path entries keep locking the installed exe against
 // updates) — and the remove command lets the UI clear one.
 
-/// Per-client global-install status. See the frozen contract in P4.
+/// Per-client global-install status.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpGlobalClientStatus {
@@ -866,13 +843,11 @@ pub struct McpGlobalStatus {
     pub copilot: McpGlobalClientStatus,
 }
 
-/// Path-normalized comparison for the launcher-path check: trailing-separator
-/// insensitive and `/` vs `\` insensitive (unconditional — the separator fold is
-/// applied to both sides, so it stays compare-safe everywhere). Case folding is
-/// gated to case-insensitive filesystems (Windows, macOS); on Linux two paths
-/// differing only in case are genuinely distinct, so case is preserved there.
-/// Mirrors `path_launcher::norm` (which is `#[cfg(windows)]`-private, so it's
-/// re-derived locally here) with the interior-separator fold added.
+/// Path-normalized comparison for the launcher-path check: trailing-separator and
+/// `/` vs `\` insensitive (both sides folded, so it's compare-safe everywhere). Case
+/// folding is gated to case-insensitive filesystems (Windows, macOS) — on Linux two
+/// paths differing only in case are genuinely distinct. Mirrors `path_launcher::norm`
+/// (that one is `#[cfg(windows)]`-private) plus the interior-separator fold.
 fn norm_launcher_path(p: &str) -> String {
     let normalized = p.trim().trim_end_matches(['\\', '/']).replace('/', "\\");
     #[cfg(any(windows, target_os = "macos"))]
@@ -881,19 +856,15 @@ fn norm_launcher_path(p: &str) -> String {
 }
 
 /// Classify a client's user-config JSON into an [`McpGlobalClientStatus`] for the
-/// `gitdesktop` entry. Pure — takes the parsed config `Value` and the current
-/// launcher path so tests need no filesystem or env. Tolerant of untrusted JSON:
+/// `gitdesktop` entry. Pure — takes the parsed `Value` and the current launcher path,
+/// so tests need no filesystem or env. Tolerant of untrusted JSON:
 ///
-/// * `mcpServers.gitdesktop` absent (or the shape isn't a map) ⇒ not installed.
+/// * `mcpServers.gitdesktop` absent (or not a map) ⇒ not installed.
 /// * present but `command` isn't a string ⇒ installed, `command: None`,
-///   `current: false` (args still carried when present).
-/// * present with a string `command` ⇒ installed; `current` iff it path-normal-
-///   equals `launcher_path`.
-///
-/// `args` carries the entry's `args` array (string elements only) whenever the
-/// entry exists and `args` is an array; non-string junk elements are dropped and
-/// a non-array `args` yields `None`. Untrusted JSON from another CLI's config, so
-/// every element is type-checked — this never panics on shape surprises.
+///   `current: false` (args still carried).
+/// * present with a string `command` ⇒ installed; `current` iff it path-normal-equals
+///   `launcher_path`.
+/// * `args` carries only the string elements of an array `args`; a non-array ⇒ `None`.
 fn classify_global_entry(config: &Value, launcher_path: &str) -> McpGlobalClientStatus {
     let Some(entry) = config
         .get("mcpServers")
@@ -1391,10 +1362,10 @@ mod tests {
 
     #[test]
     fn norm_launcher_path_folds_separators_and_trailing() {
-        // Separator style + trailing separator + surrounding whitespace fold
-        // unconditionally, so identically-cased inputs normalize equal on every
-        // platform. (Asserted as an equality invariant rather than a literal,
-        // since the case of the output is platform-dependent.)
+        // Separator style, trailing separator and surrounding whitespace fold
+        // unconditionally, so identically-cased inputs normalize equal everywhere.
+        // Asserted as an equality invariant, not a literal — the output's CASE is
+        // platform-dependent (see the cfg-gated literal test below).
         assert_eq!(
             norm_launcher_path(r"C:\Foo\Bar\"),
             norm_launcher_path("C:/Foo/Bar")

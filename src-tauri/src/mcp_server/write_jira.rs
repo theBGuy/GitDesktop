@@ -1,16 +1,11 @@
 //! Jira issue remote-WRITE tools (opt-in via `--allow-remote-write`).
 //!
-//! The write half of the Jira `jira_*` tool surface — comment, transition (close/reopen),
-//! create, assign, and update (due date / priority / labels) — against the repository's
-//! LINKED Jira project. REAL writes to
-//! Jira Cloud under the stored Atlassian credential, so every tool is gated on
-//! `allow_remote_write` (via [`GitDesktopMcp::ensure_remote_write`]) FIRST, then resolves
-//! the linked project server-side (via [`GitDesktopMcp::jira_link`] — the single source
-//! of truth; no `site`/`projectKey` param) and calls the shared [`crate::forge::jira`]
-//! cores (never the `#[tauri::command]` wrappers). All are annotated non-read-only and
-//! non-destructive (mirroring the forge issue-write tools — a Jira write is a mutation,
-//! but none is a trivially-irreversible destructive op). `comment_jira_issue` appends the
-//! shared `GD_COMMENT_FOOTER` attribution.
+//! REAL writes to Jira Cloud under the stored Atlassian credential, against the repo's
+//! LINKED project. Every tool runs the same order: `ensure_remote_write` FIRST, then
+//! [`GitDesktopMcp::jira_link`] resolves the project server-side (the single source of
+//! truth — no `site`/`projectKey` param), then the shared [`crate::forge::jira`] cores
+//! (never the `#[tauri::command]` wrappers). All annotated non-read-only and
+//! non-destructive: a Jira write is a mutation, but none is trivially irreversible.
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -103,8 +98,8 @@ struct UpdateJiraIssueArgs {
 }
 
 /// Reject an `update_jira_issue` call that changes nothing — at least one of `due_date`,
-/// `priority`, or `labels` must be present. Pure (unit-tested): the local guard that runs
-/// after the remote-write gate and before any network call.
+/// `priority`, `labels`, `original_estimate`, or `remaining_estimate` must be present.
+/// Runs after the remote-write gate and before any network call. Pure (unit-tested).
 fn ensure_update_has_a_field(args: &UpdateJiraIssueArgs) -> Result<(), McpError> {
     if args.due_date.is_none()
         && args.priority.is_none()
@@ -121,11 +116,9 @@ fn ensure_update_has_a_field(args: &UpdateJiraIssueArgs) -> Result<(), McpError>
     Ok(())
 }
 
-/// Resolve a requested priority NAME to the matching priority in `available`,
-/// case-insensitively (trimming the request). An unknown name yields the actionable
-/// `invalid_params` error listing the valid names. Pure (unit-tested) so the
-/// no-writes-before-error contract is provable at the resolution layer without a network
-/// call — the caller runs this BEFORE any write, so an unknown name performs zero writes.
+/// Resolve a requested priority NAME against `available`, case-insensitively and
+/// trimmed; an unknown name yields an `invalid_params` error listing the valid names.
+/// Pure and called BEFORE any write, so a bad name performs zero writes.
 fn resolve_priority<'a>(
     available: &'a [crate::forge::jira::JiraPriority],
     name: &str,
@@ -302,10 +295,9 @@ impl GitDesktopMcp {
         let link = self.jira_link().await?;
         ensure_key_in_project(&args.key, &link)?;
 
-        // Resolve the priority NAME → id FIRST, before ANY write. `GET /priority` is an
-        // idempotent read, and resolution can fail on an unknown name — doing it up front
-        // (a pre-mutation guard) means a bad priority name performs ZERO writes rather than
-        // leaving a half-applied due date behind. The canonical name is kept for the result.
+        // Resolve the priority NAME → id FIRST, before ANY write (pre-mutation guard): the
+        // lookup is an idempotent read that can fail, so a bad name leaves nothing
+        // half-applied. The canonical name is kept for the result.
         let resolved_priority: Option<(String, String)> = match args.priority.as_deref() {
             Some(name) => {
                 let priorities = crate::forge::jira::priorities(&link.site_host)
@@ -317,11 +309,9 @@ impl GitDesktopMcp {
             None => None,
         };
 
-        // Later writes can still fail AFTER an earlier one succeeded (the writes hit
-        // distinct field PUTs — e.g. a screen-scheme 400 on labels after the due date was
-        // already set). The app's write model is non-transactional single-field PUTs, so we
-        // don't roll back; instead we DISCLOSE what was already applied when a later step
-        // fails. `applied` accumulates human phrases in write order for that prefix.
+        // The field writes are separate, non-transactional PUTs, so a later one can fail
+        // after an earlier one landed. We don't roll back — we DISCLOSE. `applied`
+        // accumulates the phrases, in write order, for that error prefix.
         let mut applied: Vec<&str> = Vec::new();
 
         // Due date: an empty string clears; a non-empty string sets (grammar-checked in the
@@ -358,9 +348,7 @@ impl GitDesktopMcp {
             applied.push("labels were already updated");
         }
 
-        // Original estimate: an empty string clears (→ None → send ""); a non-empty string
-        // sets (grammar-checked in the core). Serde `Option` distinguishes omitted from
-        // present.
+        // Original estimate: same empty-clears / non-empty-sets convention.
         if let Some(raw) = args.original_estimate.as_deref() {
             let estimate = if raw.trim().is_empty() {
                 None
@@ -445,7 +433,6 @@ fn partial_write_err(applied: &[&str], e: AppError) -> McpError {
     if applied.is_empty() {
         return base;
     }
-    // e.g. "due date and priority were already updated before this failure — <error>".
     let joined = join_applied(applied);
     McpError::internal_error(
         format!("{joined} before this failure — {}", base.message),
@@ -454,13 +441,10 @@ fn partial_write_err(applied: &[&str], e: AppError) -> McpError {
 }
 
 /// Join the applied-write phrases for the partial-state prefix: "A", "A and B", or
-/// "A, B, and C". Each phrase already ends in "was/were already updated"; we normalize to a
-/// single "were already updated" tail so the sentence reads naturally regardless of count.
-/// Pure (unit-tested).
+/// "A, B, and C". Strips the shared "… already updated" tail (both the singular and
+/// plural forms) to recover the subjects, then rebuilds one clause with matching
+/// verb agreement. The phrases are a fixed, closed vocabulary from the handler.
 fn join_applied(applied: &[&str]) -> String {
-    // Strip the shared "… already updated" tail to recover the subject phrases, then
-    // rebuild one clause. The phrases are the fixed strings pushed in the handler, so this
-    // stays a small, closed vocabulary.
     let subjects: Vec<&str> = applied
         .iter()
         .map(|p| {
@@ -613,10 +597,8 @@ mod tests {
         ]
     }
 
-    /// The pure priority resolver: a known name (case-insensitively, trimmed) resolves to
-    /// its id + canonical name; an unknown name returns the actionable error listing the
-    /// valid names. Because resolution is pure and the handler runs it BEFORE any write, an
-    /// unknown name performs ZERO writes.
+    /// A known name (case-insensitive, trimmed) resolves to its id + canonical name; an
+    /// unknown name errors listing every valid name.
     #[test]
     fn resolve_priority_matches_or_lists_valid_names() {
         let list = priorities();

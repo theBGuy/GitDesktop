@@ -1,10 +1,7 @@
-//! The neutral, provider-agnostic data model the `Forge` abstraction speaks in.
-//!
-//! Today every hosted feature deserializes GitHub's own shapes (`GhStatus`,
-//! `PrInfo`, …). To support GitLab and Bitbucket without branching every panel,
-//! the backend grows a small set of host-independent types here; each `Forge`
-//! impl maps its provider's API onto them. Phase 0 only needs [`ForgeStatus`] +
-//! [`Capabilities`]; later phases add `PullRequest`, `Issue`, etc. alongside.
+//! The neutral, provider-agnostic data model the `Forge` abstraction speaks in:
+//! host-independent types each `Forge` impl maps its provider's API onto, so panels
+//! don't branch per provider. PR/issue payloads are the exception — they still ride
+//! GitHub's own shapes in `github::pr` / `github::issue`.
 
 use serde::{Deserialize, Serialize};
 
@@ -17,14 +14,10 @@ pub enum Provider {
     Bitbucket,
 }
 
-/// What a provider (and this repo on it) actually supports, so the UI shows only
-/// the controls that work instead of erroring. The platforms are *not*
-/// feature-identical — Bitbucket Cloud has no labels/milestones/stars, GitLab has
-/// no Discussions — so panels gate on these flags rather than assuming GitHub.
-///
-/// GitHub is all-true today; GitLab/Bitbucket follow the parity matrix in
-/// `docs/multi-provider-support.md` §6. The set grows as later phases migrate more
-/// panels behind capability gates (rulesets, collaborators, pages, …).
+/// What a provider (and this repo on it) actually supports, so the UI shows only the
+/// controls that work instead of erroring. The platforms are NOT feature-identical —
+/// Bitbucket Cloud has no labels/milestones/stars, GitLab has no Discussions — so
+/// panels gate on these flags rather than assuming GitHub. GitHub is all-true.
 #[derive(Serialize, Clone, Copy)]
 #[serde(rename_all = "camelCase")]
 pub struct Capabilities {
@@ -115,16 +108,11 @@ impl Capabilities {
     }
 }
 
-/// Which hosted features GitDesktop has actually **built** for a provider — a
-/// different axis from [`Capabilities`]. Capabilities = what the *platform* can do
-/// (GitLab has labels); `Implemented` = what *we've wired up* for it (we may not
-/// have built GitLab labels yet). A panel lights up only when the repo is ready
-/// **and** the platform supports the feature **and** we've implemented it here.
-///
-/// GitHub is the reference implementation (everything built). GitLab/Bitbucket
-/// flip these on per phase as each read/write path lands — so a *ready* GitLab
-/// repo degrades its unbuilt panels to "coming soon" instead of firing `gh_*`
-/// calls that would break against it. The frontend mirrors this as
+/// Which hosted features GitDesktop has actually BUILT for a provider — a different
+/// axis from [`Capabilities`] (what the PLATFORM can do). A panel lights up only when
+/// the repo is ready AND the platform supports the feature AND it's implemented here,
+/// so a ready GitLab repo degrades unbuilt panels to "coming soon" instead of firing
+/// `gh_*` calls that would break. Mirrored in the frontend as
 /// `forgeFeatureReady(status, feature)`.
 #[derive(Serialize, Clone, Copy)]
 #[serde(rename_all = "camelCase")]
@@ -143,9 +131,8 @@ pub struct Implemented {
     /// plus each provider's extra sections). Distinct from `repo_actions` so a
     /// provider can have View/Star without the settings surface.
     pub repo_settings: bool,
-    // ── Writes (per-action): flip on as each mutation lands for a provider, so a
-    //    read-only provider's detail views suppress just the writes it can't do
-    //    yet (distinct from the panel-level read flags above). ──
+    // ── Writes (per-action): flip on as each mutation lands, so a read-only provider
+    //    suppresses just the writes it can't do yet. ──
     /// Posting a comment/note on an issue.
     pub issue_comment: bool,
     /// Closing / reopening an issue.
@@ -154,14 +141,11 @@ pub struct Implemented {
     pub mr_comment: bool,
     /// Closing / reopening a merge/pull request (not merge).
     pub mr_state: bool,
-    /// Editing AND deleting a merge/pull request conversation comment — one flag
-    /// covering both ops (like `mr_state` covers close + reopen). GitHub edits/deletes
-    /// the IssueComment node; GitLab the MR note; Bitbucket the PR comment, so it's
-    /// true for all three.
+    /// Editing AND deleting a merge/pull request conversation comment — one flag for
+    /// both ops. True for all three providers.
     pub mr_comment_edit: bool,
-    /// Editing AND deleting an issue conversation comment — one flag covering both
-    /// ops. GitHub and GitLab wire it; Bitbucket's native tracker is being retired,
-    /// so it stays `false` there.
+    /// Editing AND deleting an issue conversation comment — one flag for both ops.
+    /// False for Bitbucket (its native tracker is being retired).
     pub issue_comment_edit: bool,
     /// Approving / unapproving a merge request via the bodyless toggle. GitLab-only:
     /// GitHub surfaces approval through the older review flow (the Review menu), not
@@ -170,9 +154,8 @@ pub struct Implemented {
     /// Merging a merge/pull request (strategy + delete-source-branch). A shared
     /// control — GitHub via `gh pr merge`, GitLab via `glab` — so it's true for both.
     pub mr_merge: bool,
-    /// Arming/cancelling GitLab auto-merge (merge-when-pipeline-succeeds). GitLab-only:
-    /// this app has no in-app GitHub PR auto-merge control, so like `mr_approve` the
-    /// flag stays `false` for GitHub (see `all`).
+    /// Arming/cancelling GitLab auto-merge (merge-when-pipeline-succeeds).
+    /// GitLab-only — this app has no in-app GitHub PR auto-merge control.
     pub mr_auto_merge: bool,
     /// Editing labels on an issue — a shared control (GitHub by node id, GitLab by
     /// name), so true for both.
@@ -182,8 +165,8 @@ pub struct Implemented {
     /// Setting an issue's assignees — a shared issue control. (MR/PR assignees are
     /// the separate `mr_assignees` below — a shared control for GitHub and GitLab.)
     pub issue_assignees: bool,
-    /// Creating an issue from the app — a shared control (the same create dialog;
-    /// the GitHub-only org issue type hides per provider — milestone works on both).
+    /// Creating an issue from the app — a shared control (the GitHub-only org issue
+    /// type hides per provider; milestone works on both).
     pub issue_create: bool,
     /// Creating a merge/pull request from the app (push the head branch + open) —
     /// a shared control.
@@ -208,17 +191,13 @@ pub struct Implemented {
     /// sets PR assignees; GitLab resolves usernames→ids and PUTs `assignee_ids`.
     /// Bitbucket PRs have no assignee concept, so it stays `false` there.
     pub mr_assignees: bool,
-    /// Requesting changes on a merge request — the blocking reviewer state.
-    /// GitLab and Bitbucket share the control; GitHub requests changes through
-    /// its Review menu (`gh_pr_review`), not this control, so the flag stays
-    /// `false` for GitHub (see `all`).
+    /// Requesting changes — the blocking reviewer state. GitLab and Bitbucket share the
+    /// control; GitHub does it through its Review menu, so the flag stays `false` there.
     pub mr_request_changes: bool,
-    /// Editing a merge/pull request's reviewer list — now a shared control on
-    /// all three providers. GitHub diffs pending user requests and runs
-    /// `gh pr edit --add/--remove-reviewer`; GitLab PUTs `reviewer_ids`;
-    /// Bitbucket picks reviewers (not assignees) from workspace members. Each
-    /// preserves the reviewers it doesn't manage (teams / bots on GitHub) so the
-    /// picker can never drop them.
+    /// Editing a merge/pull request's reviewer list — shared by all three (GitHub
+    /// `gh pr edit --add/--remove-reviewer`, GitLab `reviewer_ids`, Bitbucket workspace
+    /// members). Each arm PRESERVES the reviewers it doesn't manage (teams / bots on
+    /// GitHub) so the picker can never drop them.
     pub mr_reviewers: bool,
     /// Editing an existing issue's title/body — a shared control (the same edit
     /// dialog; GitHub PATCHes the issue, GitLab PUTs title/description).
@@ -230,9 +209,8 @@ pub struct Implemented {
     /// picker; GitHub keys on the milestone number, GitLab on the GLOBAL
     /// milestone id, which is what each provider's list read returns).
     pub issue_milestone: bool,
-    /// Reactions on an issue and its comments — a shared control (the same
-    /// ReactionBar; GitHub reacts by GraphQL node id, GitLab awards emoji by
-    /// issue/note id).
+    /// Reactions on an issue and its comments (GitHub reacts by GraphQL node id, GitLab
+    /// awards emoji by issue/note id).
     pub issue_reactions: bool,
     /// Reactions on a merge/pull request and its comments — the same shared
     /// ReactionBar.
@@ -247,27 +225,22 @@ pub struct Implemented {
     /// Permanently deleting an issue — a shared control (both providers
     /// restrict it server-side to elevated roles).
     pub issue_delete: bool,
-    /// Marking an issue confidential (members-only). GitLab-unique — GitHub has
-    /// no confidential-issue concept, so like `mr_approve` this stays `false`
-    /// for GitHub (see `all`).
+    /// Marking an issue confidential (members-only). GitLab-unique — GitHub has no
+    /// confidential-issue concept, so `false` there.
     pub issue_confidential: bool,
     /// Setting / clearing an issue's due date. GitLab-unique — GitHub issues
     /// have no due dates, so the flag stays `false` for GitHub (see `all`).
     pub issue_due_date: bool,
-    /// Playing a manual CI job (GitLab pipelines' `when: manual` jobs).
-    /// GitLab-unique — GitHub Actions has no per-job manual play, so like
-    /// `mr_approve` this stays `false` for GitHub (see `all`).
+    /// Playing a manual CI job (`when: manual`). GitLab-unique — GitHub Actions has no
+    /// per-job manual play.
     pub ci_job_play: bool,
-    /// Time tracking on issues and merge requests (estimate + spent time).
-    /// GitLab-unique — GitHub has no native time tracking, so the flag stays
-    /// `false` for GitHub (see `all`).
+    /// Time tracking on issues and merge requests (estimate + spent). GitLab-unique.
     pub time_tracking: bool,
     /// Related issues (issue links). GitLab-unique — GitHub has no native issue
     /// links, so like `mr_approve` this stays `false` for GitHub (see `all`).
     pub issue_links: bool,
-    /// The pull-request tasks checklist (create/edit/resolve/delete). Bitbucket-only:
-    /// PR tasks are a native Bitbucket concept with no GitHub/GitLab analogue wired
-    /// here, so like `mr_approve` this stays `false` for both (see `all`).
+    /// The pull-request tasks checklist (create/edit/resolve/delete). Bitbucket-native
+    /// — no GitHub/GitLab analogue wired here.
     pub pr_tasks: bool,
     /// Reading file:line-anchored review threads on a merge/pull request — a shared
     /// read surface (GitHub reviewThreads / GitLab diff-note discussions / Bitbucket
@@ -279,24 +252,20 @@ pub struct Implemented {
     /// Bitbucket exposed no comment-resolution field/endpoint on any probed comment,
     /// so it stays `false` there (the forge arm errors).
     pub mr_thread_resolve: bool,
-    /// Editing AND deleting a file:line-anchored review-thread comment — one flag
-    /// covering both ops. Separate from `mr_comment_edit` (which covers flat
-    /// conversation comments) because thread-scoped controls carry their own flag
-    /// family alongside `mr_thread_reply` / `mr_thread_resolve`. All three providers
-    /// wire it (GitHub via the PullRequestReviewComment mutations, GitLab/Bitbucket
-    /// reusing their note/comment endpoints), so it's true for each.
+    /// Editing AND deleting a file:line-anchored review-thread comment — one flag for
+    /// both ops, separate from `mr_comment_edit` (flat conversation comments). True for
+    /// all three (GitHub PullRequestReviewComment mutations; GitLab/Bitbucket reuse
+    /// their note/comment endpoints).
     pub mr_thread_comment_edit: bool,
     /// Reading + writing comments on an individual commit (whole-commit and
     /// file:line-anchored). All three providers wire it (GitHub commit-comments REST,
     /// GitLab commit discussions, Bitbucket commit comments), so it's true for each.
     pub commit_comments: bool,
-    /// Creating a NEW file:line-anchored review thread on a merge/pull request (as
-    /// opposed to replying in an existing one — `mr_thread_reply`). All three
-    /// providers wire it, so it's true for each.
+    /// Creating a NEW file:line-anchored review thread (vs replying in one —
+    /// `mr_thread_reply`). True for all three.
     pub mr_thread_create: bool,
-    /// Submitting a batched review (summary + inline comments + approve/comment/
-    /// request-changes verdict) in one action. All three providers wire it, so it's
-    /// true for each.
+    /// Submitting a batched review (summary + inline comments + verdict) in one action.
+    /// True for all three.
     pub mr_review_submit: bool,
     /// Toggling a merge/pull request's draft state BOTH ways from the shared
     /// Ready / Convert-to-draft control. GitLab (`glab mr update --ready|--draft`)
@@ -310,25 +279,22 @@ pub struct Implemented {
     /// Bitbucket workspace-scoped `q=name~"…"`), so true for all three. Bitbucket's
     /// is workspace-scoped by design (global repo search was retired platform-wide).
     pub repo_search: bool,
-    /// Forking a repo by its `owner/name` (Explore's Fork action, distinct from the
-    /// current-repo fork). Wired for all three (`gh repo fork`, GitLab fork POST,
-    /// Bitbucket forks POST), so true for each.
+    /// Forking a repo by `owner/name` (Explore's Fork, distinct from the current-repo
+    /// fork). Wired for all three.
     pub repo_fork_by_name: bool,
     /// Starring / unstarring a repo by its `owner/name` from Explore, plus the
     /// starred-state read. GitHub and GitLab both have a star API; Bitbucket Cloud
     /// has no stars, so it stays `false` there.
     pub repo_star: bool,
-    /// Reading a repo's rendered README for the Explore preview — a shared read
-    /// (GitHub `repos/…/readme`, GitLab repository-files raw, Bitbucket `src/…`),
-    /// so true for all three.
+    /// Reading a repo's README for the Explore preview. Wired for all three.
     pub repo_readme: bool,
 }
 
 impl Implemented {
-    /// Everything built — the GitHub reference profile. The one exception is
-    /// `mr_approve`: GitHub's approval surface is the older review flow (the Review
-    /// menu), not the bodyless approve/unapprove toggle, so that forge control is
-    /// GitLab-only and stays `false` here.
+    /// The GitHub reference profile. Not literally everything: controls whose GitHub
+    /// analogue lives elsewhere (`mr_approve`, `mr_request_changes`, `mr_draft_toggle`
+    /// — the Review menu / `gh pr ready`) and the GitLab- or Bitbucket-unique ones stay
+    /// `false`; each is explained at its field.
     const fn all() -> Self {
         Self {
             pull_requests: true,
@@ -347,7 +313,6 @@ impl Implemented {
             issue_comment_edit: true,
             mr_approve: false,
             mr_merge: true,
-            // Like `mr_approve`: no in-app GitHub PR auto-merge control here.
             mr_auto_merge: false,
             issue_labels: true,
             mr_labels: true,
@@ -359,15 +324,8 @@ impl Implemented {
             ci_dispatch: true,
             release_create: true,
             release_edit: true,
-            // GitHub PRs are issues under the hood, so the same assignee control the
-            // issue path uses works on PRs too — the MR/PR-assignees picker is wired
-            // for both GitHub and GitLab.
             mr_assignees: true,
-            // Like `mr_approve`: GitHub requests changes via its Review menu.
             mr_request_changes: false,
-            // Requested reviewers ARE editable (`gh pr edit --add/--remove-reviewer`).
-            // The picker manages user reviewers; any team requests are preserved
-            // (team display in the picker is a follow-up).
             mr_reviewers: true,
             issue_edit: true,
             mr_edit: true,
@@ -377,15 +335,11 @@ impl Implemented {
             issue_lock: true,
             issue_transfer: true,
             issue_delete: true,
-            // Like `mr_approve`: GitLab-unique issue fields with no GitHub analogue.
             issue_confidential: false,
             issue_due_date: false,
-            // Like `mr_approve`: GitLab-unique — no per-job manual play, native
-            // time tracking, or issue links on GitHub.
             ci_job_play: false,
             time_tracking: false,
             issue_links: false,
-            // Like `mr_approve`: PR tasks are a Bitbucket-only surface here.
             pr_tasks: false,
             // Review threads: read + reply are shared; GitHub resolves threads too.
             mr_review_threads: true,
@@ -395,11 +349,7 @@ impl Implemented {
             commit_comments: true,
             mr_thread_create: true,
             mr_review_submit: true,
-            // GitHub's Ready / Convert-to-draft goes via `gh pr ready [--undo]`
-            // gated on `canWrite`, not this flag.
             mr_draft_toggle: false,
-            // Explore: repo search, fork-by-name, star, and README are all built
-            // for GitHub.
             repo_search: true,
             repo_fork_by_name: true,
             repo_star: true,
@@ -475,15 +425,8 @@ impl Implemented {
     pub const fn for_provider(provider: Provider) -> Self {
         match provider {
             Provider::GitHub => Self::all(),
-            // GitLab reads are fully wired — merge requests, issues, CI
-            // pipelines, releases, and insights. WRITES land
-            // per-action: issue + MR comment and close/reopen, the GitLab-only MR
-            // approve/unapprove toggle, request-changes, and MR assignees, MR
-            // merge, issue + MR labels, issue assignees, issue/MR create, issue +
-            // MR title/body edit, issue milestone, award-emoji reactions, issue
-            // lock / move / delete, the GitLab-unique confidential + due-date
-            // fields, pipeline
-            // retry / cancel / run, and release create / edit / delete / assets.
+            // GitLab: reads fully wired; writes land per-action — the flags below are
+            // the source of truth (don't re-enumerate them here).
             Provider::GitLab => Self {
                 pull_requests: true,
                 issues: true,
@@ -563,26 +506,20 @@ impl Implemented {
                 repo_star: true,
                 repo_readme: true,
             },
-            // Bitbucket Cloud reads (Phase 3): PR list/view/diff, CI pipelines, and
-            // repo View/URL are wired over direct HTTP. Phase 4 adds the WRITES: PR
-            // comment, decline (`mr_state` = DECLINE only — Bitbucket can't reopen a
-            // declined PR via API or web, so `forge_pr_reopen` errors and the frontend
-            // hides the button), merge, title/body edit, create, and the bodyless
-            // approve/unapprove toggle; plus pipeline rerun / cancel / dispatch.
-            // The parity pass adds the request-changes TOGGLE (unlike GitLab,
-            // Bitbucket's revoke works on every plan) and the reviewers picker
-            // (`mr_reviewers` — workspace members, minus the author).
-            // Everything else — issues (the native tracker sunsets 2026-08-20),
-            // assignees/labels, releases, insights, settings — stays false, so
-            // those panels degrade to "coming soon".
+            // Bitbucket Cloud: PRs, pipelines, repo actions, publish, the repo-settings
+            // surface, and the PR-write set are wired over direct HTTP — the flags below
+            // are the source of truth. `mr_state` is DECLINE only: a declined PR can't
+            // be reopened via API or web (BCLOUD-4954), so `forge_pr_reopen` errors and
+            // the frontend hides the button. Issues stay false — the native tracker
+            // sunsets 2026-08-20.
             Provider::Bitbucket => Self {
                 pull_requests: true,
                 ci: true,
                 repo_actions: true,
-                // Wave 2/3: the insights flag, publishing a local repo, and the
-                // full repo-settings surface (admin probe + General / Danger zone +
-                // default reviewers / branch restrictions / pipelines config,
-                // variables, schedules / webhooks) are now wired over direct HTTP.
+                // Insights, publishing a local repo, and the full repo-settings surface
+                // (admin probe + General / Danger zone + default reviewers / branch
+                // restrictions / pipelines config, variables, schedules / webhooks) are
+                // wired over direct HTTP.
                 insights: true,
                 publish: true,
                 repo_settings: true,
@@ -600,19 +537,13 @@ impl Implemented {
                 ci_rerun: true,
                 ci_cancel: true,
                 ci_dispatch: true,
-                // Wave 4: the PR-tasks checklist (Bitbucket-native).
                 pr_tasks: true,
                 // Review threads: inline-comment reads + replies are wired; thread
                 // RESOLUTION stays false — no comment-resolution field/endpoint was
                 // found on any probed Bitbucket comment (`resolve_thread` errors).
                 mr_review_threads: true,
                 mr_thread_reply: true,
-                // Review-thread comment edit/delete: inline comments are the same
-                // comment objects as the conversation ones, so they reuse the PR
-                // comment endpoints. (Thread RESOLUTION stays false above.)
                 mr_thread_comment_edit: true,
-                // Commit comments, new-thread create, and batched review submit are
-                // all wired for Bitbucket.
                 commit_comments: true,
                 mr_thread_create: true,
                 mr_review_submit: true,
@@ -630,10 +561,9 @@ impl Implemented {
     }
 }
 
-/// The provider-neutral analogue of `GhStatus`: is the hosted integration usable
-/// for this repo, on which host, signed in as whom, and what does it support. The
-/// frontend gates hosted features on this instead of a GitHub-only readiness
-/// check, so the same panels light up for any provider.
+/// The provider-neutral analogue of `GhStatus`: is the hosted integration usable for
+/// this repo, on which host, signed in as whom, and what does it support. The frontend
+/// gates hosted features on this, not a GitHub-only readiness check.
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ForgeStatus {
@@ -690,9 +620,7 @@ pub struct CompletedReviewerOut {
     pub state: String,
 }
 
-/// A repository as listed for cloning — neutral across providers (the clone
-/// browser's row). GitHub fields map 1:1 from `GhRepo`; GitLab fills it from a
-/// `glab` project.
+/// A repository row for the clone browser — neutral across providers.
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ForgeRepo {
@@ -825,94 +753,58 @@ mod tests {
         let i = Implemented::for_provider(Provider::GitHub);
         assert!(i.pull_requests && i.issues && i.ci && i.releases && i.insights);
         assert!(i.repo_actions && i.publish);
-        // The lone exception: the bodyless approve/unapprove toggle is GitLab-only
-        // (GitHub approves via the review flow), so GitHub leaves `mr_approve` false.
+        // The GitHub `false`s all have their analogue elsewhere: approve /
+        // request-changes live in GitHub's Review menu, draft toggle in
+        // `gh pr ready [--undo]` gated on canWrite, and the rest are GitLab- or
+        // Bitbucket-unique surfaces.
         assert!(!i.mr_approve);
-        // Auto-merge (MWPS) is a GitLab-only control too — no in-app GitHub PR
-        // auto-merge here, so GitHub stays false.
         assert!(!i.mr_auto_merge);
-        // Labels (issue + MR) and issue assignees are shared controls — built for both.
         assert!(i.issue_labels && i.mr_labels && i.issue_assignees);
-        // MR/PR assignees are a shared control too (GitHub PRs are issues under the hood).
         assert!(i.mr_assignees);
         assert!(i.issue_create && i.mr_create);
-        // CI actions and release management are shared controls too.
         assert!(i.ci_rerun && i.ci_cancel && i.ci_dispatch);
         assert!(i.release_create && i.release_edit);
-        // Request-changes mirrors mr_approve: a forge-only control (GitHub's
-        // analogue lives in its own Review menu), so it stays false. The reviewers
-        // picker, though, IS built for GitHub (`gh pr edit --add/--remove-reviewer`).
         assert!(!i.mr_request_changes && i.mr_reviewers);
-        // Title/body editing, issue milestones, and reactions are shared controls.
         assert!(i.issue_edit && i.mr_edit && i.issue_milestone);
         assert!(i.issue_reactions && i.mr_reactions);
-        // CI job play, time tracking, and issue links mirror mr_approve: GitLab-only
-        // (GitHub has no per-job manual play, native time tracking, or issue links),
-        // so GitHub stays false.
         assert!(!i.ci_job_play && !i.time_tracking && !i.issue_links);
-        // PR tasks are a Bitbucket-only surface here, so GitHub stays false too.
         assert!(!i.pr_tasks);
-        // Review threads: read, reply, and resolve are all built for GitHub.
         assert!(i.mr_review_threads && i.mr_thread_reply && i.mr_thread_resolve);
-        // Commit comments, new-thread create, and batched review submit — all three.
         assert!(i.commit_comments && i.mr_thread_create && i.mr_review_submit);
-        // The draft toggle stays false for GitHub — its Ready/Convert path goes via
-        // `gh pr ready [--undo]` gated on canWrite, not this flag.
         assert!(!i.mr_draft_toggle);
-        // Explore: repo search, fork-by-name, star, and README are all built for GitHub.
         assert!(i.repo_search && i.repo_fork_by_name && i.repo_star && i.repo_readme);
     }
 
     #[test]
     fn gitlab_implements_mr_issue_ci_and_release_reads_so_far() {
-        // GitLab is platform-capable of PRs/issues/CI (capabilities); merge request,
-        // issue, CI-pipeline, and release reads are built, so only insights / repo
-        // actions still degrade to "coming soon" even when the repo is ready.
+        // GitLab is platform-capable of PRs/issues/CI; every panel is wired, and writes
+        // land per-action.
         let cap = Capabilities::for_provider(Provider::GitLab);
         let imp = Implemented::for_provider(Provider::GitLab);
         assert!(cap.pull_requests && imp.pull_requests);
         assert!(cap.issues && imp.issues);
         assert!(cap.ci && imp.ci);
         assert!(imp.releases);
-        // Every panel is wired now — insights (local charts + CI card), repo
-        // actions (view/star), and publish.
         assert!(imp.insights && imp.repo_actions && imp.publish);
-        // First WRITES: issue + MR comment and close/reopen are wired up for GitLab,
-        // plus the GitLab-only MR approve/unapprove toggle and MR merge.
         assert!(imp.issue_comment && imp.issue_state);
         assert!(imp.mr_comment && imp.mr_state && imp.mr_approve && imp.mr_merge);
-        // …plus comment edit/delete on both MR and issue comments.
         assert!(imp.mr_comment_edit && imp.issue_comment_edit);
-        // …plus the GitLab-only auto-merge (MWPS) arm/cancel control.
         assert!(imp.mr_auto_merge);
-        // Labels (issue + MR) and issue assignees now wired for GitLab too.
         assert!(imp.issue_labels && imp.mr_labels && imp.issue_assignees);
-        // …and creating issues + merge requests from the app.
         assert!(imp.issue_create && imp.mr_create);
-        // …and pipeline retry/cancel/run, release management, and the GitLab-only
-        // MR assignees picker.
         assert!(imp.ci_rerun && imp.ci_cancel && imp.ci_dispatch);
         assert!(imp.release_create && imp.release_edit);
         assert!(imp.mr_assignees);
-        // …and title/body editing plus issue milestones.
         assert!(imp.issue_edit && imp.mr_edit && imp.issue_milestone);
-        // …and the GitLab-only request-changes reviewer state.
         assert!(imp.mr_request_changes);
-        // …and award-emoji reactions on issues and MRs.
         assert!(imp.issue_reactions && imp.mr_reactions);
-        // …and the GitLab-only CI job play, time tracking, and issue links.
         assert!(imp.ci_job_play && imp.time_tracking && imp.issue_links);
         // PR tasks stay Bitbucket-only — not wired for GitLab.
         assert!(!imp.pr_tasks);
-        // Review threads: read, reply, and resolve are all wired for GitLab.
         assert!(imp.mr_review_threads && imp.mr_thread_reply && imp.mr_thread_resolve);
-        // …plus edit/delete on review-thread comments (positioned notes).
         assert!(imp.mr_thread_comment_edit);
-        // …plus commit comments, new-thread create, and batched review submit.
         assert!(imp.commit_comments && imp.mr_thread_create && imp.mr_review_submit);
-        // …and the draft toggle both ways (`glab mr update --ready|--draft`).
         assert!(imp.mr_draft_toggle);
-        // Explore: repo search, fork-by-name, star, and README are all wired for GitLab.
         assert!(imp.repo_search && imp.repo_fork_by_name && imp.repo_star && imp.repo_readme);
     }
 
@@ -937,8 +829,7 @@ mod tests {
         assert!(bb.mr_approve);
         // PR-comment edit/delete is wired; issue-comment edit stays off (no tracker).
         assert!(bb.mr_comment_edit && !bb.issue_comment_edit);
-        // …the request-changes toggle and the reviewers picker (both Bitbucket
-        // writes; GitLab's reviewer list stays unwired)…
+        // …the request-changes toggle and the reviewers picker…
         assert!(bb.mr_request_changes && bb.mr_reviewers);
         // …and pipeline rerun / cancel / dispatch.
         assert!(bb.ci_rerun && bb.ci_cancel && bb.ci_dispatch);

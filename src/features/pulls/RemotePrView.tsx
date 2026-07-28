@@ -182,12 +182,10 @@ const MERGE_LABEL: Record<MergeStrategy, string> = {
   fast_forward: "Fast-forward",
 };
 
-/** Whether a GitHub merge method is disabled by the repository's server-side merge
- *  settings (allow merge commit / squash / rebase). Only an explicit `false` gates —
- *  `null`/`undefined` is "unknown" (fetch failed, or a non-GitHub provider) and is
- *  treated as NOT disabled, so the picker behaves exactly as before when unknown.
- *  Fast-forward is a Bitbucket-only method with no GitHub server toggle, so it's
- *  never server-disabled here. */
+/** Whether a GitHub merge method is disabled by the repo's server-side merge
+ *  settings. Only an explicit `false` gates — `null`/`undefined` means unknown
+ *  (fetch failed, or a non-GitHub provider) and never disables. Bitbucket's
+ *  fast_forward has no GitHub server toggle, so it's never server-disabled here. */
 function isServerMergeDisabled(pr: PrDetails, s: MergeStrategy): boolean {
   const flag =
     s === "merge"
@@ -208,23 +206,20 @@ export function RemotePrView({
   number: number;
 }) {
   const queryClient = useQueryClient();
-  // The read view is provider-neutral. The remaining GitHub-only mutations (full
-  // reviews, ready-for-review, checkout helpers) route through `gh_*` commands
-  // and stay gated on `canWrite` — "not a known read-only provider" rather than
-  // `=== "github"`, so that while the (separate) forge-status query is still
-  // pending or after it fails, a GitHub PR keeps its write controls exactly as
-  // before — only an explicitly-detected GitLab/Bitbucket repo suppresses them.
+  // The read view is provider-neutral; GitHub-only mutations (full reviews,
+  // ready-for-review, checkout) route through `gh_*` and gate on `canWrite`
+  // ("not a known read-only provider"), NOT `provider === "github"` — so a pending
+  // or failed forge-status probe never strips a GitHub PR's write controls.
   const forge = useForgeStatus(repoPath);
   const provider = forge.data?.provider;
   const remoteLabel = providerLabel(provider);
   const prNoun = provider === "gitlab" ? "merge request" : "pull request";
-  // The single lens-resolution point for this surface (see package B2): every PR
-  // read/write below reads/writes against the fork (origin) or its parent
-  // (upstream). "origin" everywhere but a GitHub fork whose lens is set upstream.
+  // The single lens-resolution point for this surface: every PR read/write below
+  // targets the fork (origin) or its parent (upstream) — "origin" everywhere but a
+  // GitHub fork whose lens is set upstream.
   const lens = useRepoLens(repoPath);
-  // Per-action write-capability flags, derived purely from forge status + provider
-  // (see usePrCapabilities for the full gating convention). Destructured so every
-  // downstream reference keeps compiling unchanged.
+  // Per-action write-capability flags from forge status + provider (gating
+  // convention: usePrCapabilities).
   const {
     canWrite,
     canComment,
@@ -277,12 +272,10 @@ export function RemotePrView({
   const unapprovePr = useUnapprovePr(repoPath);
   const requestChangesPr = useRequestChangesPr(repoPath, lens);
   const unrequestChangesPr = useUnrequestChangesPr(repoPath);
-  // Auto-merge state (GitLab-only): read only for a ready GitLab repo with an open
-  // MR (null disables the read for GitHub / closed MRs). It polls server-side so the
-  // view notices the pipeline completing and the auto-merge firing. Gate on the Pulls
-  // tab being active too: the <Activity>-hidden subtree still renders, so the composite
-  // gate is load-bearing — a disabled query (null number) stops the refetchInterval, and
-  // staleTime (5s) means returning to the tab refetches immediately.
+  // Auto-merge state (GitLab-only): a null number disables the read (GitHub / closed
+  // MRs) and stops its refetchInterval — it polls so the view notices the pipeline
+  // completing and the auto-merge firing. The repoTab gate is load-bearing: an
+  // <Activity>-hidden subtree still renders; staleTime (5s) refetches on return.
   const repoTab = useUiStore((s) => s.repoTab);
   const mergeState = useGlMrMergeState(
     repoPath,
@@ -300,9 +293,8 @@ export function RemotePrView({
   const unminimizeComment = useUnminimizeComment(repoPath);
   const setDraft = useSetPrDraft(repoPath, lens);
   const editPr = useEditPr(repoPath, lens);
-  // File:line-anchored review threads (Copilot/CodeRabbit/human line comments).
-  // The read serves both the Conversation block below and (later) the Files
-  // diff anchors, so it lives here at the top level. The read gates on the PR
+  // File:line-anchored review threads, shared by the Conversation block and the
+  // Files-tab diff anchors — so the read lives at the top level. It gates on the PR
   // number alone (a flaky status probe mustn't hide threads); the WRITE controls
   // below stay gated on the per-provider Implemented flags.
   const reviewThreads = usePrReviewThreads(repoPath, number, lens);
@@ -318,18 +310,15 @@ export function RemotePrView({
     { target: "mr", number },
   );
   const [section, setSection] = useState<Section>("conversation");
-  // A review thread the user asked to jump to (a timeline "View thread" click on
-  // a thread-reply wrapper row). Handed to whichever ReviewThreadList owns it; it
-  // reveals the (possibly resolved/collapsed) thread and clears this via
-  // onRevealed, so the jump works even when the target card isn't mounted yet.
+  // A review thread the user asked to jump to (timeline "View thread"). Handed to
+  // whichever ReviewThreadList owns it; that list reveals the (possibly
+  // resolved/collapsed) thread and clears this via onRevealed.
   const [revealThreadId, setRevealThreadId] = useState<string | null>(null);
-  // The activity-timeline events (force-pushes, labels, state changes, review
-  // requests, approvals) that interleave into the Conversation feed. Now
-  // provider-neutral — the backend's `forge_pr_timeline` dispatches per provider
-  // (GitHub/GitLab/Bitbucket). Fetch only while the Conversation tab is showing
-  // AND we resolved a remote provider — a hidden tab or an unknown provider must
-  // not fetch (the <Activity>-hidden subtree still renders, so the composite gate
-  // is load-bearing).
+  // Activity-timeline events (force-pushes, labels, state changes, review requests,
+  // approvals) interleaved into the Conversation feed; provider-neutral via the
+  // backend's `forge_pr_timeline`. Fetch only while Conversation is showing AND a
+  // provider resolved — the <Activity>-hidden subtree still renders, so the
+  // composite gate is load-bearing.
   const timeline = usePrTimeline(
     repoPath,
     number,
@@ -369,9 +358,8 @@ export function RemotePrView({
   // (default "github" — gh is the authoritative default for an unrecognized host).
   const providerKey: ForgeProvider = provider ?? "github";
 
-  // Palette-only PR actions (mounted here, so only live while a remote PR is
-  // open). "Submit review…" opens the dialog when the provider allows a batch
-  // review; "Discard pending review" confirms then clears the drafts.
+  // Palette-only PR actions — mounted here so they live only while a remote PR is
+  // open.
   const draftCount = drafts.data?.length ?? 0;
   const [discardConfirmOpen, setDiscardConfirmOpen] = useState(false);
   useHotkeyAction(
@@ -384,15 +372,14 @@ export function RemotePrView({
     () => setDiscardConfirmOpen(true),
     draftCount > 0,
   );
-  // The shared Ready / Convert-to-draft pair is visible when a wired provider
-  // (GitLab/Bitbucket) flags `mrDraftToggle`, OR on GitHub via `canWrite` (its
-  // Ready/Convert routes through `gh pr ready [--undo]`, kept byte-identical). Used
-  // by both the footer buttons and the palette actions below.
+  // The shared Ready / Convert-to-draft pair: visible when a wired provider
+  // (GitLab/Bitbucket) flags `mrDraftToggle`, or on GitHub via `canWrite` (its
+  // Ready/Convert routes through `gh pr ready [--undo]`).
   const isGitHubProvider = providerKey === "github";
   const draftPairVisible = canToggleDraft || (isGitHubProvider && canWrite);
-  // One in-flight PR mutation at a time: every footer/state control (and the
-  // palette twins below) disables while any of these runs. Declared here, above
-  // the palette wiring, so the actions can share the exact same gate.
+  // One in-flight PR mutation at a time: every footer/state control and its palette
+  // twin disables while any of these runs. Declared above the palette wiring so both
+  // share the exact same gate.
   const busy =
     comment.isPending ||
     mergePr.isPending ||
@@ -405,9 +392,8 @@ export function RemotePrView({
     armAutoMerge.isPending ||
     cancelAutoMerge.isPending ||
     setDraft.isPending;
-  // Palette twins of the footer's draft controls (mounted here, so live only in an
-  // open remote-PR view with the applicable state). Each reuses the exact same
-  // `setDraft` mutation as its button — Ready fires the ready-review automation.
+  // Palette twins of the footer's draft controls — same `setDraft` mutation; Ready
+  // also fires the ready-review automation.
   useHotkeyAction(
     "pr-ready-for-review",
     () =>
@@ -469,9 +455,8 @@ export function RemotePrView({
       await editPr.mutateAsync({
         number,
         title,
-        // The active cluster owns the trailing ref block, so re-compose from the
-        // stripped text + its chips. Jira mention chips emit `Relates to KEY`
-        // lines; the native chips emit `Closes/Relates to #N`.
+        // The active cluster owns the trailing ref block — re-compose from the
+        // stripped text + its chips, never the raw body (that would double the refs).
         body:
           canJiraMention && jiraChips.length > 0
             ? composeBodyWithJiraRefs(body, jiraChips)
@@ -482,10 +467,9 @@ export function RemotePrView({
     },
     successToast: "Pull request updated",
   });
-  // Shared chip state machine — enabled only while the edit dialog is open (and
-  // the tracker is usable). Extraction/AI seeds follow the create rules; the
+  // Shared chip state machine — enabled only while the edit dialog is open. The
   // body's own trailing refs are peeled into chips at open (`resetWith` in
-  // openEdit below), so the two never fight as two sources of truth.
+  // openEdit), so body text and chips are never two sources of truth.
   const {
     chips: linkedIssues,
     resetWith: resetLinkedIssues,
@@ -533,12 +517,11 @@ export function RemotePrView({
   const quoteReply = (body: string) =>
     makeQuoteReply({ composerRef, setBody: setComposeBody })(body);
 
-  // GitLab approve/unapprove — a single toggle keyed on whether the viewer has
-  // approved. `user_can_approve` is unreliable on Free (false even when approving
-  // works), so we don't pre-disable; a genuine permission error surfaces via toast.
-  // The status lives in a *separate* glab query, so we flip it OPTIMISTICALLY here:
-  // otherwise the label lags a click by a full approve-POST + approvals-refetch and
-  // looks broken. The success invalidation reconciles the real count; errors roll back.
+  // GitLab approve/unapprove — one toggle keyed on whether the viewer approved.
+  // `user_can_approve` is unreliable on Free (false even when approving works), so
+  // don't pre-disable; permission errors surface via toast. The approval status lives
+  // in a SEPARATE query, so flip it optimistically — otherwise the label lags a full
+  // approve-POST + refetch. Success invalidation reconciles; errors roll back.
   async function toggleApproval() {
     const approved = approvals.data?.viewerHasApproved ?? false;
     const action = approved ? unapprovePr : approvePr;
@@ -584,11 +567,10 @@ export function RemotePrView({
     });
   }
 
-  // Request changes — a true toggle on Bitbucket (its revoke works on every
-  // plan); one-shot on GitLab (the direct undo is Premium-only; approving, which
-  // clears the state, is the natural Free-tier exit). Same optimistic flip as the
-  // approve toggle: the state lives in the separate approvals query, so waiting
-  // on the write + refetch would look broken.
+  // Request changes — a true toggle on Bitbucket (revoke works on every plan);
+  // one-shot on GitLab (the direct undo is Premium-only; approving clears it). Same
+  // optimistic flip as the approve toggle — the state lives in the separate
+  // approvals query.
   async function requestChanges() {
     const requested = approvals.data?.viewerRequestedChanges ?? false;
     // Already requested on GitLab: the button is a focusable state indicator
@@ -711,19 +693,14 @@ export function RemotePrView({
   }
 
   const pr = details.data;
-  // A successful in-app Mark-ready fires a fresh pr-open review directly, so a
-  // draft created with `reviewDraftPrs: false` still gets its first review when
-  // the user readies it here — the catch-up poller only covers PRs within its
-  // 14-day window (sync.ts), so a long-lived draft readied in-app would
-  // otherwise slip through. Gated by `prOpenEligible` — the SAME eligibility the
-  // external catch-up path enforces (some mode still missing its review, head not
-  // dismissed; the runner's per-mode pr-open gate skips the modes that already
-  // ran), so the two ready paths behave identically. This guard, not claim
-  // dedup, is what prevents a double review: a manual panel review saves via
-  // `saveReview` WITHOUT taking an automation claim, so claim dedup can't see it
-  // — only this prior-review check can (round-2 finding, PR #91). Mirrors the
-  // catch-up event shape (sync.ts); the marker-comment lift recovers any reviewer
-  // notes, so the event carries none.
+  // An in-app Mark-ready fires its own pr-open review: the catch-up poller only
+  // covers PRs inside its 14-day window (sync.ts), so a long-lived draft readied here
+  // would otherwise never get a first review. Gated by `prOpenEligible` — the SAME
+  // eligibility the external catch-up path enforces, so both paths behave identically.
+  // That guard, not claim dedup, is what prevents a double review: a manual panel
+  // review saves via `saveReview` WITHOUT taking an automation claim, so claim dedup
+  // can't see it. Event shape mirrors sync.ts; the marker-comment lift recovers
+  // reviewer notes, so none ride the event.
   async function fireReadyReview() {
     if (!pr) return;
     const headSha = pr.commits.at(-1)?.oid;
@@ -745,16 +722,13 @@ export function RemotePrView({
     });
   }
   // Each rendered review "claims" the line-comment threads it owns (GitHub
-  // `reviewId`; always "" on GitLab/Bitbucket, which don't model reviews).
-  // Claimed threads render inline under their review in the timeline; the rest
-  // fall to the residual block below — so on GitLab/Bitbucket, where nothing is
-  // owned, that block stays exactly as before.
+  // `reviewId`; always "" on GitLab/Bitbucket, which don't model reviews). Claimed
+  // threads render inline under their review; the rest fall to the residual block.
   const renderedReviews = (pr?.reviews ?? []).filter(
     (r) => hasVisibleBody(r.body) || r.state,
   );
-  // Group threads by the review that owns them (GitHub `reviewId`; "" on
-  // GitLab/Bitbucket, which don't model reviews) — built once, then reused for
-  // both the claimed-id set and each review's inline slice below.
+  // Threads grouped by owning review — built once, reused for the claimed-id set
+  // and each review's inline slice.
   const threadsByReview = new Map<string, ReviewThreadOut[]>();
   for (const t of reviewThreads.data ?? []) {
     if (!t.reviewId) continue;
@@ -768,15 +742,11 @@ export function RemotePrView({
     ),
   );
   // Thread-reply wrapper reviews: replying to a review thread outside a batched
-  // review makes GitHub auto-wrap the reply in a new empty-body `COMMENTED`
-  // review. That wrapper passed the `renderedReviews` filter on `state` alone and
-  // rendered as a contentless "commented" card — noise, with no link to the
-  // thread it wraps. It's a wrapper iff it has no visible body, is `COMMENTED`
-  // (backend delivers GitHub's uppercase state verbatim), AND claims no threads
-  // of its own. Accepted tradeoff: a genuinely empty COMMENTED review with no
-  // fetched threads also renders as the compact row — GitHub's reply-wrapping is
-  // by far the dominant producer of such reviews. GitLab/Bitbucket emit no review
-  // rows, so none of this fires there.
+  // review makes GitHub auto-wrap the reply in a new empty-body `COMMENTED` review.
+  // It's a wrapper iff it has no visible body, is `COMMENTED` (the backend delivers
+  // GitHub's uppercase state verbatim), AND claims no threads. Accepted tradeoff: a
+  // genuinely empty COMMENTED review with no fetched threads also renders as the
+  // compact row. GitLab/Bitbucket emit no review rows.
   const wrapperReviewIds = new Set(
     renderedReviews
       .filter(
@@ -809,11 +779,10 @@ export function RemotePrView({
     pr.headRefName === defaultBranch.data;
   const headDeletionBlocked =
     pr != null && isDeletionBlocked(rulesConfig, pr.headRefName);
-  // Branch rules load asynchronously, so `headDeletionBlocked` can flip true
-  // after the dialog is open and the user has already ticked "delete branch".
-  // Drop that choice when it does, so the state can't linger stale-true behind
-  // the now-disabled checkbox (the dialog's `checked` override already keeps the
-  // *render* correct on the same frame; this keeps the underlying state honest).
+  // Branch rules load async, so `headDeletionBlocked` can flip true after the user
+  // already ticked "delete branch" — drop the choice then. The dialog's own `checked`
+  // override already keeps the render correct; this keeps the underlying state honest
+  // (it can't linger stale-true behind the now-disabled checkbox).
   useEffect(() => {
     if (headDeletionBlocked) setDeleteBranch(false);
   }, [headDeletionBlocked]);
@@ -842,12 +811,11 @@ export function RemotePrView({
   // irreversible op; reloading refetches the head. (GitHub has no guard, so it's exempt.)
   const mergeGuardMissing = provider === "gitlab" && pr?.commits.length === 0;
 
-  // GitHub-only: when the server ∩ branch-rule intersection is empty — every one of
-  // the three GitHub merge methods is disabled either in the repo's settings or by a
-  // GitDesktop branch rule — opening a menu of all-disabled items is useless, so the
-  // Merge trigger itself is disabled with an explanation. `null`/`unknown` server
-  // flags never count as disabled, so a failed settings fetch can never trip this
-  // (behaviour stays exactly as today). GitLab/Bitbucket gate their methods elsewhere.
+  // GitHub-only: when every one of the three merge methods is disabled by the repo's
+  // settings or by a GitDesktop branch rule, a menu of all-disabled items is useless
+  // — disable the Merge trigger itself with an explanation. `null`/unknown server
+  // flags never count as disabled, so a failed settings fetch can't trip it.
+  // GitLab/Bitbucket gate their methods elsewhere.
   const allMergeMethodsBlocked =
     pr != null &&
     provider !== "gitlab" &&
@@ -911,13 +879,10 @@ export function RemotePrView({
   }
 
   // Open the Edit dialog: the chips OWN the trailing ref block, so peel any exact
-  // `Closes #N` / `Relates to #N` lines off the end of the body into chips
-  // (keyword preserved) and open the editor with the STRIPPED text — the user
-  // never edits the ref block as text, and on save it's re-appended from chips.
-  // With the tracker unavailable there are no chips: open with the raw body.
-  // `pr` is aliased to a narrowed const (`prForGen`) below so these hoisted
-  // function bodies see it as defined — TS doesn't carry the outer `!pr` guard
-  // into a nested closure.
+  // `Closes #N` / `Relates to #N` lines off the body into chips (keyword preserved)
+  // and open the editor with the STRIPPED text; on save it's re-appended from chips.
+  // No tracker ⇒ no chips, open the raw body. `prForGen` aliases the narrowed `pr`
+  // because TS doesn't carry the outer `!pr` guard into these hoisted closures.
   const prForGen = pr;
   function openEditWithChips() {
     if (canLinkIssues) {
@@ -938,7 +903,7 @@ export function RemotePrView({
   }
 
   // AI title+description generation — shared by the Edit dialog's Generate button
-  // and its mod+g chord. Verbatim the button's prior onClick body.
+  // and its mod+g chord.
   function runGenerate() {
     prGen.generateFromDiff(
       // Reuse the diff already cached by usePrDiff — and, crucially,
@@ -971,8 +936,7 @@ export function RemotePrView({
       },
       // Provider-aware prompt copy; null host → base GitHub wording.
       provider ?? undefined,
-      // Labels aren't wired on the edit path — keep the create default of no
-      // proposed labels; reviewer notes aren't part of an edit either.
+      // Labels and reviewer notes aren't part of the edit path — no proposed labels.
       [],
       undefined,
       // Grounded issue candidates — chips pinned first, then top-ranked open
@@ -1001,10 +965,9 @@ export function RemotePrView({
   const fileDiffLookup = (path: string): string | undefined =>
     fileSections.get(path);
 
-  // The inline line-comment composer for the Files tab: enabled only when the
-  // provider allows creating a new review thread. Anchored to the currently
-  // selected file (its section prefills a suggestion's code). Absent otherwise,
-  // so the diff stays read-only exactly as before.
+  // The inline line-comment composer for the Files tab: only when the provider allows
+  // creating a thread, anchored to the selected file (its section prefills a
+  // suggestion's code). Absent otherwise ⇒ read-only diff.
   const reviewLineWidget: LineWidget | undefined =
     canCreateThread && effectivePath
       ? {
@@ -1028,12 +991,10 @@ export function RemotePrView({
         }
       : undefined;
 
-  // Gating inputs + the write for the per-suggestion Apply affordance, shared by
-  // the Conversation review-thread block and the Files-tab diff anchors. The
-  // current branch is the same status field the header's "Checked out" gate reads
-  // (`repoStatus.data?.branch?.name`); onApply supplies `stageWhenClean: true`
-  // (SuggestionApply's arg omits it) so a clean file is staged like GitHub's
-  // "Commit suggestion".
+  // Gating inputs + the write for the per-suggestion Apply, shared by the
+  // Conversation thread block and the Files-tab anchors. `onApply` supplies
+  // `stageWhenClean: true` (SuggestionApply's arg omits it) so a clean file is staged
+  // like GitHub's "Commit suggestion".
   const suggestionApply: SuggestionApply = {
     headRefName: pr.headRefName,
     currentBranch: repoStatus.data?.branch?.name ?? null,
@@ -1042,17 +1003,14 @@ export function RemotePrView({
 
   const isOpen = pr.state === "OPEN";
   // Split reviewers so the editable picker only ever manages humans: bot requests
-  // (e.g. GitHub Copilot) render as display-only chips and must never ride through
-  // the popover's onChange as a desired reviewer. GitLab/Bitbucket never set isBot,
-  // so botReviewers stays empty there — those PRs render exactly as before.
+  // (e.g. GitHub Copilot) are display-only chips and must never ride through the
+  // popover's onChange as a desired reviewer. GitLab/Bitbucket never set isBot.
   const humanReviewers = pr.reviewers.filter((r) => !r.isBot);
   const botReviewers = pr.reviewers.filter((r) => r.isBot);
-  // Completed reviewers — reviewers who already submitted a verdict (they leave
-  // gh's `reviewRequests`, so they're gone from `pr.reviewers`, but their review
-  // stays in `pr.reviews`). GitHub's own sidebar keeps showing them WITH their
-  // state, so we surface each as a read-only chip carrying that state. Derived
-  // like humanReviewers/botReviewers above (plain, not a hook — this is past the
-  // component's early returns).
+  // Completed reviewers — those who already submitted a verdict: they leave gh's
+  // `reviewRequests` (so they're gone from `pr.reviewers`) but their review stays in
+  // `pr.reviews`. GitHub's own sidebar keeps showing them with their state. A plain
+  // derivation, not a hook — this is past the component's early returns.
   const completedReviewers = [
     ...deriveCompletedReviewers(pr.reviews, pr.reviewers),
     ...pr.completedReviewers.map((cr) => ({
@@ -1211,9 +1169,8 @@ export function RemotePrView({
             </div>
           )
         )}
-        {/* Assignee picker (GitHub + GitLab; same affordance as the issue
-            sidebar). A closed/merged PR falls back to read-only chips like the
-            labels row. */}
+        {/* Assignee picker (GitHub + GitLab). A closed/merged PR falls back to
+            read-only chips, like the labels row. */}
         {isOpen && canEditAssignees ? (
           <AssigneesPopover
             repoPath={repoPath}
@@ -1243,12 +1200,10 @@ export function RemotePrView({
             </div>
           )
         )}
-        {/* Reviewers picker (GitHub + GitLab + Bitbucket; workspace/project members,
-            GitHub diffs pending user requests). A closed/merged PR falls back to
-            read-only chips like the rows above. Bot requests (e.g. GitHub Copilot)
-            are display-only chips that never enter the picker's managed set — split
-            here so the popover's onChange (which emits its `value` as the desired
-            set) can never ride a bot through. */}
+        {/* Reviewers picker (all three providers). A closed/merged PR falls back to
+            read-only chips. Bot requests (e.g. Copilot) are display-only and split out
+            here so the popover's onChange — which emits its `value` as the desired
+            set — can never ride a bot through. */}
         {isOpen && canEditReviewers ? (
           <div className="flex flex-wrap items-center gap-1.5">
             <ReviewersPopover
@@ -1309,15 +1264,13 @@ export function RemotePrView({
             </div>
           )
         )}
-        {/* GitLab-only time-tracking summary (clock + est/spent); a popover with
-            the estimate/add-spent controls while the MR is open, static once
-            closed. GitHub never mounts it (gated on the flag). */}
+        {/* GitLab-only time-tracking summary; a popover with estimate/add-spent
+            while the MR is open, static once closed. */}
         {canTrackTime && (
           <MrTimeTracking repoPath={repoPath} number={number} open={isOpen} />
         )}
-        {/* Bitbucket-only PR-tasks chip: "{n} open tasks", quiet until there are
-            unresolved tasks. Clicking jumps to the Tasks section in the
-            conversation column. Reads the same usePrTasks query as the section. */}
+        {/* Bitbucket-only PR-tasks chip — quiet until there are unresolved tasks;
+            jumps to the Tasks section. Same usePrTasks query as the section. */}
         {canTasks && (
           <PrTasksChip
             repoPath={repoPath}
@@ -1477,9 +1430,8 @@ export function RemotePrView({
                   />
                 )}
               </div>
-              {/* Bitbucket-only PR tasks checklist — between the description and
-                  the review/comment threads. Gated on the flag alone; absent for
-                  GitHub/GitLab. */}
+              {/* Bitbucket-only PR tasks checklist, between the description and the
+                  threads. Gated on the flag alone. */}
               {canTasks && (
                 <PrTasksSection
                   repoPath={repoPath}
@@ -1487,13 +1439,10 @@ export function RemotePrView({
                   editable={pr.state === "OPEN"}
                 />
               )}
-              {/* The merged activity feed: reviews + comments + commits +
-                  timeline events, date-sorted oldest→newest (matching GitHub and
-                  the prior order). Each source maps to a {date, sortKey, node}
-                  entry so the sort is provider-neutral; the review/comment cards
-                  keep every prop they had before (they're relocated, not
-                  rewritten). Adjacent commit entries coalesce into one
-                  "pushed N commits" row. */}
+              {/* The merged activity feed: reviews + comments + commits + timeline
+                  events, date-sorted oldest→newest. Each source maps to a
+                  {date, sortKey, node} entry so the sort is provider-neutral;
+                  adjacent commit entries coalesce into one "pushed N commits" row. */}
               {(() => {
                 // Newest commit date drives approval staleness. gh returns
                 // oldest-first, but be defensive: max over all commit dates.
@@ -1512,13 +1461,11 @@ export function RemotePrView({
 
                 const entries: TimelineEntry[] = [];
 
-                // Reviews (existing cards, every prop preserved byte-for-byte). A
-                // stale APPROVED/CHANGES_REQUESTED review (its date predates the
-                // newest commit) gets a warning marker right after its card.
+                // A stale APPROVED/CHANGES_REQUESTED review (dated before the newest
+                // commit) gets a warning marker after its card.
                 for (const r of renderedReviews) {
-                  // A thread-reply wrapper review renders as a compact row instead
-                  // of an empty "commented" card: avatar + "replied in a review
-                  // thread", plus a jump-to-thread link when its thread was fetched.
+                  // A wrapper review renders as a compact row instead of an empty
+                  // "commented" card, with a jump link when its thread was fetched.
                   if (wrapperReviewIds.has(r.id)) {
                     const t = wrappedThreadFor(r.id);
                     const locator = t
@@ -1553,12 +1500,11 @@ export function RemotePrView({
                                 type="button"
                                 className="shrink-0 text-primary underline-offset-2 hover:underline cursor-pointer"
                                 onClick={() => {
-                                  // Route through the reveal seam (not a raw DOM
-                                  // scroll): the owning ReviewThreadList opens the
-                                  // resolved-group expander + expands the card so a
-                                  // resolved/collapsed target actually appears, then
-                                  // scrolls. Set the section first so the list is
-                                  // mounted when it reads the request.
+                                  // Route through the reveal seam, not a raw DOM
+                                  // scroll: the owning ReviewThreadList opens the
+                                  // resolved-group expander + expands the card
+                                  // before scrolling. Set the section first so the
+                                  // list is mounted when it reads the request.
                                   setSection("conversation");
                                   setRevealThreadId(t.id);
                                 }}
@@ -1615,11 +1561,10 @@ export function RemotePrView({
                           />
                         )}
                         {ownThreads.length > 0 && (
-                          // The review's own line-comment threads, nested under
-                          // it (a 1px border-l rail — the same nested-sublist
-                          // idiom as the pushed-commits row). GitLab/Bitbucket
-                          // never reach here: their threads carry no reviewId, so
-                          // nothing is claimed and they stay in the block below.
+                          // The review's own line-comment threads, nested under it
+                          // (a 1px border-l rail). GitLab/Bitbucket never reach
+                          // here — their threads carry no reviewId, so nothing is
+                          // claimed.
                           <div className="mt-2 border-l pl-3">
                             <ReviewThreadList
                               threads={ownThreads}
@@ -1665,8 +1610,7 @@ export function RemotePrView({
                   });
                 }
 
-                // Conversation comments (existing cards, every prop + the
-                // data-comment-id wrapper preserved).
+                // Conversation comments.
                 for (const c of pr.comments.filter((c) =>
                   hasVisibleBody(c.body),
                 )) {
@@ -1745,8 +1689,7 @@ export function RemotePrView({
 
                 const sorted = sortTimeline(entries);
 
-                // Coalesce adjacent commit markers into grouped "pushed N" rows;
-                // everything else renders its own node.
+                // Coalesce adjacent commit markers into grouped "pushed N" rows.
                 const rendered: React.ReactNode[] = [];
                 let run: CommitRow[] = [];
                 let runStart = 0;
@@ -1756,9 +1699,8 @@ export function RemotePrView({
                     <PushedCommitsRow
                       key={`push-${runStart}-${run[0].id}`}
                       commits={run}
-                      // Drill into the commit's detail via the existing Commits-tab
-                      // machinery (selectedCommitOid → pr.commits.find(oid) →
-                      // PrCommitDetail).
+                      // Drill into the commit via the Commits-tab machinery
+                      // (selectedCommitOid → PrCommitDetail).
                       onSelectCommit={(oid) => {
                         setSelectedCommitOid(oid);
                         setSection("commits");
@@ -1782,11 +1724,10 @@ export function RemotePrView({
                 if (rendered.length === 0) return null;
                 return <div className="space-y-4">{rendered}</div>;
               })()}
-              {/* Residual review threads — the ones NOT shown inline under a
-                  review above: all threads on GitLab/Bitbucket (no reviewId), and
-                  standalone line comments on GitHub. Grouped by file, same
-                  interactivity. Retitled when reviews claimed threads above so it
-                  doesn't read as a duplicate. Nothing when empty/loading. */}
+              {/* Residual review threads — those NOT shown inline under a review
+                  above: all threads on GitLab/Bitbucket (no reviewId), plus
+                  standalone line comments on GitHub. Retitled when reviews claimed
+                  threads above so it doesn't read as a duplicate. */}
               <ReviewThreadsBlock
                 threads={residualThreads}
                 heading={
@@ -1869,11 +1810,10 @@ export function RemotePrView({
                 >
                   Comment
                 </Button>
-                {/* The Review control now opens the batch submit dialog for
-                    EVERY provider (verdict + summary + any pending draft
-                    comments), replacing the legacy GitHub-only verdict menu.
-                    GitHub rides `canWrite` via canSubmitReview; a ready
-                    GitLab/Bitbucket repo enables it through the forge flag. */}
+                {/* The Review control opens the batch submit dialog for every
+                    provider (verdict + summary + pending draft comments). GitHub
+                    rides `canWrite` via canSubmitReview; GitLab/Bitbucket enable it
+                    through the forge flag. */}
                 {isOpen && canSubmitReview && (
                   <Button
                     variant="outline"
@@ -1931,14 +1871,11 @@ export function RemotePrView({
                   <Button
                     variant="outline"
                     size="sm"
-                    // Bitbucket: a true toggle (its revoke works on every plan).
-                    // GitLab: one-shot — once requested, the button becomes the
-                    // state indicator (the direct undo is Premium-only —
-                    // approve, or remove yourself as a reviewer on GitLab, to
-                    // clear). It stays FOCUSABLE in that state (the click
-                    // no-ops via the handler) so keyboard/AT users can still
-                    // reach the how-to-clear title. Same disable-on-unknown
-                    // posture as the approve toggle.
+                    // Bitbucket: a true toggle. GitLab: one-shot — once requested
+                    // the button is the state indicator (the direct undo is
+                    // Premium-only). It stays FOCUSABLE then (the handler no-ops)
+                    // so keyboard/AT users can reach the how-to-clear title. Same
+                    // disable-on-unknown posture as the approve toggle.
                     disabled={busy || approvals.isPending || approvals.isError}
                     aria-pressed={approval?.viewerRequestedChanges ?? false}
                     onClick={requestChanges}
@@ -2020,8 +1957,7 @@ export function RemotePrView({
 
       {section === "files" && (
         <div className="flex min-h-0 flex-1 flex-col">
-          {/* Pending-review status bar: hidden until a draft exists, then a
-              live count + Submit/Discard. Sits directly above the files pane. */}
+          {/* Pending-review status bar — hidden until a draft exists. */}
           <PendingReviewBar
             repoPath={repoPath}
             number={number}
@@ -2065,16 +2001,15 @@ export function RemotePrView({
         </div>
       )}
 
-      {/* The open-MR footer hosts Close + Merge (GitLab writes too) alongside the
-          shared Ready / Convert-to-draft pair — show it whenever any is available,
-          and gate each control individually. */}
+      {/* The open-MR footer hosts Close + Merge alongside the shared Ready /
+          Convert-to-draft pair — shown when any is available, each control gated
+          individually. */}
       {isOpen && (canChangeState || canMerge || canWrite) && (
         <div className="flex items-center gap-2 border-t p-3">
-          {/* One Ready / Convert-to-draft pair for all three providers. GitLab
-              (`glab mr update`) and Bitbucket (PUT `draft`) drive it off
-              `canToggleDraft`; GitHub folds in via `canWrite` and routes the same
-              `setDraft` mutation through `gh pr ready [--undo]`, so the Ready button
-              is byte-identical to before. Draft → primary Ready (fires the
+          {/* One Ready / Convert-to-draft pair for all three providers: GitLab
+              (`glab mr update`) and Bitbucket (PUT `draft`) via `canToggleDraft`;
+              GitHub folds in via `canWrite` and routes the same `setDraft` mutation
+              through `gh pr ready [--undo]`. Draft → primary Ready (fires the
               ready-review automation); open → a quieter Convert-to-draft. */}
           {draftPairVisible && pr.isDraft && (
             <Button
@@ -2165,10 +2100,7 @@ export function RemotePrView({
           {canMerge && (
             <DropdownMenu>
               {/* A natively-disabled Button swallows `title`, so the hint rides a
-                  wrapping span (same idiom as the "Checked out" button above and
-                  documented in DangerZone.tsx). Existing disabled causes (draft,
-                  merge-guard) keep their exact reasons; the all-methods-blocked cause
-                  adds its own only when it's the blocker. */}
+                  wrapping span (house idiom). */}
               <DropdownMenuTrigger
                 render={
                   <span
@@ -2216,9 +2148,8 @@ export function RemotePrView({
                     // never reaches this arm (bitbucket is excluded above) — the
                     // narrowing also keeps `s` a valid MergeMethod for the checks.
                     s !== "fast_forward";
-                  // Repository-level server setting (allow merge/squash/rebase). Only
-                  // an explicit `false` disables — `null`/`undefined` is "unknown" and
-                  // never gates (behaviour then matches today's, GitLab/BB included).
+                  // Repo-level server setting; only an explicit `false` disables
+                  // (unknown never gates).
                   const serverDisabled =
                     isGitHub && isServerMergeDisabled(pr, s);
                   const locallyBlocked =
@@ -2243,9 +2174,8 @@ export function RemotePrView({
                     </DropdownMenuItem>
                   );
                 })}
-                {/* GitLab auto-merge: while the head pipeline is in flight (and not
-                    already armed), offer merge-when-pipeline-succeeds variants that
-                    arm via the same confirm dialog. */}
+                {/* GitLab auto-merge: while the head pipeline is in flight and not
+                    already armed, offer merge-when-pipeline-succeeds variants. */}
                 {canAutoMerge && pipelineInFlight && !autoMergeArmed && (
                   <>
                     <DropdownMenuSeparator />
@@ -2419,9 +2349,8 @@ export function RemotePrView({
         }
       />
 
-      {/* The batch submit-review dialog: opened from the Review control, the
-          pending-review bar, and the palette action. Verdict caps ride canWrite
-          for GitHub, the forge flags for GitLab/Bitbucket. */}
+      {/* The batch submit-review dialog (Review control, pending-review bar, palette
+          action). Verdict caps ride canWrite for GitHub, forge flags elsewhere. */}
       <SubmitReviewDialog
         repoPath={repoPath}
         number={number}
@@ -2513,12 +2442,9 @@ function deriveCompletedReviewers(
   });
 }
 
-/**
- * Icon + tone + accessible word for a completed reviewer's state, so the verdict
- * never rides on color alone (distinct icon shapes + the word in title/aria-label).
- * Mirrors ChecksRollup's status→{Icon,tone} map; tones are token classes, never
- * hardcoded colors. Unknown states fall back to the neutral comment presentation.
- */
+/** Icon + tone + accessible word for a completed reviewer's state, so the verdict
+ *  never rides on color alone. Tones are token classes; unknown states fall back to
+ *  the neutral comment presentation. */
 function reviewStatePresentation(state: string): {
   Icon: typeof CheckCircleIcon;
   tone: string;
@@ -2537,13 +2463,10 @@ function reviewStatePresentation(state: string): {
   return { Icon: ChatCircleIcon, tone: "text-info", word: "commented" };
 }
 
-/**
- * A read-only chip for a reviewer who already submitted a verdict. Leads with a
- * state icon (distinct shape + semantic token tone), then the reviewer avatar
- * (a robot glyph for bots) and label. The state word lives in the chip's title
- * AND aria-label, so meaning never rides on color alone. Non-interactive display:
- * completed reviews are managed on the forge, so there's no picker affordance.
- */
+/** Read-only chip for a reviewer who already submitted a verdict: state icon +
+ *  avatar (robot glyph for bots) + label, with the state word in title AND
+ *  aria-label so meaning never rides on color alone. Non-interactive — completed
+ *  reviews are managed on the forge. */
 function CompletedReviewerChip({
   reviewer,
   ghHost,
@@ -2579,13 +2502,9 @@ function CompletedReviewerChip({
   );
 }
 
-/**
- * A read-only reviewer chip for a bot requested reviewer (e.g. GitHub Copilot).
- * Same visual idiom as the read-only human reviewer chips, plus a robot glyph so
- * the "bot" meaning never rides on color alone. Non-interactive display: reviewing
- * bots are managed on the forge, not from this picker, so there's no disabled-button
- * affordance. The accessible name is on the whole chip (title + aria-label).
- */
+/** Read-only chip for a bot requested reviewer (e.g. Copilot): the human chip idiom
+ *  plus a robot glyph, with the accessible name on the whole chip (title +
+ *  aria-label). Non-interactive — reviewing bots are managed on the forge. */
 function BotReviewerChip({
   user,
   ghHost,

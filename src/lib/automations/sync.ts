@@ -3,27 +3,21 @@ import { getDismissedHead } from "./dismissals";
 import { triggerAutomations } from "./runner";
 
 /**
- * Per-`(kind, repo, ref)` last head we already fired a pr-sync event for. A head
- * change fires at most once — not on every poll tick — so the watchers can call
- * `maybeFireSync` freely. The runner does the real work (per-mode watermark gate
- * + build-on-prior); this just debounces the trigger by head.
- *
- * Intentionally never reclaimed (the dedup must survive a repo view unmounting),
- * so it holds one small entry per distinct PR observed this session — a bounded,
- * negligible footprint that resets on restart.
+ * Per-`(kind, repo, ref)` last head we already fired a pr-sync event for, so a head
+ * change fires at most once instead of on every poll tick — watchers can call
+ * `maybeFireSync` freely. Intentionally never reclaimed: the dedup must survive a
+ * repo view unmounting. One small entry per PR seen this session; resets on restart.
  */
 const lastFiredHead = new Map<string, string>();
 
 /**
- * Whether two commit SHAs refer to the same commit, tolerating a short-vs-full
- * mismatch. Providers disagree on length: pr-open events seed the FULL 40-char
- * local sha, while Bitbucket's poll delivers a 12-char short sha for the same
- * head. A plain `===` would then treat every poll tick as a new head and re-fire
- * pr-sync forever. An exact-equal fast path returns true for any equal non-empty
- * value (identical SHAs are trivially the same commit, whatever their length).
- * Otherwise it prefix-matches by the shorter sha — and ONLY that prefix path
- * requires ≥7 chars (git's minimum unambiguous length), so a stray empty/1-char
- * value can't false-match a longer one.
+ * Whether two commit SHAs refer to the same commit, tolerating short-vs-full.
+ * Providers disagree on length: pr-open seeds the FULL 40-char local sha while
+ * Bitbucket's poll delivers a 12-char short sha for the same head, so a plain `===`
+ * would treat every poll tick as a new head and re-fire pr-sync forever. Equal
+ * non-empty values match outright; otherwise it prefix-matches by the shorter sha,
+ * which must be ≥7 chars (git's minimum unambiguous length) so a stray empty/1-char
+ * value can't false-match.
  */
 export function sameSha(a: string, b: string): boolean {
   if (a === b) return a !== "";
@@ -57,8 +51,6 @@ export function maybeFireSync(c: SyncCandidate): void {
   if (!c.currentHeadSha) return;
   const key = `${c.kind}:${c.repoPath}#${c.ref}`;
   const prior = lastFiredHead.get(key);
-  // sameSha (not `===`) so a short-vs-full sha for the SAME head (Bitbucket's
-  // 12-char poll head vs a full-40 seed) doesn't re-fire on every poll tick.
   if (prior !== undefined && sameSha(prior, c.currentHeadSha)) return;
   lastFiredHead.set(key, c.currentHeadSha);
   triggerAutomations({
@@ -78,11 +70,9 @@ export function maybeFireSync(c: SyncCandidate): void {
 }
 
 /**
- * How recently a PR must have been opened to earn an initial catch-up review.
- * Bounds the reach of the catch-up so an old backlog of un-reviewed PRs doesn't
- * fan out a burst of (paid) reviews the first time a rule is enabled — only PRs
- * you opened in the last two weeks are candidates. A `createdAt` that is missing
- * or unparsable fails CLOSED (not eligible).
+ * How recently a PR must have been opened to earn an initial catch-up review, so
+ * enabling a rule doesn't fan out a burst of (paid) reviews over an old backlog of
+ * un-reviewed PRs. A `createdAt` that is missing or unparsable fails CLOSED.
  */
 const CATCH_UP_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 
@@ -90,8 +80,7 @@ const CATCH_UP_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
  * Per-`(repoPath, ref, headSha)` catch-up attempts made this session. Marked
  * SYNCHRONOUSLY (before any await) so a poll tick racing an in-flight async
  * eligibility check can't double-enter the same PR. Entries stay even when
- * eligibility later fails — a review record doesn't un-exist mid-session, and a
- * genuinely missed catch-up is retried after a restart (this Set resets then).
+ * eligibility later fails; a genuinely missed catch-up retries after a restart.
  */
 const catchUpAttempted = new Set<string>();
 
@@ -112,27 +101,18 @@ export interface CatchUpCandidate {
 }
 
 /**
- * Synthesizes the initial `pr-open` automation event for a PR that was opened
- * OUTSIDE GitDesktop (gh CLI, the web, a bot flow) and so never got its initial
- * automated review.
+ * Synthesizes the initial `pr-open` automation event for a PR opened OUTSIDE
+ * GitDesktop (gh CLI, the web, a bot flow), which otherwise falls between both
+ * triggers: `pr-open` fires only from the app's own create / mark-ready paths, and
+ * the `pr-sync` runner deliberately skips any PR with no prior review record.
+ * Detecting such a PR on the existing poll tick and firing the same `pr-open` event
+ * closes the gap — without it, externally-opened PRs get zero signal.
  *
- * Why this exists — the two-trigger gap: `pr-open` events fire ONLY from the
- * app's own Create-PR dialogs, and the `pr-sync` runner deliberately skips any
- * PR with no prior review record (`!prior → continue`). A PR you opened with
- * `gh pr create` therefore falls between both triggers and never gets a first
- * pass. This closes that gap by detecting such a PR on the existing poll tick
- * and firing the same `pr-open` event an in-app create would — which then flows
- * through the runner (per-mode pr-open gate → claim dedup → review → post →
- * record → toast); the runner runs only the mode(s) still missing a review.
- * Do NOT "simplify" this away: without it, externally-opened PRs get zero signal.
- *
- * Scope is deliberately narrow (user-locked): the viewer's OWN, open, recent
- * PRs where AT LEAST ONE mode still needs a review (no prior record and no
- * matching dismissed head for that mode — see {@link prOpenEligible}). Drafts are
- * included only when `reviewDrafts` is set (the `reviewDraftPrs` setting); off (the
- * default) they're skipped until marked ready for review. At most ONE PR is
- * caught up per call (the oldest), bounding burst token spend — the next tick
- * takes the next one.
+ * Scope is deliberately narrow (user-locked): the viewer's OWN, open, recent PRs
+ * where AT LEAST ONE mode still needs a review (see {@link prOpenEligible}). Drafts
+ * are included only when `reviewDrafts` is set (the `reviewDraftPrs` setting,
+ * default OFF); skipped drafts are picked up by the mark-ready path instead. At
+ * most ONE PR is caught up per call (the oldest), bounding burst token spend.
  */
 export function maybeCatchUpMissedOpen(
   repoPath: string,
@@ -144,30 +124,25 @@ export function maybeCatchUpMissedOpen(
   if (!viewerLogin) return;
 
   const now = Date.now();
-  // Synchronous pre-filter: mine, non-draft, has a head, opened recently, and
-  // not already attempted this session. `createdAt` fails closed on missing/
-  // unparsable — an undated PR is never eligible.
+  // Synchronous pre-filter: mine, has a head, opened recently, drafts only when
+  // `reviewDrafts` is on, and not already attempted this session.
   const eligible = candidates
     .filter((c) => {
       if (!c.currentHeadSha) return false;
       if (c.author !== viewerLogin) return false;
-      // Drafts are caught up only when the reviewDraftPrs setting is on;
-      // otherwise they wait until marked ready for review.
       if (c.isDraft && !reviewDrafts) return false;
       const opened = Date.parse(c.createdAt);
       if (Number.isNaN(opened)) return false;
       if (now - opened > CATCH_UP_WINDOW_MS) return false;
       return !catchUpAttempted.has(`${repoPath}#${c.ref}@${c.currentHeadSha}`);
     })
-    // Oldest PR first (lowest number) — one per tick, so the backlog drains in
-    // number order rather than picking an arbitrary one.
+    // Oldest first (lowest number) so the backlog drains in order, one per tick.
     .sort((a, b) => Number(a.ref) - Number(b.ref));
 
   const pick = eligible[0];
   if (!pick) return;
 
-  // Mark BEFORE any await so a concurrent tick can't also claim this PR. Left
-  // marked even if the async eligibility below rejects it (see the Set's doc).
+  // Mark BEFORE any await so a concurrent tick can't also claim this PR.
   catchUpAttempted.add(`${repoPath}#${pick.ref}@${pick.currentHeadSha}`);
 
   void catchUpEligible(repoPath, pick).then((ok) => {
@@ -190,21 +165,16 @@ export function maybeCatchUpMissedOpen(
 
 /**
  * Async eligibility to fire a `pr-open` review for a remote PR: true when AT LEAST
- * ONE mode still needs a first review — i.e. it has NO prior review record (neither
- * a manual nor an automated general/security review) AND no dismissed head matching
- * the current head. Previously this required BOTH modes to be missing, so a single
- * stolen or failed mode could never be caught up once the other mode ran; now the
- * synthesized `pr-open` fires whenever any mode is missing, and the runner's per-mode
- * `pr-open` gate skips the mode(s) that already ran — so a failed general review is
- * retried even when the security audit already delivered (and only the missing mode
- * actually runs). Errors swallow to `false` (fail-closed) — a store hiccup must never
- * fire a redundant review.
+ * ONE mode still needs a first review — no prior review record (manual or automated)
+ * AND no dismissed head matching the current head. Any-mode rather than both-modes,
+ * so a stolen or failed mode is still retried after the other has run; the runner's
+ * per-mode `pr-open` gate then skips the modes that already delivered. Errors swallow
+ * to `false` (fail-closed) — a store hiccup must never fire a redundant review.
  *
  * Shared by the catch-up poller (via {@link catchUpEligible}) and the in-app
- * Mark-ready trigger (RemotePrView), so both ready paths stay behaviorally
- * identical. It's the ONLY guard that covers a manual panel review: those save
- * via `saveReview` without taking an automation claim, so the runner's
- * per-headSha claim dedup can't see them — this prior-review check can.
+ * Mark-ready trigger (RemotePrView), so both ready paths stay identical. It's the
+ * ONLY guard that covers a manual panel review: those save via `saveReview` without
+ * taking an automation claim, so the runner's per-headSha claim dedup can't see them.
  */
 export async function prOpenEligible(
   repoPath: string,
@@ -220,8 +190,6 @@ export async function prOpenEligible(
       // A dismissed head matching the current head means this mode was deliberately
       // skipped for this head — it doesn't need a review either.
       if (dismissed && sameSha(dismissed, currentHeadSha)) continue;
-      // This mode has no prior and no matching dismissal → it needs a first review, so
-      // the PR is eligible. The runner filters out the already-covered modes.
       return true;
     }
     return false;

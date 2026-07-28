@@ -1,11 +1,9 @@
-// A deterministic, progressive README distiller. The AI "Generate" for a repo's
-// About description feeds the README into the prompt; a blind slice discards the
-// tail (features/highlights breadth) of long READMEs. This condenses a README to
-// fit a char budget while preserving the high-signal content — what the project
-// does and the breadth of what it can do — over install/dev boilerplate. Pure,
-// self-contained, no AI pre-pass: same input always yields the same output. The
-// output is always ≤ budget; a README that already fits passes through normalized
-// (CRLF→LF + trim) but otherwise untouched.
+// A deterministic, progressive README distiller: condenses a README to a char budget while
+// favoring high-signal content (what the project does, the breadth of what it can do) over
+// install/dev boilerplate. It feeds the AI "Generate" for a repo's About description, where
+// a blind slice would discard a long README's tail. Pure and self-contained, no AI pre-pass
+// — same input, same output. Output is always ≤ budget; a README that already fits passes
+// through normalized (CRLF→LF + trim) but otherwise untouched.
 
 import { safeSlice } from "./truncate";
 
@@ -61,10 +59,9 @@ const LOW_HEADINGS = [
 /** Deterministically condense a README to fit `budget` chars, favoring
  *  what-it-does / features content over install/dev boilerplate. */
 export function distillReadme(markdown: string, budget: number): string {
-  // Phase 0 — normalize and short-circuit. A README that already fits passes
-  // through in its normalized form (CRLF→LF + trim). Returning the raw markdown
-  // here would let content that's short but padded with trailing newlines ship
-  // over budget while skipping every phase (including the newline collapse).
+  // Phase 0 — normalize, then short-circuit if it already fits. Returning the RAW markdown
+  // here would let content padded with trailing newlines ship over budget while skipping
+  // every phase (including the newline collapse).
   const normalized = markdown.replace(/\r\n/g, "\n").trim();
   if (normalized.length <= budget) {
     return normalized;
@@ -164,10 +161,9 @@ function selectSections(text: string): string {
     .trim();
 }
 
-/** The section body up to (but excluding) its first blank line. */
+/** The section body from its first non-blank line up to (but excluding) the next blank line. */
 function firstParagraph(body: string[]): string {
   const para: string[] = [];
-  // Skip leading blank lines, then collect until the next blank line.
   let started = false;
   for (const line of body) {
     if (line.trim() === "") {

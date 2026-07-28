@@ -143,9 +143,9 @@ interface UiState {
   /** Settings section to jump to when opening Settings; null = leave as-is.
    *  Consumed (and cleared) by SettingsScreen once applied. */
   settingsTarget: SettingsTarget | null;
-  /** Whether the MCP-registry browser (in Settings → MCP servers) is open. Held
-   *  in the store so the command palette can deep-link to it in one atomic
-   *  navigation, regardless of whether the panel is mounted yet. */
+  /** Whether the MCP-registry browser (Settings → MCP servers) is open. In the store so the
+   *  command palette can deep-link to it in one atomic navigation, whether or not the panel
+   *  is mounted yet. */
   mcpBrowseOpen: boolean;
   /** Whether the Activity & Notifications popover is open. Held in the store so
    *  the command palette / a hotkey can toggle it regardless of which mount
@@ -207,10 +207,9 @@ interface UiState {
   } | null;
   selectedFile: SelectedFile | null;
   selectedCommitHash: string | null;
-  /** Commit selected on the Compare tab. Kept separate from `selectedCommitHash`
-   *  (which History owns) so visiting Compare doesn't clobber History's selection
-   *  and vice-versa. Reset when the compare branch changes, since a commit from
-   *  one branch's compare list may not exist in another's. */
+  /** Commit selected on the Compare tab. Separate from `selectedCommitHash` (History's) so
+   *  neither clobbers the other. Reset when the compare branch changes — a commit from one
+   *  branch's compare list may not exist in another's. */
   compareCommitHash: string | null;
   commitTitle: string;
   commitBody: string;
@@ -246,12 +245,10 @@ interface UiState {
   }) => void;
   /** Open a repo (if not already) and land on its Agent tab. Atomic. */
   openAgentTab: (target: { repoPath: string; repoName: string }) => void;
-  /** Jump to a commit in the History tab (from e.g. the blame gutter). ONE
-   *  atomic set of `repoTab` + `selectedCommitHash` — sequential sets get
-   *  clobbered by the deferred transition sets elsewhere, so this must stay a
-   *  single `set()`, mirroring `requestCreate`. Pass the full 40-char hash;
-   *  CommitDetailView fetches by hash independently, so any reachable commit
-   *  resolves even if the history list hasn't paged that far. */
+  /** Jump to a commit in the History tab (e.g. from the blame gutter). ONE atomic set of
+   *  `repoTab` + `selectedCommitHash` — a follow-up `set()` gets clobbered by the deferred
+   *  transition sets elsewhere. Pass the full 40-char hash; CommitDetailView fetches by
+   *  hash, so any reachable commit resolves even if history hasn't paged that far. */
   openCommit: (hash: string) => void;
   openSettings: (target?: SettingsTarget) => void;
   clearSettingsTarget: () => void;
@@ -306,11 +303,10 @@ interface UiState {
   setCommitBody: (body: string) => void;
   setCommitCoAuthors: (coAuthors: CommitAuthor[]) => void;
   clearCommitDraft: () => void;
-  /** Restore a snapshot for the draft `key` it belonged to (re-mirrors it into
-   *  `commitDrafts[key]`, and into the live fields only if that key is still
-   *  active). Used to undo an optimistic clear when a commit fails — `key` is
-   *  captured at submit so a mid-commit branch switch can't restore to the
-   *  wrong branch. */
+  /** Restore a snapshot for the draft `key` it belonged to (into `commitDrafts[key]`, and
+   *  into the live fields only if that key is still active). Undoes an optimistic clear when
+   *  a commit fails — `key` is captured at submit, so a mid-commit branch switch can't
+   *  restore to the wrong branch. */
   restoreCommitDraft: (draft: CommitDraft, key: string | null) => void;
   setGenerating: (generating: boolean) => void;
   setCommitAiGenerated: (generated: boolean) => void;
@@ -462,12 +458,8 @@ export const useUiStore = create<UiState>()((set, get) => {
         });
       }),
     setRepoTab: (tab) => set({ repoTab: tab }),
-    // ONE atomic set (like requestCreate) — a follow-up set() for the selection
-    // would be clobbered by a deferred transition set scheduled elsewhere.
     openCommit: (hash) => set({ repoTab: "history", selectedCommitHash: hash }),
-    // Changing the compared branch resets Compare's selection to the aggregate
-    // diff: a commit selected from one branch's compare list may not exist in
-    // another's. Same atomic set — a follow-up set() would be clobbered.
+    // Atomic (a follow-up set() would be clobbered); rationale in the compareCommitHash doc.
     setCompareBranch: (branch) =>
       set({ compareBranch: branch, compareCommitHash: null }),
     selectPr: (pr) => set({ selectedPr: pr }),

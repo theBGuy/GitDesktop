@@ -20,13 +20,11 @@ const LOGIN_COMMAND = {
 
 /**
  * Builds an {@link AiClient} backed by a locally-installed agent CLI
- * (claude/codex/copilot/opencode). Adapts the Tier-1 (non-repo-aware, zero-tools)
- * agent-review machinery — the same one the PR-review path drives via
- * `runAgentReview` — to the streaming `AiClient` contract, so every generation
- * surface (commit message, PR body, branch name, …) can run through a CLI with no
- * per-surface changes. Structural cleanliness (no CLI preamble/noise in the
- * result) is guaranteed by the Tier-1 discipline: an empty tool allowlist +
- * `--strict-mcp-config` for Claude, `exec --json` read-only for Codex, output
+ * (claude/codex/copilot/opencode), adapting the Tier-1 (non-repo-aware, zero-tools)
+ * agent-review machinery to the streaming `AiClient` contract so every generation surface
+ * (commit message, PR body, branch name, …) runs through a CLI with no per-surface changes.
+ * Tier-1 discipline is what keeps the result free of CLI preamble/noise: an empty tool
+ * allowlist + `--strict-mcp-config` for Claude, `exec --json` read-only for Codex, output
  * parsed from stream-json rather than raw stdout.
  */
 export function createCliClient(settings: AiSettings): AiClient {
@@ -50,14 +48,11 @@ export function createCliClient(settings: AiSettings): AiClient {
       }
 
       const reviewId = crypto.randomUUID();
-      // Cancel is two-layer: (1) instantly stop the yielded stream so the UI stops
-      // painting the moment the user clicks Cancel — the `aborted` flag is checked
-      // atop the pump loop before any further chunk (delta OR the done tail) is
-      // yielded, and `wake()` resumes a pump blocked on the await; (2) kill the
-      // subprocess via `cancelAgentReview` to free the resource. Requesting only
-      // the subprocess kill isn't enough: queued/incoming deltas would keep
-      // flowing until the backend noticed, so the draft fields kept updating after
-      // Cancel (unlike the HTTP path, where `streamText` honors the signal at once).
+      // Cancel is two-layer: (1) stop the yielded stream at once — `aborted` is checked
+      // atop the pump loop before any further chunk (delta OR the done tail) is yielded, and
+      // `wake()` resumes a pump blocked on the await; (2) kill the subprocess via
+      // `cancelAgentReview`. The kill alone isn't enough: queued/incoming deltas keep flowing
+      // until the backend notices, so the draft fields would keep updating after Cancel.
       let aborted = false;
       const abort = () => {
         aborted = true;
@@ -106,12 +101,10 @@ export function createCliClient(settings: AiSettings): AiClient {
       let emitted = 0;
       try {
         while (true) {
-          // Stop the moment Cancel fires — before draining the queue — so no
-          // further chunk is yielded (also covers the signal aborting between
-          // events). The finally still kills the subprocess if it's unsettled.
-          // Thrown AbortError (not a clean return) for HTTP-path parity: callers'
-          // catches are gated on `abortSignal.aborted` and resolve null, so a
-          // cancelled run never hands a partial buffer to the result parsers.
+          // Stop the moment Cancel fires — before draining the queue — so no further chunk
+          // is yielded (also covers the signal aborting between events). The finally still
+          // kills the subprocess if it's unsettled. Thrown, not returned, for the HTTP-path
+          // parity noted at the pre-spawn check above.
           if (aborted || req.abortSignal?.aborted) {
             throw new DOMException(
               "The generation was cancelled.",

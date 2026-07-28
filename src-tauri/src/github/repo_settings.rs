@@ -11,11 +11,9 @@ use crate::github::runner::{
     run_gh, run_gh_input, run_gh_raw, GH_NETWORK_TIMEOUT, GH_TIMEOUT,
 };
 
-/// Whether the signed-in user is an admin on this repo. Gates the
-/// repo-settings / webhooks UI. Reads the viewer's `permissions.admin`; no
-/// access reads as `false` rather than erroring. A repo without a GitHub origin
-/// remote errors (the origin slug can't be resolved) — the same tradeoff every
-/// other pinned repo-admin call makes.
+/// Whether the signed-in user is an admin on this repo — gates the repo-settings /
+/// webhooks UI. Reads the viewer's `permissions.admin`; no access reads as `false`
+/// rather than erroring. A repo without a GitHub origin remote errors.
 #[tauri::command]
 pub async fn gh_repo_admin(repo_path: String) -> AppResult<bool> {
     // Pin the origin slug: `gh api`'s `{owner}/{repo}` placeholders auto-resolve
@@ -64,17 +62,15 @@ struct GhRepoVisibilityJson {
     parent: Option<GhParentRepo>,
 }
 
-/// The repo's remote visibility as `gh` reports it — "PUBLIC" / "PRIVATE" /
-/// "INTERNAL" (uppercase) — plus whether it's a fork and, when it is, the
-/// upstream `owner/repo` slug. Gathered from a single `gh repo view --json`
-/// call; a repo with no GitHub remote (or no access) surfaces gh's own error
-/// rather than a guessed value. Used by `forge_repo_visibility`'s GitHub arm.
+/// The repo's remote visibility as `gh` reports it — "PUBLIC"/"PRIVATE"/"INTERNAL"
+/// (uppercase) — plus whether it's a fork and, when it is, the upstream `owner/repo`
+/// slug. No GitHub remote (or no access) surfaces gh's own error rather than a
+/// guessed value. Used by `forge_repo_visibility`'s GitHub arm.
 pub async fn gh_repo_visibility(repo_path: String) -> AppResult<crate::forge::RepoVisibilityRaw> {
-    // Pin the origin slug: an unpinned `gh repo view` on a fork with an
-    // `upstream` remote auto-resolves to the PARENT, which reports `isFork:
-    // false` — so the badge would read the fork as a non-fork. NOTE: the `repo`
-    // command family takes the repository POSITIONALLY (`gh repo view <slug>`);
-    // it has no `-R` flag (that belongs to run/pr/issue — live-verified).
+    // Pin the origin slug: unpinned, a fork with an `upstream` remote resolves to the
+    // PARENT, which reports `isFork: false`. NOTE: the `repo` command family takes the
+    // repository POSITIONALLY (`gh repo view <slug>`) — it has no `-R` flag (that's
+    // run/pr/issue).
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
     let out = run_gh(
         Some(&repo_path),
@@ -673,8 +669,7 @@ pub async fn gh_repo_settings_update(
         "merge_commit_title": input.merge_commit_title,
         "merge_commit_message": input.merge_commit_message,
     });
-    // Only send allow_forking where it's actually mutable (org-owned private);
-    // including it elsewhere 422s the entire PATCH.
+    // Only mutable on an org-owned private repo; sending it elsewhere 422s the PATCH.
     if let Some(allow_forking) = input.allow_forking {
         body["allow_forking"] = json!(allow_forking);
     }
@@ -696,10 +691,8 @@ pub async fn gh_repo_settings_update(
     let mut settings: RepoSettings = serde_json::from_str(&text)
         .map_err(|e| AppError::Gh(format!("could not parse repo settings: {e}")))?;
     settings.can_change_forking = can_change_forking(&text);
-    // Recompute is_org from the PATCH response too (the field is skip_deserializing,
-    // so it would default to false). Without this, the update's onSuccess cache seed
-    // reports is_org=false and the org role picker collapses to Read/Write until the
-    // background GET corrects it. Mirrors the GET path + can_change_forking above.
+    // `is_org` is `skip_deserializing`, so recompute it from the PATCH response too —
+    // otherwise the onSuccess cache seed reports false. Mirrors the GET path.
     settings.is_org = is_org(&text);
 
     // Topics aren't part of the repo PATCH — they have their own endpoint.

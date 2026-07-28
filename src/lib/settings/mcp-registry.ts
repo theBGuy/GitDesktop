@@ -6,11 +6,10 @@ import { normalizeMcpName, SECRET_KEY_RE } from "./mcp-import";
 
 /**
  * Client + mapping for the official MCP registry (registry.modelcontextprotocol.io),
- * powering the Settings → MCP servers "Browse" dialog. We read the public catalog
- * over Tauri HTTP (the host is allow-listed in `capabilities/default.json`) and
- * convert a chosen entry into a ready-to-add {@link McpServer} that lands
- * **disabled** — the user reviews what it runs, fills any secret, and enables it.
- * Nothing is fetched-and-run automatically; this is discovery, not execution.
+ * powering the Settings → MCP servers "Browse" dialog. Reads the public catalog over
+ * Tauri HTTP (the host is allow-listed in `capabilities/default.json`) and converts a
+ * chosen entry into a ready-to-add {@link McpServer} that lands **disabled** — nothing
+ * runs until the user reviews it, fills any secret, and enables it.
  */
 
 const REGISTRY_URL = "https://registry.modelcontextprotocol.io/v0/servers";
@@ -375,11 +374,9 @@ export async function npmWeeklyDownloadsBatch(
 
 // ── GitHub as a second discovery source ──────────────────────────────────────
 //
-// Search GitHub for MCP-server repos and derive an addable server from each:
-// a `server.json` is the registry manifest shape (reused verbatim); a
-// `package.json` that looks like an MCP server becomes `npx -y <name>`; anything
-// else lands as a manual-setup stub. Rougher than the curated registry, so more
-// rows show "needs setup" — but they still carry stars / source / what-it-runs.
+// Search GitHub for MCP-server repos and derive an addable server from each (the
+// ladder lives in `deriveGithubCandidate`). Rougher than the curated registry, so
+// more rows land "needs setup" — they still carry stars / source / what-it-runs.
 
 /** One repo hit from the Rust `gh_github_mcp_search` command. */
 interface GithubMcpHit {
@@ -449,8 +446,6 @@ function deriveFromPackageJson(
     dependencies?: Record<string, unknown>;
     devDependencies?: Record<string, unknown>;
   };
-  // Untrusted: only a real npm package name (not a URL / git / flag) may become
-  // an `npx -y <name>` spec; otherwise fall through to the manual-setup stub.
   if (typeof pkg.name !== "string" || pkg.private || !isValidNpmName(pkg.name))
     return null;
 

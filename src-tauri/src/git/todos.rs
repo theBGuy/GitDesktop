@@ -47,15 +47,12 @@ fn is_word_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
-/// Comment-opener tokens (the TODO-Tree heuristic). A marker occurrence only
-/// counts as a real to-do when the text before it on the line — trailing
-/// whitespace stripped — is empty (marker at line start) or ends with one of
-/// these. Ordering doesn't matter (we test each with `ends_with`), but note the
-/// coverage each gives via `ends_with`: `//` also covers `///`, `*` covers
-/// `/**`, `-` covers `--` (SQL/Lua) and markdown list bullets. This kills
-/// mid-prose mentions ("the TODO line") and bare-word noise; it deliberately
-/// still lets a string literal that itself begins with a comment opener
-/// through — the documented TODO-Tree-parity limitation.
+/// Comment-opener tokens (the TODO-Tree heuristic). A marker counts as a real to-do
+/// only when the text before it on the line (trailing whitespace stripped) is empty
+/// or ends with one of these. Tested with `ends_with`, so `//` also covers `///`,
+/// `*` covers `/**`, and `-` covers `--` (SQL/Lua) and markdown bullets. Kills
+/// mid-prose mentions; deliberately still lets through a string literal that begins
+/// with a comment opener (TODO-Tree parity).
 const OPENER_TOKENS: &[&str] = &["//", "//!", "#", "/*", "*", "<!--", ";", "%", "-"];
 
 /// Whether `before` (the text on the line preceding a marker occurrence) opens
@@ -80,18 +77,12 @@ fn is_valid_marker(marker: &str) -> bool {
 }
 
 /// Finds the leftmost validated marker occurring as a whole word in `content`
-/// (consistent with `git grep -w`: the preceding and following char must be
-/// non-word) that ALSO passes [`passes_comment_gate`]. Returns the byte range
-/// start and the matched marker word.
-///
-/// Every whole-word marker occurrence across all `markers` is considered in
-/// left-to-right order: the first one whose preceding text opens a comment
-/// wins. So if the leftmost occurrence is mid-prose ("the TODO line") but a
-/// later one is a real comment opener, the later one is taken; if none opens a
-/// comment, the line yields nothing.
+/// (`git grep -w` semantics: flanking chars must be non-word) that ALSO passes
+/// [`passes_comment_gate`]. Returns the marker's byte-range start and the word.
+/// All whole-word occurrences are walked left-to-right and the first that opens a
+/// comment wins, so a mid-prose leftmost hit yields to a later real comment; if none
+/// opens a comment the line yields nothing.
 fn find_marker(content: &str, markers: &[String]) -> Option<(usize, String)> {
-    // Collect every word-boundary occurrence of every marker, then walk them
-    // left-to-right and take the first that passes the comment-opener gate.
     let mut occurrences: Vec<(usize, &str)> = Vec::new();
     for marker in markers {
         // A marker can appear as a substring of a larger word (`myTODO`,
@@ -138,11 +129,10 @@ fn extract_text(content: &str, marker_end: usize) -> String {
     trimmed.chars().take(TEXT_CAP_CHARS).collect()
 }
 
-/// Parses one `git grep -z -n` record into a [`TodoScanItem`]. The `-z -n`
-/// framing (confirmed empirically against this repo) is
-/// `path \0 line \0 content`, with records separated by `\n`. A record whose
-/// path/line can't be parsed, or that carries no validated marker, yields
-/// `None` and is skipped (per-item resilience) rather than failing the batch.
+/// Parses one `git grep -z -n` record into a [`TodoScanItem`]. The `-z -n` framing is
+/// `path \0 line \0 content`, records separated by `\n`. A record whose path/line
+/// can't be parsed, or that carries no validated marker, yields `None` and is skipped
+/// (per-item resilience) rather than failing the batch.
 fn parse_record(record: &str, markers: &[String]) -> Option<TodoScanItem> {
     let mut parts = record.splitn(3, '\0');
     let path = parts.next()?;
@@ -181,22 +171,17 @@ fn parse_scan(stdout: &str, markers: &[String], max_hits: usize) -> TodoScan {
     TodoScan { items, truncated }
 }
 
-/// Scans the working tree for real TODO/FIXME/etc. comment markers via
-/// `git grep`, returning parsed, globally-capped hits.
+/// Scans the working tree for real TODO/FIXME/etc. comment markers via `git grep`,
+/// returning parsed, globally-capped hits.
 ///
-/// `git grep -z -n -I -w --untracked -E "(M1|M2|…)"`: `-z` NUL-delimits the
-/// path/line fields so a `:` in a path can't be mistaken for the separator,
-/// `-n` prefixes line numbers, `-I` skips binaries, `-w` gives portable
-/// word-boundary matching (git's `\b` support varies by platform regex lib),
-/// `--untracked` includes new-but-not-gitignored files, and the pattern is an
-/// ERE alternation of the validated markers. The match is case-sensitive by
-/// design — a lowercase `todo` in an identifier or prose is noise.
+/// `git grep -z -n -I -w --untracked -E "(M1|M2|…)"`: `-z` NUL-delimits path/line so
+/// a `:` in a path can't be mistaken for the separator, `-I` skips binaries, `-w`
+/// gives portable word boundaries (git's `\b` support varies by platform regex lib),
+/// `--untracked` includes new non-ignored files. Case-sensitive by design — a
+/// lowercase `todo` in an identifier or prose is noise.
 ///
-/// `run_git_raw` (not `run_git`) so `git grep`'s documented no-match exit (code
-/// 1) stays a success signal: exit 0 → parse, exit 1 → parse stdout anyway
-/// (empty stdout yields an empty scan), any other code → a real error. This
-/// also makes the unborn (no-commit) repo path a clean empty result — `git
-/// grep` exits 1 there.
+/// Uses `run_git_raw` so `git grep`'s documented no-match exit 1 (also the unborn-repo
+/// case) parses as an empty scan instead of erroring; any other code is a real error.
 #[tauri::command]
 pub async fn git_todo_scan(
     repo_path: String,
@@ -229,10 +214,9 @@ pub async fn git_todo_scan(
     let out = run_git_raw(Some(&repo_path), &args, TODO_SCAN_TIMEOUT).await?;
     match out.code {
         0 => Ok(parse_scan(&out.stdout_lossy(), &markers, max_hits)),
-        // Exit 1 is git grep's documented no-matches exit (also fires on an
-        // unborn repo). Parse stdout anyway as best-effort in case a
-        // non-standard git emitted partial results before exiting 1 — parsing
-        // empty stdout yields an empty scan, so this subsumes the no-match case.
+        // Exit 1 = git grep's documented no-match (and unborn-repo) exit; parse stdout
+        // anyway in case a non-standard git emitted partial results before exiting 1 —
+        // empty stdout yields an empty scan.
         1 => Ok(parse_scan(&out.stdout_lossy(), &markers, max_hits)),
         _ => Err(AppError::Git {
             code: out.code,
@@ -245,11 +229,9 @@ pub async fn git_todo_scan(
 mod tests {
     use super::*;
 
-    // Synthetic tags, deliberately NOT the real default markers: the
-    // extraction/parsing logic is marker-agnostic, so using fake words keeps
-    // this test file from self-reporting when GitDesktop scans its own repo.
-    // The lone exception is the temp-dir real-repo test, whose fixture lives in
-    // a throwaway directory, not this checkout.
+    // Synthetic tags, deliberately NOT the real default markers: the parsing logic is
+    // marker-agnostic, and fake words keep this file from self-reporting when
+    // GitDesktop scans its own repo.
     fn markers() -> Vec<String> {
         ["TAGX", "ZFIX", "QHACK", "WBUG", "VXX"]
             .iter()

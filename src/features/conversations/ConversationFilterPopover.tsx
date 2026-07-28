@@ -161,7 +161,7 @@ export function ConversationFilterPopover({
         open={open}
         // handleOpenChange (not bare setOpen): closing from THIS branch must
         // still reset the query, or a stale search pre-filters the list when
-        // options return (review-caught).
+        // options return.
         onOpenChange={handleOpenChange}
       >
         {trigger}

@@ -57,7 +57,7 @@ export function shortenLongLines(
     shortened++;
     // Surrogate-pair safety: if the last kept char is a high surrogate
     // (0xD800–0xDBFF), cut one char earlier so an astral char / emoji is never
-    // split into a lone surrogate (repo bug class — PR #100).
+    // split into a lone surrogate (a real repo bug class).
     const code = line.charCodeAt(maxChars - 1);
     const cut = code >= 0xd800 && code <= 0xdbff ? maxChars - 1 : maxChars;
     lines[i] = line.slice(0, cut);

@@ -42,10 +42,8 @@ const ALLOW_FLAG_LABELS: Record<string, string> = {
   "--allow-destructive": "destructive",
 };
 
-/** The installed entry's permission tier as a readable label, e.g. "local +
- *  remote writes", or "read-only" when no `--allow-*` flags are present. Reads
- *  ONLY the known flags out of `args`, in ladder order, so unknown args never
- *  leak into the label. */
+/** The installed entry's permission tier as a readable label ("local + remote writes"), or
+ *  "read-only" when no `--allow-*` flags are present. */
 function tierLabel(installedFlags: string[]): string {
   const parts = Object.keys(ALLOW_FLAG_LABELS)
     .filter((flag) => installedFlags.includes(flag))
@@ -53,17 +51,15 @@ function tierLabel(installedFlags: string[]): string {
   return parts.length ? parts.join(" + ") : "read-only";
 }
 
-/** Bottom-of-section disclosure: the inverse of the rest of this panel. Instead of
- *  consuming MCP servers, expose GitDesktop's OWN read-only git/GitHub tools to
- *  external clients, which run the app as a stdio server via `gitdesktop mcp`.
- *  Collapsed by default — it's a one-time setup, not part of the daily list. */
+/** Bottom-of-section disclosure: the inverse of the rest of this panel. Instead of consuming
+ *  MCP servers, expose GitDesktop's own git/forge tools to external clients, which run the
+ *  managed `gitdesktop-mcp` launcher as a stdio server. Read-only by default; four opt-in
+ *  `--allow-*` tiers escalate from there. Collapsed by default — one-time setup. */
 export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
-  // Checkboxes shape the emitted config: Shareable (portable env-var paths a
-  // teammate can commit) vs Personal (absolute machine paths); and two separate,
-  // orthogonal write opt-ins — local-PR tools (`--allow-write`) and real forge
-  // writes (`--allow-remote-write`).
+  // Checkboxes shape the emitted config: Shareable (portable env-var paths a teammate can
+  // commit) vs Personal (absolute machine paths), plus the orthogonal write opt-ins below.
   const [shareable, setShareable] = useState(false);
   const [allowWrite, setAllowWrite] = useState(false);
   const [allowRemoteWrite, setAllowRemoteWrite] = useState(false);
@@ -72,12 +68,10 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
   // too, so unchecking git-write must also clear destructive).
   const [allowGitWrite, setAllowGitWrite] = useState(false);
   const [allowDestructive, setAllowDestructive] = useState(false);
-  // Dirty-tracking for the four tier checkboxes above (NOT `shareable`): true once
-  // the user has changed any of them this open. The tier checkboxes initialize to
+  // Dirty-tracking for the four tier checkboxes (NOT `shareable`): the checkboxes start
   // false, so without this a flagged global install would show the drift warning +
-  // "Reinstall" the instant the disclosure opens — a nag before any intent. Reset
-  // to false on each closed→open transition (below) so every open starts pristine;
-  // `drift` gates on it, so drift/Reinstall only surface after a real change.
+  // "Reinstall" the instant the disclosure opens — a nag before any intent. Reset on each
+  // closed→open transition; `drift` gates on it.
   const [tierTouched, setTierTouched] = useState(false);
   // One install at a time: `busyTarget` is which is running, `confirmTarget` which
   // is awaiting a replace-confirm. "project" = this repo's .mcp.json;
@@ -91,8 +85,8 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
   const [removingClient, setRemovingClient] = useState<
     "claude" | "copilot" | null
   >(null);
-  // The command-line launcher: is `gitdesktop` on PATH, and did we put it there?
-  // Only fetched while the disclosure is open (it reads the registry / $PATH).
+  // The command-line launcher: is `gitdesktop-mcp` on PATH, and did we put it there? Only
+  // fetched while the disclosure is open (it reads the registry / $PATH).
   const queryClient = useQueryClient();
   const { data: launcher, isLoading: launcherLoading } = useQuery({
     queryKey: ["path-launcher-status"],
@@ -100,10 +94,9 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
     enabled: open,
   });
   const [pathBusy, setPathBusy] = useState(false);
-  // The command is the managed MCP launcher (an update-safe copy of the app
-  // that isn't file-locked by the installed binary). Resolving it ensures the
-  // copy exists, so only fetch it once the disclosure is open — opening is the
-  // lazy-create trigger; merely mounting Settings must not write the copy.
+  // The command is the managed MCP launcher — an update-safe copy of the app that isn't
+  // file-locked by the installed binary. Resolving it CREATES the copy, so only fetch once
+  // the disclosure is open; merely mounting Settings must not write it.
   const {
     data: launcherPath,
     isPending: launcherPathPending,
@@ -114,11 +107,9 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
     staleTime: Number.POSITIVE_INFINITY,
     enabled: open,
   });
-  // Per-client global-install state (Claude Code / Copilot): is `gitdesktop` in
-  // each client's user config, and does it point at the CURRENT launcher? A
-  // read-only probe of each client's config file (no CLI spawn, no launcher
-  // ensure); only fetched while the disclosure is open. Refetched
-  // after any successful install/reinstall/remove so the rows stay authoritative.
+  // Per-client global-install state (Claude Code / Copilot): is `gitdesktop` in that client's
+  // user config, and does it point at the CURRENT launcher? A read-only probe of the config
+  // file (no CLI spawn, no launcher ensure), refetched after every install/remove.
   const { data: globalStatus, isLoading: globalStatusLoading } = useQuery({
     queryKey: ["mcp-global-status"],
     queryFn: mcpGlobalStatus,
@@ -131,17 +122,15 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
       ? launcherPathError.message
       : String(launcherPathError)
     : null;
-  // No config that embeds the absolute launcher path may be emitted until that
-  // path resolves: writing a stale/absent path silently keeps locking the old
-  // binary. The global installs (Claude Code / Copilot) ALWAYS embed it, so they
-  // gate on this unconditionally.
+  // No config embedding the absolute launcher path may be emitted until that path resolves —
+  // writing a stale/absent path silently keeps locking the old binary. The global installs
+  // always embed it, so they gate on this unconditionally.
   const launcherDisabledReason = launcherPathPending
     ? "Preparing the MCP launcher…"
     : launcherErrorMessage;
-  // Copy / Write emit `entry`, whose command in SHAREABLE mode is the constant
-  // `${GITDESKTOP_BIN:-gitdesktop-mcp}` — independent of the local launcher, so a
-  // pending/failed local ensure must not block the one path that provably works.
-  // Only personal mode embeds the absolute path and thus needs the launcher gate.
+  // In SHAREABLE mode `entry.command` is the constant `${GITDESKTOP_BIN:-gitdesktop-mcp}` —
+  // independent of the local launcher, so a pending/failed ensure must not block the one path
+  // that provably works. Only personal mode embeds the absolute path.
   const entryDisabledReason = shareable ? null : launcherDisabledReason;
   // The replace-confirm re-runs the SAME emit as the button that opened it, so it
   // must share that button's gate: `project` follows the shareable-aware entry
@@ -176,10 +165,9 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
     launcherPath,
   ]);
 
-  // The snippet is display-only: while the launcher path is still resolving,
-  // `entry.command` is undefined, so show a muted "…" placeholder rather than a
-  // JSON object with a missing command line. Emission (Copy/Write) is disabled
-  // in that state, so the real `entry` — never the placeholder — is what writes.
+  // Display-only: while the launcher path resolves, `entry.command` is undefined, so show a
+  // muted "…" rather than a JSON object with a missing command. Emission is disabled in that
+  // state, so the real `entry` — never the placeholder — is what writes.
   const snippet = JSON.stringify(
     {
       mcpServers: {
@@ -210,11 +198,9 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
     setTimeout(() => setCopied(false), 1500);
   }
 
-  // The four `--allow-*` flags the current checkbox selection wants, in ladder
-  // order. Single source of truth for both the emitted global entry and the drift
-  // comparison, so the installed tier and the wanted tier can't diverge.
-  // --allow-destructive requires git-write; gate on both so a stray flag can never
-  // emit (or be compared) without its prerequisite.
+  // The `--allow-*` flags the current selection wants, in ladder order. Single source of
+  // truth for both the emitted global entry and the drift comparison, so installed tier and
+  // wanted tier can't diverge. Destructive is gated on git-write (see `entry`).
   const wantedAllowFlags = useCallback((): string[] => {
     const flags: string[] = [];
     if (allowWrite) flags.push("--allow-write");
@@ -239,9 +225,8 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
     return { command: launcherPath, args };
   }
 
-  // `replaced` = an existing entry was overwritten (reinstall/migrate), so the
-  // global toast reads honestly instead of "Added". Project (.mcp.json) toasts
-  // are unaffected by this distinction.
+  // `replaced` = an existing entry was overwritten (reinstall/migrate) so the global toast
+  // reads honestly instead of "Added". Project (.mcp.json) toasts don't make the distinction.
   function installSuccessToast(target: InstallTarget, replaced: boolean) {
     if (target === "project") {
       toast.success(
@@ -271,9 +256,8 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
         result = await mcpJsonWrite(repoPath as string, entry, overwrite);
       } else {
         const { command, args } = globalEntry(target);
-        // A global install embeds the absolute launcher path; if it hasn't
-        // resolved yet (or failed to prepare) there's nothing safe to write.
-        // The buttons are gated on this too — this is the type-level backstop.
+        // A global install embeds the absolute launcher path; nothing safe to write until it
+        // resolves. The buttons gate on this too — this is the type-level backstop.
         if (command === undefined) return;
         result = await mcpGlobalInstall(target, command, args, overwrite);
       }
@@ -314,20 +298,16 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
     }
   }
 
-  // One per-client global-install status row (Claude Code / Copilot), mirroring
-  // the Command-line launcher section's idiom below: a label + contextual action
-  // on the right, a status line underneath. Install/Reinstall embed the absolute
-  // launcher path so they gate on `launcherDisabledReason`; Remove doesn't need
-  // the path (it must work even when the launcher errored) and only blocks while
-  // an install/remove for this row is in flight.
+  // One per-client global-install status row (Claude Code / Copilot): label + contextual
+  // action, status line underneath. Install/Reinstall embed the absolute launcher path so
+  // they gate on `launcherDisabledReason`; Remove must work even when the launcher errored.
   function globalRow(client: "claude" | "copilot") {
     const label = client === "claude" ? "Claude Code" : "Copilot";
     const status = globalStatus?.[client];
     const installing = busyTarget === client;
     const removing = removingClient === client;
-    // Any global install/remove (either row) disables every row's actions, so a
-    // second op can't race a config write. Install/Reinstall additionally need
-    // the launcher path; Remove does not (it must work in the AV-error case).
+    // Any global install/remove (either row) blocks every row's actions, so a
+    // second op can't race a config write.
     const anyBusy = busyTarget !== null || removingClient !== null;
     // Until the status query resolves, the row's action label ("Install" vs
     // "Reinstall") isn't yet known, so hold every action rather than show a
@@ -353,12 +333,9 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
             (status.args as string[]).includes(flag),
           )
         : null;
-    // Drift = the installed permission set differs from the currently-selected
-    // one. Gated on `tierTouched` so a pristine open never nags — the checkboxes
-    // start all-false, which would otherwise read as drift against any flagged
-    // install before the user expresses intent. Only meaningful for a current,
-    // readable install; the stale-path (!current) warning owns the not-current
-    // case and takes precedence.
+    // Drift = the installed permission set differs from the selected one. Gated on
+    // `tierTouched` so a pristine open never nags. Only meaningful for a current, readable
+    // install — the stale-path (!current) warning owns that case and takes precedence.
     const wanted = wantedAllowFlags();
     const drift =
       tierTouched &&
@@ -392,9 +369,7 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
                 </Button>
               </span>
             )}
-            {/* A title on a natively-disabled button never surfaces, so wrap it.
-                Install (new) and Reinstall (migrate a stale/other entry) share
-                the same overwrite-confirm-on-existing flow. */}
+            {/* A title on a natively-disabled button never surfaces, so wrap it. */}
             <span title={installReason ?? undefined}>
               <Button
                 type="button"
@@ -478,9 +453,6 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
         type="button"
         onClick={() =>
           setOpen((o) => {
-            // Each closed→open transition starts pristine, so a flagged install
-            // shows the calm success line (with its tier readout) rather than the
-            // drift nag until the user actually changes a tier checkbox.
             if (!o) setTierTouched(false);
             return !o;
           })
@@ -682,10 +654,8 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
             re-emitting here switches them to the update-safe launcher.
           </p>
 
-          {/* Install globally — per-client rows into a client's user config (all
-              projects), via its own CLI. Uses a project-aware --repo so a single
-              global entry follows whatever repo the client opens. Each row shows
-              installed state and offers Install / Reinstall / Remove. */}
+          {/* Per-client rows into a client's user config (all projects), via its own CLI,
+              with a project-aware --repo so one entry follows whatever repo is open. */}
           <div className="mt-1 space-y-2 border-t pt-3">
             <span className="text-xs font-medium">
               Install globally — all projects

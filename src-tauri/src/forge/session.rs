@@ -1,17 +1,11 @@
-//! Forge session health — a truthful, anti-flap classification of each hosted-git
-//! session (per repo and per account), plus a cancellable child-process driver for
-//! `gh`/`glab` re-authentication.
+//! Forge session health — anti-flap classification of each hosted-git session (per
+//! repo and per account), plus a cancellable `gh`/`glab` re-auth child driver.
 //!
-//! Why this exists: a transiently-failing keyring or API can make `gh auth status`
-//! report "token invalid" for a minute and then heal — misclassifying that as a
-//! broken session shows a false "session expired" alarm (observed live). So the
-//! anti-flap rules here are load-bearing: a `gh` `timeout` state is NEVER Broken, and
-//! a `gh` `error` state must be CONFIRMED by a second probe (~1.5s later) before we
-//! report Broken. The GitLab arm mirrors that posture for its (runtime-validate)
-//! failure text.
-//!
-//! Everything a token could leak through is guarded: no probe reads a credential
-//! value, and the reconnect driver truncates + redacts every line it forwards.
+//! Anti-flap is load-bearing: a transiently-failing keyring/API makes `gh auth status`
+//! report "token invalid" for a minute and then heal, so a `gh` `timeout` state is
+//! NEVER Broken and a `gh` `error` must be confirmed by a second probe (~1.5s later);
+//! the GitLab arm mirrors that. No probe reads a credential value, and the reconnect
+//! driver truncates + redacts every line it forwards.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -121,9 +115,8 @@ pub enum ReconnectEvent {
 /// in, and whether the credential validates — with the anti-flap rules applied.
 #[tauri::command]
 pub async fn forge_session_health(repo_path: String) -> AppResult<SessionHealth> {
-    // Resolve provider + host. `detect_non_github` handles GitLab (canonical +
-    // self-managed) and Bitbucket; anything else is the GitHub path, whose host we
-    // take from origin (no `gh repo view` network call — keep this cheap).
+    // Provider + host. detect_non_github covers GitLab (canonical + self-managed)
+    // and Bitbucket; everything else takes the GitHub arm.
     match crate::forge::detect_non_github(&repo_path).await {
         Some((Provider::GitLab, host)) => Ok(gitlab_health(&host).await),
         Some((Provider::Bitbucket, host)) => Ok(bitbucket_health(&host).await),
@@ -190,10 +183,9 @@ enum GhJsonProbe {
     Inconclusive(Option<String>),
 }
 
-/// Classify a non-zero `gh auth status --json` result on `(code, stderr)` alone — an
-/// unknown-flag signature (old gh) vs any other failure. Factored out so it's unit-
-/// testable without spawning gh. `code` is included for symmetry/clarity even though the
-/// discriminator is the stderr text.
+/// Classify a non-zero `gh auth status --json` result from stderr alone: an old-gh
+/// unknown-flag signature vs any other failure. `code` is unused — the discriminator
+/// is the stderr text.
 fn classify_gh_json_nonzero(_code: i32, stderr: &str) -> GhJsonProbe {
     if stderr.to_lowercase().contains("unknown flag") {
         GhJsonProbe::UnknownFlag
@@ -214,8 +206,6 @@ async fn gh_status_json(hostname: Option<&str>) -> AppResult<GhJsonProbe> {
     }
     let out = run_gh_raw(None, &args, GH_TIMEOUT).await?;
     if out.code != 0 {
-        // Non-zero ≠ auth state (gh exits 0 on auth issues). Discriminate old-gh
-        // unknown-flag (→ text fallback) from a fatal error (→ Offline).
         return Ok(classify_gh_json_nonzero(out.code, &out.stderr));
     }
     #[derive(serde::Deserialize)]
@@ -235,7 +225,6 @@ async fn gh_status_json(hostname: Option<&str>) -> AppResult<GhJsonProbe> {
 /// caller owns the anti-flap re-probe). Picks the active account, else the first.
 fn classify_gh_host(accounts: &[GhJsonAccount]) -> SessionHealth {
     // The `host` field is filled by the caller; this pure classifier leaves it "".
-    // Choose the active account, else the first present.
     let chosen = accounts
         .iter()
         .find(|a| a.active)
@@ -270,11 +259,7 @@ fn classify_gh_host(accounts: &[GhJsonAccount]) -> SessionHealth {
 async fn github_health(host: &str) -> SessionHealth {
     let json = match gh_status_json(Some(host)).await {
         Ok(GhJsonProbe::Parsed(map)) => map,
-        // Old gh: no `--json` on `auth status` → degraded text fallback (no Offline
-        // detection — plain `gh auth status` can't distinguish transient from broken).
         Ok(GhJsonProbe::UnknownFlag) => return github_health_text_fallback(Some(host)).await,
-        // A fatal/environmental gh error (non-zero, not unknown-flag) → Offline with the
-        // sanitized detail — never a fabricated auth state.
         Ok(GhJsonProbe::Inconclusive(detail)) => {
             let mut h = SessionHealth::new("github", host, SessionState::Offline);
             h.detail = detail;
@@ -545,7 +530,6 @@ async fn gitlab_health(host: &str) -> SessionHealth {
         apply_glab_expiry(&mut h, host).await;
         return h;
     }
-    // Non-zero: classify the failure text.
     let combined = format!("{}\n{}", out.stdout_lossy(), out.stderr).to_lowercase();
     match classify_glab_failure(&combined) {
         GlabFailure::NotConnected => SessionHealth::new("gitlab", host, SessionState::NotConnected),
@@ -680,7 +664,6 @@ async fn gitlab_accounts_health() -> Vec<SessionHealth> {
             }
         }
     }
-    // Probe each host concurrently.
     let futures = hosts.iter().map(|h| gitlab_health(h));
     crate::forge::futures_join_all(futures).await
 }
@@ -751,13 +734,11 @@ async fn bitbucket_login() -> Option<String> {
 static RECONNECT_REGISTRY: LazyLock<Mutex<HashMap<String, Arc<Notify>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Register (or adopt) the cancel `Notify` for `session_id`, returning it. Uses
-/// `entry().or_insert_with(...)` — NOT a blind `insert` — so a cancel that landed
-/// FIRST (creating a tombstone entry with a stored `notify_one` permit) is REUSED,
-/// not replaced. That permit is then consumed on the driver's first `.notified()`
-/// poll → immediate kill. This closes the cancel-before-register race that otherwise
-/// orphans the child (React StrictMode double-mount fires reconnect→cancel faster
-/// than the async resolve+spawn can register).
+/// Register (or adopt) the cancel `Notify` for `session_id`. Uses
+/// `entry().or_insert_with(...)`, NOT `insert`: a cancel that landed FIRST left a
+/// tombstone holding a `notify_one` permit, and replacing it would orphan the child
+/// (React StrictMode fires reconnect→cancel faster than resolve+spawn can register).
+/// The adopted permit is consumed on the driver's first `.notified()` poll.
 fn register_reconnect(session_id: &str) -> Arc<Notify> {
     RECONNECT_REGISTRY
         .lock()
@@ -775,10 +756,9 @@ fn unregister_reconnect(session_id: &str) {
         .remove(session_id);
 }
 
-/// RAII cleanup for a registered reconnect: removes the registry entry when dropped,
-/// so EVERY exit path out of `forge_reconnect` after registration (resolve failure,
-/// spawn failure, driver completion, or a panic) unregisters — a leaked entry per
-/// attempt would be a bug. Carries the `Notify` the driver waits on.
+/// RAII cleanup for a registered reconnect: unregisters on drop, so every exit path
+/// out of `forge_reconnect` after registration (including a panic) removes the entry.
+/// Carries the `Notify` the driver waits on.
 struct ReconnectGuard {
     session_id: String,
     notify: Arc<Notify>,
@@ -818,17 +798,14 @@ pub async fn forge_reconnect(
         return Err(AppError::InvalidArgument(format!("invalid mode: {mode}")));
     }
 
-    // Register BEFORE the async resolve+spawn so a cancel that races ahead of them
-    // (StrictMode double-mount, or a fast Esc) is captured — either adopting a
-    // tombstone the cancel already stored a permit on, or leaving one for a cancel
-    // that lands during resolve. The guard unregisters on EVERY exit path below,
-    // including the resolve/spawn error returns.
+    // Register BEFORE the async resolve+spawn so a cancel racing ahead of them is
+    // captured (see `register_reconnect`). The guard unregisters on every exit path
+    // below, including the resolve/spawn error returns.
     let guard = ReconnectGuard {
         session_id: session_id.clone(),
         notify: register_reconnect(&session_id),
     };
 
-    // Resolve the CLI binary + argv per provider/mode.
     let (bin_names, args): (&[&str], Vec<String>) = match provider.as_str() {
         "github" => {
             let args = match mode.as_str() {
@@ -889,10 +866,8 @@ pub async fn forge_reconnect(
 }
 
 /// Cancel an in-flight reconnect by its frontend-generated `session_id`. Fires the
-/// registered `Notify`; when the id ISN'T registered yet (a cancel that raced ahead of
-/// the async resolve+spawn), CREATE a tombstone entry and store the permit on it — the
-/// flow that registers next adopts that same entry (see `register_reconnect`) and
-/// consumes the permit on its first `.notified()` poll, killing the child immediately.
+/// registered `Notify`; an id that isn't registered yet gets a tombstone the later
+/// registration adopts (see `cancel_reconnect`).
 #[tauri::command]
 pub async fn forge_reconnect_cancel(session_id: String) -> AppResult<()> {
     // Validate before touching the registry — same grammar gate as `forge_reconnect`,
@@ -905,14 +880,12 @@ pub async fn forge_reconnect_cancel(session_id: String) -> AppResult<()> {
 }
 
 /// Fire the cancel for `session_id` — adopting the registered `Notify` when present,
-/// else creating a tombstone entry the later-registering flow will adopt. `notify_one`
-/// stores a permit, so the cancel is never lost whether it arrives mid-loop or before
-/// registration. Sync so it's unit-testable without the async command wrapper.
+/// else creating a tombstone the later-registering flow adopts. `notify_one` stores a
+/// permit, so a cancel is never lost whether it arrives mid-loop or pre-registration.
 ///
-/// When this CREATES the entry (the cancel raced ahead of any registration — or the
-/// session already finished and unregistered), nothing else may ever adopt it, so an
-/// orphan tombstone would grow the map unbounded. In that case only, schedule a delayed
-/// sweep that removes the entry IFF it stayed unadopted (see `sweep_unadopted_tombstone`).
+/// A tombstone this call CREATES may never be adopted (nothing ever registers, or the
+/// session already finished), which would grow the map unbounded — so in that case
+/// only, schedule `sweep_unadopted_tombstone` to reclaim it if it stays unadopted.
 fn cancel_reconnect(session_id: &str) {
     use std::collections::hash_map::Entry;
     let mut map = RECONNECT_REGISTRY
@@ -941,12 +914,10 @@ fn cancel_reconnect(session_id: &str) {
 /// Comfortably longer than the resolve+spawn window a racing flow needs to adopt it.
 const TOMBSTONE_SWEEP_DELAY: Duration = Duration::from_secs(60);
 
-/// Remove `session_id` from the registry ONLY IF it's still an unadopted tombstone —
-/// i.e. the map holds the sole reference to its `Notify` (`strong_count == 1` under the
-/// lock). A live flow that adopted the entry holds a clone of the `Arc` (via its RAII
-/// guard), so a count above 1 means the flow is running and its guard will remove the
-/// entry itself on drop — the sweep must not touch it. Sync + `strong_count` check under
-/// the lock so it's unit-testable without the delay.
+/// Remove `session_id` ONLY IF it's still an unadopted tombstone — i.e. the map holds
+/// the sole `Arc` (`strong_count == 1` under the lock). A flow that adopted the entry
+/// holds a clone via its RAII guard and removes it itself on drop, so any count above
+/// 1 means the sweep must not touch it.
 fn sweep_unadopted_tombstone(session_id: &str) {
     let mut map = RECONNECT_REGISTRY
         .lock()
@@ -958,9 +929,9 @@ fn sweep_unadopted_tombstone(session_id: &str) {
     }
 }
 
-/// Spawn + drive the reconnect child. Reads stdout AND stderr concurrently (the code
-/// line can land on either), sanitizes every line, emits at most one `Code` event,
-/// and always removes the registry entry.
+/// Spawn + drive the reconnect child. Reads stdout AND stderr concurrently (the
+/// one-time code can land on either), sanitizes every line, and emits at most one
+/// `Code` event. Registry cleanup is the caller's `ReconnectGuard`, not this fn.
 async fn run_reconnect_child(
     cancel: Arc<Notify>,
     binary: &PathBuf,
@@ -970,8 +941,8 @@ async fn run_reconnect_child(
 ) -> AppResult<()> {
     let mut cmd = Command::new(binary);
     cmd.args(args.iter().map(String::as_str));
-    // Non-interactive + quiet; NO GH_PROMPT_DISABLED (stdin-null suffices, and the
-    // web flow's interaction with that env var is unvalidated — see the spec).
+    // Non-interactive + quiet. Deliberately no GH_PROMPT_DISABLED — stdin-null
+    // suffices and that env var's effect on the web flow is unvalidated.
     cmd.env("NO_COLOR", "1").env("CLICOLOR", "0");
     if is_github {
         cmd.env("GH_NO_UPDATE_NOTIFIER", "1");
@@ -1083,7 +1054,6 @@ async fn run_reconnect_child(
         return Ok(());
     }
 
-    // Normal exit: reap the child and classify.
     let status = child.wait().await;
     let ok = status.map(|s| s.success()).unwrap_or(false);
     if ok {
@@ -1123,7 +1093,6 @@ fn handle_reconnect_line(
     let clean = sanitize_line(raw);
     collected.push(clean.clone());
 
-    // Harvest a one-time code and a URL from this (sanitized) line.
     if last_code.is_none() {
         if let Some(c) = find_one_time_code(&clean) {
             *last_code = Some(c);
@@ -1141,7 +1110,6 @@ fn handle_reconnect_line(
             return on_event.send(ReconnectEvent::Code { code, url }).is_ok();
         }
     }
-    // Otherwise forward the non-blank line as-is.
     if clean.trim().is_empty() {
         return true;
     }
@@ -1186,9 +1154,8 @@ fn sanitize_line(raw: &str) -> String {
     redacted.chars().take(300).collect()
 }
 
-/// Sanitize a detail/reason string: redact tokens, collapse to a single line, and cap
-/// at 300 chars (matching `sanitize_line` — the gh `error`-field call sites were
-/// otherwise unbounded).
+/// Sanitize a detail/reason string: redact tokens, collapse to one line, cap at 300
+/// chars (the same bound as `sanitize_line`).
 fn sanitize_detail(raw: &str) -> String {
     let one_line = raw.replace(['\n', '\r'], " ");
     redact_tokens(one_line.trim()).chars().take(300).collect()
@@ -1362,7 +1329,7 @@ mod tests {
 
     #[test]
     fn gh_json_success_is_healthy() {
-        // The exact live JSON from the spec.
+        // The exact live JSON a real `gh auth status --json hosts` returns.
         let json = r#"{"hosts":{"github.com":[{"state":"success","active":true,"host":"github.com","login":"theBGuy","tokenSource":"keyring","scopes":"gist, read:org, repo, workflow","gitProtocol":"https"}]}}"#;
         let hosts = parse_hosts(json);
         let health = classify_gh_host(&hosts["github.com"]);
@@ -1613,21 +1580,18 @@ mod tests {
     async fn cancel_before_register_delivers_permit() {
         // A unique id so this test can't collide with the shared global registry.
         let id = "race-test-cancel-before-register-0001";
-        // 1) Cancel arrives FIRST, before the flow registered anything (the
-        //    StrictMode double-mount / fast-Esc case that orphaned the child live).
+        // Cancel FIRST, before any registration — the StrictMode double-mount /
+        // fast-Esc race that orphaned the child live.
         cancel_reconnect(id);
-        // 2) The flow now registers — it must ADOPT the tombstone the cancel created
-        //    (carrying its stored permit), not replace it.
+        // The flow must ADOPT the cancel's tombstone (and its permit), not replace it.
         let notify = register_reconnect(id);
-        // 3) The driver's first `.notified()` poll consumes the stored permit
-        //    immediately — a zero-duration timeout still resolves, proving the permit
-        //    is there and the child would be killed at once (no orphan).
+        // A zero-duration timeout still resolves ⇒ the permit was waiting.
         let got = tokio::time::timeout(Duration::ZERO, notify.notified()).await;
         assert!(
             got.is_ok(),
             "the cancel permit must be waiting for the later-registering flow"
         );
-        // Cleanup (mirrors the guard's Drop) so the global registry stays tidy.
+        // Cleanup (mirrors the guard's Drop).
         unregister_reconnect(id);
     }
 

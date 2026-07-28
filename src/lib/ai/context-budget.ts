@@ -55,16 +55,12 @@ export function scaledProfile(multiplier: number): ContextBudgetProfile {
   };
 }
 
-/** Auto-mode multiplier from a known context window (in TOKENS). Derived from the
- *  window as headroom rather than a tier ladder, so the prompt body can never
- *  overflow the model: a code-heavy prompt runs ~3.5 chars/token, and only ~55%
- *  of the window is budgeted for the prompt body (the system prompt, metadata, and
- *  the model's own response take the rest) ⇒ safe prompt-chars ≈ windowTokens ×
- *  3.5 × 0.55 ≈ windowTokens × 1.9. Dividing by the 1× profile's 100K prompt-char
- *  budget yields the multiplier. The 0.15 floor keeps every section usable
- *  (scaledProfile's 1K-per-field floor still applies on top); the cap of 3 is the
- *  deliberate cost ceiling. Anchors: a 24K-token window → ~0.46×, 131K → ~2.5×,
- *  ≥158K → 3×. */
+/** Auto-mode multiplier from a known context window (in TOKENS). Derived as
+ *  headroom, not a tier ladder, so the prompt body can't overflow the model:
+ *  code-heavy prompts run ~3.5 chars/token and only ~55% of the window is
+ *  budgeted for the body (system prompt + response take the rest) ⇒ safe
+ *  prompt-chars ≈ windowTokens × 1.9, over the 1× profile's 100K budget. The
+ *  0.15 floor keeps every section usable; the cap of 3 is the cost ceiling. */
 function multiplierForWindow(windowTokens: number): number {
   return Math.min(3, Math.max(0.15, (windowTokens * 1.9) / 100_000));
 }
@@ -81,22 +77,15 @@ const profileCache = new Map<string, ContextBudgetProfile>();
  *  null result too, so an unreachable host is probed at most once. */
 const ollamaWindowCache = new Map<string, number | null>();
 
-/** Probes a local Ollama model's context window (in tokens) via `/api/show`,
- *  mirroring the fetch idiom in models.ts (guardedFetch → res.json()) but as a
- *  POST with a JSON body. The window is the `model_info` entry whose key ends
- *  with ".context_length" (architecture-prefixed, e.g. "llama.context_length").
- *  Returns null on any failure or when the key is absent — the caller then falls
- *  back to a conservative profile / omits `num_ctx`.
- *
- *  Never throws (best-effort by contract): any fetch/parse error resolves to
- *  null. Results are cached per `${ollamaBaseUrl}#${model}` for the session
- *  (including nulls), so both {@link resolveAutoProfile} and the AI client's
- *  request-sizing share one probe.
- *
+/** Probes a local Ollama model's context window (in tokens) via `/api/show`: the
+ *  window is the `model_info` entry whose key ends with ".context_length"
+ *  (architecture-prefixed, e.g. "llama.context_length"). Never throws by contract
+ *  — any fetch/parse failure or a missing key resolves to null, and the caller
+ *  then falls back to a conservative profile / omits `num_ctx`. Nulls cache per
+ *  `${ollamaBaseUrl}#${model}` too, so an unreachable host is probed once a session.
  *  Bounded to 5s via `AbortSignal.timeout`: neither guardedFetch nor the Tauri
- *  HTTP plugin imposes a timeout, so an unreachable/asleep LAN Ollama host would
- *  otherwise hang the first review of a session for the full OS TCP timeout. The
- *  timeout aborts the fetch, which throws → null. */
+ *  HTTP plugin imposes a timeout, so an asleep LAN host would otherwise hang the
+ *  session's first review for the full OS TCP timeout. */
 export async function probeOllamaWindowTokens(
   ai: AiSettings,
 ): Promise<number | null> {
@@ -142,15 +131,11 @@ async function probeOllamaWindowUncached(
 }
 
 /**
- * Resolves the context-budget profile for a review, given the review AI config
- * and the user's `reviewContextSize` knob. Manual sizes force a fixed multiple
- * of the default profile; `"auto"`/undefined scales to the model actually
+ * Resolves the context-budget profile for a review. Manual sizes force a fixed
+ * multiple of the default profile; `"auto"`/undefined scales to the model actually
  * reviewing — live for Ollama (probe its window), a conservative per-provider
- * fallback tier for everything else (never assumes a Claude table).
- *
- * Best-effort by contract: it never throws and never blocks a review — any probe
- * failure falls back to a conservative profile. Resolved profiles are cached
- * per provider#model#baseUrl for the session.
+ * fallback tier otherwise (never assumes a Claude table). Best-effort by contract:
+ * never throws, never blocks a review. Cached per provider#model#baseUrl.
  */
 export async function resolveBudgetProfile(
   ai: AiSettings,
@@ -160,7 +145,6 @@ export async function resolveBudgetProfile(
   if (size === "medium") return scaledProfile(1);
   if (size === "large") return scaledProfile(4);
 
-  // "auto" / undefined — resolve dynamically per provider+model.
   const baseUrl =
     ai.provider === "ollama"
       ? ai.ollamaBaseUrl
@@ -183,8 +167,6 @@ async function resolveAutoProfile(
 ): Promise<ContextBudgetProfile> {
   switch (ai.provider) {
     case "ollama": {
-      // Shares the cached `/api/show` probe with the AI client's request sizing;
-      // never throws, so a failed probe falls through to the conservative default.
       const windowTokens = await probeOllamaWindowTokens(ai);
       if (windowTokens && windowTokens > 0) {
         return scaledProfile(multiplierForWindow(windowTokens));
@@ -199,10 +181,8 @@ async function resolveAutoProfile(
     case "codex-cli":
     case "copilot-cli":
     case "opencode-cli":
-      // Hosted/CLI frontier models all have ≥200K-token windows; 3× ≈ 300K
-      // chars ≈ 75-90K tokens, a deliberate cost ceiling well inside the
-      // smallest such window. FUTURE: a live Anthropic Models API
-      // `max_input_tokens` probe would refine this per-model — recorded, not v1.
+      // Hosted/CLI frontier models all have ≥200K-token windows; 3× ≈ 300K chars
+      // ≈ 75-90K tokens — a deliberate cost ceiling well inside the smallest of them.
       return scaledProfile(3);
     case "openai-compatible":
       // Could be a local llama.cpp server behind an OpenAI-compatible endpoint;

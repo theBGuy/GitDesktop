@@ -9,36 +9,29 @@ import { persistRepoOwners, persistRepoVisibility } from "@/lib/settings/api";
 import { settingsKeys } from "@/lib/settings/queries";
 
 /**
- * Probe a repo's hosted visibility + fork provenance and persist the result,
- * returning the fresh probe (or `null` when the repo has no known provider — a
- * removed/absent remote, which clears every derived field so a stale badge
- * clears). Shared by the ambient open-time probe below and the Danger zone's
- * "Re-check fork status" affordance, so the fork badge + persisted `isFork`
- * converge without an app restart after the user leaves the fork network on
- * GitHub. Persistence is serialized against the other recentRepos writers.
+ * Probe a repo's hosted visibility + fork provenance and persist it, returning the
+ * fresh probe — or `null` when no provider resolves (remote removed/absent), which
+ * clears every derived field so a stale badge clears. Owner/host/provider are
+ * persisted here too, so a fresh clone shows its provider label, host, and fork
+ * badge on the FIRST open, without a RepoList render backfilling them.
  *
- * The owner/host/provider from `gitRepoOwners` are ALSO persisted here (not just
- * visibility/fork) — that's what makes a fresh clone's provider label, host, and
- * fork badge land on the FIRST open, without waiting for a RepoList render to
- * backfill them. The Danger-zone "Re-check fork status" therefore also refreshes
- * owners now, which is desired: after the user re-points origin then re-checks,
- * the provider label heals in the same action.
+ * Shared by the ambient open-time probe below and the Danger zone's "Re-check fork
+ * status", which therefore also heals the provider label after the user re-points
+ * origin, and converges the fork badge without an app restart after the user leaves
+ * a fork network. Persistence is serialized against the other recentRepos writers.
  *
- * A rejection propagates to the caller (the ambient probe swallows it; the
- * Danger-zone re-check surfaces it as a toast). Does NOT invalidate the settings
- * query — the caller decides whether to (the ambient probe does).
+ * Rejections propagate to the caller (the ambient probe swallows them; the Danger
+ * zone toasts). Does NOT invalidate the settings query — the caller decides.
  */
 export async function probeAndPersistVisibility(
   repoPath: string,
 ): Promise<RepoVisibility | null> {
   const [owner] = await gitRepoOwners([repoPath]);
   if (!owner?.provider) {
-    // No resolvable provider (remote removed/absent): persistRepoOwners with a
-    // null provider clears owner/host/provider AND, because visibility/isFork/
-    // forkParent can't outlive the provider, those three too — all six derived
-    // fields cleared in one write. (owner is undefined when gitRepoOwners
-    // returns no entry for this path — e.g. no remote at all; the null-filled
-    // entry still targets this path so the clear lands.)
+    // Clearing the provider also clears visibility/isFork/forkParent (they can't
+    // outlive it) — all six derived fields in one write. `owner` is undefined when
+    // gitRepoOwners returns no entry (no remote at all); the null-filled entry
+    // still targets this path, so the clear lands.
     await persistRepoOwners([
       {
         path: repoPath,
@@ -49,11 +42,9 @@ export async function probeAndPersistVisibility(
     ]);
     return null;
   }
-  // The owners write and the visibility probe are independent once gitRepoOwners
-  // resolved, so run them in parallel; the Promise.all barrier still guarantees
-  // the owners write completes before the visibility/fork persist below, and
-  // persistRepoOwners (non-null provider) preserves the visibility fields it
-  // doesn't own — so the ordering that matters is kept.
+  // Independent once gitRepoOwners resolved, so run them in parallel; the
+  // Promise.all barrier keeps the owners write ahead of the visibility persist, and
+  // persistRepoOwners (non-null provider) preserves the visibility fields it doesn't own.
   const [, probe] = await Promise.all([
     persistRepoOwners([owner]),
     forgeRepoVisibility(repoPath),
@@ -70,32 +61,16 @@ export async function probeAndPersistVisibility(
 }
 
 /**
- * On every successful repo open (this fires for every `repoPath` — including
- * app-relaunch restore), fire-and-forget refreshes the repo's stored
- * visibility badge:
+ * On every successful repo open (every `repoPath`, including app-relaunch restore),
+ * fire-and-forget refresh of the repo's stored owner/visibility/fork metadata via
+ * {@link probeAndPersistVisibility}. Never blocks or delays repo open and swallows
+ * every error silently — ambient metadata, not a user-facing action (no toasts).
  *
- * - Resolve the provider via `gitRepoOwners` (a cheap local read) and persist
- *   the owner/host/provider onto the record. When it's null (no remote, or the
- *   remote was removed), that clears all six derived fields so a stale badge
- *   clears.
- * - When the provider is known, probe `forgeRepoVisibility` and persist the
- *   result. A rejection (signed out, API failure) persists nothing beyond the
- *   owners already stored — the prior visibility/fork value is left alone.
- *
- * Because the owner/host/provider land here, a freshly cloned repo shows its
- * provider label and fork badge on the FIRST open, not the second — this probe
- * runs even when the repo list never rendered to backfill them.
- *
- * Never blocks or delays repo open, and swallows every error silently: this is
- * ambient metadata, not a user-facing action (no toasts).
- *
- * Persistence goes through the raw helper + a captured queryClient (both stable
- * across unmount), NOT a component-bound mutation: the repo view unmounts when
- * the repo closes, and a probe in flight at that moment must still land its
- * result. A value already resolved is always persisted (it's keyed by its own
- * repo's path, so writing it after a repo switch is still correct, never a stale
- * cross-repo write). `persistRepoVisibility` is serialized against the other
- * recentRepos writers, so it can't lose an update.
+ * Persists through the raw helper + a captured queryClient (both stable across
+ * unmount), NOT a component-bound mutation: the repo view unmounts when the repo
+ * closes, and a probe in flight then must still land. A resolved value is keyed by
+ * its own repo's path, so writing it after a repo switch is never a stale
+ * cross-repo write.
  */
 export function useRepoVisibilityProbe(repoPath: string | null) {
   const queryClient = useQueryClient();

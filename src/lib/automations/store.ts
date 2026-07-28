@@ -28,14 +28,12 @@ function getStore(): Promise<Store> {
   return storePromise;
 }
 
-// Serialize every read-modify-write on this store through one in-process queue.
-// Without it, two overlapping saves each read the SAME pre-flush disk snapshot
-// (autoSave persists on a ~100ms debounce, so the first write isn't on disk yet)
-// and the later write drops the earlier one's change (a lost update — e.g. a
-// per-repo override save clobbering a concurrent global-lifecycles save). Running
-// them one at a time, each re-reading fresh state, guarantees each mutation sees a
-// current snapshot. Mirrors the hardening in `pulls/local.ts` and settings/api.ts.
-// This serializes IN-PROCESS writers only; cross-window races remain out of scope.
+// Serialize every read-modify-write on this store through one in-process queue:
+// autoSave persists on a ~100ms debounce, so two overlapping saves would both read
+// the same pre-flush disk snapshot and the later would drop the earlier's change
+// (e.g. a per-repo override save clobbering a concurrent global-lifecycles save).
+// Mirrors pulls/local.ts and settings/api.ts. In-process only; cross-window races
+// remain out of scope.
 let opChain: Promise<unknown> = Promise.resolve();
 function serialize<T>(op: () => Promise<T>): Promise<T> {
   const run = opChain.then(op, op);
@@ -44,29 +42,24 @@ function serialize<T>(op: () => Promise<T>): Promise<T> {
   return run;
 }
 
-/** Re-read `automations.json` from disk into the in-memory store, tolerating a
- *  missing file. Asymmetry: `load()` tolerates a missing file but `reload()`
- *  rejects with a raw io error until the first `save()` creates the file — so on
- *  ANY reload failure we proceed with the loaded in-memory state (the next
- *  `save()` bootstraps the file). `ignoreDefaults: true` fully matches the store
- *  to disk so externally-deleted keys actually drop. Call inside the serialized
- *  queue so it can't land between another mutation's set and its flush. */
+/** Re-read `automations.json` into the in-memory store, tolerating a missing file:
+ *  `load()` tolerates one but `reload()` rejects with a raw io error until the first
+ *  `save()` creates it, so ANY reload failure proceeds with in-memory state.
+ *  `ignoreDefaults: true` matches the store to disk so externally-deleted keys drop.
+ *  Call inside the serialized queue so it can't land between a set and its flush. */
 async function reloadRaw(store: Store): Promise<void> {
   try {
     await store.reload({ ignoreDefaults: true });
   } catch {
-    // Missing/unreadable file — proceed with in-memory state; the next save()
-    // creates it.
+    // Missing file — the next save() creates it.
   }
 }
 
 /**
- * Serialized read-modify-write against fresh disk state: reloads the store,
- * reads the current normalized config, applies `mutate`, then persists. The
- * force-save (`store.save()`) flushes past the autoSave debounce so the next
- * queued op's reload sees a current snapshot. The read-modify-write runs
- * atomically within the chain, so a save computed from stale pre-read state can
- * no longer clobber a neighbor's committed write.
+ * Serialized read-modify-write against fresh disk state: reload, read the current
+ * normalized config, apply `mutate`, persist. The force-save (`store.save()`)
+ * flushes past the autoSave debounce so the next queued op's reload sees a current
+ * snapshot.
  */
 function mutateConfig(
   mutate: (current: AutomationsConfigV2) => AutomationsConfigV2,
@@ -226,7 +219,6 @@ export function normalizeAutomations(saved: unknown): AutomationsConfigV2 {
       (value as { lifecycles?: unknown } | null)?.lifecycles,
       normalizeRepoActionOverride,
     );
-    // Drop empty repo overrides entirely.
     if (Object.keys(overrides).length > 0) {
       repos[key] = { lifecycles: overrides };
     }
@@ -244,15 +236,13 @@ interface MigrationResult {
 }
 
 /**
- * Folds a v1 config into v2. Each ENABLED global rule maps to
- * `lifecycles[trigger].actions[action] = { enabled: true }` (union — N duplicates
- * collapse to one); disabled global rules contribute nothing. For each repo: a
- * `disabledGlobalIds` id naming an enabled v1 global rule becomes a repo override
- * `enabled: false` for that (trigger, action) cell; each enabled repo-local rule
- * becomes a repo override `enabled: true`. Repo keys are preserved verbatim (they
- * may be identities or legacy paths — `repoEntry` resolves both at read time).
- * Counts every enabled rule that shares a (trigger, action) cell beyond the first,
- * across the global scope and each repo scope, as a collapsed duplicate.
+ * Folds a v1 config into v2. Each ENABLED global rule becomes
+ * `lifecycles[trigger].actions[action] = { enabled: true }` (N duplicates collapse to
+ * one); disabled global rules contribute nothing. Per repo: a `disabledGlobalIds` id
+ * naming an enabled v1 global rule becomes a repo override `enabled: false` for that
+ * cell, and each enabled repo-local rule a repo override `enabled: true`. Repo keys
+ * are preserved verbatim (identities or legacy paths — `repoEntry` resolves both at
+ * read time). `collapsed` counts every enabled rule beyond the first in a shared cell.
  */
 export function migrateV1(v1: Partial<V1Config>): MigrationResult {
   let collapsed = 0;
@@ -309,7 +299,6 @@ export function migrateV1(v1: Partial<V1Config>): MigrationResult {
       lc[action] = value;
     };
 
-    // A disabled global id → repo override turning that cell off.
     for (const id of repo?.disabledGlobalIds ?? []) {
       const cell = globalCells.get(id);
       if (cell) setOverride(cell.lifecycle, cell.action, { enabled: false });
@@ -369,12 +358,13 @@ export async function loadAutomations(): Promise<AutomationsConfigV2> {
 }
 
 /**
- * Persists the GLOBAL lifecycle defaults from `config`. Only `config.lifecycles`
- * is written; per-repo overrides are re-derived from fresh disk state inside the
- * serialized queue rather than taken from the caller's (possibly stale) snapshot,
- * so a concurrent `saveRepoAutomations` isn't clobbered. The sole caller edits
- * only lifecycles and carries `repos` over unchanged from its last load, so this
- * matches its intent while closing the lost-update window.
+ * Persists the GLOBAL lifecycle defaults from `config`. Only `config.lifecycles` is
+ * written; per-repo overrides are re-derived from fresh disk state inside the
+ * serialized queue rather than taken from the caller's (possibly stale) snapshot, so
+ * a concurrent `saveRepoAutomations` isn't clobbered.
+ *
+ * Its only caller edits lifecycles alone and carries `repos` over unchanged from its
+ * last load — a caller that edits `config.repos` would have those edits dropped.
  */
 export async function saveAutomations(
   config: AutomationsConfigV2,
@@ -419,8 +409,6 @@ export async function saveRepoAutomations(
     // Re-derive only THIS repo's slice over fresh state, so the write can't clobber
     // a concurrent global-lifecycles or other-repo save.
     const repos = { ...current.repos };
-    // Fold: a differently-keyed legacy entry for the same repo is replaced by this
-    // identity-keyed write.
     if (id !== repoPath) delete repos[repoPath];
     if (repoHasCells(repo)) {
       repos[id] = repo;

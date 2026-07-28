@@ -57,15 +57,13 @@ import { ensureCustomLanguages } from "./syntax";
 import { useWorkerHighlight, type WorkerAsts } from "./use-worker-highlight";
 
 /**
- * A line-anchored annotation rendered under a specific diff line (e.g. a PR
- * review thread). The library renders it as an always-visible block below the
- * anchored line, in both Unified and Split modes.
+ * A line-anchored annotation rendered under a diff line (e.g. a PR review
+ * thread), always-visible in both Unified and Split modes.
  *
  * `extendData` holds ONE entry per line per side — duplicates silently
- * last-write-win — so callers must pre-group multiple anchors on the same
- * side+line into a single `render()` that stacks them (as PrFilesPane does).
- * Anchors on lines beyond the large-diff cap don't render until the user
- * expands "Show full diff".
+ * last-write-win — so callers must pre-group same-side+line anchors into a
+ * single stacking `render()` (as PrFilesPane does). Anchors past the
+ * large-diff cap don't render until "Show full diff".
  */
 export interface DiffLineAnchor {
   side: "old" | "new";
@@ -75,17 +73,14 @@ export interface DiffLineAnchor {
 }
 
 /**
- * An inline composer widget opened from a diff line: click a line number (or
- * drag-select a range on the gutter) to open a slot BELOW that line, rendered by
- * `render` with the resolved anchor. Generic so any surface (PR review today,
- * commit comments later) can reuse it. When absent, the diff renders exactly as
- * before — the plain vendored `<DiffView>`, no clickable line numbers, no
- * range-select wrapper (a hard zero-diff requirement, since this component backs
- * history/working-tree/PR diffs).
+ * An inline composer opened from a diff line: click a line number (or drag a
+ * range on the gutter) to open a slot BELOW that line. Generic so any surface
+ * (PR review, commit comments) can reuse it. Absent = the plain vendored
+ * `<DiffView>`, no clickable line numbers and no range-select wrapper — this
+ * component also backs history/working-tree diffs.
  *
- * `render` receives the anchored `line` (the END line of a range) and `fromLine`
- * (the range start, equal to `line` for a single line), the resolved `side`, and
- * an `onClose` that dismisses the slot.
+ * `render` receives the anchored `line` (a range's END), `fromLine` (its start,
+ * equal to `line` for a single line), the resolved `side`, and an `onClose`.
  */
 export interface LineWidget {
   enabled: boolean;
@@ -114,11 +109,10 @@ export interface SyntaxPrefs {
 
 /**
  * Which revisions to read each side's full file text from, so highlighting has
- * whole-file comment/string context (a hunk that starts mid-block-comment would
- * otherwise mis-color the code after it). `null` = working tree; omit a side
- * (undefined) when it has no version there (e.g. an added file's old side). The
- * pair MUST match the diff command's own old/new, or tokens map onto the wrong
- * lines. See the diff-highlight-midcomment task.
+ * whole-file comment/string context (a hunk starting mid-block-comment would
+ * otherwise mis-color everything after it). `null` = working tree; omit a side
+ * when it has no version there (e.g. an added file's old side). The pair MUST
+ * match the diff command's own old/new, or tokens map onto the wrong lines.
  */
 export interface DiffContentRevs {
   oldRev?: string | null;
@@ -133,13 +127,11 @@ function countLines(s: string): number {
 }
 
 /**
- * The highest old- and new-side line numbers a unified diff's hunk headers
- * reference. Content mode maps syntax onto the diff *by line number*, so each
- * side's read-back file must reach these lines; if a cached content read has
- * gone stale and is shorter than the diff (e.g. `:0` was cached when the staged
- * file was smaller, then it grew), the renderer highlights only the lines the
- * stale content covers and leaves the rest plain. {@link useFileContent} uses
- * this to fall back to the self-consistent hunk-only path instead.
+ * The highest old/new line numbers a unified diff's hunk headers reference.
+ * Content mode maps syntax onto the diff BY LINE NUMBER, so a stale, shorter
+ * cached read (e.g. `:0` cached when the staged file was smaller, then it grew)
+ * highlights only the lines it covers and leaves the rest plain —
+ * {@link useFileContent} uses this to fall back to the hunk-only path.
  */
 function diffMaxLineNumbers(diffText: string): { old: number; new: number } {
   let maxOld = 0;
@@ -235,23 +227,20 @@ export function GitDiffView({
   );
 }
 
-// Per-engine char budgets bounding the ONE-TIME synchronous tokenization the
-// hunk path runs on first paint. Measured warm cost on unique real content:
-// highlight.js ≈0.37ms/KB (~150ms at 400KB), Shiki ≈1ms/KB for rust and
-// ≈3.2ms/KB for tsx (~150ms rust / ~480ms worst-case tsx at 150KB). Shiki is
-// ~8× the per-KB cost, so it gets the tighter budget. Over budget, a Shiki-routed
-// language tokenizes off-thread instead (see {@link useWorkerHighlight}); an
-// over-budget hljs language keeps the view's own hljs pass (≤15K lines) unchanged.
+// Char budgets bounding the ONE-TIME synchronous tokenization on first paint.
+// Measured warm cost on unique real content: highlight.js ≈0.37ms/KB (~150ms at
+// the 400KB budget), Shiki ≈1ms/KB rust to ≈3.2ms/KB tsx (~150–480ms at the
+// 150KB budget) — ~8× hljs, hence the tighter budget. Over budget, a Shiki
+// language tokenizes off-thread ({@link useWorkerHighlight}); an hljs one keeps
+// the view's own pass (≤15K lines).
 const HIGHLIGHT_MAX_CHARS_HLJS = 400_000;
 const HIGHLIGHT_MAX_CHARS_SHIKI = 150_000;
 
 /**
  * Whether a diff of `textLength` chars is over the synchronous-tokenize budget
- * for the engine it routes to (Shiki gets the tighter budget — ~8× the per-KB
- * cost). Over budget for a Shiki language, the sync path skips highlighting and
- * the Web Worker tokenizes off-thread; under budget it highlights inline. Shared
- * so the worker call site computes engagement the SAME way the skip logic inside
- * {@link createDiffFile} does.
+ * for the engine it routes to. Over budget for a Shiki language the sync path
+ * skips highlighting and the worker tokenizes off-thread. Shared so the worker
+ * call site computes engagement the SAME way {@link createDiffFile} does.
  */
 export function overHighlightBudget(
   textLength: number,
@@ -268,13 +257,11 @@ export function overHighlightBudget(
 const EMPTY_WORKER_AST: DiffAST = { type: "root", children: [] };
 
 /**
- * A @git-diff-view highlighter backed by ASTs the worker already tokenized. Its
- * `getAST` just looks the side up by the raw text's djb2 hash — no engine runs
- * on the main thread. Fed to a REAL local `initSyntax` so the instance is
- * indistinguishable from a locally-highlighted one (its `syntaxFile` populates,
- * so the view's clone restores rather than wipes the highlighting on mount). A
- * hash miss returns the empty AST (that side plain). Shiki emits style-based
- * spans, so `type: "style"` — matching the worker's own highlighter.
+ * A @git-diff-view highlighter backed by ASTs the worker already tokenized:
+ * `getAST` looks the side up by the raw text's djb2 hash — no engine on the
+ * main thread; a miss returns the empty AST (that side plain). Must be fed to a
+ * REAL local `initSyntax` so `syntaxFile` populates — otherwise the view's
+ * clone WIPES the highlighting on mount. `type: "style"` matches Shiki's spans.
  */
 function precomputedHighlighter(asts: WorkerAsts) {
   return {
@@ -293,19 +280,16 @@ function precomputedHighlighter(asts: WorkerAsts) {
 // Content mode reads and highlights BOTH whole files over IPC (≈2× the hunk
 // path's cost), so it keeps the original, tighter 100KB budget.
 const CONTENT_HIGHLIGHT_MAX_CHARS = 100_000;
-// The deliberately tighter content-mode line gate: past this many lines a file
-// isn't read in full (the hunk-only path is used), and useFileContent's budget
-// check uses it too. Kept tight (not the 15_000 renderer cap) because content
-// mode reads and highlights BOTH whole files (≈2× the hunk-path cost) over IPC.
+// Content-mode line gate: past this a file isn't read in full (hunk-only path).
+// Deliberately tighter than the 15_000 renderer cap — same 2× reason as above.
 export const HIGHLIGHT_MAX_LINES = 2000;
 
-// Pin the highlight.js renderer's line cap. The core gates on the RECONSTRUCTED
-// file's line count (`rawLength`), so this decides whether a small edit DEEP in
-// a big file gets highlighted at all — not the diff's own size. Placeholder
-// reconstruction lines tokenize at ~5–20µs each (≤~200ms one-time at this cap),
-// while real-content cost is bounded separately by the char budgets above. The
-// default was 2000, which silently dropped highlighting for any edit past line
-// 2000. SYNTAX_LINE_CAP is shared with the Shiki + precomputed highlighters.
+// Pin the highlight.js renderer's line cap: the core gates on the RECONSTRUCTED
+// file's line count, so this decides whether a small edit DEEP in a big file is
+// highlighted at all — the library's default 2000 silently drops it. Placeholder
+// lines tokenize at ~5–20µs (≤~200ms one-time here); real-content cost is bounded
+// by the char budgets above. SYNTAX_LINE_CAP is shared with the Shiki +
+// precomputed highlighters.
 highlighter.setMaxLineToIgnoreSyntax(SYNTAX_LINE_CAP);
 
 /**
@@ -323,9 +307,8 @@ export function createDiffFile(
   // and switches to collapsible full-file context instead of a bare hunk.
   content?: { old: string | null; new: string | null },
   // Per-side ASTs the highlight worker already tokenized. Passed only for an
-  // over-budget Shiki-routed file (the sync path would have SKIPPED Shiki): run
-  // a REAL local initSyntax off the precomputed ASTs to paint the worker's
-  // highlighting in. Undefined = exactly today's path.
+  // over-budget Shiki-routed file (the sync path SKIPPED Shiki): run a REAL
+  // local initSyntax off them to paint the worker's highlighting in.
   workerAsts?: WorkerAsts,
 ): DiffFile | null {
   if (!text.trim()) return null;
@@ -362,11 +345,9 @@ export function createDiffFile(
       },
       hunks: [text],
     };
-    // Worker ASTs arrive only for an over-budget Shiki-routed file the sync path
-    // skipped. Build the instance locally and run the REAL initSyntax off the
-    // precomputed ASTs — the resulting instance is a genuinely-highlighted one
-    // (syntaxFile populated), so the view's clone restores it on mount instead of
-    // wiping to plain (as a getBundle-merged Shiki instance would).
+    // Precomputed worker ASTs: a REAL local initSyntax off them yields a
+    // genuinely-highlighted instance (syntaxFile populated) the view's clone
+    // restores instead of wiping — as it would a getBundle-merged Shiki instance.
     if (workerAsts) {
       const file = DiffFile.createInstance(data);
       file.initRaw();
@@ -377,13 +358,10 @@ export function createDiffFile(
     }
     const file = DiffFile.createInstance(data);
     file.initRaw();
-    // The char budget bounds the one-time synchronous tokenization cost, which
-    // differs ~8× by engine (see the constants) — so gate on the budget for the
-    // engine this diff actually routes to. The line-count cutoff is a separate
-    // concern, left to the renderer's per-engine `maxLineToIgnoreSyntax` (now
-    // 15_000 for both engines), which bounds the placeholder-reconstruction cost
-    // of an edit deep in a huge file. Gating here on a line count would wrongly
-    // skip large Shiki-rendered files (e.g. Rust) the renderer would happily do.
+    // Gate on the char budget for the engine this diff routes to (~8× apart —
+    // see the constants). Don't gate on line count here: that's the renderer's
+    // own per-engine `maxLineToIgnoreSyntax`, and a line gate would wrongly skip
+    // large Shiki files (e.g. Rust) the renderer would happily highlight.
     if (lang && !overHighlightBudget(text.length, useShiki)) {
       if (useShiki) {
         file.initSyntax({ registerHighlighter: shikiDiffHighlighter() });
@@ -398,30 +376,22 @@ export function createDiffFile(
 }
 
 /**
- * Reads the full old/new file text for whole-file highlight context (the
- * content-mode path) and returns `{ content, pending }`: `content` is
- * `{old,new}` to hand {@link createDiffFile}, or `null` when content mode
- * shouldn't apply (no revs, unreadable side, or a diff too big in lines/chars
- * for the renderer to highlight). `pending` is true only while content mode
- * WANTS to apply but its whole-file reads haven't settled yet — callers gate on
- * it to avoid painting an intermediate hunk-only diff that will immediately be
- * rebuilt into the collapsible content-mode layout once the reads land (the
- * "diff flash" single-paint fix). Gated to small, non-truncated diffs whose
- * files fit the highlight budget. The rev pair MUST match the diff's own
- * old/new. Shared by the read-only diff surface and the staging diff viewer.
- * `diffText`/`filePath` should already be deferred values.
+ * Reads the full old/new file text for whole-file highlight context (content
+ * mode). `content` is `{old,new}` for {@link createDiffFile}, or null when
+ * content mode shouldn't apply (no revs, unreadable side, or a diff too big in
+ * lines/chars). `pending` is true only while content mode WANTS to apply but
+ * its reads haven't settled — callers gate on it so the diff is painted ONCE in
+ * its final layout instead of hunk-only then rebuilt. The rev pair MUST match
+ * the diff's own old/new. `diffText`/`filePath` should already be deferred.
  */
 export function useFileContent(
   repoPath: string | undefined,
   filePath: string,
   diffText: string,
   contentRevs?: DiffContentRevs,
-  // Max diff size before content mode (whole-file highlight + collapsible
-  // expand) engages. The read-only surface caps its render at DIFF_LINE_CAP and
-  // uses that default; the staging view renders every hunk regardless, so it
-  // passes the larger highlight budget — a big diff in a normal-size file then
-  // still highlights correctly instead of falling back to the hunk-only,
-  // mid-comment-leaking path.
+  // Max diff size before content mode engages. The read-only surface caps its
+  // render at DIFF_LINE_CAP; the staging view renders every hunk regardless, so
+  // it passes the larger highlight budget instead of falling back to hunk-only.
   maxDiffLines: number = DIFF_LINE_CAP,
 ): { content: { old: string; new: string } | null; pending: boolean } {
   const oldRev = contentRevs?.oldRev;
@@ -461,11 +431,8 @@ export function useFileContent(
   const fitsBudget = (s: string) =>
     s.length <= CONTENT_HIGHLIGHT_MAX_CHARS &&
     countLines(s) <= HIGHLIGHT_MAX_LINES;
-  // Content mode maps syntax onto the diff by line number, so each side's
-  // read-back text must reach the highest line the diff references. A stale,
-  // shorter read (e.g. `:0` cached before the staged file grew) would otherwise
-  // highlight only its first lines and leave the rest plain — fall back to the
-  // self-consistent hunk-only path instead.
+  // Each side's read-back text must reach the highest line the diff references
+  // (see diffMaxLineNumbers) — a stale, shorter read would half-highlight.
   const { old: maxOldLine, new: maxNewLine } = diffMaxLineNumbers(diffText);
   const covers = (s: string, max: number) => max === 0 || countLines(s) >= max;
   const useContent =
@@ -477,11 +444,9 @@ export function useFileContent(
     fitsBudget(newText) &&
     covers(newText, maxNewLine) &&
     covers(oldText, maxOldLine);
-  // Content mode wants to apply here but its whole-file reads are still in
-  // flight — the caller should hold the paint rather than build a hunk-only diff
-  // it will immediately restructure once the reads settle. An already-viewed
-  // file settles instantly from the query cache (isPending, not isFetching, so a
-  // background refetch of cached data never re-blanks the pane).
+  // Content mode wants to apply but its reads are in flight — the caller holds
+  // the paint rather than build a hunk-only diff it will restructure. isPending,
+  // NOT isFetching: a background refetch of cached data must never re-blank.
   const pending = wantContent && (!oldSettled || !newSettled);
   return useMemo(
     () => ({
@@ -534,15 +499,10 @@ function RenderedDiff({
   const deferredText = useDeferredValue(text);
   const deferredPath = useDeferredValue(filePath);
 
-  // Reset the "Show diff anyway" opt-in when the file actually changes on the
-  // DEFERRED timeline — not the urgent `filePath` — because `blocked` derives
-  // from `deferredText`. Resetting on the urgent change would re-block the
-  // OUTGOING mega file for the transition frame(s) before the new file's
-  // deferred text lands, flashing the placeholder over its opted-in shortened
-  // render (spec-review finding). Keyed on deferredPath, it rides the same
-  // values `blocked` reads, so the outgoing file keeps its render through the
-  // transition — matching how every deferred transition holds the previous
-  // content on screen.
+  // Reset on the DEFERRED path, not the urgent `filePath`: `blocked` derives
+  // from `deferredText`, so an urgent reset would re-block the OUTGOING mega
+  // file for the transition frames and flash the placeholder over its opted-in
+  // render. Keyed on deferredPath it rides the same values `blocked` reads.
   const [prevDeferredPath, setPrevDeferredPath] = useState(deferredPath);
   if (prevDeferredPath !== deferredPath) {
     setPrevDeferredPath(deferredPath);
@@ -560,12 +520,9 @@ function RenderedDiff({
   const isMegaLine = longestLine > DIFF_MEGA_LINE_CHARS;
   const blocked = isMegaLine && !showAnyway;
 
-  // Whole-file highlight context + collapsible expand for small diffs; `content`
-  // is null when it shouldn't apply (big file / unreadable / truncated → capped
-  // hunk-only). `contentPending` is true while content mode wants to apply but
-  // its reads are still loading — we hold the whole paint until it settles so the
-  // diff is built ONCE (in its final content-mode layout) rather than painted
-  // hunk-only first and rebuilt when the reads land (the visible "flash").
+  // Whole-file highlight context + collapsible expand for small diffs (`content`
+  // null = capped hunk-only). Hold the whole paint while `contentPending` so the
+  // diff is built ONCE in its final layout rather than rebuilt (the "flash").
   const { content, pending: contentPending } = useFileContent(
     repoPath,
     deferredPath,
@@ -588,17 +545,11 @@ function RenderedDiff({
       : showFull
         ? { text: deferredText, hidden: 0 }
         : capDiffText(deferredText, DIFF_LINE_CAP);
-    // Hard-shorten over-long lines UNCONDITIONALLY on whatever is about to
-    // render: "Show full diff" reveals hidden lines but long lines stay
-    // shortened (the safety invariant — no rendered diff can ever freeze). In
-    // content mode `longestLine <= DIFF_MAX_LINE_CHARS` by construction (the
-    // gate above), so this hits the fast-path with shortened=0.
-    //
-    // `longestLine` is measured on the FULL deferredText, so ≤ cap on the full
-    // text implies ≤ cap on any subset (capped / showFull / content text) —
-    // skipping the shorten pass is always safe there and avoids its re-scan.
-    // When > cap we still call shortenLongLines, whose own fast-path also
-    // returns shortened=0 for the case where capDiffText cut the long line out.
+    // Hard-shorten over-long lines UNCONDITIONALLY on whatever renders: "Show
+    // full diff" reveals hidden lines but long lines stay shortened (safety
+    // invariant — no rendered diff may freeze). `longestLine` is measured on the
+    // FULL text, so ≤ cap there implies ≤ cap on any subset — skipping the
+    // shorten pass is safe and avoids a re-scan.
     const short =
       longestLine <= DIFF_MAX_LINE_CHARS
         ? { text: capped.text, shortened: 0 }
@@ -615,13 +566,10 @@ function RenderedDiff({
   const activeRepo = useUiStore((s) => s.repoPath);
   const { syntaxMap, customLanguages } = useEffectiveSyntax(activeRepo);
 
-  // Built-in Shiki grammars (astro/tsx/rust &c.) load lazily to keep them off
-  // the startup bundle. The first time a diff needs one it isn't loaded yet, so
-  // rather than build the diff hunk-only-highlighted and rebuild it when the
-  // grammar lands (the visible highlight pop-in), we hold the paint until the
-  // load settles. Track each language's outcome ("ready" or "failed") so a
-  // failed import still releases the gate — a missing grammar must fall back to
-  // highlight.js / plain, never deadlock the pane.
+  // Built-in Shiki grammars load lazily (off the startup bundle). Hold the paint
+  // until the load settles rather than rebuild on arrival (highlight pop-in).
+  // Track "ready" OR "failed" so a failed import still releases the gate — a
+  // missing grammar must fall back to hljs/plain, never deadlock the pane.
   const [grammarState, setGrammarState] = useState<
     Record<string, "ready" | "failed">
   >({});
@@ -664,18 +612,14 @@ function RenderedDiff({
     !isShikiLang(lang) &&
     !grammarState[lang];
 
-  // Off-thread highlighting, Shiki-only. Over-budget Shiki-routed files (Rust,
-  // TSX, Astro, custom grammars &c.) otherwise get the WRONG engine — the view's
-  // own hljs pass, which those languages are routed off on purpose — so the
-  // worker delivers correct Shiki off-thread. An over-budget hljs-routed file
-  // sends NO request: the view clone already hljs-highlights it (≤15K lines),
-  // which is the intended engine there. `useShikiWorker` also routes a builtin
-  // Shiki lang whose grammar the main thread hasn't loaded yet — the worker loads
-  // it itself. `tmGrammar` is a custom Shiki language's raw grammar for the worker
-  // to register. A custom tmGrammar routes to Shiki here directly because its
-  // registration happens lazily inside createDiffFile with no rebuild trigger —
-  // `tmGrammar` is available on the first render, module state is not. The hook
-  // adds the size ceiling.
+  // Off-thread highlighting, Shiki-only: an over-budget Shiki-routed file would
+  // otherwise get the view clone's hljs pass — the engine those languages are
+  // routed OFF on purpose. An over-budget hljs file sends NO request (the clone
+  // already highlights it correctly, ≤15K lines). A builtin Shiki lang whose
+  // grammar the main thread hasn't loaded also routes here — the worker loads
+  // its own copy. A custom `tmGrammar` routes directly: its registration happens
+  // lazily inside createDiffFile with no rebuild trigger, and the grammar (unlike
+  // module state) is available on the first render.
   const tmGrammar = useMemo(
     () =>
       lang
@@ -702,18 +646,14 @@ function RenderedDiff({
     tmGrammar,
   });
 
-  // Over budget, the main thread will NEVER Shiki-tokenize this file, so holding
-  // the plain paint on a grammar only the worker needs would just delay the
-  // interim paint — the worker loads its own grammar. Under budget, keep the
-  // original hold so the lazy-grammar rebuild still lands in one paint.
+  // Over budget the main thread never Shiki-tokenizes, so holding the paint for
+  // a grammar only the worker needs would just delay the interim paint. Under
+  // budget, hold — so the lazy-grammar rebuild still lands in one paint.
   const holdForGrammar = grammarPending && !overBudget;
 
-  // grammarState is a deliberate rebuild trigger: createDiffFile reads the
-  // now-loaded Shiki grammar via module state (isShikiLang), not a passed value,
-  // so recording the load result is what forces the rebuild that picks the
-  // grammar up (the gate below only lets the first build run once it's settled).
-  // `workerAsts` is the analogous trigger for the over-budget path: its identity
-  // change when the ASTs land is what rebuilds the diff highlighted.
+  // grammarState + workerAsts are deliberate rebuild TRIGGERS: createDiffFile
+  // reads the loaded grammar via module state (isShikiLang), not a passed value,
+  // so only their identity change forces the rebuild that picks it up.
   // biome-ignore lint/correctness/useExhaustiveDependencies: grammarState is an intentional rebuild trigger, read via module state not directly
   const diffFile = useMemo(
     () =>
@@ -740,10 +680,9 @@ function RenderedDiff({
     ],
   );
 
-  // Build the per-side extendData maps from the anchors (keyed by String(line)).
-  // Memoized for referential stability: the vendored DiffView is store-based and
-  // a fresh object each render would thrash it. Anchors on lines beyond the
-  // large-diff cap simply don't render until "Show full diff" expands the diff.
+  // Per-side extendData maps, keyed by String(line). Memoized for referential
+  // stability: the vendored DiffView is store-based and a fresh object each
+  // render thrashes it.
   const extendData = useMemo(() => {
     if (!lineAnchors || lineAnchors.length === 0) return undefined;
     const oldFile: AnchorExtendData = {};
@@ -756,15 +695,12 @@ function RenderedDiff({
   }, [lineAnchors]);
 
   // --- Drag-range survival across the "+" click (vendored-library workaround) ---
-  // The vendored DiffViewWithMultiSelect only honors a stored multi-select range
-  // when the clicked "+" sits on the range's MAX line; a click on any other
-  // selected line wipes the range and reports single-line (index.mjs ~1829-1871).
-  // Its onSelectionComplete also only stores the range when `lines.length > 0`,
-  // so an empty lines computation loses it entirely (~1733-1745). We therefore
-  // track the last completed drag range ourselves and re-apply it in
-  // renderWidgetLine so a click on ANY line of the range still opens the composer
-  // as a range. All of this is scoped to the lineWidget-enabled branch below —
-  // read-only surfaces render the plain <DiffView> and never touch this state.
+  // DiffViewWithMultiSelect honors a stored multi-select range ONLY when the
+  // clicked "+" sits on the range's MAX line; any other selected line wipes it
+  // and reports single-line. Its onSelectionComplete also stores the range only
+  // when `lines.length > 0`, so an empty computation loses it. So we track the
+  // last completed drag ourselves and re-apply it in renderWidgetLine. All of
+  // this is scoped to the lineWidget branch — read-only surfaces never touch it.
   const multiSelectRef = useRef<DiffViewWithMultiSelectRef>(null);
   // The last completed (or in-flight, as a fallback) drag range. `dragRangeRef`
   // is set on onMultiSelectComplete; `changeRangeRef` mirrors the latest non-null
@@ -773,33 +709,27 @@ function RenderedDiff({
   const dragRangeRef = useRef<SideRange | null>(null);
   const changeRangeRef = useRef<SideRange | null>(null);
   // The range the CURRENTLY-OPEN overridden widget resolved to, tagged with the
-  // exact reported anchor it opened at (`anchorSide`/`anchorLine` = the raw side
-  // + reported line the library passed renderWidgetLine). Rule B reuses `range`
-  // ONLY when a later call reports that SAME anchor — i.e. the same widget
-  // re-rendering — so it stays a range across parent re-renders without
-  // downgrading. A press on a DIFFERENT line reports a different anchor (the
-  // library's single-widget store just replaces the open one WITHOUT calling our
-  // onClose, react ~1192-1200/687), so it correctly falls through to fresh
-  // resolution instead of inheriting this range. Also gates capture: while set, a
-  // widget is open, so completion/change events are press-echo noise, not a real
-  // drag. Cleared in the wrapped onClose.
+  // exact anchor (side + reported line) the library passed renderWidgetLine.
+  // Rule B reuses `range` ONLY when a later call reports that SAME anchor — the
+  // same widget re-rendering — so it survives parent re-renders without
+  // downgrading; a press on a different line reports a different anchor (the
+  // library replaces its single widget WITHOUT calling our onClose) and falls
+  // through to fresh resolution. Also gates capture: while set, a widget is open
+  // so completion/change events are press-echo noise. Cleared in onClose.
   const activeOverrideRef = useRef<{
     anchorSide: "old" | "new";
     anchorLine: number;
     range: SideRange;
   } | null>(null);
-  // The range the highlight is currently pinned to (or null), so an identical
-  // re-assert no-ops instead of re-touching the DOM. The highlight is a purely
-  // imperative call on the manager (setPreselectedLines mutates the DOM only, no
-  // React state), so there is NO re-render on widget open — which is what kept
-  // the composer from flashing (a state bump would recreate this inline
+  // The range the highlight is pinned to (or null), so an identical re-assert
+  // no-ops instead of re-touching the DOM. setPreselectedLines mutates the DOM
+  // only — no React state, so opening a widget triggers NO re-render, which is
+  // what keeps the composer from flashing (a state bump would recreate
   // renderWidgetLine and thrash the memoized inner DiffView table).
   const preselectSigRef = useRef<string>("");
-  // Re-apply the range highlight (the library wiped its own preselect on the "+"
-  // press) or clear it on close/no-override. Deferred via a microtask so it never
-  // runs DURING render — but it is a direct manager call, not routed through a
-  // React commit. Guarded by a signature so a stable open widget re-asserting the
-  // same range does nothing.
+  // Re-apply the range highlight the library wiped on the "+" press (or clear it
+  // on close). Deferred via a microtask so it never runs DURING render; guarded
+  // by a signature so a stable open widget re-asserting the same range no-ops.
   const syncPreselect = useCallback((next: SideRange | null) => {
     const sig = next ? `${next.side}:${next.from}-${next.to}` : "";
     if (sig === preselectSigRef.current) return;
@@ -828,43 +758,29 @@ function RenderedDiff({
 
   const onMultiSelectComplete = useCallback(
     (result: MultiSelectResult) => {
-      // Capture EVERY completed drag — even while a widget is open. Do NOT gate
-      // this on activeOverrideRef: a widget can be replaced/dismissed WITHOUT
-      // our wrapped onClose ever firing (the library's single-widget store just
-      // swaps it, react ~1192-1200/687), leaving activeOverrideRef set forever;
-      // gating here would then silently starve every future drag → the "works
-      // once, then stops" intermittency. There is no press-echo to guard against:
-      // pressing "+" makes the wrapper call clearSelection, which resets
-      // isSelecting, so the mouseup hits handleMouseUp with isSelecting=false →
-      // resetState only, NO onSelectionComplete (core ~3603). So this only ever
-      // fires for a real user drag. A stale override is instead retired in
-      // resolveWidgetRange when a differently-anchored widget renders.
+      // Capture EVERY completed drag, even while a widget is open. Do NOT gate
+      // on activeOverrideRef: the library can replace/dismiss a widget WITHOUT
+      // calling our onClose, leaving the ref set forever and starving every
+      // future drag. There is no press-echo to guard against — pressing "+"
+      // calls clearSelection, so the mouseup sees isSelecting=false and fires
+      // resetState only, never onSelectionComplete. A stale override is retired
+      // in resolveWidgetRange instead.
       dragRangeRef.current = normRange(result.range);
     },
     [normRange],
   );
   const onMultiSelectChange = useCallback(
     (range: LineRange | null, state: MultiSelectState) => {
-      // NOTE: we deliberately do NOT clear dragRangeRef when a new selection
-      // starts. Pressing the "+" button itself starts a native single-line
-      // selection on mousedown (core handleMouseDown, before any React handler),
-      // firing this with isSelecting:true — clearing here would wipe the very
-      // range the press is trying to open. A completed drag's range must SURVIVE
-      // the press restart. Staleness is instead handled by: a real new drag's
-      // COMPLETE overwriting it, resolveWidgetRange dropping it on an
-      // out-of-range click, and the wrapped onClose clearing it.
-      //
-      // Do NOT re-add an `if (activeOverrideRef.current) return` guard here (or
-      // in onMultiSelectComplete): a widget can vanish without our onClose firing
-      // (the library swaps its single widget in place), so gating on an override
-      // that never clears would starve every subsequent real drag. The "+"-press
-      // echo it was meant to suppress does not exist — the wrapper's
-      // clearSelection resets isSelecting, so mouseup produces resetState only,
-      // no onSelectionComplete. And the manager only ever fires onSelectionChange
-      // with isSelecting:true (handleMouseDown / handleMouseOver), so there is no
-      // selection-ended branch to promote/reset here — just mirror the latest
-      // in-flight range so the empty-`lines` mouseup path (no
-      // onMultiSelectComplete, react ~1736) still has a range to fall back to.
+      // Deliberately do NOT clear dragRangeRef when a selection starts (and do
+      // NOT add an `if (activeOverrideRef.current) return` guard — see
+      // onMultiSelectComplete): pressing "+" itself starts a native single-line
+      // selection on mousedown, before any React handler, so clearing here would
+      // wipe the very range the press is opening. Staleness is handled by a real
+      // drag's COMPLETE, by resolveWidgetRange on an out-of-range click, and by
+      // onClose. The manager only ever fires this with isSelecting:true, so there
+      // is no selection-ended branch to handle — just mirror the in-flight range
+      // so the empty-`lines` mouseup path (which fires no onMultiSelectComplete)
+      // still has a fallback.
       if (state.isSelecting && range) {
         changeRangeRef.current = normRange(range);
       }
@@ -933,10 +849,8 @@ function RenderedDiff({
       reportedFrom: number,
       side: "old" | "new",
     ): SideRange => {
-      // (B) The SAME open overridden widget re-rendering (identical reported
-      // anchor) keeps its range, so a parent re-render after the captured drag
-      // range moves on never downgrades an open composer to single-line. A press
-      // on a different line reports a different anchor and falls through.
+      // (B) The same open widget re-rendering (identical reported anchor) keeps
+      // its range, so a parent re-render never downgrades it to single-line.
       const active = activeOverrideRef.current;
       if (
         active &&
@@ -945,12 +859,10 @@ function RenderedDiff({
       ) {
         return active.range;
       }
-      // A genuinely new resolution starts here (the reported anchor differs from
-      // any active override → the old widget is gone). Always REPLACE the ref
-      // with this resolution's outcome so a dead widget's override never lingers:
-      // the new override when a range fires, or null when it resolves single-line.
-      // This is what retires the stale override that onMultiSelectComplete no
-      // longer guards against.
+      // A genuinely new resolution (reported anchor differs from any active
+      // override → the old widget is gone). Always REPLACE the ref with this
+      // outcome — the new override on a range, null on a single line — so a dead
+      // widget's override never lingers.
       const remember = (range: SideRange) => {
         activeOverrideRef.current =
           range.from !== range.to
@@ -990,12 +902,10 @@ function RenderedDiff({
       )
     : undefined;
 
-  // Stable identity so a parent re-render (or a widget-open highlight sync) never
-  // recreates this prop — the library memoizes its internal widget renderer on
-  // [renderWidgetLine] (react ~1789-1804), so a fresh closure would re-render the
-  // whole inner DiffView table right after the composer mounts → a visible flash.
-  // Every helper it calls is itself a stable useCallback / module-level fn, so the
-  // dep list is honest and stable.
+  // Stable identity so a parent re-render (or a widget-open highlight sync)
+  // never recreates this prop — the library memoizes its internal widget
+  // renderer on [renderWidgetLine], so a fresh closure re-renders the whole
+  // inner DiffView table right after the composer mounts → a visible flash.
   const renderWidgetLine = useCallback(
     ({
       lineNumber,
@@ -1015,24 +925,18 @@ function RenderedDiff({
         sideTag(side),
       );
       const overrode = resolved.from !== resolved.to;
-      // Re-apply the range highlight the library wiped on the "+" press (or clear
-      // it when there's no override). Imperative-only — no React state, no
-      // re-render — deferred out of the render phase via a microtask.
+      // Re-apply the highlight the library wiped on the "+" press (see syncPreselect).
       syncPreselect(overrode ? resolved : null);
       return (
-        // The library's widget slot gives the row no background, so anchor the
-        // composer onto its own opaque, elevated card (like the app's other
-        // floating composers). The slot otherwise resets every descendant to
-        // `color: initial` (→ black), which would flatten this content — but that
-        // reset (and its extend-wrapper twin) is stripped at build time by a tiny
-        // postcss plugin (see vite.config.ts), leaving natural inheritance intact.
-        // So no color hammer is needed: the card's `text-popover-foreground` is
-        // inherited by unstyled nodes and the composer's own color utilities keep
-        // their semantic tones.
+        // The library's widget slot gives the row no background, so the composer
+        // gets its own opaque elevated card. The slot's `color: initial` reset
+        // (and its extend-wrapper twin) is stripped at build time by a postcss
+        // plugin (see vite.config.ts), so natural inheritance holds and no color
+        // hammer is needed.
         //
         // The slot renders under the CLICKED line, not the range's end line — a
-        // base-library limitation we accept; the composer's own "Lines X–Y" label
-        // carries the true anchor.
+        // base-library limitation; the composer's "Lines X–Y" label carries the
+        // true anchor.
         <div className="m-2 rounded-none border bg-popover p-3 font-sans text-xs text-popover-foreground shadow-md">
           {lineWidget.render({
             side: resolved.side,
@@ -1055,18 +959,9 @@ function RenderedDiff({
     [lineWidget, resolveWidgetRange, syncPreselect],
   );
 
-  // Inputs still settling (whole-file reads or the lazy grammar): render nothing
-  // rather than a hunk-only diff we'd immediately rebuild — the single-paint gate
-  // that removes the flash. Must precede the empty-state placeholder so loading
-  // never masquerades as "No changes to show". Matches DiffContent's own
-  // render-nothing-while-loading design (see the comment there). Over budget we
-  // use `holdForGrammar` (never true there) so the interim paint isn't delayed
-  // for a grammar only the worker needs — the interim is the view clone's own
-  // hljs pass (≤15K lines; plain past it), and correct Shiki swaps in when the
-  // worker ASTs land.
   // A generated/minified file (one enormous line) would freeze the renderer:
-  // show a placeholder with a one-click opt-in instead. Placed FIRST so a
-  // blocked mega file never flashes null while an irrelevant grammar loads.
+  // placeholder + one-click opt-in. FIRST, so a blocked mega file never flashes
+  // null while an irrelevant grammar loads.
   if (blocked) {
     return (
       <DiffPlaceholder
@@ -1083,15 +978,18 @@ function RenderedDiff({
       />
     );
   }
+  // Inputs still settling: render nothing rather than a hunk-only diff we'd
+  // immediately rebuild (the single-paint gate). Must precede the empty-state
+  // placeholder so loading never reads as "No changes to show". Over budget
+  // `holdForGrammar` is never true — the interim hljs paint isn't delayed for a
+  // grammar only the worker needs.
   if (contentPending || holdForGrammar) return null;
   if (!diffFile) return <DiffPlaceholder message="No changes to show" />;
   return (
     <>
       {lineWidget?.enabled ? (
         // Line-comment mode: the multi-select variant adds clickable line numbers
-        // and drag-to-select-a-range, opening the composer widget below the line.
-        // Only mounted when a caller opts in (PR Files tab) — every read-only
-        // surface keeps the plain <DiffView> below, byte-for-byte unchanged.
+        // and drag-to-select, opening the composer below the line. Opt-in only.
         <DiffViewWithMultiSelect<{ render: () => ReactNode }>
           ref={multiSelectRef}
           diffFile={diffFile}
@@ -1106,20 +1004,14 @@ function RenderedDiff({
           // DiffView), which is what opens the widget slot.
           diffViewAddWidget
           enableMultiSelect
-          // Track the drag range ourselves so a "+" press on ANY line of the
-          // range still opens a range composer. Necessary because the library's
-          // own max-line fast path never fires: pressing "+" starts a native
-          // single-line selection on mousedown (core handleMouseDown, an ancestor
-          // native listener that runs BEFORE React's synthetic handlers), which
-          // makes the wrapper wipe its stored multiResult (react ~1728-1730);
-          // then the React onMouseDown opens the widget and calls the manager's
-          // clearSelection, so the later mouseup fires no onSelectionComplete
-          // (core handleMouseUp ~3603: isSelecting already false → resetState
-          // only). The widget renders during the mousedown discrete-event flush,
-          // BEFORE mouseup. Because we no longer clear dragRangeRef on
-          // isSelecting-start, our captured drag range still holds at render
-          // time → resolveWidgetRange overrides the single-line report → the
-          // composer opens as "Lines X–Y".
+          // Track the drag range ourselves so a "+" press on ANY line of it opens
+          // a range composer. The library's own max-line fast path never fires:
+          // "+" mousedown starts a native single-line selection in an ANCESTOR
+          // listener (before React's synthetic handlers), wiping the stored
+          // multiResult; the React onMouseDown then opens the widget and calls
+          // clearSelection, so mouseup fires no onSelectionComplete. The widget
+          // renders during the mousedown flush, BEFORE mouseup — so our captured
+          // range still holds at render time and overrides the single-line report.
           onMultiSelectComplete={onMultiSelectComplete}
           onMultiSelectChange={onMultiSelectChange}
           renderWidgetLine={renderWidgetLine}

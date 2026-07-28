@@ -118,7 +118,7 @@ export function bindingToAriaKeyshortcuts(binding: string): string {
       if (part === "shift") return "Shift";
       // ARIA wants UI Events key values: our canonical arrow tokens ("up",
       // from KEY_NAMES) must map back to "ArrowUp" etc., or AT ignores them
-      // (review-caught; reachable via user-recorded arrow chords).
+      // (reachable via user-recorded arrow chords).
       const arrow = ARIA_KEY_NAMES[part];
       if (arrow) return arrow;
       if (/^f\d{1,2}$/.test(part)) return part.toUpperCase();

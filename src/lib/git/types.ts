@@ -203,10 +203,8 @@ export interface TodoScan {
   truncated: boolean;
 }
 
-/** Result of applying a review suggestion to the working tree
- *  ({@link ReviewThreadOut} → {@link ApplyLinesResult}). The backend verifies the
- *  expected lines still match before editing, preserves EOL/BOM/trailing newline,
- *  and only stages when the file had no other local changes. */
+/** Result of applying a review suggestion to the working tree (see
+ *  `gitReplaceFileLines` for the verification/EOL contract). */
 export interface ApplyLinesResult {
   /** File was staged (only when it had no other local changes before the apply). */
   staged: boolean;
@@ -396,11 +394,10 @@ export interface RepoOpState {
 export type RepoOp = "merge" | "rebase" | "cherry-pick";
 
 /**
- * One journaled entry from GitDesktop's operation log — a record of a risky
- * compound git op (see `oplog.rs`), capturing the state it started from so an
- * interrupted op can be traced or recovered. `op`/`status` are typed as their
- * known values but rendered tolerantly (a future backend value must not crash
- * the UI). Wire shape is camelCase (`#[serde(rename_all="camelCase")]`).
+ * One journaled entry from GitDesktop's operation log (`oplog.rs`) — a risky compound
+ * git op plus the state it started from, so an interrupted op can be traced or
+ * recovered. `op`/`status` are typed as their known values but must be rendered
+ * tolerantly (a future backend value must not crash the UI). Wire shape is camelCase.
  */
 export interface OpLogEntry {
   id: string;
@@ -507,10 +504,9 @@ export interface ForgeRepoList {
   repos: ForgeRepo[];
 }
 
-/** A repository row from the Explore search/browse surface — a richer shape than
- *  {@link ForgeRepo} (which the clone browser lists your own repos with): it
- *  carries stars/language/updatedAt so search results can rank and describe repos
- *  you don't own. `Option<T>` on the Rust side serializes to `null`. */
+/** A repository row from the Explore search/browse surface — richer than
+ *  {@link ForgeRepo} (stars/language/updatedAt) so results you don't own can rank and
+ *  describe. Rust `Option<T>` serializes to `null`. */
 export interface ForgeSearchRepo {
   fullName: string;
   owner: string;
@@ -645,9 +641,9 @@ export interface BbAccountInfo {
   displayName: string | null;
 }
 
-/** What a provider (and this repo on it) supports, so panels show only the
- *  controls that work instead of erroring. GitHub is all-true; GitLab/Bitbucket
- *  follow the parity matrix. Grows as more panels move behind capability gates. */
+/** What a provider (and this repo on it) supports, so panels show only controls that
+ *  work instead of erroring. GitHub is all-true; GitLab/Bitbucket follow the parity
+ *  matrix. */
 export interface ForgeCapabilities {
   pullRequests: boolean;
   draftPrs: boolean;
@@ -662,11 +658,10 @@ export interface ForgeCapabilities {
   approvals: boolean;
 }
 
-/** Which hosted features GitDesktop has actually *built* for a provider — a
- *  different axis from {@link ForgeCapabilities}. Capabilities = what the platform
- *  can do; this = what we've wired up. GitHub is all-true; GitLab/Bitbucket flip
- *  these on per phase, so a *ready* repo whose feature isn't built yet degrades to
- *  "coming soon" rather than firing GitHub calls. Gated via `forgeFeatureReady`. */
+/** Which hosted features GitDesktop has actually *built* for a provider — a different
+ *  axis from {@link ForgeCapabilities} (what the platform can do). GitHub is all-true;
+ *  a *ready* GitLab/Bitbucket repo whose feature isn't built degrades to "coming soon"
+ *  rather than firing GitHub calls. Gated via `forgeFeatureReady`. */
 export interface ForgeImplemented {
   pullRequests: boolean;
   issues: boolean;
@@ -693,8 +688,8 @@ export interface ForgeImplemented {
   mrComment: boolean;
   /** Closing / reopening a merge/pull request (not merge). */
   mrState: boolean;
-  /** Approving / unapproving a merge request via the bodyless toggle — GitLab-only
-   *  (GitHub approves through the review flow), so it's false for GitHub. */
+  /** Approving / unapproving via the bodyless toggle — GitLab and Bitbucket. GitHub
+   *  approves through its Review menu instead, so it's false there. */
   mrApprove: boolean;
   /** Merging a merge/pull request (strategy + delete-source-branch) — a shared
    *  control, so true for both GitHub and GitLab. */
@@ -709,7 +704,7 @@ export interface ForgeImplemented {
   /** Editing labels on a merge/pull request — the same shared label control. */
   mrLabels: boolean;
   /** Setting an issue's assignees — a shared issue control. (MR assignees are the
-   *  separate GitLab-only `mrAssignees` below.) */
+   *  separate `mrAssignees` below.) */
   issueAssignees: boolean;
   /** Creating an issue from the app — a shared control (the GitHub-only org
    *  issue type hides per provider in the dialog; milestone works on both). */
@@ -729,26 +724,24 @@ export interface ForgeImplemented {
   releaseCreate: boolean;
   /** Managing an existing release (edit, delete, upload/delete assets) — shared. */
   releaseEdit: boolean;
-  /** Setting a merge request's assignees — GitLab-only like `mrApprove` (GitHub
-   *  PRs expose no assignee picker here), so it's false for GitHub. */
+  /** Setting a merge/pull request's assignees — a shared control for GitHub and GitLab
+   *  (GitHub PRs are issues under the hood); false for Bitbucket, which has no PR
+   *  assignee concept. */
   mrAssignees: boolean;
   /** Requesting changes on an MR (the blocking reviewer state) — GitLab and
    *  Bitbucket (GitHub requests changes via its Review menu). Bitbucket's revoke
    *  works on every plan, so the control toggles there; GitLab is one-shot. */
   mrRequestChanges: boolean;
-  /** Editing a merge/pull request's reviewer list — now a shared control on all
-   *  three providers (GitHub/GitLab request reviewers; Bitbucket picks from
-   *  workspace members). Each provider's setter preserves reviewer kinds it
-   *  doesn't manage (teams, bots). */
+  /** Editing a merge/pull request's reviewer list — shared on all three providers. Each
+   *  provider's setter preserves reviewer kinds it doesn't manage (teams, bots). */
   mrReviewers: boolean;
   /** Editing an existing issue's title/body — the shared edit dialog. */
   issueEdit: boolean;
   /** Editing an existing merge/pull request's title/body — the same shared
    *  edit control. */
   mrEdit: boolean;
-  /** Editing + deleting your own comments on a merge/pull request — the shared
-   *  Thread edit/delete controls (GitLab notes by id, Bitbucket PR comments by
-   *  id). GitHub keeps these via `canWrite`; GitLab and Bitbucket true. */
+  /** Editing + deleting your own comments on a merge/pull request. GitHub gates these
+   *  via `canWrite`; GitLab and Bitbucket true. */
   mrCommentEdit: boolean;
   /** Editing + deleting your own comments on an issue — the same shared
    *  Thread controls. GitLab true; Bitbucket issues aren't wired, so false. */
@@ -770,26 +763,25 @@ export interface ForgeImplemented {
   issueTransfer: boolean;
   /** Permanently deleting an issue (server-side role checks apply). */
   issueDelete: boolean;
-  /** Marking an issue confidential (members-only). GitLab-unique — false for
-   *  GitHub, which has no confidential-issue concept. */
+  /** Marking an issue confidential (members-only). GitLab-unique, so false for
+   *  GitHub. */
   issueConfidential: boolean;
   /** Setting/clearing an issue's due date. GitLab-unique — false for GitHub. */
   issueDueDate: boolean;
   /** The repository-settings dialog (admin probe + General / Danger zone and
    *  the provider's extra sections). */
   repoSettings: boolean;
-  /** Playing a manual CI job (a job awaiting a manual "play"). GitLab-unique —
-   *  false for GitHub, whose manual approvals work differently. */
+  /** Playing a manual CI job (one awaiting a "play"). GitLab-unique, so false for
+   *  GitHub. */
   ciJobPlay: boolean;
-  /** Time tracking (estimate + spent) on issues and MRs. GitLab-unique — false
-   *  for GitHub, which has no built-in time tracking. */
+  /** Time tracking (estimate + spent) on issues and MRs. GitLab-unique, so false for
+   *  GitHub. */
   timeTracking: boolean;
-  /** Related-issue links (relates_to) on issues. GitLab-unique — false for
-   *  GitHub (its issue relationships are sub-issues/dependencies instead). */
+  /** Related-issue links (relates_to) on issues. GitLab-unique — GitHub models
+   *  relationships as sub-issues/dependencies instead. */
   issueLinks: boolean;
-  /** The pull-request tasks checklist (create/edit/resolve/delete). Bitbucket-only
-   *  — a native Bitbucket concept with no GitHub/GitLab analogue wired here, so
-   *  false for both. */
+  /** The pull-request tasks checklist (create/edit/resolve/delete). Bitbucket-only — no
+   *  GitHub/GitLab analogue is wired. */
   prTasks: boolean;
   /** Reading file:line-anchored review threads on a merge/pull request (GitHub
    *  reviewThreads / GitLab diff-note discussions / Bitbucket inline comments). */
@@ -798,9 +790,8 @@ export interface ForgeImplemented {
   mrThreadReply: boolean;
   /** Resolving / unresolving a review thread. */
   mrThreadResolve: boolean;
-  /** Editing + deleting your own comment inside a review thread — the shared
-   *  Thread edit/delete controls, thread-scoped like reply/resolve. GitHub keeps
-   *  these via `canWrite`; GitLab and Bitbucket true. */
+  /** Editing + deleting your own comment inside a review thread (thread-scoped like
+   *  reply/resolve). GitHub gates via `canWrite`; GitLab and Bitbucket true. */
   mrThreadCommentEdit: boolean;
   /** Commenting on individual commits of a merge/pull request (plain or
    *  diff-anchored commit comments) — a shared control. */
@@ -985,10 +976,10 @@ export interface GitLabProtectedBranch {
   inherited: boolean;
 }
 
-/** A merge/pull request's approval summary — who has approved and whether the
- *  signed-in viewer has. Only GitLab produces it today; the GitLab-only
- *  approve/unapprove toggle and Request-changes control read it (gated on
- *  `implemented.mrApprove` / `implemented.mrRequestChanges`). */
+/** A merge/pull request's approval summary — who approved and whether the viewer did.
+ *  Produced by GitLab and Bitbucket (not GitHub, which approves via its Review menu);
+ *  read by the approve/unapprove toggle and Request-changes control
+ *  (`implemented.mrApprove` / `implemented.mrRequestChanges`). */
 export interface ApprovalState {
   /** Whether the viewer has approved — the toggle's driver (Approve ↔ Revoke). */
   viewerHasApproved: boolean;
@@ -1046,11 +1037,11 @@ export interface GitLabMrMergeState {
   pipelineUrl: string;
 }
 
-// ── Bitbucket settings surface (wave 2/3) ──────────────────────────────────
+// ── Bitbucket settings surface ─────────────────────────────────────────────
 //
-// Bitbucket's repo-management model is its own shape (like GitLab's), not a
-// mapping onto the GitHub types: a `fork_policy` enum, a `mainbranch`, and no
-// topics/archiving. camelCase mirrors the serde on the Rust side.
+// Bitbucket's repo-management model is its own shape (like GitLab's), not a mapping
+// onto the GitHub types: a `fork_policy` enum, a `mainbranch`, no topics/archiving.
+// camelCase mirrors the serde on the Rust side.
 
 /** A Bitbucket workspace the viewer belongs to — the publish target picker. */
 export interface BitbucketWorkspace {
@@ -1144,10 +1135,9 @@ export interface BitbucketHookInput {
   skipCertVerification: boolean;
 }
 
-/** Provider-neutral analogue of {@link GhStatus}: is the hosted integration usable
- *  for this repo, on which host, as whom, and what does it support. Hosted panels
- *  gate on this (and its `capabilities`) instead of a GitHub-only readiness check,
- *  so the same surfaces light up for GitLab and Bitbucket too. */
+/** Provider-neutral analogue of {@link GhStatus}: whether the hosted integration is
+ *  usable for this repo, on which host, as whom, and what it supports. Hosted panels
+ *  gate on this (and its `capabilities`) rather than a GitHub-only readiness check. */
 export interface ForgeStatus {
   /** The detected provider, or null when the repo has no recognized hosted remote. */
   provider: ForgeProvider | null;
@@ -1455,11 +1445,10 @@ export interface PrInfo {
 /** A PR's rolled-up CI signal for the list-row icon. "none" = no checks. */
 export type CiStatus = "passing" | "failing" | "pending" | "none";
 
-/** One PR's CI rollup keyed by number — the hydration payload for the PR-list row
- *  icons. Provider-neutral: GitHub reads its precomputed statusCheckRollup, GitLab
- *  the MR headPipeline status, Bitbucket a per-commit statuses probe. Fetched
- *  separately from the list so a large repo's list never waits on (or 504s
- *  expanding) the per-check status. */
+/** One PR's CI rollup keyed by number — the PR-list row-icon hydration payload.
+ *  Provider-neutral (GitHub statusCheckRollup, GitLab headPipeline, Bitbucket a
+ *  per-commit statuses probe); fetched separately from the list (see
+ *  `forgePrListCi`). */
 export interface PrCiStatus {
   number: number;
   ciStatus: CiStatus;
@@ -1590,14 +1579,13 @@ export interface PrCheckOut {
   completedAt?: string;
 }
 
-/** One activity-timeline event on a PR — force-pushes, label changes, review
- *  requests, and state changes — for the Conversation tab's activity timeline.
- *  A discriminated union keyed on `kind`, mirroring the Rust `PrTimelineEventOut`
- *  tagged enum. Provider-neutral — the backend dispatches per provider (GitHub
- *  reviews still render as cards, so it emits no approved/changesRequested;
- *  GitLab/Bitbucket emit approval events here since their review lists are empty).
- *  Events arrive oldest→newest. `actor`/`date`/oid fields are `""` when the
- *  provider returned null (ghost/deleted actor, gone commit). */
+/**
+ * One PR activity-timeline event, mirroring the Rust `PrTimelineEventOut` tagged enum.
+ * Provider-neutral: GitHub renders reviews as cards so it emits no
+ * approved/changesRequested, while GitLab/Bitbucket emit approval events here. Events
+ * arrive oldest→newest; `actor`/`date`/oid fields are `""` when the provider returned
+ * null.
+ */
 export type PrTimelineEvent =
   | {
       kind: "forcePushed";
@@ -1716,10 +1704,9 @@ export interface ForgeUserRef {
   isBot: boolean;
 }
 
-/** One review item on a PR/MR (a submitted review, an inline review comment, or a
- *  conversation comment) with its author's bot flag — the raw material a re-review
- *  folds in from third-party AI reviewers. From `forge_pr_external_reviews`
- *  (GitHub reviews / GitLab MR discussions; Bitbucket returns none). */
+/** One review item on a PR/MR with its author's bot flag — the raw material a re-review
+ *  folds in from third-party AI reviewers. From `forge_pr_external_reviews` (GitHub
+ *  reviews / GitLab MR discussions; Bitbucket returns none). */
 export interface ExternalReviewItem {
   /** `review` = a submitted review body, `inline` = a file:line review comment,
    *  `comment` = a conversation comment, `reply` = a follow-up comment inside a

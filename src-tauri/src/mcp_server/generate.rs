@@ -1,35 +1,23 @@
 //! AI-generation **recipe** tools.
 //!
 //! These tools do NOT call a model. Each assembles GitDesktop's fully-prepared
-//! generation context — the same system prompt + user prompt the in-app AI feature
-//! builds — and returns it as a recipe (`{ system, prompt, note }`). The CALLING
-//! agent (itself a model) completes the prompt with its own inference and uses the
-//! result as the commit message / PR description / branch name. No HTTP, no API
-//! keys, no streaming: pure context assembly from the repository's git state.
+//! generation context — the same system + user prompt the in-app AI feature builds —
+//! and returns it as `{ system, prompt, note }` for the CALLING agent to complete.
 //!
 //! KEEP IN SYNC: src/lib/ai/prompt.ts (BASE_SYSTEM, buildCommitPrompt, buildPrPrompt,
 //! buildBranchNamePrompt) and src/lib/ai/truncate.ts (budgetDiff, DIFF_CHAR_BUDGET,
-//! PER_FILE_CAP, LOW_VALUE_PATH, splitIntoFileSections) — the MCP recipe tools mirror
-//! these builders and the diff-budgeting they run (`budgetDiff(stripBinarySections(diff))`)
-//! so recipe output quality matches the in-app feature (same section headers, ordering,
-//! constraints, low-value-file filtering, per-file cap, and truncation-marker copy).
-//! When either side changes a prompt or the budgeting, update the other.
+//! PER_FILE_CAP, LOW_VALUE_PATH, splitIntoFileSections) — same section headers,
+//! ordering, constraints, low-value filtering, per-file cap, and marker copy.
 //!
-//! Budget note: the TS review path now SCALES `DIFF_CHAR_BUDGET`/`PER_FILE_CAP`
-//! (and the review-extras caps) per reviewing model at review time — see
-//! src/lib/ai/context-budget.ts. These MCP recipe tools deliberately keep the
-//! DEFAULT profile constants (no model is known here — the recipe just assembles
-//! context for the calling agent), so `DIFF_CHAR_BUDGET`/`PER_FILE_CAP` below
-//! stay the fixed defaults and this mirror is unaffected by that scaling.
+//! Two deliberate divergences from the TS path: the recipe tools keep the DEFAULT
+//! budget constants (the TS review path scales them per reviewing model via
+//! src/lib/ai/context-budget.ts; no model is known here), and the truncation markers
+//! omit the TS `N file(s) omitted: …` clause because `budget_diff` doesn't return the
+//! omitted names.
 //!
-//! Remaining divergence from the TS path: `budgetDiff` returns the list of
-//! omitted-file names and the TS marker enumerates them (`N file(s) omitted: …`); the
-//! recipe markers here don't carry those names, so the marker copy omits that clause
-//! and keeps only the "rely on the file summary above" guidance (noted at each marker
-//! below). The raw diff is requested at the SAME 200_000-byte `RAW_DIFF_MAX_BYTES` the
-//! TS call sites use (a git-layer `truncate_at_file_boundary` cap), then binary-stripped
-//! and run through the `budget_diff` mirror — the truncation flag is set when EITHER
-//! the git cap or budgeting truncated, matching the TS `budgeted.truncated || diffTruncated`.
+//! The raw diff is requested at the same 200_000-byte `RAW_DIFF_MAX_BYTES` the TS call
+//! sites use, and the truncation flag is set when EITHER the git cap or budgeting
+//! truncated — matching the TS `budgeted.truncated || diffTruncated`.
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, GetPromptResult, PromptMessage, PromptMessageRole};
@@ -38,11 +26,10 @@ use rmcp::{prompt, prompt_router, schemars, tool, tool_router, ErrorData as McpE
 use super::{app_err, ensure_not_flag, json_result, to_value, GitDesktopMcp};
 use crate::git::types::DiffStatEntry;
 
-/// Raw diff bytes requested from the backend, matching the TS generation call
-/// sites' `RAW_DIFF_MAX_BYTES` (useGenerateCommitMessage / useGeneratePrDescription /
-/// useGenerateBranchName). The git layer caps this at a file boundary; the assembly
-/// then binary-strips and runs `budget_diff` (the 80KB prompt-side budget), exactly
-/// as the TS builders do.
+/// Raw diff bytes requested from the git layer, matching the TS generation call sites'
+/// `RAW_DIFF_MAX_BYTES` (useGenerateCommitMessage / useGeneratePrDescription /
+/// useGenerateBranchName). The git layer caps at a file boundary; the 80KB prompt-side
+/// budget (`budget_diff`) is applied after.
 const RAW_DIFF_MAX_BYTES: usize = 200_000;
 
 // ---- System prompts (mirror src/lib/ai/prompt.ts verbatim) ----------------
@@ -142,13 +129,9 @@ fn pr_system_for(provider: Option<&str>) -> String {
     }
 }
 
-// ---- Shared assembly helpers ----------------------------------------------
-
-/// Append the optional `## Project instructions` / `## User instructions`
-/// sections to a system prompt's parts, mirroring the TS builders (every builder
-/// adds these two, in this order, gated on non-empty). `repo_instructions` is
-/// already-trimmed repo content (or None); `global_instructions` is trimmed here
-/// like the TS `.trim()` guard.
+/// Append the optional `## Project instructions` / `## User instructions` sections,
+/// in that order, gated on non-empty — mirroring every TS builder. `repo_instructions`
+/// arrives pre-trimmed; `global_instructions` is trimmed here like the TS guard.
 fn push_instruction_sections(
     parts: &mut Vec<String>,
     repo_instructions: Option<&str>,
@@ -191,13 +174,10 @@ fn strip_binary_sections(diff_text: &str) -> String {
     let marker = "diff --git ";
     let mut i = 0usize;
     while i < diff_text.len() {
-        // A header boundary is a `diff --git ` at the very start or right after a newline.
         let at_start = i == 0;
         let after_newline = i > 0 && bytes[i - 1] == b'\n';
-        // NOTE: `diff_text[i..]` slicing here can NOT panic on a UTF-8 boundary. The
-        // slice only evaluates under the `(at_start || after_newline) &&` short-circuit,
-        // and `i` is either 0 or a position immediately after a single-byte ASCII `\n` —
-        // both are always char boundaries. (Not a UTF-8 bug; don't re-flag.)
+        // Safe to slice at `i`: this branch only evaluates when `i` is 0 or just past an
+        // ASCII '\n' — both always char boundaries. (Not a UTF-8 bug; don't re-flag.)
         if (at_start || after_newline) && diff_text[i..].starts_with(marker) {
             if i != last {
                 sections.push(&diff_text[last..i]);
@@ -219,15 +199,8 @@ fn strip_binary_sections(diff_text: &str) -> String {
 
 // ---- Diff budgeting (mirrors budgetDiff in src/lib/ai/truncate.ts) ----------
 //
-// KEEP IN SYNC: src/lib/ai/truncate.ts (budgetDiff, DIFF_CHAR_BUDGET,
-// PER_FILE_CAP, LOW_VALUE_PATH, splitIntoFileSections). The in-app generation
-// builders run `budgetDiff(stripBinarySections(diff))`; the recipe tools mirror
-// that so a large diff (e.g. a regenerated lockfile) is filtered the same way
-// before it reaches the calling agent, instead of shipping the raw diff.
-//
-// The TS review path scales these budgets by a per-model profile at review time
-// (src/lib/ai/context-budget.ts); these recipe tools deliberately keep the
-// DEFAULT profile constants below, since no reviewing model is known here.
+// KEEP IN SYNC with truncate.ts (budgetDiff, DIFF_CHAR_BUDGET, PER_FILE_CAP,
+// LOW_VALUE_PATH, splitIntoFileSections).
 
 /// Character budget for the diff inside the prompt — mirrors `DIFF_CHAR_BUDGET`
 /// in truncate.ts. Below this the diff passes through byte-identical to the raw
@@ -287,10 +260,8 @@ fn split_into_file_sections(diff_text: &str) -> Vec<DiffFileSection<'_>> {
     while i < diff_text.len() {
         let at_start = i == 0;
         let after_newline = i > 0 && bytes[i - 1] == b'\n';
-        // NOTE: `diff_text[i..]` slicing here can NOT panic on a UTF-8 boundary. The
-        // slice only evaluates under the `(at_start || after_newline) &&` short-circuit,
-        // and `i` is either 0 or a position immediately after a single-byte ASCII `\n` —
-        // both are always char boundaries. (Not a UTF-8 bug; don't re-flag.)
+        // Safe to slice at `i`: this branch only evaluates when `i` is 0 or just past an
+        // ASCII '\n' — both always char boundaries. (Not a UTF-8 bug; don't re-flag.)
         if (at_start || after_newline) && diff_text[i..].starts_with(marker) {
             starts.push(i);
             i += marker.len();
@@ -305,9 +276,7 @@ fn split_into_file_sections(diff_text: &str) -> Vec<DiffFileSection<'_>> {
         if part.trim().is_empty() {
             continue;
         }
-        // Header line = up to the first '\n' (or the whole part if none).
         let header = part.split('\n').next().unwrap_or(part);
-        // Take the ` b/<path>` side.
         let path = header
             .rfind(" b/")
             .map(|p| header[p + 3..].to_string())
@@ -317,10 +286,9 @@ fn split_into_file_sections(diff_text: &str) -> Vec<DiffFileSection<'_>> {
     sections
 }
 
-/// Char-boundary-safe head slice to at most `max` bytes. The TS `.slice(0, n)`
-/// operates on UTF-16 code units; diffs are overwhelmingly ASCII, so a byte cut
-/// matches in practice — this only guards against panicking mid-codepoint on the
-/// rare non-ASCII diff (a soft-heuristic budget, so any small drift is immaterial).
+/// Char-boundary-safe head slice to at most `max` bytes. The TS `.slice(0, n)` counts
+/// UTF-16 units; diffs are near-ASCII so a byte cut matches in practice — this only
+/// avoids panicking mid-codepoint.
 fn head_slice(s: &str, max: usize) -> &str {
     if s.len() <= max {
         return s;
@@ -395,20 +363,11 @@ fn budget_diff(diff_text: &str) -> BudgetedDiff {
     }
 }
 
-/// Extract candidate issue numbers referenced in git text (branch name, commit
-/// subjects). Deduplicated, first-occurrence order. KEEP IN SYNC:
-/// `extractIssueNumbers` in src/lib/issues/extract.ts — both sides use explicit
-/// leading-boundary matching (no lookbehind) so behavior stays identical.
-///
-/// Three patterns, applied in order 1→2→3 each over the FULL text (matching the
-/// TS pass order); results deduped preserving first-occurrence order across all
-/// patterns. Case table:
-///   `fix/123-crash` → [123]   (pattern 2: after `/`, digits then `-`)
-///   `#45`           → [45]    (pattern 1: `#` not preceded by letter/digit/`&`)
-///   `123-fix`       → [123]   (pattern 2: string start, digits then `-`)
-///   `&#39;`         → []      (pattern 1's `&` exclusion keeps HTML entities out)
-///   `issue-7`       → [7]     (pattern 3, case-insensitive)
-///   `v2-123`        → []      (pattern 2 fires only at start or after `/`)
+/// Extract candidate issue numbers from git text (branch name, commit subjects).
+/// Deduplicated, first-occurrence order. KEEP IN SYNC: `extractIssueNumbers` in
+/// src/lib/issues/extract.ts — both use explicit leading-boundary matching (no
+/// lookbehind) so behavior stays identical. Three patterns run over the FULL text in
+/// order 1→2→3 and dedupe across all three. Case table: see the unit tests.
 fn extract_issue_numbers(text: &str) -> Vec<u64> {
     let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
     let mut out: Vec<u64> = Vec::new();
@@ -511,22 +470,13 @@ fn extract_issue_numbers(text: &str) -> Vec<u64> {
     out
 }
 
-/// Extract the linked project's Jira issue keys from git text (branch name,
-/// commit subjects) — `<PROJECTKEY>-\d+` case-insensitive, deduped,
-/// first-occurrence order, upper-cased. KEEP IN SYNC: `extractJiraKeys` in
-/// src/lib/jira/keys.ts (same boundary table; no lookbehind — hand-rolled scan).
-///
-/// Boundary semantics (copied from keys.ts's documented table):
-///   - LEFT: the char before the key must NOT be `[A-Za-z0-9]` — underscore
-///     adjacency IS allowed (`feature_MYT-5` → MYT-5); a letter/digit prefix
-///     rejects (`XMYT-1` → []).
-///   - RIGHT (after the digits): reject a letter suffix (`MYT-12a` → []) and a
-///     version-like `dot+digit` (`MYT-1.2` → []); a sentence-ending period still
-///     matches (`fixes MYT-1.` → MYT-1).
-///
-/// Case-insensitive on the key. Empty text or empty `project_key` → `[]`.
-/// Case table: `feature_MYT-5 → MYT-5`, `feat/myt-2-fix → MYT-2`, `XMYT-1 → []`,
-/// `MYT-12a → []`, `MYT-1.2 → []`, `fixes MYT-1. → MYT-1`.
+/// Extract the linked project's Jira issue keys from git text — `<PROJECTKEY>-\d+`
+/// case-insensitive, deduped, first-occurrence order, upper-cased. KEEP IN SYNC:
+/// `extractJiraKeys` in src/lib/jira/keys.ts (same boundary table; hand-rolled scan,
+/// no lookbehind). LEFT: the preceding char must not be `[A-Za-z0-9]` — underscore IS
+/// allowed. RIGHT: reject a letter suffix (`MYT-12a`) and a version-like `dot+digit`
+/// (`MYT-1.2`); a sentence-ending period still matches. Empty text or key → `[]`.
+/// Case table: see the unit tests.
 fn extract_jira_keys(text: &str, project_key: &str) -> Vec<String> {
     if text.is_empty() || project_key.is_empty() {
         return Vec::new();
@@ -552,9 +502,7 @@ fn extract_jira_keys(text: &str, project_key: &str) -> Vec<String> {
                     j += 1;
                 }
                 if j > dash + 1 {
-                    // At least one digit consumed. RIGHT boundary checks:
-                    //   - no trailing letter (`MYT-12a`)
-                    //   - no `dot+digit` (`MYT-1.2`), while `MYT-1.` still matches.
+                    // At least one digit consumed — apply the RIGHT boundary checks.
                     let next = bytes.get(j).copied();
                     let letter_suffix = next.is_some_and(|b| b.is_ascii_alphabetic());
                     let dot_digit = next == Some(b'.')
@@ -606,7 +554,7 @@ struct Recipe {
     note: String,
 }
 
-// ---- Pure prompt assembly (mirrors the TS builders; unit-testable) ---------
+// ---- Pure prompt assembly (mirrors the TS builders) ------------------------
 
 /// The gathered pieces a commit recipe is assembled from — factored out so the
 /// assembly is a pure function testable without a repo.
@@ -664,10 +612,8 @@ fn assemble_commit_recipe(p: CommitPieces) -> Recipe {
     }
     let mut diff_section = format!("## Staged diff\n{}", budgeted.text);
     if budgeted.truncated || p.diff_truncated {
-        // Divergence from TS: neither the git file-boundary truncation nor our
-        // budget_diff enumerate the omitted file names here, so this marker omits
-        // the TS `N file(s) omitted: …` clause. The "rely on the file summary above"
-        // guidance is preserved.
+        // Divergence from TS: no omitted-file names are available here, so the marker
+        // drops the `N file(s) omitted: …` clause (module header).
         diff_section
             .push_str("\n[diff truncated — Rely on the file summary above for full coverage.]");
     }
@@ -696,10 +642,9 @@ struct BranchPieces {
     excluded_files: u32,
     recent_branches: Vec<String>,
     /// Subjects of the commits this branch adds over its base, newest first —
-    /// the strongest naming signal when the work is already committed, and supplied
-    /// ONLY on that fallback path. Empty when the base can't be resolved, when the
-    /// branch adds no commits, and when the `git log` itself fails (best-effort) —
-    /// an empty list is never evidence that the branch has no commits.
+    /// supplied ONLY on the committed-work fallback path, empty on the working-tree
+    /// path. Best-effort: a failed `git log` also yields an empty list, so emptiness
+    /// is never evidence that the branch has no commits.
     commit_subjects: Vec<String>,
     repo_instructions: Option<String>,
     global_instructions: String,
@@ -810,8 +755,7 @@ struct PrPieces {
     /// label by what it's for, not just a name-plausible match.
     available_labels: Vec<(String, Option<String>)>,
     /// Real candidate issues the model may link (best-effort, fetched server-side).
-    /// Empty ⇒ the prompt is byte-identical to before and the issue-reference ban
-    /// stands.
+    /// Empty ⇒ no `## Related issues` section and the issue-reference ban stands.
     candidate_issues: Vec<IssueCandidate>,
     /// Real candidate issues from the repo's LINKED Jira project the model may
     /// MENTION (best-effort; Bitbucket-only). Mutually exclusive with
@@ -884,18 +828,14 @@ fn assemble_pr_recipe(p: PrPieces) -> Recipe {
         "PR"
     };
 
-    // Real candidate issues the model may link (defensive cap 8, mirrored TS-side).
-    // Empty ⇒ the issue-reference ban stands and the recipe is byte-identical to
-    // before (no ban swap, no `## Related issues` section, unchanged note).
+    // Real candidate issues (defensive cap 8, mirrored TS-side). Empty ⇒ the ban
+    // stands, no `## Related issues` section, unchanged note.
     let candidates: Vec<&IssueCandidate> =
         p.candidate_issues.iter().filter(|c| c.number > 0).take(8).collect();
     let has_candidates = !candidates.is_empty();
 
-    // Jira candidates (Bitbucket repos with a linked project). Mention-only: they
-    // drive a `Relates:`-only variant, never a `Closes:` line. Precedence: native
-    // `candidate_issues` win — the Jira variant fires ONLY when there are no native
-    // candidates (the Bitbucket-only gather makes both-non-empty impossible, but the
-    // precedence is encoded here defensively). Filter empty keys, then cap at 8.
+    // Jira candidates (Bitbucket + linked project). Mention-only, and native
+    // candidates win — the precedence is defensive (see PrPieces::jira_candidates).
     let jira_candidates: Vec<&JiraCandidate> = if has_candidates {
         Vec::new()
     } else {
@@ -909,10 +849,8 @@ fn assemble_pr_recipe(p: PrPieces) -> Recipe {
 
     let mut base_system = pr_system_for(p.provider.as_deref());
     if has_candidates {
-        // Swap the issue-reference ban line for the relaxed rule that allows the
-        // final `Closes:`/`Relates:` trailer lines drawn from the Related issues
-        // section. Both lines are constructed with the in-scope `abbrev`, so the
-        // swap works cross-provider (GitHub `PR` / GitLab `MR`).
+        // Swap the ban line for the relaxed Closes:/Relates: rule. Both are built with
+        // the in-scope `abbrev`, so the replacen matches on GitHub (PR) and GitLab (MR).
         let ban = format!(
             "- NEVER reference issue or {abbrev} numbers, tickets, milestones, or external links (e.g. \"Closes #123\", \"part of #60\", \"fixes JIRA-4\"). You have no access to the issue tracker, so any such reference is fabricated — leave them out entirely."
         );
@@ -987,11 +925,9 @@ fn assemble_pr_recipe(p: PrPieces) -> Recipe {
     }
     prompt_parts.push(diff_section);
 
-    // Label proposal — only when the repo actually has labels (mirrors the TS
-    // `labels.length > 0` gate). Framed in the system prompt and reinforced by the
-    // closing line. Each label is rendered with its stated purpose (description) so
-    // the model can judge fit by purpose, not a name-plausible match. The parser
-    // drops invented labels, so an off-list label is silently discarded.
+    // Label proposal — only when the repo has labels (mirrors the TS `labels.length > 0`
+    // gate). Each label carries its description so the model judges by purpose. The
+    // parser drops invented labels, so an off-list suggestion is silently discarded.
     let labels: Vec<(&str, &str)> = p
         .available_labels
         .iter()
@@ -1009,10 +945,8 @@ fn assemble_pr_recipe(p: PrPieces) -> Recipe {
         ));
     }
 
-    // Related-issues proposal — only when real candidates were found (server-side
-    // fetch). Pushed AFTER the Labels section so the `Closes:`/`Relates:` trailer
-    // lines land after any `Labels:` line. Empty ⇒ this section is absent and the
-    // ban above is untouched.
+    // Related-issues proposal. Pushed AFTER Labels so the Closes:/Relates: trailers
+    // land after any `Labels:` line. Empty ⇒ section absent, ban untouched.
     if has_candidates {
         let issue_lines = candidates
             .iter()
@@ -1023,10 +957,8 @@ fn assemble_pr_recipe(p: PrPieces) -> Recipe {
             "## Related issues\n{issue_lines}\nThese are real, open-or-closed issues from this repository's tracker that MAY be related to this change — judge each by its title against what the diff actually does. Most changes genuinely address at most one or two, often none; never force a link. After the description (and after the Labels line when present), report qualifying issues on up to two final lines, exactly like:\nCloses: 123, 456\nRelates: 789\nUse Closes ONLY for an issue this change fully resolves — merging will close it automatically, so prefer Relates when unsure. Use Relates for an issue this change advances or clearly connects to without resolving it. List ONLY numbers from the list above, never any other number; omit either line (or both) when no issue qualifies."
         ));
     } else if has_jira {
-        // Jira mention-only variant of the Related-issues section (Bitbucket + linked
-        // project). Pushed AFTER the Labels section so the `Relates:` line lands after
-        // any `Labels:` line. Only a `Relates:` line is offered — Jira tickets are not
-        // closed from PR text.
+        // Jira variant, same ordering. Relates:-only — Jira tickets are never closed
+        // from PR text.
         let issue_lines = jira_candidates
             .iter()
             .map(|c| render_jira_line(&c.key, &c.summary, &c.status_category))
@@ -1061,10 +993,7 @@ fn assemble_pr_recipe(p: PrPieces) -> Recipe {
     }
     prompt_parts.push(closing);
 
-    // The note's trailing clause: with native candidates the `no issue/{abbrev}
-    // references` rule is replaced by the Closes:/Relates: allowance; with Jira
-    // candidates by the mention-only Relates: allowance; without either, it's
-    // byte-identical to before.
+    // Note tail: the ban clause is replaced by whichever allowance is in force.
     let note_tail = if has_candidates {
         "; issue references may appear ONLY as the final Closes:/Relates: lines drawn from the Related issues section".to_string()
     } else if has_jira {
@@ -1088,13 +1017,11 @@ fn assemble_pr_recipe(p: PrPieces) -> Recipe {
 
 // ---- Provider detection (network-light mirror of forge::detect_non_github) --
 
-/// Resolve the frontend provider tag (`"github"` / `"gitlab"` / `"bitbucket"`) for
-/// the bound repo from its `origin` remote, or None when it can't be determined
-/// (no remote, unparseable URL, or an unrecognized host — the GitHub wording is
-/// the resilient default). Composed from the same public primitives
-/// `forge::detect_non_github` uses (remote URL → host → tag, with glab's
-/// known-hosts covering self-managed GitLab) so it stays in lockstep without a
-/// live status probe.
+/// Resolve the frontend provider tag for the bound repo from its `origin` remote, or
+/// None (no remote / unparseable / unknown host — GitHub wording is the resilient
+/// default). Composed from the same primitives as `forge::detect_non_github` (URL →
+/// host → tag, glab known-hosts covering self-managed GitLab) so it stays in lockstep
+/// without a live status probe.
 async fn provider_tag(repo: &str) -> Option<String> {
     let url = crate::git::remote::git_remote_url(repo.to_string(), "origin".to_string())
         .await
@@ -1103,8 +1030,6 @@ async fn provider_tag(repo: &str) -> Option<String> {
     let glab_hosts = crate::forge::glab::known_hosts().await;
     crate::forge::provider_tag_for_host(&host, &glab_hosts).map(str::to_string)
 }
-
-// ---- The recipe tools ------------------------------------------------------
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct PrRecipeArgs {
@@ -1172,10 +1097,8 @@ impl GitDesktopMcp {
 
 // ---- Recipe builders (shared by the recipe TOOLS above and the PROMPTS below) --
 //
-// Each gathers the repository context and assembles the `Recipe`, returning the
-// same `McpError::invalid_request` on the empty-input cases. The tools serialize
-// the recipe as JSON; the prompts render it as a single user PromptMessage. One
-// source of truth so a tool and its twin prompt can never drift.
+// One source of truth per recipe, so a tool and its twin prompt can never drift:
+// the tools serialize it as JSON, the prompts render it as one user PromptMessage.
 impl GitDesktopMcp {
     /// The user's AI-ignore patterns for the bound repo: the repo's own ignore
     /// file first, then the global setting's patterns — the merge every recipe
@@ -1264,9 +1187,8 @@ impl GitDesktopMcp {
         ensure_not_flag(&base, "base")?;
         ensure_not_flag(&head, "head")?;
 
-        // The user's AI-ignore patterns (repo ignore file first, then the global
-        // setting) — the same merge the commit/branch recipes do, so a file the user
-        // excluded never reaches the model.
+        // Same AI-ignore merge as the commit/branch recipes — an excluded file must
+        // never reach the model.
         let exclude = self.ai_ignore_patterns(&settings).await?;
 
         let diff = crate::git::compare::git_branch_diff(
@@ -1383,9 +1305,8 @@ impl GitDesktopMcp {
         let mut out: Vec<IssueCandidate> = Vec::new();
         let mut included: std::collections::HashSet<u64> = std::collections::HashSet::new();
 
-        // 1. Extracted numbers first (pinned, extraction order). Prefer the open-page
-        //    entry; for numbers not on the page, probe the single-issue view and
-        //    include on success, dropping silently on any error.
+        // 1. Extracted numbers first (pinned). Not on the open page ⇒ probe the single-issue
+        //    view and drop silently on any error.
         for n in &extracted {
             if included.contains(n) {
                 continue;
@@ -1409,9 +1330,8 @@ impl GitDesktopMcp {
             }
         }
 
-        // 2. Fill remaining slots (up to 8 total) from the open page, ranked by the
-        //    count of shared long (≥4-char) tokens between the issue title and the
-        //    branch + subjects, tie-broken by `updated_at` descending.
+        // 2. Fill to 8 from the open page: shared long-token count, tie-broken by
+        //    `updated_at` desc.
         if out.len() < 8 {
             let context = format!("{head}\n{subjects}");
             let context_tokens = long_tokens(&context);
@@ -1478,10 +1398,8 @@ impl GitDesktopMcp {
         let mut out: Vec<JiraCandidate> = Vec::new();
         let mut included: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-        // 1. Extracted keys first (pinned, extraction order). Prefer the open-page
-        //    entry; for keys not on the page, probe the single-issue view (only after
-        //    confirming the key belongs to the linked project), including on success and
-        //    dropping silently on any error.
+        // 1. Extracted keys first (pinned). Not on the open page ⇒ probe the single-issue
+        //    view only after `ensure_key_in_project`; drop silently on any error.
         for key in &extracted {
             if included.contains(key) {
                 continue;
@@ -1505,9 +1423,9 @@ impl GitDesktopMcp {
             }
         }
 
-        // 2. Fill remaining slots (up to 8 total) from the open page, ranked by the
-        //    count of shared long (≥4-char) tokens between the issue summary and the
-        //    branch + subjects, tie-broken by `updated_at` descending.
+        // 2. Fill to 8 from the open page: shared long-token count between the issue summary
+        //    and the branch + subjects, tie-broken by `updated_at` desc (ISO-8601 string
+        //    compare is chronological).
         if out.len() < 8 {
             let context = format!("{head}\n{subjects}");
             let context_tokens = long_tokens(&context);
@@ -1615,12 +1533,10 @@ impl GitDesktopMcp {
                 };
                 return Err(McpError::invalid_request(msg, None));
             }
-            // The committed diff has no untracked side. Fold the working tree's
-            // hidden files into the disclosure — they're also changes the model
-            // can't see (mirrors the TS fallback path). The sum is an UPPER BOUND:
-            // a file hidden in both diffs is counted twice. Over-disclosing how much
-            // is hidden is the safe direction — the number only tells the model the
-            // diff isn't the whole story.
+            // Fold the working tree's hidden files into the committed diff's
+            // disclosure — they're also changes the model can't see (mirrors the TS
+            // fallback). The sum is an UPPER BOUND: a file hidden in both diffs is
+            // counted twice, and over-disclosing is the safe direction here.
             committed.excluded_files += diff.excluded_files;
             let subjects = branch_commit_subjects(&self.repo, &base).await;
             (committed, Vec::new(), subjects)
@@ -1658,9 +1574,7 @@ impl GitDesktopMcp {
 }
 
 /// Render a [`Recipe`] as the single user [`PromptMessage`] an MCP prompt returns:
-/// the system + user prompt joined, described by the recipe's `note`. The client
-/// model completes the assembled prompt (the recipe tools return the same content
-/// as JSON; the prompts hand it to the client as a ready-to-complete message).
+/// system + user prompt joined, described by the recipe's `note`.
 fn recipe_as_prompt(recipe: Recipe) -> GetPromptResult {
     let Recipe {
         system,
@@ -1676,12 +1590,9 @@ fn recipe_as_prompt(recipe: Recipe) -> GetPromptResult {
 
 // ---- The generation PROMPTS (MCP prompts primitive) ------------------------
 //
-// The same three generation recipes as the tools above, exposed additionally as
-// MCP prompts (slash-command-like in clients). Each assembles GitDesktop's system
-// + user prompt from the repository and returns it as ONE user message for the
-// client's own model to complete — read-only, no writes, no opt-in required. The
-// Rust method names carry a `_prompt` suffix so they don't collide with the recipe
-// tool methods on the same type.
+// The same three recipes as the tools above, exposed as MCP prompts (one user message
+// for the client's model). Read-only, no opt-in. The `_prompt` method suffix avoids
+// colliding with the recipe tool methods on the same type.
 #[prompt_router(router = "generate_prompt_router", vis = "pub(crate)")]
 impl GitDesktopMcp {
     #[prompt(
@@ -1767,12 +1678,10 @@ async fn ref_exists(repo: &str, full_ref: &str) -> bool {
     .unwrap_or(false)
 }
 
-/// Subjects of the commits `HEAD` adds over `base` (`git log base..HEAD`), newest
-/// first as git emits them, capped at [`BRANCH_FALLBACK_MAX_SUBJECTS`]. Deliberately
-/// scoped rather than reusing `git_compare_branches`: that one also walks the
-/// `behind` side, which this caller would discard, and the MCP server has no query
-/// cache to amortize it. Best-effort — a git failure yields an empty list rather
-/// than failing the recipe.
+/// Subjects of the commits `HEAD` adds over `base`, newest first, capped at
+/// [`BRANCH_FALLBACK_MAX_SUBJECTS`]. Not `git_compare_branches`: that also walks the
+/// `behind` side this caller discards, and the MCP server has no query cache to
+/// amortize it. Best-effort — a git failure yields an empty list, not a failed recipe.
 async fn branch_commit_subjects(repo: &str, base: &str) -> Vec<String> {
     let max = BRANCH_FALLBACK_MAX_SUBJECTS.to_string();
     let range = format!("{base}..HEAD");
@@ -2008,7 +1917,6 @@ mod tests {
         assert!(recipe
             .system
             .starts_with("You write GitHub pull request descriptions"));
-        // No labels section when the repo has none (asserted again below).
         assert!(recipe
             .prompt
             .contains("This pull request merges `feature/x` into `main`."));
@@ -2154,8 +2062,7 @@ mod tests {
 
     #[test]
     fn pr_recipe_no_candidates_keeps_ban_and_old_note() {
-        // Byte-stability guard: with no candidates the ban stands, there's no
-        // `## Related issues` section, and the note ends with the old tail.
+        // With no candidates: ban stands, no Related-issues section, original note tail.
         let recipe = assemble_pr_recipe(PrPieces {
             diff_text: "diff --git a/x.rs b/x.rs\n+a\n".to_string(),
             diff_truncated: false,
@@ -2594,7 +2501,7 @@ mod tests {
         }
     }
 
-    // ---- committed_base_ref (branch-name fallback base resolution) ----------
+    // ---- branch-name committed-work fallback helpers ------------------------
 
     async fn git(repo: &str, args: &[&str]) -> String {
         crate::git::runner::run_git_raw(Some(repo), args, crate::git::runner::DEFAULT_TIMEOUT)
@@ -2662,7 +2569,6 @@ mod tests {
         git(&repo_s, &["add", "-A"]).await;
         git(&repo_s, &["commit", "-qm", "seed"]).await;
 
-        // Only the local branch exists → the local name.
         assert_eq!(
             committed_base_ref(&repo_s).await,
             Some("main".to_string()),

@@ -1,28 +1,19 @@
 //! The Bitbucket Cloud [`Forge`](super::Forge) implementation, over direct HTTPS
-//! (`api.bitbucket.org/2.0`) via the [`http`](super::http) layer.
+//! (`api.bitbucket.org/2.0`) via the [`http`](super::http) layer. Like the GitLab impl,
+//! every read maps Bitbucket's JSON onto the SAME neutral models the GitHub panels
+//! render, so the frontend stays provider-agnostic. Absent by PLATFORM limitation:
+//! issues (the native tracker is deleted platform-wide 2026-08-20) and
+//! reactions/labels/milestones (Cloud has none).
 //!
-//! Like the GitLab impl, every read maps Bitbucket's JSON onto the SAME neutral
-//! models the GitHub panels render (`PrInfo`, `PrDetails`, `WorkflowRun`, …), so the
-//! frontend stays provider-agnostic. Reads (Phase 3) cover PRs, pipelines, and repo
-//! listing/URL; writes (Phase 4 + the parity pass) cover PR comment / decline /
-//! merge / edit / create / approve / request-changes / reviewers / draft plus
-//! pipeline rerun / cancel / dispatch. Still absent by PLATFORM limitation: issues
-//! (the native tracker is being deleted platform-wide 2026-08-20) and
-//! reactions/labels/milestones (Cloud has none of those).
+//! Auth is HTTP Basic (`{atlassian_account_email}:{api_token}`) for the REST API — app
+//! passwords are dead — with the token in the OS keyring under `forge/bitbucket.org/*`.
+//! git-over-HTTPS is the exception: it needs the literal `x-bitbucket-api-token-auth`
+//! sentinel username (NOT the email) plus the same token, seeded into git's credential
+//! store on STDIN by [`seed_git_credential`].
 //!
-//! Auth is HTTP Basic (`{atlassian_account_email}:{api_token}`) for the REST API —
-//! app passwords are dead — with the token stored in the OS keyring under
-//! `forge/bitbucket.org/*`. git-over-HTTPS is the exception: it authenticates with the
-//! literal `x-bitbucket-api-token-auth` sentinel username (NOT the account email) plus
-//! the same token, seeded into git's credential store on STDIN by
-//! [`seed_git_credential`] (shared by clone, fetch/pull/push, `create_pr`, and
-//! `publish_repo`).
-//!
-//! Pagination policy matches GitLab: a single page at the endpoint's max `pagelen`,
-//! no `next`-following loops (documented per call). The PR-list endpoint caps at 50;
-//! repos/pipelines allow 100. The bounded exceptions that DO follow `next` (up to 5
-//! pages) are workspace members, PR tasks, and PR comments — each documented at its
-//! call site.
+//! Pagination default: one page at the endpoint's max `pagelen`, no `next`-following
+//! (the PR-list endpoint caps at 50; repos/pipelines allow 100). Readers that DO follow
+//! `next` bound it at 5 pages and say so at their call site.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -299,14 +290,11 @@ pub async fn clear_account() -> AppResult<()> {
     })
     .await
     .map_err(|e| AppError::Bitbucket(format!("keyring task failed: {e}")))??;
-    // Drop the cached credential, re-arm the seed latch, and evict the seeded
-    // entry from git's OS credential store — git's store is separate from our
-    // keyring, so without the eviction a disconnected account would keep
-    // authenticating git ops until the token expired. All UNDER the seed lock:
-    // once we hold it, no seed is in flight, so an in-flight first-op seed that
-    // raced this disconnect has fully finished (its entry written, its latch
-    // stored) — the reset + evict below then clear exactly that state, instead of
-    // being silently undone by the seed completing after us.
+    // Drop the cached credential, re-arm the seed latch, and evict the seeded entry
+    // from git's OS credential store — git's store is SEPARATE from our keyring, so
+    // without the eviction a disconnected account keeps authenticating git ops until
+    // the token expires. All UNDER the seed lock, so an in-flight seed can't land after
+    // us and silently undo the reset + evict.
     let _seed_guard = CREDENTIAL_SEED_LOCK.lock().await;
     http::invalidate_credential_cache();
     reset_credential_seed();
@@ -457,12 +445,10 @@ fn from_bb_repo(r: BbRepo) -> ForgeRepo {
 /// The signed-in user's repositories, for the clone browser. Both `GET
 /// /2.0/repositories?role=member` AND `GET /2.0/workspaces` were removed (CHANGE-2770,
 /// Feb 2026); the replacement is `GET /2.0/user/workspaces` (CHANGE-3022), whose items
-/// are `workspace_access` membership wrappers (a nested `workspace_base` with
-/// uuid/slug/links — no `name`). We list the viewer's workspaces, then each
-/// workspace's member repos. Single page per call at the max `pagelen` (100),
-/// mirroring GitLab's no-pagination-loop policy — the least-recently-updated repos
-/// past 100/workspace drop off (they're sorted `-updated_on`). Live-verified against
-/// a real account (3 workspaces, 11 repos).
+/// are `workspace_access` membership wrappers (nested `workspace_base` with
+/// uuid/slug/links — no `name`). We list the viewer's workspaces, then each workspace's
+/// member repos: one page each at the max `pagelen` (100), sorted `-updated_on`, so
+/// repos past 100/workspace drop off.
 pub async fn list_repos() -> AppResult<ForgeRepoList> {
     let creds = http::load_credentials().await?;
     let viewer = http::bb_get_json::<BbUser>(&creds, "user", "user")
@@ -475,10 +461,8 @@ pub async fn list_repos() -> AppResult<ForgeRepoList> {
         http::bb_get_json(&creds, "user/workspaces?pagelen=100", "workspaces").await?;
 
     let mut repos = Vec::new();
-    // Best-effort per workspace (one workspace erroring shouldn't sink the others),
-    // but if EVERY workspace fetch fails (e.g. a transient 429/5xx or an expired
-    // token across the board), surface the last error rather than reporting an empty
-    // "no repositories" list.
+    // Best-effort per workspace (one erroring shouldn't sink the others), but if EVERY
+    // fetch fails, surface the last error rather than an empty "no repositories" list.
     let mut workspace_count = 0usize;
     let mut any_ok = false;
     let mut last_err: Option<AppError> = None;
@@ -529,7 +513,6 @@ struct BbPrEndpoint {
     branch: Option<BbBranchRef>,
     /// The endpoint's head commit — its `hash` feeds the per-commit CI-status probe
     /// (Bitbucket has no batch pipeline endpoint). Short hash is fine for `.../statuses`.
-    /// Reuses the module's existing [`BbCommitRef`] (`{hash}`).
     #[serde(default)]
     commit: Option<BbCommitRef>,
 }
@@ -574,11 +557,10 @@ struct BbPr {
     /// commenters/approvers who were never asked to review.
     #[serde(default)]
     reviewers: Vec<BbUser>,
-    /// The participant list (present on the unfielded single-PR GET, avatars and
-    /// all). Carries each participant's approval `state`, so `view_pr` derives the
-    /// completed reviewers (approved / changes-requested) from it without a second
-    /// fetch. Distinct from `reviewers`: this also includes commenters/approvers
-    /// who were never formally asked to review.
+    /// The participant list (present on the unfielded single-PR GET). Carries each
+    /// participant's approval `state`, so `view_pr` derives completed reviewers without
+    /// a second fetch. Wider than `reviewers`: includes commenters/approvers who were
+    /// never asked to review.
     #[serde(default, deserialize_with = "null_to_default")]
     participants: Vec<BbParticipant>,
     /// ISO-8601 open time (`created_on`); "" when absent.
@@ -779,17 +761,16 @@ fn from_bb_poll_pr(p: BbPollPr, viewer_uuid: &str, viewer_login: &str) -> PrPoll
         state: map_bb_pr_state(&p.state),
         is_draft: p.draft,
         author,
-        // Bitbucket's list carries no review decision or check rollup (single-PR/
-        // pipeline reads only), so both stay empty — the poller's checks/review
-        // branches never fire for Bitbucket (a documented v1 limit).
+        // Bitbucket's PR LIST carries no review decision or check rollup (both need the
+        // single-PR / pipeline reads), so the poller's checks/review branches never
+        // fire (a documented v1 limit).
         review_decision: String::new(),
         checks_state: String::new(),
         // The 12-char SHORT sha as-is; `sameSha` on the frontend prefix-matches it
         // against the full head sha seeded by pr-open events.
         head_sha: p.source.and_then(|s| s.commit).map(|c| c.hash).unwrap_or_default(),
-        // The new-comment / new-review / review-requested detectors are GitHub-only
-        // in v1 — Bitbucket's PR list carries none of these, so they stay empty and
-        // those notification branches never fire for Bitbucket.
+        // New-comment / new-review / review-requested detection is GitHub-only in v1 —
+        // Bitbucket's PR list carries none of these.
         comment_count: 0,
         last_comment_author: String::new(),
         review_count: 0,
@@ -887,14 +868,10 @@ struct BbPathItem {
 }
 
 /// A PR comment (`{id, content:{raw}, user, created_on, deleted, pending, inline?,
-/// parent?}`).
-///
-/// Live-probed 2026-07-05 (a real workspace repo: one inline thread + one reply):
-/// a reply comment carries `parent: {id, links}`; only the ROOT
-/// inline comment carries the `inline` object — replies to it do NOT re-carry
-/// `inline` (they anchor via `parent` alone). NO `resolution` key was present on
-/// ANY probed comment (general, inline, or reply) across three repos, so
-/// thread-resolution is left unwired for Bitbucket (`mr_thread_resolve` false).
+/// parent?}`). A reply carries `parent: {id, links}`; only the ROOT inline comment
+/// carries `inline` — replies anchor via `parent` alone. No `resolution` key was
+/// present on any PROBED comment (general, inline, or reply), so thread-resolution is
+/// unwired for Bitbucket (`mr_thread_resolve` false).
 #[derive(Deserialize)]
 struct BbComment {
     #[serde(default)]
@@ -993,12 +970,10 @@ fn reduce_bb_ci(states: &[String]) -> String {
 
 /// The CI rollup for a set of PRs, keyed by number — the Bitbucket arm of
 /// `forge_pr_list_ci`. Bitbucket has NO batch pipeline endpoint, so this probes each
-/// PR's head commit `.../commit/{sha}/statuses` individually (reusing the same endpoint
-/// the PR-detail checks use). Best-effort decoration: refs with an empty `head_sha` are
-/// skipped, the set is capped at the FIRST 50 PRs, and any per-PR failure just omits
-/// that PR's icon. Requests run SEQUENTIALLY — the forge module has no established
-/// concurrency idiom, and a capped-at-50 best-effort probe doesn't justify inventing
-/// one; see the report's timing note.
+/// PR's head commit `.../commit/{sha}/statuses` individually. Best-effort: refs with an
+/// empty `head_sha` are skipped, the set is capped at the FIRST 50 PRs, a per-PR failure
+/// just omits that icon, and the probes run SEQUENTIALLY (no concurrency idiom in this
+/// module; a capped best-effort probe doesn't justify inventing one).
 pub async fn pr_list_ci(repo_path: &str, prs: &[PrCiRefIn]) -> AppResult<Vec<PrCiStatus>> {
     let creds = http::load_credentials().await?;
     let (ws, slug) = workspace_slug(repo_path).await?;
@@ -1056,14 +1031,11 @@ fn commit_author(c: &BbCommit) -> String {
         .unwrap_or_default()
 }
 
-/// Full read view of one pull request — the single PR GET (hard error) plus
-/// best-effort sub-fetches (commits, diffstat, comments, statuses), mapped onto
-/// `PrDetails`. Reviews are left empty: the frontend renders `reviews` generically
-/// (author + body + state), but a Bitbucket "approved" participant has no body/state
-/// text to show — so like GitLab's `view_pr` this returns `Vec::new()` rather than
-/// bare author lines. Participants who acted DO surface as `completed_reviewers`
-/// (verdict chips) instead, derived from participant state. Assignees/labels are
-/// always empty (Bitbucket has neither).
+/// Full read view of one pull request — the single PR GET (hard error) plus best-effort
+/// sub-fetches (commits, diffstat, comments, statuses), mapped onto `PrDetails`.
+/// `reviews` is empty: a Bitbucket "approved" participant has no body/state text to
+/// render, so (like GitLab) participants who acted surface as `completed_reviewers`
+/// verdict chips instead. Assignees/labels are always empty (Bitbucket has neither).
 pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
     let creds = http::load_credentials().await?;
     let (ws, slug) = workspace_slug(repo_path).await?;
@@ -1141,20 +1113,13 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         .unwrap_or_default();
 
     // Comments — drop deleted + pending, AND every comment belonging to an inline
-    // (diff-anchored) thread, root OR reply. Those surface as `review_threads` with
-    // real file/line context; leaving replies here would both leak them context-free
-    // into the flat list AND double them (they also nest under their thread). A reply
-    // carries `parent` but not `inline`, so an `inline.is_none()` filter alone misses
-    // it — resolve each comment's chain root instead. A reply to a plain (non-inline)
-    // comment has a non-inline root, so it stays in the flat list (unchanged).
-    //
-    // Reads ALL comment pages (up to 500) via `fetch_all_pr_comments`, best-effort
-    // (empty on any failure — comments must not fail the view). `base` already
-    // carries the `/pullrequests/{number}` suffix here, so the endpoint is just
-    // `{base}/comments`. Resolving `inline_thread_comment_ids` over the FULL set
-    // also closes a latent hole: previously a reply on page 2 whose inline root
-    // sat on page 1 escaped the root-resolution (which only saw one page) and
-    // leaked context-free into this flat list.
+    // (diff-anchored) thread, root OR reply: those surface as `review_threads` with real
+    // file/line context, and leaving replies here would both strip that context and
+    // double-render them. A reply carries `parent` but not `inline`, so an
+    // `inline.is_none()` filter alone misses it — resolve each comment's chain root
+    // instead, across ALL pages (a page-2 reply's inline root can sit on page 1). A reply
+    // to a plain comment has a non-inline root and stays in the flat list. Best-effort
+    // (empty on failure); `base` already carries the `/pullrequests/{number}` suffix.
     let comments: Vec<PrThreadOut> = fetch_all_pr_comments(&creds, &format!("{base}/comments"))
         .await
         .map(|values| {
@@ -1205,13 +1170,10 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         .unwrap_or_default()
     };
 
-    // Completed reviewers = participants who acted (approved or requested changes),
-    // derived from participant state (Bitbucket has no GitHub-style review objects).
-    // These are DISPLAYED separately from the pending reviewers; the frontend de-dups
-    // the display so an acted reviewer doesn't render as both a pending and a completed
-    // chip. `reviewers` below stays the FULL assigned set on purpose — it feeds the
-    // reviewers picker's full-replacement PUT, so dropping an acted reviewer here would
-    // silently un-assign them on the next reviewer edit.
+    // Completed reviewers = participants who acted, derived from participant state
+    // (Bitbucket has no review objects); the frontend de-dups them against pending
+    // reviewers. `reviewers` below stays the FULL assigned set on purpose — it feeds the
+    // picker's full-replacement PUT, so dropping an acted reviewer would un-assign them.
     let completed_reviewers = completed_reviewers_from(&pr.participants);
 
     Ok(PrDetails {
@@ -1397,14 +1359,11 @@ fn bb_timeline_date(e: &PrTimelineEventOut) -> &str {
     }
 }
 
-/// Map one non-deleted/non-pending comment onto a neutral thread. The body is the
-/// raw content verbatim — inline (diff-anchored) comments carry their file/line
-/// context structurally now (via `ReviewThreadOut.path`/`line` when grouped as a
-/// review thread), so there is no longer a `**path** (line N):` text prefix.
-/// `viewer_uuid` is the signed-in user's braced account uuid (empty = unknown →
-/// `viewer_did_author` false). A comment's author carries a uuid only via its
-/// nested user object; a missing/mismatched uuid maps to `false` — the safe
-/// direction (edit/delete hidden), never the reverse.
+/// Map one non-deleted/non-pending comment onto a neutral thread. The body is the raw
+/// content verbatim — inline comments carry file/line context structurally (via
+/// `ReviewThreadOut.path`/`line`), not as a text prefix. `viewer_uuid` is the signed-in
+/// user's braced account uuid; a missing/mismatched uuid maps `viewer_did_author` to
+/// false — the safe direction (edit/delete hidden), never the reverse.
 fn from_bb_comment(c: BbComment, viewer_uuid: &str) -> PrThreadOut {
     let body = c.content.map(|r| r.raw).unwrap_or_default();
     let viewer_did_author = comment_authored_by_viewer(c.user.as_ref(), viewer_uuid);
@@ -1785,10 +1744,8 @@ fn encode_uuid(uuid: &str) -> String {
     out
 }
 
-/// Resolve one pipeline by build number: primary `GET …/pipelines/{n}`, with a
-/// fallback to `GET …/pipelines/?q=build_number={n}` (taking the single value) if
-/// the primary 404s. Both paths are written per the spec — live validation confirms
-/// which sticks.
+/// Resolve one pipeline by build number: primary `GET …/pipelines/{n}`, falling back to
+/// `GET …/pipelines/?q=build_number={n}` (taking the single value) when the primary 404s.
 async fn resolve_pipeline(
     creds: &BbCredentials,
     ws: &str,
@@ -1926,16 +1883,13 @@ const EXPIRED_LOG_MESSAGE: &str =
     "Logs for this step are no longer available — Bitbucket expires older pipeline logs.";
 
 /// Fetch one pipeline step's log from ALREADY-RESOLVED credentials + workspace/slug and
-/// the bare pipeline/step uuids. Split out from [`step_logs`] so `run_failed_logs` can
-/// loop over failed steps WITHOUT re-reading the keyring and re-spawning
-/// `git remote get-url origin` once per step (N failed steps → N redundant of each).
+/// the bare uuids, so `run_failed_logs` can loop over failed steps without re-reading the
+/// keyring and re-spawning `git remote get-url origin` once per step.
 ///
-/// The `…/steps/{uuid}/log` endpoint 307-redirects (cross-host) to a pre-signed S3
-/// URL; reqwest strips Authorization on that hop (see `http::CLIENT`). Cleaned/capped
-/// like the gitlab job log (60_000 chars; empty → placeholder). A 404 means the log has
-/// EXPIRED (Bitbucket prunes old logs) — a normal state, so it returns the informative
-/// [`EXPIRED_LOG_MESSAGE`] as `Ok` rather than surfacing a raw error toast. Any other
-/// non-2xx still errors via `http::http_error` (401/429 special-casing preserved).
+/// The `…/steps/{uuid}/log` endpoint 307-redirects CROSS-HOST to a pre-signed S3 URL;
+/// reqwest strips Authorization on that hop (see `http::CLIENT`). Capped at 60_000 chars,
+/// empty → placeholder. A 404 means the log EXPIRED (Bitbucket prunes old logs) — normal,
+/// so it returns [`EXPIRED_LOG_MESSAGE`] as `Ok`; any other non-2xx errors.
 async fn step_log_raw(
     creds: &BbCredentials,
     ws: &str,
@@ -2015,11 +1969,9 @@ pub async fn run_failed_logs(repo_path: &str, run_id: u64) -> AppResult<String> 
             .clone()
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| format!("Step {}", i + 1));
-        // An expired log comes back as the placeholder message (Ok), a hard failure
-        // as an Err — either way make the section say so rather than leave a bare
-        // header with an empty body in the concatenated output. Call `step_log_raw`
-        // directly with the creds/ws/slug already resolved above — going through
-        // `step_logs` would re-read the keyring and re-spawn `git remote get-url` per step.
+        // An expired log returns the placeholder (Ok), a hard failure an Err — either
+        // way make the section say so rather than leave a bare header. Calls
+        // `step_log_raw` directly to avoid re-resolving creds/ws/slug per step.
         let log = match step_log_raw(&creds, &ws, &slug, &uuid, &step.uuid).await {
             Ok(l) if l == EXPIRED_LOG_MESSAGE => "(log unavailable — expired)".to_string(),
             Ok(l) if l.trim().is_empty() => "(log unavailable)".to_string(),
@@ -2104,13 +2056,6 @@ pub async fn delete_pr_comment(repo_path: &str, number: u64, comment_id: &str) -
     http::bb_delete(&creds, &path).await
 }
 
-/// Group a flat list of PR comments into file:line-anchored review threads. Pure
-/// (unit-tested). A thread ROOT is an inline comment with no parent; replies
-/// attach to their root by walking the `parent` chain (a reply's parent may itself
-/// be a reply). Deleted / pending comments are dropped first. Threads and their
-/// comments are ordered oldest-first (Bitbucket returns comments oldest-first).
-/// `viewer_uuid` is the signed-in user's braced account uuid (empty = unknown → every
-/// `viewer_did_author` false), compared per comment via [`comment_authored_by_viewer`].
 /// The set of comment ids whose parent-chain ROOT carries `inline` — i.e. every
 /// comment that belongs to an inline (diff-anchored) thread, root or reply. Used
 /// to exclude thread replies from the flat conversation list: a reply carries
@@ -2155,6 +2100,13 @@ fn inline_thread_comment_ids(comments: &[BbComment]) -> std::collections::HashSe
         .collect()
 }
 
+/// Group a flat list of PR comments into file:line-anchored review threads. Pure
+/// (unit-tested). A thread ROOT is an inline comment with no parent; replies
+/// attach to their root by walking the `parent` chain (a reply's parent may itself
+/// be a reply). Deleted / pending comments are dropped first. Threads and their
+/// comments are ordered oldest-first (Bitbucket returns comments oldest-first).
+/// `viewer_uuid` is the signed-in user's braced account uuid (empty = unknown → every
+/// `viewer_did_author` false), compared per comment via [`comment_authored_by_viewer`].
 fn group_bb_threads(comments: Vec<BbComment>, viewer_uuid: &str) -> Vec<ReviewThreadOut> {
     // Chain topology (child id -> parent id) is built from ALL fetched comments,
     // including deleted/pending ones: they still carry id + parent, so a live reply
@@ -2274,16 +2226,12 @@ struct BbCommentsPage {
     next: Option<String>,
 }
 
-/// Fetch a PR's comments, following `next` up to 5 pages (500 comments at
-/// `pagelen=100`, the `workspace_members`/`pr_tasks` idiom). `comments_path` is
-/// the `…/comments` endpoint WITHOUT a query string — the caller supplies it,
-/// because `view_pr`'s base already carries the `/pullrequests/{n}` suffix while
-/// `review_threads`' `repo_base` does not, so a shared base+number signature
-/// would make one call site untruthful. Shared by both readers: `review_threads`
-/// groups parent chains across ALL comments and `view_pr` resolves each comment's
-/// inline-thread root across ALL comments — either truncated at one page would
-/// silently orphan reply chains (or, for `view_pr`, leak a page-2 reply whose
-/// inline root sat on page 1) and drop whole threads on busy PRs.
+/// Fetch a PR's comments, following `next` up to 5 pages (500 at `pagelen=100`, the
+/// `workspace_members`/`pr_tasks` idiom). `comments_path` is the `…/comments` endpoint
+/// WITHOUT a query string, because `view_pr`'s base already carries the
+/// `/pullrequests/{n}` suffix while `review_threads`' `repo_base` does not. Both readers
+/// need ALL pages — they resolve parent chains / inline-thread roots across the full set,
+/// so truncating at one page orphans reply chains and drops threads on busy PRs.
 async fn fetch_all_pr_comments(
     creds: &http::BbCredentials,
     comments_path: &str,
@@ -2301,18 +2249,15 @@ async fn fetch_all_pr_comments(
     Ok(comments)
 }
 
-/// File:line-anchored review threads on a PR — Bitbucket inline comments grouped
-/// with their reply chains. Own fetch (kept separate from `view_pr`'s conversation
-/// read). Reads all comment pages via `fetch_all_pr_comments` (up to 500) because
-/// `group_bb_threads` walks parent chains across ALL comments — truncating at one
-/// page would silently orphan reply chains and drop whole threads on busy PRs.
+/// File:line-anchored review threads on a PR — Bitbucket inline comments grouped with
+/// their reply chains. Own fetch, kept separate from `view_pr`'s conversation read; reads
+/// all comment pages because `group_bb_threads` walks parent chains across ALL comments.
 pub async fn review_threads(repo_path: &str, number: u64) -> AppResult<Vec<ReviewThreadOut>> {
     let creds = http::load_credentials().await?;
     let base = repo_base(repo_path).await?;
 
-    // Resolve the viewer's account uuid once (tolerant — a failure just leaves each
-    // comment's edit/delete hidden; it must not fail the read), the same GET user
-    // idiom `view_pr` uses. Drives the truthful `viewer_did_author` in the grouping.
+    // Resolve the viewer's uuid once (tolerant — a failure just hides edit/delete; it
+    // must not fail the read). Drives `viewer_did_author` in the grouping.
     let viewer_uuid = http::bb_get_json::<BbUser>(&creds, "user", "user")
         .await
         .ok()
@@ -2431,14 +2376,10 @@ struct BbMergeTask {
 }
 
 /// Merge a pull request (`POST …/pullrequests/{n}/merge`). Bitbucket has no
-/// expected-hash guard (the caller's `sha` is dropped upstream). The body is
-/// `{"type":"pullrequest","merge_strategy":<mapped>,"close_source_branch": delete}` —
-/// `close_source_branch:true` auto-deletes the source branch.
-///
-/// Small repos merge SYNCHRONOUSLY (200); large/slow merges return 202 with a
-/// `Location` task-status URL we poll until `SUCCESS`. Any other status → an error via
-/// [`http::http_error`] (an already-closed PR surfaces as its 400 "This pull request is
-/// already closed.").
+/// expected-hash guard (the caller's `sha` is dropped upstream); `close_source_branch`
+/// auto-deletes the source branch. Small repos merge SYNCHRONOUSLY (200); large/slow
+/// merges return 202 with a `Location` task-status URL we poll until `SUCCESS`. Any other
+/// status errors via [`http::http_error`] (an already-closed PR surfaces its 400).
 pub async fn merge_pr(
     repo_path: &str,
     number: u64,
@@ -2609,7 +2550,7 @@ pub async fn set_pr_reviewers(repo_path: &str, number: u64, uuids: &[String]) ->
 }
 
 /// One `/workspaces/{ws}/members` page — `values` plus the absolute `next` link
-/// (the one paginated read here that follows `next`, bounded below).
+/// (one of several bounded `next`-following reads; the bound is below).
 #[derive(Deserialize, Default)]
 struct BbMembersPage {
     #[serde(default)]
@@ -2745,11 +2686,9 @@ fn build_create_body(
     payload
 }
 
-/// Find an existing OPEN PR from `head` into `base` in a candidate list. Pure
-/// (testable). `prs_for_branch` already filters to `source.branch.name == head` AND
-/// `state == OPEN`, but does NOT constrain the destination, so we filter on
-/// `base_ref_name == base` here to catch only a genuine same-source→same-dest
-/// duplicate. Returns the matching PR's number, if any.
+/// Find an existing OPEN PR from `head` into `base`. Pure (testable). `prs_for_branch`
+/// already constrains source + OPEN but NOT the destination, so filter on
+/// `base_ref_name == base` to catch only a genuine same-source→same-dest duplicate.
 fn duplicate_pr_number(open_prs: &[PrInfo], base: &str) -> Option<u64> {
     open_prs
         .iter()
@@ -2758,36 +2697,25 @@ fn duplicate_pr_number(open_prs: &[PrInfo], base: &str) -> Option<u64> {
 }
 
 /// Seed git's credential store with the Bitbucket API token so a subsequent HTTPS
-/// clone / fetch / pull / push authenticates non-interactively — the same mechanism
-/// `publish_repo`'s post-create push has always used, lifted out so clone, the
-/// fetch/pull/push funnel, and `create_pr` can share it. Best-effort: no stored
-/// token, a missing credential helper, or a non-zero exit are all tolerated (the
-/// git op itself surfaces any real auth failure); it only ever ADDS a credential.
-/// Seeds at most ONCE per process (the seed persists in the OS store), re-armed
-/// when the stored token changes — otherwise every op would re-run `git credential
-/// approve` (a subprocess) redundantly. (The keyring READ is separately cached in
-/// `http::load_credentials`, so neither this nor the REST layer re-pops the macOS
-/// "gitdesktop wants to use your confidential information" prompt after the first.)
+/// clone / fetch / pull / push authenticates non-interactively. Best-effort (no stored
+/// token, a missing helper, or a non-zero exit are tolerated — the git op surfaces any
+/// real auth failure); it only ever ADDS a credential. Seeds at most ONCE per process
+/// (the seed persists in the OS store; the keyring READ is separately cached in
+/// `http::load_credentials`, so the macOS keychain prompt does not re-pop after the
+/// first), re-armed by [`reset_credential_seed`] when the stored token changes.
 ///
-/// Runs `git credential approve` OUTSIDE any repo (`run_git_input(None, …)`) and
-/// takes NO repo lock — deliberately, so it stays safe to call from ANY context,
-/// including a future caller that already holds the per-repo mutating lock. (Today's
-/// callers compute the credential config BEFORE the op takes its lock, so there is
-/// no present-day deadlock; the non-locking runner is defensive, not load-bearing.)
-/// Do NOT switch this to a locking runner.
+/// Runs `git credential approve` OUTSIDE any repo (`run_git_input(None, …)`) and takes
+/// NO repo lock, so it stays safe to call from a context that already holds the per-repo
+/// mutating lock. Do NOT switch this to a locking runner.
 ///
-/// SECURITY: the token is fed on STDIN ONLY — never argv / env / git config —
-/// matching the discipline the rest of the Bitbucket git path holds. NOTE:
+/// SECURITY: the token is fed on STDIN ONLY — never argv / env / git config. NOTE:
 /// git-over-HTTPS REQUIRES the `x-bitbucket-api-token-auth` sentinel username; the
-/// account email authenticates the REST API but NOT git (probe-validated:
-/// `git ls-remote` succeeds with the sentinel and fails with the email). Do not
-/// change the username to the email; it will fail auth.
+/// account email authenticates the REST API but NOT git (probe-validated with
+/// `git ls-remote`). Changing the username to the email breaks auth.
 ///
-/// Returns whether a credential is (now) in the store — `true` when this or an
-/// earlier successful seed landed, `false` when no token is stored or the seed
-/// failed. Callers use it to gate credential-dependent `-c` entries (e.g.
-/// `credential.interactive=false`) so an unconfigured user keeps git's ambient —
-/// possibly interactive — behavior, fail-open.
+/// Returns whether a credential is now in the store. Callers gate credential-dependent
+/// `-c` entries (e.g. `credential.interactive=false`) on it, so an unconfigured user
+/// keeps git's ambient — possibly interactive — behavior, fail-open.
 pub async fn seed_git_credential() -> bool {
     // Fast path: a prior seed this session already succeeded (latch is set only
     // AFTER `approve` exits 0, so `true` means the credential is really stored).
@@ -2831,13 +2759,11 @@ pub(crate) fn reset_credential_seed() {
     CREDENTIAL_SEEDED.store(false, Ordering::Release);
 }
 
-/// Evict the seeded entry from git's OS credential store (`git credential reject`,
-/// same protocol/host/username shape the seed wrote, no password — helpers match on
-/// those fields, so ONLY our sentinel-account entry is erased; a user's own ambient
-/// Bitbucket credential under a different username is untouched). Called on
-/// disconnect: git's store is SEPARATE from GitDesktop's keyring, so without this a
-/// disconnected account would keep authenticating git ops until the token expired.
-/// Best-effort — a missing helper or non-zero exit is tolerated.
+/// Evict the seeded entry from git's OS credential store (`git credential reject`, same
+/// protocol/host/username shape the seed wrote, no password — helpers match on those
+/// fields, so ONLY our sentinel-account entry is erased; a user's own Bitbucket
+/// credential under a different username is untouched). Called on disconnect, since git's
+/// store is SEPARATE from our keyring. Best-effort.
 async fn evict_git_credential() {
     let reject_input =
         format!("protocol=https\nhost={BB_HOST}\nusername=x-bitbucket-api-token-auth\n\n");
@@ -2851,13 +2777,11 @@ async fn evict_git_credential() {
 }
 
 /// Strip an embedded `user@` from an `https://` URL's authority so git's credential
-/// lookup keys on the host alone and finds the seeded `x-bitbucket-api-token-auth`
-/// entry. Bitbucket's API/web clone links embed the account username
-/// (`https://<user>@bitbucket.org/…`); git SCOPES its credential lookup by the URL
-/// username when present, so a `user@` URL asks the helper for account=`user` and
-/// misses the sentinel-account seed — re-prompting. This is git's protocol behavior,
-/// so it bites BOTH macOS osxkeychain and Windows GCM, not just macOS. Non-`https`
-/// URLs and URLs without userinfo pass through unchanged.
+/// lookup keys on the host alone and finds the seeded `x-bitbucket-api-token-auth` entry.
+/// Bitbucket's clone links embed the account username; git SCOPES its credential lookup
+/// by the URL username when present, so a `user@` URL asks for account=`user`, misses the
+/// sentinel seed, and re-prompts — on Windows GCM as well as macOS osxkeychain.
+/// Non-`https` URLs and URLs without userinfo pass through unchanged.
 pub(crate) fn strip_https_userinfo(url: &str) -> String {
     let Some(rest) = url.strip_prefix("https://") else {
         return url.to_string();
@@ -2875,21 +2799,16 @@ pub(crate) fn strip_https_userinfo(url: &str) -> String {
     }
 }
 
-/// The one-shot `-c` entries for a SEEDED Bitbucket network op (the funnel's
-/// Bitbucket analogue of `github_credential_entries`). Pure/format-only:
+/// The one-shot `-c` entries for a SEEDED Bitbucket network op (the Bitbucket analogue
+/// of `github_credential_entries`). Pure/format-only:
 ///
 ///  - `credential.interactive=false` — the seeded credential answers the fill, so an
-///    interactive helper GUI (e.g. GCM's dialog) must not pop on a stale/rejected
-///    token; matches `publish_repo`'s push. Callers only apply these entries when
-///    the seed SUCCEEDED, so an unconfigured user keeps ambient interactive auth.
-///  - When the remote URL embeds userinfo (`https://user@bitbucket.org/…`, the form
-///    Bitbucket's web UI hands out): a one-shot `url.<stripped>.insteadOf=<url>`
-///    rewrite, so git resolves the remote to the bare host and its credential
-///    lookup finds the host-keyed sentinel seed (see [`strip_https_userinfo`]).
-///    Transient — the repo's stored remote is never mutated, no lock is needed, and
-///    the entry rides the same `-c` prefix mechanism as the GitHub/GitLab helpers.
-///    (Safe as a `-c` key: Bitbucket remote URLs contain no `=`, so the key can't
-///    be mis-split.)
+///    interactive helper GUI (e.g. GCM's dialog) must not pop on a stale token. Callers
+///    apply these only when the seed SUCCEEDED, so an unconfigured user keeps ambient auth.
+///  - For a userinfo remote (`https://user@bitbucket.org/…`): a transient
+///    `url.<stripped>.insteadOf=<url>` rewrite so git's credential lookup resolves to the
+///    bare host and finds the sentinel seed (see [`strip_https_userinfo`]). The stored
+///    remote is never mutated. Safe as a `-c` key: Bitbucket URLs contain no `=`.
 pub(crate) fn bitbucket_credential_entries(url: &str) -> Vec<String> {
     let mut entries = vec![CREDENTIAL_NONINTERACTIVE.to_string()];
     let stripped = strip_https_userinfo(url);
@@ -2906,24 +2825,14 @@ pub(crate) fn bitbucket_credential_entries(url: &str) -> Vec<String> {
 pub(crate) const CREDENTIAL_NONINTERACTIVE: &str = "credential.interactive=false";
 
 /// Push `head` to origin, then open a pull request from `head` into `base`. Mirrors
-/// `gitlab::create_mr`, with two Bitbucket-specific differences:
-///
-///  - **Duplicate is an UPSERT, so we pre-check.** A Bitbucket create POST for a
-///    source→dest pair that already has an OPEN PR returns 201 with the EXISTING PR
-///    but ALSO applies the payload (title overwritten, an omitted description wiped to
-///    ""). So BEFORE any mutation we read the open PRs from `head` (via the same query
-///    `prs_for_branch` uses) and, if one already targets `base`, error out naming its
-///    number — nothing is pushed or changed.
-///  - **Funnel credentials on the push.** The push routes through the same
-///    `credential_config_for_remote` funnel as every other network op: on a
-///    Bitbucket HTTPS origin the token is seeded into git's credential store on
-///    STDIN (`seed_git_credential`) and the one-shot `-c` pair (interactive
-///    suppression + `insteadOf` rewrite for `user@` origins) rides the push. The
-///    keyring token is NEVER put on argv / env / git config of the push process.
-///
-/// Order: duplicate pre-check (read-only) → validate → push → POST create. If the POST
-/// fails after a successful push, the error discloses the partial state (the branch was
-/// pushed) — the same pre-mutation-guard discipline as the rest of the codebase.
+/// `gitlab::create_mr`, with one Bitbucket-specific hazard: a create POST for a
+/// source→dest pair that already has an OPEN PR returns 201 with the EXISTING PR but ALSO
+/// applies the payload (title overwritten, an omitted description wiped to ""). So the
+/// duplicate pre-check runs FIRST (read-only) and errors naming that PR — nothing is
+/// pushed or changed. Order: pre-check → validate → push → POST create; a POST failure
+/// after a successful push discloses the partial state. The push routes through the shared
+/// `credential_config_for_remote` funnel (STDIN-only token seed + one-shot `-c` entries) —
+/// the token never reaches argv / env / git config.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_pr(
     state: &crate::state::AppState,
@@ -2955,14 +2864,9 @@ pub async fn create_pr(
         )));
     }
 
-    // A PR needs the branch on the remote first. Route the push's credentials
-    // through the SAME funnel every other network op uses
-    // (`credential_config_for_remote`): on a Bitbucket HTTPS origin it seeds the
-    // token into git's credential store (STDIN only) and returns the one-shot `-c`
-    // pair — interactive-helper suppression + the `insteadOf` host rewrite a
-    // `user@`-form origin needs for git's credential lookup to find the sentinel
-    // seed. An unconfigured user (or an SSH origin) gets no entries, keeping git's
-    // ambient, possibly interactive, behavior — fail-open, funnel-identical.
+    // A PR needs the branch on the remote first. Route the push's credentials through
+    // the same `credential_config_for_remote` funnel every other network op uses; an
+    // unconfigured user (or an SSH origin) gets no entries — fail-open.
     let cred = crate::forge::credential_config_for_remote(repo_path, "origin").await?;
     let push_args =
         crate::git::remote::with_credentials(&cred, &["push", "-u", "origin", head]);
@@ -3150,10 +3054,9 @@ struct BbPrParticipants {
     participants: Vec<BbParticipant>,
 }
 
-/// A human-readable display name for a PR participant: nickname → display_name →
-/// username (participant user objects carry no `username`, so in practice this is the
-/// nickname, then display_name). Used for the names of OTHER participants in
-/// `approved_by`; the viewer's own entry is derived differently (see
+/// Display name for a PR participant: nickname → display_name → username (participant
+/// objects carry no `username`, so in practice nickname then display_name). Used for
+/// OTHER participants in `approved_by`; the viewer's own entry differs (see
 /// [`build_approval_state`]).
 fn participant_login(u: &BbUser) -> String {
     u.nickname
@@ -3163,26 +3066,20 @@ fn participant_login(u: &BbUser) -> String {
         .unwrap_or_default()
 }
 
-/// Build the neutral [`ApprovalState`] from a PR's participants, matching the viewer by
-/// UUID. Pure (testable).
+/// Build the neutral [`ApprovalState`] from a PR's participants. Pure (testable).
 ///
-/// The viewer is matched on `participant.user.uuid == viewer_uuid`, NOT a name string:
-/// participant user objects never carry `username` (privacy — only the self object
-/// does), so a name match would silently fail whenever the viewer's nickname differs
-/// from their username. `viewer_has_approved` / `viewer_requested_changes` come from
-/// the matched participant.
+/// The viewer is matched on `participant.user.uuid`, NOT a name: participant user objects
+/// never carry `username` (privacy), so a name match fails whenever the viewer's nickname
+/// differs from their username.
 ///
-/// `approved_by` mixes two derivations on purpose: OTHER approvers get their
-/// human-readable [`participant_login`] (nickname-first), but the VIEWER's own entry
-/// emits `viewer_login` — exactly the string `status().login` produces
-/// (`username || display_name`), which is what the frontend's `forge.data.login`
-/// carries and what its optimistic add/remove inserts into `approvedBy`. Emitting that
-/// same string here lets the viewer's entry reconcile across the optimistic window
-/// (otherwise the server-truth refetch would show a different string than the
-/// optimistic insert and the row would flicker/duplicate).
+/// `approved_by` mixes two derivations on purpose: other approvers get their
+/// human-readable [`participant_login`], but the VIEWER's entry emits `viewer_login` —
+/// the exact string `status().login` produces, which the frontend's optimistic
+/// add/remove inserts into `approvedBy`. Anything else flickers/duplicates across the
+/// optimistic window.
 ///
-/// Bitbucket exposes no required-approval count here (that's a repo-settings merge
-/// check), so `approvals_required`/`_left` are 0.
+/// Bitbucket exposes no required-approval count here (it's a repo-settings merge check),
+/// so `approvals_required`/`_left` are 0.
 fn build_approval_state(
     participants: &[BbParticipant],
     viewer_uuid: &str,
@@ -3222,14 +3119,11 @@ fn build_approval_state(
     }
 }
 
-/// The completed reviewers of a PR — every participant who cast a verdict — derived
-/// from participant `state`. Bitbucket has no GitHub-style review objects, so a
-/// participant's `state` (`"approved"` / `"changes_requested"` / null) IS the verdict:
-/// `"approved"` → `"APPROVED"`, `"changes_requested"` → `"CHANGES_REQUESTED"`.
-/// Commenters who never acted carry `state: null` (and any unrecognized state) and are
-/// skipped, as are participants with no resolvable braced uuid. Identity = braced uuid
-/// (the one field present on participant objects), matching the reviewers picker so the
-/// caller can subtract these from the pending reviewer list. Pure (testable).
+/// The completed reviewers of a PR — every participant who cast a verdict. Bitbucket has
+/// no review objects, so participant `state` IS the verdict; commenters (`null`) and
+/// unrecognized states are skipped, as are participants with no braced uuid. Identity =
+/// braced uuid (the one field on participant objects), matching the reviewers picker so
+/// the caller can subtract these from pending. Pure (testable).
 fn completed_reviewers_from(participants: &[BbParticipant]) -> Vec<CompletedReviewerOut> {
     participants
         .iter()
@@ -3291,11 +3185,10 @@ pub async fn pr_approvals(repo_path: &str, number: u64) -> AppResult<ApprovalSta
 // ── Pull-request tasks (checklist) ───────────────────────────────────────────────
 //
 // Bitbucket PRs carry a native task checklist (`…/pullrequests/{id}/tasks`) — a
-// Bitbucket-only surface (`implemented.pr_tasks`). A task is UNRESOLVED / RESOLVED
-// with free-text content; it may optionally be attached to a PR comment. Task/user
-// ids are numeric on the wire and travel as Strings over IPC (the u64-precision
-// rule); user objects here carry NO `username` (only uuid/display_name/nickname), so
-// the neutral shape reads display_name → nickname only.
+// Bitbucket-only surface (`implemented.pr_tasks`). A task is UNRESOLVED / RESOLVED with
+// free-text content, optionally attached to a PR comment. Task/user ids are numeric on
+// the wire and travel as Strings over IPC (the u64-precision rule); task user objects
+// carry NO `username`, so the neutral shape reads display_name → nickname only.
 
 /// A pull-request task, as the frontend consumes it. `id`/`commentId` are the numeric
 /// server ids serialized as Strings (u64-precision rule); `state` is
@@ -3481,15 +3374,12 @@ pub async fn pr_task_delete(repo_path: &str, number: u64, task_id: &str) -> AppR
 
 // ── Pipelines (CI, write) ───────────────────────────────────────────────────────
 
-/// Build the pipeline-trigger body for a ref, with an optional custom-pipeline
-/// selector and optional variables. Pure (testable). `ref_type` is the target's
-/// `ref_type` (`"branch"` or `"tag"`) — the dispatch dialog's ref field is free-text
-/// and labelled "Branch or tag", so the backend detects which it is (the frontend
-/// can't). A non-empty `workflow` adds a `selector` (`{type:"custom",
-/// pattern:<workflow>}`) INSIDE `target`, dispatching a named custom pipeline instead
-/// of the ref's default; empty `workflow` triggers the ref's default pipeline (the
-/// rerun path passes ""). A non-empty `inputs` map adds a top-level `variables` array
-/// (sibling of `target`); an empty map omits it entirely.
+/// Build the pipeline-trigger body for a ref. Pure (testable). `ref_type` is
+/// `"branch"`/`"tag"` — the dispatch dialog's ref field is free-text ("Branch or tag"),
+/// so the backend detects which it is. A non-empty `workflow` adds a `selector`
+/// (`{type:"custom", pattern}`) INSIDE `target`, dispatching that named custom pipeline;
+/// empty triggers the ref's default (the rerun path passes ""). A non-empty `inputs` adds
+/// a top-level `variables` array (sibling of `target`); an empty map omits it.
 fn build_trigger_body(
     git_ref: &str,
     ref_type: &str,
@@ -3583,13 +3473,10 @@ async fn ref_is_tag(creds: &BbCredentials, ws: &str, slug: &str, git_ref: &str) 
 }
 
 /// Manually start a pipeline on `git_ref` (`POST …/pipelines/`), with `inputs` as
-/// pipeline variables. A non-empty `workflow` dispatches that named CUSTOM pipeline
-/// (via a `selector` on the target); empty `workflow` triggers the ref's default
-/// pipeline. The dialog's ref field is free-text ("Branch or tag"), so we detect the
-/// ref type ([`ref_is_tag`]) and set the target's `ref_type` accordingly. A 400
+/// pipeline variables and a non-empty `workflow` selecting a named CUSTOM pipeline. The
+/// dialog's ref field is free-text, so the ref type is detected ([`ref_is_tag`]). A 400
 /// (pipelines disabled / missing yml / unknown selector) surfaces its raw message via
-/// [`http::http_error`] — the unknown-selector envelope carries the useful text in
-/// `error.detail`, which `http_error` now prefers.
+/// [`http::http_error`], which prefers the `error.detail` text.
 pub async fn dispatch_ci(
     repo_path: &str,
     workflow: &str,
@@ -3872,16 +3759,11 @@ pub async fn environments(repo_path: &str) -> AppResult<Vec<BbEnvironment>> {
 
 // ── Repository settings & lifecycle ──────────────────────────────────────────
 //
-// The Bitbucket repo-management surface (wave 3): the settings read/update, the
-// admin probe, the lifecycle actions (rename / visibility / delete — archive and
-// transfer are platform-impossible), default reviewers, branch restrictions,
-// pipelines config / variables / schedules, and webhooks. All endpoints were
-// live-validated against a throwaway repo. Mirrors the GitLab settings
-// architecture (`forge_gl_*` → `forge_bb_*`), but with Bitbucket's own shapes.
-
-// Account UUIDs the app addresses in paths are percent-encoded (braced) via
-// [`encode_uuid`] (defined for pipeline UUIDs) — it encodes `{`/`}` and any
-// reserved byte, passing unreserved chars through.
+// The Bitbucket repo-management surface: settings read/update, the admin probe, the
+// lifecycle actions (rename / visibility / delete — archive and transfer are
+// platform-impossible), default reviewers, branch restrictions, pipelines config /
+// variables / schedules, and webhooks. Account UUIDs the app puts in paths are
+// percent-encoded (braced) via [`encode_uuid`].
 
 /// Whether the signed-in viewer is an admin of this repo. The old
 /// `/user/permissions/repositories` endpoint is 410-GONE (CHANGE-2770); the
@@ -3897,11 +3779,9 @@ pub async fn repo_admin(repo_path: &str) -> AppResult<bool> {
         )));
     }
     let creds = http::load_credentials().await?;
-    // Bitbucket stores slugs lowercase, and the BBQL `slug="…"` filter is
-    // case-sensitive server-side — a mixed-case clone URL would otherwise match 0
-    // rows and report a real admin as non-admin. The `slug.contains('"')` guard above
-    // ran on the original slug; the `repo_admin_matches` check below is already
-    // case-insensitive.
+    // Bitbucket stores slugs lowercase and the BBQL `slug="…"` filter is case-sensitive
+    // server-side — a mixed-case clone URL would match 0 rows and report a real admin as
+    // non-admin. (`repo_admin_matches` below is case-insensitive.)
     let query = format!(r#"slug="{}""#, slug.to_ascii_lowercase());
     let path = format!(
         "repositories/{}?role=admin&q={}&pagelen=100",
@@ -3996,13 +3876,11 @@ fn rewritten_origin_url(old_url: &str, ws: &str, new_slug: &str) -> Option<Strin
     }
 }
 
-/// Rename the repository: `PUT repositories/{ws}/{slug} {name}` → the server
-/// slugifies the name (lowercase, spaces→dashes) and returns the new `slug`. Unlike
-/// GitLab, the OLD slug 404s immediately (no redirect), so the local `origin` remote
-/// must be rewritten to the new slug. If the rename SUCCEEDS but the local
-/// `remote set-url` then fails, the error discloses the partial state so the user can
-/// fix the remote by hand (a post-mutation disclosure, per the pre-mutation-guard
-/// discipline).
+/// Rename the repository: `PUT repositories/{ws}/{slug} {name}` → the server slugifies
+/// the name (lowercase, spaces→dashes) and returns the new `slug`. Unlike GitLab, the
+/// OLD slug 404s immediately (no redirect), so the local `origin` remote must be
+/// rewritten. If the rename succeeds but `remote set-url` then fails, the error
+/// discloses the partial state so the user can fix the remote by hand.
 pub async fn rename_repo(state: &crate::state::AppState, repo_path: &str, new_name: &str) -> AppResult<()> {
     let new_name = new_name.trim();
     if new_name.is_empty() || new_name.starts_with('-') {
@@ -4145,14 +4023,11 @@ pub async fn repo_settings(repo_path: &str) -> AppResult<BitbucketRepoSettings> 
     Ok(settings_from_repo(raw))
 }
 
-/// The repo's `is_private` (mapped to the neutral visibility string) plus fork
-/// provenance. Bitbucket has no "internal" tier, so it's just private/public.
-/// Reuses the same `GET repositories/{ws}/{slug}` read the settings fetch uses.
-/// Unlike the tolerant settings struct, `is_private` is STRICT here (`Option`,
-/// no default): a missing or null value is undeterminable, and this probe must
-/// error rather than guess "public" (mirrors the GitHub arm's empty-string
-/// guard). `parent` is the upstream-repo embed Bitbucket returns for a fork
-/// (null otherwise), so fork-ness rides the same round-trip.
+/// The repo's `is_private` (→ neutral visibility string) plus fork provenance; Bitbucket
+/// has no "internal" tier. Unlike the tolerant settings struct, `is_private` is STRICT
+/// (`Option`, no default): a missing/null value is undeterminable and this probe must
+/// error rather than guess "public". `parent` is the upstream embed Bitbucket returns for
+/// a fork (null otherwise), so fork-ness rides the same round-trip.
 #[derive(Deserialize)]
 struct BbRepoVisibility {
     #[serde(default)]
@@ -4921,16 +4796,14 @@ struct BbCreatedRepo {
 }
 
 /// Publish a local repo to Bitbucket: create the repo in `workspace`, seed git's
-/// credential store, add `origin`, and push the current branch. Returns the repo's
-/// html URL. `website` maps to Bitbucket's website field (homepage); topics are
-/// dropped (Bitbucket has no topics).
+/// credential store, add `origin`, and push the current branch. Returns the repo's html
+/// URL. `website` maps to Bitbucket's website field; topics are dropped (Bitbucket has
+/// none).
 ///
-/// Guard order mirrors `gitlab::publish_repo`: every locally-checkable precondition
-/// runs BEFORE the create POST (an orphaned repo whose slug then blocks retries is
-/// the failure to avoid). Any failure AFTER the create discloses the partial state
-/// ("The Bitbucket repository was created at <url>, but …"). The keyring token never
-/// reaches argv / env / git config — the `git credential approve` seed feeds it on
-/// STDIN only.
+/// Guard order mirrors `gitlab::publish_repo`: every locally-checkable precondition runs
+/// BEFORE the create POST — the failure to avoid is an orphaned repo whose slug then
+/// blocks retries. Any failure AFTER the create discloses the partial state ("The
+/// Bitbucket repository was created at <url>, but …").
 pub async fn publish_repo(
     state: &crate::state::AppState,
     repo_path: &str,
@@ -5024,10 +4897,8 @@ pub async fn publish_repo(
     let created_hint =
         format!("The Bitbucket repository was created at {html_url}, but ");
 
-    // ── Seed git's credential store so the push authenticates non-interactively —
-    //    the shared sentinel-username STDIN seed (see `seed_git_credential`, which
-    //    carries the probe-validated do-not-use-the-email warning). Best-effort: a
-    //    failed seed is tolerated (the push surfaces any auth failure). ──
+    // ── Seed git's credential store so the push authenticates non-interactively (see
+    //    `seed_git_credential`). Best-effort — the push surfaces any auth failure. ──
     let _ = seed_git_credential().await;
 
     // ── Add origin, then push the current branch. ──
@@ -5060,11 +4931,10 @@ pub async fn publish_repo(
 // ── Explore: repo search / fork-by-name / README ──────────────────────────────
 //
 // Bitbucket retired global repo search (`GET /2.0/repositories` → 410 Gone,
-// CHANGE-2770), so Explore search is workspace-scoped by design: we iterate the
-// viewer's workspaces and run a `q=name~"…"` filter in each, aggregating results.
-// Fork and README address the repo by `owner/name` over the REST API. Bitbucket
-// Cloud has no stars, so `star_repo`/`starred` are inert (the frontend never calls
-// them — the flag is false). All owner/name values are grammar-validated.
+// CHANGE-2770), so Explore search is workspace-scoped by design: iterate the viewer's
+// workspaces and run a `q=name~"…"` filter in each, aggregating. Fork and README address
+// the repo by `owner/name` (grammar-validated). Bitbucket Cloud has no stars, so
+// `star_repo`/`starred` are inert.
 
 /// Bitbucket's single page cap for the workspace repo-search endpoint.
 const BB_SEARCH_PAGELEN: u32 = 50;
@@ -5396,10 +5266,9 @@ mod tests {
 
     #[test]
     fn bb_search_repo_name_is_slug_not_display_name() {
-        // Same class as the GitLab bug: Bitbucket's `name` is a DISPLAY name that
-        // can diverge from the URL slug. `ForgeSearchRepo.name` must be the slug so
-        // `owner + "/" + name == full_name` and by-owner/name commands address the
-        // right repo.
+        // Bitbucket's `name` is a DISPLAY name that can diverge from the URL slug.
+        // `ForgeSearchRepo.name` must be the slug so `owner + "/" + name == full_name`
+        // and by-owner/name commands address the right repo.
         let item = serde_json::json!({
             "full_name": "ws/pretty-name",
             "slug": "pretty-name",
@@ -5829,12 +5698,9 @@ mod tests {
 
     #[test]
     fn group_bb_threads_walks_through_deleted_mid_chain_but_drops_deleted_root() {
-        // root(live, inline) ← mid(deleted) ← reply(live): the reply's parent points
-        // at the DELETED mid comment, so the chain must walk THROUGH mid (via the
-        // full-topology map) up to the surviving root — the reply lands in the
-        // thread even though mid itself is not rendered.
-        // root2(deleted, inline) ← reply2(live): the chain root is deleted, so no
-        // live root exists and the reply stays dropped (correct orphan handling).
+        // Chains must walk THROUGH a deleted intermediate up to a surviving root (that
+        // reply renders), but a chain whose ROOT is deleted has no live root, so its
+        // reply drops (orphan handling).
         let page: BbPage<BbComment> = serde_json::from_str(
             r#"{"values":[
                 {"id":100,"content":{"raw":"root live"},"user":{"display_name":"Ann"},
@@ -6207,9 +6073,9 @@ mod tests {
 
     #[test]
     fn approval_state_matches_viewer_by_uuid_not_name() {
-        // The reconciliation bug fixture: the viewer's nickname, username, and
-        // display_name are ALL different, and the participant object carries no
-        // username at all (Bitbucket's privacy behavior). Only uuid matching works.
+        // The viewer's nickname, username, and display_name are ALL different and the
+        // participant object carries no username (Bitbucket privacy) — only uuid matching
+        // works.
         let ps = participants(
             r#"{"participants":[
                 {"user":{"uuid":"{viewer-uuid}","nickname":"nick","display_name":"Display Name"},
@@ -6531,7 +6397,6 @@ mod tests {
 
     #[test]
     fn custom_pipelines_parse_the_live_validated_yml() {
-        // The exact yml validated live (2 custom pipelines).
         let yml = "\
 pipelines:
   custom:

@@ -1,12 +1,11 @@
-//! Bitbucket-only HTTP layer (per `docs/multi-provider-support.md` §0 decision 1:
-//! GitHub stays on `gh`, GitLab on `glab`, and Bitbucket Cloud speaks direct HTTP).
-//!
-//! This is the credential + transport substrate the [`bitbucket`](super::bitbucket)
-//! provider builds on: a shared [`reqwest`](tauri_plugin_http::reqwest) client, the
-//! keyring-backed credential loading, and the JSON/raw GET helpers with Bitbucket's
-//! error-envelope parsing. All calls authenticate with HTTP Basic
-//! (`{atlassian_account_email}:{api_token}`) — app passwords are dead (removed
-//! 2026-07-28), so the API token is the only supported credential.
+//! Bitbucket-only HTTP layer: GitHub stays on `gh` and GitLab on `glab`, so only
+//! Bitbucket Cloud speaks direct HTTP. This is the credential + transport substrate
+//! the [`bitbucket`](super::bitbucket) provider builds on — a shared
+//! [`reqwest`](tauri_plugin_http::reqwest) client, keyring-backed credential loading,
+//! and the JSON/raw GET helpers with Bitbucket's error-envelope parsing. Every call
+//! authenticates with HTTP Basic (`{atlassian_account_email}:{api_token}`); app
+//! passwords were removed 2026-07-28, so the API token is the only supported
+//! credential.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
@@ -35,19 +34,14 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// A tighter connect timeout so an unreachable host fails fast, not after 120s.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The process-wide Bitbucket HTTP client. Built once (connection pooling, one TLS
-/// setup) and shared across all calls.
+/// The process-wide Bitbucket HTTP client (built once: connection pooling, one TLS
+/// setup).
 ///
-/// Redirect policy is reqwest's DEFAULT, and that default is LOAD-BEARING here:
-///  - PR `/diff` 302-redirects to a raw-diff URL on the SAME host — reqwest keeps
-///    the `Authorization` header across a same-host redirect, so the follow-up is
-///    still authenticated.
-///  - Step logs 307-redirect to a pre-signed S3 URL on a DIFFERENT host — reqwest
-///    STRIPS `Authorization` on a cross-host redirect (the pre-signed URL carries
-///    its own auth in the query string), which is exactly what we want; sending our
-///    Basic creds to S3 would be both wrong and a credential leak.
-///
-/// Do not override the redirect policy without preserving both behaviours.
+/// Redirect policy is reqwest's DEFAULT, and that default is LOAD-BEARING: PR `/diff`
+/// 302s to a same-host raw-diff URL where reqwest KEEPS `Authorization`, while step
+/// logs 307 to a pre-signed S3 URL on another host where reqwest STRIPS it (the URL
+/// carries its own auth; sending our Basic creds to S3 would leak them). Don't
+/// override the policy without preserving both behaviours.
 static CLIENT: OnceLock<Client> = OnceLock::new();
 
 fn client() -> &'static Client {
@@ -57,9 +51,8 @@ fn client() -> &'static Client {
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
             .build()
-            // The builder only fails on a broken TLS backend — unrecoverable, and
-            // a plain `Client::new()` uses the same backend, so fall back to it
-            // rather than panic on a machine we can't do anything about anyway.
+            // The builder only fails on a broken TLS backend, and `Client::new()` uses
+            // the same backend — fall back rather than panic.
             .unwrap_or_else(|_| Client::new())
     })
 }
@@ -72,11 +65,10 @@ pub struct BbCredentials {
     pub token: String,
 }
 
-/// Process cache of the loaded credentials so the OS keyring is read ONCE per
-/// session, not on every call. Each keyring read pops a macOS keychain-authorization
-/// prompt, and the Bitbucket layer loads credentials at 70+ call sites (every REST
-/// request + the git-credential seed), so reading each time was a prompt storm.
-/// Invalidated on connect/disconnect via [`invalidate_credential_cache`].
+/// Process cache of the loaded credentials: every keyring read pops a macOS
+/// keychain-authorization prompt and this layer loads credentials on essentially every
+/// REST request, so the keyring is read ONCE per session. Invalidated on
+/// connect/disconnect via [`invalidate_credential_cache`].
 static CREDENTIAL_CACHE: RwLock<Option<BbCredentials>> = RwLock::new(None);
 /// Serializes the first (uncached) load so a burst of concurrent callers on repo
 /// open triggers ONE keyring read (one prompt), not one per caller.
@@ -92,10 +84,8 @@ static CREDENTIAL_GENERATION: AtomicU64 = AtomicU64::new(0);
 /// `BitbucketNotConfigured` when no token is stored — the signal the read commands
 /// turn into the "connect an account" state.
 pub async fn load_credentials() -> AppResult<BbCredentials> {
-    // Fast path: reuse the cached credential (no keyring read → no macOS prompt).
-    // Poison recovery (`into_inner`) matches the oplog locks: nothing fallible runs
-    // under these guards, and the cache is atomically-assigned, so a recovered
-    // value is always coherent.
+    // Fast path: cached credential → no keyring read → no macOS prompt. Poison recovery
+    // (`into_inner`) is safe — nothing fallible runs under these guards.
     if let Some(creds) = CREDENTIAL_CACHE.read().unwrap_or_else(|p| p.into_inner()).clone() {
         return Ok(creds);
     }
@@ -117,11 +107,9 @@ pub async fn load_credentials() -> AppResult<BbCredentials> {
     match (email, token) {
         (Some(email), Some(token)) if !email.is_empty() && !token.is_empty() => {
             let creds = BbCredentials { email, token };
-            // Commit only if no invalidation raced in during the read. The check and
-            // write are held under the cache write lock, and `invalidate` bumps the
-            // generation BEFORE clearing under the same lock — so either we skip the
-            // stale write, or our write is superseded by the clear; a stale value is
-            // never left cached.
+            // Commit only if no invalidation raced in: check + write are held under
+            // the cache write lock, and `invalidate` bumps the generation BEFORE
+            // clearing under that lock, so a stale value is never left cached.
             {
                 let mut cache = CREDENTIAL_CACHE.write().unwrap_or_else(|p| p.into_inner());
                 if CREDENTIAL_GENERATION.load(Ordering::Acquire) == generation {
@@ -137,9 +125,7 @@ pub async fn load_credentials() -> AppResult<BbCredentials> {
 /// Drop the cached credential so the next [`load_credentials`] re-reads the keyring —
 /// called on connect/disconnect (the stored token changed).
 pub(crate) fn invalidate_credential_cache() {
-    // Bump BEFORE clearing so an in-flight cold load sees the change and skips
-    // caching its stale read; the clear is serialized (cache write lock) against
-    // that load's commit.
+    // Bump BEFORE clearing so an in-flight cold load skips caching its stale read.
     CREDENTIAL_GENERATION.fetch_add(1, Ordering::AcqRel);
     *CREDENTIAL_CACHE.write().unwrap_or_else(|p| p.into_inner()) = None;
 }
@@ -177,11 +163,11 @@ impl BbErrorBody {
 }
 
 /// Turn a non-2xx response body + status into an [`AppError::Bitbucket`], with the
-/// 401 / 429 special-casing the provider contract requires. `body` is the raw
-/// response text (never logged elsewhere — it may echo request context, but never
-/// our credentials, which live only in the request header). Exposed to the provider
-/// so a caller that inspects the status itself (e.g. [`bb_get_text_status`]) can
-/// still produce the identical error for statuses it doesn't special-case.
+/// 401/429 special-casing the provider contract requires. `body` is raw response text
+/// (it may echo request context but never our credentials, which live only in the
+/// request header). Exposed to the provider so a caller that inspects the status
+/// itself (e.g. [`bb_get_text_status`]) produces the identical error for statuses it
+/// doesn't special-case.
 pub(crate) fn http_error(status: u16, body: &str) -> AppError {
     // Prefer the API's own message when the body is the JSON error envelope.
     let api_msg = serde_json::from_str::<BbErrorEnvelope>(body)
@@ -199,10 +185,7 @@ pub(crate) fn http_error(status: u16, body: &str) -> AppError {
             "Bitbucket rate limit reached (429). Wait a moment and try again.".into(),
         ),
         // A 403 whose body names Bitbucket's "privilege scopes" is a missing-write-scope
-        // token (distinct from a bad token, which is a 401). Point the user at
-        // reconnecting with the write scopes rather than showing the raw envelope. Other
-        // 403s (e.g. a genuine per-resource permission denial) fall through to the
-        // envelope/status message below.
+        // token (a bad token is a 401); other 403s fall through to the envelope message.
         403 if body.contains("privilege scopes") => AppError::Bitbucket(
             "Bitbucket rejected the request (403) — your API token is missing a required \
              write scope. Reconnect it in Settings → Accounts with pull request / \
@@ -271,11 +254,10 @@ pub async fn bb_get_text(creds: &BbCredentials, path_or_url: &str) -> AppResult<
     Ok(body)
 }
 
-/// GET a Bitbucket endpoint expecting JSON, deserializing into `T`. `Accept:
-/// application/json`, HTTP Basic auth, default redirect policy. Non-2xx →
-/// [`http_error`] (with the error-envelope parse); a parse failure of a 2xx body →
-/// `Bitbucket("could not parse …")` carrying the underlying serde error (never
-/// mapped into a specific-cause message).
+/// GET a Bitbucket endpoint expecting JSON, deserializing into `T` (HTTP Basic,
+/// `Accept: application/json`, default redirect policy). Non-2xx → [`http_error`]; a
+/// 2xx body that won't parse → `Bitbucket("could not parse …")` carrying the serde
+/// error.
 pub async fn bb_get_json<T: serde::de::DeserializeOwned>(
     creds: &BbCredentials,
     path_or_url: &str,
@@ -301,13 +283,11 @@ pub async fn bb_get_json<T: serde::de::DeserializeOwned>(
         .map_err(|e| AppError::Bitbucket(format!("could not parse Bitbucket {what}: {e}")))
 }
 
-/// The low-level write primitive: send `method` to `path_or_url` with an optional
-/// JSON `body`, HTTP Basic auth, and return the raw `(status, location_header,
-/// body_text)` WITHOUT turning a non-2xx into an error — the caller decides. The
-/// `Location` header is read case-insensitively (reqwest already normalizes header
-/// names, but the accessor is explicit here). Used directly by the merge path, which
-/// must branch on 200 (sync) vs 202 (async task, follow `Location`); the typed
-/// helpers below build on it.
+/// The low-level write primitive: send `method` to `path_or_url` with an optional JSON
+/// `body` and HTTP Basic auth, returning the raw `(status, location_header, body_text)`
+/// WITHOUT turning a non-2xx into an error — the caller decides. Used directly by the
+/// merge path, which must branch on 200 (sync) vs 202 (async task, follow `Location`);
+/// the typed helpers below build on it.
 pub async fn bb_send(
     creds: &BbCredentials,
     method: reqwest::Method,
@@ -320,10 +300,9 @@ pub async fn bb_send(
         .basic_auth(&creds.email, Some(&creds.token))
         .header(reqwest::header::ACCEPT, "application/json");
     if let Some(b) = body {
-        // Serialize the JSON body ourselves rather than `.json()` (which needs
-        // reqwest's `json` feature — a new dep). `serde_json::to_string` on a
-        // `serde_json::Value` cannot fail, so an empty body on the impossible error is
-        // safe.
+        // Serialize ourselves rather than `.json()` (which needs reqwest's `json`
+        // feature — a new dep). `to_string` on a `Value` can't fail, so the empty-body
+        // fallback is unreachable.
         let text = serde_json::to_string(b).unwrap_or_default();
         req = req
             .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -446,8 +425,9 @@ mod tests {
 
     #[test]
     fn http_error_typed_envelope_message_parses_exactly_as_before() {
-        // The waves-2+3 envelope (top-level "type" + error.message, no detail) is
-        // unchanged: message surfaces verbatim.
+        // Regression guard for the `detail`-over-`message` preference above: the typed
+        // envelope (top-level "type" + error.message, no detail) still surfaces
+        // `message` verbatim.
         let body = r#"{"type":"error","error":{"message":"Repository not found"}}"#;
         match http_error(404, body) {
             AppError::Bitbucket(m) => {

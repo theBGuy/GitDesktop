@@ -265,9 +265,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     [divergence.data],
   );
 
-  // Per-branch PR badge. Remote PRs (open + closed, the latter carrying merged)
-  // and local PRs, fetched only while the menu is open and the repo has a
-  // Per-branch PR/MR popovers — the list reads work for GitHub and GitLab alike.
+  // Per-branch PR badge: remote PRs (open + closed, the latter carrying merged)
+  // fetched only while the menu is open AND the repo's forge reports pull-request
+  // support — mirrors the divergence gate above. Local PRs are not gated. Both
+  // reads are forge-neutral: they work for GitHub and GitLab alike.
   const gh = useForgeStatus(repoPath);
   const canGh = forgeFeatureReady(gh.data, "pullRequests");
   // Origin lens: the branch popover lists the FORK's own branch PRs; the
@@ -396,19 +397,17 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       ),
     [sortedBranches, bq],
   );
-  // Both branch dialogs are always mounted, so their AI name-generation queries
-  // gate on one of them actually being open — and on AI being usable at all:
-  // without it the generate button renders nothing (or the setup button, which
-  // reads none of this), so a Hide-AI or unconfigured user would be paying for
-  // `git branch -r` plus two `git log` walks that feed nothing.
+  // Both dialogs stay mounted, so the name-generation queries gate on one being
+  // open AND on AI being usable at all — otherwise a Hide-AI or unconfigured
+  // user pays for `git branch -r` plus two `git log` walks feeding a button that
+  // never renders.
   const branchDialogOpen =
     (createOpen || renameTarget !== null) && aiEnabled && aiConfigured;
-  // Branches that live on a remote but aren't checked out locally yet — fetched
-  // while the menu is open, and while a branch dialog is open (it resolves the
-  // committed-work base off this list, and the palette can open it without ever
-  // opening the menu). Drop ones already represented by a local branch (its row
-  // already shows ahead/behind + PR) and the internal session branches; dedupe a
-  // branch that exists on multiple remotes to one row.
+  // Remote-only branches, fetched while the menu is open or a branch dialog is
+  // (the dialog resolves the committed-work base off this list, and the palette
+  // can open it without the menu ever opening). Drop ones a local branch already
+  // represents (that row shows ahead/behind + PR) and gd/session/* branches;
+  // dedupe a branch on multiple remotes to one row.
   const remoteBranchesQuery = useRemoteBranches(
     repoPath,
     open || branchDialogOpen,
@@ -429,20 +428,17 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       .filter((b) => (seen.has(b.name) ? false : (seen.add(b.name), true)))
       .sort((a, b) => b.lastCommitDate.localeCompare(a.lastCommitDate));
   }, [remoteBranchesQuery.data, localNames, bq]);
-  // The ref the branch dialogs are naming, and whose committed work the AI
-  // fallback describes: the rename target (which need NOT be checked out — every
-  // branch row's menu opens it), or the checked-out branch for a new one. Null ⇒
-  // both closed. The create side names the BRANCH, not the literal "HEAD", so the
-  // comparison's cache key changes when you switch branches — keyed on "HEAD" it
-  // would serve the previous branch's commits to a fast Generate. A detached HEAD
-  // has no branch name to key on and keeps the literal.
+  // The ref being named, whose committed work the AI fallback describes: the
+  // rename target (which need NOT be checked out) or the checked-out branch for
+  // a create; null ⇒ both closed. Create names the BRANCH, not the literal
+  // "HEAD", so the comparison's cache key changes when you switch branches —
+  // keyed on "HEAD" a fast Generate would serve the previous branch's commits.
+  // A detached HEAD has no branch name to key on and keeps the literal.
   const namedRef =
     renameTarget ?? (createOpen ? (currentName ?? "HEAD") : null);
-  // Whether the remote list has settled. Until it has, a missing `origin/<default>`
-  // means "not loaded yet", not "absent" — resolving the local default here is
-  // exactly the stale ref this base resolution exists to avoid. An ERRORED list
-  // settles too, and can't be trusted either: that case is reported as an error
-  // state below rather than silently falling through to the local default.
+  // Until the remote list settles, a missing `origin/<default>` means "not
+  // loaded yet", not "absent" — falling back to the local default there is
+  // exactly the stale ref this base resolution exists to avoid.
   const remoteBranchesSettled = !remoteBranchesQuery.isPending;
   // The default branch names the comparison base, so its own lookup gates the
   // fallback too: a null `defaultName` while it's still loading must not read as
@@ -452,8 +448,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // skews the three-dot diff, and when origin/HEAD resolved the default name the
   // local twin may not even exist. Null (⇒ no fallback) when neither side has it.
   const committedBase = useMemo(() => {
-    // An errored remote list must not fall through to the local default — that
-    // base can't be trusted, so no base ⇒ no fallback ⇒ the error state renders.
+    // An errored remote list can't be trusted as a base either: no base ⇒ no
+    // fallback ⇒ the error state below renders instead of a silent local default.
     if (
       !branchDialogOpen ||
       !defaultName ||
@@ -474,18 +470,16 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     remoteBranchesQuery.data,
     localNames,
   ]);
-  // Commits the named ref has that the default branch doesn't — its committed
-  // work. A null base keeps the query disabled (both dialogs closed, or no
-  // resolvable default).
+  // Commits the named ref has that the default doesn't. A null base leaves the
+  // query disabled (both dialogs closed, or no resolvable default).
   const committedCompare = useCompareBranches(
     repoPath,
     committedBase,
     namedRef,
   );
-  // Mirrors `useCompareBranches`' own enabled condition, so a query that never
-  // runs isn't read as "still loading" forever. base === compare survives only
-  // when no `origin/<default>` exists and the named ref IS the local default —
-  // with the remote ref preferred, `origin/main` vs `main` does run.
+  // Mirrors `useCompareBranches`' own enabled condition — a query that never
+  // runs (base === compare: naming the local default with no `origin/<default>`)
+  // must not read as "still loading" forever.
   const comparing =
     committedBase !== null && namedRef !== null && committedBase !== namedRef;
   // Never let the affordance claim there's no committed work on evidence it
@@ -518,9 +512,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       new Set((remoteBranchesQuery.data ?? []).map((b) => b.remote)).size > 1,
     [remoteBranchesQuery.data],
   );
-  // Arrow-key navigation over the visible rows (+ archived when expanded) so
-  // keyboard users can move through branches instead of Tabbing each one. Enter
-  // on the focused row checks it out via the row button's native click.
+  // Arrow-key nav over the visible rows (+ archived/remote when expanded); Enter
+  // on the focused row checks out via the row button's native click.
   const navBranches: { name: string }[] = [
     ...visibleBranches,
     ...(showArchived ? archivedBranches : []),
@@ -654,8 +647,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     }
     try {
       // git refuses to delete the checked-out branch: move off it first — onto a
-      // branch that isn't already occupied by another worktree (checking out an
-      // occupied branch fails too, which is what stranded the delete before).
+      // branch not already occupied by another worktree (that checkout fails too).
       if (deleteTarget === currentName) {
         // Fetch occupancy FRESH: the cached `worktreeByBranch` is gated on the
         // popover being open, but a delete can fire from the `delete-branch`
@@ -838,15 +830,13 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // Hotkey handlers reuse the menu's own flows, so every gate (clean tree,
   // stash count, picker availability) and confirm dialog applies equally.
   useHotkeyAction("show-branches", () => setOpen(true), !amending);
-  // Push-to-origin: one open-aware handler drives both shapes so the chord
-  // behaves identically regardless of where focus sits (the popup is non-modal,
-  // so a two-handler split let a focus-outside-popup press act on the wrong
-  // branch). The action is ORIGIN-scoped everywhere — its palette label, help
-  // text, and name all say "origin", so it must never push somewhere the user
-  // can't predict. Enabled whenever the repo has an origin (plus a resolvable
-  // target); a non-actionable invocation gives an honest info toast rather than
-  // silence, which is what makes the help text true. The window listener's
-  // `e.repeat` guard covers key-repeat for free.
+  // Push-to-origin: ONE open-aware handler drives both shapes, because the popup
+  // is non-modal — a two-handler split lets a focus-outside press act on the
+  // wrong branch. The action is ORIGIN-scoped everywhere (label, help text,
+  // name), so it must never push somewhere unpredictable; enabled whenever the
+  // repo has an origin AND a target resolves (open list, or a current branch),
+  // and a non-actionable invocation gives an honest info toast rather than
+  // silence.
   const currentBranch = branches.data?.find((b) => b.isCurrent);
   useHotkeyAction(
     "push-to-origin",
@@ -891,7 +881,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         branch.upstreamBehind > 0
       ) {
         // Genuinely diverged: commits on BOTH sides. Behind-only is not
-        // divergence — it gets its own arm below (review-caught mislabel).
+        // divergence — it gets its own arm below.
         toast.info(
           `${branch.name} has diverged — update it from its upstream first`,
         );
@@ -913,8 +903,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           `${branch.name} tracks ${branch.upstreamRemote} — push it from its context menu`,
         );
       } else {
-        // Tracked, but the upstream's remote is no longer configured (only
-        // reachable when that is actually true).
+        // Tracked, but the upstream's remote is no longer configured.
         toast.info(
           `${branch.name} tracks a remote that's no longer configured`,
         );
@@ -1080,8 +1069,6 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                 if (!branch.isCurrent) switchTo(branch.name);
               }}
             >
-              {/* Line 1: branch name (+ default tag) with the current-branch
-                  check pinned to the right edge. */}
               <span className="flex w-full items-center gap-2">
                 <span
                   className="min-w-0 flex-1 truncate"
@@ -1104,9 +1091,6 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                   <CheckIcon className="size-3.5 shrink-0" />
                 )}
               </span>
-              {/* Line 2: PR badge · worktree · sync · divergence, then the
-                  relative time pushed to the far right. Always renders (the
-                  time is always present). */}
               <span className="flex w-full items-center gap-2">
                 {(() => {
                   const pr = prByBranch.get(branch.name);
@@ -1153,27 +1137,21 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                     worktree
                   </span>
                 )}
-                {/* Two distinct indicators per row: (1) the sync indicator
-                    below shows the branch's OWN upstream push/pull state in the
-                    arrow vocabulary (matching the counts on the header's
-                    Push/Pull buttons), so
-                    "Update from {upstream}" / "Push to {upstream}" stay
-                    discoverable on every branch; (2) the divergence indicator
-                    further down shows how far the branch has drifted from the
-                    DEFAULT branch, rendered as `+N −M {default}` text so it can't
-                    be mistaken for unpushed work. Sync is skipped entirely on a
-                    remoteless repo (there's no push story). */}
+                {/* Two distinct indicators: the sync indicator shows the
+                    branch's OWN upstream state in ARROW vocabulary (matching
+                    the header's Push/Pull counts); the divergence indicator
+                    shows drift from the DEFAULT branch as `+N −M {default}`
+                    TEXT so it can't be mistaken for unpushed work. Sync is
+                    skipped on a remoteless repo. */}
                 {remoteNames.length > 0 &&
                   (() => {
-                    // A branch tracking a remote that's since been removed (while
-                    // other remotes remain) offers neither Push nor Publish in the
-                    // context menu — arrows here would imply a push/pull action the
-                    // menu can't honor, so render the muted local-only marker with a
-                    // NO-action title. `upstreamRemote` is null for a branch tracking
-                    // a LOCAL upstream (git's `%(upstream:remotename)` is empty →
-                    // None on the Rust side); the `branch.upstreamRemote &&` conjunct
-                    // keeps such a branch OUT of this case so its truthful vs-local
-                    // arrows still show below.
+                    // A branch tracking a REMOVED remote offers neither Push
+                    // nor Publish, so arrows would imply an action the menu
+                    // can't honor — muted marker with a no-action title
+                    // instead. The `branch.upstreamRemote &&` conjunct keeps a
+                    // LOCAL-upstream branch (git's `%(upstream:remotename)` is
+                    // empty → null) out of this case so its truthful arrows
+                    // still show below.
                     if (
                       branch.upstream &&
                       !branch.upstreamGone &&
@@ -1341,12 +1319,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                     : `Push to ${branch.upstream}`}
                 </ContextMenuItem>
               )}
-              {/* Publish an unpushed / upstream-deleted branch. One remote →
-                  a single item (the classic "Publish branch" when it's origin,
-                  else "Publish to {remote}"); multiple remotes → one flat item
-                  per remote (origin first, then alphabetical), each passing its
-                  explicit destination. Always-visible flat rows — keyboard nav is
-                  inherited from the menu. */}
+              {/* Publish an unpushed / upstream-deleted branch: one remote → a
+                  single item ("Publish branch" for origin), multiple → one flat
+                  item per remote (origin first), each passing its explicit
+                  destination. */}
               {publishRemotes.length === 1 ? (
                 <ContextMenuItem
                   disabled={busy}
@@ -1499,11 +1475,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
             <Button
               variant="ghost"
               size="sm"
-              // Large shrink factor makes the branch label absorb essentially
-              // all header space pressure before the repo name or CI badge give
-              // way (flex removes space proportionally to factor × base size),
-              // so the header cascade collapses branch (20) → CI badge (4) →
-              // repo (1).
+              // Large shrink factor: flex removes space proportionally to
+              // factor × base size, so the header cascade collapses branch (20)
+              // → CI badge (4) → repo (1) — the label absorbs the pressure
+              // first.
               className="min-w-0 shrink-20"
               disabled={busy || amending}
               title={

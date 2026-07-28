@@ -29,10 +29,9 @@ export type AgentToolKind =
   | "task"
   | "other";
 
-/** One piece of an agent turn's rendered transcript, in the order it happened: a
- *  run of streamed prose, or a tool step interleaved between prose. Built live
- *  from `delta` + `tool` events so the UI reads like one chronological log
- *  (text → tool → text), the way Claude Code / the VS Code agent view show it. */
+/** One piece of an agent turn's rendered transcript, in the order it happened: a run of
+ *  streamed prose, or a tool step interleaved between prose. Built live from `delta` +
+ *  `tool` events so the UI reads as one chronological log (text → tool → text). */
 export type TranscriptSegment =
   | { type: "text"; text: string }
   | { type: "tool"; tool: AgentToolKind; target: string | null };
@@ -165,17 +164,16 @@ export interface AgentReviewArgs {
   repoPath: string;
   /** Tier 2: allow the agent read-only access to the repo for context. */
   repoAware: boolean;
-  /** Attach GitDesktop's own read-only MCP server (`gitdesktop` tools) to the run
-   *  so an agentic reviewer can pull the full PR diff, read files at any ref, blame,
-   *  and list PR comments. Reviews only; default off is byte-identical to today. */
+  /** Attach GitDesktop's own read-only MCP server (`gitdesktop` tools) to the run so an
+   *  agentic reviewer can pull the full PR diff, read files at any ref, blame, and list PR
+   *  comments. Reviews only; default off. */
   mcpSelf?: boolean;
   /** Kill-timeout override for the run, in seconds (clamped backend-side to
    *  60–7200); null/absent = the backend's tier defaults (300s, 1200s agentic). */
   timeoutSecs?: number | null;
-  /** True only for flows whose timeout the user's Review-timeout setting governs
-   *  (the AI reviews). Drives the timed-out message's settings hint, so generation
-   *  and Debug-with-AI — which share this command — don't advertise a knob that
-   *  can't help them. */
+  /** True only for flows the user's Review-timeout setting governs (the AI reviews).
+   *  Drives the timed-out message's settings hint, so generation and Debug-with-AI — which
+   *  share this command — don't advertise a knob that can't help them. */
   timeoutConfigurable?: boolean;
   /** Caller-generated id used to cancel this run via `cancelAgentReview`. */
   reviewId: string;
@@ -213,7 +211,7 @@ export const cancelAgentReview = (reviewId: string) =>
 export interface AgentSessionArgs {
   /** Which CLI drives the session. */
   agent: "claude" | "codex" | "copilot" | "opencode";
-  /** Explicit Claude binary path, or null to auto-detect. */
+  /** Explicit binary path for the chosen `agent`, or null to auto-detect. */
   binPath: string | null;
   model: string;
   /** Reasoning/effort level ("" = provider default; else low/medium/high/xhigh).
@@ -231,19 +229,16 @@ export interface AgentSessionArgs {
   /** false = first turn (start the session), true = a follow-up turn (resume it). */
   resume: boolean;
   /** Claude-only: a resume turn forks the conversation to a throwaway session id
-   *  (`--fork-session`) so it reads the full transcript as context but doesn't
-   *  pollute it — a later follow-up then resumes a clean conversation. Ignored by
-   *  the other agents (no equivalent). Omitted/false everywhere except the
-   *  research→plan distill turn. */
+   *  (`--fork-session`) so it reads the full transcript as context without polluting it.
+   *  Ignored by the other agents. Set only by the research→plan distill turn. */
   fork?: boolean;
   /** Read-only mode (a Plan conversation): swaps each CLI's write toolset for its
    *  read-only one, so the resumable turn can explore but never write. */
   readOnly: boolean;
-  /** Web-enabled read-only profile (a Research conversation): each CLI gains its
-   *  native web tools (Claude WebSearch/WebFetch, Codex live web_search, Copilot
-   *  web_fetch, opencode a generated read-only-web agent) so the turn can investigate
-   *  the web while still never writing. Ignored without `readOnly`. Omitted/false
-   *  everywhere else (Plan, Delegate). */
+  /** Web-enabled read-only profile (a Research conversation): each CLI gains its native web
+   *  tools (Claude WebSearch/WebFetch, Codex live web_search, Copilot web_fetch, opencode a
+   *  generated read-only-web agent), so the turn can investigate the web while still never
+   *  writing. Ignored without `readOnly`; omitted everywhere else (Plan, Delegate). */
   web?: boolean;
   /** Isolation mode, fixed at session creation. "container" runs the turn inside
    *  a Docker/Podman container; anything else runs on the host (worktree-confined
@@ -283,11 +278,8 @@ export async function runAgentSession(args: AgentSessionArgs): Promise<void> {
     worktreePath: args.worktreePath,
     sessionId: args.sessionId,
     resume: args.resume,
-    // Default false so every non-distill caller (Plan/Delegate/Research turns +
-    // follow-ups/Implement) is byte-identical — `--fork-session` is never added.
     fork: args.fork ?? false,
     readOnly: args.readOnly,
-    // Default false so Plan/Delegate (which omit it) stay on the non-web profile.
     web: args.web ?? false,
     isolation: args.isolation,
     nativeSessionId: args.nativeSessionId,

@@ -9,25 +9,21 @@ import {
 } from "./truncate";
 
 /** FLOOR for the per-block head cap ({@link distillBlockCap} computes the cap
- *  actually applied) before the blocks are joined into the distillation prompt —
- *  keeps one verbose review from crowding out later follow-ups. Head-kept WITH an
- *  explicit truncation note (`capBody`), so the ledger model can tell a block was
- *  clipped rather than reading a mid-sentence stop as the comment's end; reviews
- *  front-load their blockers, so the head is the part worth keeping. A block that
- *  exceeds its cap may already carry a note from its own per-comment cap — the
+ *  actually applied) — keeps one verbose review from crowding out later
+ *  follow-ups. Head-kept through `capBody` so the ledger model can tell a block
+ *  was clipped rather than reading a mid-sentence stop as the comment's end. A
+ *  block over its cap may already carry a note from its own per-comment cap: the
  *  count restated here is CUMULATIVE across both cuts, never a note nested inside
- *  a note. This bounds each block, but NOT the total, which grows with block
- *  count — {@link DISTILL_INPUT_CAP} bounds the request. */
+ *  a note. Bounds each block, not the total — {@link DISTILL_INPUT_CAP} bounds
+ *  the request. */
 const DISTILL_BLOCK_CAP = 6_000;
 
-/** Overall input cap for the joined distillation prompt, so the total request stays
- *  bounded regardless of round count. After per-block capping, selection mirrors
- *  truncate.ts's `fitOwn`: the OLDEST block is pinned (the opening context brief
- *  nothing later supersedes) and the rest is a contiguous NEWEST-first suffix, so
- *  the MIDDLE is what drops rather than the record's beginning. A whole block that
- *  drops leaves no `capBody` note behind — nothing inside the remaining text says
- *  it existed — so the omission is disclosed by {@link omittedMarker}, charged
- *  against this cap like any other block. */
+/** Overall input cap for the joined distillation prompt, so the request stays
+ *  bounded regardless of round count. Selection mirrors truncate.ts's `fitOwn` —
+ *  pin the oldest, keep a newest-first suffix of the rest (see
+ *  `distillOwnComments`). A whole block that drops leaves no `capBody` note
+ *  behind — nothing in the remaining text says it existed — so the omission is
+ *  disclosed by {@link omittedMarker}, charged against this cap like any block. */
 const DISTILL_INPUT_CAP = 48_000;
 
 /** Stands in for the whole comments the input cap dropped, so the ledger model
@@ -46,35 +42,24 @@ const markerCost = (count: number) => omittedMarker(count).length + 2;
 
 /** The per-block head cap actually applied to a record of `blockCount` blocks: an
  *  equal share of {@link DISTILL_INPUT_CAP} *after* the joiners and the worst-case
- *  omitted marker are charged, never below {@link DISTILL_BLOCK_CAP}.
+ *  omitted marker are charged, never below {@link DISTILL_BLOCK_CAP}. Sharing the
+ *  budget lets a short record put far more of the opening brief in front of the
+ *  ledger model than a flat cap did.
  *
- *  A flat 6,000 meant the ledger model never read more than 6,000 chars of the
- *  opening brief even on a short record with 42,000 chars of the input budget going
- *  unspent — and the opening brief is precisely the block a summary can least afford
- *  to be missing. Sharing the budget instead gives a 3-comment record 15,972 chars
- *  per block.
- *
- *  The netting is what makes that safe, and it is NOT decoration. A naive
- *  `DISTILL_INPUT_CAP / blockCount` hands out shares that consume the cap exactly,
- *  leaving nothing for the `\n\n` between blocks — so once blocks actually sit at
- *  their cap the selection walk below can no longer fit them all and drops one. It
- *  drops the newest-first suffix's oldest member, which at `blockCount === 2` is
- *  the NEWEST follow-up (the live dispositions), not a middle block: measured, a
- *  2-block record of 40K blocks kept 2/2 under the flat 6,000 and 1/2 under the
- *  un-netted share, and the same one-block loss appeared at every count from 2
- *  through 7. Charging `2 × (blockCount − 1)` joiners plus `markerCost(blockCount)`
- *  (worst-case digit width, the same trick `capBody` uses) keeps
- *  `blockCount × cap + joiners` strictly under the input cap, so nothing drops for
- *  want of room the caps already spent.
+ *  The netting is what makes that safe. A naive `DISTILL_INPUT_CAP / blockCount`
+ *  hands out shares that consume the cap exactly, leaving nothing for the `\n\n`
+ *  between blocks — so once blocks sit at their cap the selection walk can no
+ *  longer fit them all and drops one, and at `blockCount === 2` that is the NEWEST
+ *  follow-up (the live dispositions), not a middle block. Charging
+ *  `2 × (blockCount − 1)` joiners plus `markerCost(blockCount)` (worst-case digit
+ *  width, the trick `capBody` uses) keeps the shares plus joiners under the cap.
  *
  *  From `blockCount ≥ 8` the share falls under the floor and the floor binds, so
- *  the cap — and therefore the whole selection — is byte-identical to the flat
- *  6,000: a long record still overflows and still drops MIDDLE blocks, disclosed by
- *  {@link omittedMarker}, exactly as before.
+ *  cap and selection are byte-identical to the flat 6,000: a long record still
+ *  overflows and still drops MIDDLE blocks, disclosed by {@link omittedMarker}.
  *
- *  `blockCount` is always ≥ 1 in practice: `resolveOwnCommentsContext` returns
- *  early on an empty record, so `distillOwnComments` is never called with no
- *  blocks (which would fail on the pin regardless of what this returns). */
+ *  `blockCount` is always ≥ 1 — `resolveOwnCommentsContext` returns early on an
+ *  empty record. */
 function distillBlockCap(blockCount: number): number {
   return Math.max(
     DISTILL_BLOCK_CAP,
@@ -106,12 +91,9 @@ function distillBlockCap(blockCount: number): number {
 // remembered too. A genuinely hung model stays bounded, just at 180s instead of
 // 60s, with the same silent fallback.
 
-// Both ceilings were sized against a MEASURED 19.7K payload. `distillBlockCap`
-// now shares the input budget out instead of capping every block at 6,000, so a
-// 2- or 3-block record can hand the model close to the full 48K — the same
-// wall-clock budget over a wider input range. The measurement has not been
-// repeated at that size; re-measuring the CLI ceiling against a ~48K payload is a
-// recorded follow-up, not a constant change made on a guess.
+// Caveat: both ceilings were measured against a ~19.7K payload, but
+// `distillBlockCap` can now hand a 2- or 3-block record close to the full 48K.
+// The CLI ceiling has not been re-measured at that size.
 
 /** Distillation ceiling for an HTTP-API generation provider: it answers a ~20K
  *  prompt in seconds, so a minute is already generous. */
@@ -155,10 +137,6 @@ export async function distillOwnComments(input: {
   input.onModel?.(settings.ai.model);
   const client = await createAiClient(settings.ai);
 
-  // Per-block head cap first, then keep the NEWEST contiguous suffix that fits the
-  // overall input cap (walk from the array end, joined "\n\n" length ≤ cap),
-  // dropping the oldest overflow — so the request stays bounded regardless of how
-  // many review rounds have accumulated.
   // Only OVER-cap blocks go through the strip/re-cap pair. A block that already
   // fits must pass through byte-identical: re-emitting it would move a legitimate
   // note off `formatOwnComments`' continuation indent, and `stripTruncationNote`
@@ -185,15 +163,10 @@ export async function distillOwnComments(input: {
   // If not even the pin plus the marker it might need fits, fall back to the newest
   // block alone, head-kept to the cap — through the same strip/cap pair, so this cut
   // discloses itself too and its count still folds in the block-cap cut above.
-  // Still unreachable under the scaled per-block cap, by either of its two
-  // regimes. In the SHARE regime (n ≤ 7) `distillBlockCap` charges the joiners AND
-  // `markerCost(n)` before dividing, so `n × cap + 2(n − 1) + markerCost(n) ≤
-  // DISTILL_INPUT_CAP` holds and the pin — one of those n shares — leaves room for
-  // its own joiner and marker with the other n−1 shares to spare. In the FLOOR
-  // regime (n ≥ 8) that sum exceeds the input cap by design (this is where the
-  // walk drops middle blocks, disclosed by the marker), but the pin itself is
-  // pinned at 6,000, further under the cap than any share. Kept so the fallback is
-  // correct if the constants ever converge.
+  // Unreachable while one block's cap leaves room under DISTILL_INPUT_CAP for the
+  // `\n\n` joiner and one marker — true in both of `distillBlockCap`'s regimes (the
+  // share regime charges both before dividing; the floor regime pins 6,000). Kept so
+  // the fallback is correct if the constants ever converge.
   const newestAlone = (cap: number) => {
     const { text, omitted } = stripTruncationNote(capped[capped.length - 1]);
     return capBody(text, cap, omitted, OWN_BLOCK_INDENT);
@@ -203,10 +176,9 @@ export async function distillOwnComments(input: {
   const pinFloor =
     pin.length + (rest.length > 0 ? 2 + markerCost(rest.length) : 0);
   if (pinFloor > DISTILL_INPUT_CAP) {
-    // This branch drops EVERY block but the newest, which is exactly the loss the
-    // marker exists to disclose — the cap's guarantee is unconditional, so it holds
-    // here too. The marker is charged out of the cap before the survivor is sized,
-    // so the total still fits.
+    // Drops EVERY block but the newest — exactly the loss the marker exists to
+    // disclose, so the marker is charged out of the cap before the survivor is
+    // sized and the total still fits.
     const gone = capped.length - 1;
     body =
       gone > 0
@@ -221,11 +193,11 @@ export async function distillOwnComments(input: {
     );
     let dropped = rest.length - keptCount;
     if (dropped > 0) {
-      // Something has to go, so the marker is now part of the request and has to be
-      // paid for. Reserve against the WORST-CASE digit count (`dropped` can only be
-      // ≤ `rest.length`), the same trick `capBody` uses to charge its own note, so
-      // the marker we finally render always fits the room held for it — and round 2
-      // can only shrink `keptCount`, never grow it, so `dropped` stays positive.
+      // Something has to go, so the marker is now part of the request. Reserve
+      // against the WORST-CASE digit count (`dropped` ≤ `rest.length`), the same
+      // trick `capBody` uses, so the marker finally rendered always fits the room
+      // held for it — and round 2 can only shrink `keptCount`, never grow it, so
+      // `dropped` stays positive.
       keptCount = newestSuffixCount(
         rest,
         DISTILL_INPUT_CAP - pin.length - 2 - markerCost(rest.length),

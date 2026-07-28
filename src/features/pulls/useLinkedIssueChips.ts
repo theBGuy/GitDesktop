@@ -36,36 +36,20 @@ const JIRA_REF_LINE = /^relates to\s+([A-Z][A-Z0-9_]*-\d+)\s*$/i;
 
 /**
  * Peel the EXACT trailing ref block off a PR body for the ACTIVE tracker `kind`.
- * The trailing block is the run of final lines each matching EITHER the numeric
- * form (`Closes #N` / `Relates to #N`) OR the Jira mention form
- * (`Relates to KEY-123`) — blank lines between/after are consumed. The whole
- * block is traversed (an interleaved block is fully walked), but only lines of
- * the ACTIVE kind are EXTRACTED into chips; lines of the INACTIVE kind are
- * RE-APPENDED to the returned `text` (canonical form, original relative order,
- * separated from any retained prose above by one blank line). Nothing that isn't
- * extracted ever leaves `text` — an unedited save re-composes from `text` + the
- * active chips and loses no line of either kind.
+ * The block is the run of final lines each matching either the numeric form
+ * (`Closes #N` / `Relates to #N`) or the Jira mention form (`Relates to KEY-123`);
+ * blank lines between/after are consumed. The whole block is walked, but only
+ * ACTIVE-kind lines are EXTRACTED into chips — INACTIVE-kind lines are RE-APPENDED
+ * to `text` in canonical form and original relative order, so an unedited save
+ * loses no line of either kind. Prose refs elsewhere in the body are untouched.
  *
- * Contract: exactly ONE of `refs` / `jiraRefs` is populated (the active kind);
- * the other is always `[]`. For `kind === "native"`, numeric refs are extracted
- * (a repeated number keeps the LAST line's keyword) and any Jira line rides back
- * in `text`. For `kind === "jira"`, mention keys are extracted (first occurrence
- * wins) and any numeric line rides back in `text`. Prose refs elsewhere in the
- * body are untouched.
+ * Contract: exactly ONE of `refs` / `jiraRefs` is populated (the active kind); the
+ * other is always `[]`. Native: a repeated number keeps the LAST line's keyword.
+ * Jira: first occurrence wins.
  *
- * Reasoning (no test runner), kind = "native":
- *   ""                                    → { text: "", refs: [] }
- *   "hi"                                  → { text: "hi", refs: [] }
- *   "hi\n\nCloses #6\nRelates to #5"      → { text: "hi", refs: [C#6, R#5] }
- *   "Closes #6"                           → { text: "", refs: [C#6] }
- *   "see #12 mid\n\nCloses #6"            → { text: "see #12 mid", refs: [C#6] }
- *   "x\n\nCloses #6\nCloses #6"           → { text: "x", refs: [C#6] } (last, deduped)
- *   "x\n\nRelates to #6\nCloses #6"       → { text: "x", refs: [C#6] } (last keyword)
- *   "x\n\nCloses #6\nRelates to JIRA-4"   → { text: "x\n\nRelates to JIRA-4", refs: [C#6] }
- *                                            (inactive Jira line re-appended, kept)
- * kind = "jira":
- *   "x\n\nCloses #6\nRelates to JIRA-4"   → { text: "x\n\nCloses #6", jiraRefs: [JIRA-4] }
- *                                            (inactive numeric line re-appended, kept)
+ *   native: "x\n\nCloses #6\nRelates to JIRA-4"
+ *             → { text: "x\n\nRelates to JIRA-4", refs: [C#6] }
+ *   jira:   same input → { text: "x\n\nCloses #6", jiraRefs: [JIRA-4] }
  */
 export function splitBodyRefBlock(
   body: string,
@@ -125,8 +109,7 @@ export function splitBodyRefBlock(
   const jiraRefs: string[] = [];
   const inactiveLines: string[] = [];
   if (kind === "native") {
-    // Dedupe by number keeping the LAST line's keyword (original order → later
-    // entry wins), mirroring the pre-`kind` behavior exactly.
+    // Dedupe by number, keeping the LAST line's keyword (later entry wins).
     const byNumber = new Map<number, "closes" | "relates">();
     for (const b of block)
       if (b.kind === "native") byNumber.set(b.ref.number, b.ref.keyword);
@@ -173,15 +156,9 @@ export function splitBodyRefBlock(
 
 /**
  * Compose the final body: text + the chips' ref lines (`Closes #N` /
- * `Relates to #N`, one per chip, chip order), joined by a blank line; either
- * part absent degrades cleanly ([text] alone / lines alone / ""). This is the
- * single composition used by ALL create/edit save paths.
- *
- * Reasoning:
- *   ("hi", [C#6])   → "hi\n\nCloses #6"
- *   ("hi", [])      → "hi"
- *   ("", [C#6])     → "Closes #6"
- *   ("", [])        → ""
+ * `Relates to #N`, chip order), joined by a blank line; either part absent degrades
+ * cleanly (text alone / lines alone / ""). The single composition used by ALL
+ * create/edit save paths.
  */
 export function composeBodyWithRefs(
   text: string,
@@ -195,10 +172,9 @@ export function composeBodyWithRefs(
 }
 
 /**
- * Compose the final body for the Jira-mention variant: text + the chips'
- * `Relates to KEY` lines (one per chip, chip order), joined by a blank line;
- * same degrade-cleanly joining rules as {@link composeBodyWithRefs}. Only
- * `Relates to` is emitted — there is no close form for Jira.
+ * The Jira-mention twin of {@link composeBodyWithRefs}: text + the chips'
+ * `Relates to KEY` lines, same degrade-cleanly joining. Only `Relates to` is
+ * emitted — there is no close form for Jira.
  */
 export function composeBodyWithJiraRefs(
   text: string,
@@ -240,16 +216,12 @@ function byUpdatedAtDesc(a: string, b: string): number {
 }
 
 /**
- * The shared linked-issue chip state machine. Extracted from CreatePrDialog so
- * the create, edit, and local-create paths share ONE implementation (chips,
- * dismissed/probed refs, extraction seeding, AI union, candidate ranking).
- *
- * The hook is fully inert while `enabled` is false (no queries, no seeding),
- * so a caller can mount it unconditionally and gate on forge/dialog state.
- *
- * A differently-shaped chip source (e.g. Bitbucket/Jira) is intended to plug in
- * later behind the same `chips`/candidate surface — this hook only knows about
- * the forge's own issue tracker for now.
+ * The shared linked-issue chip state machine used by the create, edit and
+ * local-create paths: chips, dismissed/probed refs, extraction seeding, AI union,
+ * candidate ranking. Fully inert while `enabled` is false (no queries, no seeding),
+ * so a caller can mount it unconditionally and gate on forge/dialog state. Knows
+ * only the forge's own issue tracker — the Jira sibling is
+ * {@link useJiraMentionChips}.
  */
 export function useLinkedIssueChips(opts: {
   repoPath: string;
@@ -297,9 +269,8 @@ export function useLinkedIssueChips(opts: {
     dismissedIssuesRef.current = new Set();
     probedIssuesRef.current = new Set();
     lastCandidatesRef.current = new Map();
-    // Seed a chip per body ref, keyword preserved, source "manual". Title/state
-    // start empty/OPEN and are filled in lazily below; a repeated number keeps
-    // its first appearance.
+    // Seed a chip per body ref, keyword preserved, source "manual"; title/state
+    // fill in lazily below. A repeated number keeps its first appearance.
     const seen = new Set<number>();
     const seeded: LinkedIssueChip[] = [];
     for (const r of refs) {
@@ -335,13 +306,11 @@ export function useLinkedIssueChips(opts: {
     setChips(seeded);
   });
 
-  // Backfill a body-parsed chip's title/state once the open-issues page arrives
-  // (a chip seeded with title "" before the list loaded). Only touches chips
-  // still missing a title, so it never fights a probe result or a user edit.
-  // A chip NOT on the open page (e.g. `Closes #<closed-issue>`) is probed once
-  // here — resetWith's own probe is skipped when `enabled` still reflects the
-  // pre-open render, so this effect is the reliable resolution point. The
-  // preservation rule stands: a failed probe leaves the chip intact (title "").
+  // Backfill a body-parsed chip's title/state once the open-issues page arrives.
+  // Only touches chips still missing a title, so it never fights a probe result or a
+  // user edit. A chip NOT on the open page is probed once here — resetWith's own
+  // probe is skipped when `enabled` still reflects the pre-open render, so this is
+  // the reliable resolution point. A failed probe leaves the chip intact (title "").
   useEffect(() => {
     if (!enabled || !issueList.data) return;
     setChips((prev) => {
@@ -388,13 +357,12 @@ export function useLinkedIssueChips(opts: {
     dismissedIssuesRef.current.add(issueNumber);
     setChips((prev) => prev.filter((c) => c.number !== issueNumber));
   }
-  // Manual pick from the picker: an explicit user intent, so it clears any prior
-  // dismissal for that number and adds it as a `manual` relates chip. The picker
-  // already excludes current chips, so a duplicate can't arrive here. The picker
+  // Manual pick: explicit intent, so it clears any prior dismissal and adds a
+  // `manual` relates chip (the picker already excludes current chips). The picker
   // offers CLOSED issues too, which aren't on the open page — seed those with an
   // empty title/state so the backfill-probe effect resolves them (a placeholder
-  // `#N`/OPEN would be a permanent lie, since that effect only targets empty
-  // titles). Clear the probed marker so the effect re-probes this number.
+  // `#N`/OPEN would be a permanent lie: that effect only targets empty titles).
+  // Clearing the probed marker lets the effect re-probe this number.
   function pick(issueNumber: number) {
     dismissedIssuesRef.current.delete(issueNumber);
     probedIssuesRef.current.delete(issueNumber);
@@ -415,12 +383,10 @@ export function useLinkedIssueChips(opts: {
     });
   }
 
-  // Extraction seeding: pull candidate issue numbers from the head branch name
-  // and the commit subjects, then add a chip for each that's a real repo issue —
-  // resolving from the open-issues page, or probing the tracker once for a number
-  // not on that page (dropping it on any error: it's a PR number, a deleted
-  // issue, or noise). Dismissed and already-present numbers are skipped. Runs
-  // once per number per reset-cycle; re-runs when head/commits change.
+  // Extraction seeding: pull candidate issue numbers from the head branch name and
+  // commit subjects, then add a chip for each that's a real repo issue — resolved
+  // from the open page or probed once (dropped on any error: a PR number, a deleted
+  // issue, or noise). Dismissed/present numbers skipped; once per number per reset.
   const seedExtractedIssues = useEffectEvent(
     (numbers: number[], openIssues: typeof issueList.data) => {
       const existing = new Set(chips.map((c) => c.number));
@@ -475,9 +441,9 @@ export function useLinkedIssueChips(opts: {
       }
     },
   );
-  // Join the subjects into a stable string so callers passing a fresh
-  // `commitSubjects` array each render don't re-fire this effect on every render
-  // (the seeder is idempotent, but the string dep keeps it to real changes).
+  // Join the subjects into a stable string so a fresh `commitSubjects` array each
+  // render doesn't re-fire this effect (the seeder is idempotent, but keep it to
+  // real changes).
   const subjectsText = commitSubjects.join("\n");
   useEffect(() => {
     if (!enabled) return;
@@ -522,11 +488,10 @@ export function useLinkedIssueChips(opts: {
     return candidates;
   }
 
-  // Union the model's proposed close/relate numbers into the chip cluster. A
-  // `closes` proposal marks `aiSuggestedClose`; both land as `relates` chips
-  // (the safe default the user can toggle up). Skip dismissed numbers; never
-  // downgrade an existing chip — only OR-in the `aiSuggestedClose` flag. Resolve
-  // a new chip's title/state from the last-built candidates.
+  // Union the model's proposed close/relate numbers into the chip cluster. A `closes`
+  // proposal marks `aiSuggestedClose`; both land as `relates` chips (the safe default
+  // the user can toggle up). Skip dismissed numbers; never downgrade an existing
+  // chip. New chips resolve title/state from the last-built candidates.
   function upsertFromDraft(draft: { closes: number[]; relates: number[] }) {
     const fed = lastCandidatesRef.current;
     const closeSet = new Set(draft.closes);
@@ -538,7 +503,6 @@ export function useLinkedIssueChips(opts: {
         const suggestedClose = closeSet.has(n);
         const existingIdx = next.findIndex((c) => c.number === n);
         if (existingIdx >= 0) {
-          // Never downgrade an existing chip — only OR-in the AI close hint.
           if (suggestedClose && !next[existingIdx].aiSuggestedClose) {
             next = next.map((c, i) =>
               i === existingIdx ? { ...c, aiSuggestedClose: true } : c,
@@ -586,13 +550,10 @@ export interface JiraCandidate {
 
 /**
  * The Jira twin of {@link useLinkedIssueChips} for Bitbucket repos with a linked
- * project (no native issue tracker). Same state-machine shape — dismissed set,
- * manual picks, extraction seeding, AI union, candidate ranking — but keyed by
- * the human key (`PROJ-123`) and MENTION-ONLY: chips carry no keyword and no
- * close semantics, and they compose into the body as `Relates to KEY` lines.
- *
- * Fully inert while `enabled` is false (no queries, no seeding), so a caller can
- * mount it unconditionally and gate on forge/dialog + link state.
+ * project (no native tracker). Same state machine — dismissed set, manual picks,
+ * extraction seeding, AI union, candidate ranking — but keyed by the human key
+ * (`PROJ-123`) and MENTION-ONLY: no keyword, no close semantics; chips compose into
+ * the body as `Relates to KEY` lines. Fully inert while `enabled` is false.
  */
 export function useJiraMentionChips(opts: {
   repoPath: string;
@@ -631,11 +592,9 @@ export function useJiraMentionChips(opts: {
   // resolves an AI-proposed key's summary/status from here.
   const lastCandidatesRef = useRef<Map<string, JiraCandidate>>(new Map());
 
-  // Reset the chip state and seed from body-parsed refs (keys). An unresolvable
-  // body-parsed key KEEPS its chip with summary "" (the author's existing content
-  // must never be silently dropped; contrast extraction seeds, which drop when
-  // unverified). Resolves summary/status lazily from the open page or a one-shot
-  // per-key probe.
+  // Reset and seed from body-parsed keys. An unresolvable key KEEPS its chip with
+  // summary "" (author content is never silently dropped; contrast extraction seeds,
+  // which drop when unverified); summary/status resolve lazily.
   const resetWith = useEffectEvent((keys: string[]) => {
     dismissedRef.current = new Set();
     probedRef.current = new Set();
@@ -676,12 +635,11 @@ export function useJiraMentionChips(opts: {
     setChips(seeded);
   });
 
-  // Backfill a body-parsed chip's summary/status once the open page arrives (a
-  // chip seeded with summary "" before the list loaded). Only touches chips still
-  // missing a summary, so it never fights a probe result or a user edit. A chip
-  // NOT on the open page is probed once here — resetWith's own probe is skipped
-  // when `active` still reflects the pre-open render, so this effect is the
-  // reliable resolution point. A failed probe leaves the chip intact (summary "").
+  // Backfill a chip's summary/status once the open page arrives. Only touches chips
+  // still missing a summary, so it never fights a probe result or a user edit. A chip
+  // NOT on the open page is probed once here — `resetWith`'s own probe is skipped
+  // when `active` still reflects the pre-open render. A failed probe leaves the chip
+  // intact (summary "").
   useEffect(() => {
     if (!active || !issueList.data || !link) return;
     setChips((prev) => {
@@ -726,13 +684,12 @@ export function useJiraMentionChips(opts: {
     dismissedRef.current.add(key);
     setChips((prev) => prev.filter((c) => c.key !== key));
   }
-  // Manual pick from the picker: an explicit user intent, so it clears any prior
-  // dismissal for that key and adds it as a `manual` chip. The picker already
-  // excludes current chips, so a duplicate can't arrive here. The picker offers
-  // ALL states (incl. done/closed), which aren't on the open page — seed those
-  // with an empty summary so the backfill-probe effect resolves them (a `key`
-  // placeholder would be a permanent lie, since that effect only targets empty
-  // summaries). Clear the probed marker so the effect re-probes this key.
+  // Manual pick: explicit intent, so it clears any prior dismissal and adds a
+  // `manual` chip (the picker already excludes current chips). The picker offers ALL
+  // states, which aren't on the open page — seed those with an empty summary so the
+  // backfill-probe effect resolves them (a `key` placeholder would be a permanent
+  // lie: that effect only targets empty summaries). Clearing the probed marker lets
+  // the effect re-probe this key.
   function pick(key: string) {
     dismissedRef.current.delete(key);
     probedRef.current.delete(key);
@@ -751,11 +708,10 @@ export function useJiraMentionChips(opts: {
     });
   }
 
-  // Extraction seeding: pull linked-project keys from the head branch name and the
-  // commit subjects, then add a chip for each that's a real project issue —
-  // resolving from the open page, or probing the project once for a key not on
-  // that page (dropping it on any error). Dismissed and already-present keys are
-  // skipped. Runs once per key per reset-cycle; re-runs when head/commits change.
+  // Extraction seeding: pull linked-project keys from the head branch and commit
+  // subjects, then add a chip for each that's a real project issue — resolved from
+  // the open page or probed once (dropped on any error). Dismissed/present keys
+  // skipped; once per key per reset.
   const seedExtractedKeys = useEffectEvent(
     (keys: string[], openIssues: typeof issueList.data) => {
       const existing = new Set(chips.map((c) => c.key));
@@ -816,11 +772,9 @@ export function useJiraMentionChips(opts: {
     seedExtractedKeys(keys, issueList.data);
   }, [active, link, headBranch, subjectsText, issueList.data]);
 
-  // chips ∪ extraction ∪ top-ranked open issues, cap 8 — for generate(). Current
-  // chips pinned first; then the highest-scoring open issues by shared-token
-  // overlap between the summary and the branch + commit subjects, `updatedAt` desc
-  // tie-break. Records the exact set fed so `upsertFromDraft` can resolve
-  // summary/status.
+  // chips ∪ extraction ∪ top-ranked open issues, cap 8 — for generate(). Chips
+  // pinned first, then highest shared-token overlap, `updatedAt` desc tie-break.
+  // Records the exact fed set so `upsertFromDraft` can resolve summary/status.
   function buildCandidates(): JiraCandidate[] {
     if (!active) {
       lastCandidatesRef.current = new Map();

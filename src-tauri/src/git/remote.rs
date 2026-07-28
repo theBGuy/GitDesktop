@@ -34,21 +34,17 @@ pub(crate) fn with_credentials(cred: &[String], sub: &[&str]) -> Vec<String> {
 /// gate for the ambient-credential fallback in [`run_git_mutating_with_creds`].
 /// Case-insensitive substring match on three signatures:
 ///
-/// 1. `"authentication failed"` — git exhausted a 401 retry with the
-///    helper-provided credentials (the injected CLI helper's token was rejected).
-/// 2. `"could not read username"` — every helper returned nothing and
-///    `GIT_TERMINAL_PROMPT=0` blocks the interactive prompt (covers the ≤60s
-///    stale-cache window after `gh auth logout`, where the cached auth gate still
-///    injects a helper that no longer answers).
-/// 3. `"repository not found"` — GitHub answers 404 (the sideband line
-///    `remote: Repository not found.`) for a VALID identity that lacks access to a
-///    private repo: it hides existence rather than 403ing, so a wrong-identity CLI
-///    token surfaces as not-found, not as an auth error. This is the exact
-///    motivating symptom, now inverted — a stale CLI token that shadows a working
-///    ambient credential.
+/// 1. `"authentication failed"` — the helper-provided token was rejected (401).
+/// 2. `"could not read username"` — no helper answered and `GIT_TERMINAL_PROMPT=0`
+///    blocks the prompt (covers the ≤60s stale-cache window after `gh auth logout`,
+///    where the cached auth gate still injects a helper that no longer answers).
+/// 3. `"repository not found"` — GitHub 404s (sideband `remote: Repository not
+///    found.`) for a VALID identity that merely lacks access to a private repo: it
+///    hides existence rather than 403ing, so a wrong-identity CLI token surfaces as
+///    not-found, not as an auth error.
 ///
 /// Deliberately narrow: network/DNS failures (e.g. `"could not resolve hostname"`)
-/// and merge conflicts do NOT match — retrying those can't help and would double
+/// and merge conflicts must NOT match — retrying those can't help and would double
 /// the network timeout.
 fn is_auth_class_failure(stderr: &str) -> bool {
     let s = stderr.to_lowercase();
@@ -63,28 +59,22 @@ fn is_auth_class_failure(stderr: &str) -> bool {
 
 /// Run a mutating git network op with one-shot credential `-c` entries prefixed.
 ///
-/// When `cred` is non-empty and the injected run fails with an auth-class git
-/// error ([`is_auth_class_failure`]), this retries EXACTLY ONCE with NO injected
-/// config (plain [`run_git_mutating`] on the same sub-args) and returns that
-/// retry's result — on a double failure the RETRY's error is surfaced, because the
-/// ambient attempt's error names the true end state. When `cred` is empty there is
-/// nothing to fall back from, so behavior is unchanged.
+/// When `cred` is non-empty and the injected run fails with an auth-class git error
+/// ([`is_auth_class_failure`]), retries EXACTLY ONCE with NO injected config (plain
+/// [`run_git_mutating`] on the same sub-args) and returns that result — on a double
+/// failure the RETRY's error is surfaced, because the ambient attempt's error names
+/// the true end state. Empty `cred` ⇒ behavior unchanged.
 ///
-/// The auth gates that produce `cred` prove a credential EXISTS locally
-/// (`gh auth token` is a local read; glab's `hosts:` entry persists past PAT
-/// expiry) — not that it WORKS. Severing the ambient chain for a user whose CLI
-/// token is revoked/expired but whose ambient credential (git-credential-manager,
-/// OS keychain) is valid would hard-fail an op that worked before this change (the
-/// additive helper let the ambient one answer first) — the exact inverse of the
-/// motivating bug. This one-shot fallback restores pre-change behavior for those
-/// users; an authenticated CLI never reaches it (its helper answers and the run
-/// succeeds).
+/// The auth gates that produce `cred` only prove a credential EXISTS locally
+/// (`gh auth token` is a local read; glab's `hosts:` entry outlives PAT expiry) —
+/// not that it WORKS. Without this fallback, a revoked/expired CLI token would
+/// hard-fail a user whose ambient credential (git-credential-manager, OS keychain)
+/// is perfectly valid.
 ///
 /// The retry is safe because HTTPS auth happens at ref negotiation BEFORE any
-/// server-side ref update: a failed-auth push has mutated nothing on the remote, so
-/// re-running with different credentials can't double-apply. Only Git-kind errors
-/// are classified; every other error kind (timeout, IO, …) returns as-is with no
-/// retry.
+/// server-side ref update: a failed-auth push mutated nothing on the remote, so it
+/// can't double-apply. Only Git-kind errors are classified; every other kind
+/// (timeout, IO, …) returns as-is with no retry.
 pub(crate) async fn run_git_mutating_with_creds(
     state: &AppState,
     repo_path: &str,
@@ -101,9 +91,7 @@ pub(crate) async fn run_git_mutating_with_creds(
     )
     .await;
 
-    // Fall back to git's ambient credential helpers exactly once when injected
-    // credentials are present but rejected — the CLI token may be stale while an
-    // ambient credential still works.
+    // Injected credentials present but rejected → one-shot ambient retry.
     if !cred.is_empty() {
         if let Err(AppError::Git { stderr, .. }) = &result {
             if is_auth_class_failure(stderr) {
@@ -114,12 +102,10 @@ pub(crate) async fn run_git_mutating_with_creds(
     result
 }
 
-/// How long a resolved remote URL stays trusted before we re-shell to `git`. A few seconds
-/// is enough to collapse the burst of concurrent `forge_*` queries a single forge view fires
-/// (each of which otherwise spawns `git remote get-url origin` twice), while staying short
-/// enough that an external `git remote set-url` run in a terminal is picked up promptly. An
-/// in-app `git_remote_set_url` invalidates eagerly, so the TTL is only the backstop for
-/// out-of-band changes.
+/// How long a resolved remote URL stays trusted before re-shelling to `git`. A few
+/// seconds collapses the burst of concurrent `forge_*` queries one forge view fires
+/// (each otherwise spawns `git remote get-url` twice) while still picking up an
+/// out-of-band `git remote set-url` promptly; in-app changes invalidate eagerly.
 const REMOTE_URL_TTL: Duration = Duration::from_secs(5);
 
 /// Cache map keyed by `(repo_path, remote_name)`; value is `(fetch time, resolved url)`.
@@ -232,24 +218,22 @@ pub async fn git_remote_add(
         DEFAULT_TIMEOUT,
     )
     .await?;
-    // A stale negative entry (a prior get-url miss for this name) would otherwise
-    // linger until the TTL — drop it so the next read resolves the new remote.
+    // Drop any cached URL for this name: an out-of-band `git remote remove` (in a
+    // terminal, bypassing git_remote_remove_core's invalidate) can leave a stale
+    // POSITIVE entry that would be served for the re-added remote until the TTL.
     cache_invalidate(&repo_path, &name);
     Ok(())
 }
 
-/// Remove a remote (`git remote remove <name>`) — the "Detach from fork"
-/// action, dropping the `upstream` remote a fork was given so the fork/upstream
-/// lens stops treating the repo as a fork. Generic over the remote name.
+/// Remove a remote (`git remote remove <name>`) — the "Detach from fork" action,
+/// dropping the `upstream` remote a fork was given so the fork/upstream lens stops
+/// treating the repo as a fork. Generic over the remote name.
 ///
-/// What git does on remove (git-remote(1) / `builtin/remote.c`): it deletes the
-/// entire `remote.<name>` config section, unsets `branch.<b>.remote` /
-/// `branch.<b>.merge` for every branch that was tracking this remote (leaving
-/// those branches with **no** upstream — they are not re-pointed at another
-/// remote), and deletes the remote-tracking refs under
-/// `refs/remotes/<name>/`. The remote must exist first — [`ensure_remote_exists`]
-/// turns an unknown name into an honest `InvalidArgument` (and rejects the
-/// `-flag` injection shape) rather than a confusing raw-git error.
+/// What git does (git-remote(1)): deletes the whole `remote.<name>` config section,
+/// unsets `branch.<b>.remote` / `.merge` for every branch tracking it — those
+/// branches end up with **no** upstream, they are NOT re-pointed at another remote —
+/// and deletes `refs/remotes/<name>/`. [`ensure_remote_exists`] turns an unknown
+/// name into an honest `InvalidArgument` (and rejects the `-flag` shape) first.
 #[tauri::command]
 pub async fn git_remote_remove(
     state: State<'_, AppState>,
@@ -343,17 +327,12 @@ pub async fn git_fetch_remote(
     Ok(())
 }
 
-/// Resolve a remote's default branch name (e.g. `"master"` / `"main"`) — the
-/// branch a fork's `upstream` sync targets.
-///
-/// Phase 1 — validate the remote exists.
-/// Phase 2 — read the LOCAL `refs/remotes/<remote>/HEAD` symbolic ref
-///   (`refs/remotes/<remote>/<branch>`) and strip the prefix. This is offline
-///   and set by the initial `git clone`, so it usually answers immediately.
-/// Phase 3 — if that ref is unset (e.g. the remote was added by hand, as an
-///   `upstream` typically is), one network call `git remote set-head
-///   <remote> --auto` asks the remote for its HEAD, then we re-read the local
-///   ref. Returns just the branch name (no `<remote>/` prefix).
+/// Resolve a remote's default branch name (e.g. `"master"` / `"main"`) — the branch
+/// a fork's `upstream` sync targets. Reads the LOCAL `refs/remotes/<remote>/HEAD`
+/// symbolic ref first: offline, written by the initial `git clone`, so it usually
+/// answers immediately. If that ref is unset — as it is for a hand-added `upstream`
+/// — one network call (`git remote set-head <remote> --auto`) writes it and we
+/// re-read. Returns the bare branch name (no `<remote>/` prefix).
 #[tauri::command]
 pub async fn git_remote_default_branch(
     state: State<'_, AppState>,
@@ -466,10 +445,8 @@ pub(crate) async fn git_push_core(
     // The credential config is scoped to the remote we actually push to, resolved
     // below. Defaults to origin (the HEAD path and the origin-tracked cases).
     let mut cred_remote = "origin".to_string();
-    // Build the git args as owned Strings — a named-branch push interpolates the
-    // branch/refspec, which can't borrow from a temporary. `None` reproduces the
-    // original HEAD-relative args exactly (bare `push`, `--force-with-lease` on
-    // force, `-u origin HEAD` on set_upstream).
+    // Owned Strings: a named-branch push interpolates the branch into a refspec,
+    // which can't borrow from a temporary.
     let args: Vec<String> = match &branch {
         None => {
             // A remote can only be chosen for an explicit branch — the HEAD path
@@ -507,15 +484,11 @@ pub(crate) async fn git_push_core(
                     return Err(AppError::InvalidArgument(format!("unknown remote: {r}")));
                 }
             }
-            // Resolve b's tracking state with one read-only call: the branch's own
-            // `%(refname)`, its upstream's short name (e.g. `origin/feature`), the
-            // upstream's remote name, and git's `%(upstream:track)` (which carries
-            // `[gone]` when the tracked ref was deleted). `for-each-ref` matches a
-            // pattern as a prefix up to a slash (`refs/heads/feat` also matches
-            // `refs/heads/feat/sub`), so emitting `%(refname)` and requiring it to
-            // equal the expected ref (below) is what makes this behave as an
-            // exact-name lookup — otherwise a non-exact `feat` would read
-            // `feat/sub`'s tracking. No matching line means no such local branch.
+            // Resolve b's tracking state in one read-only call. `for-each-ref`
+            // matches a pattern as a prefix up to a slash (`refs/heads/feat` also
+            // matches `refs/heads/feat/sub`), so emitting `%(refname)` and requiring
+            // an exact match (in `parse_upstream_tracking`) is what makes this an
+            // exact-name lookup. `%(upstream:track)` carries `[gone]`.
             let out = run_git(
                 Some(&repo_path),
                 &[
@@ -526,9 +499,8 @@ pub(crate) async fn git_push_core(
                 DEFAULT_TIMEOUT,
             )
             .await?;
-            // No line whose refname is exactly `refs/heads/<b>` → the branch does
-            // not exist (an *untracked* branch still emits a non-empty
-            // `refs/heads/<b>\0\0\0` line — see parse_upstream_tracking).
+            // No exact-refname line ⇒ no such local branch (an *untracked* branch
+            // still emits `refs/heads/<b>\0\0\0`).
             let Some((upstream_short, remotename, gone)) =
                 parse_upstream_tracking(&out.stdout_lossy(), &format!("refs/heads/{b}"))
             else {
@@ -602,44 +574,30 @@ fn resolve_push_target<'a>(
     }
 }
 
-/// Decide the `git push` args for pushing a NAMED local branch `branch`, from its
-/// resolved tracking state and an optional caller-chosen `requested_remote`. Pure
-/// — no git calls — so the decision table is unit-testable.
+/// Decide the `git push` args for pushing a NAMED local branch, from its resolved
+/// tracking state and an optional caller-chosen `requested_remote`. Pure — no git
+/// calls — so the decision table is unit-testable.
 ///
-/// - `upstream_short`: `%(upstream:short)` (e.g. `origin/feat`), empty when the
-///   branch is untracked.
+/// - `upstream_short`: `%(upstream:short)` (e.g. `origin/feat`), empty when untracked.
 /// - `remotename`: `%(upstream:remotename)` (the tracked upstream's remote).
 /// - `gone`: the tracked ref was deleted (`[gone]`).
-/// - `requested_remote`: an explicit push target (from the switcher's per-remote
-///   Publish items, or MCP's `remote`); `None` resolves the default below.
+/// - `requested_remote`: an explicit push target (the switcher's per-remote Publish
+///   items, or MCP's `remote`); `None` resolves the default.
 ///
-/// The target `T` is [`resolve_push_target`]: `requested_remote`, else the
-/// branch's own upstream remote when tracked-and-not-gone, else `origin`.
-/// Rules:
+/// The target `T` is [`resolve_push_target`]. Rules:
 /// - untracked / gone / `set_upstream` → `-u T refs/heads/<branch>:refs/heads/<branch>`
-///   (publish + track). A *gone* upstream publishes under the LOCAL branch name
-///   (a fresh `T/<branch>`), deliberately not resurrecting a differently-named
-///   deleted ref.
+///   (publish + track). A *gone* upstream publishes under the LOCAL name, deliberately
+///   not resurrecting a differently-named deleted ref.
 /// - tracked and `T == remotename`: strip the `remotename/` prefix off
 ///   `upstream_short` to get the remote branch name `up`;
 ///   `push T refs/heads/<branch>:refs/heads/<up>` (a bare `push T <branch>` would
 ///   advance the WRONG remote ref when the names differ).
-/// - tracked and `T != remotename` (a copy elsewhere, e.g. a fork's `origin`
-///   snapshot of an `upstream`-tracked branch, or an explicitly chosen remote):
-///   `push T refs/heads/<branch>:refs/heads/<branch>` with NO `-u` — publishes
-///   under the LOCAL name and leaves the branch's own upstream config untouched.
-///
-/// DELIBERATE BEHAVIOR CHANGE (from the origin-centric v1): with
-/// `requested_remote: None`, a tracked-NON-origin branch now targets its OWN
-/// remote (`T == remotename`, the first tracked arm) instead of the old fallback
-/// that pushed a `upstream`-tracked branch to `origin` under its own name. That
-/// old arm was UI-unreachable (per-row push required tracked-on-origin) and
-/// reachable only via MCP `push {branch}`; targeting the branch's own remote is
-/// the honest default.
+/// - tracked and `T != remotename` (a copy elsewhere, e.g. a fork's `origin` snapshot
+///   of an `upstream`-tracked branch): `push T refs/heads/<branch>:refs/heads/<branch>`
+///   with NO `-u` — publishes under the LOCAL name, upstream config untouched.
 ///
 /// Refspecs are fully qualified so a branch named `+x`/`-x` can't be read as a
 /// force/delete indicator; the remote is only ever the bare `push <remote>` arg.
-///
 /// `force` prepends `--force-with-lease` before the refspec in every arm.
 fn build_push_args(
     branch: &str,
@@ -657,14 +615,12 @@ fn build_push_args(
     }
     let untracked = upstream_short.is_empty();
     if untracked || gone || set_upstream {
-        // Publish + track: first push of a branch (or a resurrected gone one), or
-        // an explicit retrack request. Publishes under the LOCAL name.
+        // Publish + track, under the LOCAL name.
         args.extend(["-u", target].map(str::to_string));
         args.push(format!("refs/heads/{branch}:refs/heads/{branch}"));
     } else if target == remotename {
-        // Tracked, pushing to the branch's own remote. Strip the `<remotename>/`
-        // prefix to recover the remote branch name and target it explicitly (may
-        // differ from the local name).
+        // Tracked → its own remote: target the remote branch name explicitly (it
+        // may differ from the local one).
         let up = upstream_short
             .strip_prefix(&format!("{remotename}/"))
             .unwrap_or(upstream_short);
@@ -828,10 +784,8 @@ mod tests {
 
     #[test]
     fn push_tracked_non_origin_default_targets_own_remote() {
-        // DELIBERATE BEHAVIOR CHANGE (v2): with no requested remote, a branch
-        // tracking a fork's `upstream/main` now pushes to its OWN remote
-        // (`upstream`) under the tracked remote-branch name — not the old v1
-        // fallback to origin. T == remotename → the refspec-to-`up` arm.
+        // No requested remote + a branch tracking a fork's `upstream/main` targets
+        // its OWN remote: T == remotename → the refspec-to-`up` arm.
         assert_eq!(
             build_push_args("main", "upstream/main", "upstream", false, false, false, None),
             vec!["push", "upstream", "refs/heads/main:refs/heads/main"]
@@ -930,8 +884,8 @@ mod tests {
 
     #[test]
     fn push_gone_different_name_publishes_under_local_name() {
-        // Deliberate v1: a gone upstream publishes under the LOCAL name (a fresh
-        // `origin/feature`), not the deleted `feat`, matching the "Publish"
+        // Deliberate: a gone upstream publishes under the LOCAL name (a fresh
+        // `origin/feature`), not the deleted `feat` — matching the "Publish"
         // affordance and toast.
         assert_eq!(
             build_push_args("feature", "origin/feat", "origin", true, false, false, None),
@@ -981,9 +935,9 @@ mod tests {
 
     #[test]
     fn parse_upstream_tracking_prefix_match_is_rejected() {
-        // Round-3 regression guard: `for-each-ref refs/heads/feat` also matches
-        // `refs/heads/feat/sub`; the exact-refname check must reject it so the caller
-        // returns "no such branch" instead of reading feat/sub's tracking.
+        // `for-each-ref refs/heads/feat` also matches `refs/heads/feat/sub`; the
+        // exact-refname check must reject it so the caller returns "no such branch"
+        // instead of reading feat/sub's tracking.
         assert_eq!(
             parse_upstream_tracking("refs/heads/feat/sub\0\0\0\n", "refs/heads/feat"),
             None

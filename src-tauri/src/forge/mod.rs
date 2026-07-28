@@ -1,13 +1,11 @@
 //! The provider abstraction — one neutral interface over GitHub, GitLab, and
-//! Bitbucket so hosted features (PRs/MRs, issues, CI, settings) work regardless of
-//! where a repo is hosted.
+//! Bitbucket so hosted features (PRs/MRs, issues, CI, settings) work regardless
+//! of where a repo is hosted.
 //!
-//! Per `docs/multi-provider-support.md` (decisions locked 2026-06-29): GitHub stays
-//! on `gh`, GitLab uses the `glab` CLI, and Bitbucket Cloud (not yet built) will use
-//! direct HTTP — all behind the [`Forge`] trait. Each `forge_*` command dispatches
-//! on the detected provider: the GitHub arm delegates to the existing `gh_*`
-//! commands (byte-identical), the GitLab arm to `gitlab.rs`. Which features each
-//! provider has wired up is declared in `model.rs::Implemented`.
+//! Transport per provider: GitHub shells `gh`, GitLab shells `glab`, Bitbucket
+//! Cloud speaks direct HTTP — all behind the [`Forge`] trait. Each `forge_*`
+//! command dispatches on the detected provider; which features are wired per
+//! provider is declared in `model.rs::Implemented`.
 
 pub mod bitbucket;
 pub mod github;
@@ -27,9 +25,9 @@ use crate::forge::model::{
     Provider, ProviderFeatures,
 };
 
-/// A hosted-git provider GitDesktop can talk to. One method per hosted capability;
-/// the trait grows a method per phase (Phase 0 = `status` only). Called via static
-/// dispatch over concrete impls, so there's no `dyn`/async-trait machinery.
+/// A hosted-git provider GitDesktop can talk to — one method per hosted
+/// capability. Called via static dispatch over concrete impls, so there's no
+/// `dyn`/async-trait machinery.
 #[allow(async_fn_in_trait)]
 pub trait Forge {
     /// Whether the hosted integration is usable for this repo, on which host, as
@@ -78,12 +76,10 @@ pub(crate) fn remote_path(url: &str) -> Option<String> {
     (!path.is_empty()).then(|| path.to_string())
 }
 
-/// Percent-encode a value for safe use inside an API query string, encoding
-/// everything outside the RFC-3986 unreserved set. A value with a
-/// query-significant byte (`&`, `#`, `?`, `=`, `%`, space, `/`, …) must be
-/// encoded or it corrupts the query. Shared by the GitLab (`glab api`) and
-/// Bitbucket (HTTP) providers, which both interpolate untrusted values (branch
-/// names, search terms) into query strings.
+/// Percent-encode a value for an API query string (RFC-3986 unreserved kept,
+/// everything else encoded) — an unencoded `&`/`#`/`?`/`=`/`%`/space corrupts the
+/// query. Shared by the GitLab (`glab api`) and Bitbucket (HTTP) providers, which
+/// interpolate untrusted branch names and search terms.
 pub(crate) fn encode_query_value(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -105,14 +101,11 @@ pub(crate) fn encode_query_value(s: &str) -> String {
 /// The two pure-traversal segments `.` and `..` are rejected outright, as is the
 /// empty string. A `/` never appears in a segment (the caller splits on it).
 fn is_valid_path_segment(seg: &str) -> bool {
-    // Reject empty and the two path-traversal segments explicitly.
     if seg.is_empty() || seg == "." || seg == ".." {
         return false;
     }
     let mut chars = seg.chars();
     match chars.next() {
-        // Leading `.` and `_` are allowed (`.github`, `_name`); a leading `-` is not
-        // (argv-flag injection).
         Some(c) if c.is_ascii_alphanumeric() || c == '.' || c == '_' => {}
         _ => return false,
     }
@@ -144,20 +137,16 @@ pub(crate) fn validate_owner(owner: &str) -> AppResult<()> {
     }
 }
 
-/// The maximum README size returned to the frontend (~300 KB). A README larger than
-/// this is truncated on a `char` boundary so the returned string is never split mid
-/// code-point. Shared by all three providers' README reads.
+/// Max README size returned to the frontend (~300 KB); larger bodies are
+/// truncated on a char boundary by [`cap_readme`].
 const README_CAP: usize = 300 * 1024;
 
-/// Cap a README body at [`README_CAP`] bytes, truncating on a UTF-8 `char` boundary
-/// (never mid code-point). Returns the input unchanged when it's already within the
-/// cap. Pure, so it's unit-testable.
+/// Cap a README body at [`README_CAP`] bytes, truncating on a UTF-8 `char`
+/// boundary (never mid code-point).
 pub(crate) fn cap_readme(body: &str) -> String {
     if body.len() <= README_CAP {
         return body.to_string();
     }
-    // Walk back from the cap to the nearest char boundary so we never split a
-    // multibyte code point.
     let mut end = README_CAP;
     while end > 0 && !body.is_char_boundary(end) {
         end -= 1;
@@ -205,13 +194,11 @@ where
         .collect()
 }
 
-/// Route a remote host to a **non-GitHub** provider, but only when it's
-/// unmistakably GitLab.com or Bitbucket Cloud. github.com, Enterprise servers,
-/// and unknown hosts all return `None` — so the GitHub path runs and `gh`'s own
-/// (Enterprise-aware) detection stays authoritative. Self-managed GitLab is the
-/// one exception, resolved separately in [`detect_non_github`] via glab's own
-/// signed-in host list (a custom domain is otherwise indistinguishable from
-/// GitHub Enterprise).
+/// Route a remote host to a non-GitHub provider only when it's unmistakably
+/// GitLab.com or Bitbucket Cloud. github.com, Enterprise, and unknown hosts return
+/// `None` so `gh`'s own (Enterprise-aware) detection stays authoritative.
+/// Self-managed GitLab is indistinguishable from GHE by host alone and is resolved
+/// in [`detect_non_github`] via glab's signed-in host list.
 fn provider_for_host(host: &str) -> Option<Provider> {
     match host {
         "gitlab.com" => Some(Provider::GitLab),
@@ -220,13 +207,11 @@ fn provider_for_host(host: &str) -> Option<Provider> {
     }
 }
 
-/// Detect a non-GitHub provider from the repo's `origin` remote, with its host.
-/// Canonical hosts match directly; any other host glab is signed in to (the
-/// `hosts:` keys of its config) is self-managed GitLab — glab carries per-host
-/// auth, so every downstream `glab` call just works there. `None` (→ GitHub
-/// path) when the `origin` URL can't be read (no remote, or any git error), is
-/// unparseable, or the host is unrecognized — so GitHub stays the resilient
-/// default and `gh`'s own detection decides readiness.
+/// Detect a non-GitHub provider from `origin`, with its host. Canonical hosts match
+/// directly; any other host glab is signed in to is self-managed GitLab (glab carries
+/// per-host auth, so downstream `glab` calls just work there). Any failure — no
+/// remote, git error, unparseable URL, unknown host — returns `None` so GitHub stays
+/// the resilient default and `gh` decides readiness.
 pub(crate) async fn detect_non_github(repo_path: &str) -> Option<(Provider, String)> {
     let url = crate::git::remote::git_remote_url(repo_path.to_string(), "origin".to_string())
         .await
@@ -245,49 +230,31 @@ pub(crate) async fn detect_non_github(repo_path: &str) -> Option<(Provider, Stri
     None
 }
 
-/// The one-shot URL-scoped `-c credential.https://<host>.helper` entries to
-/// authenticate a network op on `remote`, resolved to the provider CLI's ABSOLUTE
-/// path. The provider comes from the REQUESTED remote's OWN host (not always
-/// `origin`), so a cross-forge origin/upstream pair — e.g. an `origin` on GitLab
-/// with a `github.com` `upstream` — each gets the right CLI's helper.
+/// The one-shot `-c credential.https://<host>.helper` entries authenticating a
+/// network op on `remote`, resolved to the provider CLI's ABSOLUTE path. The
+/// provider comes from the REQUESTED remote's own host, so a cross-forge
+/// origin/upstream pair each gets the right CLI's helper.
 ///
-/// Entries are injected ONLY when the provider CLI is present AND has a stored
-/// token/session for the remote's own host, and the injection is a `[reset,
-/// helper]` PAIR: a blank reset entry (`credential.https://<host>.helper=`, empty
-/// value) that SEVERS git's accumulated helper chain for that URL, followed by the
-/// absolute-path CLI helper — the same pair `gh auth setup-git` writes. This makes
-/// the network op deterministically use the same identity as the app's forge
-/// surfaces, rather than falling through to whichever ambient helper answers first
-/// (git stops at the first helper returning a complete credential — an earlier
-/// `osxkeychain`/git-credential-manager entry holding a stale-but-valid credential
-/// would otherwise shadow the CLI and 404 the wrong identity; that was the bug).
+/// The injection is a `[reset, helper]` PAIR (blank reset entry, then the CLI
+/// helper — what `gh auth setup-git` writes): git stops at the first helper that
+/// returns a complete credential, so an ambient osxkeychain/GCM entry holding a
+/// stale-but-valid credential would otherwise shadow the CLI and act as the wrong
+/// identity. The gates prove a credential EXISTS, not that it WORKS, so
+/// [`crate::git::remote::run_git_mutating_with_creds`] retries once with ambient
+/// auth on an auth-class failure. The CLONE path (`repo.rs` `extra_config`)
+/// deliberately stays strict-injection with no fallback.
 ///
-/// The gates prove a credential merely EXISTS, not that it WORKS, so a stale CLI
-/// token could sever a working ambient chain (the inverse failure) —
-/// [`crate::git::remote::run_git_mutating_with_creds`] covers that with a one-shot
-/// ambient-fallback retry on an auth-class failure. Deliberate residual: the CLONE
-/// path (the `extra_config` in `repo.rs`) keeps strict injection with NO fallback —
-/// clone is user-initiated, clearly messaged, and re-runnable, and GitLab private
-/// clone was always strict-injection.
+/// Empty (→ git's ambient behavior) for SSH remotes, a missing remote, and an absent
+/// or unauthenticated provider CLI — fail-open, so a GCM user's fetches keep working.
+/// An UNKNOWN HTTPS host takes the GitHub-default route, whose gh gate injects the
+/// pair only when gh holds a token for that host — that is what makes a signed-in
+/// GitHub Enterprise host work, and yields nothing otherwise.
 ///
-/// Empty (→ git's ambient behavior, unchanged, so this never breaks a local, SSH,
-/// or already-authenticated repo) for: SSH remotes (credential helpers don't
-/// apply), a repo with no such remote, an unknown HTTPS host (the GitHub-default
-/// routing's gh gate injects the pair ONLY when gh holds a token for that host —
-/// e.g. a signed-in GitHub Enterprise host, which is what makes GHE work — and
-/// nothing otherwise), and — fail open — when the provider CLI isn't installed OR
-/// is installed but has no stored token/session for this host (ambient helpers like
-/// git-credential-manager keep working for both).
-///
-/// Bitbucket is the exception to the `[reset, helper]` shape: it has no CLI, so it
-/// SEEDS git's credential store out of band with the `x-bitbucket-api-token-auth`
-/// sentinel and token (STDIN only, no repo lock — see
-/// [`bitbucket::seed_git_credential`]), and on a successful seed returns the
-/// [`bitbucket::bitbucket_credential_entries`] pair — interactive-helper
-/// suppression plus a transient `insteadOf` host rewrite for `user@` remotes — so
-/// the op authenticates from the seeded store. No stored token or a failed seed
-/// yields no entries, leaving git's ambient behavior (including an interactive
-/// GCM) unchanged — fail-open.
+/// Bitbucket has no CLI: it SEEDS git's credential store with the
+/// `x-bitbucket-api-token-auth` sentinel ([`bitbucket::seed_git_credential`]) and,
+/// on a successful seed only, returns [`bitbucket::bitbucket_credential_entries`]
+/// (interactive-helper suppression + a transient `insteadOf` rewrite for `user@`
+/// remotes).
 pub async fn credential_config_for_remote(repo_path: &str, remote: &str) -> AppResult<Vec<String>> {
     let url = match crate::git::remote::git_remote_url(repo_path.to_string(), remote.to_string()).await
     {
@@ -300,31 +267,18 @@ pub async fn credential_config_for_remote(repo_path: &str, remote: &str) -> AppR
     let Some(host) = remote_host(&url) else {
         return Ok(Vec::new());
     };
-    // Classify by the requested remote's OWN host, reproducing `detect_non_github`'s
-    // logic on `url` — identical when `remote == "origin"`, correct for other
-    // remotes. The glab-known-hosts config read is skipped for canonical hosts and
-    // github.com; only an unrecognized host reads it (as `detect_non_github` does).
+    // Classify by the REQUESTED remote's own host (mirrors `detect_non_github`);
+    // only an unrecognized host pays for the glab-known-hosts config read.
     let provider = if host == "github.com" || provider_for_host(&host).is_some() {
         provider_for_remote_host(&host, &[])
     } else {
         // Any other host glab is signed in to is self-managed GitLab — mirrors detect_non_github.
         provider_for_remote_host(&host, &glab::known_hosts().await)
     };
-    // Fail open when the CLI can't be resolved: a user with working ambient auth
-    // (e.g. git-credential-manager) must not have every HTTPS fetch/pull/push hard-
-    // fail just because gh/glab isn't installed.
+    // Fail open when the CLI can't be resolved — ambient auth (e.g. GCM) must keep working.
     match provider {
         Some(Provider::GitLab) => Ok(gitlab::clone_credential_config(&url).await.unwrap_or_default()),
         Some(Provider::Bitbucket) => {
-            // Bitbucket has no CLI helper: seed the token into git's credential
-            // store (STDIN only) so the op authenticates ambiently from it. On a
-            // SUCCESSFUL seed, inject the one-shot `-c` pair (interactive-helper
-            // suppression + a transient `insteadOf` rewrite when the stored remote
-            // embeds `user@`, so git's host-scoped lookup finds the sentinel seed —
-            // see `bitbucket_credential_entries`; the stored remote is never
-            // mutated). No token / failed seed → no entries, so git's ambient
-            // behavior (incl. an interactive GCM) is unchanged — fail-open, same
-            // philosophy as the gh/glab arms.
             if bitbucket::seed_git_credential().await {
                 Ok(bitbucket::bitbucket_credential_entries(&url))
             } else {
@@ -335,13 +289,10 @@ pub async fn credential_config_for_remote(repo_path: &str, remote: &str) -> AppR
     }
 }
 
-/// The provider a remote's host maps to, mirroring [`detect_non_github`] but on an
-/// arbitrary remote's host rather than always `origin`. Canonical hosts match
-/// directly; any *other* host in `glab_hosts` (the hosts `glab` is signed in to) is
-/// self-managed GitLab; `github.com`, GHE, and unknown hosts return `None` (→ the
-/// app's gh-default routing). Pure/sync so it's unit-testable — the caller supplies
-/// `glab_hosts` (empty when the host is canonical/github.com and the config read is
-/// skipped).
+/// The provider a host maps to — like [`detect_non_github`] but for an arbitrary
+/// remote's host. Canonical hosts match directly; any OTHER host in `glab_hosts` is
+/// self-managed GitLab; github.com / GHE / unknown → `None` (gh-default routing).
+/// Pure/sync for unit tests — the caller supplies `glab_hosts`.
 fn provider_for_remote_host(host: &str, glab_hosts: &[String]) -> Option<Provider> {
     if let Some(p) = provider_for_host(host) {
         return Some(p);
@@ -360,11 +311,10 @@ fn is_https_remote(url: &str) -> bool {
     url.trim().starts_with("https://")
 }
 
-/// The provider a host resolves to, as the lowercase tag the frontend keys
-/// labels on (`"github"` / `"gitlab"` / `"bitbucket"`), or `None` for hosts the
-/// app doesn't recognize (the UI treats those as GitHub, matching the routing
-/// above). `glab_hosts` is [`glab::known_hosts`], passed in so batch callers
-/// read the config once.
+/// The provider tag the frontend keys labels on (`"github"`/`"gitlab"`/
+/// `"bitbucket"`), or `None` for unrecognized hosts (the UI treats those as GitHub,
+/// matching the routing above). `glab_hosts` is passed in so batch callers read the
+/// config once.
 pub(crate) fn provider_tag_for_host(host: &str, glab_hosts: &[String]) -> Option<&'static str> {
     match provider_for_host(host) {
         Some(Provider::GitLab) => Some("gitlab"),
@@ -382,14 +332,11 @@ pub(crate) fn provider_tag_for_host(host: &str, glab_hosts: &[String]) -> Option
 }
 
 /// Resolve a repo's hosted-integration status behind the provider abstraction.
-/// GitLab/Bitbucket repos are recognized but report not-ready (their impls arrive
-/// in Phases 1–4); everything else delegates to the GitHub impl, unchanged.
 pub async fn resolve_status(repo_path: &str) -> AppResult<ForgeStatus> {
     if let Some((provider, host)) = detect_non_github(repo_path).await {
         return match provider {
-            // GitLab probes glab for install/auth; Bitbucket probes the keyring
-            // token + `/user` over HTTP. Both report their real readiness (unbuilt
-            // panels degrade via the `implemented` flags).
+            // GitLab probes glab install/auth; Bitbucket probes the keyring token
+            // + `/user`. Unbuilt panels degrade via the `implemented` flags.
             Provider::GitLab => GitLabForge::new(host).status(repo_path).await,
             Provider::Bitbucket => BitbucketForge::new(host).status(repo_path).await,
             Provider::GitHub => GitHubForge.status(repo_path).await,
@@ -398,20 +345,16 @@ pub async fn resolve_status(repo_path: &str) -> AppResult<ForgeStatus> {
     GitHubForge.status(repo_path).await
 }
 
-/// Provider-neutral hosted-integration status for a repo. The frontend gates
-/// hosted features on this (and its `capabilities`) instead of a GitHub-only
-/// readiness check. Phase 0: GitHub delegates to the existing gh-backed status.
+/// Provider-neutral hosted-integration status for a repo. The frontend gates hosted
+/// features on this (and its `capabilities`) instead of a GitHub-only readiness check.
 #[tauri::command]
 pub async fn forge_status(repo_path: String) -> AppResult<ForgeStatus> {
     resolve_status(&repo_path).await
 }
 
 // ── Bitbucket account (Settings → Accounts) ───────────────────────────────────
-//
-// Bitbucket Cloud has no CLI to carry credentials (unlike gh/glab), so its token
-// is managed here: connect (validate + store), disconnect (clear), and read (the
-// stored account, no network). The token is stored in the OS keyring and is NEVER
-// returned to the frontend.
+// Bitbucket Cloud has no CLI to carry credentials, so its token is managed here.
+// It lives in the OS keyring and is NEVER returned to the frontend.
 
 /// Connect a Bitbucket account: validate the Atlassian email + API token against
 /// `GET /2.0/user` BEFORE persisting (nothing is stored if validation fails), then
@@ -448,12 +391,11 @@ pub async fn forge_bb_step_logs(repo_path: String, log_ref: String) -> AppResult
 }
 
 // ── Jira (linked issue provider) ───────────────────────────────────────────────
-//
-// Jira is a per-repo LINKED issue provider, orthogonal to the git-host detection every
-// `forge_issue_*` command dispatches on: no repo has a Jira git remote, so Jira is
-// never detected — it's configured. The frontend stores a per-repo `{site, projectKey}`
-// link and passes `site`/`project_key` into these commands, keeping Rust stateless about
-// linkage. Phase 1 is read-only. See `docs/jira-issue-integration.md`.
+// Jira is a per-repo LINKED issue provider, orthogonal to the git-host detection
+// every `forge_issue_*` command dispatches on: no repo has a Jira remote, so Jira is
+// never detected — it's configured. The frontend stores the per-repo
+// `{site, projectKey}` link and passes site/project_key in, keeping Rust stateless
+// about linkage.
 
 /// Connect a Jira account for a site: normalize + validate the site, validate the
 /// (site, email, token) triple via `GET /rest/api/3/myself` BEFORE persisting (nothing
@@ -527,7 +469,7 @@ pub async fn jira_issue_view(site: String, key: String) -> AppResult<jira::JiraI
     jira::issue_view(&site, &key).await
 }
 
-// ── Jira writes (phase 2) ──────────────────────────────────────────────────────
+// ── Jira writes ────────────────────────────────────────────────────────────────
 
 /// Add a comment to a Jira issue. `body_md` is markdown (converted to ADF Rust-side); a
 /// whitespace-only body is rejected before any network call. Returns the created comment.
@@ -634,7 +576,7 @@ pub async fn jira_permissions(
     jira::permissions(&site, &project_key).await
 }
 
-// ── Jira writes (phase 5): due date / priority / labels / comment edit-delete + pickers ──
+// ── Jira writes: due date / priority / labels / comment edit-delete + pickers ──
 
 /// The site's priorities for the priority picker (`GET /rest/api/3/priority`).
 #[tauri::command]
@@ -704,7 +646,7 @@ pub async fn jira_comment_delete(
     jira::comment_delete(&site, &key, &comment_id).await
 }
 
-// ── Jira writes (phase 6): time tracking (estimates + worklogs) ──
+// ── Jira writes: time tracking (estimates + worklogs) ──
 
 /// Set (or clear) a Jira issue's original estimate. `estimate = Some("2d 4h")` sets it;
 /// `None` clears it. The duration grammar is validated before any network call.
@@ -779,11 +721,9 @@ pub async fn forge_list_repos(provider: Provider) -> AppResult<ForgeRepoList> {
 }
 
 // ── Explore: repo search / fork-by-name / star / README / provider features ────
-//
-// The Explore view's backend. Each command dispatches on the explicit `provider`
-// argument (account-scoped, no repo path — Explore browses arbitrary repos across a
-// provider). Per-provider impls live in github.rs / gitlab.rs / bitbucket.rs. The
-// frontend mirrors these signatures exactly.
+// Account-scoped (no repo path) — Explore browses arbitrary repos across a provider,
+// so each command dispatches on an explicit `provider` argument. The frontend
+// mirrors these signatures exactly.
 
 /// Search a provider's repositories for the Explore view. `sort` is exactly
 /// `"best" | "stars" | "updated"` (anything else → `InvalidArgument`); `page` is
@@ -891,12 +831,10 @@ pub async fn forge_provider_features(provider: Provider) -> AppResult<ProviderFe
 }
 
 /// Clone a repo, supplying provider auth that plain `git clone` lacks. A private
-/// GitLab repo needs glab's token, injected as a ONE-SHOT `git -c` credential
-/// helper (no persistent config, no token in the remote URL) — glab IS GitLab's
-/// auth path here, so that arm stays strict. GitHub gets the same one-shot gh
-/// helper when gh is present, but falls open to git's ambient auth when gh is
-/// absent (public repos need none; a GCM user already has HTTPS auth), matching
-/// how GitHub clone worked before this helper existed. Returns the path.
+/// GitLab repo needs glab's token, injected as a ONE-SHOT `git -c` credential helper
+/// (no persistent config, no token in the URL) — glab IS GitLab's auth path, so that
+/// arm stays strict. GitHub gets the same one-shot gh helper when gh is present but
+/// falls open to git's ambient auth when it isn't. Returns the path.
 #[tauri::command]
 pub async fn forge_clone(
     provider: Provider,
@@ -904,12 +842,10 @@ pub async fn forge_clone(
     parent_dir: String,
     dir_name: Option<String>,
 ) -> AppResult<String> {
-    // Bitbucket seeds the token into git's credential store, then clones with the
-    // API's embedded `user@` stripped from the URL (git scopes credential lookup by
-    // the URL username, so the bare host is what finds the sentinel-account seed)
-    // and interactive helpers suppressed — but only on a SUCCESSFUL seed; with no
-    // stored token the URL and behavior are untouched so ambient (possibly
-    // interactive) helpers still work. The others inject `-c` helper entries.
+    // Bitbucket: on a SUCCESSFUL token seed, clone with the API URL's embedded `user@`
+    // stripped — git scopes credential lookup by the URL username, so the bare host is
+    // what finds the sentinel-account seed — and interactive helpers suppressed. No
+    // stored token → URL and behavior untouched (ambient auth still works).
     let mut clone_url = url;
     let extra = match provider {
         Provider::GitLab => gitlab::clone_credential_config(&clone_url).await?,
@@ -926,18 +862,14 @@ pub async fn forge_clone(
     crate::git::repo::clone_repo_core(&clone_url, &parent_dir, dir_name, &extra).await
 }
 
-/// A repo's merge/pull requests, behind the provider abstraction. GitHub
-/// delegates to the existing `gh pr list`; GitLab maps `glab` merge requests onto
-/// the same neutral [`PrInfo`] shape. `state` is `"open"` or `"closed"` (closed
-/// includes merged, matching the GitHub panel's Closed tab).
+/// A repo's merge/pull requests, behind the provider abstraction. `state` is `"open"`
+/// or `"closed"` (closed includes merged, matching the GitHub panel's Closed tab).
 ///
-/// `lens` (the fork-identity Part B primitive — `None`/`Some("origin")`/
-/// `Some("upstream")`) is threaded to the GitHub arm ONLY: it selects whether a
-/// fork addresses its own PRs (origin) or the parent's (upstream). The GitLab and
-/// Bitbucket arms deliberately do NOT receive the lens — their behavior is
-/// byte-identical to today, and the frontend gates the lens UI to GitHub, so a
-/// stray upstream lens on GitLab/Bitbucket simply reads as origin (acceptable v1).
-/// This note stands for every `forge_*` PR/issue dispatcher below.
+/// `lens` (`None`/`Some("origin")`/`Some("upstream")`) is threaded to the GitHub arm
+/// ONLY: it selects whether a fork addresses its own PRs or the parent's. GitLab and
+/// Bitbucket deliberately don't receive it (the frontend gates the lens UI to GitHub),
+/// so a stray upstream lens there simply reads as origin. This note stands for every
+/// `forge_*` PR/issue dispatcher below.
 #[tauri::command]
 pub async fn forge_pr_list(
     repo_path: String,
@@ -952,15 +884,13 @@ pub async fn forge_pr_list(
     }
 }
 
-/// The rolled-up CI signal for a PR-list page, keyed by number — hydrates the row
-/// icons SEPARATELY from `forge_pr_list` so a large repo's list never waits on (or
-/// 504s expanding) per-check status. Provider-routed: GitHub queries its precomputed
-/// `statusCheckRollup` by PR number, GitLab its MR `headPipeline.status` by iid (one
-/// batched GraphQL call each), Bitbucket falls back to a per-commit statuses probe
-/// keyed on each PR's `head_sha` (no batch endpoint). `sample_url` is any PR html url
-/// from the same page — it fixes the repo the numbers belong to (load-bearing for
-/// forks, where the list resolves to the parent while origin points at the fork).
-/// Best-effort throughout: a PR whose status can't be fetched simply gets no icon.
+/// The rolled-up CI signal for a PR-list page, keyed by number — fetched SEPARATELY
+/// from `forge_pr_list` so a large repo's list never waits on (or 504s expanding)
+/// per-check status. GitHub reads its precomputed `statusCheckRollup` by number,
+/// GitLab `headPipeline.status` by iid (one batched call each); Bitbucket has no batch
+/// endpoint and probes per-commit statuses by `head_sha`. `sample_url` fixes which
+/// repo the numbers belong to — load-bearing for forks, where the list resolves to the
+/// parent while origin points at the fork. Best-effort: an unfetchable PR gets no icon.
 #[tauri::command]
 pub async fn forge_pr_list_ci(
     repo_path: String,
@@ -980,12 +910,9 @@ pub async fn forge_pr_list_ci(
     }
 }
 
-/// A lightweight snapshot of the repo's recently-updated PRs for the notification
-/// poller + remote pr-sync, behind the abstraction. GitHub delegates to the UNCHANGED
-/// `gh_pr_poll`; GitLab/Bitbucket map their list responses onto the same neutral
-/// [`PrPollInfo`](crate::github::pr::PrPollInfo). GitLab/Bitbucket carry no check
-/// rollup or review decision in list responses, so those fields come back empty (a
-/// documented v1 limit — the poller's checks/review notification branches never fire
+/// A lightweight snapshot of recently-updated PRs for the notification poller + remote
+/// pr-sync. GitLab/Bitbucket list responses carry no check rollup or review decision,
+/// so those fields come back empty (the poller's checks/review branches never fire
 /// there); `headSha` still drives pr-sync re-review.
 #[tauri::command]
 pub async fn forge_pr_poll(repo_path: String) -> AppResult<Vec<crate::github::pr::PrPollInfo>> {
@@ -1201,13 +1128,11 @@ pub async fn forge_commit_comment_delete(
     }
 }
 
-/// Third-party AI-reviewer findings on a merge/pull request (Copilot/CodeRabbit/…),
-/// behind the abstraction. GitHub delegates unchanged (`gh_pr_external_reviews`);
-/// GitLab maps MR discussion notes onto the same neutral shape; Bitbucket returns
-/// an empty list by design — no third-party AI-reviewer ecosystem posts on
-/// Bitbucket PRs, so there's nothing to harvest and no reason to hit the network.
-/// The frontend decides which authors are AI reviewers and folds their findings
-/// in as soft re-review context.
+/// Third-party AI-reviewer findings on a merge/pull request (Copilot/CodeRabbit/…).
+/// GitHub delegates to `gh_pr_external_reviews`; GitLab maps MR discussion notes;
+/// Bitbucket returns an empty list by design — no third-party AI-reviewer ecosystem
+/// posts there, so there's nothing to fetch. The frontend decides which authors are
+/// AI reviewers and folds their findings in as soft re-review context.
 #[tauri::command]
 pub async fn forge_pr_external_reviews(
     repo_path: String,
@@ -1216,8 +1141,7 @@ pub async fn forge_pr_external_reviews(
 ) -> AppResult<Vec<crate::github::pr::ExternalReviewItem>> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::external_reviews(&repo_path, number).await,
-        // By design: no bot-review ecosystem posts on Bitbucket PRs. Cheap,
-        // permanent no-network empty — nothing to map.
+        // By design: no bot-review ecosystem posts on Bitbucket PRs — a permanent empty.
         Some((Provider::Bitbucket, _)) => Ok(Vec::new()),
         _ => github::external_reviews(&repo_path, number, lens).await,
     }
@@ -1314,7 +1238,7 @@ pub async fn forge_pr_review_submit(
     comments: Vec<crate::github::pr::DraftCommentIn>,
     lens: Option<String>,
 ) -> AppResult<crate::github::pr::ReviewSubmitOut> {
-    // Pre-mutation guards: verdict validity, and request_changes needs a summary.
+    // Pre-mutation guards.
     if !matches!(verdict.as_str(), "comment" | "approve" | "request_changes") {
         return Err(AppError::InvalidArgument(format!(
             "invalid review verdict: {verdict}"
@@ -1361,12 +1285,11 @@ pub async fn forge_pr_thread_resolve(
 }
 
 /// Post a comment on a merge/pull request, behind the abstraction. GitHub delegates
-/// to `gh pr comment`; GitLab posts a note via `glab`. (Full reviews stay
-/// GitHub-only — approve/merge/edit each have their own forge command.) `as_bot`
-/// (optional — existing callers omit it) is honored only by the GitLab arm: when
-/// `Some(true)` and a review-bot token is configured for this repo's GitLab host,
-/// the note is authored by the project bot (else it falls back to the signed-in
-/// user). GitHub/Bitbucket ignore the flag.
+/// to `gh pr comment`; GitLab posts a note via `glab`; Bitbucket POSTs a PR comment.
+/// `as_bot` (optional — existing callers omit it) is honored only by the GitLab arm:
+/// with `Some(true)` and a review-bot token configured for this repo's GitLab host,
+/// the note is authored by the project bot (else the signed-in user). GitHub and
+/// Bitbucket ignore the flag.
 #[tauri::command]
 pub async fn forge_pr_comment(
     repo_path: String,
@@ -1448,13 +1371,11 @@ pub async fn forge_pr_delete_comment(
     }
 }
 
-/// Edit a file:line-anchored review-THREAD comment's body, behind the abstraction.
-/// Distinct from `forge_pr_edit_comment` (which edits flat conversation comments):
-/// GitHub review comments are `PullRequestReviewComment` nodes with their own
-/// mutation, so the GitHub arm calls a dedicated fn. GitLab positioned notes and
-/// Bitbucket inline comments are the same objects as their conversation notes/
-/// comments, so those arms reuse the existing note/comment endpoints. `comment_id`
-/// is the id the review thread already carries. Gated on
+/// Edit a file:line-anchored review-THREAD comment's body. Distinct from
+/// `forge_pr_edit_comment` (flat conversation comments): GitHub review comments are
+/// `PullRequestReviewComment` nodes with their own mutation, while GitLab positioned
+/// notes and Bitbucket inline comments ARE the same objects as their conversation
+/// notes, so those arms reuse the note/comment endpoints. Gated on
 /// `implemented.mrThreadCommentEdit`.
 #[tauri::command]
 pub async fn forge_pr_edit_review_comment(
@@ -1567,14 +1488,11 @@ pub async fn forge_pr_unrequest_changes(repo_path: String, number: u64) -> AppRe
     }
 }
 
-/// Toggle a merge/pull request's draft state — wired for all three providers, each
-/// via its own mechanism: Bitbucket PUTs `draft` both ways; GitLab shells
-/// `glab mr update <iid> --ready|--draft` (a draft is a `Draft:` title prefix glab
-/// manages); GitHub shells `gh pr ready [--undo]` — `draft = true` appends `--undo`
-/// to convert an open PR back to a draft, `draft = false` marks a draft ready.
-/// `lens` is GitHub-only (see `forge_pr_list`): it resolves a fork's PR against the
-/// chosen remote; the Bitbucket/GitLab arms ignore it. gh's own error on plans that
-/// don't support draft conversion passes through as the actionable message.
+/// Toggle a merge/pull request's draft state, each provider via its own mechanism:
+/// Bitbucket PUTs `draft`; GitLab shells `glab mr update --ready|--draft` (a draft is a
+/// `Draft:` title prefix glab manages); GitHub shells `gh pr ready [--undo]`, so
+/// `draft = true` appends `--undo`. `lens` is GitHub-only (see `forge_pr_list`). gh's
+/// error on plans without draft conversion passes through as the actionable message.
 #[tauri::command]
 pub async fn forge_pr_set_draft(
     repo_path: String,
@@ -1585,8 +1503,7 @@ pub async fn forge_pr_set_draft(
     match detect_non_github(&repo_path).await {
         Some((Provider::Bitbucket, _)) => bitbucket::set_pr_draft(&repo_path, number, draft).await,
         Some((Provider::GitLab, _)) => gitlab::set_mr_draft(&repo_path, number, draft).await,
-        // `draft = true` → convert back to draft (`gh pr ready --undo`); `false` →
-        // mark ready. The GitHub arm maps draft-state to the gh `ready` flag.
+        // gh takes a READY flag, so the draft state inverts (`ready = !draft`).
         _ => crate::github::pr::gh_pr_set_ready(&repo_path, number, !draft, lens.as_deref()).await,
     }
 }
@@ -1670,12 +1587,10 @@ pub async fn forge_pr_approvals(
     }
 }
 
-/// Approve a merge/pull request (a bodyless reviewer action), behind the
-/// abstraction. Wired for all three providers: GitLab/Bitbucket via their
-/// reviewer APIs, GitHub through `gh pr review --approve` (`gh_pr_review`, no
-/// body). The frontend still gates its own control on `implemented.mrApprove`
-/// (false for GitHub, which uses its native review flow there); this arm serves
-/// the MCP `approve_pull_request` tool.
+/// Approve a merge/pull request (a bodyless reviewer action). Wired for all three:
+/// GitLab/Bitbucket via their reviewer APIs, GitHub via `gh pr review --approve`. The
+/// frontend gates its own control on `implemented.mrApprove` (false for GitHub); this
+/// arm serves the MCP `approve_pull_request` tool.
 #[tauri::command]
 pub async fn forge_pr_approve(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
@@ -1705,18 +1620,15 @@ pub async fn forge_pr_unapprove(repo_path: String, number: u64) -> AppResult<()>
     }
 }
 
-/// Merge a merge/pull request, behind the abstraction. GitHub delegates to the
-/// existing `gh pr merge` UNCHANGED (it has no `sha` guard, so it's dropped); GitLab
-/// merges via `glab` — `merge`/`squash` only (no per-MR rebase) with an optional
-/// head-`sha` stale-view guard. `strategy` is `merge`/`squash`/`rebase` (rebase is
-/// GitHub-only; the GitLab arm rejects it).
+/// Merge a merge/pull request. GitHub delegates to `gh pr merge` (it has no `sha`
+/// guard, so that arg is dropped); GitLab merges via `glab` — merge/squash only — with
+/// an optional head-`sha` stale-view guard. `strategy` is merge/squash/rebase; rebase
+/// is GitHub-only.
 ///
-/// Returns a [`PrMergeOutcome`](crate::github::pr::PrMergeOutcome). Its
-/// `cleanup_warning` means the PR merged fine but the post-merge head-branch
-/// cleanup failed — GitHub-only by construction: GitLab and Bitbucket fold
-/// branch deletion into the atomic server-side merge, so their arms always
-/// return a clean outcome (`cleanup_warning: None`). A merge *failure* is still
-/// an `Err`.
+/// `cleanup_warning` on the returned [`PrMergeOutcome`](crate::github::pr::PrMergeOutcome)
+/// means the PR merged but post-merge branch cleanup failed — GitHub-only, since
+/// GitLab/Bitbucket fold branch deletion into the server-side merge. A merge FAILURE
+/// is still an `Err`.
 #[tauri::command]
 pub async fn forge_pr_merge(
     repo_path: String,
@@ -2031,8 +1943,8 @@ pub async fn forge_release_delete_asset(
     }
 }
 
-/// Post a comment on an issue, behind the provider abstraction — the first GitLab
-/// WRITE. GitHub delegates to `gh issue comment`; GitLab posts a note via `glab`.
+/// Post a comment on an issue, behind the provider abstraction. GitHub delegates to
+/// `gh issue comment`; GitLab posts a note via `glab`.
 #[tauri::command]
 pub async fn forge_issue_comment(
     repo_path: String,
@@ -2426,16 +2338,14 @@ pub async fn forge_mr_set_assignees(
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
             "Bitbucket assignees aren't supported yet.".into(),
         )),
-        // A PR number addresses the same issues endpoint (PRs are issues on GitHub).
         _ => github::set_issue_assignees(&repo_path, number, assignees, lens).await,
     }
 }
 
-/// Create an issue, behind the abstraction. Returns the new number + URL.
-/// GitHub sends the full field set; GitLab takes everything but the org issue
-/// type (no GitLab analogue — the dialog hides that picker, and the dispatch
-/// drops it like `forge_issue_close` drops the GitHub-only close reason).
-/// `milestone` is whatever `forge_milestones` returned as `number`.
+/// Create an issue, behind the abstraction. Returns the new number + URL. GitHub sends
+/// the full field set; GitLab takes everything but the org issue type (no analogue —
+/// the dialog hides that picker). `milestone` is whatever `forge_milestones` returned
+/// as `number`.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn forge_issue_create(
@@ -2536,13 +2446,10 @@ pub struct RepoVisibilityOut {
     pub parent: Option<String>,
 }
 
-/// The repo's remote visibility (`public` / `private` / `internal`) plus whether
-/// it's a fork, behind the abstraction — for badging the repo list. Every arm
-/// returns a raw provider result whose visibility is canonicalized here; an
-/// undeterminable visibility (no remote, CLI/API failure, unrecognized payload)
-/// errors rather than guessing. Fork-ness is best-effort: a provider that can't
-/// report it yields `is_fork: false` (never a guess), so absence of the badge is
-/// always honest.
+/// The repo's remote visibility (`public`/`private`/`internal`) plus fork-ness, for
+/// badging the repo list. Each arm returns a raw provider result whose visibility is
+/// canonicalized here; an undeterminable visibility errors rather than guessing, and
+/// fork-ness falls back to `false` (never a guess), so absence of the badge is honest.
 #[tauri::command]
 pub async fn forge_repo_visibility(repo_path: String) -> AppResult<RepoVisibilityOut> {
     let raw = match detect_non_github(&repo_path).await {
@@ -3097,11 +3004,9 @@ pub async fn forge_repo_transfer(
     }
 }
 
-/// Permanently delete the repository on its provider, behind the abstraction.
-/// After the remote is gone the local `origin` remote is a dangling pointer, so
-/// we remove it — the repo then reads as unpublished again (the header's
-/// "Publish repository…" button reappears). The `state` handle is injected by
-/// Tauri; the invoke args are unchanged.
+/// Permanently delete the repository on its provider. After the remote is gone the
+/// local `origin` is a dangling pointer, so it's removed — the repo then reads as
+/// unpublished (the header's "Publish repository…" button reappears).
 #[tauri::command]
 pub async fn forge_repo_delete(
     state: tauri::State<'_, crate::state::AppState>,
@@ -3113,10 +3018,9 @@ pub async fn forge_repo_delete(
         _ => crate::github::lifecycle::gh_repo_delete(repo_path.clone()).await,
     }?;
 
-    // The remote delete succeeded — now drop the local `origin` remote so the
-    // repo reads as unpublished. Tolerate origin already being absent (a git
-    // "No such remote" failure is treated as success). Any other failure AFTER
-    // the remote is gone discloses the partial state rather than masking it.
+    // Drop the local `origin` so the repo reads as unpublished. An already-absent
+    // origin counts as success; any other failure AFTER the remote is gone discloses
+    // the partial state rather than masking it.
     if let Err(e) = crate::git::runner::run_git_mutating(
         &state,
         &repo_path,
@@ -3143,7 +3047,7 @@ pub async fn forge_repo_delete(
     Ok(())
 }
 
-// ── Bitbucket settings sub-surfaces (wave 3) ─────────────────────────────────
+// ── Bitbucket settings sub-surfaces ──
 
 /// The viewer's Bitbucket workspaces — the publish target picker. Account-scoped
 /// (no repo_path); creds come from the keyring.
@@ -3364,7 +3268,7 @@ pub async fn forge_bb_hook_delete(repo_path: String, uuid: String) -> AppResult<
     bb_only!(repo_path, bitbucket::hook_delete(&repo_path, &uuid))
 }
 
-// ── Bitbucket PR tasks + custom pipelines + environments (wave 4) ─────────────
+// ── Bitbucket PR tasks + custom pipelines + environments ──
 
 /// A pull request's task checklist, in list order (Bitbucket-only —
 /// `implemented.pr_tasks`).
@@ -3514,11 +3418,13 @@ pub async fn forge_publish_repo(
     }
 }
 
-/// Create a merge/pull request, behind the abstraction. Both arms push the head
-/// branch to origin first (an MR/PR needs it on the remote); GitLab injects glab's
-/// token as a one-shot git credential helper for that push, like `forge_clone`.
-/// GitHub delegates to the unchanged `gh pr create`; GitLab POSTs the MR with
-/// draft mapped to the `Draft:` title prefix. Returns the new number + URL.
+/// Create a merge/pull request, behind the abstraction. Every arm pushes the head
+/// branch to origin first (an MR/PR needs it on the remote). GitHub and Bitbucket
+/// route that push through `credential_config_for_remote` like `forge_clone`; the
+/// GitLab arm injects glab's own one-shot helper (`clone_credential_config`).
+/// GitHub then delegates to `gh pr create`; GitLab POSTs the MR with draft mapped to
+/// the `Draft:` title prefix; Bitbucket POSTs after a duplicate-PR pre-guard (a
+/// duplicate create silently overwrites there). Returns the new number + URL.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn forge_pr_create(
@@ -3534,9 +3440,8 @@ pub async fn forge_pr_create(
     assignees: Option<Vec<String>>,
     lens: Option<String>,
 ) -> AppResult<crate::github::pr::PrRef> {
-    // The `#[tauri::command]` shell just derefs the managed `State` to a plain
-    // `&AppState` and delegates to the core, so non-Tauri callers (the MCP server)
-    // can create a PR with an `AppState` they own — GUI behavior is unchanged.
+    // Deref the managed `State` and delegate to the core, so non-Tauri callers (the
+    // MCP server) can create a PR with an `AppState` they own.
     forge_pr_create_core(
         &state, repo_path, base, head, title, body, draft, reviewers, labels, assignees, lens,
     )
@@ -3579,9 +3484,8 @@ pub(crate) async fn forge_pr_create_core(
             "Create-time reviewers aren't supported for this provider.".into(),
         ));
     }
-    // Labels/assignees are the mirror case: GitHub and GitLab carry them at create
-    // time; Bitbucket PRs have no label/assignee concept, so reject a non-empty list
-    // BEFORE dispatching (existing callers omit the keys → `None` → untouched behavior).
+    // Mirror case: Bitbucket PRs have no label/assignee concept, so reject a non-empty
+    // list BEFORE dispatching.
     let labels = labels.unwrap_or_default();
     let assignees = assignees.unwrap_or_default();
     if (!labels.is_empty() || !assignees.is_empty())
@@ -3764,9 +3668,8 @@ mod tests {
     fn cap_readme_leaves_small_bodies_and_truncates_on_char_boundary() {
         // A short body is returned unchanged.
         assert_eq!(cap_readme("hello"), "hello");
-        // Build a body whose byte length crosses the cap right in the middle of a
-        // 4-byte emoji, so a naive byte slice would split the code point. Pad with
-        // ASCII so the cap lands two bytes into the trailing emoji.
+        // Pad so the cap lands two bytes into a trailing 4-byte emoji — a naive byte
+        // slice would split the code point.
         let pad_len = README_CAP - 2;
         let mut body = "a".repeat(pad_len);
         body.push('😀'); // 4 bytes; the cap at README_CAP falls inside it

@@ -1,28 +1,21 @@
 //! In-app **terminal** backend: real PTYs streamed to the frontend's xterm.js.
 //!
 //! Each terminal is a pseudo-terminal (ConPTY on Windows via `portable-pty`)
-//! running either a **host shell** in the session worktree, a shell *inside* the
-//! worktree's test container (reusing the exact run-or-exec + port-publish +
-//! cleanup logic the external "Test in container" launcher uses, see
-//! `agent_sandbox::container_shell_command`), or — for the **Tasks** feature — a
-//! user-registered script: its body is written to a temp file and run by the
-//! chosen interpreter (argv-only; the body is never interpolated into a `-c`
-//! shell string). Output is streamed to the UI over a Tauri `Channel` (base64
-//! chunks, so binary + partial-UTF-8 are safe); input/resize/close come back as
-//! commands. PTYs are held in app state keyed by a frontend id and torn down on
-//! close (or when the process exits).
+//! running a host shell in the session worktree, a shell inside the worktree's
+//! test container (`agent_sandbox::container_shell_command`), or — for Tasks — a
+//! user-registered script run argv-only by the chosen interpreter (the body is
+//! never interpolated into a `-c` shell string). Output streams to the UI over a
+//! Tauri `Channel` as base64 chunks (binary + partial UTF-8 safe); input/resize/
+//! close come back as commands. PTYs live in app state keyed by a frontend id.
 //!
 //! **Windows dev caveat (known limitation, not a bug — do not re-chase):** the
-//! in-app terminal works in a RELEASE install but NOT under `pnpm tauri dev`. The
-//! dev launcher runs the app as a child of the terminal, so it inherits a console;
-//! that inherited console makes the ConPTY child spawn fail (empty output, child
-//! exits immediately). Three fixes were tried and reverted — `FreeConsole()`,
-//! `CREATE_NO_WINDOW` on the child, and making the binary windowless
-//! (`windows_subsystem = "windows"` in dev too) — none worked, because a windowless
-//! subsystem only stops Windows *allocating* a console, it doesn't shed an
-//! *inherited* one. In dev, use the UI's "Open in external terminal" escape hatch
-//! instead; don't reopen this without a real diagnostic build (instrument the spawn
-//! to see the child's actual std handles), not another guess.
+//! in-app terminal works in a RELEASE install but NOT under `pnpm tauri dev`.
+//! The dev launcher runs the app as a child of the terminal, so it inherits a
+//! console, and that inherited console makes the ConPTY child spawn fail (empty
+//! output, instant exit). `FreeConsole()`, `CREATE_NO_WINDOW` and a windowless
+//! subsystem were all tried and reverted — a windowless subsystem only stops
+//! Windows ALLOCATING a console, it can't shed an inherited one. In dev, use
+//! "Open in external terminal"; don't reopen without a real diagnostic build.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -59,11 +52,10 @@ struct PtyHandle {
     /// (git, node, pnpm…) that a single-process kill would orphan; a shell's
     /// children are reached by the PTY hangup, so this stays off for those.
     tree_kill: bool,
-    /// Registration generation — lets a reader thread prove the map entry under
-    /// its id is still ITS OWN before tearing it down. React StrictMode (dev)
-    /// double-mounts the terminal, firing two `pty_open`s for the same id; the
-    /// second insert clobbers the first, and without this guard the first
-    /// reader's exit teardown would kill the second's live process.
+    /// Registration generation — lets a reader thread prove the map entry under its
+    /// id is still ITS OWN before tearing it down. React StrictMode (dev)
+    /// double-mounts and fires two `pty_open`s for one id; without this the first
+    /// reader's exit would kill the second's live process.
     gen: u64,
 }
 
@@ -125,13 +117,10 @@ fn host_shell() -> String {
 }
 
 /// Maps a Tasks interpreter key to the binary names to resolve, the temp-file
-/// extension, and the argv that runs the script *file*. Argv-only by design: the
-/// script body is executed as a file, never interpolated into a `-c` string (which
-/// is the one shell-injection class the rest of the app has zero instances of, and
-/// avoids the Windows `.cmd`-shim multi-line-argv rejection).
-///
-/// The frontend's interpreter dropdown mirrors these keys; an unknown key errors
-/// at run time rather than silently doing nothing.
+/// extension, and the argv that runs the script FILE. Argv-only by design: the
+/// body is never interpolated into a `-c` string (also dodges the Windows
+/// `.cmd`-shim multi-line-argv rejection). The frontend's dropdown mirrors these
+/// keys; an unknown key errors at run time rather than doing nothing.
 type TaskArgs = fn(&str) -> Vec<String>;
 fn task_interp(interpreter: &str) -> Option<(&'static [&'static str], &'static str, TaskArgs)> {
     let ps: TaskArgs = |p| {
@@ -266,14 +255,12 @@ pub async fn detect_interpreters() -> AppResult<Vec<DetectedInterpreter>> {
     .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))
 }
 
-/// Full run-resolution for a SINGLE interpreter — the same resolution an actual
-/// task run uses (macOS/Linux login-shell PATH recovery, Windows live-registry
-/// PATH), unlike the cheap PATH-only `detect_interpreters`. The task editor calls
-/// this lazily for the SELECTED interpreter when the cheap pass missed it, so a
-/// Finder/Dock-launched macOS app (which inherits launchd's minimal PATH) doesn't
-/// warn that an nvm/fnm-managed `node` is absent when it will actually run fine.
-/// Returns the resolved absolute path, or `None` when even the login shell can't
-/// find it. An unknown key resolves to `None`, matching `detect_interpreters`.
+/// Full run-resolution for a SINGLE interpreter — the resolution an actual task
+/// run uses (login-shell PATH recovery, Windows live-registry PATH), unlike the
+/// cheap PATH-only `detect_interpreters`. The editor calls it lazily for the
+/// SELECTED interpreter when the cheap pass missed it, so a Finder-launched
+/// macOS app doesn't warn that an nvm-managed `node` is absent when it will run
+/// fine. `None` (incl. unknown keys) = not resolvable.
 #[tauri::command]
 pub async fn resolve_task_interpreter(key: String) -> AppResult<Option<String>> {
     // git-bash resolves specially inside `resolve_interpreter_run` (names ignored);
@@ -411,12 +398,10 @@ fn encode(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-/// Kills a PTY's child. Tasks tree-kill (Windows `taskkill /F /T`) so their git /
-/// node / pnpm descendants don't orphan; a shell relies on the PTY hangup reaching
-/// its foreground group, so `child.kill()` alone is enough there. Returns the
-/// still-running `taskkill` process (when one was spawned) so the caller can WAIT
-/// for it before deleting the temp script — deleting while a descendant still has
-/// the file open fails silently on Windows and leaks the file.
+/// Kills a PTY's child: tasks tree-kill (their git/node/pnpm descendants would
+/// orphan), shells rely on the PTY hangup. Returns the still-running `taskkill`
+/// so the caller can WAIT before deleting the temp script — deleting while a
+/// descendant holds it open fails silently on Windows and leaks the file.
 fn kill_handle(h: &mut PtyHandle) -> Option<std::process::Child> {
     let tk = if h.tree_kill {
         kill_tree(&mut h.child)
@@ -427,11 +412,9 @@ fn kill_handle(h: &mut PtyHandle) -> Option<std::process::Child> {
     tk
 }
 
-/// Best-effort process-tree kill for a task run. On Windows `taskkill /T` reaches
-/// the whole tree (git/node/pnpm children a bare `TerminateProcess` would orphan);
-/// the spawned `taskkill` is returned for the caller to wait on. On Unix the PTY
-/// hangup (SIGHUP to the foreground group when the master drops) plus the caller's
-/// `child.kill()` already reach descendants, so there's nothing extra to do.
+/// Best-effort process-tree kill for a task run (see `kill_handle`). Windows:
+/// `taskkill /T`, returned for the caller to wait on. Unix: nothing extra — the
+/// PTY hangup plus `child.kill()` already reach descendants.
 fn kill_tree(child: &mut Box<dyn Child + Send + Sync>) -> Option<std::process::Child> {
     #[cfg(windows)]
     if let Some(pid) = child.process_id() {
@@ -455,12 +438,9 @@ fn cleanup_handle(h: &mut PtyHandle) {
     }
 }
 
-/// Full teardown of a removed handle: kill (tree first), WAIT for the Windows
-/// `taskkill` to finish sweeping descendants, then delete the temp script. The
-/// wait is what makes the delete stick — a child that still holds the script
-/// open at delete time would otherwise leak it. Blocking: run this on a
-/// dedicated or detached thread, never the main thread (sync Tauri commands run
-/// there).
+/// Full teardown of a removed handle: kill (tree first), wait for the Windows
+/// tree-kill, then delete the temp script. Blocking — run on a dedicated or
+/// detached thread, never the main thread (sync Tauri commands run there).
 fn teardown_handle(mut h: PtyHandle) {
     if let Some(mut tk) = kill_handle(&mut h) {
         let _ = tk.wait();
@@ -661,13 +641,11 @@ pub fn pty_close(state: State<'_, PtyState>, id: String) -> AppResult<()> {
 }
 
 // ── Dev-only external-terminal fallback ─────────────────────────────────────
-// Runs a task in the user's OS terminal instead of the in-app PTY. This exists
-// ONLY for the Windows ConPTY-under-`pnpm tauri dev` limitation (see the module
-// header): the in-app terminal can't spawn in dev, so the frontend silently
-// routes Run here on Windows dev builds. **Compiled out of release binaries**
-// (`debug_assertions`) — a production build carries none of this; its frontend
-// gate is statically false there too, so nothing ever calls it. Structure
-// mirrors `agent_sandbox::launch_container_shell`.
+// Dev-only external-terminal fallback: runs a task in the user's OS terminal
+// because the in-app PTY can't spawn under `pnpm tauri dev` on Windows (see the
+// module header). Compiled out of release builds (`debug_assertions`), and the
+// frontend's gate is statically false there. Mirrors
+// `agent_sandbox::launch_container_shell`.
 
 #[cfg(debug_assertions)]
 static TERM_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -754,11 +732,9 @@ fn spawn_terminal(cwd: &str, bin: &str, argv: &[String]) -> AppResult<()> {
     ))
 }
 
-/// Launches a task in the user's OS terminal (rather than the in-app PTY) — the
-/// automatic dev fallback for the Windows ConPTY-under-`tauri dev` limitation.
-/// Dev builds only: in release the implementation is compiled out and this
-/// answers with an error (nothing routes here in production — the frontend's
-/// dev gate is statically false in a production bundle).
+/// Launches a task in the user's OS terminal — the dev fallback for the Windows
+/// ConPTY-under-`tauri dev` limitation. Dev builds only; in release the body is
+/// compiled out and this answers with an error (nothing routes here).
 #[tauri::command]
 pub async fn task_open_terminal(
     cwd: String,

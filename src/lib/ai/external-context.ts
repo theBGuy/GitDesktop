@@ -18,12 +18,9 @@ export interface ExternalContext {
   externalStale?: boolean;
 }
 
-/**
- * Known reviewer-bot logins → friendly display names. Conversation comments are
- * harvested ONLY from these (other bots — CI, deploy, dependabot — also post on
- * that surface); inline review comments and submitted review bodies are taken
- * from ANY bot, since only reviewer tools produce those.
- */
+/** Known reviewer-bot logins → friendly display names. This allowlist is the only bot
+ *  truth we have for GitLab, and the gate for conversation comments on GitHub (CI /
+ *  deploy / dependabot post on that surface too) — see `isReviewerFinding`. */
 const REVIEWER_BOTS: Record<string, string> = {
   copilot: "GitHub Copilot",
   "copilot-pull-request-reviewer": "GitHub Copilot",
@@ -59,46 +56,34 @@ function isReviewerBotLogin(login: string): boolean {
 /**
  * Whether an item is a genuine AI-reviewer finding worth folding in.
  *
- * On GitHub, `isBot` is server truth (GraphQL `__typename == "Bot"`), so inline
- * review comments and submitted reviews from any bot qualify (only reviewers post
- * those); conversation comments only from an allowlisted reviewer bot.
- *
- * On GitLab, REST authors carry NO bot flag — the Rust mapper sets `isBot: true`
- * unconditionally — so the inline/review "any bot" bypass would let a HUMAN
- * teammate's inline diff comment ("nit: rename this") pose as an AI finding. For
- * GitLab we therefore require the author to be an allowlisted reviewer bot for
- * EVERY kind; the login allowlist (`REVIEWER_BOTS`) is the only bot truth we have,
- * and it lives in exactly one place — here.
+ * GitHub: `isBot` is server truth (GraphQL `__typename == "Bot"`), so any bot's inline
+ * or submitted review qualifies (only reviewers post those); conversation comments need
+ * the `REVIEWER_BOTS` allowlist. GitLab: REST authors carry no bot flag (the Rust mapper
+ * hardcodes `isBot: true`), so without the allowlist on EVERY kind a human teammate's
+ * inline diff comment would pose as an AI finding.
  */
 function isReviewerFinding(
   item: ExternalReviewItem,
   provider: string,
 ): boolean {
-  // Thread replies are scoped to own-context in v1; the external section stays
-  // opener-only. Note the GitLab asymmetry: GitLab replies arrive as
-  // `inline`/`comment` (never `reply`) and remain admitted for allowlisted bots
-  // below — unchanged, deliberate. Only the GitHub harvest emits `reply`.
+  // Replies are own-context's job; the external section stays opener-only. Only the
+  // GitHub harvest emits `reply` — GitLab replies arrive as `inline`/`comment` and stay
+  // admitted for allowlisted bots below.
   if (item.kind === "reply") return false;
   if (!item.isBot || !item.body.trim()) return false;
   if (provider === "gitlab") return isReviewerBotLogin(item.author);
-  // GitHub: `isBot` is server-verified, so reviewer-only surfaces (inline/review)
-  // qualify from any bot; conversation comments need the allowlist.
   if (item.kind === "inline" || item.kind === "review") return true;
   return isReviewerBotLogin(item.author);
 }
 
 /**
- * Fetches a PR's review activity and keeps only the third-party AI-reviewer
- * findings. Best-effort: any failure (no gh, network) yields an empty list —
- * external context never blocks a review. Used by the panel's banner query and by
- * `resolveExternalContext`.
+ * Fetches a PR's review activity and keeps only the third-party AI-reviewer findings.
+ * Best-effort: any failure (no gh, network) yields an empty list — external context never
+ * blocks a review. Runs behind the forge abstraction (`forge_pr_external_reviews`);
+ * Bitbucket has no third-party AI-reviewer ecosystem and its Rust arm is an empty
+ * no-network `[]`, so short-circuiting here also skips the IPC round trip.
  *
- * The harvest runs behind the forge abstraction (`forge_pr_external_reviews`):
- * GitHub delegates unchanged, GitLab maps MR discussions. Bitbucket has no
- * third-party AI-reviewer ecosystem, so we skip it here (the Rust arm is an empty
- * no-network `[]` anyway — skipping in one place, the frontend, avoids even the
- * IPC round trip per automated run and per panel view). The `provider` param
- * defaults to GitHub so existing callers are unchanged.
+ * Used by the panel's external-reviews query as well as `resolveExternalContext`.
  */
 export async function fetchExternalFindings(
   repoPath: string,
@@ -107,8 +92,7 @@ export async function fetchExternalFindings(
 ): Promise<ExternalReviewItem[]> {
   if (provider === "bitbucket") return [];
   try {
-    // Origin-pinned (package B2 recorded gap): AI review context reads the fork's
-    // own PR; upstream-lens AI review is a follow-up.
+    // Origin-pinned: AI review context reads the fork's own PR, not the upstream lens.
     const items = await forgePrExternalReviews(repoPath, prNumber, "origin");
     return items.filter((item) => isReviewerFinding(item, provider));
   } catch {
@@ -130,24 +114,19 @@ export function externalReviewerNames(items: ExternalReviewItem[]): string[] {
   return names;
 }
 
-/** Per-kind body FLOORS under the fair-share allocator — every kept finding is
- *  guaranteed at least this many characters, so a giant conversation summary
- *  (a CodeRabbit walkthrough) can never crowd out a later inline finding. They
- *  are NOT ceilings: a finding's actual cap is its max-min share of the section
- *  budget (see `allocateBodyCaps`), which is larger whenever the other findings
- *  leave slack — an inline finding stays tight because it IS short, not because
- *  it's clamped. When the floors alone exceed the budget the allocation
- *  degenerates to floor-for-all and over-allocates; `fit` in `budgetReviewExtras`
- *  stays the hard enforcement. */
+/** Per-kind body FLOORS for the fair-share allocator — a guaranteed minimum per kept
+ *  finding, so a giant conversation summary (a CodeRabbit walkthrough) can't crowd out a
+ *  later inline finding. NOT ceilings: the actual cap is the max-min share
+ *  (`allocateBodyCaps`), and when the floors alone exceed the budget the allocation
+ *  over-allocates — `fit` in `budgetReviewExtras` stays the hard enforcement. */
 const INLINE_BODY_FLOOR = 700;
 const REVIEW_BODY_FLOOR = 1_500;
 const COMMENT_BODY_FLOOR = 1_200;
 
-/** Crudely de-noises a bot comment body: drops HTML comments and collapsible
- *  `<details>` blocks (walkthroughs / sequence diagrams), unwraps the remaining
- *  tags, and collapses blank runs. The actionable findings live in inline
- *  comments; this is only to make a summary comment cheap to include. Length is
- *  not this function's business — the fair-share caps land in pass 2. */
+/** De-noises a bot comment body: drops HTML comments and collapsible `<details>` blocks
+ *  (walkthroughs / sequence diagrams), unwraps the remaining tags, collapses blank runs.
+ *  The actionable findings live in inline comments, so a summary comment only has to be
+ *  cheap to include. Length is pass 2's business (the fair-share caps). */
 function condense(body: string): string {
   return body
     .replace(/<!--[\s\S]*?-->/g, "")
@@ -169,17 +148,17 @@ function locationTag(item: ExternalReviewItem): string {
 }
 
 /**
- * Formats the kept findings into a grouped markdown block, reviewer by reviewer:
- * inline (line-anchored) findings first — the actionable ones — then submitted
- * review bodies, then a condensed conversation summary. Returns "" when empty.
+ * Formats the kept findings into a grouped markdown block, reviewer by reviewer: inline
+ * (line-anchored) findings first — the actionable ones — then submitted review bodies,
+ * then a condensed conversation summary. Returns "" when empty.
  *
- * Two passes, because each body's cap depends on all the others: pass 1 groups,
- * sorts and de-noises, dropping whatever condenses to nothing, then the surviving
- * lengths are fair-shared across `budget` net of the rendered scaffolding (see
- * `allocateBodyCaps` and the reserve below) — ALL reviewers pooled, since the
- * budget is section-wide — and pass 2 renders each body under its own cap.
- * Capping per item BEFORE knowing the section budget was the old bug: a bot's 5K
- * review body was cut to 1.5K even with most of the external budget unspent.
+ * Two passes, because each body's cap depends on all the others: pass 1 groups, sorts and
+ * de-noises, dropping whatever condenses to nothing; the surviving lengths are fair-shared
+ * across `budget` net of the rendered scaffolding — ALL reviewers pooled, since the budget
+ * is section-wide — and pass 2 renders each body under its own cap.
+ *
+ * Capping per item BEFORE the section budget is known is the trap it avoids: a long review
+ * body gets cut to its floor while most of the external budget goes unspent.
  */
 function formatExternalFindings(
   items: ExternalReviewItem[],
@@ -229,25 +208,17 @@ function formatExternalFindings(
     }
   }
 
-  // The caps govern BODY length, but the rendered section also carries
-  // scaffolding: each line's prefix and the newline joining it to the next, two
-  // more characters for every newline inside a body (the `\n  ` continuation
-  // indent), and a `### <reviewer>` header plus blank-line joiner per group.
-  // Reserving it buys right-sized SHARES — without it the fair split is computed
-  // over a budget the render then blows past, so the bodies are collectively
-  // sized wrong. It is NOT a guarantee that the result fits `budget`: the floors
-  // can lift a cap back above any netted budget, and `fit` (truncate.ts) is the
-  // real enforcement point — it now cuts through `capBody`, so an overflow ends
-  // in a marked cut rather than a bare one.
+  // The caps govern BODY length, but the render also emits scaffolding: each line's prefix
+  // + the joining newline, two more chars per newline inside a body (the `\n  ` continuation
+  // indent), and a `### <reviewer>` header per group. Reserving it buys right-sized SHARES —
+  // without it the split is computed over a budget the render then blows past. It is not a
+  // guarantee of fit (the floors can lift a cap back over any netted budget).
   //
-  // The newline term is charged against `body.slice(0, provisionalCap)`, not the
-  // whole body: a 40K walkthrough with 2,000 newlines would otherwise reserve
-  // ~4,000 characters for a body that will be cut to ~1,200, starving every other
-  // finding of its share. Round 1 allocates with no scaffolding to get those
-  // provisional caps; since a smaller budget never yields a LARGER share, round
-  // 2's caps are ≤ round 1's, so the measured newline count stays an upper bound
-  // (+1 covers the line `capBody` adds for its note) and the only failure mode is
-  // slightly under-using the budget.
+  // Round 1 allocates with no scaffolding purely to get provisional caps: the newline term
+  // is charged against the body AS CUT, or one huge walkthrough reserves for newlines it
+  // will never render and starves every other finding of its share. A smaller budget never
+  // yields a LARGER share, so round 2's caps are ≤ round 1's and that count stays an upper
+  // bound (+1 for `capBody`'s note line) — the only failure mode is under-using the budget.
   const lengths = cleaned.map((c) => c.body.length);
   const bodyFloors = cleaned.map((c) => floors[c.item.kind]);
   const provisional = allocateBodyCaps(lengths, budget, bodyFloors);
@@ -280,16 +251,14 @@ function formatExternalFindings(
 }
 
 /**
- * Loads third-party AI-reviewer findings for a remote PR and formats them as
- * soft context. Remote-only (local PRs have no remote reviewers) and best-effort
- * — `ignore`, a non-remote kind, a non-numeric ref, or any fetch failure yields
- * `{}`. Mirrors `resolvePriorContext`: takes primitives, never throws, never the
- * source of truth.
+ * Loads third-party AI-reviewer findings for a remote PR and formats them as soft context.
+ * Remote-only (local PRs have no remote reviewers) and best-effort — `ignore`, a non-remote
+ * kind, a non-numeric ref, or any fetch failure yields `{}`. Mirrors `resolvePriorContext`:
+ * takes primitives, never throws, never the source of truth.
  *
- * `opts.budgetChars` is the section budget the per-finding caps are fair-shared
- * across — the same budget the rest of the prompt scales to (the user's
- * Review-context knob), so the knob actually reaches this section. The constant
- * is a defensive default for a caller that doesn't resolve it.
+ * `opts.budgetChars` is the section budget the per-finding caps are fair-shared across —
+ * the user's Review-context knob, so the knob reaches this section; the constant is a
+ * defensive default for callers that don't resolve it.
  */
 export async function resolveExternalContext(
   repoPath: string,

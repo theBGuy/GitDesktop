@@ -24,21 +24,16 @@ import { SUBMIT_HINT } from "./ReviewThreads";
 export type DiffSections = ReturnType<typeof splitUnifiedDiff>;
 
 /**
- * Derive the new-side (right) line number a GitHub commit comment anchors to
- * from its diff `position`. GitHub sends `position` (1-based index of the line
- * within the file's patch, counting EVERY line after the first `@@` hunk
- * header — the headers of subsequent hunks included) but often leaves `line`
- * null, so the position must be walked against the file's own diff section to
- * recover the line. Returns null when the section is absent, the position is
- * out of range, or the target line isn't on the new side (context/added lines
- * carry a new-side number; a removed line does not).
+ * Derive the new-side (right) line a GitHub commit comment anchors to from its
+ * diff `position`. GitHub sends `position` (1-based index of the line within the
+ * file's patch, counting EVERY line after the first `@@` header — subsequent hunk
+ * headers included) but often leaves `line` null, so the position must be walked
+ * against the file's own diff section. Returns null when the section is absent, the
+ * position is out of range, or the target isn't on the new side.
  *
- * `\ No newline at end of file` markers are counted toward `position` (GitHub
- * indexes every patch line after the first `@@` header, including them) but are
- * NOT content — they annotate the previous line, so they never advance the
- * new-side counter and are never a valid anchor target. Advancing on them would
- * shift every line after a no-trailing-newline transition by one (the same rule
- * `parseHunk` in ReviewThreads.tsx documents).
+ * `\ No newline at end of file` markers COUNT toward `position` but are not
+ * content: they never advance the new-side counter and are never a valid anchor
+ * (advancing on them would shift every line after the transition by one).
  */
 export function lineFromPosition(
   section: string | undefined,
@@ -71,8 +66,7 @@ export function lineFromPosition(
     }
     pos += 1;
     if (l.startsWith("\\")) {
-      // `\ No newline at end of file`: counts toward position but is not content
-      // — no new-side number, and never a valid anchor target.
+      // `\ No newline…`: counts toward position, but is not content — never an anchor.
       if (pos === position) return null;
       continue;
     }
@@ -89,21 +83,12 @@ export function lineFromPosition(
 }
 
 /**
- * The inverse of {@link lineFromPosition}: given a new-side (right) line number,
- * derive the GitHub commit-comment `position` (1-based index within the file's
- * patch, counting EVERY line after the first `@@` hunk header — the headers of
- * subsequent hunks included) that anchors to it. Walks the file's own diff
- * section with the same counting rules as `lineFromPosition`, in the forward
- * direction, and returns the position at which the target new-side line is first
- * reached. Returns null when the section is absent, has no hunk header, or the
- * requested line never appears on the new side (it wasn't part of this commit's
- * diff for that file) — the caller then disables the post with a visible reason.
- *
- * `\ No newline at end of file` markers are counted toward `position` (to stay
- * symmetric with {@link lineFromPosition}) but never advance the new-side
- * counter and are never a returned target: a `\` line is not content, so the
- * position it occupies can't anchor a comment (the same rule `parseHunk` in
- * ReviewThreads.tsx documents).
+ * The inverse of {@link lineFromPosition}: given a new-side line number, return the
+ * GitHub commit-comment `position` that anchors to it, walking the file's diff
+ * section with the same counting rules forward. Returns null when the section is
+ * absent, has no hunk header, or the line never appears on the new side (it wasn't
+ * in this commit's diff for that file) — the caller then disables the post with a
+ * visible reason. `\` lines count toward `position` but never anchor a comment.
  */
 export function positionFromLine(
   section: string | undefined,
@@ -133,8 +118,7 @@ export function positionFromLine(
       continue;
     }
     pos += 1;
-    // `\ No newline at end of file`: counts toward position but is not content,
-    // so it never advances the new-side counter nor anchors a comment.
+    // `\ No newline…`: counts toward position, never advances the new-side counter.
     if (l.startsWith("\\")) continue;
     // Removed line: no new-side number, so it can never match the target line.
     if (l.startsWith("-")) continue;
@@ -149,12 +133,11 @@ export function positionFromLine(
  * The inline diff anchors for a commit's line-anchored comments on ONE file:
  * every comment on `path` that resolves to a new-side line, grouped by that line
  * into a single stacked {@link DiffLineAnchor} (DiffSurface keeps one entry per
- * line/side, so multiple comments on the same line must be pre-grouped). A
- * comment's line is its own `line` when present, else recovered from its diff
- * `position` via {@link lineFromPosition}; unresolvable comments are dropped here
- * and surface in {@link CommitComments}' labelled group instead. A ranged comment
- * (`startLine != null && startLine !== line`) gets a small mono range chip so it
- * reads as ranged. Shared by {@link PrCommitDetail} and P4's history surface.
+ * line/side, so same-line comments MUST be pre-grouped). A comment's line is its
+ * own `line` when present, else recovered from `position` via
+ * {@link lineFromPosition}; unresolvable comments are dropped here and surface in
+ * {@link CommitComments}' labelled group instead. A ranged comment gets a small
+ * mono range chip.
  */
 export function useCommitLineAnchors(
   comments: CommitCommentOut[] | undefined,
@@ -201,7 +184,9 @@ export function useCommitLineAnchors(
 function toThread(c: CommitCommentOut): PrThreadOut {
   return {
     author: c.author,
-    // Commit comments are GitHub-only; the avatar is login-derived on the frontend.
+    // The commit-comment payload carries no avatar URL on any provider, so pass "" —
+    // ForgeUserAvatar derives one from the login on GitHub and falls back to initials
+    // elsewhere.
     authorAvatarUrl: "",
     state: "",
     body: c.body,
@@ -217,14 +202,12 @@ function toThread(c: CommitCommentOut): PrThreadOut {
 }
 
 /**
- * The comment surface for a single commit: whole-commit comments as a flat
- * thread list, line-anchored comments grouped by `path:line`, and a
- * whole-commit composer. Consumes the already-optimistic commit-comment hooks
- * (P2); the diff pane owns rendering anchored comments inline via `lineAnchors`,
- * but ONLY for the currently-selected file. So the labelled group here lists
- * every anchored comment that isn't visible inline — anchored to a non-selected
- * file, or on the selected file but unresolvable to a new-side line — so no
- * anchored comment is ever silently dropped.
+ * The comment surface for a single commit: whole-commit comments as a flat thread
+ * list, line-anchored comments grouped by `path:line`, and a whole-commit composer.
+ * The diff pane renders anchored comments inline via `lineAnchors`, but ONLY for
+ * the selected file — so the labelled group here lists every anchored comment that
+ * isn't visible inline (another file, or unresolvable to a new-side line), so none
+ * is ever silently dropped.
  */
 export function CommitComments({
   repoPath,
@@ -264,12 +247,9 @@ export function CommitComments({
   const whole = list.filter((c) => c.path == null);
   const anchored = list.filter((c) => c.path != null);
 
-  // Anchored comments NOT visible inline in the diff. A comment renders inline
-  // only when it's on the currently-selected file AND resolves to a new-side
-  // line (the parent's `lineAnchors` cover exactly that set). Everything else —
-  // comments on other files, or unresolvable ones on this file — surfaces here
-  // under its `path:line` label so it's never silently dropped. Each carries the
-  // resolved line for a precise label when we have one.
+  // Anchored comments NOT visible inline: one renders inline only when it's on the
+  // selected file AND resolves to a new-side line. Everything else surfaces below
+  // under its `path:line` label, with the resolved line when we have one.
   const hiddenAnchored = useMemo(() => {
     return anchored
       .map((c) => {
@@ -450,15 +430,13 @@ export function CommitComments({
 }
 
 /**
- * The inline composer rendered inside a commit-diff line-widget slot: a compact
- * MarkdownEditor + Comment button that creates a line-anchored commit comment via
- * {@link useCreateCommitComment}. Commit comments anchor to the NEW side only, so
- * an old-side line is disabled with a visible reason. On GitHub the `position` is
- * recovered from the file's diff section via {@link positionFromLine}; when the
- * line isn't in this commit's diff for the file that resolves to null and the
+ * The inline composer in a commit-diff line-widget slot: a compact MarkdownEditor +
+ * Comment that creates a line-anchored commit comment. Commit comments anchor to
+ * the NEW side only, so an old-side line is disabled with a visible reason. On
+ * GitHub the `position` is recovered from the file's diff section via
+ * {@link positionFromLine}; a line not in this commit's diff yields null and the
  * post is disabled with a reason. GitLab commit notes anchor by `line` alone.
- * Posting is optimistic (the hook appends the synthetic comment), so it closes
- * the slot immediately. Wired by PrCommitDetail via the diff `lineWidget`.
+ * Posting is optimistic, so the slot closes immediately.
  */
 export function CommitLineComposer({
   repoPath,
@@ -494,11 +472,9 @@ export function CommitLineComposer({
   const rangeFrom = fromLine !== undefined && fromLine < line ? fromLine : line;
   const isRange = rangeFrom !== line;
 
-  // GitHub needs the diff `position` (not just the line); recover it from the
-  // file's section. A null means the line isn't on the new side of this commit's
-  // diff for the file, so it can't be anchored — disable with a reason. The
-  // position is always the END line: GitHub/Bitbucket commit comments are
-  // single-line APIs, so a range still anchors there.
+  // GitHub needs the diff `position`; null means the line isn't on the new side of
+  // this commit's diff for the file → disable with a reason. The position is always
+  // the END line (GitHub/Bitbucket commit comments are single-line APIs).
   const position =
     provider === "github" ? positionFromLine(fileSection, line) : null;
   const disabledReason =
@@ -510,8 +486,8 @@ export function CommitLineComposer({
   const canPost = disabledReason === null;
 
   // Only GitLab commit discussions carry a real range; GitHub/Bitbucket commit
-  // comments are single-line APIs and anchor at the END line only, disclosed
-  // below so a dragged range never silently collapses without saying so.
+  // comments are single-line APIs anchored at the END line — disclosed below so a
+  // dragged range never silently collapses without saying so.
   const rangeHint = !isRange
     ? null
     : provider === "github"

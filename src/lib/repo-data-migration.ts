@@ -2,65 +2,46 @@ import { load } from "@tauri-apps/plugin-store";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import { storeName } from "@/lib/test-mode";
 
-// Best-effort migration of every per-repo app-data store when a recents row is
-// *relocated* — the user pointed GitDesktop at a repo's new folder after it moved
-// on disk (see features/repository/useOpenRepoByPath.ts). The relocate row-rewrite
-// only moves the settings.json recents entry; every other per-repo store still keys
-// its data under the OLD location, which would orphan the repo's local PRs/issues,
-// review history + drafts, review notes, automations config, Jira link, etc. This
-// re-homes each store's entries onto the new identity key.
+// Best-effort re-homing of every per-repo app-data store when a recents row is
+// *relocated* (features/repository/useOpenRepoByPath.ts): that rewrite moves only
+// the settings.json entry, so every other store still keys its data under the OLD
+// location and would orphan it.
 //
-// **Why TS-side, not Rust:** every store here is a `@tauri-apps/plugin-store` file
-// that returns ONE shared instance per file app-wide. Loading a file here via the
-// same `storeName()` wrapper + load options mutates the exact instance the feature
-// modules cache, so the change is coherent with their in-memory state (a Rust-side
-// file rewrite behind the plugin's back would be silently overwritten on the next
-// autosave). We `reload()` before each mutation because `local-prs.json` and
-// `review-notes.json` are also written by the Rust MCP server — reload-before-mutate
-// is the repo's established reconcile pattern, and it's harmless for the rest.
+// TS-side, not Rust: each store is one shared `@tauri-apps/plugin-store` instance
+// app-wide, so loading it here with the same `storeName()` + options mutates the
+// instance the feature modules cache — a Rust rewrite behind the plugin's back
+// would be lost to the next autosave. `reload()` first because local-prs.json and
+// review-notes.json are also written by the Rust MCP server.
 //
-// **Why the old key can't be recomputed:** a repo's identity key is
-// `git rev-parse --git-common-dir` on its checkout, but the old folder no longer
-// exists so git can't resolve it. Instead we match stored keys against the old path
-// in its two possible on-disk forms:
-//   - the identity form of a main checkout: `<oldPath>/.git`
-//   - a legacy raw-path key or an identity-fallback key: `<oldPath>` verbatim
-// (both forms may coexist across stores, or even within one store, so we collect
-// ALL matches). Matching is case-insensitive because Windows paths differ in case
-// in the wild (e.g. `C:\temp` vs `C:\Temp`); a false merge would require two
-// distinct repos on a case-sensitive filesystem at paths differing only by case,
-// one of them at the exact old location of an explicitly relocated row —
-// acceptable and documented.
+// The old key can't be recomputed (`--git-common-dir` needs the vanished folder),
+// so we match both on-disk forms of the old path — `<oldPath>/.git` (identity) and
+// `<oldPath>` verbatim (legacy raw / identity fallback) — collecting ALL matches,
+// case-insensitively (Windows paths differ in case in the wild); a false merge
+// would need two distinct repos on a case-sensitive filesystem at paths differing
+// only by case, one at the exact old location of an explicitly relocated row.
 //
-// **Merge classes** (how an old value combines with any value already under the
-// new key):
-//   - `id-merge`   — arrays of `{ id }` records: keep new-key records, append old
-//                    records whose id isn't already present.
-//   - `inner-key`  — `Record`-valued maps: spread old then new, so the new key's
-//                    inner entries win per inner key.
-//   - `keep-new`   — single values: keep the new-key value if present, else move
-//                    the old one.
+// Merge classes — how an old value combines with any value already under the
+// new key:
+//   - `id-merge`  — arrays of `{ id }`: keep new-key records, append old records
+//                   whose id isn't already present.
+//   - `inner-key` — `Record`-valued maps: spread old then new, so the new key's
+//                   inner entries win per inner key.
+//   - `keep-new`  — single values: keep the new-key value if present, else the old.
+//
 // plans.json / research.json are handled separately: their items carry a RAW
-// checkout `repoPath` (not an identity key), rewritten from old to new in place.
+// checkout `repoPath`, rewritten in place.
 //
-// **Deliberate exclusions:** settings.json (the relocate row-rewrite already moved
-// it); sessions/*.jsonl (Rust-owned append-only, and a moved repo's session
-// worktrees are broken at the git level regardless); notifications.json (transient
-// 50-cap inbox); scripts / analytics / agent-numbers / jira-field-maps (global or
-// per-site, not per-repo).
+// Deliberately excluded: settings.json (already moved), sessions/*.jsonl (Rust-owned
+// append-only; a moved repo's session worktrees are broken at the git level anyway),
+// notifications.json (transient), scripts / analytics / agent-numbers /
+// jira-field-maps (not per-repo).
 //
-// **Accepted residual — concurrent writers:** this surgery runs outside the feature
-// modules' own serialized write queues, so a peer write landing between a store's
-// `reload()` and `save()` (an automation runner, an MCP-server write) loses to our
-// whole-object write-back. The window is milliseconds wide and requires relocating
-// a repo at the exact moment a background writer fires; it matches the risk the
-// MCP-vs-GUI dual-writer stores already carry by design (reload-before-mutate).
-//
-// **Accepted residual — no retry:** when a single store throws mid-migration its
-// old-key data is orphaned permanently — nothing re-attempts the move on the next
-// reopen. The stores' own legacy folding only re-homes the *current* checkout's
-// raw-path key onto its identity, never the departed `<oldPath>/.git` key, so a
-// failed store stays split at the old location.
+// Accepted residuals: this runs outside the feature modules' serialized write queues,
+// so a peer write landing between a store's reload() and save() loses to our
+// write-back; and a store that throws mid-migration orphans its old-key data
+// permanently — nothing retries on reopen, and the stores' own legacy folding only
+// re-homes the CURRENT checkout's raw-path key, never the departed `<oldPath>/.git`
+// key.
 
 /** Load a store with the exact shared-instance options every feature module uses,
  *  so we mutate the same cached instance rather than a private copy. */
@@ -128,10 +109,10 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return v != null && typeof v === "object" && !Array.isArray(v);
 }
 
-/** Merge two id-bearing arrays: keep-array records first, append old records whose
- *  id isn't already present. Non-object entries in the old array are dropped (they
- *  can't be de-duped); an idless object still passes `isRecord` and is kept (its
- *  `id` is `undefined`, so at most one idless old record survives per merge). */
+/** Merge two id-bearing arrays: `keep` first, then old records whose id isn't
+ *  already present. Non-object old entries are dropped (undedupable); idless
+ *  objects all collide on `id === undefined`, so an idless record in `keep`
+ *  suppresses every idless old one. */
 function mergeIds(keep: unknown[], old: unknown[]): unknown[] {
   const seen = new Set(
     keep.filter((r): r is { id: unknown } => isRecord(r)).map((r) => r.id),
@@ -163,7 +144,6 @@ function matchingOldKeys(
     if (nk === dotGit) gitForm.push(k);
     else if (nk === raw) rawForm.push(k);
   }
-  // `/.git`-form values win over raw-form on collision, so list them first.
   return [...gitForm, ...rawForm];
 }
 
@@ -178,8 +158,7 @@ function combine(
 ): unknown {
   if (merge === "id-merge") {
     const keep = Array.isArray(newVal) ? newVal : [];
-    // Fold the old arrays together first (the `/.git` form, oldVals[0], wins on a
-    // shared id since it's the accumulator base), then fold that onto the new key.
+    // oldVals[0] (the `/.git` form) is the accumulator base, so it wins on a shared id.
     let mergedOld: unknown[] = [];
     for (const v of oldVals) {
       if (Array.isArray(v)) mergedOld = mergeIds(mergedOld, v);
@@ -187,8 +166,6 @@ function combine(
     return mergeIds(keep, mergedOld);
   }
   if (merge === "inner-key") {
-    // Fold old maps together with the first-listed (`/.git`) form winning, then
-    // let the new key's inner entries win over all of them.
     const mergedOld: Record<string, unknown> = {};
     // Iterate in reverse so earlier-listed old keys overwrite later ones.
     for (let i = oldVals.length - 1; i >= 0; i--) {

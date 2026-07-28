@@ -43,9 +43,10 @@ const MAX_PER_GROUP = 3;
 const groupKey = (r: Pick<PersistedReview, "kind" | "ref" | "mode">) =>
   `${r.kind}#${r.ref}#${r.mode}`;
 
-// Personal app-data, keyed by repo path — never written into the repo itself
-// (the text quotes user source + may contain AI false positives). Routed through
-// storeName() so cold-start/test mode never pollutes real history.
+// Personal app-data, keyed by the repo's worktree-stable identity — never written
+// into the repo itself (the text quotes user source + may contain AI false
+// positives). Routed through storeName() so cold-start/test mode never pollutes
+// real history.
 let storePromise: Promise<Store> | null = null;
 function getStore(): Promise<Store> {
   storePromise ??= load(storeName("pr-reviews.json"), {
@@ -55,14 +56,12 @@ function getStore(): Promise<Store> {
   return storePromise;
 }
 
-// Serialize every read-modify-write on this store through one in-process queue.
-// Without it, two overlapping mutations each reload the SAME pre-flush disk snapshot
-// — autoSave persists on a ~100ms debounce, so the first write isn't on disk yet — and
-// the later write drops the earlier one's change (a lost update). Unlike local-prs.json,
-// pr-reviews.json is NOT written by the MCP server; the realistic overlap is entirely
-// in-process — e.g. an automation's review finishing while the user edits or deletes a
-// review's text, or two automation instances finishing close together. Running them one
-// at a time, plus the force-save in writeAll, guarantees each reload sees a current snapshot.
+// Serialize every read-modify-write on this store through one in-process queue:
+// autoSave persists on a ~100ms debounce, so two overlapping mutations would both
+// reload the same pre-flush disk snapshot and the later would drop the earlier's
+// change (e.g. an automation's review finishing while the user edits another's text).
+// Unlike local-prs.json this file has NO external MCP writer, so the overlap is
+// entirely in-process. With the force-save in writeAll, each reload sees fresh state.
 let opChain: Promise<unknown> = Promise.resolve();
 function serialize<T>(op: () => Promise<T>): Promise<T> {
   const run = opChain.then(op, op);
@@ -73,26 +72,21 @@ function serialize<T>(op: () => Promise<T>): Promise<T> {
 
 async function reloadRaw(): Promise<void> {
   const store = await getStore();
-  // Tolerate a missing store file. Asymmetry: `load()` tolerates a missing file
-  // but `reload()` rejects with a raw io error ("The system cannot find the file
-  // specified. (os error 2)") — the file only exists after the first `save()`.
-  // Without this guard the first-ever mutation throws before reaching `save()`,
-  // so the store can never bootstrap; an external delete of the file breaks every
-  // mutation until restart the same way. Fall back to the loaded in-memory state
-  // on ANY reload failure — the serialized op-chain + force-save still protect the
-  // write path.
+  // Tolerate a missing store file: `load()` tolerates one but `reload()` rejects with
+  // a raw io error (os error 2) until the first `save()` creates the file — without
+  // this guard the first-ever mutation throws before reaching `save()` and the store
+  // can never bootstrap (an external delete of the file breaks every mutation until
+  // restart the same way). Fall back to the loaded in-memory state on ANY reload failure.
   try {
     await store.reload({ ignoreDefaults: true });
   } catch {
-    // Missing/unreadable file — proceed with in-memory state; the next save()
-    // creates it.
+    // Missing file — the next save() creates it.
   }
 }
 
-// Records are keyed by the repo's worktree-stable identity (not its checkout
-// path) so a PR's review history is shared across the main checkout and every
-// worktree. Reads merge in any records still under a legacy checkout-path key
-// (folded onto the identity key by the next write via `keyFor`).
+// Keyed by the repo's worktree-stable identity, so reads merge in any records still
+// under a legacy checkout-path key (folded onto the identity by the next write via
+// `keyFor`).
 async function readMerged(repo: string): Promise<PersistedReview[]> {
   const store = await getStore();
   const id = await repoIdentity(repo);
@@ -181,8 +175,6 @@ export async function saveReview(
   record: PersistedReview,
 ): Promise<void> {
   return serialize(async () => {
-    // Fresh disk state first, then key-fold, then read-modify-write — all inside the
-    // serialized op so an overlapping mutation can't reload a pre-flush snapshot.
     await reloadRaw();
     const key = await keyFor(repo);
     const all = await readByKey(key);

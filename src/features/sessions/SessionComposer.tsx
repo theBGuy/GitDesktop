@@ -60,15 +60,13 @@ const CONTAINER_BLOCKED_TEXT =
   "Container isolation isn't ready — open Options for details.";
 
 /**
- * The single line shown under the composer's Isolation control. Container is
- * pick-then-warn: choosing it (or inheriting it from Settings) surfaces the same
- * readiness probe Settings runs, with a jump to Settings → AI where the runtime and
- * image are actually set up. A missing runtime / stopped engine / unbuilt image also
- * blocks Start (see `containerBlocked`); everything after that — a stale image, an
- * agent missing from it, a probe that couldn't run — only warns, because the backend
- * verifies at turn 1 anyway and over-blocking on a guess is worse than a warning. On
- * the worktree side the only note is the downgrade disclosure — running on the host
- * when the global setting says container — so the drop in confinement is never silent.
+ * The single line under the composer's Isolation control. Container is
+ * pick-then-warn: it surfaces the same readiness probe Settings runs, with a
+ * jump to Settings → AI. A missing runtime / stopped engine / unbuilt image also
+ * blocks Start (`containerBlocked`); everything after that only WARNS — the
+ * backend verifies at turn 1 anyway and over-blocking on a guess is worse. On
+ * the worktree side the only note is the host-downgrade disclosure, so a drop in
+ * confinement is never silent.
  */
 function isolationNoteFor({
   effective,
@@ -164,12 +162,11 @@ export interface SessionComposerHandle {
 }
 
 /**
- * The agent task composer, modeled on Claude Code's VS Code input: a single
- * auto-growing box (grows with content, capped, then scrolls) pinned at the
- * bottom, with the model picker and Send/Stop on its bottom edge. Enter sends,
- * Shift+Enter inserts a newline. Type `@` to mention a repo file. Used in two
- * places with the same logic — the activation panel (no session → `start`) and
- * the conversation footer (active session → `send` a follow-up).
+ * The agent task composer: a single auto-growing box (grows with content,
+ * capped, then scrolls) pinned at the bottom, with the model picker and
+ * Send/Stop on its bottom edge. Enter sends, Shift+Enter newlines, `@` mentions
+ * a repo file. Used both in the activation panel (no session → `start`) and the
+ * conversation footer (active session → `send` a follow-up).
  */
 export function SessionComposer({
   repoPath,
@@ -300,14 +297,12 @@ export function SessionComposer({
     setSlash(null);
     setHistIndex(null);
     setDraftCaretEnd(pendingTask.prompt);
-    // A record stashed by the "Set up in Settings…" jump also carries the whole
-    // start-state, so the round-trip can't silently change what will run. A plain
-    // handoff carries none of it and the composer keeps its own values. Tested
-    // with `!== undefined` throughout: "" (default model / Auto effort) and null
-    // (follow the default MCP set) are real values, not absences. These are plain
-    // setState calls — the agent-change RESET (model + MCP) lives in AgentPicker's
-    // onChange handler, not an effect, so restoring an agent doesn't wipe the
-    // model or servers restored alongside it.
+    // A record stashed by the "Set up in Settings…" jump carries the whole
+    // start-state so the round-trip can't silently change what will run; a plain
+    // handoff carries none of it. Tested with `!== undefined` throughout: "" and
+    // null are REAL values (default model, "follow the default MCP set"), not
+    // absences. Plain setState — the agent-change RESET lives in AgentPicker's
+    // onChange, so restoring an agent doesn't wipe the model restored with it.
     if (pendingTask.isolation !== undefined)
       setStartIsolation(pendingTask.isolation);
     if (pendingTask.agent !== undefined) setStartAgent(pendingTask.agent);
@@ -419,15 +414,14 @@ export function SessionComposer({
     isContainer &&
     !!probe &&
     (!probe.runtime || !probe.ready || !probe.imagePresent);
-  // Until settings resolve we don't yet know the global isolation, so the readiness
-  // gate above hasn't run — but start() reads settings itself and would happily
-  // launch a container session. Hold Start for those few milliseconds rather than
-  // let one slip past the gate. Deliberately silent: it's a load, not a problem.
-  // A settings load that FAILED is deliberately not pending — holding Send forever
-  // would be the worse bug. Residual: start()'s own loadSettings() can succeed where
-  // the query errored and launch per the real setting while the row showed the
-  // worktree fallback — near-unreachable, it errs toward MORE confinement than
-  // displayed, and turn 1 re-checks readiness in Rust.
+  // Until settings resolve the global isolation is unknown, so the readiness gate
+  // hasn't run — but start() reads settings itself and would happily launch a
+  // container session. Hold Start for those milliseconds. Deliberately silent:
+  // it's a load, not a problem. A settings load that FAILED is deliberately NOT
+  // pending — holding Send forever would be the worse bug. Residual: start()'s
+  // own loadSettings() can succeed where the query errored and launch per the
+  // real setting while the row showed the worktree fallback — it errs toward
+  // MORE confinement than displayed, and turn 1 re-checks readiness in Rust.
   const settingsPending = !session && !settings.data && !settings.isError;
   const canSubmit =
     !running &&
@@ -573,8 +567,7 @@ export function SessionComposer({
               mcpServersForAgent.some((s) => s.id === id),
             )
           : undefined,
-        // Absent unless the user explicitly picked — start() then reads the global
-        // setting itself, exactly as before.
+        // Absent unless explicitly picked — start() then reads the global setting.
         startIsolation ?? undefined,
       );
   };
@@ -889,14 +882,12 @@ export function SessionComposer({
               }
               className="max-h-40 min-h-9 w-full resize-none overflow-y-auto bg-transparent text-xs leading-relaxed outline-none placeholder:text-muted-foreground"
             />
-            {/* Why Send is disabled, in layout flow — the global setting alone can
-                put you here, in which case the Options badge doesn't move and a
-                hover-only tooltip would be the sole explanation. Carries the
-                SPECIFIC reason (engine down, image missing, …) and is what the Send
-                button points `aria-describedby` at while blocked. Reasons Settings
-                can fix carry the remedy here too, so it's reachable without ever
-                opening the Options popover; an engine that isn't running has no
-                `settingsAction` (Settings can't start a daemon) and gets no button. */}
+            {/* Why Send is disabled, in LAYOUT FLOW: the global setting alone
+                can put you here, where a hover-only tooltip would be the sole
+                explanation. Carries the SPECIFIC reason and is what Send's
+                aria-describedby points at. Reasons Settings can fix carry the
+                remedy here too; an engine that isn't running has no
+                `settingsAction` (Settings can't start a daemon) and gets none. */}
             <p
               role="status"
               // Mounted unconditionally: a live region created together with its

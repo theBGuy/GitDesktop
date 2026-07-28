@@ -1,10 +1,9 @@
-//! Drives a locally-installed coding-agent CLI (Claude Code, and later Codex)
-//! as a non-interactive subprocess to produce a code review, streaming its
-//! output back to the frontend over a Tauri channel.
+//! Drives a locally-installed coding-agent CLI (Claude / Codex / Copilot /
+//! opencode) as a non-interactive subprocess — reviews and write-capable
+//! sessions — streaming output to the frontend over a Tauri channel.
 //!
-//! The whole point is to reuse the user's existing CLI auth (a Claude/ChatGPT
-//! subscription) so a review can run without an API key. Reviews run read-only:
-//! Tier 1 disables all tools, so the agent physically can't edit or commit.
+//! Reuses the user's existing CLI subscription auth, so no API key is needed.
+//! Reviews are read-only: Tier 1 exposes no tools at all.
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -77,8 +76,7 @@ fn timeout_message(noun: &str, timeout: Duration, hint: bool) -> String {
 }
 
 /// Which agent CLI to drive. Frontend sends `"claude"` / `"codex"` / `"copilot"` /
-/// `"opencode"`. All four are fully wired for sessions + reviews; opencode runs
-/// host-only for now (its container tier is a follow-up).
+/// `"opencode"`; all four run reviews + sessions, host or container.
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum AgentKind {
@@ -241,15 +239,11 @@ fn candidate_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// Windows analog of `resolve_via_login_shell`: a packaged GUI app captures its
-/// PATH once at launch, and Windows never pushes a later PATH edit into a
-/// running process — so a CLI installed (or added to PATH) AFTER GitDesktop
-/// started is invisible to a process-PATH search until the app is relaunched
-/// with a fresh environment. Re-read the *current* user + system PATH straight
-/// from the registry (the source of truth Windows itself broadcasts edits from)
-/// and feed those directories into the search. This recovers an after-launch
-/// PATH addition without a restart and makes Settings → About's "Re-check"
-/// button actually find a freshly-installed tool (e.g. glab, or an agent CLI).
+/// Windows analog of `resolve_via_login_shell`. A process captures PATH at
+/// launch and Windows never pushes later edits into it, so a CLI installed
+/// after GitDesktop started is invisible to a process-PATH search. Read the
+/// current user + system PATH straight from the registry instead, so a
+/// freshly-installed tool resolves without relaunching the app.
 #[cfg(windows)]
 pub(crate) fn registry_path_dirs() -> Vec<PathBuf> {
     use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
@@ -340,10 +334,8 @@ fn exe_exts() -> Vec<String> {
 
 fn probe_dir(dir: &Path, names: &[&str], exts: &[String]) -> Option<PathBuf> {
     for name in names {
-        // Prefer extension variants first. On Windows this picks `codex.cmd`
-        // over the extension-less `codex` (a bash shim CreateProcess can't run);
-        // on Unix `exts` is just [""], so this loop no-ops and we use the bare
-        // name below.
+        // Extension variants first: on Windows this picks `codex.cmd` over a bare
+        // `codex` (a bash shim CreateProcess can't run).
         for ext in exts {
             if ext.is_empty() {
                 continue;
@@ -368,23 +360,18 @@ pub(crate) fn find_executable(names: &[&str]) -> Option<PathBuf> {
         .map(|p| std::env::split_paths(&p).collect())
         .unwrap_or_default();
     dirs.extend(candidate_dirs());
-    // Windows: also search the *live* registry PATH, so a tool added to PATH
-    // after launch is found without a relaunch. Appended after the process PATH
-    // (the common case) but before probing — both the `.exe`-preference pass and
-    // the general pass below iterate `dirs`, so a registry-only `.exe` still wins
-    // over an earlier `.cmd` shim.
+    // Windows: also search the LIVE registry PATH so a tool added after launch is
+    // found without a relaunch. Appended after the process PATH, before probing —
+    // the `.exe`-preference pass below still beats an earlier `.cmd` shim.
     #[cfg(windows)]
     dirs.extend(registry_path_dirs());
 
-    // Windows: prefer a real `.exe`/`.com` found ANYWHERE over a `.cmd`/`.bat`
-    // shim that sits earlier on PATH. Two reasons: Rust refuses to pass a
-    // newline-bearing argument to a batch file ("batch file arguments are
-    // invalid"), which our multi-line agent prompts are; and a wrapper shim is the
-    // wrong target anyway — e.g. the VS Code Copilot extension injects a
-    // `copilot.bat` ahead of the real `copilot.exe` on the integrated-terminal
-    // PATH (`pnpm tauri dev` inherits it), so without this we'd spawn the wrapper.
-    // CLIs that ship ONLY a `.cmd` shim (e.g. codex) still resolve in the second
-    // pass below. (Unix `exts` is just `[""]`, so this pass is a no-op there.)
+    // Windows: prefer a real `.exe`/`.com` found ANYWHERE over a `.cmd`/`.bat` shim
+    // earlier on PATH. Rust refuses to pass newline-bearing args to a batch file
+    // ("batch file arguments are invalid") and our prompts are multi-line; and the
+    // VS Code Copilot extension injects a `copilot.bat` ahead of the real
+    // `copilot.exe` on the integrated-terminal PATH. CLIs shipping ONLY a `.cmd`
+    // (codex) still resolve in the pass below; no-op on Unix.
     #[cfg(windows)]
     {
         let exe_only: Vec<&String> = exts
@@ -416,13 +403,10 @@ pub(crate) fn find_executable(names: &[&str]) -> Option<PathBuf> {
     None
 }
 
-/// macOS/Linux fallback: a packaged GUI app inherits launchd's (or a desktop
-/// launcher's) minimal PATH, not the user's shell PATH — so a CLI installed by a
-/// Node version manager (nvm/fnm/asdf) or under a non-standard prefix is neither
-/// on PATH nor in `candidate_dirs`. Ask the user's login+interactive shell to
-/// resolve it the way their terminal would. Assumes a POSIX-ish shell
-/// (bash/zsh/sh, the overwhelming default); fish and others simply fall back to
-/// the explicit-path override in Settings.
+/// macOS/Linux fallback: a packaged GUI app inherits launchd's minimal PATH, so
+/// a version-manager-installed CLI (nvm/fnm/asdf) is on neither PATH nor in
+/// `candidate_dirs`. Ask the user's login+interactive shell to resolve it.
+/// POSIX-ish shells only; fish users fall back to the Settings path override.
 #[cfg(not(windows))]
 async fn resolve_via_login_shell(names: &[&str]) -> Option<PathBuf> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
@@ -559,18 +543,14 @@ fn claude_review_args(
     system_prompt: &str,
     repo_aware: bool,
     mcp_config: Option<&str>,
-    // `mcp__<server>` allowlist entries for any server loaded via `mcp_config`.
-    // Two separate layers gate an MCP call: `--tools` is AVAILABILITY (a loaded
-    // server's tools stay invisible to the model unless its pattern is appended),
-    // and `--allowedTools` is PERMISSION (without it, headless `-p` mode auto-denies
-    // every MCP call — no one is there to answer the approval prompt). Both are
-    // appended below. Empty when no self-MCP is attached, so the diff-only / plain
-    // repo-aware toolset is byte-identical to before.
+    // `mcp__<server>` allowlist entries for servers loaded via `mcp_config`.
+    // Two layers gate an MCP call: `--tools` = availability, `--allowedTools` =
+    // permission (headless `-p` auto-denies every ungranted MCP call). Both are
+    // appended below. Empty when no self-MCP is attached.
     mcp_tools: &[String],
 ) -> Vec<String> {
-    // Base toolset: repo-aware exposes the read tools; diff-only exposes none. Any
-    // MCP tool patterns are appended so a loaded self-server is actually callable —
-    // even in the diff-only case, where the base is otherwise empty.
+    // Diff-only exposes no base tools; MCP patterns are still appended so a loaded
+    // self-server is callable.
     let mut tools = if repo_aware {
         "Read,Grep,Glob".to_string()
     } else {
@@ -602,11 +582,8 @@ fn claude_review_args(
         args.push("--mcp-config".into());
         args.push(path.into());
     }
-    // `--tools` only makes an MCP tool AVAILABLE to the model; permission is a
-    // separate layer. In headless `-p` mode there is no one to answer an approval
-    // prompt, so every ungranted MCP call is auto-denied. `--allowedTools` grants
-    // exactly the self-server's tools (safe: the self server is spawned read-only,
-    // no write flags), so the loaded server is actually callable.
+    // Permission layer (see the `mcp_tools` param note) — grant exactly the
+    // self-server's tools; it is spawned read-only.
     if !mcp_tools.is_empty() {
         args.push("--allowedTools".into());
         args.push(mcp_tools.join(","));
@@ -618,22 +595,16 @@ fn claude_review_args(
     args
 }
 
-/// Claude write-capable *session* invocation. Same streaming shape as a review,
-/// but with the write toolset and `bypassPermissions` so it runs full-auto and
-/// never hangs on a mid-run permission prompt — safe because the session runs in
-/// a throwaway worktree (the sandbox boundary; see `docs/agent-sessions.md`).
-/// The task prompt is fed on stdin; the worktree is the process `current_dir`.
+/// Claude write-capable *session* invocation: write toolset +
+/// `bypassPermissions` so it never hangs on a mid-run permission prompt — safe
+/// because the session runs in a throwaway worktree (`docs/agent-sessions.md`).
+/// Prompt on stdin; worktree is the process cwd.
 ///
-/// Sessions are multi-turn: turn 1 (`resume = false`) starts a persisted session
-/// under `session_id`; each follow-up (`resume = true`) resumes it, so the agent
-/// keeps the full conversation AND the worktree's evolving state. Persistence is
-/// ON (no `--no-session-persistence`) so `--resume` can find the transcript; the
-/// system prompt is set only on turn 1 (the resumed session already carries it).
-///
-/// `fork` (resume-only): branch the resumed conversation to a NEW throwaway session
-/// id via `--fork-session`, so this turn reads the full transcript as context but
-/// never appends to the original. Used by the research→plan distill so a later
-/// follow-up resumes a clean conversation with no distill turn in it.
+/// Multi-turn: turn 1 starts a persisted session under `session_id`, follow-ups
+/// `--resume` it. Persistence stays ON so `--resume` finds the transcript; the
+/// system prompt is set on turn 1 only. `fork` (resume-only) branches to a new
+/// throwaway id via `--fork-session`, so the distill turn never appends to the
+/// original transcript.
 #[allow(clippy::too_many_arguments)]
 fn claude_session_args(
     model: &str,
@@ -642,24 +613,17 @@ fn claude_session_args(
     resume: bool,
     fork: bool,
     read_only: bool,
-    // Web-enabled read-only profile (a Research conversation): add WebSearch/WebFetch
-    // to the read tools so the agent can investigate the web while STILL being unable
-    // to write (no Edit/Write/Bash). Only meaningful when `read_only` is true; ignored
-    // for write sessions (which already have the full toolset). Plan passes false.
+    // Research profile: adds WebSearch/WebFetch to the read tools — still no
+    // Edit/Write/Bash. Only meaningful when `read_only`.
     web: bool,
     mcp_config: Option<&str>,
     mcp_tools: &[String],
 ) -> Vec<String> {
-    // Read-only (a Plan / Research conversation): only read tools. Plan needs no
-    // bypass — the read tools (Read/Grep/Glob) are auto-approved even in `-p`
-    // non-interactive mode. Research additionally gets the WEB tools, which are NOT
-    // auto-approved (they hit the network), so a non-interactive run reports
-    // "Web search isn't authorized" without a permission grant — hence bypass is
-    // added below for the web profile too. It stays read-only regardless: the strict
-    // `--tools` allowlist has no Edit/Write/Bash, so bypass only skips the approval
-    // prompt there's no one to answer. Write sessions get the full toolset + bypass.
-    // `--tools` is a strict allowlist, so any opted-in MCP servers' tools
-    // (`mcp__<server>`) must be appended or the loaded server stays uncallable.
+    // Read-only profiles get read tools only. Plan needs no bypass (read tools are
+    // auto-approved in `-p`); Research does, because the WEB tools are NOT
+    // auto-approved and a headless run reports "Web search isn't authorized".
+    // Bypass can't widen it: `--tools` is a strict allowlist with no Edit/Write/
+    // Bash. MCP tools (`mcp__<server>`) must be appended or the server is uncallable.
     let mut tools = if read_only {
         if web {
             "Read,Grep,Glob,WebSearch,WebFetch".to_string()
@@ -689,20 +653,14 @@ fn claude_session_args(
         args.push("--mcp-config".into());
         args.push(path.into());
     }
-    // Grant permission to the opted-in MCP tools (a separate layer from `--tools`
-    // availability). Write/Research sessions already run `bypassPermissions` below,
-    // which skips this layer entirely — the grant is redundant but harmless there.
-    // It matters for a read-only no-web session (Plan) with MCP attached: that
-    // profile has no bypass, so it would hit the same headless auto-denial as a
-    // review; `--allowedTools` closes the hole uniformly across profiles.
+    // Permission layer for the opted-in MCP tools. Redundant under bypass, but it
+    // is what makes a Plan session's MCP servers callable (no bypass there).
     if !mcp_tools.is_empty() {
         args.push("--allowedTools".into());
         args.push(mcp_tools.join(","));
     }
-    // Write sessions always bypass; a read-only Research run bypasses too so its web
-    // tools are authorized (see the toolset comment above). Plan (read-only, no web)
-    // stays prompt-gated — its built-in read tools need no grant, and its opted-in
-    // MCP tools are covered by the `--allowedTools` grant above.
+    // Write sessions bypass; Research bypasses for its web tools. Plan stays
+    // prompt-gated (see the toolset comment above).
     if !read_only || web {
         args.push("--permission-mode".into());
         args.push("bypassPermissions".into());
@@ -710,9 +668,7 @@ fn claude_session_args(
     if resume {
         args.push("--resume".into());
         args.push(session_id.into());
-        // A forked resume: branch the conversation to a NEW (throwaway) session id so
-        // this turn never appends to the original transcript. Used by the distill
-        // handoff so a subsequent follow-up resumes a clean conversation.
+        // Fork: branch to a throwaway id so this turn never appends to the original.
         if fork {
             args.push("--fork-session".into());
         }
@@ -731,20 +687,14 @@ fn claude_session_args(
 
 /// Codex write-capable *session* invocation. Two confinement shapes:
 ///
-/// - **Host (`container=false`):** confine the agent's writes to the worktree with
-///   Codex's *own* OS sandbox — `-s workspace-write` (macOS/Linux enforce it via
-///   Seatbelt/Landlock; Windows needs the unelevated restricted-token sandbox, so
-///   `-c windows.sandbox="unelevated"`, which needs no admin/reboot). `exec` is
-///   non-interactive so approval is already "never". Verified 2026-06-22:
-///   in-worktree writes land, out-of-worktree escapes are denied.
-/// - **Container (`container=true`):** the kernel is the boundary, so the full-bypass
-///   flag is safe and is the only mode that writes (the host workspace-write sandbox
-///   inside the container would just confine to the bind-mount anyway).
+/// - **Host:** Codex's own OS sandbox, `-s workspace-write` (Seatbelt/Landlock;
+///   Windows needs `-c windows.sandbox="unelevated"`, which needs no admin).
+///   `exec` is non-interactive so approval is already "never".
+/// - **Container:** the kernel is the boundary, so full-bypass is safe there.
 ///
-/// The task goes on stdin (`-`); `--skip-git-repo-check` because the worktree's
-/// `.git` is a pointer file (in-container it's dangling; on host the main repo
-/// drives git either way). Multi-turn: each session has its own dedicated home +
-/// cwd, so `exec resume --last` continues it without us tracking a thread id.
+/// Task on stdin (`-`); `--skip-git-repo-check` because the worktree's `.git` is
+/// a pointer file. Each session has its own home + cwd, so `exec resume --last`
+/// continues it without tracking a thread id.
 fn codex_session_args(
     model: &str,
     resume: bool,
@@ -752,10 +702,8 @@ fn codex_session_args(
     thread_id: Option<&str>,
     effort: &str,
     read_only: bool,
-    // Web-enabled read-only profile (a Research conversation): force Codex's
-    // first-party web_search tool to LIVE mode (it's on-by-default but cached). The
-    // tool is hosted, so it works under the read-only sandbox. Only meaningful with
-    // read_only; Plan/Delegate pass false.
+    // Research profile: force Codex's first-party web_search to LIVE (on by
+    // default but cached). Hosted, so it works under the read-only sandbox.
     web: bool,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec!["exec".into()];
@@ -775,12 +723,10 @@ fn codex_session_args(
         args.push("-s".into());
         args.push("read-only".into());
         if cfg!(target_os = "windows") && !container {
-            // On Windows, read-only WITHOUT a sandbox profile blocks shell process
-            // creation entirely — so Codex (which explores the repo by running read
-            // commands like `ls`/`Get-ChildItem`) can't read it at all and falls back
-            // to "web-grounded only". The unelevated restricted token lets read
-            // commands run while the read-only policy still denies every write
-            // (same sandbox the host write profile uses, just read-only).
+            // Windows read-only WITHOUT a sandbox profile blocks process creation, so
+            // Codex can't even run its read commands and degrades to "web-grounded
+            // only". The unelevated restricted token allows reads; the read-only
+            // policy still denies every write.
             args.push("-c".into());
             args.push("windows.sandbox=\"unelevated\"".into());
         }
@@ -791,10 +737,10 @@ fn codex_session_args(
         // is non-interactive, so approval is already "never" (no `-a` flag exists).
         args.push("-s".into());
         args.push("workspace-write".into());
-        // Let the agent's shell commands reach the network (npm/pip/git fetch);
-        // filesystem confinement is the property we enforce here. Default-on also
-        // keeps platforms consistent (Windows `unelevated` is filesystem-only, so
-        // network is open there regardless).
+        // Allow network for shell commands (npm/pip/git fetch); filesystem confinement
+        // is the property we enforce. Default-on also keeps platforms consistent —
+        // Windows's `unelevated` sandbox is filesystem-only, so network is open there
+        // regardless.
         args.push("-c".into());
         args.push("sandbox_workspace_write.network_access=true".into());
         if cfg!(target_os = "windows") {
@@ -823,17 +769,15 @@ fn codex_session_args(
     args
 }
 
-/// GitHub Copilot CLI write-capable *session* invocation (host only for now —
-/// Copilot's creds live in the OS keychain, not a mountable file, so the container
-/// tier is a follow-up). Unlike Claude/Codex the prompt is an **argument**
-/// (`-p <text>`), not stdin, so the caller passes it here and feeds empty stdin.
+/// GitHub Copilot CLI write-capable *session* invocation. Unlike Claude/Codex
+/// the prompt is an **argument** (`-p <text>`), not stdin, so the caller passes
+/// it here and feeds empty stdin.
 ///
-/// Confinement: `--add-dir <worktree>` (with NO `--allow-all-paths`) restricts the
-/// file tools to the worktree — verified: in-worktree writes land, escapes denied.
-/// `--allow-all-tools` is required for non-interactive (`-p`) runs. A shell command
-/// could still escape, so the host tier is "soft" (like Claude); the worktree's git
-/// isolation is the hard guarantee. Multi-turn is deterministic: `--session-id
-/// <uuid>` sets the id on turn 1, `--resume <uuid>` continues it (context retained).
+/// Confinement: `--add-dir <worktree>` with NO `--allow-all-paths` restricts the
+/// file tools to the worktree; `--allow-all-tools` is required for `-p` runs. A
+/// shell command could still escape, so the host tier is "soft" (like Claude) —
+/// the worktree's git isolation is the hard guarantee. Multi-turn is
+/// deterministic: `--session-id <uuid>` then `--resume <uuid>`.
 #[allow(clippy::too_many_arguments)]
 fn copilot_session_args(
     model: &str,
@@ -843,11 +787,8 @@ fn copilot_session_args(
     prompt: &str,
     effort: &str,
     read_only: bool,
-    // Web-enabled read-only profile (a Research conversation): keep Copilot's web
-    // tools (web_fetch + web search) and the GitHub MCP available — `--allow-all-tools`
-    // already admits them and they're neither `write` nor `shell`, so the read-only
-    // guarantee holds. A plain Plan run (web=false) drops the builtin MCPs to stay
-    // repo-local. Only meaningful with read_only.
+    // Research profile: keep the web tools + GitHub MCP (neither is `write` nor
+    // `shell`, so the read-only guarantee holds). Plan drops the builtin MCPs.
     web: bool,
     mcp_config: Option<&str>,
 ) -> Vec<String> {
@@ -934,31 +875,25 @@ fn claude_thinking_keyword(level: &str) -> Option<&'static str> {
     }
 }
 
-/// GitHub Copilot CLI **read-only** review invocation. The prompt (system + diff) is
-/// an argument (`-p`), not stdin (Copilot has no stdin prompt form; `copilot.exe` is a
-/// real binary, exempt from the batch-file-arg limit).
+/// GitHub Copilot CLI **read-only** review invocation. The prompt (system +
+/// diff) is an argument (`-p`), not stdin — Copilot has no stdin prompt form,
+/// and `copilot.exe` is a real binary, so it's exempt from the batch-file
+/// newline-arg limit.
 ///
-/// Diff-only (`repo_aware = false`): no tool flags, so the agent just analyzes the diff
-/// carried in the prompt without invoking tools — verified clean.
-///
-/// Repo-aware (`repo_aware = true`, Tier 2): the agent may read surrounding files for
-/// context. `--allow-all-tools` auto-approves tools so the non-interactive run doesn't
-/// hang on a permission prompt, but `--deny-tool` denies the write paths — `write` (all
-/// file create/modify tools) and `shell` (arbitrary commands, incl. redirects). Denial
-/// takes precedence over allow-all (per `copilot help permissions`), so reads/search are
-/// auto-approved while writes stay impossible: a hard read-only guarantee even in the
-/// live repo — the same shape as opencode's `plan` agent. `--disable-builtin-mcps` drops
-/// the GitHub MCP server too, keeping it to local repo reads (no remote GitHub calls).
-/// Reads are path-allowed because the review runs with the repo as cwd.
+/// Diff-only: no tool flags, so it just analyzes the prompt's diff. Repo-aware
+/// (Tier 2): `--allow-all-tools` avoids a permission hang while `--deny-tool`ing
+/// `write` + `shell`; denial takes precedence over allow-all, so reads are
+/// auto-approved (path-allowed — the review runs with the repo as cwd) and
+/// writes stay impossible even in the live repo. `--disable-builtin-mcps` keeps
+/// it to local repo reads.
 fn copilot_review_args(
     model: &str,
     prompt: &str,
     repo_aware: bool,
     effort: &str,
     // Per-review MCP config (GitDesktop's own self-server), passed via
-    // `--additional-mcp-config @<path>` exactly as `copilot_session_args` does — it
-    // AUGMENTS (never mutates) the user's `~/.copilot/mcp-config.json`. `None` = no
-    // self-MCP, and the args are byte-identical to before.
+    // `--additional-mcp-config @<path>` — AUGMENTS the user's
+    // `~/.copilot/mcp-config.json`, never mutates it. `None` = no self-MCP.
     mcp_config: Option<&str>,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec![
@@ -969,11 +904,8 @@ fn copilot_review_args(
         "--no-color".into(),
     ];
     if let Some(path) = mcp_config {
-        // `@` marks a file path. Needs tools enabled to be reachable, so ensure the
-        // allow-all/deny-write pair is present even when a diff-only (non-repo-aware)
-        // review attaches the self-server (the `if repo_aware` block below only runs
-        // for repo-aware). `--allow-all-tools` auto-approves the loaded tools for
-        // this non-interactive run.
+        // `@` marks a file path. The server needs tools enabled to be reachable, so a
+        // diff-only review must carry the allow-all/deny-write pair itself.
         args.push("--additional-mcp-config".into());
         args.push(format!("@{path}"));
         if !repo_aware {
@@ -986,12 +918,9 @@ fn copilot_review_args(
         args.push("--allow-all-tools".into());
         args.push("--deny-tool=write".into());
         args.push("--deny-tool=shell".into());
-        // Drop Copilot's BUILTIN GitHub MCP so a repo-aware review stays repo-local.
-        // Our explicitly-passed `--additional-mcp-config` is a DIFFERENT mechanism and
-        // SURVIVES this flag — probe-validated 2026-07-10 on Copilot CLI 1.0.70 with
-        // this exact flag set: the agent enumerated every `gitdesktop-*` tool from the
-        // additional config while the builtin GitHub MCP stayed disabled. Do not make
-        // this conditional on `mcp_config` — the two flags compose as intended.
+        // Drops Copilot's BUILTIN GitHub MCP so a repo-aware review stays repo-local.
+        // Our `--additional-mcp-config` is a DIFFERENT mechanism and survives this flag
+        // (verified on Copilot CLI 1.0.70) — do not make it conditional on `mcp_config`.
         args.push("--disable-builtin-mcps".into());
     }
     if !model.trim().is_empty() {
@@ -1005,30 +934,26 @@ fn copilot_review_args(
     args
 }
 
-/// opencode write-capable *session* invocation (host only for now — its creds
-/// live in a file, `~/.local/share/opencode/auth.json`, so a container tier is
-/// feasible later but unbuilt). The prompt goes on **stdin** (`opencode run` with no
-/// positional message reads it), not as an argument — a large turn (with prior
-/// context / @file mentions) would otherwise blow the Windows ~32 KB argv limit
-/// ("Argument list too long"). This also matches Claude/Codex.
+/// opencode write-capable *session* invocation. The prompt goes on **stdin**
+/// (`opencode run` with no positional message reads it), not as an argument — a
+/// large turn would blow the Windows ~32 KB argv limit.
 ///
-/// Confinement is "soft" (like Claude): `--dangerously-skip-permissions` auto-approves
-/// tools so the non-interactive run doesn't hang on a permission prompt; the worktree's
-/// git isolation is the hard guarantee. opencode generates its **own** `sessionID`
-/// (there's no flag to set it on turn 1), so turn 1 omits `--session` and we capture
-/// the id from the stream; resume passes it back as `--session <id>` — exactly the
-/// host-Codex thread-id dance, since opencode shares `~/.local/share/opencode` too.
+/// Confinement is "soft" (like Claude): `--dangerously-skip-permissions` avoids
+/// a permission hang; the worktree's git isolation is the hard guarantee.
+/// opencode generates its OWN `sessionID` (no flag to set it), so turn 1 omits
+/// `--session`, we capture the id from the stream, and resume passes it back —
+/// the host-Codex thread-id dance, because host sessions share one opencode home
+/// (`~/.local/share/opencode`), so an implicit "continue last" could grab a
+/// concurrent session.
 fn opencode_session_args(
     model: &str,
     session_id: &str,
     resume: bool,
     effort: &str,
     read_only: bool,
-    // Web-enabled read-only profile (a Research conversation): use our generated
-    // read-only agent (`gd-research`) instead of the builtin `plan`, because `plan`
-    // has NO web tools and opencode has no permission CLI flags — the agent is
-    // defined in the `OPENCODE_CONFIG` file (see mcp::build_opencode_config) with
-    // edit/bash denied + webfetch/websearch allowed. Only meaningful with read_only.
+    // Research profile: use our generated `gd-research` agent instead of the
+    // builtin `plan` — `plan` has NO web tools and opencode has no permission CLI
+    // flags, so the agent is defined in `OPENCODE_CONFIG` (see mcp.rs).
     web: bool,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec![
@@ -1064,17 +989,14 @@ fn opencode_session_args(
     args
 }
 
-/// opencode **read-only** review invocation. The prompt (system + diff) goes on
-/// **stdin**, not as an argument — besides the argv-length ceiling, on Windows
-/// `opencode` is a `.cmd` and Rust refuses to pass a newline-bearing argument to a
-/// batch file ("batch file arguments are invalid"), which every diff prompt is.
+/// opencode **read-only** review invocation. Prompt on **stdin**: besides the
+/// argv ceiling, on Windows `opencode` is a `.cmd` and Rust refuses to pass a
+/// newline-bearing argument to a batch file — which every diff prompt is.
 ///
-/// `repo_aware` (Tier 2) lets it read surrounding files for context via opencode's
-/// built-in read-only **`plan`** agent — it can glob/read but has no write/edit/bash
-/// tools, so it's a hard read-only guarantee even when the review runs in the live
-/// repo. `--dangerously-skip-permissions` only auto-approves the *reads* (writes stay
-/// impossible in plan mode), so an in-project read doesn't hang or auto-reject.
-/// Verified live 2026-06-23. The plain (diff-only) mode invokes no tools at all.
+/// `repo_aware` uses the builtin read-only `plan` agent (glob/read, no
+/// write/edit/bash — a hard guarantee even in the live repo);
+/// `--dangerously-skip-permissions` only auto-approves those reads. Diff-only
+/// invokes no tools at all.
 fn opencode_review_args(model: &str, repo_aware: bool, effort: &str) -> Vec<String> {
     let mut args: Vec<String> = vec!["run".into(), "--format".into(), "json".into()];
     if repo_aware {
@@ -1126,14 +1048,12 @@ fn normalize_tool(name: &str) -> &'static str {
 /// Pull the most useful "target" out of a tool-call input object: the file path,
 /// command, URL, or query — whatever the tool acted on. None when nothing fits.
 fn tool_target(input: &serde_json::Value) -> Option<String> {
-    // Path-type keys come first (a tool acting on a file). The FULL path is kept
-    // un-clipped: it's load-bearing — the UI relativizes it and uses it as a git
-    // pathspec for the inline edit-step diff, so clipping (200-char cut or
-    // whitespace-collapse) would corrupt the pathspec. The display is shortened by
-    // relativize + CSS truncation instead. (A path is naturally bounded in length.)
+    // Path keys first. The FULL path is kept un-clipped: the UI uses it as a git
+    // pathspec for the inline edit-step diff, so any clipping would corrupt it.
+    // Display shortening happens via relativize + CSS.
     const PATH_KEYS: &[&str] = &["file_path", "filePath", "path", "notebook_path"];
-    // Free-text keys (a command / URL / query / prompt) are display-only, so clip
-    // them to a sane payload size and collapse newlines to a single line.
+    // Free-text keys (command / URL / query / prompt) are display-only: clipped to
+    // a sane payload size, newlines preserved.
     const TEXT_KEYS: &[&str] = &["command", "cmd", "url", "query", "pattern", "prompt"];
     for k in PATH_KEYS {
         if let Some(s) = input.get(k).and_then(|v| v.as_str()) {
@@ -1154,10 +1074,9 @@ fn tool_target(input: &serde_json::Value) -> Option<String> {
     None
 }
 
-/// Bound a free-text target (command / URL / query / prompt) to a sane payload
-/// size. NOT whitespace-collapsed: the UI renders the row single-line via CSS and
-/// an expandable view shows the command verbatim (newlines preserved), so the full
-/// command stays readable when expanded — a 200-char clip used to hide the rest.
+/// Bound a free-text target to a sane payload size. NOT whitespace-collapsed:
+/// the UI renders the row single-line via CSS and an expandable view shows the
+/// command verbatim, so newlines must survive.
 fn clip_target(s: &str) -> String {
     let t = s.trim();
     if t.chars().count() > 2000 {
@@ -1281,17 +1200,13 @@ fn parse_codex_line(
     }
 }
 
-/// Parses one line of GitHub Copilot CLI `--output-format json` (JSONL). Streams
-/// `assistant.message_delta.deltaContent` as narration, keeps the latest
-/// `assistant.message.content` as the authoritative final text, and emits `Done` at
-/// the terminal `result` (whose `exitCode` decides success). Setup / MCP / skills /
-/// reasoning / turn-marker events are ignored.
+/// Parses one line of Copilot CLI `--output-format json` (JSONL). Streams
+/// `message_delta.deltaContent` as narration, keeps the latest
+/// `assistant.message.content` as the final text, emits `Done` at `result`
+/// (its `exitCode` decides success). Setup/MCP/skills/reasoning events ignored.
 ///
-/// Successive assistant messages would otherwise concatenate with no separator
-/// ("…real context.Let me check…"), so a paragraph break is lazily PREPENDED to the
-/// first non-empty delta after a completed message (`emitted_text`/`pending_sep`).
-/// The separator lands before the delta text, so the delta buffer still ends with
-/// `Done.text` (which stays verbatim, never separator-prefixed).
+/// A `\n\n` is lazily PREPENDED to the first non-empty delta after a completed
+/// message, so the delta buffer still ENDS WITH `Done.text` (frontend invariant).
 fn parse_copilot_line(
     line: &str,
     saw_terminal: &mut bool,
@@ -1310,10 +1225,9 @@ fn parse_copilot_line(
                 .get("data")
                 .and_then(|d| d.get("deltaContent"))
                 .and_then(|t| t.as_str())?;
-            // Empty deltas are dropped here, while the Claude parser still emits
-            // `Delta { text: "" }` for them (its pre-separator behavior, kept
-            // byte-identical). Both deliberately leave `pending_sep` armed — the
-            // separator belongs on the first REAL text.
+            // Empty deltas are dropped (Claude's parser still emits an empty Delta).
+            // Both leave `pending_sep` armed — the separator belongs on the first
+            // REAL text.
             if t.is_empty() {
                 return None;
             }
@@ -1381,17 +1295,14 @@ fn parse_copilot_line(
     }
 }
 
-/// Parses one line of opencode `run --format json` (JSONL). opencode has **no**
-/// single terminal event — a turn is a sequence of steps; `step_finish` with
-/// `reason == "stop"` ends it (`"tool-calls"` means another step follows). It emits
-/// whole `text` parts (not token deltas), each a distinct segment, so we stream them
-/// as deltas *and* accumulate them. The agent narrates as it works, so the final
-/// `Done` carries only the FINAL step's text (the actual answer, in `step_text`) —
-/// the earlier steps' narration stays in the `Delta` stream but is stripped off the
-/// final body. `last_message` accumulates every step for the degenerate fallback (a
-/// final step that produced no text). The generated `sessionID` (on every event) is
-/// surfaced once as `NativeSession` so a host resume targets the right session — the
-/// store de-dups, so re-emitting is fine.
+/// Parses one line of opencode `run --format json` (JSONL). There is **no**
+/// single terminal event: `step_finish` with `reason == "stop"` ends the turn
+/// (`"tool-calls"` means another step follows). It emits whole `text` parts, not
+/// token deltas, so we stream them as deltas AND accumulate.
+///
+/// `Done` carries only the FINAL step's text (`step_text`) — earlier narration
+/// stays in the delta stream; `last_message` is the fallback for a final step
+/// with no text. The `sessionID` is surfaced as `NativeSession` (store de-dups).
 fn parse_opencode_line(
     line: &str,
     saw_terminal: &mut bool,
@@ -1418,9 +1329,7 @@ fn parse_opencode_line(
             if text.is_empty() {
                 return None;
             }
-            // Separate consecutive segments so multi-step narration stays readable;
-            // the delta mirrors what we append, so the buffer == last_message and its
-            // tail == the current step's text.
+            // Separate consecutive segments so multi-step narration stays readable.
             let chunk = if last_message.is_empty() {
                 text.to_string()
             } else {
@@ -1462,10 +1371,8 @@ fn parse_opencode_line(
                 return None;
             }
             *saw_terminal = true;
-            // The final answer is the final step's text; earlier steps were narration
-            // and stay in the delta stream only. Fall back to the full accumulation
-            // only for a degenerate final step that produced no text — never emit an
-            // empty Done when text existed.
+            // Final step's text is the answer; fall back to the accumulation only when
+            // the final step produced none (never emit an empty Done when text existed).
             let text = std::mem::take(step_text);
             let text = if text.is_empty() {
                 std::mem::take(last_message)
@@ -1494,17 +1401,14 @@ fn parse_opencode_line(
 }
 
 /// Parses one NDJSON line of Claude `--output-format stream-json`. Sets
-/// `saw_result` when the terminal `result` event arrives. `tool_inputs`
-/// accumulates each in-flight tool call's streamed input JSON, keyed by block
-/// index (the input arrives as `input_json_delta` fragments after the block
-/// starts); a completed block emits one `Tool` event with the extracted target.
+/// `saw_result` at the terminal `result`. `tool_inputs` accumulates each
+/// in-flight tool call's streamed input JSON by block index (input arrives as
+/// `input_json_delta` fragments); the block's stop emits one `Tool` event.
 ///
-/// Consecutive text blocks/messages would otherwise concatenate with no separator
-/// ("…real context.Let me check…"), so a paragraph break is lazily PREPENDED to the
-/// first non-empty `text_delta` following a completed TEXT block (every text block
-/// ends with `content_block_stop`), gated on some text already having been emitted
-/// (`emitted_text`/`pending_sep`). The separator lands before the delta text, so the
-/// delta buffer still ends with `Done.text` (the raw `result`, never separator-prefixed).
+/// A `\n\n` is lazily PREPENDED to the first non-empty `text_delta` after a
+/// completed TEXT block, so the delta buffer still ENDS WITH `Done.text` (the
+/// raw `result`, never separator-prefixed) — the frontend's suffix-strip relies
+/// on that.
 fn parse_claude_line(
     line: &str,
     saw_result: &mut bool,
@@ -1573,10 +1477,8 @@ fn parse_claude_line(
                         _ => None,
                     }
                 }
-                // A block finished. A tool block (idx in `tool_inputs`) emits one
-                // structured Tool step. A TEXT block (idx absent) ends a paragraph:
-                // arm the lazy separator so the next message/block's first text delta
-                // is prefixed — but only once some text has actually been emitted.
+                // Block stop: a tool block emits its Tool step; a TEXT block arms the
+                // lazy separator (only once some text has been emitted).
                 "content_block_stop" => {
                     let idx = event.get("index").and_then(|i| i.as_i64())?;
                     let Some((name, json)) = tool_inputs.remove(&idx) else {
@@ -1612,14 +1514,11 @@ fn parse_claude_line(
 
 /// Kills the entire process tree of a host-mode agent child on cancel/timeout.
 ///
-/// `child.start_kill()` maps to `TerminateProcess` (Windows) / `SIGKILL`
-/// (Unix), which reach only the direct child. The agent CLI is a shim
-/// (`claude`, `codex.cmd`→node, `copilot.exe`, `opencode`) that spawns node
-/// workers, MCP-server children, and tool subprocesses; killing the shim alone
-/// orphans that tree, which keeps consuming tokens, appending to the
-/// transcript, and holding worktree file handles. This traverses the tree:
-/// `taskkill /T` on Windows, a process-group kill on Unix (the child leads its
-/// own group — see the `process_group(0)` at the spawn site).
+/// `child.start_kill()` reaches only the direct child, but the agent CLI is a
+/// shim that spawns node workers, MCP servers and tool subprocesses — killing
+/// the shim orphans them (they keep burning tokens and holding worktree file
+/// handles). `taskkill /T` on Windows; a process-group kill on Unix (the child
+/// leads its own group — see `process_group(0)` at the spawn site).
 fn kill_process_tree(child: &mut tokio::process::Child) {
     let Some(pid) = child.id() else {
         // Already reaped — nothing to signal.
@@ -1853,9 +1752,8 @@ pub async fn agent_review(
     repo_aware: bool,
     // Attach GitDesktop ITSELF as a read-only MCP server (`gitdesktop mcp --repo
     // <repo_path>`) so the review agent can pull the full PR diff / read files at
-    // any ref / blame / list PR comments, instead of relying on the budget-truncated
-    // diff in the prompt. Honored for Claude / Copilot / opencode (Codex is exempt —
-    // see below). `false` = today's behavior, byte-for-byte.
+    // any ref / blame, instead of the budget-truncated diff in the prompt. Honored
+    // for Claude / Copilot / opencode; Codex is exempt (see below).
     mcp_self: bool,
     // User's "Review timeout" override in seconds, clamped to 1–120 minutes here.
     // `None` / `0` = the tier defaults below.
@@ -1874,13 +1772,11 @@ pub async fn agent_review(
         ))
     })?;
 
-    // When mcp_self is on and the CLI supports it, generate a per-review MCP config
-    // exposing EXACTLY one server — GitDesktop itself, read-only against `repo_path`.
-    // Written into `<app_data>/mcp` keyed by `review_id` (a UUID, so `validate_id`
-    // passes), the SAME lifecycle sessions use; removed after the run on every path.
+    // Per-review MCP config exposing EXACTLY one server — GitDesktop itself,
+    // read-only against `repo_path`. Written under `<app_data>/mcp` keyed by
+    // `review_id`, same lifecycle as sessions; removed after the run on every path.
     // Codex is excluded: host `codex exec` cancels every MCP tool call (stdin EOF →
-    // "declined", upstream — the same wall `agent_session` documents for host Codex),
-    // and Codex reviews already self-explore the repo, so mcp_self is ignored for it.
+    // "declined", upstream), and its reviews self-explore anyway.
     let self_mcp_wanted = mcp_self && !matches!(kind, AgentKind::Codex);
     let self_specs = if self_mcp_wanted {
         vec![crate::mcp::self_server_spec(&repo_path)?]
@@ -1931,9 +1827,7 @@ pub async fn agent_review(
             codex_review_args(&model, &repo_path, &effort),
             format!("{system_prompt}\n\n{user_prompt}"),
         ),
-        // Copilot: read-only review. The prompt (system + diff) is an argument, not
-        // stdin. `repo_aware` adds a deny-write/deny-shell tool allowlist so it can
-        // read surrounding files without being able to modify the repo.
+        // Copilot takes the prompt as an argument, not stdin (see copilot_review_args).
         AgentKind::Copilot => (
             copilot_review_args(
                 &model,
@@ -1982,9 +1876,7 @@ pub async fn agent_review(
         &on_event,
     )
     .await;
-    // Remove the generated config on EVERY path (success, error), mirroring the
-    // session lifecycle — even though the self-spec carries no secrets. No-op when
-    // nothing was written.
+    // Remove the generated config on EVERY path, mirroring the session lifecycle.
     if mcp_config_path.is_some() {
         crate::mcp::cleanup_host_config(&app, &review_id);
     }
@@ -2002,17 +1894,14 @@ pub async fn agent_review_cancel(
 
 /// Runs one turn of a write-capable agent session: the CLI implements
 /// `user_prompt` full-auto inside `worktree_path` (a throwaway worktree — the
-/// sandbox boundary). `resume = false` starts the session; `resume = true`
-/// continues it (keeping context). Streams the same `ReviewEvent`s as a review;
-/// cancel via `agent_review_cancel` with the same `session_id`.
+/// sandbox boundary). `resume = false` starts, `true` continues. Streams the
+/// same `ReviewEvent`s as a review; cancel via `agent_review_cancel` with the
+/// same `session_id`.
 ///
-/// `agent` picks the CLI. Each runs worktree-confined on the **host** (Claude full-
-/// auto via `bypassPermissions` — soft until its permission prompt lands; Codex via
-/// its own OS sandbox, `-s workspace-write`; Copilot via `--add-dir`; opencode via
-/// `--dangerously-skip-permissions`) or in a **container** (kernel boundary; for Codex
-/// that's also what makes full-bypass safe, and it's the only mode where its MCP support
-/// works). Copilot's container authenticates from a `gh auth token` passed by
-/// env, since its login isn't a mountable creds file like the others'.
+/// `agent` picks the CLI; each runs worktree-confined on the **host** (see its
+/// `*_session_args` doc for the mechanism) or in a **container** (kernel
+/// boundary — and for Codex the only mode where MCP works). Copilot's container
+/// authenticates from a `gh auth token` passed by env.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn agent_session(
@@ -2040,11 +1929,8 @@ pub async fn agent_session(
     // Copilot deny-write/shell, opencode `--agent plan`), so the turn can explore
     // but can NEVER write — even though it runs in the live repo, not a worktree.
     read_only: bool,
-    // Web-enabled read-only profile (a Research conversation): each CLI gains its
-    // native web tools while still never writing — Claude WebSearch/WebFetch, Codex
-    // live web_search, Copilot web_fetch + GitHub MCP, opencode a generated
-    // read-only-web agent (webfetch/websearch). Only meaningful alongside `read_only`;
-    // Plan/Delegate pass false, so they're untouched.
+    // Research profile: each CLI gains its native web tools while still never
+    // writing (see each `*_session_args`). Only meaningful alongside `read_only`.
     web: bool,
     // "container" runs the turn inside a Docker/Podman container (worktree-
     // confined); anything else (incl. None) runs it on the host (worktree-only).
@@ -2087,24 +1973,18 @@ pub async fn agent_session(
     // supported (agent, isolation) combos, so an unsupported one arriving here with
     // servers is an error, not a silent drop.
     let mcp_specs = mcp_servers.unwrap_or_default();
-    // `mcp__<server>` allowlist entries so the opted-in servers' tools are usable:
-    // loading them via `--mcp-config` does NOT admit them past `--tools` (proven by
-    // live testing — the server connected but its tools stayed uncallable without this).
-    // (Claude only — host AND container; the others need no allowlist.)
+    // `mcp__<server>` allowlist entries — loading a server via `--mcp-config` does
+    // NOT admit its tools past `--tools`. Claude only (host and container).
     let mcp_tools = crate::mcp::tool_allow_patterns(&mcp_specs);
-    // Each CLI takes its MCP config differently — `mcp_config_path` holds the value for
-    // whichever CLI's config flag applies here (consumed by the inner builders below):
-    //  - Claude: a JSON file via `--mcp-config` (strict) + a `mcp__<server>` tool allowlist;
-    //    HOST = a host file path, CONTAINER = the mounted `/home/node/.claude/mcp.json`.
-    //  - Copilot: HOST = `--additional-mcp-config @<path>`; CONTAINER = none (the file is
-    //    written to `~/.copilot/mcp-config.json` in the mounted home, which Copilot auto-loads).
-    //    `--allow-all-tools` auto-approves the tools — no allowlist, no host-Codex wall.
-    //  - opencode: the `OPENCODE_CONFIG` env var (HOST = via the spawn env; CONTAINER = `-e`
-    //    on the run, set in the container branch). `--dangerously-skip-permissions` approves.
-    //  - Codex: container ONLY — a `config.toml` in the mounted `~/.codex` (host Codex cancels
-    //    every MCP tool call, stdin EOF → "declined", upstream). stdio servers only.
-    // The config FILE is written HERE for host sessions and in the container branch below
-    // (uniform, all agents) for container ones. Codex-on-host is the only rejected combo.
+    // Per-CLI MCP config plumbing (`mcp_config_path` holds whatever this CLI needs):
+    //  - Claude: JSON via `--mcp-config` (strict) + a `mcp__<server>` allowlist;
+    //    host = a host path, container = the mounted `/home/node/.claude/mcp.json`.
+    //  - Copilot: host `--additional-mcp-config @<path>`; container = the auto-loaded
+    //    `~/.copilot/mcp-config.json` in the mounted home. No allowlist needed.
+    //  - opencode: the `OPENCODE_CONFIG` env var (host spawn env / container `-e`).
+    //  - Codex: container ONLY (host Codex cancels every MCP tool call — stdin EOF →
+    //    "declined", upstream), stdio servers only, via `~/.codex/config.toml`.
+    // Host configs are written here; container ones in the container branch below.
     let mut mcp_config_path: Option<String> = None;
     if !mcp_specs.is_empty() {
         crate::mcp::validate_specs(&mcp_specs)?;
@@ -2208,10 +2088,9 @@ pub async fn agent_session(
             } else {
                 format!("{system_prompt}\n\n{user_prompt}")
             };
-            // `--add-dir` must point at where the worktree actually is for this run:
-            // the bind-mount `/workspace` in a container, or the real host path on the
-            // host. Passing the host path into the container would name a nonexistent
-            // dir (live-verified: the container confines to /workspace either way).
+            // `--add-dir` must name the path as it exists FOR THIS RUN: `/workspace` in
+            // a container, the real host path otherwise — the host path names nothing
+            // inside.
             let add_dir = if container {
                 "/workspace"
             } else {
@@ -2291,11 +2170,9 @@ pub async fn agent_session(
                 kind.label()
             )));
         }
-        // Fail early with a clear message if the agent isn't logged in on the host
-        // (its creds are what we mount into the container). opencode is exempt — its
-        // free hosted models need no credentials, so a container runs keyless. Copilot
-        // is exempt too: it has no mountable creds file, so it authenticates from a
-        // GitHub token passed by env (sourced from `gh auth token`, fetched below).
+        // Fail early if the agent isn't logged in on the host (its creds are what we
+        // mount). opencode is exempt (free hosted models, keyless) and so is Copilot
+        // (no creds file — it authenticates from the env token fetched below).
         if !matches!(kind, AgentKind::Opencode | AgentKind::Copilot)
             && !crate::agent_sandbox::host_logged_in(agent_name)
         {
@@ -2304,11 +2181,9 @@ pub async fn agent_session(
                 kind.label()
             )));
         }
-        // Copilot's login lives in the OS keychain (not a mountable file), so a
-        // containerized session authenticates with a GitHub token instead. The CLI
-        // reads `COPILOT_GITHUB_TOKEN`; we source it from the GitHub CLI the app
-        // already drives. Passed by-name to the runtime client (see `extra_env`) so
-        // the token never lands in argv / `docker inspect`.
+        // Copilot authenticates from a GitHub token (`gh auth token`) instead of a
+        // mounted creds file. Passed by-name to the runtime client (`extra_env`) so it
+        // never lands in argv / `docker inspect`.
         let extra_env: Vec<(&str, String)> = if kind == AgentKind::Copilot {
             let token = crate::github::runner::run_gh(
                 None,
@@ -2339,13 +2214,10 @@ pub async fn agent_session(
             ));
         }
         let home = crate::agent_sandbox::seed_session_home(&app, &session_id, agent_name)?;
-        // Write the opted-in MCP servers into the mounted home so the in-container CLI
-        // loads them. The seeded home is clean (only the agent's creds), so the file is
-        // the ONLY MCP source — strict, regardless of CLI. Each CLI's filename + format
-        // differ (`container_mcp_config` maps them); the body is the per-CLI config
-        // (secrets resolved into the file, never argv). REMOVE a stale file when this
-        // turn has none, so a de-selected server stops loading — the CLIs read the file
-        // implicitly (no host-style `--strict-mcp-config` to ignore a leftover).
+        // Write the opted-in MCP servers into the mounted home — the seeded home is
+        // clean, so this file is the ONLY MCP source (secrets resolved into the file,
+        // never argv). REMOVE a stale file when this turn has none: the CLIs read it
+        // implicitly, with no host-style `--strict-mcp-config` to ignore a leftover.
         if let Some((filename, _)) = crate::agent_sandbox::container_mcp_config(agent_name) {
             let config_path = home.join(filename);
             // opencode Research also needs its generated read-only-web agent in the
@@ -2420,19 +2292,16 @@ pub async fn agent_session(
         .await;
     }
 
-    // Host: both agents run worktree-confined — Claude via `bypassPermissions`
-    // (soft FS boundary until its permission prompt lands), Codex via its own OS
-    // sandbox (`-s workspace-write`; really confines writes — see codex_session_args).
+    // Host: every CLI runs worktree-confined — see each `*_session_args` doc for
+    // the mechanism (Claude bypass = soft; Codex `-s workspace-write` = enforced).
     let binary = resolve(kind, bin_path.as_deref()).await.ok_or_else(|| {
         AppError::Command(format!(
             "{} CLI not found. Install it or set its path in Settings.",
             kind.label()
         ))
     })?;
-    // opencode takes its MCP config (and our Research agent) via the `OPENCODE_CONFIG`
-    // env var (it has no config-file flag); set it whenever we wrote a config file.
-    // opencode merges config layers, so this adds ours without replacing the user's.
-    // (Claude/Copilot carry their config in argv, so they need no extra env.)
+    // opencode has no config-file flag: it reads `OPENCODE_CONFIG`, and merges
+    // config layers, so ours adds to the user's rather than replacing it.
     let mut host_extra_env: Vec<(&str, String)> = match (kind, &mcp_config_path) {
         (AgentKind::Opencode, Some(path)) => vec![("OPENCODE_CONFIG", path.clone())],
         _ => Vec::new(),
@@ -2785,12 +2654,9 @@ mod tests {
         std::env::remove_var("GD_TEST_ROOT");
     }
 
-    // Runtime validation of the actual registry read (not just the expander):
-    // HKLM's Session Manager Environment Path always exists on Windows and always
-    // contains the (expandable) system32 dir, so a working read returns a
-    // non-empty list with at least one real directory in it. This is what proves
-    // the open_subkey + get_value + %VAR% expansion path works against the live
-    // registry on the build machine — the bit a pure-logic test can't cover.
+    // Live-registry validation (not just the expander): HKLM's Session Manager Path
+    // always exists and always contains an expandable system32 dir, so a working
+    // read returns a non-empty list with at least one real directory.
     #[cfg(windows)]
     #[test]
     fn registry_path_dirs_reads_the_live_system_path() {
@@ -2898,9 +2764,8 @@ mod tests {
 
     #[test]
     fn claude_review_without_mcp_is_unchanged() {
-        // No self-MCP: no `--mcp-config`, tools are the plain repo-aware/diff-only set,
-        // and `--strict-mcp-config` is still present. This locks the mcp_self=false path
-        // to today's behavior.
+        // No self-MCP: no `--mcp-config`, plain repo-aware/diff-only toolset, and
+        // `--strict-mcp-config` still present.
         let aware = claude_review_args("m", "sys", true, None, &[]);
         assert_eq!(tools_of(&aware), "Read,Grep,Glob");
         assert!(!aware.iter().any(|a| a == "--mcp-config"));

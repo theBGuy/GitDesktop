@@ -14,11 +14,10 @@ pub struct Milestone {
     pub title: String,
 }
 
-/// Whether a gh failure is the "issues are turned off on this repo" error.
-/// GitHub forks disable issues by default, so pinning to the origin slug surfaces
-/// this where a bare `gh` would have silently resolved to the parent. gh's line is
-/// `the '<owner>/<repo>' repository has disabled issues`; match the stable
-/// substring case-insensitively so a wording tweak doesn't slip past.
+/// Whether a gh failure is the "issues are turned off on this repo" error. gh's line
+/// is `the '<owner>/<repo>' repository has disabled issues`; match the stable
+/// substring case-insensitively so a wording tweak doesn't slip past. (Forks disable
+/// issues by default, so pinning to the origin slug surfaces this.)
 fn is_issues_disabled(stderr: &str) -> bool {
     stderr.to_ascii_lowercase().contains("has disabled issues")
 }
@@ -87,13 +86,10 @@ pub fn map_reaction_groups(groups: Option<&serde_json::Value>) -> Vec<Reaction> 
 /// Resolves the repo's GraphQL `owner` and `name`. GraphQL (unlike REST) has no
 /// `{owner}/{repo}` substitution, so callers must pass them explicitly.
 ///
-/// Resolved through the lens (via `gh_lens_slug`), NOT a bare `gh repo view`:
-/// on a fork with an `upstream` remote a bare `gh repo view` auto-resolves to the
-/// PARENT, so every GraphQL read built on this pair (issue types/reactions/
-/// relations/dependencies/development, PR reactions/timeline/review-threads/
-/// external-reviews) would answer for the upstream instead of the fork. `lens`
-/// (`None`/`Some("origin")`/`Some("upstream")`) selects which remote to resolve;
-/// `None` = origin, so a single-remote repo's behavior is unchanged.
+/// Resolved through the lens (`gh_lens_slug`), NOT a bare `gh repo view`: on a fork
+/// with an `upstream` remote a bare `gh repo view` resolves to the PARENT, so every
+/// GraphQL read built on this pair would answer for the upstream. `None` = origin, so
+/// a single-remote repo is unchanged.
 pub(crate) async fn repo_owner_name(
     repo_path: &str,
     lens: Option<&str>,
@@ -104,9 +100,8 @@ pub(crate) async fn repo_owner_name(
         .ok_or_else(|| AppError::Gh("could not determine the repository owner".into()))
 }
 
-// Issues mirror the Pull Request feature: `gh issue` covers the REST surface
-// 1:1 (and `gh issue list` already excludes PRs), and the comment node ids it
-// returns let the shared GraphQL comment/label mutations work unchanged.
+// `gh issue` covers the REST surface 1:1, and the comment ids it returns are GraphQL
+// node ids — so the shared comment/label/reaction mutations work on issues unchanged.
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -153,20 +148,16 @@ pub async fn gh_issue_list(
             )));
         }
     };
-    // `gh issue list` defaults to 30; thread an explicit `--limit` when the caller
-    // asks (existing callers pass `None` → gh's default is untouched).
-    // Clamp to gh's accepted `--limit` range (1..=1000): `--limit 0` errors at runtime,
-    // and this keeps the MCP `limit` behavior consistent with the other providers, which
-    // clamp to their own page ceilings rather than erroring.
+    // gh defaults to 30. Clamp to gh's accepted 1..=1000 (`--limit 0` errors at
+    // runtime); `None` leaves gh's default untouched.
     let limit_str;
     if let Some(n) = limit {
         limit_str = n.clamp(1, 1000).to_string();
         args.push("--limit");
         args.push(&limit_str);
     }
-    // A fork with issues turned off (GitHub's default) fails here with a stable
-    // signature — remap it to a typed variant the UI renders as an informative,
-    // non-retryable state instead of a generic "couldn't load" + Retry.
+    // A fork with issues off (GitHub's default) fails with a stable signature —
+    // remap to the typed variant so the UI shows an informative, non-retryable state.
     let out = run_gh(Some(&repo_path), &args, GH_TIMEOUT)
         .await
         .map_err(map_issues_disabled)?;
@@ -297,8 +288,7 @@ pub async fn gh_issue_view(
         run_gh(Some(&repo_path), &view_args, GH_TIMEOUT),
         run_gh(Some(&repo_path), &lock_args, GH_TIMEOUT),
     );
-    // On a fork with issues disabled, viewing an issue fails with the same gh
-    // signature — remap it to the typed variant (consistent with `gh_issue_list`).
+    // Same disabled-issues remap as `gh_issue_list`.
     let out = view_res.map_err(map_issues_disabled)?;
     let raw: RawIssue = serde_json::from_str(&out.stdout_lossy())
         .map_err(|e| AppError::Gh(format!("could not parse gh issue view: {e}")))?;
@@ -314,7 +304,7 @@ pub async fn gh_issue_view(
         title: raw.title,
         body: raw.body,
         author: raw.author.map(|a| a.login).unwrap_or_default(),
-        // GitHub carries no avatar URL in the API; login-derived on the frontend.
+        // GitHub avatar is login-derived on the frontend.
         author_avatar_url: String::new(),
         state: raw.state,
         created_at: raw.created_at,
@@ -405,8 +395,7 @@ pub async fn gh_issue_create(
     // no-op).
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let endpoint = format!("repos/{slug}/issues");
-    // Creating an issue on a fork with issues disabled fails with the same gh
-    // signature — remap it so the toast carries the readable variant message.
+    // Same disabled-issues remap as `gh_issue_list`.
     let out = run_gh_input(
         Some(&repo_path),
         &["api", "--method", "POST", &endpoint, "--input", "-"],
@@ -468,7 +457,6 @@ pub async fn gh_issue_set_assignees(
 ) -> AppResult<()> {
     let input = serde_json::to_string(&serde_json::json!({ "assignees": assignees }))
         .map_err(|e| AppError::Gh(format!("could not encode assignees: {e}")))?;
-    // Resolve the lens slug so the issue is edited on the chosen repo.
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let endpoint = format!("repos/{slug}/issues/{number}");
     run_gh_input(
@@ -496,7 +484,6 @@ pub async fn gh_issue_set_milestone(
     let input =
         serde_json::to_string(&serde_json::json!({ "milestone": milestone_value }))
             .map_err(|e| AppError::Gh(format!("could not encode milestone: {e}")))?;
-    // Resolve the lens slug so the issue is edited on the chosen repo.
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let endpoint = format!("repos/{slug}/issues/{number}");
     run_gh_input(
@@ -569,7 +556,6 @@ pub async fn gh_issue_set_type(
     lens: Option<String>,
 ) -> AppResult<()> {
     let n = number.to_string();
-    // Resolve the lens slug so the issue is edited on the chosen repo.
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let args: Vec<&str> = match type_name.as_deref() {
         Some(t) if !t.trim().is_empty() => {
@@ -593,7 +579,6 @@ pub async fn gh_issue_comment(
         return Err(AppError::InvalidArgument("a comment is required".into()));
     }
     let n = number.to_string();
-    // Resolve the lens slug so the comment lands on the chosen repo's issue.
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     run_gh(
         Some(&repo_path),
@@ -623,7 +608,6 @@ pub async fn gh_issue_close(
             )));
         }
     };
-    // Resolve the lens slug so the issue closes on the chosen repo.
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     run_gh(
         Some(&repo_path),
@@ -638,7 +622,6 @@ pub async fn gh_issue_close(
 #[tauri::command]
 pub async fn gh_issue_reopen(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     let n = number.to_string();
-    // Resolve the lens slug so the issue reopens on the chosen repo.
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     run_gh(
         Some(&repo_path),
@@ -667,7 +650,6 @@ pub async fn gh_issue_edit(
             "an issue title is required".into(),
         ));
     }
-    // Resolve the lens slug so the issue is edited on the chosen repo.
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let endpoint = format!("repos/{slug}/issues/{number}");
     run_gh(
@@ -692,7 +674,6 @@ pub async fn gh_issue_edit(
 #[tauri::command]
 pub async fn gh_issue_pin(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     let n = number.to_string();
-    // Resolve the lens slug so the issue is pinned on the chosen repo.
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     run_gh(
         Some(&repo_path),
@@ -706,7 +687,6 @@ pub async fn gh_issue_pin(repo_path: String, number: u64, lens: Option<String>) 
 #[tauri::command]
 pub async fn gh_issue_unpin(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     let n = number.to_string();
-    // Resolve the lens slug so the issue is unpinned on the chosen repo.
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     run_gh(
         Some(&repo_path),
@@ -727,7 +707,6 @@ pub async fn gh_issue_lock(
     lens: Option<String>,
 ) -> AppResult<()> {
     let n = number.to_string();
-    // Resolve the lens slug so the issue is locked on the chosen repo.
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let mut args = vec!["issue", "lock", &n, "--repo", &slug];
     if let Some(r) = reason.as_deref() {
@@ -746,7 +725,6 @@ pub async fn gh_issue_lock(
 #[tauri::command]
 pub async fn gh_issue_unlock(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     let n = number.to_string();
-    // Resolve the lens slug so the issue is unlocked on the chosen repo.
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     run_gh(
         Some(&repo_path),
@@ -757,11 +735,10 @@ pub async fn gh_issue_unlock(repo_path: String, number: u64, lens: Option<String
     Ok(())
 }
 
-/// Reactions for an issue's body + each comment, keyed by the comment's id as
-/// the thread carries it (a GraphQL node id here; the GitLab impl keys by note
-/// id). Kept separate from `gh_issue_view` so it loads in parallel and adds no
-/// latency to the conversation — `viewerHasReacted` requires GraphQL, which the
-/// `gh issue view` CLI JSON doesn't expose.
+/// Reactions for an issue's body + each comment, keyed by the comment id as the
+/// thread carries it (a GraphQL node id here; the GitLab impl keys by note id). Kept
+/// out of `gh_issue_view` so it loads in parallel — `viewerHasReacted` requires
+/// GraphQL, which `gh issue view`'s CLI JSON doesn't expose.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IssueReactions {
@@ -926,7 +903,6 @@ pub async fn gh_issue_transfer(
 #[tauri::command]
 pub async fn gh_issue_delete(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     let n = number.to_string();
-    // Resolve the lens slug so the issue is deleted on the chosen repo.
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     run_gh(
         Some(&repo_path),
@@ -1172,7 +1148,6 @@ pub async fn gh_issue_set_dependency(
     };
     let n = number.to_string();
     let t = target.to_string();
-    // Resolve the lens slug so the dependency is edited on the chosen repo's issue.
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     run_gh(
         Some(&repo_path),

@@ -1,45 +1,36 @@
-//! Operation journal ("opslog") core — Slice B of the git-recovery epic.
-//!
-//! A durable, per-repo journal of the four **compound rollback git operations**
-//! (local-PR merge, cherry-pick-onto, rewrite-commits, interactive rebase-edit).
-//! If one is interrupted by a crash or dev-restart mid-op, a `"pending"` record
-//! survives on disk, and on relaunch [`git_oplog_check`] can detect it and point
-//! the user at their pre-op state.
+//! Operation journal ("opslog"): a durable, per-repo record of the four compound
+//! rollback git operations (local-PR merge, cherry-pick-onto, rewrite-commits,
+//! interactive rebase-edit). If one is interrupted by a crash or restart mid-op, a
+//! `"pending"` record survives on disk and [`git_oplog_check`] points the user at
+//! their pre-op state on relaunch.
 //!
 //! ## Inform-only, best-effort safety net
 //!
-//! The journal NEVER performs a git mutation to "recover" — its job is to record
-//! and surface, not to reset or continue. It is also a *pure* safety net: a
-//! journal write failure must NEVER cause a git op to fail or change behavior.
+//! The journal NEVER performs a git mutation to "recover" — it records and surfaces,
+//! nothing more. A journal write failure must NEVER fail or alter a git op:
 //! [`begin`]/[`finish`] swallow+log every error and let the caller proceed.
 //!
 //! ## Storage-dir mirroring contract
 //!
-//! We resolve `opslog.json` with the SAME `dirs::data_dir()` the Tauri path layer
-//! uses, joined with the bundle identifier — mirroring `local_prs.rs`:
-//!
-//! ```text
-//!   Windows: %APPDATA%\com.thebguy.gitdesktop\opslog.json
-//!   macOS:   ~/Library/Application Support/com.thebguy.gitdesktop/opslog.json
-//!   Linux:   $XDG_DATA_HOME (or ~/.local/share)/com.thebguy.gitdesktop/opslog.json
-//! ```
+//! `opslog.json` is resolved with the SAME `dirs::data_dir()` the Tauri path layer
+//! uses, joined with the bundle identifier (mirroring `local_prs.rs`):
+//! `%APPDATA%\com.thebguy.gitdesktop\` on Windows, `~/Library/Application
+//! Support/<id>/` on macOS, `$XDG_DATA_HOME` (or `~/.local/share`)`/<id>/` on Linux.
 //!
 //! ## Value-based round-trip (never drop unknown fields)
 //!
-//! The whole file is read as a `serde_json::Value`; only the target repo key's
-//! array is mutated — record-by-record as `Value`s. We NEVER deserialize existing
-//! records into a struct and re-serialize (that would drop any field a future GUI
-//! version adds). NEW records are built from the typed [`OpLogEntry`] then
-//! converted to `Value`. Writes are atomic (temp file + rename over the target).
+//! The file is read as a `serde_json::Value` and mutated record-by-record as `Value`s
+//! — existing records are NEVER deserialized into a struct and re-serialized (that
+//! would drop any field a future GUI version adds). New records are built from the
+//! typed [`OpLogEntry`]. Writes are atomic (temp file + rename).
 //!
 //! ## Concurrency
 //!
-//! `opslog.json` is a single shared file keyed by repo path, written from
-//! concurrent async command handlers (two repos' ops can run at once). A naive
-//! read→modify→write races and loses updates. Every read-modify-write goes
-//! through a sync helper guarded by a module-level [`OPLOG_LOCK`], held across
-//! read→mutate→write. `atomic_write` gives torn-file safety; the lock gives
-//! lost-update safety — we need both. The lock is never held across an `.await`.
+//! One shared file keyed by repo path, written from concurrent async handlers, so a
+//! naive read→modify→write loses updates. Every read-modify-write goes through a sync
+//! helper guarded by [`OPLOG_LOCK`] held across read→mutate→write: `atomic_write`
+//! gives torn-file safety, the lock gives lost-update safety — both are needed. The
+//! lock is never held across an `.await`.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -83,23 +74,20 @@ pub struct OpLogEntry {
     pub error: Option<String>,
 }
 
-/// Guards the whole read-modify-write of the shared store file against the
-/// lost-update race between concurrent command handlers. Never held across an
-/// `.await` (the store fns it wraps are all synchronous).
+/// Guards the whole read-modify-write of the shared store file (see module docs).
+/// Never held across an `.await` — the store fns it wraps are all synchronous.
 fn oplog_lock() -> &'static Mutex<()> {
     static OPLOG_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     OPLOG_LOCK.get_or_init(|| Mutex::new(()))
 }
 
-/// Pure resolution of the store's base directory (the dir the `STORE_FILE` lives
-/// in), in precedence order:
-/// 1. `GD_OPLOG_DIR` override (any non-empty value) — an explicit escape hatch for
-///    headless/test callers.
-/// 2. Under `cfg!(test)` — a temp subdir, so no in-crate test can ever write the
-///    user's real store (the instrumented ops run for real under `cargo test`).
-/// 3. Otherwise the real app-data dir (`dirs::data_dir()/<identifier>`), unchanged.
+/// Pure resolution of the store's base directory, in precedence order:
+/// 1. a non-empty `GD_OPLOG_DIR` override — the escape hatch for headless/test callers;
+/// 2. under `cfg!(test)`, a temp subdir, so no in-crate test can write the user's real
+///    store (the instrumented ops run for real under `cargo test`);
+/// 3. otherwise the real app-data dir (`dirs::data_dir()/<identifier>`).
 ///
-/// No filesystem side effects — `atomic_write` creates the parent dir at write time.
+/// No filesystem side effects — `atomic_write` creates the parent at write time.
 fn resolve_store_base(gd_oplog_dir: Option<&str>, is_test: bool) -> AppResult<PathBuf> {
     match gd_oplog_dir {
         Some(dir) if !dir.is_empty() => Ok(PathBuf::from(dir)),
@@ -113,10 +101,8 @@ fn resolve_store_base(gd_oplog_dir: Option<&str>, is_test: bool) -> AppResult<Pa
     }
 }
 
-/// Resolve the absolute path of `opslog.json`. Real path is
-/// `dirs::data_dir()/<identifier>/opslog.json` (mirrors `local_prs.rs`); a
-/// `GD_OPLOG_DIR` override or a `cfg!(test)` build redirect the base — see
-/// [`resolve_store_base`].
+/// Absolute path of `opslog.json` — `<store base>/opslog.json`; see
+/// [`resolve_store_base`] for how the base is chosen.
 pub fn store_path() -> AppResult<PathBuf> {
     let base = resolve_store_base(std::env::var("GD_OPLOG_DIR").ok().as_deref(), cfg!(test))?;
     Ok(base.join(STORE_FILE))
@@ -156,8 +142,8 @@ fn write_store(path: &Path, store: &Map<String, Value>) -> AppResult<()> {
 }
 
 /// Compare two repo-path keys for "same repo" tolerantly: normalize separators to
-/// `/`, and treat a leading Windows drive letter case-insensitively (`C:` == `c:`).
-/// (Copied from `local_prs.rs` — same need to reuse the GUI's key variant.)
+/// `/` and treat a leading Windows drive letter case-insensitively (`C:` == `c:`).
+/// Mirrors `local_prs.rs`.
 fn same_repo(a: &str, b: &str) -> bool {
     fn norm(s: &str) -> String {
         let slashed: String = s.chars().map(|c| if c == '\\' { '/' } else { c }).collect();
@@ -460,8 +446,8 @@ pub async fn git_oplog_list(repo_path: String) -> AppResult<Vec<OpLogEntry>> {
 }
 
 /// Reconcile `repo`'s pending entries against real git state (see the module
-/// contract + §3) and return the genuinely-interrupted entries (0 or 1),
-/// newest-first. All git reads are done OUTSIDE the store lock.
+/// contract) and return the genuinely-interrupted entries (0 or 1), newest-first.
+/// All git reads happen OUTSIDE the store lock.
 #[tauri::command]
 pub async fn git_oplog_check(repo_path: String) -> AppResult<Vec<OpLogEntry>> {
     use crate::git::runner::{run_git, DEFAULT_TIMEOUT};

@@ -1,64 +1,39 @@
-//! Per-site Jira custom-field discovery cache (agile fields — phase 4).
+//! Per-site Jira custom-field discovery cache (agile fields).
 //!
-//! Story points and sprint live in per-TENANT `customfield_NNNNN` ids (the numeric id
-//! differs from one Jira site to the next), so before the issue-list / issue-view field
-//! lists can request them, we must discover them. This module is the persisted cache of
+//! Story points and sprint live in per-TENANT `customfield_NNNNN` ids, so they must be
+//! discovered before any field list can request them. This module is the persisted cache of
 //! that discovery, keyed by site HOST (several repos can share one site).
 //!
-//! ## Storage-dir mirroring contract (same as [`crate::local_prs`])
+//! ## Storage + concurrency contract (same as [`crate::local_prs`])
 //!
-//! The file is `jira-field-maps.json` under `dirs::data_dir()/<APP_IDENTIFIER>/` — the
-//! very directory the Tauri Store plugin resolves `BaseDirectory::AppData` to (see the
-//! `local_prs` module docs for the derivation). Both the GUI process AND the headless MCP
-//! server process discover against the same Jira sites, so both read and write this one
-//! file — writes are therefore atomic (temp file + rename via
-//! [`crate::fsops::atomic_write`]), and we NEVER assume single-process ownership.
+//! `jira-field-maps.json` under `dirs::data_dir()/<APP_IDENTIFIER>/` — the directory the
+//! Tauri Store plugin resolves `BaseDirectory::AppData` to. The GUI process AND the headless
+//! MCP process both read and write this one file, so writes are atomic (temp + rename via
+//! [`crate::fsops::atomic_write`]) and single-process ownership is NEVER assumed.
 //!
-//! ```text
-//!   Windows: %APPDATA%\com.thebguy.gitdesktop\jira-field-maps.json
-//!   macOS:   ~/Library/Application Support/com.thebguy.gitdesktop/jira-field-maps.json
-//!   Linux:   $XDG_DATA_HOME (or ~/.local/share)/com.thebguy.gitdesktop/jira-field-maps.json
-//! ```
+//! ## This is a CACHE — tolerance is the opposite of [`crate::jira_links`]
 //!
-//! JSON shape:
-//!
-//! ```json
-//! { "<siteHost>": { "storyPointsFieldId": "customfield_10016" | null,
-//!                   "sprintFieldId": "customfield_10020" | null,
-//!                   "fieldNames": { "customfield_10016": "Story point estimate", … },
-//!                   "resolvedAt": "2026-07-11T00:00:00.000Z" } }
-//! ```
-//!
-//! ## This is a CACHE — tolerance differs from [`crate::jira_links`] on purpose
-//!
-//! `jira_links.rs` treats a malformed file as a hard error (it holds user intent we must
-//! never silently drop). This file holds only DISCOVERED data we can always re-derive, so
-//! the tolerance is the opposite: a malformed/unreadable file, or a malformed individual
-//! entry, degrades to "no entry" — which triggers rediscovery and an overwrite — and is
-//! NEVER surfaced as an error to the caller. Discovery is best-effort; a site legitimately
-//! without agile fields caches an all-`None` entry so we don't re-probe it every call.
+//! `jira_links.rs` treats a malformed file as a hard error (it holds user intent). This file
+//! holds only re-derivable data, so a malformed file OR a malformed entry degrades to "no
+//! entry" — triggering rediscovery and overwrite — and NEVER surfaces as an error. A site
+//! legitimately without agile fields caches an all-`None` entry so it isn't re-probed.
 //!
 //! ## No TTL / invalidation — by design
 //!
-//! There is deliberately no staleness rule. A Jira `customfield_NNNNN` id is stable for the
-//! life of the field on a site, so a cached entry stays correct indefinitely. If a site
-//! later gains agile fields (or an admin moves the estimation field), the entry re-resolves
-//! only when the file is deleted — or on a fresh process for a site whose discovery had
-//! failed (that failure is in-process only, never persisted). `resolvedAt` is purely
-//! informational today and is the natural hook for a future staleness rule (compare against
-//! `now()` and re-discover past some age) should one ever be wanted.
+//! A `customfield_NNNNN` id is stable for the life of the field, so a cached entry stays
+//! correct indefinitely. The flip side: if a site later gains agile fields, or an admin
+//! moves the estimation field, the entry re-resolves only when the file is deleted (or, for
+//! a site whose discovery failed, on a fresh process — that failure is in-process only,
+//! never persisted). `resolvedAt` is informational.
 //!
 //! ## Two in-process layers
 //!
-//! 1. The persisted [`SiteFieldMap`] per site, mirrored in an `OnceLock<Mutex<HashMap>>`
-//!    so a warm process answers from memory without touching disk.
-//! 2. An in-process field-NAME map per site (`field id → display name`), consumed by the
-//!    error translation in [`crate::forge::jira`] to render `customfield_10016` as
-//!    `Story point estimate`. It is populated both at discovery time (from the live
-//!    `/field` response) AND — crucially — hydrated from the PERSISTED entry's `fieldNames`
-//!    on every [`get`], so a process that only ever reads the persisted map (every app
-//!    restart after first discovery, and the headless MCP process) still gets warm
-//!    translation with no extra network. Reads stay off the error path (which does no I/O).
+//! 1. The persisted [`SiteFieldMap`] per site, mirrored in an `OnceLock<Mutex<HashMap>>` so
+//!    a warm process answers from memory.
+//! 2. A field-NAME map per site (`field id → display name`) consumed by the error
+//!    translation in [`crate::forge::jira`], populated at discovery AND hydrated from the
+//!    persisted `fieldNames` on every [`get`] — so a restart or the headless MCP gets warm
+//!    translation with no network. The error path itself does no I/O.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -103,13 +78,11 @@ pub struct SiteFieldMap {
     /// `customfield_NNNNN` for the sprint field, or `None`.
     #[serde(default)]
     pub sprint_field_id: Option<String>,
-    /// The `customfield_NNNNN → display name` map captured from the same `/field` response
-    /// at discovery, PERSISTED so every process (including restarts and the headless MCP)
-    /// gets warm error-message translation without a network round-trip. `None` marks a
-    /// legacy entry written before this field existed (the file written during live
-    /// validation) — such an entry is treated as ABSENT by [`get`] so one idempotent
-    /// rediscovery rewrites it complete. A complete write always sets `Some(_)` (possibly an
-    /// empty map, for a site with no custom fields at all).
+    /// The `customfield_NNNNN → display name` map from the discovery `/field` response,
+    /// PERSISTED so every process (restarts, the headless MCP) gets warm error-message
+    /// translation with no network round-trip. `None` marks a LEGACY entry written before
+    /// this field existed — [`get`] treats it as ABSENT so one rediscovery rewrites it
+    /// complete. A complete write always sets `Some(_)` (possibly empty).
     #[serde(default)]
     pub field_names: Option<HashMap<String, String>>,
     /// RFC3339 timestamp of the discovery that produced this entry. Informational — see the
@@ -126,11 +99,10 @@ fn cache() -> &'static Mutex<HashMap<String, SiteFieldMap>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// The in-process-ONLY full field-name map per site (`field id → display name`), never
-/// persisted. Populated at discovery time from the `/field` response; consumed by the
-/// error translation so a `customfield_NNNNN` key renders as its human name. Empty for a
-/// site until its first discovery in THIS process (the error path then falls back to raw
-/// ids — today's behavior).
+/// The in-process field-name map per site (`field id → display name`), consumed by the
+/// error translation in [`crate::forge::jira`] so a `customfield_NNNNN` key renders as its
+/// human name. Filled at discovery time AND hydrated from the persisted entry's
+/// `fieldNames` by [`get`]; a site with neither yet renders raw ids.
 static NAME_MAPS: OnceLock<Mutex<HashMap<String, HashMap<String, String>>>> = OnceLock::new();
 
 fn name_maps() -> &'static Mutex<HashMap<String, HashMap<String, String>>> {
@@ -157,12 +129,10 @@ fn read_store(path: &Path) -> Map<String, Value> {
 }
 
 /// Decode a persisted per-site entry into `(sanitized SiteFieldMap, field-name map)`, or
-/// `None` when the entry must be treated as ABSENT (→ one idempotent rediscovery). Absent
-/// cases: a malformed shape, OR a legacy entry predating `fieldNames` (its
-/// `field_names == None`). The two ids are grammar-validated ([`is_valid_field_id`]) so a
-/// hostile persisted id (e.g. `customfield_10016&extra=1`) degrades to `None` rather than
-/// reaching a request URL. The returned entry always carries `field_names: Some(_)`. Pure
-/// (testable) — no I/O, no statics.
+/// `None` when the entry must be treated as ABSENT (→ one idempotent rediscovery): a
+/// malformed shape, OR a legacy entry predating `fieldNames`. Both ids are grammar-validated
+/// ([`is_valid_field_id`]) so a hostile persisted id can't reach a request URL. The returned
+/// entry always carries `field_names: Some(_)`. Pure.
 fn decode_persisted_entry(raw: &Value) -> Option<(SiteFieldMap, HashMap<String, String>)> {
     // A malformed entry (wrong shape) degrades to "absent" → rediscovery + overwrite.
     let mut entry: SiteFieldMap = serde_json::from_value(raw.clone()).ok()?;
@@ -216,14 +186,13 @@ pub fn put(site: &str, entry: SiteFieldMap) {
     };
     store.insert(site.to_string(), value);
     if let Ok(body) = serde_json::to_string_pretty(&Value::Object(store)) {
-        // Best-effort: a failed disk write leaves the in-process cache authoritative for
-        // this process; the next process rediscovers.
+        // Best-effort: a failed write leaves the in-process cache authoritative.
         let _ = crate::fsops::atomic_write(&path, body.as_bytes());
     }
 }
 
-/// Store the in-process-only full field-name map (`field id → display name`) for a site,
-/// captured at discovery time. Overwrites any prior map for the site. Never persisted.
+/// Store the in-process field-name map for a site (from live discovery, or hydrated from
+/// the persisted entry by [`get`]). Overwrites any prior map for the site.
 pub fn set_name_map(site: &str, names: HashMap<String, String>) {
     if let Ok(mut m) = name_maps().lock() {
         m.insert(site.to_string(), names);
@@ -231,9 +200,8 @@ pub fn set_name_map(site: &str, names: HashMap<String, String>) {
 }
 
 /// The display name for a single field id on a site, from the in-process name map. `None`
-/// when the site has no name map in this process yet (no discovery happened), or the id is
-/// unknown — the error path then renders the raw id (today's behavior). NO disk / network
-/// I/O: the error path must stay pure.
+/// when the site has no map in this process yet, or the id is unknown — the error path then
+/// renders the raw id. NO disk / network I/O: the error path must stay pure.
 pub fn field_name(site: &str, field_id: &str) -> Option<String> {
     name_maps()
         .lock()
@@ -399,9 +367,8 @@ mod tests {
 
     #[test]
     fn decode_entry_without_field_names_is_absent() {
-        // A legacy entry (no fieldNames) — the file written during live validation — MUST
-        // decode to None so exactly one rediscovery rewrites it complete; otherwise names
-        // stay cold for it forever.
+        // A legacy entry (no fieldNames) MUST decode to None so exactly one rediscovery
+        // rewrites it complete; otherwise names stay cold for it forever.
         let legacy = json!({
             "storyPointsFieldId": "customfield_10016",
             "sprintFieldId": "customfield_10020",

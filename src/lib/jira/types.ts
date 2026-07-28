@@ -62,7 +62,7 @@ export interface JiraIssueInfo {
   createdAt: string;
   updatedAt: string;
   url: string;
-  // ── Agile fields (phase 4, read-only) ──────────────────────────────────────
+  // ── Agile fields (read-only) ───────────────────────────────────────────────
   // Resolved lazily from per-site custom fields on the backend; every one is
   // null/empty on a site without agile fields, so all UI omits-when-empty.
   /** Story-points estimate; `null` when unset or the site has no points field. */
@@ -153,7 +153,7 @@ export interface JiraIssueDetails extends JiraIssueInfo {
   worklogsTotal: number;
 }
 
-// ── Write path (phase 2) ────────────────────────────────────────────────────
+// ── Write path ──────────────────────────────────────────────────────────────
 
 /** Per-project write permissions for the linked project, resolved server-side
  *  (Jira's `mypermissions`). Each flag gates one affordance: permitted → the

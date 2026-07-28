@@ -125,11 +125,11 @@ export function DiffViewer({ repoPath }: { repoPath: string }) {
 }
 
 /**
- * The working-tree variant of the diff pane: hunks render as individual cards
- * with whole-hunk stage/unstage/discard actions, plus drag-to-select for
- * staging an individual subset of lines. Untracked, binary, truncated, and
- * generated/minified (one enormous line) diffs fall back to the plain
- * whole-file surface (which shows the generated/minified placeholder).
+ * The working-tree variant of the diff pane: hunks render as cards with
+ * whole-hunk stage/unstage/discard, plus drag-to-select for staging a subset of
+ * lines. Untracked, binary, truncated, and generated/minified (one enormous
+ * line) diffs fall back to the plain whole-file surface (which is what shows
+ * the generated/minified placeholder).
  */
 function WorkingTreeDiff({
   repoPath,
@@ -548,10 +548,9 @@ function HunkActionButtons({
 }
 
 /**
- * The working-tree diff as ONE whole-file view: syntax highlighting with
- * full-file context + GitHub-style collapsible expand (content mode, small
- * files), drag the line-number gutter to select lines to stage across the whole
- * file, and one-click Stage/Unstage/Discard per hunk via buttons overlaid on
+ * The working-tree diff as ONE whole-file view: content-mode highlighting with
+ * collapsible expand, drag the line-number gutter to select lines to stage
+ * across the whole file, and per-hunk Stage/Unstage/Discard buttons OVERLAID on
  * each hunk header (the library exposes no hunk-header slot). The library's
  * selection manager handles the drag; we paint the `gd-line-selected` highlight
  * ourselves (its own class doesn't apply in this standalone setup).
@@ -589,14 +588,12 @@ function StagingDiffView({
   const deferredText = useDeferredValue(diffText);
   const deferredPath = useDeferredValue(filePath);
   // Hard-shorten over-long lines before rendering so a file with lines in the
-  // 4K–20K band (past the mega threshold it falls back to the whole-file
-  // surface entirely) can't freeze the un-virtualized renderer here either.
-  // DISPLAY-ONLY: shortening preserves line COUNT and numbers, so the drag
-  // manager, paint helpers, hunk anchors, and every mutation path (which all
-  // work off the ORIGINAL text/parsed hunks in WorkingTreeDiff) stay correct.
-  // One scan: measure the longest line once, and only shorten when it overflows
-  // — normal files then fast-path to the SAME string reference (shortened=0),
-  // keeping createDiffFile's inputs — and thus behavior — byte-identical.
+  // 4K–20K band can't freeze the un-virtualized renderer here either (past the
+  // mega threshold it falls back to the whole-file surface). DISPLAY-ONLY:
+  // shortening preserves line COUNT and numbers, so the drag manager, paint
+  // helpers, hunk anchors, and every mutation path (all working off the ORIGINAL
+  // text) stay correct. Measure once; unchanged files fast-path to the same
+  // string reference.
   const { longestLine, displayText, shortened } = useMemo(() => {
     const longest = longestLineLength(deferredText);
     if (longest <= DIFF_MAX_LINE_CHARS) {
@@ -610,12 +607,10 @@ function StagingDiffView({
     };
   }, [deferredText]);
   // Whole-file highlight context + expand. The staging view renders every hunk
-  // regardless, so let content mode engage for big diffs too — bounded by the
-  // file highlight budget, not the read-only surface's 200-line render cap.
-  // `pending` holds the paint until the whole-file reads settle, so the diff is
-  // built once in its final content-mode layout instead of flashing hunk-only
-  // first (the single-paint fix). (No Shiki grammar gating here — this staging
-  // path doesn't lazy-load built-in grammars, a pre-existing gap left as-is.)
+  // regardless, so content mode may engage for big diffs too — bounded by the
+  // file highlight budget, not the read-only surface's render cap. `pending`
+  // holds the paint so the diff is built once in its final layout. (No lazy
+  // built-in Shiki grammar gating on this path — known gap.)
   const { content, pending: contentPending } = useFileContent(
     repoPath,
     deferredPath,
@@ -735,15 +730,13 @@ function StagingDiffView({
   }, [diffFile, hunks]);
 
   // Whole-file reads still settling: render nothing rather than build a hunk-only
-  // diff we'd immediately restructure once they land (the single-paint fix). Must
-  // precede the empty-state placeholder so loading never reads as "No changes to
-  // show". All hooks above have already run (rules of hooks); the effects guard
-  // on `!diffFile`, so they no-op while pending and re-bind on the single build.
+  // diff we'd immediately restructure (the single-paint fix). Must precede the
+  // empty-state placeholder so loading never reads as "No changes to show". The
+  // effects above guard on `!diffFile`, so they no-op while pending and re-bind on
+  // the single build.
   if (contentPending) return null;
   if (!diffFile) return <DiffPlaceholder message="No changes to show" />;
-  // A hunk at line 1 has no `@@` separator row to host its buttons (sep=false),
-  // so give it a synthetic header bar at the very top instead of overlaying the
-  // buttons on its first code line.
+  // A line-1 hunk has no `@@` row to host its buttons — synthetic header instead.
   const firstNeedsHeader =
     !!anchors[0] && anchors[0].top >= 0 && !anchors[0].sep && !!hunks[0];
   return (

@@ -93,12 +93,10 @@ pub async fn git_branch_diff_files(
 }
 
 /// The full combined `base...compare` diff text plus its file summary, for
-/// feeding AI PR description generation. The `exclude` handling mirrors
-/// `git_staged_diff` exactly — the caller's AI-ignore patterns become git pathspec
-/// excludes and `excluded_files` reports how many changed files they hid, with
-/// `exclude: None` behaving as an unfiltered three-dot diff. Truncation deliberately
-/// differs: this cuts at a char boundary with a 1 MB default, not at a file boundary
-/// with the AI budget.
+/// feeding AI PR description generation. `exclude` mirrors `git_staged_diff`:
+/// AI-ignore patterns become pathspec excludes and `excluded_files` reports how
+/// many changed files they hid. Truncation deliberately differs — char boundary
+/// at a 1 MB default, not file boundary at the AI budget.
 #[tauri::command]
 pub async fn git_branch_diff(
     repo_path: String,
@@ -266,9 +264,9 @@ pub async fn git_diff_between_refs(
     }
 
     // 2. Ancestry — exit 0 = ancestor (clean append), 1 = not (rebase/force-push),
-    //    anything else (e.g. 128 on a shallow clone) = couldn't determine. This is
-    //    why "rewritten" and "indeterminate" are distinct (N4): only a definite
-    //    exit-1 means the history was actually rewritten.
+    //    anything else (e.g. 128 on a shallow clone) = couldn't determine. Only a
+    //    definite exit-1 means the history was actually rewritten, which is why
+    //    "rewritten" and "indeterminate" are distinct.
     let anc = run_git_raw(
         Some(&repo_path),
         &["merge-base", "--is-ancestor", &from_ref, &to_ref],
@@ -379,15 +377,13 @@ pub async fn git_review_worktree(repo_path: String, sha: String) -> AppResult<Op
     Ok(Some(path_str))
 }
 
-/// Whether `path` is a `git_review_worktree`-shaped review temp dir: located
-/// DIRECTLY under the OS temp dir with a basename starting `gd-review-`. This is
-/// the guard for the `remove_dir_all` fallback in `git_remove_worktree` — the
-/// fallback must NEVER widen that `#[tauri::command]` into an arbitrary recursive
-/// delete of any caller-supplied path (git's own `worktree remove` refuses a
-/// non-worktree path, so the fallback is the only unbounded-delete risk). Only
-/// paths this returns `true` for get the fallback; every other path degrades to
-/// git-only baseline. Comparison is component-wise (robust to trailing
-/// separators) and case-insensitive on the file name to match Windows semantics.
+/// Whether `path` is a `git_review_worktree`-shaped review temp dir: DIRECTLY under
+/// the OS temp dir with a basename starting `gd-review-`. This is the guard for the
+/// `remove_dir_all` fallback in `git_remove_worktree` — git's own `worktree remove`
+/// refuses a non-worktree path, so that fallback is the only unbounded-delete risk
+/// and must never widen the command into an arbitrary recursive delete. Comparison
+/// is component-wise (trailing-separator safe) and case-insensitive on the file
+/// name, to match Windows.
 fn is_review_worktree_temp_path(path: &std::path::Path) -> bool {
     let temp = std::env::temp_dir();
     // The path's parent must be exactly the temp dir. Compare component sequences
@@ -418,15 +414,12 @@ pub async fn git_remove_worktree(repo_path: String, worktree_path: String) -> Ap
     .await;
     let _ = run_git_raw(Some(&repo_path), &["worktree", "prune"], DEFAULT_TIMEOUT).await;
     // `git worktree remove` deletes the directory itself, but on Windows that
-    // recursive delete can lose a handle race (an antivirus/indexer still holding
-    // the temp dir) and leave an EMPTY husk behind, and `git_remove_worktree`
-    // discards every result above — so the husk leaks in %TEMP% forever. Finish
-    // the delete ourselves best-effort with a short backoff. GUARDED to exactly
-    // the `gd-review-*` temp shape the only caller passes: git's own remove can
-    // never delete a non-worktree path, so an unguarded `remove_dir_all` here
-    // would widen this command into an arbitrary recursive-delete primitive on any
-    // caller-supplied path. Off the guard, behavior degrades to the git-only
-    // baseline. Still returns Ok(()) regardless (best-effort; the caller swallows).
+    // recursive delete can lose a handle race (antivirus/indexer still holding the
+    // dir) and leave an EMPTY husk behind — and every result above is discarded, so
+    // it would leak in %TEMP% forever. Finish the delete ourselves, best-effort with
+    // a short backoff, GUARDED to the `gd-review-*` temp shape: an unguarded
+    // `remove_dir_all` would turn this command into an arbitrary recursive-delete
+    // primitive on any caller-supplied path. Off the guard, git-only baseline.
     if is_review_worktree_temp_path(std::path::Path::new(&worktree_path)) {
         for _ in 0..2 {
             if !std::path::Path::new(&worktree_path).exists() {
@@ -443,25 +436,21 @@ pub async fn git_remove_worktree(repo_path: String, worktree_path: String) -> Ap
 }
 
 /// Sweep leaked empty `gd-review-*` worktree husks from the OS temp dir. A review
-/// worktree (`git_review_worktree`) lives its whole life NON-empty — populated by
-/// `worktree add`, then deleted whole by `git_remove_worktree` — so unlike the
-/// paused-state `gd-resolve-*` worktrees (which need a keep-list), a `gd-review-*`
-/// dir that is *empty* can only be a husk whose delete lost the Windows handle
-/// race; there is no in-flight review it could belong to. That makes "empty" a
-/// sufficient exclusion with no keep-list needed. Best-effort housekeeping, run
-/// once fire-and-forget on startup; every failure is skipped conservatively.
+/// worktree lives its whole life NON-empty — populated by `worktree add`, deleted
+/// whole by `git_remove_worktree` — so an *empty* one can only be a husk whose
+/// delete lost the Windows handle race. That makes "empty" a sufficient exclusion,
+/// unlike the paused `gd-resolve-*` worktrees which need a keep-list. Best-effort,
+/// fire-and-forget on startup.
 pub fn sweep_review_worktree_husks() {
     let _ = sweep_review_husks_in(&std::env::temp_dir());
 }
 
 /// The testable core of [`sweep_review_worktree_husks`], parameterized on the
-/// directory so a unit test can drive it against a real fixture dir. Deletes only
-/// entries whose basename starts with exactly `gd-review-` AND are empty
-/// directories: `remove_dir` HARD-FAILS on a non-empty dir, so it is the real
-/// TOCTOU-safe guard (not just the name filter) — a review that repopulates
-/// between the filter and the delete simply fails the `remove_dir` and is spared.
-/// Returns how many husks were removed (for the test); a dir it can't list is
-/// skipped, not an error.
+/// directory so a unit test can drive a real fixture. Deletes only `gd-review-*`
+/// entries that are EMPTY dirs: `remove_dir` HARD-FAILS on a non-empty dir, so it —
+/// not the name filter — is the real TOCTOU-safe guard (a review that repopulates
+/// between filter and delete is spared). Returns the husk count; an unlistable dir
+/// is skipped, not an error.
 fn sweep_review_husks_in(dir: &std::path::Path) -> std::io::Result<usize> {
     let mut removed = 0;
     // "Can't list it" ⇒ skip the whole sweep conservatively.
@@ -495,13 +484,9 @@ pub async fn git_fetch_objects(repo_path: String, refs: Vec<String>) -> AppResul
     if refs.is_empty() {
         return Ok(false);
     }
-    // Short-circuit when every requested object is already present locally — this
-    // runs before every repo-aware review worktree, and a PR that was already
-    // checked out (or fetched earlier) needs no network round-trip. If ALL SHAs
-    // resolve to a local commit, skip the fetch and report success. Any missing (or
-    // unresolvable) object falls through to the real fetch below, preserving prior
-    // behavior. `git rev-parse --verify --quiet <sha>^{commit}` exits non-zero when
-    // the object is absent, so a clean exit across all refs means "all local".
+    // Short-circuit when every requested object is already local: this runs before
+    // every repo-aware review worktree, and a PR already checked out (or fetched
+    // earlier) needs no network round-trip. Any missing object falls through.
     if all_objects_present(&repo_path, &refs).await {
         return Ok(true);
     }
@@ -511,15 +496,14 @@ pub async fn git_fetch_objects(repo_path: String, refs: Vec<String>) -> AppResul
     Ok(out.code == 0)
 }
 
-/// Whether every ref in `refs` resolves to a commit object already in `repo_path`
-/// (no network). A spawn/timeout error or a non-zero exit for any ref ⇒ `false`,
-/// so the caller fetches — this only ever SKIPS the fetch when it's provably
-/// unnecessary, never suppresses a needed one.
+/// Whether every ref resolves to a commit object already in `repo_path` (no
+/// network). Any spawn/timeout error or non-zero exit ⇒ `false`, so the caller
+/// fetches — this only ever SKIPS a provably unnecessary fetch, never suppresses a
+/// needed one.
 ///
-/// One `rev-parse` spawn per ref: every current caller passes a single SHA (the PR
-/// head), so batching isn't worth it yet. If a multi-SHA caller appears, switch to
-/// one `git cat-file --batch-check` process (`rev-parse --verify` takes exactly one
-/// revision, so it can't batch).
+/// One `rev-parse` spawn per ref: `rev-parse --verify` takes exactly one revision,
+/// so it can't batch. If a multi-SHA caller appears, switch to one
+/// `git cat-file --batch-check` process.
 async fn all_objects_present(repo_path: &str, refs: &[String]) -> bool {
     for r in refs {
         let spec = format!("{r}^{{commit}}");
@@ -548,24 +532,18 @@ const GREP_MAX_BYTES: usize = 100_000;
 /// against a PR head, with NO checkout/worktree (it greps the rev directly).
 ///
 /// `git grep -I -n -F -m <max_hits> --no-color -e <pattern> <atRef>`: `-F` is
-/// fixed-string (v1 is deliberately literal, not regex — a regex mode is a later
-/// addition), `-I` skips binary files, `-n` prefixes line numbers, and `-m` caps
-/// results PER FILE so one pathological file (a minified bundle the `-I` filter
-/// didn't catch) can't dominate the captured output before we trim. The pattern
-/// is passed with `-e`, so a leading `-` in it is data, not an option (a bare
-/// `--` guard isn't needed for the pattern; `validate_ref` guards the rev the
-/// same way the rest of this module does).
+/// fixed-string (deliberately literal, not regex), `-I` skips binary files, and `-m`
+/// caps results PER FILE so one pathological file (a minified bundle `-I` missed)
+/// can't dominate the capture. The pattern goes through `-e`, so a leading `-` in it
+/// is data, not an option.
 ///
-/// `-m` (`--max-count`) landed in git 2.38 (Oct 2022); on an older git the switch
-/// is unknown and git grep hard-fails, so [`run_grep`] retries once without it
-/// (same output, just an uncapped capture). Because `-m` is per-file, the true
-/// total match count isn't recoverable from the output, so the truncation marker
-/// is count-less.
+/// `-m` (`--max-count`) landed in git 2.38; on an older git the switch is unknown and
+/// git grep hard-fails, so [`run_grep`] retries once without it. Because `-m` is
+/// per-file, the true total match count isn't recoverable — the truncation marker is
+/// count-less.
 ///
-/// Grepping a rev makes git prefix every hit with `<atRef>:` (output is
-/// `<atRef>:path:line:content`); we strip exactly that known prefix so the model
-/// sees repo-relative `path:line:content`. Only the leading `atRef:` is removed —
-/// path- and content-embedded colons are preserved.
+/// Grepping a rev makes git prefix every hit with `<atRef>:`; we strip exactly that
+/// known prefix, leaving path- and content-embedded colons intact.
 #[tauri::command]
 pub async fn git_grep_at_ref(
     repo_path: String,
@@ -608,13 +586,10 @@ pub async fn git_grep_at_ref(
     Ok(result)
 }
 
-/// Runs the fixed-string `git grep` at a rev, returning `Some(stdout)` on a match,
-/// `None` for the documented no-match (exit 1, empty output). `run_git_raw` so exit
-/// 1 stays a success signal rather than an error; any OTHER non-zero is a real error.
-///
-/// Retries ONCE without `-m` when the first run fails with an unknown-option error,
-/// so a git older than 2.38 (which lacks `--max-count`) falls back to an uncapped
-/// capture instead of hard-failing. The retry shares this same match/exit handling.
+/// Runs the fixed-string `git grep` at a rev: `Some(stdout)` on a match, `None` for
+/// git's documented no-match (exit 1, empty output) — `run_git_raw` so exit 1 stays
+/// a signal, not an error. Any OTHER non-zero is a real error, except an
+/// unknown-option failure, which retries ONCE without `-m` (git < 2.38).
 async fn run_grep(
     repo_path: &str,
     pattern: &str,
@@ -729,10 +704,8 @@ mod tests {
         (base, repo_s)
     }
 
-    /// `exclude` patterns hide matching files from BOTH the diff text and the file
-    /// list of the three-dot range, and `excluded_files` reports how many were
-    /// hidden. `None` (and a list of only blank/comment patterns) leaves the diff
-    /// unfiltered with a zero count.
+    /// `exclude` hides matching files from BOTH the diff text and the file list, and
+    /// `excluded_files` counts them; `None` (or only blank/`#` patterns) filters nothing.
     #[tokio::test]
     async fn branch_diff_applies_exclude_pathspecs() {
         let (_base, repo) = seed_repo("branchdiff-exclude").await;
@@ -743,9 +716,8 @@ mod tests {
         run(&repo, &["commit", "-qm", "seed"]).await;
         let base_sha = run(&repo, &["rev-parse", "HEAD"]).await.trim().to_string();
 
-        // Six changed files on top of the base, shaped to exercise the three
-        // pattern kinds a real AI-ignore list uses: a bare filename, a glob, and a
-        // directory — the glob and directory cases each with a NESTED member.
+        // Six changed files covering the three AI-ignore pattern kinds — bare name,
+        // glob, directory — the glob and directory cases each with a NESTED member.
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::create_dir_all(root.join("tools")).unwrap();
         std::fs::create_dir_all(root.join("vendor").join("sub")).unwrap();
@@ -789,8 +761,7 @@ mod tests {
         assert!(filtered.text.contains("src/a.rs"), "other files survive");
         assert_eq!(filtered.excluded_files, 1);
 
-        // A GLOB pattern: `*` reaches into subdirectories, so a nested `.lock` is
-        // hidden too (`package-lock.json` is untouched — it doesn't end in `.lock`).
+        // A GLOB pattern — `package-lock.json` survives, it doesn't end in `.lock`.
         let globbed = git_branch_diff(
             repo.clone(),
             base_sha.clone(),
@@ -908,15 +879,10 @@ mod tests {
     }
 
     /// More returned lines than `max_hits` → the kept lines plus a count-less
-    /// truncation marker. The marker carries NO remainder count: `-m` caps per
-    /// file, so the true total match count is not recoverable from the output (a
-    /// count would understate). We assert the fixed lines returned and the marker
-    /// text only.
-    ///
-    /// The matches are spread across THREE files deliberately: `-m` is per-file, so
-    /// a single file with N matches would itself be capped to `max_hits` by git and
-    /// never overflow the returned-line cap. Three files × 2 matches each = 6 lines
-    /// out of git, which the caller's `take(2)` then trims — the realistic path.
+    /// truncation marker (`-m` caps per file, so the true total isn't recoverable).
+    /// The matches are spread across THREE files deliberately: with `-m` per-file, a
+    /// single file with N matches would be capped by git itself and never overflow
+    /// the caller's line cap. 3 files × 2 matches → 6 lines, trimmed by `take(2)`.
     #[tokio::test]
     async fn grep_at_ref_caps_hits_with_marker() {
         let (_base, repo) = seed_repo("grep-cap").await;

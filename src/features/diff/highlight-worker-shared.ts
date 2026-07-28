@@ -2,7 +2,7 @@
 // (`use-worker-highlight.ts`, `DiffSurface.tsx`), so the worker implementation
 // never enters a main-thread chunk: the main thread imports `djb2` and these
 // types from here, and references the worker only via `new Worker(new
-// URL("./highlight-worker.ts", ...))` (review finding, PR #57).
+// URL("./highlight-worker.ts", ...))`.
 import type { DiffAST } from "@git-diff-view/core";
 
 /** djb2 over a full string — O(n) at ~1ms/MB, negligible next to tokenize. The

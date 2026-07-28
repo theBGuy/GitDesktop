@@ -20,13 +20,11 @@ export interface LocalPrComment {
 
 export type LocalPrStatus = "open" | "merged" | "closed";
 
-/** A local-PR merge that hit conflicts and is paused for the user to resolve in
- *  an isolated worktree. Carries everything `git_finish_local_pr_merge` /
+/** A local-PR merge that hit conflicts and is paused for the user to resolve in an
+ *  isolated worktree. Carries everything `git_finish_local_pr_merge` /
  *  `git_abort_local_pr_merge` need to commit the result or roll it back. The
  *  conflicts are unmerged paths in the hidden worktree at `worktreePath` — the
- *  user's branch and working tree stay untouched. Set on the PR while resolution
- *  is in flight; cleared (set to `undefined`, which JSON omits) once finished or
- *  aborted. */
+ *  user's branch and working tree stay untouched. */
 export interface PendingMerge {
   base: string;
   head: string;
@@ -63,12 +61,13 @@ export interface LocalPr {
   /** Hidden from the list unless "Show archived" — a soft alternative to delete. */
   archived?: boolean;
   /** Set while a merge of this PR is paused on conflicts (resolved in an isolated
-   *  worktree); cleared once finished or aborted. Absent on PRs stored before it
-   *  existed. */
+   *  worktree); cleared by setting `undefined`, which JSON omits. Absent on PRs
+   *  stored before it existed. */
   pendingMerge?: PendingMerge;
 }
 
-// Personal app-data, keyed by repo path — never written into the repo itself.
+// Personal app-data, keyed by the repo's worktree-stable identity — never written
+// into the repo itself.
 let storePromise: Promise<Store> | null = null;
 function getStore(): Promise<Store> {
   storePromise ??= load(storeName("local-prs.json"), {
@@ -78,12 +77,11 @@ function getStore(): Promise<Store> {
   return storePromise;
 }
 
-// Serialize every read-modify-write on this store (and the reconcile reload) through one
-// in-process queue. Without it, two overlapping mutations each reload the SAME pre-flush
-// disk snapshot — autoSave persists on a ~100ms debounce, so the first write isn't on disk
-// yet — and the later write drops the earlier one's change (a lost update; e.g. the
-// reconcile hook marking several PRs in a parallel forEach). Running them one at a time,
-// plus the force-save in writeAll, guarantees each reload sees a current snapshot.
+// Serialize every read-modify-write on this store (and the reconcile reload) through
+// one in-process queue: autoSave persists on a ~100ms debounce, so two overlapping
+// mutations would both reload the same pre-flush disk snapshot and the later would
+// drop the earlier's change (e.g. the reconcile hook marking several PRs in a parallel
+// forEach). With the force-save in writeAll, each reload sees a current snapshot.
 let opChain: Promise<unknown> = Promise.resolve();
 function serialize<T>(op: () => Promise<T>): Promise<T> {
   const run = opChain.then(op, op);
@@ -94,19 +92,15 @@ function serialize<T>(op: () => Promise<T>): Promise<T> {
 
 async function reloadRaw(): Promise<void> {
   const store = await getStore();
-  // Tolerate a missing store file. Asymmetry: `load()` tolerates a missing file
-  // but `reload()` rejects with a raw io error ("The system cannot find the file
-  // specified. (os error 2)") — the file only exists after the first `save()`.
-  // Without this guard the first-ever mutation throws before reaching `save()`,
-  // so the store can never bootstrap (live-hit on first Save 2026-07-10); an
-  // external delete of the file breaks every mutation until restart the same way.
-  // Fall back to the loaded in-memory state on ANY reload failure — the
-  // serialized op-chain + force-save still protect the write path.
+  // Tolerate a missing store file: `load()` tolerates one but `reload()` rejects with
+  // a raw io error (os error 2) until the first `save()` creates the file — without
+  // this guard the first-ever mutation throws before reaching `save()` and the store
+  // can never bootstrap (an external delete of the file breaks every mutation until
+  // restart the same way). Fall back to the loaded in-memory state on ANY reload failure.
   try {
     await store.reload({ ignoreDefaults: true });
   } catch {
-    // Missing/unreadable file — proceed with in-memory state; the next save()
-    // creates it.
+    // Missing file — the next save() creates it.
   }
 }
 
@@ -121,11 +115,9 @@ export async function reloadLocalPrs(): Promise<void> {
 
 const withLabels = (p: LocalPr): LocalPr => ({ ...p, labels: p.labels ?? [] });
 
-/** Records are keyed by the repo's worktree-stable identity, not its checkout
- *  path, so a PR is shared across the main checkout and every worktree. This
- *  read-only path merges in any records still under a legacy checkout-path key
- *  (not yet folded by a mutation), so a worktree-created PR shows up right away.
- *  Never writes — the fold happens on the next mutation (see `keyFor`). */
+/** Records are keyed by the repo's worktree-stable identity ({@link repoIdentity}), so
+ *  this read-only path also merges in records still under a legacy checkout-path key —
+ *  a worktree-created PR shows up before the next mutation folds it. Never writes. */
 export async function listLocalPrs(repo: string): Promise<LocalPr[]> {
   const store = await getStore();
   const id = await repoIdentity(repo);
@@ -162,8 +154,7 @@ export async function createLocalPr(
   input: { title: string; body: string; base: string; head: string },
 ): Promise<LocalPr> {
   return serialize(async () => {
-    // Reconcile any external MCP (--allow-write) writes from disk before we read-modify-
-    // write, so a GUI mutation never clobbers a PR the server added while we were focused.
+    // Fresh disk state first, so we don't drop a concurrent external MCP write.
     await reloadRaw();
     const key = await keyFor(repo);
     const pr: LocalPr = {

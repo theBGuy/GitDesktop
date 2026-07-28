@@ -93,12 +93,10 @@ export function CreatePrDialog({
   const forge = useForgeStatus(repoPath);
   const queryClient = useQueryClient();
 
-  // Fork PR-create: on a GitHub fork (upstream remote present) the dialog offers
-  // an explicit "Create in" target — the parent (lens "upstream") or the fork
-  // (lens "origin"). The gate is hidden entirely otherwise, so behavior collapses
-  // to today's origin-only path. Default = parent: that reproduces what gh's
-  // implicit auto-resolution did before this feature, keeping the common
-  // contribution flow's outcome (now explicit).
+  // Fork PR-create: on a GitHub fork (upstream remote present) the dialog offers an
+  // explicit "Create in" target — the parent (lens "upstream") or the fork
+  // ("origin"); hidden entirely otherwise. Default = parent, matching what gh's
+  // implicit auto-resolution used to pick for the common contribution flow.
   const lensGate = useLensGate(repoPath);
   const [target, setTarget] = useState<RemoteLens>("upstream");
   // Resolved slugs label the two target buttons and the success toast; only
@@ -110,11 +108,10 @@ export function CreatePrDialog({
   const createLens: RemoteLens = targetIsParent ? "upstream" : "origin";
   const targetSlug = targetIsParent ? upstreamSlug : forkSlug;
 
-  // Fork-without-upstream affordance: a fork cloned by plain `git clone` has no
-  // `upstream` remote, so the lens gate is off and the pinned origin path opens
-  // the PR on the fork — a silent regression from gh's old parent auto-resolution.
-  // When the persisted fork provenance says this GitHub repo IS a fork with a
-  // known parent, offer to add the remote so the parent-target path returns.
+  // Fork without an `upstream` remote (plain `git clone`): the lens gate is off and
+  // the pinned origin path would silently open the PR on the fork. When the persisted
+  // fork provenance says this GitHub repo IS a fork with a known parent, offer to add
+  // the remote so the parent-target path returns.
   const settings = useSettings();
   const isGithub = forge.data?.provider === "github";
   const forkRecord = settings.data?.recentRepos.find(
@@ -139,20 +136,18 @@ export function CreatePrDialog({
     addRemote.mutate(
       { name: "upstream", url: `https://${ghHost}/${forkParent}.git` },
       {
-        // On success the broad invalidation refreshes the remotes query →
-        // `useLensGate` flips true → the "Create in" picker appears (default
-        // Parent). No local state to reset; the effect chain handles it.
+        // On success the broad invalidation refreshes remotes → `useLensGate` flips
+        // true → the "Create in" picker appears (default Parent).
         onError: (e) => toastError(e),
       },
     );
   }
 
   // Create-TIME reviewers stay Bitbucket-only: `forge_pr_create` rejects a reviewer
-  // list for GitHub/GitLab (their create arms don't accept one yet). The
-  // `mrReviewers` capability now covers all three, but only for editing reviewers on
-  // an existing PR (the RemotePrView picker), so scope the create dialog explicitly.
-  // Targeting the parent rejects reviewers/labels/assignees backend-side, so the
-  // pickers are hidden on that path entirely (never offered as dead controls).
+  // list for GitHub/GitLab. The `mrReviewers` capability covers all three but only
+  // for EDITING reviewers on an existing PR, so scope the create dialog explicitly.
+  // Targeting the parent rejects reviewers/labels/assignees backend-side, so those
+  // pickers are hidden on that path (never offered as dead controls).
   const canPickReviewers =
     !targetIsParent &&
     forge.data?.provider === "bitbucket" &&
@@ -167,12 +162,10 @@ export function CreatePrDialog({
   const [labels, setLabels] = useState<Set<string>>(new Set());
   const [assignees, setAssignees] = useState<ForgeUserRef[]>([]);
 
-  // Linked issues: real repo issues to reference on create (extraction-seeded,
-  // AI-proposed, or manually added). These become `Closes #N`/`Relates to #N`
-  // lines appended to the body — body text, not create-mutation params — so
-  // unlike labels they work on the PARENT path too, with the parent's issues.
-  // Gated only on the forge having a usable issue tracker (not on `aiEnabled`:
-  // the cluster is a non-AI surface — Hide-AI still shows it, minus AI chips).
+  // Linked issues: repo issues referenced on create (extraction-seeded, AI-proposed
+  // or manual). They become `Closes #N`/`Relates to #N` body LINES, not create-
+  // mutation params — so unlike labels they work on the PARENT path too. Gated only
+  // on a usable tracker, not `aiEnabled` (Hide-AI still shows the cluster).
   const canLinkIssues = !!forge.data && forgeFeatureReady(forge.data, "issues");
   // Bitbucket repos have no native tracker (`canLinkIssues` is false), so a
   // LINKED Jira project drives a mention-only cluster instead. Mutually exclusive
@@ -243,8 +236,6 @@ export function CreatePrDialog({
   const parentFetchError = parentBranches.data?.fetchError ?? null;
   const parentBase = parentBranches.data?.defaultBase || parentNames[0] || "";
 
-  // Which base picker the current target drives. Parent → the upstream refs;
-  // fork → the local branches (unchanged behavior).
   const baseItems = targetIsParent ? parentItems : items;
   const baseAnnotations = targetIsParent ? undefined : annotations;
   const baseLoading = targetIsParent && parentBranches.isPending;
@@ -255,9 +246,8 @@ export function CreatePrDialog({
       base: "",
       title: "",
       body: "",
-      // Seed from the setting so a user who defaults new PRs to draft opens the
-      // dialog pre-ticked; undefined-safe (settings pending / pre-field store →
-      // false). The reset() on open re-applies this so a stored change takes.
+      // Seed from the setting so a user who defaults new PRs to draft opens
+      // pre-ticked; undefined-safe. The reset() on open re-applies it.
       draft: settings.data?.createPrsAsDraft ?? false,
       notes: "",
     },
@@ -273,12 +263,11 @@ export function CreatePrDialog({
     },
     onSubmit: async ({ value }) => {
       try {
-        // Append the linked-issue chips as their exact keyword lines via the
-        // shared composer (the single ref-block composition used by every
-        // create/edit save path). The forge does the real linking/auto-closing on
-        // merge; here we only compose body text. On a Bitbucket repo with a Jira
-        // link, the Jira mention chips compose `Relates to KEY` lines instead (the
-        // two clusters are mutually exclusive).
+        // Append the linked-issue chips as their exact keyword lines via the shared
+        // composer (the single ref-block composition used by every create/edit save
+        // path) — the forge does the real linking/auto-closing on merge. On a
+        // Bitbucket repo with a Jira link the mention chips compose `Relates to KEY`
+        // lines instead (the two clusters are mutually exclusive).
         const finalBody =
           canJiraMention && jiraChips.length > 0
             ? composeBodyWithJiraRefs(value.body, jiraChips)
@@ -295,9 +284,9 @@ export function CreatePrDialog({
           title: value.title.trim(),
           body: finalBody,
           draft: value.draft,
-          // Targets the fork ("origin") or its parent ("upstream"); the parent
-          // path rejects reviewers/labels/assignees backend-side (their pickers
-          // are hidden above), so those keys are already omitted there.
+          // Targets the fork ("origin") or its parent ("upstream"); the parent path
+          // rejects reviewers/labels/assignees backend-side, so those keys are
+          // omitted there.
           lens: createLens,
           // Bitbucket-only; omit the key otherwise (GitHub/GitLab byte-identical).
           // An empty selection also omits it, preserving server-side default reviewers.
@@ -324,12 +313,10 @@ export function CreatePrDialog({
         // is enabled), so the whole post + consume is gated on `aiEnabled` —
         // Hide-AI must post nothing and consume no deposit (no behavior change).
         if (aiEnabled) {
-          // Post the author's reviewer notes as the FIRST comment, before the
-          // review fires — this is the whole point of the feature: the automated
-          // review reads the conversation, so the notes must land ahead of it.
-          // `asBot: false` — this is the user's own author content, not a
-          // GitDesktop-branded post. Its own try/catch: a failed post must not
-          // abort the create (the PR exists) — the review still gets the notes
+          // Post the author's reviewer notes as the FIRST comment, BEFORE the review
+          // fires — the automated review reads the conversation, so ordering is the
+          // whole point. `asBot: false` (the user's own content). Its own try/catch:
+          // a failed post must not abort the create — the review still gets the notes
           // via the `reviewNotes` event below.
           if (notes) {
             try {
@@ -353,9 +340,8 @@ export function CreatePrDialog({
           // create itself consumed the note. Best-effort; app-data, not the PR.
           void deleteReviewNote(repoPath, value.head).catch(() => undefined);
         }
-        // Creating on the parent means the new PR lives under the upstream lens —
-        // flip the persisted lens so the PRs tab shows it (setter is a no-op when
-        // already "upstream").
+        // Creating on the parent means the PR lives under the upstream lens — flip
+        // the persisted lens so the PRs tab shows it (no-op when already "upstream").
         if (createLens === "upstream") setRepoLens("upstream");
         // Name the target repo in the toast so "Opened PR #N in owner/repo" is
         // unambiguous for a fork contribution.
@@ -369,11 +355,10 @@ export function CreatePrDialog({
         // defer the close and strand the dialog). Want navigation? Hoist it to
         // RepositoryView first, like CreateLocalPrDialog.
         onOpenChange(false);
-        // Draft gate: a draft PR fires no review unless the user opted into
-        // reviewing drafts. A gated-out draft is NOT a lost review — marking it
-        // ready gets it one: an in-app Mark-ready (RemotePrView) fires pr-open
-        // directly, while an EXTERNAL ready flip rides the background catch-up
-        // poller and its 14-day window. So don't "fix" this by dropping the gate.
+        // Draft gate: a draft PR fires no review unless the user opted into reviewing
+        // drafts. A gated-out draft is NOT a lost review — an in-app Mark-ready fires
+        // pr-open directly, and an EXTERNAL ready flip rides the catch-up poller's
+        // 14-day window. Don't "fix" this by dropping the gate.
         const reviewDraftPrs = settings.data?.reviewDraftPrs ?? false;
         if (!value.draft || reviewDraftPrs) {
           triggerAutomations({
@@ -405,9 +390,8 @@ export function CreatePrDialog({
     setReviewers([]);
     setLabels(new Set());
     setAssignees([]);
-    // Reset the linked-issue chips (and their dismissed/probed refs) to empty —
-    // the create dialog opens with no seeded body refs; extraction/AI seeding
-    // then repopulates from the head branch + commits.
+    // Reset the linked-issue chips (and their dismissed/probed refs) — the create
+    // dialog opens with no seeded body refs; extraction/AI seeding repopulates.
     resetLinkedIssues([]);
     // Same for the Jira mention cluster (Bitbucket + linked project).
     resetJiraChips([]);
@@ -429,9 +413,8 @@ export function CreatePrDialog({
         base: defaultBase ?? fallbackBase,
         title: "",
         body: "",
-        // Seed each open from the setting (undefined-safe → false), so the draft
-        // default reflects the current preference without leaking a prior open's
-        // per-dialog toggle.
+        // Seed each open from the setting so the draft default reflects the current
+        // preference, not a prior open's toggle.
         draft: settings.data?.createPrsAsDraft ?? false,
         // Cleared on open; ReviewerNotesField re-seeds from the head branch's
         // deposit (if any) once its query resolves.
@@ -451,9 +434,8 @@ export function CreatePrDialog({
   // reflect the reviewer notes) and the ReviewerNotesField's seeding provenance.
   const notes = useSelector(form.store, (s) => s.values.notes);
 
-  // Compute the fork-side fallback base (used both here and when reconciling back
-  // from the parent target). Mirrors the seed logic: default branch, else the
-  // first non-head branch.
+  // Fork-side fallback base, mirroring the seed logic (default branch, else first
+  // non-head) — reused when reconciling back from the parent target.
   const forkFallbackBase = useEffectEvent(() => {
     const h = form.state.values.head;
     return defaultBranch.data && defaultBranch.data !== h
@@ -461,10 +443,9 @@ export function CreatePrDialog({
       : (names.find((n) => n !== h) ?? "");
   });
   // Reconcile the base when the target changes (or the parent's branches arrive):
-  // re-seed ONLY when the current base isn't a valid option for the active
-  // target, so a user-picked base survives a target toggle where it still fits.
-  // The guard makes `base` safe to read directly — a valid pick is left alone, so
-  // this never fights the user's own edit.
+  // re-seed ONLY when the current base isn't a valid option for the active target, so
+  // a user-picked base survives a target toggle where it still fits — this never
+  // fights the user's own edit.
   useEffect(() => {
     if (!open) return;
     if (targetIsParent) {
@@ -490,14 +471,12 @@ export function CreatePrDialog({
     defaultBase,
     form,
   ]);
-  // The base ref to compare against: for the parent target the picked base is a
-  // bare upstream branch name, so qualify it as `upstream/<base>` (the ref that
-  // exists locally after the fetch) — otherwise `git log main..head` would
-  // resolve against a *local* `main`, a stale proxy for the parent's branch.
-  // While the parent fetch is in flight, `base` is still the fork-seeded local
-  // name and `upstream/<name>` may not exist yet — yield null so the compare
-  // query stays idle (baseLoading already gates the hint + submit) rather than
-  // erroring on a not-yet-fetched ref.
+  // The base ref to compare against: on the parent target the picked base is a bare
+  // upstream branch name, so qualify it `upstream/<base>` — otherwise
+  // `git log main..head` resolves against a *local* `main`, a stale proxy for the
+  // parent's branch. While the parent fetch is in flight `base` is still the
+  // fork-seeded local name and `upstream/<name>` may not exist yet → yield null so
+  // the compare query stays idle rather than erroring.
   const compareBaseRef =
     targetIsParent && parentBranches.isPending
       ? null
@@ -519,11 +498,9 @@ export function CreatePrDialog({
   const branchPrs = usePrsForBranch(repoPath, head || null, open, createLens);
   const existingPr = (branchPrs.data ?? []).find((p) => p.baseRefName === base);
 
-  // Linked-issue chip cluster — extraction seeding, AI union, candidate ranking,
-  // and the chip mutations all live in the shared hook (also used by the edit and
-  // local-create paths). Gated on the tracker being usable AND the dialog open;
-  // reset from empty in seedOnOpen. The parent target reads the parent's issues
-  // (createLens). Chips compose into the body as `Closes #N`/`Relates to #N`.
+  // Linked-issue chip cluster — extraction seeding, AI union, candidate ranking and
+  // the chip mutations live in the shared hook. Gated on a usable tracker AND the
+  // dialog being open; the parent target reads the parent's issues (createLens).
   const {
     chips: linkedIssues,
     resetWith: resetLinkedIssues,
@@ -540,9 +517,8 @@ export function CreatePrDialog({
     commitSubjects: ahead.map((c) => c.subject),
   });
 
-  // Jira mention chips — the Bitbucket-only sibling cluster. Enabled on
-  // `open && canJiraMention`; reset from empty in seedOnOpen. Chips compose into
-  // the body as `Relates to KEY` lines; there's no keyword toggle.
+  // Jira mention chips — the Bitbucket-only sibling cluster; composes
+  // `Relates to KEY` lines, no keyword toggle.
   const {
     chips: jiraChips,
     resetWith: resetJiraChips,
@@ -571,8 +547,8 @@ export function CreatePrDialog({
     labels.has(l.name),
   );
 
-  // AI title+description generation — shared by the Generate button's onClick and
-  // the dialog-local generate chord below. Verbatim the button's prior body.
+  // AI title+description generation — shared by the Generate button and the
+  // dialog-local generate chord.
   function runGenerate() {
     aiDescriptionRef.current = true;
     // Grounded issue candidates the model may link: current chips pinned first,
@@ -592,11 +568,8 @@ export function CreatePrDialog({
         // Additive: union the model's (already repo-validated) labels with the
         // user's manual picks, never replace.
         setLabels((prev) => new Set([...prev, ...d.labels]));
-        // Union the model's proposed issue links into the chip cluster. A `closes`
-        // proposal marks `aiSuggestedClose` (sorts first, hint tooltip); both land
-        // as `relates` chips (the safe default the user can toggle up). Skip
-        // dismissed numbers; never downgrade an existing chip — only OR-in the
-        // `aiSuggestedClose` flag.
+        // Union the model's proposed issue links into the chip cluster (the hook
+        // owns the relate-default / dismissed-set / AI-flag rules).
         upsertAiIssues({ closes: d.closes, relates: d.relates });
         // Union the model's proposed Jira mentions into the mention cluster.
         upsertAiJira({ jiraMentions: d.jiraMentions });
@@ -618,9 +591,8 @@ export function CreatePrDialog({
       jiraCandidates,
     );
   }
-  // Context-sensitive reuse of the `generate-commit-message` binding (mod+g by
-  // default) while this dialog is open — never a hardcoded chord, so a
-  // Settings → Keyboard rebinding drives it. null = explicitly unbound.
+  // Context-sensitive reuse of the `generate-commit-message` binding while this
+  // dialog is open — never a hardcoded chord. null = explicitly unbound.
   const generateBinding =
     useEffectiveBindings().get("generate-commit-message") ?? null;
   const generateHint = generateBinding
@@ -631,14 +603,12 @@ export function CreatePrDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         className="flex max-h-[85vh] flex-col sm:max-w-2xl"
-        // mod+enter submits from anywhere in the dialog. It's captured on
-        // DialogContent (the Popup), not the <form>, because the X close button
-        // renders as a SIBLING of the form inside the Popup — a chord pressed
-        // with focus on the X would otherwise bypass a form-level handler and
-        // reach the global mod+enter action. ALWAYS swallow the chord here; only
-        // submit when the same gates as the SubmitButton allow (handleSubmit
-        // then enforces the field validators — title, same-branch — so an
-        // invalid form stays inert).
+        // mod+enter submits from anywhere in the dialog. Captured on DialogContent
+        // (the Popup), not the <form>: the X close button renders as a SIBLING of
+        // the form inside the Popup, so a chord pressed with focus on X would bypass
+        // a form-level handler and reach the global mod+enter action. ALWAYS swallow
+        // the chord here; submit only under the same gates as the SubmitButton
+        // (handleSubmit then enforces the field validators).
         onKeyDown={(e) => {
           if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
             e.preventDefault();
@@ -654,13 +624,12 @@ export function CreatePrDialog({
             }
             return;
           }
-          // The generate-commit-message chord (mod+g by default) runs this
-          // dialog's own Generate while it's open. Only when AI is on (no
-          // Generate surface otherwise) and the chord is bound. ALWAYS swallow
-          // it so it can't reach the global listener and generate a commit
-          // message behind the dialog; run Generate only when its button would
-          // be enabled. While generating we swallow but DON'T cancel — an
-          // accidental repeat must never abort an in-flight generation.
+          // The generate-commit-message chord runs this dialog's own Generate while
+          // it's open — only when AI is on and the chord is bound. ALWAYS swallow it
+          // so it can't reach the global listener and generate a commit message
+          // behind the dialog; run Generate only when its button would be enabled.
+          // While generating we swallow but DON'T cancel — an accidental repeat must
+          // never abort an in-flight generation.
           if (
             aiEnabled &&
             generateBinding !== null &&
@@ -731,9 +700,8 @@ export function CreatePrDialog({
               </div>
             )}
 
-            {/* Fork without an `upstream` remote: the picker can't render (no
-                remote to read), so offer to add it. Mutually exclusive with the
-                picker above — `canOfferUpstream` requires the gate to be OFF. */}
+            {/* Fork without an `upstream` remote: offer to add it. Mutually exclusive
+                with the picker above (`canOfferUpstream` requires the gate OFF). */}
             {canOfferUpstream && (
               <div className="space-y-1.5 rounded-none bg-muted/40 p-2.5 ring-1 ring-foreground/10">
                 <p className="text-xs text-muted-foreground">
@@ -985,12 +953,10 @@ export function CreatePrDialog({
               )}
             </form.AppField>
 
-            {/* Linked issues: real repo issues referenced on create. Non-AI
-                surface (shown under Hide-AI too), gated on the tracker being
-                usable. Chips stay interactive while generating — the stream union
-                only adds/annotates, never fights a user edit. On a Bitbucket repo
-                with a linked Jira project the mention-only variant renders in the
-                SAME slot instead (the two clusters are mutually exclusive). */}
+            {/* Linked issues: non-AI surface (shown under Hide-AI too), gated on a
+                usable tracker. Chips stay interactive while generating — the stream
+                union only adds/annotates. On a Bitbucket repo with a linked Jira
+                project the mention-only variant renders in this SAME slot. */}
             {canLinkIssues ? (
               <LinkedIssuesField
                 repoPath={repoPath}

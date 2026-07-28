@@ -280,10 +280,9 @@ pub(crate) async fn git_delete_branch_core(
     name: String,
 ) -> AppResult<()> {
     validate_ref_name(&name)?;
-    // Pre-mutation guard: git refuses to delete a branch checked out in a worktree
-    // with a terse message. Detect a linked worktree holding it and surface a
-    // clear, actionable one — shared by every caller (branch switcher, bulk
-    // cleanup, and any future path), not just the switcher's own UI guard.
+    // Pre-mutation guard: git's own refusal for a branch checked out in a worktree
+    // is terse. Detect the holding worktree here — shared by every caller, not just
+    // the switcher's UI guard — and surface an actionable message.
     if let Some(path) = worktree_holding_branch(&repo_path, &name).await {
         return Err(AppError::Command(format!(
             "{name} is checked out in the worktree at {path} — remove that worktree \
@@ -350,11 +349,10 @@ pub(crate) async fn git_delete_remote_branch_core(
     .await;
     match out {
         Ok(_) => Ok(()),
-        // Idempotent: the server ref is already gone, so the goal state holds.
-        // A failed delete-push leaves the local remote-tracking ref in place
-        // (unlike the success path, which prunes it), so the switcher row would
-        // survive until the next pruning fetch — best-effort delete it now so
-        // the UI reflects the deletion immediately. The ref may already be absent.
+        // Idempotent: the server ref is already gone. Unlike the success path, a
+        // failed delete-push doesn't prune the local remote-tracking ref, so the
+        // switcher row would survive until the next pruning fetch — best-effort
+        // delete it now (it may already be absent).
         Err(AppError::Git { stderr, .. })
             if stderr.to_lowercase().contains("remote ref does not exist") =>
         {
@@ -643,19 +641,16 @@ pub async fn git_branch_divergence(
     Ok(result)
 }
 
-/// Updates `branch` with the latest commits from `base` (typically the default
-/// branch) WITHOUT switching to it, so the working tree the user is editing —
-/// and any watchers (vite, `tsc --watch`, …) running against it — never change.
+/// Updates `branch` with the latest commits from `base` WITHOUT switching to it, so
+/// the user's working tree — and any watchers (vite, `tsc --watch`) — never change.
 ///
-/// - `branch` already contains `base` → no-op, returns `"up-to-date"`.
-/// - `branch` is strictly behind `base` → fast-forward the ref, returns
-///   `"fast-forward"`.
-/// - `branch` has diverged → merge `base` into `branch` inside a throwaway
-///   worktree so the main checkout is untouched, returns `"merge"`. A
-///   conflicting merge is aborted and reported; the branch is left unchanged.
+/// - already contains `base` → no-op, `"up-to-date"`.
+/// - strictly behind → fast-forward the ref, `"fast-forward"`.
+/// - diverged → merge `base` in a throwaway worktree so the main checkout is
+///   untouched, `"merge"`; a conflicting merge is aborted and the branch left as-is.
 ///
-/// When `branch` IS the current branch there's nothing to avoid switching to,
-/// so it merges in place (conflicts surface in the changes list as usual).
+/// When `branch` IS the current branch there's nothing to avoid switching to, so it
+/// merges in place (conflicts surface in the changes list as usual — no abort).
 #[tauri::command]
 pub async fn git_update_branch_from(
     state: State<'_, AppState>,
@@ -726,8 +721,7 @@ pub async fn git_update_branch_from(
         return Ok("fast-forward".to_string());
     }
 
-    // Diverged → merge inside a throwaway worktree so the user's checkout (and
-    // its file watchers) is never disturbed.
+    // Diverged → merge in a throwaway worktree so the user's checkout is untouched.
     let tmp = std::env::temp_dir().join(format!("gd-update-{}", unique_suffix()));
     let tmp_str = tmp.to_string_lossy().to_string();
 
@@ -789,22 +783,18 @@ pub async fn commit_on_remote(repo_path: String, sha: String) -> AppResult<bool>
         DEFAULT_TIMEOUT,
     )
     .await?;
-    // Non-zero exit (e.g. an unknown/unfetched sha) → treat as "not on a remote".
     if out.code != 0 {
         return Ok(false);
     }
     Ok(!out.stdout_lossy().trim().is_empty())
 }
 
-/// Count of commits reachable from `HEAD` but not from any remote-tracking ref
-/// (`git rev-list --count HEAD --not --remotes`) — i.e. how many commits haven't
-/// been published anywhere. The History tab uses this to mark the "not pushed"
-/// rows on a branch with **no upstream** (a never-pushed branch), where "ahead of
-/// upstream" is undefined: the fork point and everything below it live on
-/// `origin/<base>` and ARE published, so only the commits above it are unpushed —
-/// not the whole branch. A repo with no remotes at all yields the full `HEAD`
-/// count (nothing is published), which is the correct answer. A benign git error
-/// (e.g. an unborn `HEAD`) maps to `0` — nothing to mark.
+/// Count of commits reachable from `HEAD` but not from any remote-tracking ref —
+/// i.e. unpublished anywhere. The History tab uses this to mark "not pushed" rows on
+/// a branch with NO upstream, where "ahead of upstream" is undefined: the fork point
+/// and everything below it live on `origin/<base>` and ARE published. A repo with no
+/// remotes yields the full `HEAD` count (correct); a benign git error (unborn `HEAD`)
+/// maps to `0`.
 #[tauri::command]
 pub async fn git_unpushed_count(repo_path: String) -> AppResult<u32> {
     let out = run_git_raw(
@@ -839,8 +829,8 @@ mod tests {
     use crate::state::AppState;
 
     // Full decision table for the create-branch argv: checkout × start_point ×
-    // no_track (8 cases). The no_track=false rows must stay byte-identical to the
-    // pre-`--no-track` behavior for every combination.
+    // no_track (8 cases). The no_track=false rows are a regression guard — their argv
+    // must not change.
     #[test]
     fn build_create_branch_args_checkout_no_start_no_track() {
         assert_eq!(
@@ -909,13 +899,11 @@ mod tests {
 
     #[test]
     fn validate_ref_name_rejects_glob_and_refspec_metacharacters() {
-        // The round-2 security regression guard: `*` would otherwise glob-match /
-        // mirror-push every branch via `for-each-ref refs/heads/*` and a wildcard
-        // push refspec.
+        // `*` would otherwise glob-match via `for-each-ref refs/heads/*` and
+        // mirror-push every branch through a wildcard push refspec.
         for bad in ["*", "feat*", "a?b", "a[b", "a:b", "a\\b", "a b", "x\u{7f}"] {
             assert!(validate_ref_name(bad).is_err(), "should reject {bad:?}");
         }
-        // Pre-existing rejects still hold.
         assert!(validate_ref_name("").is_err());
         assert!(validate_ref_name("-x").is_err());
     }
@@ -989,14 +977,12 @@ mod tests {
         run(repo_s, &["commit", "-qm", "seed"]).await;
     }
 
-    /// The argv table pins `--no-track` placement; this closes the argv→outcome
-    /// gap by driving `git_create_branch_core` against a real repo and asserting
-    /// git actually honors it. Synthesizes a remote-tracking ref
-    /// (`refs/remotes/origin/x` via `update-ref`, so nothing is ever fetched) and
-    /// bases two branches on it: the `no_track=true` arm must have NO upstream,
-    /// the `no_track=false` control arm must track `origin/x`. Both arms create
-    /// without checkout (`checkout=false`) to keep the assertions simple; the
-    /// checkout arm shares the same `--no-track` placement per the argv table.
+    /// Drives `git_create_branch_core` against a real repo to prove git honors the
+    /// `--no-track` placement the argv table pins. Synthesizes a remote-tracking ref
+    /// (`refs/remotes/origin/x` via `update-ref`, so nothing is ever fetched) and bases
+    /// two branches on it: the `no_track=true` arm must have NO upstream, the control
+    /// arm must track `origin/x`. Both use `checkout=false` to keep assertions simple —
+    /// the checkout arm shares the same `--no-track` placement per the argv table.
     #[tokio::test]
     async fn create_branch_honors_no_track_against_real_repo() {
         let (_base, base) = temp_base("no-track");
@@ -1041,10 +1027,9 @@ mod tests {
             "y should start at origin/x"
         );
 
-        // Pin the tracking mode repo-locally: a contributor's ambient global
-        // `branch.autoSetupMerge = simple|false` would leave `z` untracked and
-        // false-fail this control arm (probed live both ways). The `--no-track`
-        // arm above is immune — the flag overrides config.
+        // Pin the tracking mode repo-locally: an ambient global
+        // `branch.autoSetupMerge = simple|false` leaves `z` untracked and false-fails
+        // this control arm. The `--no-track` arm is immune — the flag overrides config.
         run(&repo_s, &["config", "branch.autoSetupMerge", "true"]).await;
 
         // control arm: branch `z` from `origin/x` with tracking left on.
@@ -1092,8 +1077,7 @@ mod tests {
 
         let state = AppState::default();
         // Pin tracking mode repo-locally so an ambient global
-        // `branch.autoSetupMerge = simple|false` can't leave `tracked` untracked
-        // and false-fail the assertion (same guard as the no-track control arm).
+        // `branch.autoSetupMerge = simple|false` can't leave `tracked` untracked.
         run(&repo_s, &["config", "branch.autoSetupMerge", "true"]).await;
         // Tracked branch `tracked` → tracks origin/x.
         git_create_branch_core(

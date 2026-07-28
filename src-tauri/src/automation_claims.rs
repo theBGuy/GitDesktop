@@ -1,39 +1,28 @@
-//! Cross-process claim files for automation dispatch (duplicate-AI-review fix).
+//! Cross-process claim files for automation dispatch.
 //!
-//! ## The bug this closes
-//!
-//! Automations (AI PR reviews fired on pr-open / pr-sync / commit events) dispatch
-//! entirely in the frontend. When two GitDesktop instances watch the SAME repository
-//! — e.g. a main checkout and a linked worktree, which share a worktree-stable
-//! identity — each instance independently decides to run and posts the SAME review
-//! (observed live: two identical AI reviews 26s apart). The pre-existing dedup is
-//! per-process only: an in-memory debounce map plus a review-history watermark read
-//! from the tauri-store plugin, whose cache is per-process — so two processes never
-//! see each other's claim. And the watermark is only written AFTER the slow AI call
-//! completes, leaving a wide race window.
-//!
-//! This is a real-money bug (duplicate PAID AI reviews posted publicly on PRs), so
-//! the claim must be atomic at the OS level. We use `OpenOptions::create_new` — an
-//! atomic exclusive-create on NTFS (and every platform we target) — as a claim file
-//! under app-data, claimed at DISPATCH time (before the AI call). It deliberately
-//! does NOT go through the tauri-store plugin: that plugin's per-process cache is the
-//! root cause we're routing around.
+//! Automations (AI PR reviews on pr-open / pr-sync / commit) dispatch in the frontend.
+//! Two GitDesktop instances watching the SAME repository (a main checkout and a linked
+//! worktree share a worktree-stable identity) would each decide to run and post the
+//! same PAID review: the pre-existing dedup is per-process only (an in-memory debounce
+//! map plus a tauri-store watermark whose cache is per-process, and which is written
+//! only AFTER the slow AI call). So the claim must be atomic at the OS level:
+//! `OpenOptions::create_new` — an atomic exclusive-create on every platform we target
+//! — on a claim file under app-data, taken at DISPATCH time. Deliberately NOT via the
+//! tauri-store plugin: that plugin's per-process cache is what we're routing around.
 //!
 //! ## Fail-open, always
 //!
 //! A broken claims directory must NEVER disable automations. Every unexpected error
-//! (a permission problem, a full disk, anything that is not "the file already
-//! exists") resolves to "you won the claim" so the automation still runs. The worst
-//! case of a fail-open is the original duplicate-review bug; the worst case of a
-//! fail-closed is silently disabling all AI reviews — the former is strictly less bad.
+//! (permissions, full disk — anything that is not "the file already exists") resolves
+//! to "you won the claim". Worst case of fail-open is a duplicate review; worst case of
+//! fail-closed is silently disabling all AI reviews.
 //!
 //! ## Deterministic key hashing (why not `DefaultHasher`)
 //!
-//! Two instances that must dedup can be DIFFERENT builds (a dev build + a prod build,
-//! or two parallel-worktree dev builds). They must hash the same composite key to the
-//! same filename or the dedup silently breaks. `std::collections::hash_map::
-//! DefaultHasher`'s algorithm is explicitly unspecified across releases, so we
-//! implement FNV-1a-64 inline with its fixed constants — deterministic forever.
+//! Two instances that must dedup can be DIFFERENT builds (dev + prod, or two
+//! parallel-worktree dev builds) and must hash the same composite key to the same
+//! filename. `DefaultHasher`'s algorithm is explicitly unspecified across releases, so
+//! we implement FNV-1a-64 inline with its fixed constants.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -47,29 +36,21 @@ use crate::error::{AppError, AppResult};
 /// run and longer than any head stays "current", so a sweep never races a live claim.
 const SWEEP_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
-/// A claim file this old with no accompanying release is treated as abandoned and
-/// reclaimed by the next claimant (the sweep only fires at 30 days). This closes the
-/// starvation bug where an instance that dies WITHOUT running its release arm (crash,
-/// kill, a version-skewed old build) leaves a claim that suppresses this exact
-/// `(repo, target, sha, action)` review across ALL instances until the 30-day sweep.
+/// A claim file this old with no release is treated as abandoned and reclaimed by the
+/// next claimant (the 30-day sweep is far too slow to unblock an instance that died
+/// without running its release arm — crash, kill, version skew).
 ///
-/// 30 minutes is safe because a DELIVERED review no longer relies on its claim for
-/// dedup: at delivery the runner writes a pr-reviews history record, and that record —
-/// not the claim — gates pr-open (per-mode) and pr-sync (same-sha skip). Reclaiming an
-/// old delivered claim therefore cannot cause a re-review. A run whose delivery-record
-/// write failed (best-effort in the runner) is bounded the same way: one duplicate
-/// after 30 minutes, not a month of silence.
+/// 30 minutes is safe because a DELIVERED review no longer relies on its claim: at
+/// delivery the runner writes a pr-reviews history record, and THAT record gates
+/// pr-open (per-mode) and pr-sync (same-sha skip), so reclaiming an old delivered
+/// claim cannot cause a re-review. A run whose delivery-record write failed is bounded
+/// the same way — one duplicate after 30 minutes, not a month of silence.
 ///
 /// **This window measures heartbeat LIVENESS, not run length.** A running automation
-/// refreshes its own claim's mtime from the runner every few minutes (see
-/// [`touch_automation_claim`]) for as long as the AI call is in flight, so a long run
-/// stays "fresh" indefinitely and is never double-claimed. That heartbeat closes what
-/// used to be an accepted residual risk: reviews were once capped at 600s backend-side,
-/// making a 30-minute overrun unreachable, but the user-facing "Review timeout" setting
-/// now allows up to 60 minutes (and the backend clamp permits 7200s), so a legitimately
-/// still-RUNNING review can outlive this window. The crash story is unchanged: an
-/// instance that dies stops heartbeating, its claim ages out at 30 minutes, and the next
-/// claimant reclaims it instead of being starved until the 30-day sweep.
+/// refreshes its claim's mtime every few minutes (see [`touch_automation_claim`]) while
+/// the AI call is in flight, so a long run (the Review-timeout setting allows up to 60
+/// minutes; the backend clamp permits 7200s) stays fresh and is never double-claimed.
+/// An instance that dies stops heartbeating and ages out at 30 minutes.
 const STALE_CLAIM_AGE: Duration = Duration::from_secs(30 * 60);
 
 /// The app-data subdir holding claim files.
@@ -168,17 +149,14 @@ fn create_new_claim(path: &Path, key: &str) -> std::io::Result<bool> {
     }
 }
 
-/// Claim `key` inside `dir`. Returns `Ok(true)` when THIS caller won the claim (the
-/// file did not exist and we created it, OR we reclaimed a stale one), `Ok(false)` when
-/// another instance already owns a FRESH claim. This helper takes a `&Path` so it's
-/// unit-testable without an `AppHandle`.
+/// Claim `key` inside `dir`. `Ok(true)` = this caller won (created it, or reclaimed a
+/// stale one); `Ok(false)` = another instance owns a FRESH claim. Takes a `&Path` so
+/// it's unit-testable without an `AppHandle`.
 ///
-/// Stale-claim reclaim: if the exclusive-create loses to an existing file, we stat that
-/// file — if its mtime is older than [`STALE_CLAIM_AGE`], the owning instance is assumed
-/// dead (it never ran its release arm), so we best-effort delete the file and retry the
-/// exclusive-create EXACTLY ONCE. A second `AlreadyExists` means a concurrent instance
-/// won the reclaim race, so we yield to it with `Ok(false)` rather than looping. A fresh
-/// (< `STALE_CLAIM_AGE`) existing claim keeps returning `Ok(false)` unchanged.
+/// Stale reclaim: when the exclusive-create loses, stat the existing file — if its
+/// mtime is older than [`STALE_CLAIM_AGE`] the owner is assumed dead, so best-effort
+/// delete and retry the exclusive-create EXACTLY ONCE. A second `AlreadyExists` means a
+/// concurrent instance won the reclaim race, so yield with `Ok(false)` rather than loop.
 fn claim_in_dir(dir: &Path, key: &str) -> std::io::Result<bool> {
     let path = dir.join(claim_filename(key));
     if create_new_claim(&path, key)? {
@@ -198,24 +176,18 @@ fn claim_in_dir(dir: &Path, key: &str) -> std::io::Result<bool> {
     if !stale {
         return Ok(false);
     }
-    // Best-effort delete of the abandoned claim, then retry the exclusive-create ONCE.
-    // A failed delete or a lost retry race both resolve to Ok(false): another instance
-    // owns the (possibly just-reclaimed) claim, so we skip this run rather than loop.
+    // Best-effort delete of the abandoned claim, then retry the exclusive-create ONCE;
+    // a failed delete or a lost race both resolve to Ok(false).
     let _ = std::fs::remove_file(&path);
     create_new_claim(&path, key)
 }
 
-/// Best-effort liveness heartbeat: refresh the mtime of `key`'s claim file so a
-/// long-running automation keeps its claim "fresh" past [`STALE_CLAIM_AGE`]. All errors
-/// are ignored (fail-open philosophy — a failed heartbeat degrades to the old behavior,
-/// a reclaim after 30 quiet minutes). Opens WITHOUT `create`, so a RELEASED claim is
-/// never resurrected by a late heartbeat — the open errs on the missing file and is
-/// ignored. A RECLAIMED claim is different: the filename derives from the run key, not
-/// the owning instance, so a late heartbeat from the old owner lands on (and refreshes)
-/// the new owner's file — harmless, since it only keeps the live owner's claim fresh.
-/// The write handle is required, not incidental: on Windows `set_modified` on a
-/// read-only handle fails with PermissionDenied (the tests' `backdate` helper documents
-/// the same constraint).
+/// Best-effort liveness heartbeat: refresh the mtime of `key`'s claim so a long-running
+/// automation stays "fresh" past [`STALE_CLAIM_AGE`]. All errors ignored. Opens WITHOUT
+/// `create`, so a RELEASED claim is never resurrected by a late heartbeat. A RECLAIMED
+/// one differs: the filename derives from the run key, not the owner, so a late
+/// heartbeat refreshes the NEW owner's file — harmless. The write handle is required:
+/// on Windows `set_modified` fails with PermissionDenied on a read-only handle.
 fn touch_in_dir(dir: &Path, key: &str) {
     let _ = std::fs::OpenOptions::new()
         .write(true)
@@ -492,12 +464,6 @@ mod tests {
     #[test]
     fn stale_reclaim_rewrites_file_with_new_key() {
         let (_tmp, dir) = tmp_dir();
-        // Two DISTINCT composite keys whose sanitized tails + hash collide onto the SAME
-        // filename cannot be relied on, so assert the reclaimed file holds the CURRENT
-        // key's content. Both claims key the same run, so the filename is identical and
-        // the reclaim overwrites the file body with a fresh (identical) key. To prove the
-        // content is the NEW write and not the stale one, we re-key the file content and
-        // confirm it matches after reclaim.
         let key = composite_key(r"C:\repo\one", "42", "abc123", "review");
         assert!(claim_in_dir(&dir, &key).unwrap());
         let path = dir.join(claim_filename(&key));
@@ -523,7 +489,6 @@ mod tests {
         let old_key = composite_key(r"C:\repo\one", "1", "oldhead", "review");
         let fresh_key = composite_key(r"C:\repo\one", "2", "freshhead", "review");
 
-        // Create both claims.
         assert!(claim_in_dir(&dir, &old_key).unwrap());
         assert!(claim_in_dir(&dir, &fresh_key).unwrap());
 

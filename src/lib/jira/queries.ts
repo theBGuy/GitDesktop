@@ -51,13 +51,10 @@ import type {
 const jiraLinkKey = (repo: string) => ["jira-link", repo] as const;
 
 /**
- * `keepPreviousData`, scoped to a single repo — the Jira-module twin of the one in
- * `git/queries.ts` (kept local rather than cross-imported, since this module doesn't
- * otherwise depend on `git/queries`). Panels stay mounted across repo switches, so a
- * plain `keepPreviousData` would flash the previous repo's Jira issue while the new
- * repo's loads. Keeps previous data only when the previous query was for the SAME
- * repo (repo lives at query-key index 1 for the repo-keyed Jira hooks); drops to a
- * fresh skeleton when the repo changes.
+ * `keepPreviousData` scoped to a single repo (the Jira twin of git/queries.ts's, kept local
+ * so this module doesn't depend on it). Panels stay mounted across repo switches, so plain
+ * keepPreviousData would flash the previous repo's Jira issue — keep previous data only
+ * when the previous query was for the SAME repo (repo at query-key index 1).
  */
 function keepPreviousDataForRepo(repo: string, repoKeyIndex = 1) {
   return <T>(
@@ -75,11 +72,10 @@ export function useJiraLink(repo: string) {
   });
 }
 
-/** Invalidate the link query AND every Jira issue-list/issue-detail query for
- *  this repo. The issue queries key on the link's site + project, so re-linking
- *  to a different project mints new keys — but the OLD keys' caches would linger
- *  (up to staleTime) and could be served on a same-identity re-link; a predicate
- *  sweep of both issue namespaces drops them so the panel/detail refetch. */
+/** Invalidate the link query AND every Jira issue-list/issue-detail query for this repo.
+ *  Re-linking to a different project mints new keys, but the OLD keys' caches would linger
+ *  (up to staleTime) and could be served on a same-identity re-link — the predicate sweep
+ *  over both issue namespaces drops them. */
 function invalidateJiraForRepo(
   queryClient: ReturnType<typeof useQueryClient>,
   repo: string,
@@ -94,15 +90,12 @@ function invalidateJiraForRepo(
 }
 
 /**
- * Narrower reconciliation for a single-issue PROPERTY write (due date, priority,
- * labels, comment create/edit/delete): invalidate just that one issue's detail
- * key + the repo's jira-issues LIST keys (lists render priority/due/labels, so
- * they must reconcile). Unlike {@link invalidateJiraForRepo} it does NOT touch
- * the link key or the whole jira-issue namespace — a property write on one issue
- * can't affect another issue's detail. `link` supplies the site that keys the
- * detail entry; when it's absent (unlinked) there's nothing to reconcile beyond
- * the (empty) list keys. Reserve the broad helper for writes that change list
- * membership or need cross-issue effects (create, transition, assign).
+ * Narrow reconciliation for a single-issue PROPERTY write (due date, priority, labels,
+ * comment create/edit/delete): just that issue's detail key plus the repo's jira-issues
+ * LIST keys (lists render priority/due/labels). It deliberately leaves the link key and the
+ * rest of the jira-issue namespace alone — a property write on one issue can't affect
+ * another's detail. Reserve {@link invalidateJiraForRepo} for writes that change list
+ * membership (create, transition, assign).
  */
 function invalidateJiraIssue(
   queryClient: ReturnType<typeof useQueryClient>,
@@ -155,10 +148,9 @@ export function useJiraIssues(
   state: JiraIssueState,
 ) {
   return useQuery({
-    // The link's site + project are part of the key so a re-link to a different
-    // project (or site) is a distinct cache entry — never served the prior
-    // project's list. `?? ""` keeps the key stable while `link` is absent (the
-    // query is disabled then anyway).
+    // Site + project are in the key so a re-link to a different project/site is a distinct
+    // cache entry, never served the prior project's list. `?? ""` keeps the key stable
+    // while `link` is absent (the query is disabled then).
     queryKey: [
       "repo",
       repo,
@@ -191,9 +183,8 @@ export function useJiraIssue(
     queryKey: ["repo", repo, "jira-issue", link?.siteHost ?? "", key] as const,
     queryFn: () => jiraIssueView((link as JiraLink).siteHost, key as string),
     enabled: !!link && key !== null,
-    // Repo-scoped: panels persist across repo switches, so don't flash the previous
-    // repo's issue. The other two Jira hooks below key on site/query (no repo), so
-    // they keep plain keepPreviousData.
+    // Repo-scoped: panels persist across repo switches, so don't flash the previous repo's
+    // issue. The site/query-keyed hooks below keep plain keepPreviousData.
     placeholderData: keepPreviousDataForRepo(repo),
   });
 }
@@ -211,18 +202,17 @@ export function useJiraProjectSearch(site: string, query: string) {
   });
 }
 
-// ── Write path (phase 2) ────────────────────────────────────────────────────
+// ── Write path ───────────────────────────────────────────────────────────────
 
 /** The detail-cache key for one issue — must match `useJiraIssue`'s key exactly
  *  so optimistic patches and reads land on the same entry. */
 const jiraIssueDetailKey = (repo: string, site: string, key: string) =>
   ["repo", repo, "jira-issue", site, key] as const;
 
-/** The linked project's write permissions (server-resolved). Enabled only when
- *  linked; permissions change rarely, so a generous staleTime keeps this off the
- *  hot path. A failed probe surfaces as `isError` with `data === undefined`; the
- *  gate callers read `data?.<flag> ?? false`, so a failure treats every write as
- *  not-permitted (affordances absent) without touching the read path. */
+/** The linked project's write permissions (server-resolved). Permissions change rarely, so
+ *  a generous staleTime keeps this off the hot path. A failed probe surfaces as `isError`
+ *  with `data === undefined`, and gates read `data?.<flag> ?? false` — a failure treats
+ *  every write as not-permitted without touching the read path. */
 export function useJiraPermissions(
   repo: string,
   link: JiraLink | null | undefined,
@@ -297,10 +287,9 @@ export function useJiraUserSearch(
   });
 }
 
-/** The site's priority scheme, for the priority picker. Fetched lazily — the
- *  caller passes `enabled` (e.g. the priority menu being open) so nothing loads
- *  on mount. Priorities are site-global (not per-project), so the key is the site
- *  alone and a generous staleTime keeps it off the hot path. */
+/** The site's priority scheme, for the priority picker. Lazy (`enabled` = the menu being
+ *  open) so nothing loads on mount. Priorities are site-global, not per-project, so the key
+ *  is the site alone with a generous staleTime. */
 export function useJiraPriorities(
   link: JiraLink | null | undefined,
   enabled: boolean,
@@ -328,10 +317,9 @@ export function useJiraLabels(
   });
 }
 
-/** Add a comment. Optimistic: appends the returned comment to the detail cache
- *  on success (the server assigns the id + timestamp, so — unlike the transition
- *  patch — there's nothing to show until it resolves). Invalidates the repo's
- *  Jira caches on settle to reconcile. */
+/** Add a comment. The server assigns the id + timestamp, so — unlike the transition patch —
+ *  there's nothing to show until it resolves: the returned comment is appended to the
+ *  detail cache on success, and the repo's Jira caches reconcile on settle. */
 export function useJiraComment(
   repo: string,
   link: JiraLink | null | undefined,
@@ -352,10 +340,9 @@ export function useJiraComment(
   });
 }
 
-/** The available workflow transitions from an issue's current status, for the
- *  full status picker. Fetched lazily — the caller passes `enabled` (e.g. the
- *  status menu being open) so nothing is fetched on mount. Site is part of the
- *  key so a re-link can't serve the prior site's transitions for the same key. */
+/** The available workflow transitions from an issue's current status, for the full status
+ *  picker. Lazy (`enabled` = the status menu being open). Site is in the key so a re-link
+ *  can't serve the prior site's transitions for the same key. */
 export function useJiraTransitions(
   repo: string,
   link: JiraLink | null | undefined,
@@ -384,11 +371,10 @@ type StatusPatchCtx = {
   lists: [readonly unknown[], JiraIssueInfo[] | undefined][];
 };
 
-/** Optimistically flip an issue's status category (and, when known, its name)
- *  across the detail cache AND every jira-issues list cache for this repo, so the
- *  chip + any visible row update instantly. Shared by both transition mutations.
- *  `name === undefined` (the directional path, which can't know the per-workflow
- *  target name yet) leaves the existing name; the real values land on success. */
+/** Optimistically flip an issue's status category (and name when known) across the detail
+ *  cache AND every jira-issues list cache for this repo, so the chip and any visible row
+ *  update instantly. Shared by both transition mutations; `name === undefined` (the
+ *  directional path can't know the per-workflow target name) leaves the existing name. */
 async function applyOptimisticStatus(
   queryClient: ReturnType<typeof useQueryClient>,
   repo: string,
@@ -460,12 +446,10 @@ function landRealStatus(
   );
 }
 
-/** Close/reopen via a directional workflow transition. Optimistic: flips the
- *  category across the detail cache AND every list cache for this repo (so the
- *  row's chip flips instantly). Rollback on error restores both. The list patch
- *  may make a row fall out of the active state filter (e.g. closing while viewing
- *  Open) — that's fine: the detail view stays put and invalidation reconciles the
- *  list on settle. */
+/** Close/reopen via a directional workflow transition. Optimistic across the detail + every
+ *  list cache, with rollback on error. The list patch may drop a row out of the active state
+ *  filter (closing while viewing Open) — fine: the detail view stays put and settle-time
+ *  invalidation reconciles the list. */
 export function useJiraTransition(
   repo: string,
   link: JiraLink | null | undefined,
@@ -513,10 +497,9 @@ export function useJiraTransition(
   });
 }
 
-/** Apply a specific transition by id (the full status picker). Same optimistic
- *  plumbing as `useJiraTransition`, but the caller knows the target from the
- *  chosen option, so we flip BOTH category and name up front; the server's real
- *  values still land on success and invalidation reconciles on settle. */
+/** Apply a specific transition by id (the full status picker). Same plumbing as
+ *  {@link useJiraTransition}, but the caller knows the target from the chosen option, so
+ *  category AND name flip up front; the server's real values still land on success. */
 export function useJiraTransitionTo(
   repo: string,
   link: JiraLink | null | undefined,
@@ -574,9 +557,8 @@ export function useJiraAssign(repo: string, link: JiraLink | null | undefined) {
       ),
     onMutate: async (args) => {
       if (!link) return undefined;
-      // Assignee shows on both the detail and every list row; the shared helper
-      // gives field-scoped rollback (restores only `assignee`, never a
-      // concurrent field edit on the same issue).
+      // Assignee shows on the detail and every list row; the shared helper gives
+      // field-scoped rollback (never reverts a concurrent field edit on the same issue).
       return applyOptimisticField(
         queryClient,
         repo,
@@ -601,18 +583,16 @@ type FieldPatchCtx = {
   prevFields: Partial<JiraIssueDetails> | undefined;
   /** The patched issue's key — used to find its row when rolling back the lists. */
   issueKey: string;
-  /** Per jira-issues list cache, the affected row's PRIOR values for just the
-   *  patched fields (or `undefined` when the row wasn't present). Field-scoped
-   *  like the detail snapshot, so a list rollback restores only the row fields
-   *  this patch changed — never a concurrent sibling mutation's row update. */
+  /** Per jira-issues list cache, the affected row's PRIOR values for just the patched
+   *  fields (`undefined` when the row wasn't present) — field-scoped like the detail
+   *  snapshot, so a rollback never reverts a concurrent sibling mutation's row update. */
   listPrev: [readonly unknown[], Partial<JiraIssueInfo> | undefined][];
 };
 
-/** Optimistically patch a set of detail fields, and (for the subset of fields the
- *  list row also carries) the matching row in every jira-issues list cache for
- *  this repo. `detailPatch` is applied to the detail entry; `listPatch` (when
- *  given) to the matching list row — separate because a detail-only field (due
- *  date) has no list-row counterpart. Snapshots for rollback. */
+/** Optimistically patch a set of detail fields, and (for the fields the list row also
+ *  carries) the matching row in every jira-issues list cache for this repo. `listPatch` is
+ *  separate from `detailPatch` because a detail-only field (due date) has no list-row
+ *  counterpart. Snapshots for rollback. */
 async function applyOptimisticField(
   queryClient: ReturnType<typeof useQueryClient>,
   repo: string,
@@ -638,10 +618,8 @@ async function applyOptimisticField(
       ...detailPatch,
     });
   }
-  // Patch the matching row in every jira-issues list cache, snapshotting ONLY
-  // that row's prior values for the patched fields (field-scoped, like the detail
-  // above) so a rollback never reverts a concurrent sibling mutation's row update.
-  // A detail-only field (due date) has no listPatch, so listPrev stays empty.
+  // Patch the matching row in every list cache, snapshotting only that row's prior values
+  // for the patched fields. A detail-only field has no listPatch, so listPrev stays empty.
   const listPrev: [readonly unknown[], Partial<JiraIssueInfo> | undefined][] =
     [];
   if (listPatch) {
@@ -789,10 +767,9 @@ export function useJiraSetLabels(
   });
 }
 
-/** Edit one of the viewer's own comments. Optimistic: patches the comment's body
- *  (and a provisional `updatedAt`) in place in the detail cache; the server's real
- *  comment (with the true updatedAt) lands on success. Rollback restores the
- *  prior comment array. Comments aren't on the list row, so no list patch. */
+/** Edit one of the viewer's own comments. Optimistic: patches the body and a provisional
+ *  `updatedAt` in place; the server's real comment lands on success and rollback restores
+ *  the prior array. Comments aren't on the list row, so no list patch. */
 export function useJiraCommentEdit(
   repo: string,
   link: JiraLink | null | undefined,
@@ -913,15 +890,13 @@ export function useJiraCreateIssue(
   });
 }
 
-// ── Write path (phase 6): time tracking (estimates + worklogs) ────────────────
-// Jira DERIVES every time-tracking value server-side — adding a worklog
-// decrements the remaining estimate, deleting one restores it, setting an
-// original with no worklogs initializes remaining, clearing an original while
-// worklogs exist snaps original := remaining. We CANNOT reconstruct those
-// derivations client-side, so — unlike the phase-5 field writes — these five
-// mutations are deliberately NON-optimistic: no applyOptimisticField, plain
-// useMutation, `invalidateJiraIssue` on settle re-fetches the server truth. The
-// mutation's own `isPending` drives the UI's disabled/busy state.
+// ── Time tracking (estimates + worklogs) ─────────────────────────────────────
+// Jira DERIVES every time-tracking value server-side — adding a worklog decrements the
+// remaining estimate, deleting one restores it, setting an original with no worklogs
+// initializes remaining, clearing an original while worklogs exist snaps original :=
+// remaining. Those derivations can't be reconstructed client-side, so these five mutations
+// are deliberately NON-optimistic: `invalidateJiraIssue` on settle re-fetches server truth
+// and the mutation's own `isPending` drives the busy state.
 
 /** Set/clear the issue's original estimate. Non-optimistic (server-derived) —
  *  see the section note above. */

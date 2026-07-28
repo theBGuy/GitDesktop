@@ -1,11 +1,8 @@
 //! The GitLab [`Forge`](super::Forge) implementation, via the `glab` CLI.
 //!
-//! Every operation maps GitLab's JSON onto the SAME neutral models the GitHub
-//! panels already render (`PrInfo`, `IssueDetails`, `WorkflowRun`, `ReleaseInfo`,
-//! …), so the frontend stays provider-agnostic. Reads cover MRs, issues, CI
-//! pipelines, and releases; writes land per-action behind `Implemented` flags
-//! (comment, close/reopen, approve, merge, labels, assignees, create, pipeline
-//! retry/cancel/run, release management). Which features are wired up is declared
+//! Every operation maps GitLab's JSON onto the same neutral models the GitHub
+//! panels render (`PrInfo`, `IssueDetails`, `WorkflowRun`, `ReleaseInfo`, …), so
+//! the frontend stays provider-agnostic. Which features are wired up is declared
 //! in `model.rs::Implemented::for_provider` — flip flags there as impls land.
 
 use std::collections::HashMap;
@@ -42,11 +39,9 @@ impl GitLabForge {
     }
 }
 
-/// Assemble the neutral status from the `glab` probes. Pure (testable). `repo` is
-/// the project path derived from the origin remote, which flips the integration
-/// *ready* once `glab` is installed and signed in — merge-request reads are wired
-/// up, so it's safe for a GitLab repo to be ready (unbuilt panels degrade to
-/// "coming soon" via the `implemented` flags).
+/// Assemble the neutral status from the `glab` probes. Pure (testable). A `Some`
+/// `repo` (the project path from the origin remote) flips the integration *ready*;
+/// unbuilt panels degrade to "coming soon" via the `implemented` flags.
 fn gitlab_status(
     installed: bool,
     authenticated: bool,
@@ -138,12 +133,10 @@ fn from_glab_project(p: GlabProject) -> ForgeRepo {
     }
 }
 
-/// The signed-in GitLab user's projects, for the clone browser. Uses the `glab
-/// api` REST escape hatch (validated live — mirrors `gh api`); `membership=true`
-/// = projects the user belongs to. Caps at 100 for now (`--paginate` for >100 is
-/// a follow-up — its multi-page output format needs its own validation);
-/// ordering by activity means the cap drops the least-recently-active projects
-/// rather than an arbitrary 100.
+/// The signed-in GitLab user's projects, for the clone browser, via the `glab api`
+/// REST escape hatch; `membership=true` = projects the user belongs to. Caps at 100
+/// (`--paginate`'s multi-page output needs its own validation); ordering by activity
+/// means the cap drops the least-recently-active projects, not an arbitrary 100.
 pub async fn list_repos() -> AppResult<ForgeRepoList> {
     let viewer = run_glab(None, &["api", "user"], GLAB_TIMEOUT)
         .await
@@ -170,28 +163,20 @@ pub async fn list_repos() -> AppResult<ForgeRepoList> {
 
 /// The one-shot `git -c` credential entries that let a network op on a private
 /// GitLab repo authenticate via glab's token — glab's token isn't in git's
-/// credential store, so plain `git clone` (and even `glab repo clone`) 401s.
-/// One-shot (per `git` invocation), so nothing is written to git config and no
-/// token lands in the remote URL. Validated live against a private gitlab.com repo.
-///
-/// Returns the `[reset, helper]` pair (see [`gitlab_credential_entries`]) ONLY
-/// when glab is present AND has a STORED session for `host`; when glab is present
-/// but has no stored session for that host, returns an empty Vec so git's ambient
-/// behavior is preserved unchanged. The stored-session check is a `hosts:` entry in
-/// glab's config — it persists past PAT expiry, so it proves a session EXISTS, not
-/// that it works; the ambient fallback in
-/// [`crate::git::remote::run_git_mutating_with_creds`] covers a dead session.
-/// Missing glab → `Err(GlabNotFound)`, unchanged — the strict `?` clone sites stay
-/// fail-closed on a missing CLI.
+/// credential store, so plain `git clone` 401s; one-shot, so no token lands in
+/// config or the remote URL. Returns the `[reset, helper]` pair only when glab has
+/// a stored session for `host` (a `hosts:` entry — it proves a session EXISTS, not
+/// that it works; `run_git_mutating_with_creds`'s ambient fallback covers a dead
+/// one); no session → empty Vec (git's ambient helpers still run). Missing glab →
+/// `Err(GlabNotFound)`, keeping strict `?` clone sites fail-closed.
 pub async fn clone_credential_config(clone_url: &str) -> AppResult<Vec<String>> {
     let glab = crate::agent::resolve_named(&["glab"], None)
         .await
         .ok_or(AppError::GlabNotFound)?;
     let host = crate::forge::remote_host(clone_url).unwrap_or_else(|| "gitlab.com".to_string());
-    // glab's signed-in hosts are the `hosts:` keys of its config.yml — an entry
-    // exists only after `glab auth login`. No signed-in host → inject nothing so
-    // git's ambient credential helpers still run (the established repo signal; we
-    // don't invent a new `glab auth status` probe).
+    // glab's signed-in hosts are the `hosts:` keys of its config.yml (written by
+    // `glab auth login`) — the established repo signal, not a new `glab auth
+    // status` probe. No entry → inject nothing; git's ambient helpers still run.
     if !crate::forge::glab::known_hosts().await.contains(&host) {
         return Ok(Vec::new());
     }
@@ -199,16 +184,13 @@ pub async fn clone_credential_config(clone_url: &str) -> AppResult<Vec<String>> 
 }
 
 /// The one-shot `-c` credential entries for a signed-in GitLab host — a
-/// `[reset, helper]` pair, mirroring the GitHub arm. entry[0] SEVERS git's
-/// accumulated helper chain for this URL (empty value = "clear the helper list",
-/// per gitcredentials(7); the trailing `=` is load-bearing — `-c name` without it
-/// sets boolean `true` and breaks the reset), and entry[1] installs glab as the
-/// sole helper so an ambient helper earlier in the config chain can't shadow
-/// glab's identity. Order matters: reset FIRST — consumers prefix `-c` pairs in
-/// Vec order. Pure/format-only.
+/// `[reset, helper]` pair. entry[0] SEVERS git's accumulated helper chain for this
+/// URL (empty value clears the helper list per gitcredentials(7); the trailing `=`
+/// is load-bearing — `-c name` without it sets boolean `true`), entry[1] installs
+/// glab as the sole helper so no ambient helper can shadow it. Reset MUST come
+/// first — consumers prefix `-c` pairs in Vec order. Pure/format-only.
 fn gitlab_credential_entries(host: &str, glab_path: &str) -> Vec<String> {
     vec![
-        // Reset: empty value clears the accumulated helper list for this URL.
         format!("credential.https://{host}.helper="),
         format!("credential.https://{host}.helper=!\"{glab_path}\" auth git-credential"),
     ]
@@ -216,11 +198,9 @@ fn gitlab_credential_entries(host: &str, glab_path: &str) -> Vec<String> {
 
 // ── Merge requests (read) ─────────────────────────────────────────────────────
 //
-// GitLab merge requests map onto the same neutral `PrInfo`/`PrDetails` the GitHub
-// panels already render, so the frontend stays provider-agnostic. We go through
-// the `glab api` REST escape hatch addressing the project by its URL-encoded full
-// path (which GitLab accepts in place of a numeric id), derived from the origin
-// remote — the same path `status` reports as `repo`.
+// We address the project through the `glab api` REST escape hatch by its
+// URL-encoded full path (GitLab accepts it in place of a numeric id), derived from
+// the origin remote — the same path `status` reports as `repo`.
 
 /// URL-encode a project's full path for use as a `glab api` project id. Only `/`
 /// needs escaping for the paths GitLab allows (letters/digits/`_`/`-`/`.`).
@@ -254,12 +234,10 @@ fn map_mr_state(state: &str) -> String {
     }
 }
 
-/// Deserialize a field the provider may send as JSON `null` rather than omitting,
-/// treating a present `null` as the type's default. Paired with `#[serde(default)]`
-/// (which only fills a *missing* key) this absorbs both — the exact trap that sank a
-/// whole issue parse when GitLab returned `discussion_locked: null` instead of
-/// `false`. Applied to the optional scalars and the collections GitLab could null
-/// out (it returns `[]` today, but the same one-quirk-away fragility bit us once).
+/// Deserialize a field the provider may send as JSON `null` rather than omitting it,
+/// treating a present `null` as the type's default. `#[serde(default)]` alone only
+/// fills a MISSING key, so a present `null` fails the whole parse — this absorbs
+/// both. Applied to every optional scalar and collection GitLab could null out.
 pub(crate) fn null_to_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -372,11 +350,9 @@ pub async fn prs_for_branch(repo_path: &str, head: &str) -> AppResult<Vec<PrInfo
 }
 
 /// Map a GitLab GraphQL `PipelineStatusEnum` (the MR head pipeline's status) onto the
-/// neutral list-row CI signal. SUCCESS → passing; the terminal-failure states →
-/// failing; SKIPPED counts as passing (nothing to run, not a failure); a null/absent
-/// pipeline → none. Everything else — CREATED/PENDING/RUNNING/PREPARING/WAITING_*/
-/// MANUAL/SCHEDULED and any value we don't recognize — is in-flight/indeterminate →
-/// pending (conservative, never a false green). Case-insensitive.
+/// neutral list-row CI signal. SKIPPED counts as passing (nothing to run, not a
+/// failure); everything unrecognized or in-flight → pending, never a false green.
+/// Null/absent pipeline → none. Case-insensitive.
 fn pipeline_status_to_ci(status: Option<&str>) -> String {
     match status.map(|s| s.trim().to_ascii_uppercase()) {
         None => "none".to_string(),
@@ -422,14 +398,13 @@ fn parse_mr_url_project(url: &str) -> AppResult<(String, String)> {
     Ok((host, full_path.to_string()))
 }
 
-/// The MR CI rollup for a set of iids in ONE project, keyed by number — the GitLab arm
-/// of `forge_pr_list_ci`. GitLab's GraphQL exposes each MR's `headPipeline.status`
-/// (a precomputed single enum), so one batched call per ≤50-iid chunk suffices — no
-/// N+1. `sample_url` (any MR web url from the same page) fixes the host + project full
-/// path. `fullPath` is passed as a GraphQL variable; iids are digits-only, embedded as
-/// quoted strings (GitLab's `iids` arg takes `[ID!]` strings). Per-chunk tolerance: a
-/// chunk that errors or fails to parse is omitted (its rows show no icon), never
-/// failing the whole call. Self-hosted GitLab is supported via glab's `--hostname`.
+/// The MR CI rollup for a set of iids in ONE project, keyed by number. GitLab's
+/// GraphQL exposes each MR's `headPipeline.status` as a precomputed enum, so one
+/// batched call per ≤50-iid chunk suffices — no N+1. `sample_url` (any MR web url
+/// from the same page) fixes the host + project full path; `fullPath` rides as a
+/// GraphQL variable, iids are digits-only and embedded as quoted strings (`[ID!]`).
+/// A chunk that errors or won't parse is omitted (its rows show no icon), never
+/// failing the whole call. Self-hosted works via glab's `--hostname`.
 pub async fn pr_list_ci(
     repo_path: &str,
     iids: Vec<u64>,
@@ -443,7 +418,8 @@ pub async fn pr_list_ci(
 
     let mut result: Vec<PrCiStatus> = Vec::with_capacity(iids.len());
     for chunk in iids.chunks(50) {
-        // iids are u64 → safe to embed as quoted strings. fullPath is a GraphQL var.
+        // Safe to interpolate: iids are u64 (digits only). fullPath rides as a
+        // GraphQL variable, never interpolated.
         let iid_list = chunk
             .iter()
             .map(|i| format!("\"{i}\""))
@@ -464,8 +440,6 @@ pub async fn pr_list_ci(
         args.push("-f");
         args.push(&path_arg);
 
-        // Per-chunk tolerance: network error / non-zero exit / parse failure drops
-        // just this chunk's iids (their icons stay absent).
         let Ok(out) = run_glab_raw(Some(repo_path), &args, GLAB_NETWORK_TIMEOUT).await else {
             continue;
         };
@@ -547,14 +521,12 @@ fn from_glab_poll_mr(m: GlabPollMr) -> PrPollInfo {
         is_draft: m.draft,
         author: m.author.map(|a| a.username).unwrap_or_default(),
         // The list response carries neither an approval decision nor a pipeline
-        // rollup, so both stay empty — the notification poller's checks/review
-        // branches simply never fire for GitLab (a documented v1 limit).
+        // rollup, so the poller's checks/review branches never fire for GitLab (v1).
         review_decision: String::new(),
         checks_state: String::new(),
         head_sha: m.sha,
         // The new-comment / new-review / review-requested detectors are GitHub-only
-        // in v1 — the MR list carries none of these, so they stay empty and those
-        // notification branches never fire for GitLab.
+        // in v1 — the MR list carries none of these.
         comment_count: 0,
         last_comment_author: String::new(),
         review_count: 0,
@@ -628,9 +600,8 @@ struct GlabMrChanges {
     head_pipeline: Option<GlabHeadPipeline>,
 }
 
-/// The `head_pipeline` object embedded in an MR payload — just the fields the check
-/// rollup needs (id for the jobs fetch; the pipeline's own web_url is unused, the
-/// per-job `web_url` links each check).
+/// The `head_pipeline` object embedded in an MR payload — only `id` (the jobs
+/// fetch) is needed; each check links via its own per-job `web_url`.
 #[derive(Deserialize)]
 struct GlabHeadPipeline {
     id: u64,
@@ -688,13 +659,11 @@ fn reconstruct_file_diff(c: &GlabChange) -> String {
 // ── Multi-line diff-note ranges (line_range / line_code) ───────────────────────
 //
 // GitLab anchors a multi-line diff note via `position.line_range`, whose start/end
-// refs each carry a `line_code` = `sha1_hex(file_path)_<old_pos>_<new_pos>`. The
-// (old_pos, new_pos) pair follows GitLab's own diff-parser walk of the file's
-// unified-diff hunks. We send BOTH `line_code` and `type` + `new_line`/`old_line`
-// on each ref (GitLab's web UI highlights on `line_code`; our reader keys on the
-// explicit line field). A ref without `line_code` (just `type` + line) is also
-// accepted — the fallback when line_code can't be computed, so a post never fails
-// over line_code.
+// refs each carry `line_code` = `sha1_hex(file_path)_<old_pos>_<new_pos>`, with the
+// (old, new) pair following GitLab's own diff-parser walk. We send BOTH `line_code`
+// and `type` + `new_line`/`old_line` (the web UI highlights on line_code; our reader
+// keys on the explicit field). A ref without `line_code` is also accepted — the
+// fallback when it can't be computed, so a post never fails over line_code.
 
 /// The `line_code` for a diff-note range ref: `sha1_hex(file_path)_<old_pos>_<new_pos>`.
 /// GitLab keys its multi-line highlight on this value. Pure (testable).
@@ -709,15 +678,11 @@ fn gl_line_code(file_path: &str, old_pos: u64, new_pos: u64) -> String {
 
 /// Walk a GitLab per-file unified-diff hunk string (starts at `@@`, no `---`/`+++`
 /// header — the raw `GlabChange.diff`) and return the `(old_pos, new_pos)` pair for
-/// the requested `line` on the given `side` ("new" or "old"), following GitLab's own
-/// diff-parser semantics. Returns `None` when the line isn't found in the diff.
-///
-/// Per GitLab's parser: at each `@@ -a[,b] +c[,d] @@` header, the old counter starts
-/// at `a`, the new at `c`. A `+` line takes (old, new) then advances new only (so an
-/// added line in a new file with `@@ -0,0 +1,6 @@` gets `_0_2` at new line 2). A `-`
-/// line takes (old, new) then advances old. A context (space / empty) line takes
-/// (old, new) then advances both. A `\ No newline…` marker is skipped entirely.
-/// Pure (testable).
+/// `line` on `side` ("new"/"old"), following GitLab's own diff-parser semantics:
+/// each `@@ -a[,b] +c[,d] @@` sets old=a, new=c; a `+` line takes (old,new) then
+/// advances new; a `-` line takes it then advances old; a context/empty line takes
+/// it then advances both; `\ No newline…` is skipped. `None` when the line isn't in
+/// the diff. Pure (testable).
 fn gl_diff_line_refs(file_diff: &str, side: &str, line: u64) -> Option<(u64, u64)> {
     let mut old_pos: u64 = 0;
     let mut new_pos: u64 = 0;
@@ -763,16 +728,12 @@ fn gl_diff_line_refs(file_diff: &str, side: &str, line: u64) -> Option<(u64, u64
 /// Parse the `-a[,b] +c[,d]` starts out of a hunk header body (the text AFTER the
 /// leading `@@`). Returns `(old_start, new_start)`, or `None` if malformed. Pure.
 ///
-/// ONLY the range slice between the leading `@@` and the CLOSING `@@` is parsed; the
-/// text after the closing marker is git's function-context section heading and is
-/// untrusted (it can contain arbitrary code — a `->` return type, a trailing `+5`/`-3`
-/// token, even a literal `@@` in Ruby `@@var`). Cut at the FIRST subsequent `@@`, then
-/// take the old start from the FIRST `-`-prefixed token and the new start from the
-/// FIRST `+`-prefixed token — never reassigning, so a heading number can't clobber a
-/// real range.
+/// ONLY the slice before the CLOSING `@@` is parsed: the text after it is git's
+/// function-context heading and is untrusted (it can hold a `->`, a trailing `+5`,
+/// even a literal `@@`). Cut at the first subsequent `@@`, then take the FIRST
+/// `-`- and `+`-prefixed tokens without reassigning, so a heading number can't
+/// clobber a real range.
 fn parse_hunk_header(header: &str) -> Option<(u64, u64)> {
-    // header (text after the leading `@@`) looks like ` -a,b +c,d @@ optional context`.
-    // Everything from the first subsequent `@@` on is the section heading — drop it.
     let range = match header.split_once("@@") {
         Some((range, _heading)) => range,
         None => header,
@@ -841,8 +802,6 @@ struct GlabCommit {
 /// providers produce the same "body = everything after the headline" semantics.
 /// Returns "" when the message is a single line (no body).
 pub(crate) fn message_body_from_full(message: &str) -> String {
-    // Split off the first line (title); the rest, with one leading blank line
-    // consumed, is the body. `splitn(2, '\n')` keeps embedded newlines in the body.
     let rest = match message.split_once('\n') {
         Some((_, rest)) => rest,
         None => return String::new(),
@@ -867,10 +826,9 @@ struct GlabNote {
     author: Option<GlabMrUser>,
     #[serde(default)]
     created_at: String,
-    /// The diff-anchor `position` object, present only on inline (diff) notes. We
-    /// use its presence to keep diff-anchored notes OUT of the flat conversation
-    /// list — they now surface as `review_threads` with real file/line context,
-    /// instead of leaking bodies context-free into `PrDetails.comments`.
+    /// The diff-anchor `position`, present only on inline (diff) notes. Its presence
+    /// keeps diff-anchored notes OUT of the flat conversation list — they surface as
+    /// `review_threads` with real file/line context instead.
     #[serde(default)]
     position: Option<GlabNotePosition>,
 }
@@ -972,14 +930,12 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
     .collect();
     commits.reverse();
 
-    // Resolve the signed-in user once (tolerantly — a failure must not fail the
-    // view; it just means every comment's edit/delete stays hidden). Drives the
-    // truthful `viewer_did_author` below.
+    // Resolve the signed-in user once, tolerantly — a failure just hides every
+    // comment's edit/delete (drives `viewer_did_author`), it must not fail the view.
     let viewer = current_user_login(repo_path).await;
 
-    // Comments — drop GitLab's system notes (auto "added a commit", etc.) AND
-    // diff-anchored (positioned) notes, which now surface as `review_threads` with
-    // real file/line context instead of leaking into the flat conversation list.
+    // Comments — drop GitLab's system notes and diff-anchored (positioned) notes
+    // (the latter surface as `review_threads`).
     let comments: Vec<PrThreadOut> = run_glab(
         Some(repo_path),
         &[
@@ -1047,14 +1003,13 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         .map(|a| (a.username, a.avatar_url))
         .unwrap_or_default();
 
-    // Reviewer verdicts. GitLab MRs carry no reviewable review objects, so a
-    // completed reviewer is an assigned reviewer whose per-reviewer state is
-    // `approved` or `requested_changes` (from `…/reviewers`). Best-effort: a
-    // failed/omitted fetch just leaves `completed_reviewers` empty (never fails
-    // the view). NOTE: `reviewers` below stays the FULL assigned set — on GitLab
-    // an approver remains an assigned reviewer, and that list drives a
-    // full-replacement reviewer PUT, so dropping acted reviewers from it would
-    // un-assign them on the next edit. The frontend de-dups the display instead.
+    // Reviewer verdicts. GitLab MRs carry no reviewable review objects, so a completed
+    // reviewer is an assigned reviewer whose per-reviewer state is `approved` or
+    // `requested_changes` (from `…/reviewers`). Best-effort — a failed fetch just leaves
+    // `completed_reviewers` empty. NOTE: `reviewers` below stays the FULL assigned set:
+    // an approver remains assigned, and that list drives a full-replacement PUT, so
+    // dropping acted reviewers would un-assign them on the next edit. The frontend
+    // de-dups the display instead.
     let reviewer_states: std::collections::HashMap<String, String> =
         mr_reviewers(repo_path, &enc, number)
             .await
@@ -1067,9 +1022,8 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
             })
             .collect();
 
-    // The acted subset (approved / requested-changes), with each reviewer's
-    // verdict — built by borrowing `mr.reviewers` so the full list below can
-    // still consume it.
+    // The acted subset (approved / requested-changes) with each verdict — borrows
+    // `mr.reviewers` so the full list below can still consume it.
     let completed_reviewers: Vec<CompletedReviewerOut> = mr
         .reviewers
         .iter()
@@ -1125,10 +1079,8 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
             })
             .collect(),
         // The FULL assigned reviewer set, keyed by username (like assignees — the
-        // setter resolves username→id, candidates use username), so the picker's
-        // selected chips match its candidate ids. Acted reviewers stay here (this
-        // list drives a full-replacement PUT); `completed_reviewers` carries their
-        // verdicts and the frontend de-dups the display.
+        // setter resolves username→id), so the picker's chips match its candidate
+        // ids. Acted reviewers stay (this list drives a full-replacement PUT).
         reviewers: mr
             .reviewers
             .into_iter()
@@ -1219,16 +1171,12 @@ fn map_approval_note(body: &str, actor: String, date: String) -> Option<PrTimeli
     }
 }
 
-/// The MR's activity timeline — label add/remove, state changes (close/reopen/merge),
-/// and approval-flow events (approve/unapprove/request-changes) — mapped onto the
-/// neutral `PrTimelineEventOut` union, oldest→newest. GitLab's arm of
-/// `forge_pr_timeline`. Deliberately omits commits (the frontend interleaves
-/// `pr.commits`), force-pushes (no GitLab API), and draft/ready + review-request
-/// events. Every sub-fetch is best-effort: one endpoint failing yields no events of
-/// that class rather than failing the whole timeline. Each sub-fetch is a single
-/// `per_page=100` page (matching `view_pr`'s comments/commits convention, no
-/// pagination) — a very busy MR with >100 label/state/note events truncates the
-/// oldest of that class.
+/// The MR's activity timeline — label add/remove, state changes, and approval-flow
+/// events — mapped onto the neutral `PrTimelineEventOut` union, oldest→newest.
+/// Deliberately omits commits (the frontend interleaves `pr.commits`), force-pushes
+/// (no GitLab API), and draft/ready + review-request events. Every sub-fetch is
+/// best-effort and a single `per_page=100` page, so a very busy MR truncates the
+/// oldest events of that class.
 pub async fn mr_timeline(repo_path: &str, number: u64) -> AppResult<Vec<PrTimelineEventOut>> {
     let enc = encode_project(&project_path(repo_path).await?);
     let mut events: Vec<PrTimelineEventOut> = Vec::new();
@@ -1250,10 +1198,9 @@ pub async fn mr_timeline(repo_path: &str, number: u64) -> AppResult<Vec<PrTimeli
         let Some(label) = e.label else { continue };
         events.push(PrTimelineEventOut::Labeled {
             label: label.name,
-            // `resource_label_events` returns `color` WITH a leading `#` (e.g.
-            // "#428BCA"), but the `Labeled.color` contract is bare hex (the frontend
-            // renders `#${color}`). Strip it, matching the file's other GitLab label
-            // producers (`project_label_colors`, `repo_labels`).
+            // `resource_label_events` returns `color` WITH a leading `#`, but the
+            // `Labeled.color` contract is bare hex (the frontend renders `#${color}`)
+            // — strip it, like the file's other GitLab label producers.
             color: label.color.trim_start_matches('#').to_string(),
             added: e.action == "add",
             actor: e.user.map(|u| u.username).unwrap_or_default(),
@@ -1291,9 +1238,8 @@ pub async fn mr_timeline(repo_path: &str, number: u64) -> AppResult<Vec<PrTimeli
         events.push(mapped);
     }
 
-    // Approval-flow events — system notes with fixed bodies carry the timestamped
-    // approve/unapprove/request-changes history (the `/approvals` endpoint has no
-    // per-event timestamps).
+    // Approval-flow events — system notes carry the timestamped history
+    // (see `map_approval_note`).
     let notes: Vec<GlabNote> = run_glab(
         Some(repo_path),
         &[
@@ -1434,10 +1380,9 @@ fn validate_commit_sha(sha: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// The unified diff of ONE commit (`GET projects/{enc}/repository/commits/{sha}/diff`),
-/// rebuilt from GitLab's per-file diff array into the same `git`-style format
-/// `gh pr diff` produces (via `reconstruct_file_diff`, the same synthesis `diff_pr`
-/// uses for the MR changes array). Sha validated before the request.
+/// The unified diff of ONE commit (`GET …/repository/commits/{sha}/diff`), rebuilt
+/// from GitLab's per-file array into the `git`-style format `gh pr diff` produces
+/// (via `reconstruct_file_diff`). Sha validated before the request.
 pub async fn commit_diff(repo_path: &str, sha: &str) -> AppResult<String> {
     validate_commit_sha(sha)?;
     let enc = encode_project(&project_path(repo_path).await?);
@@ -1462,12 +1407,12 @@ pub async fn commit_diff(repo_path: &str, sha: &str) -> AppResult<String> {
 
 // ── Commit comments ───────────────────────────────────────────────────────────
 //
-// GitLab has no first-class "commit comment" object — a comment on a commit is a
-// note inside a commit DISCUSSION (`…/repository/commits/{sha}/discussions`). So
-// the neutral comment id is the COMPOSITE `"{discussion_id}:{note_id}"`, which
-// edit/delete parse back apart. A whole-commit comment posts a flat `-f body`;
-// an anchored one needs the nested `position` JSON (flat `-f position[x]=y` is
-// silently ignored by GitLab — the known trap), fed via `--input -`.
+// GitLab has no first-class "commit comment" — a comment on a commit is a note in a
+// commit DISCUSSION (`…/repository/commits/{sha}/discussions`), so the neutral
+// comment id is the COMPOSITE `"{discussion_id}:{note_id}"` that edit/delete parse
+// apart. A whole-commit comment posts a flat `-f body`; an anchored one needs the
+// nested `position` JSON via `--input -` (flat `-f position[x]=y` is SILENTLY
+// ignored by GitLab).
 
 /// A note inside a commit discussion (the fields we map). `position` (present only
 /// on diff-anchored notes) carries the anchored path/line.
@@ -1626,13 +1571,11 @@ async fn commit_parent_sha(repo_path: &str, enc: &str, sha: &str) -> AppResult<S
 }
 
 /// Post a comment on a commit. Whole-commit (`path`/`line` both None) posts a flat
-/// `-f body`; an anchored one posts the nested `position` JSON via `--input -`
-/// (flat `-f position[x]=y` is silently ignored by GitLab). `start_line`, when
-/// `Some(start)` and `start != line`, makes an anchored comment a MULTI-LINE range
-/// (new side only — the commit composer ranges the new side): we fetch the commit's
-/// per-file diffs, compute each endpoint's `line_code`, and attach
-/// `position.line_range` (falling back to line_code-less refs if the file/line can't
-/// be resolved — the post never fails over line_code). Empty-body guarded.
+/// `-f body`; an anchored one posts the nested `position` JSON via `--input -`.
+/// `start_line`, when set and different from `line`, makes it a MULTI-LINE range
+/// (new side only): fetch the commit's per-file diffs and attach
+/// `position.line_range`, falling back to line_code-less refs if the file/line
+/// can't be resolved — the post never fails over line_code. Empty-body guarded.
 pub async fn commit_comment_create(
     repo_path: &str,
     sha: &str,
@@ -1741,14 +1684,12 @@ pub async fn commit_comment_delete(repo_path: &str, sha: &str, comment_id: &str)
 // Comment (note), close/reopen, title/body edit, approve/unapprove, and merge —
 // mirroring the gh_pr_* commands and dispatching through forge_pr_*. (Full reviews
 // stay GitHub-only.) Same glab `-f` raw-field + `state_event` shape as the issue
-// writes (validated live against the demo). Unlike issue close, MR close has no
-// reason on either platform.
+// writes. Unlike issue close, MR close has no reason on either platform.
 
 /// Post a comment (note) on a merge request. When `as_bot` is set and a review-bot
-/// token is stored for this repo's GitLab host, the note is authored by the project
-/// bot (the POST runs with the bot `GITLAB_TOKEN` in the env, which overrides glab's
-/// configured auth — probe-proven); with no token stored it falls back silently to
-/// the normal (signed-in-user) path and still succeeds.
+/// token is stored for this repo's GitLab host, the POST runs with the bot
+/// `GITLAB_TOKEN` in the env (which overrides glab's configured auth); with no token
+/// stored it falls back silently to the signed-in-user path and still succeeds.
 pub async fn comment_mr(repo_path: &str, number: u64, body: &str, as_bot: bool) -> AppResult<()> {
     if body.trim().is_empty() {
         return Err(AppError::InvalidArgument("a comment is required".into()));
@@ -1894,11 +1835,10 @@ pub async fn reopen_mr(repo_path: &str, number: u64) -> AppResult<()> {
 }
 
 /// Set a merge request's draft state via `glab mr update <iid> --ready | --draft`.
-/// A GitLab draft is a `Draft:` title prefix; `glab mr update` handles adding and
-/// stripping that prefix for us (both flags validated live), which is why this
-/// shells the `mr` subcommand rather than PATCHing the title itself. The project is
-/// resolved from the repo directory context (`Some(repo_path)`), matching the iid's
-/// scope; `number` is a u64 (digits only) so it's safe to pass positionally.
+/// A GitLab draft is a `Draft:` title prefix and `glab mr update` adds/strips it for
+/// us — which is why this shells the `mr` subcommand instead of PATCHing the title.
+/// The project resolves from the repo dir (matching the iid's scope); `number` is a
+/// u64, so it's safe positionally.
 pub async fn set_mr_draft(repo_path: &str, number: u64, draft: bool) -> AppResult<()> {
     let iid = number.to_string();
     let flag = if draft { "--draft" } else { "--ready" };
@@ -1986,21 +1926,16 @@ pub async fn delete_mr_comment(repo_path: &str, number: u64, comment_id: &str) -
 
 // ── Merge requests (approvals & reviewer states) ──────────────────────────────
 //
-// GitLab's approve/unapprove is a bodyless toggle with no GitHub analogue (GitHub
-// approves through the review flow), so it surfaces as a GitLab-only control gated
-// on `implemented.mr_approve`. The approvals read drives the toggle. `user_can_approve`
-// is deliberately dropped from the neutral shape: GitLab reports it `false` on the
-// Free tier even when approving succeeds (it's a Premium approval-rules signal), so
-// the toggle keys on `user_has_approved` instead and a real permission error surfaces
-// via the action's toast. Validated live against the demo (approve adds the viewer to
-// `approved_by`; unapprove reverts it).
-//
-// Request-changes (the blocking reviewer state, `implemented.mr_request_changes`)
-// rides the same read: the reviewers endpoint carries a per-reviewer `state`
-// (`unreviewed` / `requested_changes` / `approved` — validated live on Free). The
-// WRITE is GraphQL-only (`mergeRequestRequestChanges`, works on Free) and requires
-// the viewer to BE a reviewer first; approving clears the state (validated), while
-// the direct undo mutation is Premium-only ("Invalid license" on Free).
+// GitLab's approve/unapprove is a bodyless toggle with no GitHub analogue, gated on
+// `implemented.mr_approve`; the approvals read drives it. `user_can_approve` is
+// deliberately dropped from the neutral shape — GitLab reports it `false` on Free
+// even when approving succeeds (it's a Premium approval-rules signal), so the toggle
+// keys on `user_has_approved` and a real permission error surfaces via the toast.
+// Request-changes (`implemented.mr_request_changes`) rides the same read: the
+// reviewers endpoint carries a per-reviewer `state` (unreviewed / requested_changes
+// / approved). Its WRITE is GraphQL-only (`mergeRequestRequestChanges`, works on
+// Free) and needs the viewer to BE a reviewer first; approving clears the state,
+// and the direct undo mutation is Premium-only ("Invalid license" on Free).
 
 /// One entry of a GitLab MR's `approved_by` list.
 #[derive(Deserialize)]
@@ -2202,14 +2137,12 @@ async fn set_mr_reviewer_ids(
 }
 
 /// Request changes on a merge request (the blocking reviewer state), with an
-/// optional comment. All forms validated live on the Free-tier demo:
-/// - The GraphQL mutation `mergeRequestRequestChanges` works on Free but requires
-///   the viewer to BE a reviewer ("Reviewer not found") — so we add them first
-///   when needed, keeping the existing reviewers ahead of the viewer in the PUT.
-///   Free allows a single reviewer and keeps only the FIRST id, so that order
-///   never displaces an existing reviewer — we re-read and error honestly when
-///   the viewer didn't stick, rather than silently bumping someone.
-/// - Approving clears the state; the direct undo mutation is Premium-only.
+/// optional comment. The GraphQL `mergeRequestRequestChanges` works on Free but
+/// requires the viewer to BE a reviewer ("Reviewer not found"), so we add them
+/// first, keeping existing reviewers AHEAD of the viewer in the PUT — Free allows
+/// one reviewer and keeps only the FIRST id, so that order never displaces an
+/// existing one; we re-read and error honestly when the viewer didn't stick.
+/// Approving clears the state; the direct undo mutation is Premium-only.
 pub async fn request_changes_mr(repo_path: &str, number: u64, body: &str) -> AppResult<()> {
     let path = project_path(repo_path).await?;
     // The path is embedded in a quoted GraphQL string; GitLab paths can't contain
@@ -2240,11 +2173,10 @@ pub async fn request_changes_mr(repo_path: &str, number: u64, body: &str) -> App
             .collect();
         if !now_ids.contains(&me.id) {
             // Single-reviewer tier: the PUT kept only the FIRST id. With one
-            // pre-existing reviewer nothing changed (ours was appended last);
-            // with several (multi-reviewer data retained across a tier
-            // downgrade) that same PUT just dropped the rest — attempt a
-            // restore and DISCLOSE the drop rather than report a clean no-op
-            // (the restore runs through the same keep-first filter, so
+            // pre-existing reviewer nothing changed (ours was appended last); with
+            // several (multi-reviewer data retained across a tier downgrade) it just
+            // dropped the rest — attempt a restore and DISCLOSE the drop rather than
+            // report a clean no-op (the restore hits the same keep-first filter, so
             // verification on GitLab is the honest ask).
             let lost: Vec<String> = reviewers
                 .iter()
@@ -2330,19 +2262,18 @@ pub async fn request_changes_mr(repo_path: &str, number: u64, body: &str) -> App
 
 // ── Merge requests (merge) ────────────────────────────────────────────────────
 //
-// MR merge — a SHARED control with GitHub's `gh pr merge`. GitLab's merge endpoint
-// controls `squash` (the one genuine per-MR knob) + `should_remove_source_branch`; the
-// merge-commit-vs-fast-forward shape is the PROJECT's `merge_method` setting, NOT a
-// per-MR choice. So we offer only `merge` (squash=false) and `squash` (squash=true) and
-// reject `rebase` (GitLab has no per-MR rebase-merge — that's the project setting plus a
-// separate async endpoint, deliberately out of scope). The optional `sha` guards against
-// merging a head the user never saw (GitLab 409s if it moved). Validated live against the
-// demo: squash+delete+sha happy path, sha-mismatch 409, and 405 on an unmergeable MR — all
-// exit non-zero carrying a message, so they surface via the existing toast.
+// A SHARED control with GitHub's `gh pr merge`. GitLab's merge endpoint controls
+// `squash` (the one genuine per-MR knob) + `should_remove_source_branch`; the
+// merge-commit-vs-fast-forward shape is the PROJECT's `merge_method` setting, not a
+// per-MR choice. So we offer only `merge` (squash=false) and `squash` (squash=true)
+// and reject `rebase` (GitLab has no per-MR rebase-merge — that's the project
+// setting plus a separate async endpoint). The optional `sha` guards against merging
+// a head the user never saw (GitLab 409s if it moved); that 409 and the 405 on an
+// unmergeable MR both exit non-zero with a message, so they surface via the toast.
 
-/// Merge a merge request. `strategy` is `merge` (merge commit) or `squash`; `rebase` is
-/// rejected (GitLab merges via the project's configured method). `sha`, when non-empty,
-/// must match the source branch HEAD or GitLab refuses — a stale-view safety guard.
+/// Merge a merge request. `strategy` is `merge` or `squash` — `rebase` is rejected
+/// (see the section note). A non-empty `sha` must match the source branch HEAD or
+/// GitLab refuses: a stale-view safety guard.
 pub async fn merge_mr(
     repo_path: &str,
     number: u64,
@@ -2374,17 +2305,16 @@ async fn merge_mr_inner(
         }
     };
     let enc = encode_project(&project_path(repo_path).await?);
-    // GitLab's merge-time `squash` / `should_remove_source_branch` params can set
-    // but not clear the MR's persisted `squash` / `remove_source_branch` attributes
-    // (validated live; which the deferred merge consults is inconsistent) — set the
-    // attributes first so the chosen strategy always governs (an MR the author
-    // flagged "squash on accept" or born under the project's delete-source default
-    // would otherwise ignore the user's choice). This is a pre-mutation guard: if
-    // the attribute update fails we must NOT fall through to the irreversible merge.
-    // (A project with a locked squash policy — squash_option always/never — may
-    // reject this PUT; that surfaces as a loud toast before any merge, which is the
-    // honest failure mode. Note the attribute name is `remove_source_branch`, not
-    // the merge endpoint's `should_remove_source_branch`.)
+    // GitLab's merge-time `squash` / `should_remove_source_branch` params can SET but
+    // not CLEAR the MR's persisted `squash` / `remove_source_branch` attributes (and
+    // which one the deferred merge consults is inconsistent) — so set the attributes
+    // first and let the chosen strategy always govern; otherwise an MR the author
+    // flagged "squash on accept", or born under the project's delete-source default,
+    // ignores the user's choice. This is a pre-mutation guard: if the attribute PUT
+    // fails we must NOT fall through to the irreversible merge. (A project with a
+    // locked squash policy may reject the PUT; that's a loud toast before any merge.
+    // Note the attribute is `remove_source_branch`, not the merge endpoint's
+    // `should_remove_source_branch`.)
     let mr_endpoint = format!("projects/{enc}/merge_requests/{number}");
     let attr_squash_arg = format!("squash={squash}");
     let attr_remove_arg = format!("remove_source_branch={delete_branch}");
@@ -2433,16 +2363,14 @@ async fn merge_mr_inner(
 
 // ── Merge requests (auto-merge / merge-when-pipeline-succeeds) ─────────────────
 //
-// GitLab's "auto-merge" (MWPS) arms the merge endpoint to complete server-side
-// once the head pipeline goes green — a GitLab-ONLY control (`mr_auto_merge`),
-// unlike the shared `merge_mr`: GitHub has no in-app PR auto-merge here. The
-// arm reuses the merge endpoint with `merge_when_pipeline_succeeds=true`; the
-// read exposes the MR's armed flag + detailed merge status + head-pipeline
-// summary so the UI can decide whether to offer the affordance; cancel disarms.
-// All three validated live against gitlab.com (Free): arm while the pipeline is
-// running → 200 with the flag set and `detailed_merge_status: ci_still_running`;
-// a stale `sha` → 409 (propagates like merge); arming a finished pipeline → 405
-// (a race the UI gates against). Cancel's gotcha lives on `cancel_auto_merge_mr`.
+// GitLab's "auto-merge" (MWPS) arms the merge endpoint to complete server-side once
+// the head pipeline goes green — a GitLab-ONLY control (`mr_auto_merge`); GitHub has
+// no in-app PR auto-merge here. Arm reuses the merge endpoint with
+// `merge_when_pipeline_succeeds=true`; the read exposes the armed flag + detailed
+// merge status + head-pipeline summary so the UI can decide whether to offer it;
+// cancel disarms. A stale `sha` → 409 (propagates like merge); arming a FINISHED
+// pipeline → 405 (a race the UI gates against). Cancel's gotcha lives on
+// `cancel_auto_merge_mr`.
 
 /// The head pipeline of an MR, as the slim MR GET embeds it (present only when
 /// the MR has a pipeline). Both scalars are null-tolerant — GitLab nulls fields.
@@ -2508,10 +2436,8 @@ pub async fn mr_merge_state(repo_path: &str, number: u64) -> AppResult<GitLabMrM
     })
 }
 
-/// Arm auto-merge (merge-when-pipeline-succeeds) on a merge request — the merge
-/// endpoint with the MWPS flag set. Same strategy/`sha`/delete-branch semantics
-/// as `merge_mr`; a stale `sha` → 409 and a finished pipeline → 405, both
-/// propagating via `run_glab` (the UI gates the affordance on a live pipeline).
+/// Arm auto-merge (merge-when-pipeline-succeeds) — the merge endpoint with the MWPS
+/// flag set. Same strategy / `sha` / delete-branch semantics as `merge_mr`.
 pub async fn auto_merge_mr(
     repo_path: &str,
     number: u64,
@@ -2574,12 +2500,9 @@ pub async fn cancel_auto_merge_mr(repo_path: &str, number: u64) -> AppResult<()>
 
 // ── Issues (read) ─────────────────────────────────────────────────────────────
 //
-// GitLab issues map onto the same neutral `IssueInfo`/`IssueDetails` the GitHub
-// panels render, so the frontend stays provider-agnostic. As with MRs we go
-// through `glab api` addressing the project by its URL-encoded full path. The
-// GitLab fields the still-unwired mutations would need (node id, lock reason,
-// pinned, org issue type) are left empty rather than mislabeled — the wired
-// writes (see the write section below) key on the iid, names, or global ids.
+// The GitLab fields the still-unwired mutations would need (node id, lock reason,
+// pinned, org issue type) are left EMPTY rather than mislabeled — the wired writes
+// key on the iid, names, or global ids.
 
 /// Map GitLab's issue state (`opened`/`closed`) onto the neutral `"OPEN"/"CLOSED"`
 /// the frontend expects. (Issues, unlike MRs, never have a `merged` state.)
@@ -2625,12 +2548,10 @@ fn from_glab_issue(i: GlabIssue) -> IssueInfo {
     }
 }
 
-/// A GitLab milestone as embedded in an issue payload or listed by the milestones
-/// endpoint. We keep the GLOBAL `id` — not the `iid` — because the milestone write
+/// A GitLab milestone. We keep the GLOBAL `id`, not the `iid`: the milestone write
 /// keys on `milestone_id`, and `iid` is project-scoped for project milestones but
-/// group-scoped for group milestones (a collision waiting to happen). The neutral
-/// `Milestone.number` carries this id everywhere on GitLab (list, detail, write),
-/// so the picker's selection lookup and the mutation agree.
+/// group-scoped for group ones (a collision waiting to happen). The neutral
+/// `Milestone.number` carries this id everywhere on GitLab.
 #[derive(Deserialize)]
 struct GlabMilestone {
     id: u64,
@@ -2657,10 +2578,8 @@ struct GlabIssueDetail {
     assignees: Vec<GlabMrUser>,
     #[serde(default)]
     milestone: Option<GlabMilestone>,
-    // GitLab returns `null` (not `false`) when the discussion isn't locked, and
-    // `#[serde(default)]` only fills a MISSING key — a present `null` would fail to
-    // deserialize into a bare `bool` and sink the whole detail parse ("Could not
-    // load this issue"). `null_to_default` absorbs both null and missing.
+    // GitLab returns `null` (not `false`) here when the discussion isn't locked; a
+    // present `null` would sink the whole detail parse. See `null_to_default`.
     #[serde(default, deserialize_with = "null_to_default")]
     discussion_locked: bool,
     #[serde(default, deserialize_with = "null_to_default")]
@@ -2827,13 +2746,12 @@ pub async fn view_issue(repo_path: &str, number: u64) -> AppResult<IssueDetails>
 // ── Issues (write) ────────────────────────────────────────────────────────────
 //
 // Comment (note), close/reopen, title/body edit, and milestone — mirroring the
-// gh_issue_* commands and dispatching through forge_issue_* (labels/assignees/
-// create live in their own sections below). The GitHub close `reason`
-// (completed/not_planned) has no GitLab analogue, so the dispatch drops it before
-// calling close_issue. `glab api -f key=value` is a RAW string field (no `@file`
-// interpretation, unlike `-F`), so a body starting with `@` or carrying newlines
-// is safe (glab is a real .exe — no BatBadBut shim refusal of newline argv; all
-// validated live against the demo).
+// gh_issue_* commands and dispatching through forge_issue_* (labels/assignees/create
+// live in their own sections below). The GitHub close `reason` has no GitLab
+// analogue, so the dispatch drops it before calling close_issue. `glab api -f
+// key=value` is a RAW string field (no `@file` interpretation, unlike `-F`), so a
+// body starting with `@` or carrying newlines is safe (glab is a real .exe — no
+// BatBadBut shim refusal of newline argv).
 
 /// Post a comment (note) on an issue.
 pub async fn comment_issue(repo_path: &str, number: u64, body: &str) -> AppResult<()> {
@@ -2954,13 +2872,13 @@ pub async fn lock_issue(repo_path: &str, number: u64, locked: bool) -> AppResult
     Ok(())
 }
 
-/// The two fields the issue-move flow reads back (the target project's id, the
-/// moved issue's URL).
+/// The destination project's numeric id, resolved from its full path for the move.
 #[derive(Deserialize)]
 struct GlabMoveTarget {
     id: u64,
 }
 
+/// The moved issue's URL, read back from the move response.
 #[derive(Deserialize)]
 struct GlabMovedIssue {
     web_url: String,
@@ -3006,9 +2924,8 @@ pub async fn move_issue(repo_path: &str, number: u64, destination: &str) -> AppR
     )
     .await
     .map_err(|e| match e {
-        // GitLab folds several distinct causes into this one message — seen
-        // live when the TARGET project has issues disabled, not just on actual
-        // permission gaps. Spell out both so the fix is findable.
+        // GitLab folds several causes into this one message — a target project with
+        // issues DISABLED, not just a permission gap. Spell out both.
         AppError::Glab(msg) if msg.contains("insufficient permissions") => AppError::Glab(
             "GitLab refused the move — this needs Reporter access on both projects, \
              and the destination must have issues enabled."
@@ -3063,11 +2980,9 @@ pub async fn delete_issue(repo_path: &str, number: u64) -> AppResult<()> {
 
 // ── Milestones (read + write) ─────────────────────────────────────────────────
 //
-// The milestone picker's option list plus the issue milestone write. Everything
-// keys on GitLab's GLOBAL milestone id (see `GlabMilestone`): the list returns it
-// as the neutral `Milestone.number`, the issue detail carries the same id, and the
-// write sends it as `milestone_id` — so the picker's selection lookup, the chip,
-// and the mutation all agree. Set/clear validated live (`milestone_id=0` clears).
+// Everything keys on GitLab's GLOBAL milestone id (see `GlabMilestone`): the list
+// returns it as the neutral `Milestone.number`, the issue detail carries the same
+// id, and the write sends it as `milestone_id`. `milestone_id=0` clears.
 
 /// Active milestones for the milestone picker — project milestones plus ancestor
 /// group milestones (`include_ancestor_groups=true`; GitLab issues commonly use a
@@ -3161,24 +3076,18 @@ pub async fn set_issue_due_date(
 
 // ── Reactions (award emoji) ───────────────────────────────────────────────────
 //
-// GitLab reactions are "award emoji" on issues, MRs, and notes. They map onto the
-// SAME neutral `IssueReactions`/`Reaction` shape the GitHub panels render, with
-// GitLab's award names translated to GitHub's ReactionContent enum (the 8 the
-// ReactionBar knows); awards outside that set (GitLab allows the full emoji
-// palette) are deliberately dropped — they stay visible on GitLab itself.
-// Read strategy (all validated live): notes' awards come from ONE GraphQL query
-// (`Note.awardEmoji`, with `currentUser` riding along for viewer detection) since
-// per-note REST reads would be N+1 glab process spawns; the BODY awards come from
-// GraphQL too for MRs (`MergeRequest.awardEmoji`) but REST for issues — the
-// GraphQL `Issue` type exposes no `awardEmoji` field. Writes are REST: add =
-// `POST …/award_emoji -f name=<award>` (a duplicate add 404s "has already been
-// taken" — treated as already-on), remove = list, find the viewer's award by
-// name, `DELETE …/award_emoji/<id>`.
-// KNOWN CAP: every award list (REST reads + the GraphQL connections + the
-// remove-path lookup) covers the first 100 awards per subject — past that,
-// tallies undercount and a remove whose award sits beyond the page silently
-// no-ops until a refetch. Accepted for now (a single subject with >100
-// reactions is rare); revisit with pagination if it ever bites.
+// GitLab reactions are "award emoji" on issues, MRs, and notes, mapped onto the same
+// neutral `IssueReactions`/`Reaction` shape as GitHub, with GitLab's award names
+// translated to GitHub's ReactionContent enum (the 8 the ReactionBar knows); awards
+// outside that set are dropped from our tallies and stay visible on GitLab itself.
+// Reads: notes' awards come from ONE GraphQL query (`Note.awardEmoji`, with
+// `currentUser` riding along) — per-note REST reads would be N+1 glab spawns; BODY
+// awards come from GraphQL for MRs but REST for issues, because the GraphQL `Issue`
+// type exposes NO `awardEmoji` field. Writes are REST: add = `POST …/award_emoji -f
+// name=<award>` (a duplicate add 404s "has already been taken" = already-on),
+// remove = list, find the viewer's award by name, DELETE by id.
+// KNOWN CAP: every award list covers the first 100 awards per subject — past that
+// tallies undercount and a remove beyond the page silently no-ops until a refetch.
 
 /// GitLab award name → GitHub ReactionContent enum (the neutral vocabulary).
 fn award_to_reaction(name: &str) -> Option<&'static str> {
@@ -3398,15 +3307,14 @@ pub async fn mr_reactions(repo_path: &str, number: u64) -> AppResult<IssueReacti
 
 // ── External (third-party) reviews ────────────────────────────────────────────
 //
-// Third-party AI reviewers (Copilot / CodeRabbit / …) post their findings as MR
-// discussion notes. We map each NON-system note onto the neutral
-// `ExternalReviewItem` shape the frontend already consumes for GitHub, so its
-// budgeting / prompt layers stay unchanged. GitLab REST authors carry NO `bot`
-// flag (unlike GitHub's GraphQL `__typename`), so `is_bot` is NOT meaningful for
-// GitLab — the frontend applies its `REVIEWER_BOTS` login allowlist to EVERY
-// GitLab item regardless of kind (otherwise a human's inline diff comment would
-// pose as an AI finding). GitHub, with a server-verified bot flag, still lets
-// inline/review items bypass the list.
+// Third-party AI reviewers post findings as MR discussion notes; each NON-system
+// note maps onto the neutral `ExternalReviewItem` the frontend already consumes for
+// GitHub, so its budgeting / prompt layers stay unchanged. GitLab REST authors carry
+// NO bot flag (unlike GitHub's GraphQL `__typename`), so `is_bot` is NOT meaningful
+// here — the frontend applies its `REVIEWER_BOTS` login allowlist to EVERY GitLab
+// item regardless of kind (otherwise a human's inline comment would pose as an AI
+// finding). GitHub, with a server-verified bot flag, still lets inline/review items
+// bypass the list.
 
 /// A note's `position` object as GitLab embeds it on diff (inline) notes; absent
 /// or null for plain conversation notes. Every field is tolerated as
@@ -3543,15 +3451,12 @@ struct GlabDiscussion {
     notes: Vec<GlabDiscussionNote>,
 }
 
-/// Maps a discussion note onto the neutral `ExternalReviewItem` shape, or `None`
-/// when the note is a system note (auto "approved" / "assigned" / "changed the
-/// title" …) that must never enter the findings pipeline. Inline (DiffNote /
-/// positioned) notes become `kind == "inline"` with a path/line; everything else
-/// is `kind == "comment"`. `is_bot` is always true, but it is NOT meaningful for
-/// GitLab (REST has no bot flag) — the frontend applies its `REVIEWER_BOTS` login
-/// allowlist to every GitLab item regardless of kind, so it is the real gate.
-/// Per-item: a malformed field falls back to a default rather than sinking the
-/// whole batch.
+/// Maps a discussion note onto the neutral `ExternalReviewItem`, or `None` for a
+/// system note (which must never enter the findings pipeline). Positioned (DiffNote)
+/// notes become `kind == "inline"` with a path/line; everything else is `"comment"`.
+/// `is_bot` is always true but NOT meaningful for GitLab (see the section note — the
+/// frontend's `REVIEWER_BOTS` allowlist is the real gate). Per-item: a malformed
+/// field falls back to a default rather than sinking the batch.
 fn external_item_from_note(n: &GlabDiscussionNote) -> Option<ExternalReviewItem> {
     if n.system {
         return None;
@@ -3574,10 +3479,8 @@ fn external_item_from_note(n: &GlabDiscussionNote) -> Option<ExternalReviewItem>
             .as_ref()
             .map(|a| a.username.clone())
             .unwrap_or_default(),
-        // GitLab REST authors carry no bot flag; `is_bot` is not meaningful for
-        // GitLab. The frontend applies its `REVIEWER_BOTS` login allowlist to
-        // EVERY GitLab item regardless of kind, so this value is only a
-        // placeholder that keeps the shared shape non-empty.
+        // GitLab REST authors carry no bot flag — a placeholder that keeps the shared
+        // shape non-empty; the frontend's `REVIEWER_BOTS` allowlist is the real gate.
         is_bot: true,
         body: n.body.clone(),
         path,
@@ -3634,32 +3537,28 @@ async fn fetch_mr_discussions(
     Ok(all)
 }
 
-/// Third-party AI-reviewer findings on a merge request, mapped onto the same
-/// neutral shape GitHub uses. Fetches the MR discussions and maps every non-system
-/// note. Per-item tolerant: a malformed note falls back rather than sinking the batch.
+/// Third-party AI-reviewer findings on a merge request, mapped onto the same neutral
+/// shape GitHub uses — every non-system note of the MR's discussions.
 pub async fn external_reviews(repo_path: &str, number: u64) -> AppResult<Vec<ExternalReviewItem>> {
     let enc = encode_project(&project_path(repo_path).await?);
     let discussions = fetch_mr_discussions(repo_path, &enc, number).await?;
     Ok(external_items_from_discussions(&discussions))
 }
 
-/// File:line-anchored review threads on an MR — the positioned diff-note
-/// discussions mapped onto the neutral `ReviewThreadOut`. A thread is a discussion
-/// with at least one non-system positioned note. Path/line come from the first
-/// positioned note (new side, else old, else new-path/0, else old-path/0 labelled
-/// "old"); resolution comes from the
-/// first resolvable note (GitLab resolves whole discussions, not individual notes).
-/// `start_line` comes from a multi-line note's `position.line_range` (0 when
-/// single-line). GitLab's flat discussions API exposes no cheap per-thread
-/// "outdated" bit nor a diff excerpt, so `is_outdated` is always false and
-/// `diff_hunk` is always empty. The thread's comments are its non-system notes.
+/// File:line-anchored review threads on an MR — positioned diff-note discussions
+/// mapped onto `ReviewThreadOut`. A thread is a discussion with at least one
+/// non-system positioned note; path/line come from the first such note (see
+/// `gl_thread_anchor`), resolution from the first resolvable one (GitLab resolves
+/// whole discussions, not individual notes), `start_line` from a multi-line note's
+/// `position.line_range` (0 when single-line). GitLab's flat discussions API exposes
+/// no per-thread "outdated" bit nor a diff excerpt, so `is_outdated` is always false
+/// and `diff_hunk` always empty.
 pub async fn review_threads(repo_path: &str, number: u64) -> AppResult<Vec<ReviewThreadOut>> {
     let enc = encode_project(&project_path(repo_path).await?);
     let discussions = fetch_mr_discussions(repo_path, &enc, number).await?;
 
-    // Resolve the signed-in user once (tolerant — a failure just leaves each
-    // comment's edit/delete hidden; it must not fail the read). Drives the truthful
-    // `viewer_did_author` below.
+    // Resolve the signed-in user once, tolerantly — a failure just hides every
+    // comment's edit/delete (drives `viewer_did_author`), it must not fail the read.
     let viewer = current_user_login(repo_path).await;
 
     let mut threads: Vec<ReviewThreadOut> = Vec::new();
@@ -3725,9 +3624,8 @@ pub async fn review_threads(repo_path: &str, number: u64) -> AppResult<Vec<Revie
             // GitLab's flat discussions API has no cheap per-thread "outdated"
             // bit, so this is always false (staleness is inferred elsewhere).
             is_outdated: false,
-            // GitLab's flat discussions API carries no unified-diff excerpt on the
-            // note, so no cheap hunk to render — empty (frontend falls back to the
-            // MR diff at the anchored line).
+            // No diff excerpt on the note — the frontend falls back to the MR diff
+            // at the anchored line.
             diff_hunk: String::new(),
             // GitLab doesn't model review objects here (pr_view emits no reviews),
             // so there's no owning review id to attach.
@@ -3819,15 +3717,13 @@ async fn mr_diff_refs(repo_path: &str, enc: &str, number: u64) -> AppResult<Glab
     })
 }
 
-/// Create a NEW file:line-anchored review thread on an MR (`POST
-/// …/merge_requests/{n}/discussions` with the nested `position` JSON via `--input -`
-/// — flat `-f position[x]=y` is silently ignored by GitLab). `side` is `"new"`/`"old"`
-/// (old → `old_path`/`old_line`). `start_line`, when `Some(start)` and `start != line`,
-/// makes this a MULTI-LINE range: we fetch the MR's per-file diffs, compute each
-/// endpoint's `line_code`, and attach `position.line_range`. If the file or a line
-/// can't be resolved, the range falls back to line_code-less refs (type + line only)
-/// — the post never fails over line_code. A single-line call sends the identical
-/// payload it always has.
+/// Create a NEW file:line-anchored review thread on an MR (`POST …/discussions` with
+/// the nested `position` JSON via `--input -` — flat `-f position[x]=y` is SILENTLY
+/// ignored by GitLab). `side` is `"new"`/`"old"` (old → `old_path`/`old_line`).
+/// `start_line`, when set and different from `line`, makes it a MULTI-LINE range from
+/// the MR's per-file diffs; an unresolvable file or line falls back to line_code-less
+/// refs, so the post never fails over line_code. A single-line call sends the
+/// identical payload it always has.
 #[allow(clippy::too_many_arguments)]
 pub async fn thread_create(
     repo_path: &str,
@@ -3907,9 +3803,8 @@ pub async fn review_submit(
     let draft_endpoint = format!("projects/{enc}/merge_requests/{number}/draft_notes");
     let total = comments.len() as u32;
     let has_summary = summary.map(str::trim).is_some_and(|s| !s.is_empty());
-    // Whether ANYTHING gets staged — drives whether we run the draft/publish phase at
-    // all. An approve-only review (no summary, no comments) stages nothing, and
-    // `bulk_publish` on an empty draft set fails with a misleading error, so we skip
+    // `bulk_publish` on an EMPTY draft set fails with a misleading error, so an
+    // approve-only review (no summary, no comments) stages nothing and skips
     // straight to the verdict.
     let staged_any = has_summary || !comments.is_empty();
 
@@ -4000,10 +3895,8 @@ pub async fn review_submit(
         }
     }
 
-    // Publish all drafts at once — but only when something was actually staged.
-    // `bulk_publish` on an empty draft set fails misleadingly, so an approve-only
-    // review (no summary, no comments) skips straight to the verdict below. A failure
-    // here leaves the drafts staged (invisible).
+    // Publish all drafts at once — only when something was staged (see `staged_any`).
+    // A failure here leaves the drafts staged (invisible).
     if staged_any {
         let publish_endpoint = format!("{draft_endpoint}/bulk_publish");
         run_glab(
@@ -4161,16 +4054,13 @@ pub async fn remove_reaction(
 
 // ── Labels & assignees (read + write) ─────────────────────────────────────────
 //
-// Labels are a SHARED control on both issues and MRs (GitHub keys them by GraphQL
-// node id, GitLab by name); issue assignees are a shared issue control. The pickers
-// read the project's labels / members, then the writes apply a delta (labels) or a
-// full set (assignees). Both arg forms were validated live against the demo:
-//   • labels  → `add_labels=<csv>` / `remove_labels=<csv>` (delta, by name);
-//   • assignees → `assignee_ids=<comma-joined ids>` (set) or `=0` (clear). GitLab
-//     assigns by numeric id, so the write resolves usernames→ids from the members
-//     list. The `assignee_ids[]=…` array form 400s through glab's `-f`, hence the
-//     comma form; on the Free tier GitLab keeps only the first id (reconciled by
-//     refetch). The same PUT works on MRs (GitLab-only — GitHub PRs have no picker).
+// Labels are a SHARED control on issues and MRs (GitHub keys them by node id, GitLab
+// by name); issue assignees are a shared issue control. Writes apply a delta for
+// labels (`add_labels`/`remove_labels` by name) and a full set for assignees
+// (`assignee_ids=<comma-joined ids>`, `=0` clears). GitLab assigns by NUMERIC id, so
+// the write resolves usernames→ids from the members list; the `assignee_ids[]=…`
+// array form 400s through glab's `-f`, hence the comma form. On the Free tier GitLab
+// keeps only the first id (reconciled by refetch). The same PUT works on MRs.
 
 /// The project's labels for the label picker, as neutral `RepoLabel`s. GitLab has no
 /// node id for a label (it addresses them by name), so `id` is left empty — the
@@ -4424,16 +4314,13 @@ pub async fn set_mr_assignees(repo_path: &str, number: u64, assignees: &[String]
 
 // ── Repository actions & publish ──────────────────────────────────────────────
 //
-// View (web URL), star/unstar, and publishing a local repo to GitLab. Forking
-// stays a web link-out for GitLab (the fork+remote-rewire flow is GitHub-only for
-// now), and the admin-settings / branch-rule-import sub-surfaces stay GitHub-only
-// — the frontend guards those on the provider, not just `repo_actions`.
-// All validated live: `starrers?search=<username>` answers "has the viewer
-// starred it" (exact-match filter); re-starring returns HTTP 304 (treated as
-// already-done); `glab repo create <name>` creates the project (visibility /
-// description / repeated `-t` topics all land) but does NOT wire a remote — the
-// publish flow adds `origin` itself and pushes with the one-shot glab credential
-// helper (the same trick as clone/create-MR).
+// View (web URL), star/unstar, and publishing a local repo to GitLab. Forking stays
+// a web link-out for GitLab, and the admin-settings / branch-rule-import
+// sub-surfaces stay GitHub-only — the frontend guards those on the provider, not
+// just `repo_actions`. Re-starring returns HTTP 304 (treated as already-done).
+// `glab repo create <name>` creates the project (visibility / description /
+// repeated `-t` topics all land) but does NOT wire a remote — the publish flow adds
+// `origin` itself and pushes with the one-shot glab credential helper.
 
 /// The project fields the repo-action reads need.
 #[derive(Deserialize)]
@@ -4498,12 +4385,10 @@ pub async fn repo_visibility(repo_path: &str) -> AppResult<crate::forge::RepoVis
     })
 }
 
-/// Remove the project's fork relationship (`DELETE projects/{enc}/fork`),
-/// detaching it from the fork network. Requires the administrator or project
-/// Owner role — glab surfaces a non-Owner's 403 as an error, which bubbles up
-/// as an honest toast. Side effect: any open merge requests from the fork to
-/// the source are closed (and stay closed even if the relationship is later
-/// re-established via the GitLab API).
+/// Remove the project's fork relationship (`DELETE projects/{enc}/fork`). Requires
+/// admin or project Owner — a non-Owner's 403 bubbles up as an honest toast. Side
+/// effect: any open merge requests from the fork to the source are CLOSED, and stay
+/// closed even if the relationship is later re-established.
 pub async fn remove_fork_relationship(repo_path: &str) -> AppResult<()> {
     let enc = encode_project(&project_path(repo_path).await?);
     run_glab(
@@ -4531,9 +4416,8 @@ pub async fn repo_star_status(repo_path: &str) -> AppResult<bool> {
     let path = project_path(repo_path).await?;
     let me = current_user(repo_path).await?;
     let name = path.rsplit('/').next().unwrap_or(&path);
-    // `search` also matches names/descriptions, so a common path tail can match
-    // far more than one project — walk pages (capped) rather than trust page 1;
-    // a missed star turns the button permanently dead via the 304-tolerant write.
+    // `search` also matches names/descriptions, so walk pages (capped) rather than
+    // trust page 1.
     for page in 1..=10u32 {
         let endpoint = format!(
             "users/{}/starred_projects?search={}&per_page=100&page={page}",
@@ -4746,15 +4630,13 @@ pub async fn publish_repo(
 
 // ── Issues & merge requests (create) ──────────────────────────────────────────
 //
-// Both creates POST through `glab api` and return the same neutral `PrRef`
-// (number + URL) the GitHub creates return, so the dialogs stay provider-agnostic.
-// Arg forms validated live against the demo: `labels=<csv>` (names),
-// `assignee_ids=<csv>` (numeric ids, resolved from usernames like the assignee
-// write), and `milestone_id=<global id>` on issue create;
-// `source_branch`/`target_branch`/`title`/`description` on MR create, with
-// **draft = the `Draft:` title prefix** (GitLab has no draft field on create —
-// the response then carries `draft: true`). Note the created issue's `web_url`
-// comes back in GitLab's newer `/-/work_items/<iid>` form.
+// Both creates POST through `glab api` and return the same neutral `PrRef` the
+// GitHub creates return, so the dialogs stay provider-agnostic. Issue create takes
+// `labels=<csv>` (names), `assignee_ids=<csv>` (numeric ids resolved from
+// usernames) and `milestone_id=<global id>`; MR create takes
+// source/target/title/description, with **draft = the `Draft:` title prefix**
+// (GitLab has no draft field on create — the response then carries `draft: true`).
+// A created issue's `web_url` comes back in GitLab's newer `/-/work_items/<iid>` form.
 
 /// The created issue/MR fields we need back (GitLab returns the full object).
 #[derive(Deserialize)]
@@ -4932,17 +4814,14 @@ pub async fn create_mr(
 
 // ── Pipelines (CI, read) ──────────────────────────────────────────────────────
 //
-// GitLab pipelines map onto the same neutral `WorkflowRun`/`RunDetail`/`RunJob`
-// the GitHub Actions panels render, so the frontend stays provider-agnostic. The
-// two models differ in two ways we bridge here:
-//   • GitLab has ONE `status` per pipeline/job; GitHub splits lifecycle (`status`)
-//     from result (`conclusion`). `map_ci_status` collapses GitLab's onto both.
-//   • GitHub nests run → jobs → steps; GitLab is pipeline → jobs (grouped by
-//     `stage`, no per-job steps via the API), so GitLab jobs map to neutral jobs
-//     with an empty `steps` list. Logs are per-job (`/jobs/<id>/trace`).
-// Writes (retry / cancel / run) live at the end of this section. GitLab's retry
-// restarts failed+canceled jobs only — there is no "re-run all" on an existing
-// pipeline, so that one control stays GitHub-only in the UI.
+// GitLab pipelines map onto the neutral `WorkflowRun`/`RunDetail`/`RunJob` the
+// GitHub Actions panels render. Two model gaps we bridge: GitLab has ONE `status`
+// per pipeline/job where GitHub splits lifecycle from result (`map_ci_status`
+// collapses one onto both); and GitLab is pipeline → jobs with no per-job steps via
+// the API, so GitLab jobs map to neutral jobs with an empty `steps` list (logs are
+// per-job, `/jobs/<id>/trace`). GitLab's retry restarts failed+canceled jobs only —
+// there is no "re-run all" on an existing pipeline, so that control stays
+// GitHub-only in the UI.
 
 /// Failed-step logs can run to many MB; keep the tail (failures land at the end).
 const CI_RUN_LOG_CAP: usize = 200_000;
@@ -4972,20 +4851,17 @@ fn map_ci_status(s: &str) -> (String, String) {
 }
 
 /// Map a GitLab job `status` onto the check-status vocabulary the PR-view rollup
-/// keys on (`ChecksRollup.checkPresentation`, matched uppercased): `SUCCESS`
-/// reads as passed, `FAILURE`/`CANCELLED` (+ ERROR/TIMED_OUT) as failed,
-/// `SKIPPED` as its own muted bucket, and everything else —
-/// running/pending/manual/created — as the pending bucket. `manual` stays
-/// pending because it's blocked on a human (not skipped). Pure (unit-tested).
+/// keys on (`ChecksRollup.checkPresentation`, matched uppercased). `SKIPPED` is its
+/// own muted bucket; everything unrecognized or in flight → PENDING, and `manual`
+/// stays pending because it's blocked on a human, not skipped. Pure (unit-tested).
 fn map_job_check_status(status: &str) -> String {
     match status {
         "success" => "SUCCESS",
         "failed" => "FAILURE",
         "canceled" | "cancelled" => "CANCELLED",
         "skipped" => "SKIPPED",
-        // running / pending / manual / created / preparing / scheduled /
-        // waiting_for_resource / any new state → the frontend's pending bucket
-        // (`manual` is blocked on a human, not skipped).
+        // Anything else (running / pending / manual / created / a new state) →
+        // the frontend's pending bucket.
         _ => "PENDING",
     }
     .to_string()
@@ -5348,10 +5224,9 @@ pub async fn run_failed_logs(repo_path: &str, run_id: u64) -> AppResult<String> 
     Ok(tail_cap(text, CI_RUN_LOG_CAP))
 }
 
-/// Retry a pipeline (`run_id` is the global pipeline id the runs list carries).
-/// GitLab restarts the failed + canceled jobs of the pipeline — the analogue of
-/// GitHub's "re-run failed jobs"; a full re-run of an existing pipeline doesn't
-/// exist on GitLab (a *new* pipeline on the ref is a different thing).
+/// Retry a pipeline (`run_id` = the global pipeline id the runs list carries).
+/// GitLab restarts the failed + canceled jobs — the analogue of GitHub's "re-run
+/// failed jobs" (see the section note).
 pub async fn retry_run(repo_path: &str, run_id: u64) -> AppResult<()> {
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/pipelines/{run_id}/retry");
@@ -5442,21 +5317,15 @@ pub async fn run_pipeline(
 
 // ── Releases (read) ───────────────────────────────────────────────────────────
 //
-// GitLab releases map onto the same neutral `ReleaseInfo`/`ReleaseDetails` the
-// GitHub Tags panel renders, so the frontend stays provider-agnostic. The two
-// models differ in a few ways we bridge here:
-//   • GitLab has no draft or prerelease concept — both map to `false`.
-//   • GitLab has no per-release "latest" flag; the list comes back `released_at`-
-//     desc, so the newest non-upcoming release is GitLab's own "latest" — we mark
-//     just that one.
-//   • The release web URL is `_links.self` (not a top-level `web_url` like MRs).
-//   • GitLab release assets are `links` (named URLs, no size/download count) plus
-//     auto-generated source archives; we surface only the user `links` — mirroring
-//     `gh`, which likewise omits source archives — with size/downloads 0, so the
-//     UI renders them as plain external links, not downloadable binaries.
-// Writes (create / edit / delete / asset upload+delete) live at the end of this
-// section; the GitHub-only draft / prerelease / latest toggles are dropped by the
-// forge dispatch before reaching here.
+// GitLab releases map onto the neutral `ReleaseInfo`/`ReleaseDetails` the GitHub
+// Tags panel renders. Model gaps: GitLab has no draft or prerelease (both map to
+// `false`); no per-release "latest" flag — the list comes back `released_at`-desc, so
+// we mark the newest non-upcoming one; the release web URL is `_links.self`, not a
+// top-level `web_url`; and assets are `links` (named URLs, no size/downloads) plus
+// auto-generated source archives — we surface only the user `links`, mirroring `gh`,
+// with size/downloads 0 so the UI renders plain external links. The GitHub-only
+// draft / prerelease / latest toggles are dropped by the forge dispatch before
+// reaching the writes at the end of this section.
 
 #[derive(Deserialize)]
 struct GlabReleaseAuthor {
@@ -5553,9 +5422,8 @@ fn release_info(r: &GlabRelease, is_latest: bool) -> ReleaseInfo {
     }
 }
 
-/// Mark the newest non-upcoming release "latest". GitLab returns releases
-/// `released_at`-desc, so the first non-upcoming entry is GitLab's own default
-/// "latest" — every other row (and any upcoming ones) stays non-latest.
+/// Mark the newest non-upcoming release "latest" (the list is `released_at`-desc);
+/// every other row, and any upcoming one, stays non-latest.
 fn releases_to_infos(releases: &[GlabRelease]) -> Vec<ReleaseInfo> {
     let latest_idx = releases.iter().position(|r| !r.upcoming_release);
     releases
@@ -5793,16 +5661,14 @@ pub async fn delete_release_asset(repo_path: &str, tag: &str, asset_name: &str) 
 
 // ── Repository settings & lifecycle ──────────────────────────────────────────
 //
-// The project-settings surface (`GET/PUT projects/:id` + the lifecycle
-// endpoints), all validated live. GitLab's settings model differs from
-// GitHub's where it matters — per-feature ACCESS LEVELS (enabled / private /
-// disabled) instead of has_* booleans, one `merge_method` enum instead of
-// three allow-flags, a `squash_option` enum — so it travels as its own
-// `GitLabRepoSettings` shape and the frontend renders a GitLab-shaped General
-// section, rather than forcing a lossy mapping onto the GitHub types. The
-// lifecycle actions (rename/archive/visibility/transfer/delete) DO share
-// GitHub's parameter shapes and dispatch behind neutral `forge_repo_*`
-// commands.
+// The project-settings surface (`GET/PUT projects/:id` + the lifecycle endpoints).
+// GitLab's settings model differs from GitHub's where it matters — per-feature
+// ACCESS LEVELS (enabled/private/disabled) instead of has_* booleans, one
+// `merge_method` enum instead of three allow-flags, a `squash_option` enum — so it
+// travels as its own `GitLabRepoSettings` shape and the frontend renders a
+// GitLab-shaped General section rather than a lossy mapping onto the GitHub types.
+// The lifecycle actions DO share GitHub's parameter shapes and dispatch behind
+// neutral `forge_repo_*` commands.
 
 /// The viewer's effective access to this project, from `permissions` on the
 /// project read: the max of the direct project grant and the inherited group
@@ -6555,12 +6421,11 @@ pub async fn test_hook(repo_path: &str, hook_id: &str, trigger: &str) -> AppResu
     .await
     {
         Ok(_) => Ok(()),
-        // GitLab answers 422 BOTH when the endpoint rejected the delivered
-        // event (relaying its response body — the event DID fire) and when the
-        // test couldn't fire at all (e.g. "Ensure the project has commits" for
-        // a push test on an empty repo). Keep the original message so the
-        // could-not-fire causes stay diagnosable, truncated because a relayed
-        // body can be a whole HTML page.
+        // GitLab answers 422 BOTH when the endpoint rejected a delivered event
+        // (relaying its body — the event DID fire) and when the test couldn't fire
+        // at all (e.g. "Ensure the project has commits"). Keep the original message
+        // so the could-not-fire causes stay diagnosable, truncated — a relayed body
+        // can be a whole HTML page.
         Err(AppError::Glab(msg)) if msg.contains("HTTP 422") => {
             let detail: String = msg.chars().take(200).collect();
             Err(AppError::Glab(format!(
@@ -6810,13 +6675,12 @@ pub async fn delete_variable(repo_path: &str, key: &str, scope: &str) -> AppResu
 
 // ── Protected branches ────────────────────────────────────────────────────────
 //
-// Project protected branches (`projects/:id/protected_branches`), validated live
-// on gitlab.com Free tier. Each protection carries per-action access-level lists
-// (push/merge); on Free tier the levels are one of {0 = no one, 30 = developers +
-// maintainers, 40 = maintainers}. Only `allow_force_push` is updatable on Free —
-// access-level PATCH params are silently ignored — so this package exposes no
-// level-editing surface. `unprotect_access_levels` / `code_owner_approval_required`
-// are Premium concepts and deliberately not surfaced.
+// Project protected branches (`projects/:id/protected_branches`). Each protection
+// carries per-action access-level lists (push/merge); on Free the levels are one of
+// {0 = no one, 30 = developers + maintainers, 40 = maintainers}. Only
+// `allow_force_push` is updatable on Free — access-level PATCH params are SILENTLY
+// ignored — so no level-editing surface is exposed. `unprotect_access_levels` /
+// `code_owner_approval_required` are Premium and deliberately not surfaced.
 
 /// One entry in a protection's push/merge access-level list, projected onto the
 /// camelCase shape the frontend consumes.
@@ -6998,14 +6862,12 @@ pub async fn delete_protected_branch(repo_path: &str, name: &str) -> AppResult<(
 
 // ── Time tracking (issues & merge requests) ───────────────────────────────────
 //
-// GitLab-only: estimate + spent time on issues and MRs, a GitLab-unique surface
-// with no GitHub analogue (`time_tracking`). The read (`time_stats`) and both
-// writes (`time_estimate`/`add_spent_time`) return the SAME `time_stats` object,
-// so every command resolves to a `GitLabTimeStats`. Issue and MR endpoints are
-// exactly symmetric under `issues/{n}/…` vs `merge_requests/{n}/…`. Durations are
-// GitLab's human strings ("3h", "45m", and even negative "-15m" — passed through;
-// the server validates, rejecting bad input with a non-zero exit + message). An
-// absent/blank duration routes to the matching reset endpoint. Validated live.
+// GitLab-only: estimate + spent time, with no GitHub analogue. The read
+// (`time_stats`) and both writes (`time_estimate`/`add_spent_time`) return the SAME
+// `time_stats` object, so every command resolves to a `GitLabTimeStats`; issue and
+// MR endpoints are exactly symmetric. Durations are GitLab's human strings ("3h",
+// "45m", even negative "-15m" — passed through for the server to validate), and an
+// absent/blank duration routes to the matching reset endpoint.
 
 /// The neutral time-tracking stats the frontend renders. GitLab returns
 /// `human_*` as `null` when the underlying seconds are zero, so those map to "".
@@ -7023,8 +6885,7 @@ pub struct GitLabTimeStats {
 }
 
 /// The raw `time_stats` payload GitLab returns from the read and both writes.
-/// `human_*` come back `null` when the corresponding seconds are zero, so they're
-/// null-tolerant and map onto the empty string.
+/// `human_*` come back `null` when the seconds are zero → the empty string.
 #[derive(Deserialize)]
 struct GlabTimeStats {
     #[serde(default)]
@@ -7204,13 +7065,11 @@ pub async fn mr_add_spent_time(
 
 // ── Related issues (issue links) ──────────────────────────────────────────────
 //
-// GitLab-only: link two issues as "related" (`issue_links`), a GitLab-unique
-// surface with no GitHub analogue. Links are symmetric — the same link appears on
-// both issues. The list endpoint returns full issue objects each augmented with
-// `issue_link_id` (the link's own id, needed for delete) and `link_type`. Create
-// takes the target by `target_project_id` (the plain "owner/repo" path, NOT
-// url-encoded) + `target_issue_iid`; delete keys on the `issue_link_id`. All
-// validated live against a real GitLab project.
+// GitLab-only: link two issues as "related" (`issue_links`), no GitHub analogue.
+// Links are SYMMETRIC — the same link shows on both issues. The list returns full
+// issue objects each augmented with `issue_link_id` (needed for delete) and
+// `link_type`. Create takes `target_project_id` = the PLAIN "owner/repo" path (NOT
+// url-encoded) + `target_issue_iid`; delete keys on the `issue_link_id`.
 
 /// One linked issue as `GET …/issues/{n}/links` returns it — a full issue object
 /// augmented with the link's own id and type. Only the fields the neutral
@@ -7270,9 +7129,7 @@ pub async fn issue_links(repo_path: &str, number: u64) -> AppResult<Vec<GitLabLi
 }
 
 /// Link `number` to `target_number` (both iids in this project) as related. The
-/// target project is this repo's own path (a plain "owner/repo", not url-encoded
-/// in the field value — validated live). The link is symmetric, so it shows on
-/// both issues afterward.
+/// link is symmetric, so it shows on both issues afterward.
 pub async fn link_issue(repo_path: &str, number: u64, target_number: u64) -> AppResult<()> {
     let path = project_path(repo_path).await?;
     let enc = encode_project(&path);
@@ -7321,34 +7178,29 @@ pub async fn unlink_issue(repo_path: &str, number: u64, link_id: &str) -> AppRes
 /// documented "more available" heuristic (we don't parse response headers).
 const GL_SEARCH_PER_PAGE: usize = 30;
 
-/// Map the neutral `sort` onto GitLab's `order_by` value. `order_by` and `sort` are
-/// two separate query params — a combined `order_by=stars_desc` 400s. `"best"` maps
-/// to `star_count`, NOT GitLab's `similarity`: similarity ordering is silently
-/// restricted to projects the caller is a member of, so a public Explore search
-/// with `order_by=similarity` returns an EMPTY set (live-verified on gitlab.com,
-/// 2026-07-24 — `search=tree-online&order_by=similarity` → `[]`, `star_count` → hits).
+/// Map the neutral `sort` onto GitLab's `order_by`. `order_by` and `sort` are two
+/// separate query params — a combined `order_by=stars_desc` 400s. `"best"` maps to
+/// `star_count`, NOT `similarity`: similarity ordering is silently restricted to
+/// projects the caller is a member of, so a public Explore search with it returns
+/// an EMPTY set (live-verified on gitlab.com).
 fn gitlab_order_by(sort: &str) -> &'static str {
     match sort {
         "stars" => "star_count",
         "updated" => "last_activity_at",
-        // "best" → star_count as the relevance proxy (see doc comment — similarity
-        // is member-scoped and empties public searches). Defensive default for any
-        // other value the caller didn't already reject.
+        // "best" → star_count (see the doc comment); also the defensive default.
         _ => "star_count",
     }
 }
 
-/// One search-result repo from a `serde_json::Value` item of GitLab's `projects`
-/// response. Tolerant: a missing `path_with_namespace` skips the item. GitLab has no
-/// per-request language field on this endpoint, so `language` is always `None`.
+/// One search-result repo from an item of GitLab's `projects` response. Tolerant: a
+/// missing `path_with_namespace` skips the item. This endpoint has no per-project
+/// language field, so `language` is always `None`.
 ///
 /// CRITICAL: `name` must be the URL SLUG (`path`), never GitLab's `name` field —
-/// that's the DISPLAY name and can diverge (e.g. path `tree-online` / display
-/// `tree.nathanfriend.com`). Every by-owner/name command (README, fork, star)
-/// addresses `owner%2Fname`, so a display name there 404s. `owner` is derived by
-/// stripping the last `/`-segment of `path_with_namespace` (rather than
-/// `namespace.full_path`) so the identity `owner + "/" + name == full_name` ALWAYS
-/// holds — that identity is what every by-owner/name command depends on.
+/// that's the DISPLAY name and can diverge. Every by-owner/name command (README,
+/// fork, star) addresses `owner%2Fname`, so a display name there 404s. `owner` is
+/// `path_with_namespace` minus its last segment (not `namespace.full_path`) so
+/// `owner + "/" + name == full_name` ALWAYS holds.
 fn gl_search_repo_from_value(item: &serde_json::Value) -> Option<ForgeSearchRepo> {
     use serde_json::Value;
     let full_name = item
@@ -7358,9 +7210,7 @@ fn gl_search_repo_from_value(item: &serde_json::Value) -> Option<ForgeSearchRepo
     if full_name.is_empty() {
         return None;
     }
-    // Slug (the URL path segment) and owner, derived so `owner/name == full_name`.
-    // Prefer the explicit `path` field for the slug; fall back to the last segment
-    // of `path_with_namespace`. Owner is everything before that last segment.
+    // Slug + owner, derived so `owner/name == full_name`.
     let (owner, name) = match full_name.rsplit_once('/') {
         Some((o, n)) => (o.to_string(), n.to_string()),
         // No namespace separator (shouldn't happen for a real project) — no owner.
@@ -7657,8 +7507,8 @@ mod tests {
 
     #[test]
     fn gl_search_repo_name_is_slug_not_display_name() {
-        // The live-caught bug: GitLab's `name` is a DISPLAY name that can diverge
-        // from the URL slug (`path`). `ForgeSearchRepo.name` must be the slug so
+        // GitLab's `name` is a DISPLAY name that can diverge from the URL slug
+        // (`path`). `ForgeSearchRepo.name` must be the slug so
         // `owner + "/" + name == full_name` and by-owner/name commands address the
         // right project.
         let item = serde_json::json!({
@@ -7692,7 +7542,6 @@ mod tests {
         assert_eq!(entries.len(), 2);
         // entry[0] resets the helper chain: empty value, nothing after the `=`.
         assert_eq!(entries[0], "credential.https://gitlab.com.helper=");
-        // entry[1] is byte-identical to the historical single helper entry.
         assert_eq!(
             entries[1],
             "credential.https://gitlab.com.helper=!\"/abs/glab\" auth git-credential"
@@ -7754,9 +7603,8 @@ mod tests {
 
     #[test]
     fn label_event_color_is_stripped_to_bare_hex() {
-        // `resource_label_events` returns `label.color` WITH a leading `#`; the
-        // `Labeled.color` contract is bare hex (the frontend renders `#${color}`).
-        // Deserialize a live-shaped event and run the same strip the mapper applies.
+        // `resource_label_events` returns `color` with a leading `#`; the
+        // `Labeled.color` contract is bare hex — run the same strip the mapper does.
         let e: GlabLabelEvent = serde_json::from_str(
             r##"{"action":"add","created_at":"2026-06-30T00:35:46.215Z",
                 "user":{"username":"theBGuy"},
@@ -8339,9 +8187,8 @@ mod tests {
     #[test]
     fn issue_detail_tolerates_null_collections_and_scalars() {
         // GitLab can send `null` (not `[]`/`false`/omitted) for any of these, and a
-        // bare field with only `#[serde(default)]` fails the WHOLE parse on a present
-        // `null` — the "Could not load this issue" dogfood bug. `null_to_default`
-        // must absorb every one (labels, assignees, milestone, discussion_locked).
+        // bare `#[serde(default)]` field fails the WHOLE parse on a present `null` —
+        // `null_to_default` must absorb every one.
         let json = r#"{
             "iid": 2,
             "web_url": "https://gitlab.com/g/r/-/issues/2",
@@ -8642,9 +8489,8 @@ mod tests {
 
     #[test]
     fn release_tolerates_null_description_and_missing_links() {
-        // A release with no description / no assets / no `_links`: GitLab can send
-        // `null` for the body, and `#[serde(default)]` alone would sink a present
-        // `null` — `null_to_default` must absorb it (same trap as the issue parse).
+        // No description / assets / `_links`: GitLab sends `null` for the body, which
+        // `null_to_default` must absorb (same trap as the issue parse).
         let json = r#"{
             "tag_name": "v0.1.0",
             "name": "",
@@ -9080,13 +8926,8 @@ mod tests {
 
     #[test]
     fn diff_line_refs_mixed_hunk_context_add_remove() {
-        // @@ -10,4 +10,4 @@ : ctx(10,10) -old(11) +new(11) ctx(12,12) ctx(13,13→...)
-        // Walk:
-        //   " ctx"  new=10 old=10  → advance both → old=11,new=11
-        //   "-gone" old=11         → advance old   → old=12,new=11
-        //   "+new"  new=11         → advance new   → old=12,new=12
-        //   " a"    new=12 old=12  → both          → old=13,new=13
-        //   " b"    new=13 old=13  → both          → old=14,new=14
+        // A mixed hunk: context advances both counters, `-` advances old only,
+        // `+` advances new only.
         let diff = "@@ -10,4 +10,4 @@\n ctx\n-gone\n+new\n a\n b\n";
         // New-side line 11 is the `+new` line ⇒ (12, 11) (old counter is 12 there).
         assert_eq!(gl_diff_line_refs(diff, "new", 11), Some((12, 11)));

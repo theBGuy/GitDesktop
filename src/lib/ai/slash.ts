@@ -4,21 +4,16 @@ import type { CustomCommand } from "@/lib/settings/api";
 /**
  * An item in the agent composer's `/` menu. Three kinds:
  * - `command` — a prompt template. No agent CLI parses `/command` in headless
- *   (`-p`/`exec`) mode, so we expand its body client-side (`$ARGUMENTS` and
- *   `$1`..`$9` substituted with what the user typed) and send the result.
- * - `skill` — an Agent Skill (a multi-file `SKILL.md` dir with progressive
- *   disclosure). We DON'T inline its body — the CLI already loaded the real
- *   skill from disk, so we nudge it by name and let the model invoke it.
- * - `native` — a built-in command of the SELECTED CLI (e.g. `/init`). Delivery
- *   is per-CLI (see NATIVE_COMMANDS): passed through verbatim where the CLI
- *   resolves `/name` headlessly (Claude/Copilot), else sent as an NL template.
- *
- * Sources, merged by NAME (one entry per `/name`) with precedence
- * custom > discovered (`agent`) > native > builtin:
- * - `builtin` — the starters + curated native commands below;
- * - `agent` — discovered from the SELECTED CLI's command/skill dirs (project +
- *   global), including the vendor-neutral `.agents/skills` canonical store;
- * - `custom` — user-defined, edited under Settings → Slash commands.
+ *   (`-p`/`exec`) mode, so we expand it client-side (`$ARGUMENTS`, `$1`..`$9`)
+ *   and send the result.
+ * - `skill` — an Agent Skill dir. We DON'T inline its body: the CLI already
+ *   loaded the real skill from disk, so we nudge it by name.
+ * - `native` — a built-in command of the SELECTED CLI; delivery is per-CLI
+ *   (see NATIVE_COMMANDS).
+ * Sources: `builtin`, `agent` (discovered from the selected CLI's command/skill
+ * dirs incl. the neutral `.agents/skills` store), `custom` (user-defined, edited
+ * under Settings → Slash commands) — merged by name with the precedence
+ * documented on `mergeCommands`.
  */
 export interface SlashCommand {
   name: string;
@@ -95,18 +90,16 @@ export const BUILTIN_COMMANDS: SlashCommand[] = [
 ];
 
 /**
- * A curated, relevant subset of each CLI's OWN commands (the full lists are
- * large and mostly interactive-TUI only). DELIVERY differs per CLI because not
- * all resolve `/name` in headless mode:
- * - **Claude, Copilot** parse `/name` in `-p`, so we pass `/name args` through
- *   verbatim (no `prompt`) and the CLI runs its real command — incl. ones that
- *   invoke a dedicated agent like Copilot's `/review`/`/security-review`.
- * - **Codex** (`codex exec`) and **opencode** (`opencode run`) do NOT resolve
- *   `/name` (it's sent to the model as plain text), so those entries carry a
- *   `prompt` template we expand and send as a normal instruction instead.
- *   (opencode's own `--command` flag would run them natively — deferred.)
- * Entries override a same-named builtin template for that agent (e.g. Copilot's
- * `/review` supersedes ours), but a user's own command/skill still wins.
+ * A curated subset of each CLI's OWN commands (the full lists are large and
+ * mostly interactive-TUI only). Delivery differs because not all CLIs resolve
+ * `/name` in headless mode:
+ * - **Claude, Copilot** parse `/name` in `-p` — passed through verbatim (no
+ *   `prompt`) so the CLI runs its real command, incl. agent-backed ones like
+ *   Copilot's `/review`.
+ * - **Codex** (`codex exec`) / **opencode** (`opencode run`) do NOT — `/name`
+ *   reaches the model as plain text, so those entries carry a `prompt` template
+ *   we expand instead. (opencode's `--command` would run them natively — deferred.)
+ * These override a same-named builtin for that agent; a user's own entry wins.
  */
 const NATIVE_COMMANDS: Record<
   string,
@@ -152,7 +145,6 @@ const NATIVE_COMMANDS: Record<
       argumentHint: "[task]",
     },
   ],
-  // Codex/opencode don't resolve `/name` headlessly → send an NL template.
   codex: [
     {
       name: "init",
@@ -201,11 +193,9 @@ export function findCommand(
   return commands.find((c) => c.name.toLowerCase() === n);
 }
 
-/**
- * Builds the final prompt sent to the agent for a picked command/skill.
- * - Skills: a by-name nudge (+ any args) — the CLI loads the real skill.
- * - Commands: the template, expanded (see `expandCommand`).
- */
+/** Builds the final prompt for a picked entry: skills get a by-name nudge (the
+ *  CLI loads the real skill from disk); a native entry without a template passes
+ *  `/name args` through verbatim; everything else goes through `expandCommand`. */
 export function buildPrompt(cmd: SlashCommand, args: string): string {
   const trimmed = args.trim();
   if (cmd.kind === "skill") {
@@ -213,9 +203,8 @@ export function buildPrompt(cmd: SlashCommand, args: string): string {
     return trimmed ? `${nudge}\n\n${trimmed}` : nudge;
   }
   if (cmd.kind === "native") {
-    // With a template, deliver as a normal instruction (Codex/opencode, which
-    // don't resolve `/name` headlessly); otherwise pass the CLI's own command
-    // through verbatim for it to run (Claude/Copilot).
+    // Template ⇒ Codex/opencode (no headless `/name`): send as an instruction.
+    // Otherwise pass the CLI's own command through for Claude/Copilot to run.
     if (cmd.prompt) return expandCommand(cmd, args);
     return trimmed ? `/${cmd.name} ${trimmed}` : `/${cmd.name}`;
   }

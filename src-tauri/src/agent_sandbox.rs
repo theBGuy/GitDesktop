@@ -1,31 +1,22 @@
 //! Optional **container isolation** for write-capable agent sessions.
 //!
 //! By default a session runs the agent CLI full-auto on the host, confined only
-//! by its throwaway git worktree (a soft boundary). When the user opts into
-//! container isolation and Docker/Podman is available, we instead run the same
-//! CLI inside an ephemeral `--rm` container with **only** the worktree
-//! bind-mounted — so the agent's writes are confined to that mount by the kernel,
-//! and full-auto bypass is safe inside. The host still drives git (the worktree
-//! `.git` is a file-pointer that doesn't resolve in-container), so commit/diff/
-//! Keep-Discard are unchanged.
+//! by its throwaway git worktree (a soft boundary). With container isolation on,
+//! the same CLI runs in an ephemeral `--rm` container with **only** the worktree
+//! bind-mounted, so the kernel confines its writes and full-auto bypass is safe.
+//! The host still drives git (the worktree `.git` is a file-pointer that doesn't
+//! resolve in-container), so commit/diff/Keep-Discard are unchanged.
 //!
-//! Auth: each agent CLI's credentials are a file (Claude `~/.claude/
-//! .credentials.json`, Codex `~/.codex/auth.json`, opencode optionally
-//! `~/.local/share/opencode/auth.json`), so we seed a **copy** into a per-session,
-//! per-agent home that's mounted read-write at the CLI's dir — the container
-//! authenticates with no API key, can refresh its own token, and never sees the
-//! host's real config. The home persists across a session's turns (so `--resume`
-//! finds the transcript) and is removed on discard/delete. **opencode needs no
-//! creds for its free hosted models**, so its container runs keyless out of the box.
-//! **Copilot has no mountable creds file** (its login lives in the OS keychain), so
-//! its container authenticates from a GitHub token (`gh auth token`) passed by env
-//! (`COPILOT_GITHUB_TOKEN`), never a file.
+//! Auth: each CLI's credentials file is COPIED into a per-session, per-agent home
+//! mounted read-write at the CLI's dotdir (`host_creds`/`agent_dotdir`) — the
+//! container authenticates with no API key, refreshes its own token, and never
+//! sees the host's real config. The home survives a session's turns (so
+//! `--resume` works) and is removed on discard. opencode needs no creds (free
+//! hosted models); Copilot has none to mount (OS keychain) and authenticates
+//! from a `COPILOT_GITHUB_TOKEN` passed by env.
 //!
-//! Every agent — Codex included — runs on the host or in a container; on the host
-//! Codex is confined by its own OS sandbox (`-s workspace-write`), and the container
-//! is what makes its full-bypass safe. Only Codex's **MCP** support is container-only
-//! (see `mcp.rs`). Validated end-to-end by spike + live runs (Codex 2026-06-22,
-//! opencode 2026-06-23); see docs/agent-sandbox-docker.md.
+//! Every agent runs host or container; only Codex's **MCP** support is
+//! container-only (see `mcp.rs`). Details: docs/agent-sandbox-docker.md.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -39,11 +30,9 @@ use tokio::process::Command;
 use crate::agent::{resolve_named, run_capture, DETECT_TIMEOUT};
 use crate::error::{AppError, AppResult};
 
-/// The managed image: a small Node base with the user-selected agent CLIs, run as
-/// the non-root `node` user (the CLIs refuse full-bypass as root). A single fixed
-/// tag, rebuilt in place when the user changes the Node version or providers; the
-/// built config is recorded as the `gdconfig` image LABEL so detect can tell
-/// whether the image matches the current selection (else the UI prompts a rebuild).
+/// The managed image: a small Node base with the user-selected agent CLIs, run
+/// as non-root `node` (the CLIs refuse full-bypass as root). One fixed tag,
+/// rebuilt in place; the built config is stamped as the `gdconfig` LABEL.
 pub const IMAGE: &str = "gitdesktop-agent:latest";
 const BUILD_TIMEOUT: Duration = Duration::from_secs(600);
 
@@ -68,9 +57,7 @@ fn agent_npm_package(agent: &str) -> Option<&'static str> {
         "claude" => Some("@anthropic-ai/claude-code"),
         "codex" => Some("@openai/codex"),
         "opencode" => Some("opencode-ai"),
-        // Copilot has no mountable creds file (its login lives in the OS keychain),
-        // so a container session authenticates from a `gh auth token` passed by env
-        // — see `build_run_args` / the `agent_session` container branch.
+        // Copilot authenticates from an env token, not a mounted creds file.
         "copilot" => Some("@github/copilot"),
         _ => None,
     }
@@ -83,21 +70,17 @@ fn agent_dotdir(agent: &str) -> &'static str {
     match agent {
         "codex" => "/home/node/.codex",
         "opencode" => "/home/node/.local/share/opencode",
-        // Copilot keeps its session-store.db (for `--resume`) + config here; no creds
-        // file (it authenticates from the env token), but the dir still mounts so the
-        // session db survives across a session's turns.
+        // Copilot keeps its session-store.db (for `--resume`) here, so the dir mounts
+        // even though there are no creds to seed.
         "copilot" => "/home/node/.copilot",
         _ => "/home/node/.claude",
     }
 }
 
 /// The MCP config an in-container agent reads, as `(home-relative filename,
-/// absolute container path)`. The per-session home mounts at the agent's dotdir
-/// (`agent_dotdir`), so writing `<home>/<filename>` lands the file at the returned
-/// container path. Each CLI consumes it differently (Claude `--mcp-config <path>`;
-/// opencode `OPENCODE_CONFIG=<path>`; Codex + Copilot read their dotdir file
-/// implicitly — `config.toml` / `mcp-config.json`). The seeded home is clean, so
-/// the written file is the ONLY MCP source (strict). `None` for an unknown agent.
+/// absolute container path)`. The per-session home mounts at `agent_dotdir`, so
+/// writing `<home>/<filename>` lands the file at the returned path. The seeded
+/// home is clean, so this file is the ONLY MCP source. `None` = unknown agent.
 pub(crate) fn container_mcp_config(agent: &str) -> Option<(&'static str, String)> {
     let dotdir = agent_dotdir(agent);
     let filename = match agent {
@@ -166,12 +149,10 @@ fn render_dockerfile(node_version: &str, providers: &[String]) -> AppResult<Stri
     }
     let pkgs = pkgs.join(" ");
     let dirs = dirs.join(" ");
-    // `chown` the WHOLE home, not just `{dirs}`: opencode's dotdir is several levels
-    // deep (`~/.local/share/opencode`), so `mkdir -p` leaves the intermediate
-    // `~/.local` root-owned — and then `node` can't create the sibling XDG dirs
-    // opencode needs at runtime (`~/.local/state`), failing with EACCES. Chowning
-    // `/home/node` (nearly empty in the slim image) is a harmless superset for the
-    // top-level Claude/Codex dotdirs and fixes the deep opencode case. Verified live.
+    // `chown` the WHOLE home, not just `{dirs}`: opencode's dotdir is deep
+    // (`~/.local/share/opencode`), so `mkdir -p` leaves `~/.local` root-owned and
+    // `node` then can't create its sibling XDG dirs (EACCES). Chowning /home/node
+    // is a harmless superset for the shallow dotdirs.
     Ok(format!(
         "FROM node:{node_version}-slim\nRUN apt-get update \\\n && apt-get install -y --no-install-recommends ca-certificates \\\n && rm -rf /var/lib/apt/lists/* \\\n && npm install -g {pkgs} \\\n && mkdir -p {dirs} \\\n && chown -R node:node /home/node\nUSER node\nWORKDIR /workspace\n"
     ))
@@ -201,8 +182,6 @@ fn home_dir() -> Option<PathBuf> {
 /// agent with no mountable creds file — Copilot (login is in the OS keychain; it auths
 /// from an env token instead) and opencode when it has no `auth.json` (free models).
 fn host_creds(agent: &str) -> Option<PathBuf> {
-    // Copilot has no creds file to seed — its container authenticates from a GitHub
-    // token passed by env, not a mounted file.
     if agent == "copilot" {
         return None;
     }
@@ -224,12 +203,9 @@ pub(crate) fn host_logged_in(agent: &str) -> bool {
     host_creds(agent).is_some_and(|p| p.is_file())
 }
 
-/// The host's GLOBAL skills store — the vendor-neutral canonical `~/.agents/skills`
-/// — if it exists, to bind-mount read-only into a container session. Without it, a
-/// container only sees PROJECT skills carried in the mounted worktree, so a nudge to
-/// a global skill (which the host CLI would auto-load from home) can't resolve. We
-/// source the canonical dir (all real subdirs); a Claude-only skill living solely in
-/// a real `~/.claude/skills` entry isn't covered (a follow-up if it's ever needed).
+/// The host's GLOBAL skills store (`~/.agents/skills`) to bind-mount read-only
+/// into a container session. Without it a container sees only PROJECT skills
+/// from the worktree, so a nudge to a global skill can't resolve.
 pub(crate) fn global_skills_dir() -> Option<PathBuf> {
     home_dir()
         .map(|h| h.join(".agents").join("skills"))
@@ -384,10 +360,8 @@ pub async fn agent_container_prepare(
     result
 }
 
-/// Runs a `<rt> build …` invocation with the build timeout, no console window on Windows,
-/// and a tail of the build log on failure. Shared by the base-image build
-/// (`agent_container_prepare`) and the per-repo derived-image build; each caller manages
-/// its own temp context dir.
+/// Runs a `<rt> build …` with the build timeout, no console window on Windows,
+/// and a tail of the build log on failure. Callers own their temp context dir.
 async fn run_build(bin: &Path, build_args: &[String]) -> AppResult<()> {
     let mut cmd = Command::new(bin);
     cmd.args(build_args)
@@ -423,14 +397,12 @@ async fn run_build(bin: &Path, build_args: &[String]) -> AppResult<()> {
 
 // --- per-repo derived (custom) image -----------------------------------------
 //
-// A repo can layer extra tools (e.g. Playwright) onto the managed base by committing a
-// `.gitdesktop/agent.Dockerfile` that starts `FROM gitdesktop-agent:latest`. GitDesktop
-// builds that into a per-repo image tagged by a content hash, and container sessions (plus
-// the Test shell) for that repo run in it. The build runs the Dockerfile's arbitrary
-// commands, so it is ONLY ever user-initiated after a review + confirm — never automatic —
-// the guard against a cloned/untrusted repo. The tag's existence doubles as the "built"
-// record: a changed Dockerfile (or a rebuilt base) hashes to a new tag, so it reads as
-// "needs build" until the user confirms again.
+// A repo can layer extra tools onto the managed base via a committed
+// `.gitdesktop/agent.Dockerfile` starting `FROM gitdesktop-agent:latest`. It is
+// built into a per-repo image tagged by content hash, used by that repo's
+// container sessions and Test shell. The build runs arbitrary commands from a
+// possibly-untrusted repo, so it is ONLY ever user-initiated after review +
+// confirm — never automatic. The tag's existence doubles as the "built" record.
 
 /// The repo-relative custom Dockerfile path (`<repo>/.gitdesktop/agent.Dockerfile`).
 fn custom_dockerfile_path(worktree_path: &str) -> PathBuf {
@@ -458,13 +430,11 @@ fn first_instruction(dockerfile: &str) -> Option<&str> {
         .find(|l| !l.is_empty() && !l.starts_with('#'))
 }
 
-/// The name of a Docker **parser directive** (`syntax` / `escape`) in the leading comment
-/// block, if present. Parser directives are processed by BuildKit BEFORE any instruction —
-/// `# syntax=<image>` makes it fetch an arbitrary remote build *frontend* that can ignore the
-/// `FROM` boundary and run build-time code the reviewer never saw. Docker only honours them in
-/// the unbroken run of comment lines at the very top (a blank line or an instruction ends that
-/// run), and only after a **single** `#` — so we scan that region, skip `##…` lines (ordinary
-/// comments, e.g. a directive deliberately commented out), and reject any real directive we find.
+/// The name of a Docker **parser directive** (`syntax` / `escape`) in the leading
+/// comment block. BuildKit processes these BEFORE any instruction, so
+/// `# syntax=<image>` can fetch an arbitrary build frontend that ignores our
+/// `FROM` boundary. Docker honours them only in the unbroken comment run at the
+/// very top and only after a SINGLE `#`, so `##…` lines are ordinary comments.
 fn leading_parser_directive(dockerfile: &str) -> Option<String> {
     for raw in dockerfile.lines() {
         let line = raw.trim();
@@ -472,8 +442,7 @@ fn leading_parser_directive(dockerfile: &str) -> Option<String> {
         let Some(rest) = line.strip_prefix('#') else {
             break;
         };
-        // `##…` is an ordinary comment — Docker only treats `# name=value` (one `#`) as a
-        // directive — so skip it rather than mis-reading it as `# name=value`.
+        // `##…` is an ordinary comment, not a directive.
         if rest.starts_with('#') {
             continue;
         }
@@ -750,12 +719,10 @@ fn agent_home_root(app: &AppHandle) -> AppResult<PathBuf> {
         .join("agent-home"))
 }
 
-/// A persistent host npm cache, mounted into every container at `~/.npm` so an
-/// `npx`-based MCP server (or any `npx` use) downloads ONCE and is reused across
-/// turns + sessions instead of re-fetching each run (the per-session home is wiped
-/// on discard, so without this every first turn re-downloads). Shared across
-/// sessions — npm's content-addressed cache is concurrency-safe. Best-effort:
-/// returns `None` if the dir can't be created, so a session still runs (just slower).
+/// A persistent host npm cache mounted at `~/.npm` in every container, so an
+/// `npx` MCP server downloads once rather than every turn (the per-session home
+/// is wiped on discard). Shared — npm's cache is concurrency-safe. Best-effort:
+/// `None` if it can't be created, and the session still runs.
 pub(crate) fn npm_cache_dir(app: &AppHandle) -> Option<PathBuf> {
     let dir = app.path().app_data_dir().ok()?.join("agent-npm-cache");
     std::fs::create_dir_all(&dir).ok()?;
@@ -780,9 +747,7 @@ pub(crate) fn seed_session_home(
     crate::sessions::validate_id(session_id)?; // no path traversal into the home root
     let home = session_home(app, session_id, agent)?;
     std::fs::create_dir_all(&home)?;
-    // Re-copy every run so an expired in-home token is refreshed from the host's
-    // current one. Best-effort: the container branch pre-checks `host_logged_in`
-    // for a clearer message if the creds are absent.
+    // Re-copy each run so an expired in-home token is refreshed.
     if let Some(src) = host_creds(agent) {
         if let (true, Some(name)) = (src.is_file(), src.file_name()) {
             let _ = std::fs::copy(&src, home.join(name));
@@ -816,10 +781,9 @@ pub(crate) fn container_name(session_id: &str) -> String {
 }
 
 /// Converts a host path to the `-v` source form the engine expects. The Windows
-/// form is RUNTIME-SPECIFIC (validated 2026-06-22): Docker Desktop wants the
-/// MSYS-style `//c/a/b`, while Podman (a WSL machine) wants the WSL path
-/// `/mnt/c/a/b` and rejects `//c/...` with "no such file or directory".
-/// Elsewhere (Linux/macOS) both runtimes take the POSIX path as-is.
+/// form is RUNTIME-SPECIFIC: Docker Desktop wants MSYS-style `//c/a/b`, Podman
+/// (a WSL machine) wants `/mnt/c/a/b` and rejects `//c/...` with "no such file
+/// or directory". On Linux/macOS both take the POSIX path as-is.
 pub(crate) fn to_mount_source(path: &str, runtime: &str) -> String {
     #[cfg(windows)]
     {
@@ -843,12 +807,10 @@ pub(crate) fn to_mount_source(path: &str, runtime: &str) -> String {
     }
 }
 
-/// Validates a single user-supplied port spec — either a bare `PORT` (published
-/// host→container 1:1) or a `HOST:CONTAINER` remap — returning the parsed
-/// `(host, container)` pair. Everything is parsed as a `u16` (1..=65535), so
-/// nothing non-numeric the user typed can reach the engine argv unchecked, and a
-/// busy host port can be sidestepped by remapping (e.g. `5174:5173` when host 5173
-/// is taken). `u16::parse` already rejects empty / non-digit / out-of-range.
+/// Validates a user-supplied port spec — a bare `PORT` or a `HOST:CONTAINER`
+/// remap — into `(host, container)`. Everything parses as `u16` (1..=65535), so
+/// nothing non-numeric can reach the engine argv, and a busy host port can be
+/// sidestepped by remapping.
 fn parse_port_spec(spec: &str) -> AppResult<(u16, u16)> {
     let spec = spec.trim();
     let (h, c) = spec.split_once(':').unwrap_or((spec, spec));
@@ -896,24 +858,20 @@ async fn container_running(bin: &Path, name: &str) -> bool {
 }
 
 /// Opens an **interactive shell inside a container** with a session's worktree
-/// bind-mounted at `/workspace`, so the user can test a container session's changes
-/// in the *matching* Linux environment (its host deps would be Linux builds — wrong
-/// on Windows/macOS). Reuses the session image + the runtime-specific mount form;
-/// runs as the default user so `pnpm`/`npm`/build all work the way they did for the
-/// agent. Launches a real terminal window because `run -it` needs a TTY.
+/// bind-mounted at `/workspace`, so the user can test a container session's
+/// changes in the matching Linux environment (its deps are Linux builds). Reuses
+/// the session image + the runtime-specific mount form, runs as the default user
+/// so `pnpm`/`npm` behave as they did for the agent, and launches a real terminal
+/// window because `run -it` needs a TTY.
 ///
-/// The container is **named per-worktree** and `run -it` (not detached): if its
-/// terminal is closed without `exit`, the container — and any dev server in it —
-/// keeps running in the daemon, holding the published ports. So on re-open we
-/// **reconnect** a new shell (`exec`) into the still-running container instead of
-/// starting a second one (which would collide on the name and ports). An explicit
-/// `agent_stop_test_container` shuts it down when you're done.
+/// The container is named per-worktree and `run -it` (not detached): closing its
+/// terminal without `exit` leaves it — and any dev server — running and holding
+/// ports, so re-open `exec`s a new shell into it instead of colliding on name +
+/// ports. `agent_stop_test_container` shuts it down.
 ///
-/// `ports` are the user-chosen dev-server ports to publish to the host loopback
-/// (each a bare `PORT` or a `HOST:CONTAINER` remap). A fixed list used to be
-/// published, but that fails hard (`ports are not available`) when *any* one of
-/// them is already bound on the host — so the port set is now the user's call,
-/// defaulted in the UI but fully overridable, and a busy host port can be remapped.
+/// `ports` are the user's chosen dev-server ports (bare `PORT` or
+/// `HOST:CONTAINER`) — a fixed list fails hard ("ports are not available") when
+/// any one is already bound on the host.
 #[tauri::command]
 pub async fn agent_open_container_shell(
     worktree_path: String,
@@ -928,13 +886,11 @@ pub async fn agent_open_container_shell(
     launch_container_shell(&bin, &args, &tip)
 }
 
-/// Builds the docker/podman command (binary + args) that opens a shell for a
-/// worktree's test container — `exec` into it if it's already running, else `run`
-/// a fresh named container publishing `ports` with the worktree mounted (clearing
-/// any stale same-name container first). Returns `(binary, args, tip)`; the tip
-/// names the reachable `localhost:<port>` URLs (or the reconnect note). Shared by
-/// the external terminal launcher (above) and the in-app PTY terminal so both use
-/// the identical run-or-exec, port, and cleanup logic.
+/// Builds the docker/podman command that opens a shell for a worktree's test
+/// container — `exec` into it when already running, else `run` a fresh named
+/// container (clearing a stale same-name one first). Returns `(binary, args,
+/// tip)`. Shared by the external-terminal launcher and the in-app PTY terminal,
+/// so both use identical run-or-exec, port and cleanup logic.
 pub(crate) async fn container_shell_command(
     worktree_path: &str,
     ports: &[String],
@@ -1166,15 +1122,11 @@ pub(crate) fn build_run_args(
         args.push("-e".into());
         args.push(format!("{k}={v}"));
     }
-    // Rootless Podman on Linux maps the container's non-root `node` (uid 1000) to
-    // a host *subuid*, so it can't even write the host-user-owned worktree, and
-    // any files it does write aren't owned by the host user (its git can't touch
-    // them). `keep-id` maps the host user in as `node` so writes land owned by the
-    // host user. Validated 2026-06-22 (without it: EACCES; with it: files owned by
-    // the host uid, host git works). NOT needed for Docker, nor the Podman-machine
-    // VMs on Windows/macOS (NTFS/VirtioFS already present files as the host user) —
-    // and `keep-id` assumes the host login uid is 1000 (= our image's `node`),
-    // the overwhelmingly common Linux-desktop case.
+    // Rootless Podman on Linux maps the container's `node` (uid 1000) to a host
+    // subuid, so it can't write the host-user-owned worktree (EACCES) and anything
+    // it does write is unowned by the host user. `keep-id` maps the host user in as
+    // `node`. Not needed for Docker nor the Podman-machine VMs on Windows/macOS,
+    // and it assumes the host login uid is 1000.
     if cfg!(target_os = "linux") && runtime == "podman" {
         args.push("--userns=keep-id".into());
     }
@@ -1188,11 +1140,9 @@ pub(crate) fn build_run_args(
         "-v".into(),
         home_mount,
     ]);
-    // Mount the user's GLOBAL skills read-only so a skill nudged by name resolves
-    // in-container like it does on the host (the worktree only carries PROJECT
-    // skills). Target is per-agent (`skills_target`); for Claude it nests under the
-    // `~/.claude` home mount, so it MUST be added after it. `:ro` — the agent reads
-    // skills, never edits the user's store.
+    // Mount the user's GLOBAL skills read-only (the worktree carries only project
+    // skills). Target is per-agent; for Claude it nests under the `~/.claude` home
+    // mount, so it MUST come after it. `:ro` — never edit the user's store.
     if let Some(src) = skills_src {
         args.push("-v".into());
         args.push(format!(
@@ -1223,12 +1173,10 @@ pub(crate) fn build_run_args(
         "1024".into(),
         image.into(),
     ]);
-    // Name the agent CLI as the in-container command. The image inherits the `node`
-    // base entrypoint, which execs its args directly BUT prepends `node` to a leading
-    // `-flag` — so a bare `-p …` / `exec …` (what the `*_session_args` builders emit,
-    // since the host path supplies the binary separately) would run `node`, not the
-    // CLI. The CLIs install on PATH under exactly these names
-    // (`claude`/`codex`/`opencode`/`copilot`), so prepend `agent` here.
+    // Name the agent CLI as the in-container command: the node base entrypoint
+    // execs its args but PREPENDS `node` to a leading `-flag`, so the bare `-p …` /
+    // `exec …` the `*_session_args` builders emit would run `node`. The CLIs install
+    // on PATH under exactly these names.
     args.push(agent.into());
     args.extend(inner.iter().cloned());
     args

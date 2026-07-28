@@ -80,16 +80,11 @@ export function useRepoIdentity(repo: string) {
 }
 
 /**
- * `keepPreviousData`, scoped to a single repo. Panels stay mounted across repo
- * switches, so a plain `keepPreviousData` `placeholderData` would keep the PREVIOUS
- * repo's rows on screen while the new repo's query loads — a visible flash of the
- * wrong repo's PRs/issues/etc. (and, for number-keyed maps, briefly-wrong data).
- * This keeps the previous data only when the previous query was for the SAME repo
- * (so Load-more page growth and Open/Closed tab switches still avoid a skeleton),
- * and drops to fresh skeletons the moment the key's repo segment changes.
- *
- * Pass the current `repo` and the index of the repo segment in the query key (all
- * `repoKeys.*` and the `["repo", repo, …]` literals here put it at index 1).
+ * `keepPreviousData` scoped to ONE repo: panels stay mounted across repo switches, so
+ * plain keepPreviousData would keep the previous repo's rows on screen (and, for
+ * number-keyed maps, briefly-wrong data). Keeps previous data only when the previous
+ * query's repo segment matches, so Load-more and Open/Closed switches still skip the
+ * skeleton. `repoKeyIndex` is where the repo sits in the key (1 for every key here).
  */
 function keepPreviousDataForRepo(repo: string, repoKeyIndex = 1) {
   return <T>(
@@ -122,15 +117,12 @@ export const repoKeys = {
 };
 
 /**
- * The working-tree query keys a staging-class mutation actually touches: repo
- * status, every working-tree file diff, and the worktree side of file-at-rev
- * reads (the image-diff "new" pane) — all prefix-matched. Hot mutations
- * (stage/unstage/discard/apply) pass this to {@link useRepoMutation} so they
- * don't needlessly mark the heavy history/branches/Insights/SBOM queries stale.
- * Of the file-at-rev reads (image diffs + the diff viewer's whole-file highlight
- * context), only the mutable sides are invalidated: the `"worktree"` slice and
- * the index (`":0"`) slice, which staging rewrites. Committed-rev reads (HEAD,
- * commit SHAs) are immutable here and deliberately left alone.
+ * The keys a staging-class mutation touches: repo status, every working-tree file diff,
+ * and only the MUTABLE file-at-rev slices — `"worktree"` and the index `":0"`, which
+ * staging rewrites — all prefix-matched. Hot mutations (stage/unstage/discard/apply)
+ * pass this to {@link useRepoMutation} so they don't mark the heavy
+ * history/branches/Insights/SBOM queries stale. Committed-rev reads (HEAD, commit SHAs)
+ * are immutable here and deliberately left alone.
  */
 const workingTreeKeys = (repo: string) =>
   [
@@ -168,11 +160,11 @@ export function useBranches(repo: string) {
   });
 }
 
-/** Count of commits on HEAD not on any remote — the "unpublished" count for a
- *  branch with no upstream, where `branch.ahead` is undefined (a never-pushed
- *  branch's commits below the fork point already live on `origin/<base>`, so the
- *  whole branch isn't unpushed). `enabled` fires it only in that case. Keyed
- *  under the repo so a commit / push / fetch invalidation refetches it. */
+/** Commits on HEAD not on any remote — the "unpublished" count for a branch with no
+ *  upstream, where `branch.ahead` is undefined (a never-pushed branch's pre-fork-point
+ *  commits already live on `origin/<base>`, so the whole branch isn't unpushed).
+ *  `enabled` fires it only in that case. Keyed under the repo so commit/push/fetch
+ *  invalidation refetches it. */
 export function useUnpushedCount(repo: string, enabled: boolean) {
   return useQuery({
     queryKey: ["repo", repo, "unpushed-count"] as const,
@@ -286,9 +278,8 @@ export function useRepoOwners(paths: string[]) {
     queryFn: () => api.gitRepoOwners(sorted),
     enabled: sorted.length > 0,
     staleTime: 10 * 60 * 1000,
-    // Survive the switcher popover closing so the owners stay warm across opens
-    // (the stored owner on each RecentRepo is the primary anti-reflow path; this
-    // just avoids re-running the owner scan and keeps refreshes instant).
+    // gcTime: Infinity — keep owners warm across popover opens so refreshes stay
+    // instant (the stored owner on each RecentRepo is the primary anti-reflow path).
     gcTime: Number.POSITIVE_INFINITY,
   });
 }
@@ -318,14 +309,11 @@ export function useFileDiff(
 }
 
 /**
- * A single file's cumulative diff in an agent session worktree vs the session's
- * base commit — for the inline edit-step diff in the transcript. `base` is in the
- * key so a different base (e.g. after a restart) doesn't cache-hit. Idle until
- * `enabled` (the step is expanded), so an unopened edit step costs nothing. While
- * `live` (the session is still working), it polls: the agent edits the worktree
- * through its own CLI, outside any app mutation that could invalidate this, so an
- * open diff would otherwise freeze as the agent keeps editing the same file. A
- * settled session needs no poll — the last fetch is the final diff.
+ * A file's cumulative diff in an agent session worktree vs the session's base commit.
+ * `base` is in the key so a restarted session's new base can't cache-hit; idle until
+ * `enabled` (the step is expanded). While `live` it polls: the agent edits the worktree
+ * through its own CLI, outside any app mutation that could invalidate this, so an open
+ * diff would otherwise freeze.
  */
 export function useSessionFileDiff(
   repo: string,
@@ -429,12 +417,9 @@ export function useCommitFileDiff(
   });
 }
 
-/**
- * Warms a commit's detail view (header + file list + the first file's diff) so
- * selecting it is instant. Called on row hover and for the rows adjacent to the
- * current selection (so keyboard arrowing stays ahead). prefetchQuery is a
- * no-op once the data is cached, so repeats are free.
- */
+/** Warms a commit's detail view (header + files + the first file's diff) on row hover
+ *  and for rows adjacent to the selection, so keyboard arrowing stays ahead.
+ *  prefetchQuery no-ops once cached, so repeats are free. */
 export function usePrefetchCommit(repo: string) {
   const queryClient = useQueryClient();
   return useCallback(
@@ -463,12 +448,9 @@ export function usePrefetchCommitFileDiff(repo: string) {
   );
 }
 
-/**
- * Debounces hover-triggered prefetches so sweeping the pointer down a long list
- * doesn't spawn a prefetch (and its git subprocesses) for every row it crosses
- * — only the row the pointer settles on fires. Keyboard-neighbor prefetch stays
- * immediate. Returns a trigger you hand the prefetch thunk to.
- */
+/** Debounces hover prefetches so sweeping the pointer down a long list doesn't spawn a
+ *  prefetch (and its git subprocess) for every row it crosses. Keyboard-neighbor
+ *  prefetch stays immediate. */
 export function useHoverPrefetch(delay = 100) {
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(timer.current), []);
@@ -510,10 +492,9 @@ export function useBlame(
   });
 }
 
-/** Raw working-tree text of a repo-relative file — the fallback source for the
- *  Code TODOs excerpt when `git blame` refuses the file (e.g. an untracked, but
- *  scanned-with-`--untracked`, new file). `enabled` lets the caller defer the
- *  read until blame has actually errored, so tracked files never pay for it. */
+/** Raw working-tree text of a repo-relative file — the Code TODOs excerpt fallback when
+ *  `git blame` refuses the file (an untracked but `--untracked`-scanned file). `enabled`
+ *  defers the read until blame has errored, so tracked files never pay for it. */
 export function useFileText(repo: string, path: string, enabled: boolean) {
   return useQuery({
     queryKey: ["repo", repo, "file-text", path] as const,
@@ -532,14 +513,10 @@ export function useCommitAuthors(repo: string) {
   });
 }
 
-/** Working-tree TODO/FIXME/HACK/… scan for the Code TODOs tab. A heavy `git
- *  grep`, so — like `useRepoStats` — it's gated on the tab being active
- *  (<Activity> keeps the panel mounted but doesn't defer fetches). A modest
- *  staleTime keeps a same-session tab re-entry from rescanning; the panel offers
- *  a manual Refresh. Keyed on the marker set so toggling the marker chips (which
- *  drive the scan, not a client filter) caches per-set and refetches cleanly.
- *  `maxHits` is passed explicitly so the panel's truncated-count and the backend
- *  cap can't drift; it's in the key so a different cap would refetch. */
+/** Working-tree TODO/FIXME/HACK scan. A heavy `git grep`, so gated on the tab being
+ *  active (<Activity> keeps the panel mounted but doesn't defer fetches). Keyed on the
+ *  marker set (the chips drive the scan, not a client filter) and on `maxHits`, which is
+ *  passed explicitly so the panel's truncated count and the backend cap can't drift. */
 export function useTodoScan(
   repo: string,
   markers: string[],
@@ -554,9 +531,8 @@ export function useTodoScan(
   });
 }
 
-/** Returns a thunk that invalidates the repo's TODO-scan queries — used by the
- *  detail pane's Rescan when the file has drifted from the scan. Keeps the query
- *  key owned here rather than leaking the literal into the feature. */
+/** Invalidates the repo's TODO-scan queries (the detail pane's Rescan), keeping the
+ *  query key owned here instead of leaking the literal into the feature. */
 export function useTodoScanInvalidate(repo: string) {
   const queryClient = useQueryClient();
   return () =>
@@ -882,15 +858,11 @@ export function usePrList(
   });
 }
 
-/** Hydrates the PR-list rows with each PR's CI rollup, keyed by number. Runs
- *  SEPARATELY from `usePrList` so the list paints immediately and the row icons
- *  appear a moment later — a full rollup expansion in the list query 504s on large
- *  GitHub repos. Provider-neutral: the backend routes to GitHub/GitLab/Bitbucket, so
- *  `enabled` only needs the list to be ready (`ghReady`); it self-disables when `prs`
- *  is empty. The numbers digest in the key is load-bearing: the list uses
- *  keepPreviousData, so on a tab switch this hook can fire against the PREVIOUS
- *  tab's placeholder rows — keyed by state+limit alone that result would cache
- *  under the new tab's key and the real rows would never get statuses. */
+/** Hydrates PR-list rows with each PR's CI rollup, keyed by number. Runs SEPARATELY from
+ *  `usePrList` — a full rollup expansion inside the list query 504s on large GitHub
+ *  repos. The numbers digest in the key is load-bearing: the list uses keepPreviousData,
+ *  so on a tab switch this can fire against the PREVIOUS tab's rows, and keyed by
+ *  state+limit alone that result would cache under the new tab's key. */
 export function usePrListCi(
   repo: string,
   enabled: boolean,
@@ -910,7 +882,7 @@ export function usePrListCi(
       prs?.map((p) => p.number).join(",") ?? "",
     ] as const,
     queryFn: async () => {
-      // `enabled` guarantees a non-empty list here; `prs![0]` is safe.
+      // `enabled` requires a non-empty `prs`, so the cast and `list[0]` below are safe.
       const list = prs as PrInfo[];
       // No lens arg on the api call: `sampleUrl` (list[0].url) already pins which
       // repo these numbers belong to, so the CI rollup is fork/parent-correct by
@@ -1012,14 +984,11 @@ export function usePrReviewThreads(
 }
 
 /**
- * Applies a review suggestion to the working tree (GitHub's "Commit suggestion",
- * done locally). It's a staging-class edit — only the working tree changes — so it
- * narrows invalidation to {@link workingTreeKeys} (status + working-tree file
- * diffs + the mutable file-at-rev slices), exactly like {@link useStage}. That
- * refreshes the Changes tab/status/diffs WITHOUT prefix-matching the review-threads
- * query key (which the whole-repo default would, forcing a needless GitHub GraphQL
- * refetch even though no thread changed). The backend verifies the expected lines
- * before editing; a mismatch throws.
+ * Applies a review suggestion to the working tree (GitHub's "Commit suggestion", done
+ * locally). A staging-class edit, so it narrows invalidation to {@link workingTreeKeys}
+ * like {@link useStage} — the whole-repo default would prefix-match the review-threads
+ * key and force a needless GitHub GraphQL refetch even though no thread changed. The
+ * backend verifies the expected lines before editing; a mismatch throws.
  */
 export function useApplySuggestion(repo: string) {
   return useRepoMutation(
@@ -1043,10 +1012,9 @@ export function useApplySuggestion(repo: string) {
   );
 }
 
-/** The unified diff for one commit of a PR/MR — the per-commit review view. Pass
- *  `oid: null` (no commit selected) so the read doesn't fire; keyed by oid so each
- *  commit's diff caches independently, with the same short stale window as the
- *  other PR-detail queries. */
+/** The unified diff for one commit of a PR/MR. Pass `oid: null` when no commit is
+ *  selected so the read doesn't fire; keyed by oid so each commit's diff caches
+ *  independently. */
 export function usePrCommitDiff(
   repo: string,
   number: number,
@@ -1080,10 +1048,9 @@ export function useCommitComments(
   });
 }
 
-/** Whether a commit lives on any remote — gates the History-tab commit-comment
- *  surface (you can only comment on a commit the forge already has). A push can
- *  flip it from false to true, hence the short stale window; pass `sha: null` when
- *  no commit is selected so the read doesn't fire. */
+/** Whether a commit lives on any remote — gates the History-tab commit-comment surface
+ *  (you can only comment on a commit the forge already has). A push flips it, hence the
+ *  short stale window; pass `sha: null` when no commit is selected. */
 export function useCommitOnRemote(repo: string, sha: string | null) {
   return useQuery({
     queryKey: ["repo", repo, "commit", sha, "on-remote"] as const,
@@ -1110,26 +1077,12 @@ const commitCommentsKey = (repo: string, sha: string, lens: RemoteLens) =>
   ["repo", repo, "commit", sha, "comments", lens] as const;
 
 /**
- * The shared skeleton behind every optimistic-cache mutation in this file:
- * cancel in-flight fetches on the target key, snapshot it, apply an optimistic
- * `setQueryData` patch, roll the snapshot back on error, and reconcile on
- * settle. The five exported factories below (`useOptimisticCommitCommentMutation`,
- * `useOptimisticIssueMutation`, `useOptimisticCreateCommentMutation`,
- * `useOptimisticCommentMutation`, `useOptimisticReviewCommentMutation`) are thin
- * wrappers over this — they only differ in the *deltas*:
- *
- * - `keyFor(args)` — the cache key to patch (derived from the mutation args at
- *   mutate time, so a mid-flight repo/number/sha switch never corrupts another
- *   key's cache).
- * - `patch(prev, args)` — the optimistic `setQueryData` updater.
- * - `reconcile(queryClient, args)` — the onSettled invalidation. Four factories
- *   pass a repo-wide invalidate (server-truth reconciliation, matching what
- *   `useRepoMutation`'s default did before they were made optimistic); the issue
- *   factory passes a narrow single-issue invalidate.
- *
- * `TCache` is the shape stored at the key (a list, a detail object, …); the
- * rollback context carries the exact key + prior value so onError restores
- * precisely what onMutate captured.
+ * The shared skeleton behind the optimistic-cache mutations here: cancel in-flight
+ * fetches on the target key, snapshot it, apply an optimistic `setQueryData` patch, roll
+ * the snapshot back on error, reconcile on settle. Wrappers differ only in `keyFor(args)`
+ * (the key is derived from the args AT MUTATE TIME, so a mid-flight repo/number/sha
+ * switch can never corrupt another key's cache), `patch`, and `reconcile`. `TCache` is
+ * the shape stored at the key; the rollback context carries the exact key + prior value.
  */
 function useOptimisticCacheMutation<TArgs, TData, TCache>(
   mutationFn: (args: TArgs) => Promise<TData>,
@@ -1155,13 +1108,10 @@ function useOptimisticCacheMutation<TArgs, TData, TCache>(
       _args: TArgs,
       ctx: { prev: TCache | undefined; key: QueryKey } | undefined,
     ) => {
-      // The explicit guard is deliberate: in TanStack Query v5,
-      // setQueryData(key, undefined) BAILS without updating (it does not
-      // remove the entry), so an unguarded call would be a silent no-op, not
-      // a rollback. A future "create from nothing" patch (prev === undefined,
-      // patch returns data) would need removeQueries here instead — but
-      // onSettled's reconcile invalidates immediately after, so there is no
-      // observable window today.
+      // Explicit guard: in TanStack Query v5 `setQueryData(key, undefined)` BAILS
+      // without updating (it does not remove the entry), so an unguarded call would be
+      // a silent no-op, not a rollback. A create-from-nothing patch would need
+      // removeQueries here instead.
       if (ctx?.prev !== undefined) queryClient.setQueryData(ctx.key, ctx.prev);
     },
     onSettled: (_d: TData | undefined, _e: unknown, args: TArgs) =>
@@ -1170,15 +1120,11 @@ function useOptimisticCacheMutation<TArgs, TData, TCache>(
 }
 
 /**
- * Optimistically append a synthetic commit comment to the commit-comments cache,
- * with exact-key rollback — mirroring {@link useOptimisticCreateCommentMutation}
- * for the flat commit-comment list. The synthetic row carries a collision-proof
- * `optimistic:<n>` id and `viewerDidAuthor: false` (so it offers no edit/delete
- * until the reconciliation refetch replaces it with the real comment). `author` is
- * the viewer's forge login when cheaply cached, else "You". The key is derived
- * from `sha` at mutate time so a mid-flight commit switch never corrupts another
- * key's cache; onSettled keeps the repo-wide invalidation as server-truth
- * reconciliation.
+ * Optimistically appends a synthetic commit comment with exact-key rollback. The
+ * synthetic row carries a collision-proof `optimistic:<n>` id and
+ * `viewerDidAuthor: false`, so it offers no edit/delete until the reconciling refetch
+ * replaces it with the real comment; `author` is the viewer's cached forge login, else
+ * "You".
  */
 export function useCreateCommitComment(repo: string, lens: RemoteLens) {
   const queryClient = useQueryClient();
@@ -1233,13 +1179,8 @@ export function useCreateCommitComment(repo: string, lens: RemoteLens) {
   });
 }
 
-/**
- * Optimistically patch the commit-comments cache (edit replaces one comment's
- * body; delete removes it) with exact-key rollback — the commit-comment analogue
- * of {@link useOptimisticCommentMutation}. The key is derived from `sha` at mutate
- * time so a mid-flight commit switch never corrupts another key's cache; onSettled
- * keeps the repo-wide invalidation as server-truth reconciliation.
- */
+/** Optimistic edit/delete of one commit comment with exact-key rollback — the
+ *  commit-comment analogue of {@link useOptimisticCommentMutation}. */
 function useOptimisticCommitCommentMutation<TData>(
   repo: string,
   lens: RemoteLens,
@@ -1299,13 +1240,10 @@ export function useDeleteCommitComment(repo: string, lens: RemoteLens) {
 }
 
 /**
- * Create a new file:line-anchored review thread, optimistically appending a
- * synthetic single-comment {@link ReviewThreadOut} to the review-threads cache
- * with exact-key rollback — so the thread card shows instantly instead of waiting
- * on the write + refetch. The synthetic thread carries a collision-proof
- * `optimistic:<n>` comment id and `viewerDidAuthor: false` (no edit/delete until
- * the reconciliation refetch replaces it); onSettled keeps the repo-wide
- * invalidation as server-truth reconciliation.
+ * Creates a file:line-anchored review thread, optimistically appending a synthetic
+ * single-comment {@link ReviewThreadOut} with exact-key rollback so the card shows
+ * instantly. The synthetic comment carries an `optimistic:<n>` id and
+ * `viewerDidAuthor: false` — no edit/delete until the reconciling refetch replaces it.
  */
 export function useCreateReviewThread(repo: string, lens: RemoteLens) {
   const queryClient = useQueryClient();
@@ -1414,11 +1352,8 @@ export function useThreadResolve(
   );
 }
 
-/**
- * Warms a remote PR's view (metadata + diff) so opening it is instant. PR data
- * comes over the network (the slowest loads in the app), so prefetching on row
- * hover and for the adjacent rows pays off most here.
- */
+/** Warms a remote PR's view (metadata + diff) on row hover and adjacent rows — PR data
+ *  is the slowest load in the app, so prefetching pays off most here. */
 export function usePrefetchPr(repo: string, lens: RemoteLens) {
   const queryClient = useQueryClient();
   return useCallback(
@@ -1445,11 +1380,10 @@ export function usePrReactions(
   });
 }
 
-/** A PR's activity timeline (force-pushes, label changes, review requests, state
- *  changes, approvals) for the Conversation tab. Provider-neutral (the backend
- *  dispatches per provider), so the caller passes
- *  `enabled = section === "conversation" && <a known remote provider>`; a hidden
- *  tab must NOT fetch. Decoupled from the PR view like {@link usePrReactions}. */
+/** A PR's activity timeline for the Conversation tab. Provider-neutral (the backend
+ *  dispatches), so the caller passes `enabled = section === "conversation" && <known
+ *  provider>` — a hidden tab must NOT fetch. Decoupled from the PR view like
+ *  {@link usePrReactions}. */
 export function usePrTimeline(
   repoPath: string,
   number: number,
@@ -1569,13 +1503,6 @@ export function useMilestones(
   });
 }
 
-/**
- * An issue meta mutation (assignee/milestone/type) with an optimistic patch of
- * the issue-details cache + rollback, so the sidebar updates instantly instead
- * of waiting on the PATCH + refetch. `patch` applies the new value locally; the
- * extra display fields callers pass (milestone title, the full type) are only
- * for this patch — the backend takes just the id/name.
- */
 /** Shallow-diff two objects, returning the keys whose value changed (`Object.is`).
  *  Lets an optimistic mutation capture exactly which fields it touched, so a
  *  rollback restores only those — never reverting a concurrent edit to a sibling
@@ -1588,6 +1515,10 @@ function changedKeys<T extends object>(prev: T, next: T): (keyof T)[] {
   return [...keys].filter((k) => !Object.is(prev[k], next[k]));
 }
 
+/** An issue meta mutation (assignee/milestone/type) with an optimistic patch of the
+ *  issue-details cache + field-scoped rollback. The extra display fields callers pass
+ *  (milestone title, the full type) exist only for that patch — the backend takes the
+ *  id/name. */
 function useOptimisticIssueMutation<TArgs extends { number: number }, TData>(
   repo: string,
   lens: RemoteLens,
@@ -1691,10 +1622,9 @@ export function useSetIssueDueDate(repo: string) {
 
 // ── GitLab time tracking + related issues ────────────────────────────────────
 
-// GitLab-only time-tracking / links keys. These surfaces are GitLab-only and the
-// lens switcher is GitHub-only, so they always live under the "origin" lens
-// segment — baked in so they stay nested under the (lens-scoped) issue/MR detail
-// subtree that repoKeys.all + the details refetch reconcile.
+// GitLab-only keys: the lens switcher is GitHub-only, so these always sit under the
+// "origin" lens segment — nested inside the lens-scoped issue/MR detail subtree that
+// repoKeys.all + the details refetch reconcile.
 const issueTimeStatsKey = (repo: string, number: number) =>
   ["repo", repo, "issue", "origin", number, "time-stats"] as const;
 const mrTimeStatsKey = (repo: string, number: number) =>
@@ -1723,13 +1653,10 @@ export function useGlMrTimeStats(repo: string, number: number | null) {
   });
 }
 
-/**
- * A time-tracking write (set-estimate / add-spent) whose response IS the fresh
- * {@link GitLabTimeStats}: on success we write it straight into the matching
- * time-stats query key (no refetch needed), then invalidate the issue/MR view
- * (the time estimate can surface elsewhere). `statsKey` picks the issue vs MR
- * cache; `viewKey` is the details query to nudge.
- */
+/** A time-tracking write whose response IS the fresh {@link GitLabTimeStats}: write it
+ *  straight into the stats key (no refetch), then invalidate the issue/MR view (the
+ *  estimate surfaces elsewhere). `statsKey` picks issue vs MR; `viewKey` is the details
+ *  query to nudge. */
 function useTimeTrackingMutation(
   repo: string,
   statsKey: (repo: string, number: number) => readonly unknown[],
@@ -1870,16 +1797,12 @@ export function useSetIssueType(repo: string, lens: RemoteLens) {
 }
 
 /**
- * An issue-lifecycle write (close/reopen/edit/pin/lock/unlock/transfer/delete)
- * that reconciles NARROWLY on settle instead of the whole-repo default: the one
- * issue's detail subtree (`["repo", repo, "issue", n]`, prefix-matched so its
- * reactions/relations/dependencies/development sub-queries refresh too) + every
- * issue-list state variant (`["repo", repo, "issue-list"]` — the list row shows
- * state/title/labels/assignees/pinned/locked, and transfer/delete change list
- * membership). `numberOf` extracts the issue number from the mutation args (the
- * arg shapes differ — a bare `number` vs `{ number, … }`). No optimistic patch:
- * these change fields the details view re-reads wholesale, so a scoped refetch is
- * the reconciliation.
+ * An issue-lifecycle write (close/reopen/edit/pin/lock/transfer/delete) that reconciles
+ * NARROWLY instead of whole-repo: the one issue's detail subtree (prefix-matched, so its
+ * reactions/relations/dependencies/development sub-queries refresh too) plus every
+ * issue-list state variant (row fields change, and transfer/delete change list
+ * membership). `numberOf` extracts the number because the arg shapes differ. No
+ * optimistic patch — these change fields the details view re-reads wholesale.
  */
 function useIssueLifecycleMutation<TArgs, TData>(
   repo: string,
@@ -1974,12 +1897,10 @@ function patchReactionList(
 }
 
 /**
- * Toggles the viewer's reaction with an optimistic cache update + rollback, so
- * the chip responds instantly instead of waiting on a refetch. `reactionsKey`
- * is the reactions query; `bodyId` is the issue/PR/discussion body's id
- * (anything else is a comment id). `opts` carries the GitLab-side subject
- * (containing issue/MR — GitHub keys purely on node ids and ignores it);
- * discussions are GitHub-only, so the default rides the GitHub arm untouched.
+ * Toggles the viewer's reaction with an optimistic cache update + rollback.
+ * `reactionsKey` is the reactions query; `bodyId` is the issue/PR/discussion body id
+ * (anything else is a comment id). `opts` carries the GitLab-side subject (containing
+ * issue/MR) — GitHub keys purely on node ids and ignores it.
  */
 export function useToggleReaction(
   repo: string,
@@ -2423,10 +2344,9 @@ export function useSwitchAccount() {
   return useMutation({
     mutationFn: (args: { host: string; login: string }) =>
       api.ghSwitchAccount(args.host, args.login),
-    // The active account changes what every gh query returns.
-    // Deliberately app-wide (no key filter): the collateral refetch of non-gh
-    // caches is accepted because account switches are rare, and correctness of
-    // every gh-derived answer wins over the narrow-invalidation policy elsewhere.
+    // Deliberately app-wide (no key filter): the active account changes every
+    // gh-derived answer, and switches are rare enough that the collateral refetch
+    // beats the narrow-invalidation policy used elsewhere.
     onSettled: () => queryClient.invalidateQueries(),
   });
 }
@@ -2604,9 +2524,9 @@ const NO_FORGE_STATUS: ForgeStatus = {
 };
 
 /**
- * Provider-neutral hosted-integration status — the gate every hosted panel reads.
- * GitHub delegates to the gh-backed probe; GitLab and Bitbucket join as their
- * impls land.
+ * Provider-neutral hosted-integration status — the gate every hosted panel reads
+ * (GitHub, GitLab and Bitbucket all dispatch behind it). Honors the cold-start test
+ * mode; the probe hits the real CLIs otherwise.
  */
 export function useForgeStatus(repo: string) {
   return useQuery({
@@ -2619,10 +2539,9 @@ export function useForgeStatus(repo: string) {
   });
 }
 
-/** Whether a repo's hosted integration is ready — its tooling is installed, signed
- *  in, and pointing at a recognized hosted repo. The provider-neutral gate hosted
- *  panels check before fetching or offering hosted actions, replacing the inline
- *  `gh.data?.installed && …` duplication. */
+/** Whether a repo's hosted integration is ready: tooling installed, signed in, and
+ *  pointing at a recognized hosted repo. The provider-neutral gate hosted panels check
+ *  before fetching or offering hosted actions. */
 export function forgeReady(status: ForgeStatus | undefined | null): boolean {
   return Boolean(status?.installed && status?.authenticated && status?.repo);
 }
@@ -2638,12 +2557,10 @@ export function forgeSupports(
   return Boolean(status?.capabilities[capability]);
 }
 
-/** Whether a specific hosted *feature* is usable for this repo: the integration is
- *  ready (installed/signed-in/recognized) **and** GitDesktop has actually built
- *  that feature for this provider. The gate every feature panel checks before
- *  firing its data calls. GitHub implements everything, so this is exactly
- *  `forgeReady` there; for a *ready* GitLab/Bitbucket repo it stays false for the
- *  panels not yet wired up, so they show "coming soon" instead of breaking. */
+/** Whether a hosted *feature* is usable here: the integration is ready AND GitDesktop
+ *  has built that feature for this provider. Exactly `forgeReady` on GitHub; false on a
+ *  *ready* GitLab/Bitbucket repo whose panel isn't wired yet, so it shows "coming
+ *  soon". */
 export function forgeFeatureReady(
   status: ForgeStatus | undefined | null,
   feature: keyof ForgeImplemented,
@@ -2789,10 +2706,9 @@ export function useRepoStarred(
   });
 }
 
-/** Star / unstar a repo, optimistically flipping the starred-query cache with
- *  exact-key snapshot/rollback (repo convention for remote-content mutations).
- *  The key is derived from the args at mutate time so a mid-flight repo switch
- *  never corrupts another repo's cache. */
+/** Star / unstar a repo, optimistically flipping the starred-query cache with exact-key
+ *  snapshot/rollback. The key is derived from the args at mutate time so a mid-flight
+ *  repo switch never corrupts another repo's cache. */
 export function useStarRepo() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -2832,12 +2748,10 @@ export function useForkRepoByName() {
 }
 
 /**
- * Builds a mutation that invalidates repo queries when it completes. By default
- * it invalidates the entire repo subtree (correct but broad) in `onSettled`;
- * pass `opts.invalidate` to narrow it for hot mutations (each key is
- * prefix-matched). Reserve the whole-subtree default for ops that touch history
- * or branch topology (checkout/pull/reset/merge). Pass `opts.refetchBeforeSuccess`
- * for commit, where the refetch must land before the caller's onSuccess.
+ * A mutation that invalidates repo queries on completion. Defaults to the whole repo
+ * subtree (correct but broad); pass `opts.invalidate` to narrow it for hot mutations
+ * (each key is prefix-matched). Reserve the whole-subtree default for ops that touch
+ * history or branch topology (checkout/pull/reset/merge).
  */
 function useRepoMutation<TArgs, TData>(
   repo: string,
@@ -2879,11 +2793,11 @@ export function useRemoteUrl(repo: string, name: string, enabled: boolean) {
     queryKey: ["repo", repo, "remote-url", name] as const,
     queryFn: () => api.gitRemoteUrl(repo, name),
     enabled,
-    // Consumed by the always-visible RepoLensSwitcher + CreatePrDialog via
-    // useRemoteSlug, so leave the house default (not Infinity): the Rust cache's
-    // short 5s TTL exists so an external `git remote set-url` is picked up
-    // promptly, and in-app edits invalidate this key eagerly (useSetRemoteUrl).
-    // Without this, every window focus re-spawned `git remote get-url` twice.
+    // Always-visible consumers (RepoLensSwitcher + CreatePrDialog via useRemoteSlug), so
+    // it needs a staleTime at all — without one every window focus re-spawned
+    // `git remote get-url` twice. Not Infinity: the Rust cache's 5s TTL exists so an
+    // external `git remote set-url` is picked up promptly, and in-app edits invalidate
+    // this key eagerly (useSetRemoteUrl).
     staleTime: 30_000,
   });
 }
@@ -2894,21 +2808,18 @@ export function useSetRemoteUrl(repo: string) {
   );
 }
 
-/** Adds a remote (e.g. `upstream` on a fork cloned without one). The default
- *  broad invalidation (`["repo", repo]`) prefix-covers the `remotes` and
- *  `remote-url` queries, so `useLensGate` re-reads and the fork/upstream UI
- *  lights up live once the remote exists. */
+/** Adds a remote (e.g. `upstream` on a fork cloned without one). The default broad
+ *  invalidation prefix-covers `remotes`/`remote-url`, so `useLensGate` re-reads and the
+ *  fork/upstream UI lights up live. */
 export function useAddRemote(repo: string) {
   return useRepoMutation(repo, (args: { name: string; url: string }) =>
     api.gitRemoteAdd(repo, args.name, args.url),
   );
 }
 
-/** Removes a remote (e.g. dropping `upstream` to detach a clone from the fork's
- *  parent). The default broad invalidation (`["repo", repo]`) prefix-covers the
- *  `remotes` and `remote-url` queries, so `useLensGate` re-reads and every
- *  fork-identity surface — the origin/upstream switcher, "Update from upstream",
- *  and "Create on parent" — collapses live once the remote is gone. */
+/** Removes a remote. The default broad invalidation prefix-covers
+ *  `remotes`/`remote-url`, so `useLensGate` re-reads and every fork-identity surface
+ *  collapses live. */
 export function useRemoveRemote(repo: string) {
   return useRepoMutation(repo, (args: { name: string }) =>
     api.gitRemoteRemove(repo, args.name),
@@ -3026,9 +2937,8 @@ export function useUnstage(repo: string) {
 }
 
 export function useCommit(repo: string) {
-  // refetchBeforeSuccess so the emptied changes list, cleared draft, and success
-  // toast land together instead of the toast firing while the list still shows
-  // old entries (react-query awaits the onSuccess refetch before the caller's).
+  // refetchBeforeSuccess: the emptied changes list, cleared draft, and toast land
+  // together.
   return useRepoMutation(
     repo,
     (args: { title: string; body?: string; amend?: boolean }) =>
@@ -3584,9 +3494,9 @@ export function useOrphanedStashes(repo: string, enabled = false) {
     queryKey: ["repo", repo, "orphaned-stashes"] as const,
     queryFn: () => api.gitOrphanedStashes(repo),
     enabled,
-    // fsck is slow: don't re-scan on every toggle back to the Recoverable view
-    // within a session (the Rescan button forces a fresh scan), and keep the
-    // list on screen during a refetch instead of blanking to the spinner.
+    // fsck is slow: don't re-scan on every toggle back to Recoverable (Rescan forces
+    // one), and keep the list on screen during a refetch instead of blanking to a
+    // spinner.
     staleTime: 60_000,
     placeholderData: keepPreviousDataForRepo(repo),
   });
@@ -3622,19 +3532,15 @@ export function useOrphanedStashFileDiff(
 }
 
 /** Restore an orphaned stash to the working tree (`git stash apply <sha>` — never
- *  drops). Default invalidation refetches the whole repo subtree, so the status
- *  and stash lists reflect the applied change. */
+ *  drops). Default whole-repo invalidation refreshes the status and stash lists. */
 export function useRestoreOrphaned(repo: string) {
   return useRepoMutation(repo, (sha: string) =>
     api.gitRestoreOrphaned(repo, sha),
   );
 }
 
-/**
- * Reconcile-on-read: renders the interrupted-op recovery banner. Lives under
- * the repo subtree, so a ConflictBanner Continue/Abort (a repo mutation) re-runs
- * it and clears the banner once the op is resolved.
- */
+/** Reconcile-on-read for the interrupted-op recovery banner. Lives under the repo
+ *  subtree, so a ConflictBanner Continue/Abort re-runs it and clears the banner. */
 export function useOplogCheck(repo: string, enabled = true) {
   return useQuery({
     queryKey: ["repo", repo, "oplog-check"] as const,
@@ -3706,11 +3612,8 @@ export function useRebaseOnto(repo: string) {
   );
 }
 
-/**
- * Ahead/behind of every local branch vs. `base`. Gated on `enabled` so it only
- * runs while the branch menu is open (it's N rev-list calls), and keyed under
- * the repo so branch mutations invalidate it.
- */
+/** Ahead/behind of every local branch vs `base`. Gated on `enabled` (it's N rev-list
+ *  calls) and keyed under the repo so branch mutations invalidate it. */
 export function useBranchDivergence(
   repo: string,
   base: string | null,
@@ -3812,9 +3715,10 @@ export function useCommentPr(repo: string, lens: RemoteLens) {
   );
 }
 
-/** A merge request's approval state — the GitLab-only approve/unapprove toggle's
- *  driver. Pass `null` when the toggle isn't shown (GitHub, or a closed MR) so the
- *  read doesn't fire. GitLab-only, so it lives under the "origin" lens segment. */
+/** A merge/pull request's approval state — the approve/unapprove toggle's driver
+ *  (GitLab + Bitbucket; GitHub approves via its Review menu, so `implemented.mrApprove`
+ *  is false there). Pass `null` when the toggle isn't shown so the read doesn't fire;
+ *  keyed under the "origin" lens segment (the lens switcher is GitHub-only). */
 export function usePrApprovals(repo: string, number: number | null) {
   return useQuery({
     queryKey: ["repo", repo, "pr", "origin", number ?? 0, "approvals"] as const,
@@ -3844,11 +3748,9 @@ export function usePrTasks(repo: string, number: number | null) {
   });
 }
 
-// PR-task mutations invalidate the exact tasks key onSettled (keyed on the PR number
-// carried in the mutation args); the component patches its own local state
-// optimistically (like toggleApproval), so no optimistic logic lives in the hook.
-// Bitbucket-only surface, so it lives under the "origin" lens segment (the lens
-// switcher is GitHub-only).
+// PR-task mutations invalidate the exact tasks key onSettled; the component patches its
+// own local state optimistically (like toggleApproval), so no optimistic logic lives in
+// the hooks. Bitbucket-only, so the key sits under the "origin" lens segment.
 export const prTasksKey = (repo: string, number: number) =>
   ["repo", repo, "pr", "origin", number, "tasks"] as const;
 
@@ -3924,12 +3826,10 @@ export function useUnrequestChangesPr(repo: string) {
   );
 }
 
-/** Toggle a PR's draft state both ways, for all three providers (Bitbucket PUT,
- *  GitLab `glab mr update`, GitHub `gh pr ready [--undo]`). `lens` threads the
- *  fork identity through to the GitHub arm. Optimistically patches the PR detail's
- *  `isDraft` with field-scoped rollback (mirroring `useSetPrAssignees`) so the
- *  badge flips instantly; the repo-wide invalidate on settle reconciles server
- *  truth and refreshes the merge gate. */
+/** Toggle a PR/MR's draft state both ways on all three providers. `lens` threads the
+ *  fork identity through to the GitHub arm. Optimistically patches `isDraft` with
+ *  field-scoped rollback so the badge flips instantly; the repo-wide invalidate on
+ *  settle reconciles server truth and refreshes the merge gate. */
 export function useSetPrDraft(repo: string, lens: RemoteLens) {
   const queryClient = useQueryClient();
   return useMutation({
@@ -3955,8 +3855,6 @@ export function useSetPrDraft(repo: string, lens: RemoteLens) {
         cur ? { ...cur, isDraft: prevIsDraft } : cur,
       );
     },
-    // Repo-wide reconcile (what useRepoMutation's default gave before this went
-    // optimistic) so the PR badge AND the merge gate both refresh on settle.
     onSettled: () =>
       queryClient.invalidateQueries({ queryKey: repoKeys.all(repo) }),
   });
@@ -3988,13 +3886,9 @@ export function useReviewerCandidates(
   });
 }
 
-/**
- * Replace an MR's reviewer list (all three providers, gated on
- * `implemented.mrReviewers`) with an optimistic patch of the PR-details cache +
- * rollback, mirroring `useSetPrAssignees` — the picker's chips update instantly
- * instead of waiting on the PUT + refetch. The list is the picker's HUMAN set;
- * bot/team requests never travel through it (preserved provider-side).
- */
+/** Replace an MR's reviewer list (all three providers, `implemented.mrReviewers`) with
+ *  an optimistic PR-details patch + field-scoped rollback. The list is the picker's
+ *  HUMAN set; bot/team requests never travel through it (preserved provider-side). */
 export function useSetPrReviewers(repo: string, lens: RemoteLens) {
   const queryClient = useQueryClient();
   return useMutation({
@@ -4032,12 +3926,9 @@ export function useSetPrReviewers(repo: string, lens: RemoteLens) {
   });
 }
 
-/**
- * Set a PR/MR's assignees (GitHub + GitLab, gated on `implemented.mrAssignees`)
- * with an optimistic patch of the PR-details cache + rollback, mirroring
- * `useSetIssueAssignees` — the picker's chips update instantly instead of
- * waiting on the PATCH/PUT + refetch (the CLI spawns a process per call).
- */
+/** Set a PR/MR's assignees (GitHub + GitLab, gated on `implemented.mrAssignees`) with an
+ *  optimistic PR-details patch + field-scoped rollback — the CLI spawns a process per
+ *  call, so waiting on the round trip is visible. */
 export function useSetPrAssignees(repo: string, lens: RemoteLens) {
   const queryClient = useQueryClient();
   return useMutation({
@@ -4094,20 +3985,12 @@ export function useMergePr(repo: string, lens: RemoteLens) {
         args.sha,
         lens,
       );
-      // The remote just advanced (and, on a deleteBranch merge, dropped the
-      // head branch), but the local repo is now stale — ahead/behind, history,
-      // and remote-tracking refs won't reflect the merge until the next fetch.
-      // Kick off a background fetch so they catch up automatically instead of
-      // waiting on a manual header-Fetch click. NOT awaited: the "Merged #N"
-      // toast in RemotePrView must fire the moment the merge resolves, not stall
-      // behind a network round-trip. Silent best-effort: the merge already
-      // succeeded, so a red/warning toast for a transient fetch failure would
-      // misreport it (same false-failure class as the cleanup_warning fix), and
-      // the header Fetch button stays the manual fallback. `git_fetch` runs
-      // `git fetch --prune`, so a deleteBranch merge also drops the now-stale
-      // remote-tracking ref. The extra invalidation surfaces the git-side
-      // changes; the mutation's own default invalidation (which fires
-      // immediately) refreshes the forge-side PR state.
+      // The remote advanced but the local repo is now stale (ahead/behind, history,
+      // tracking refs). Kick off a background `git fetch --prune` so they catch up —
+      // NOT awaited, so the "Merged #N" toast fires the moment the merge resolves, and
+      // silent: the merge already succeeded, so a failure toast would misreport it
+      // (header Fetch stays the manual fallback). The mutation's own invalidation
+      // refreshes the forge-side PR state.
       void api
         .gitFetch(repo)
         .then(() =>
@@ -4130,14 +4013,11 @@ export const PIPELINE_IN_FLIGHT = [
   "running",
 ] as const;
 
-/** A GitLab MR's merge/auto-merge state — drives the auto-merge dropdown items
- *  and the "auto-merge enabled" footer indicator. Pass `null` when auto-merge
- *  isn't shown (GitHub, or a closed MR) so the read doesn't fire.
- *
- *  Polls: the merge fires SERVER-side once the pipeline passes, so the view has
- *  to notice both the pipeline completing (which un-gates / re-gates the arm
- *  affordance) and the auto-merge itself — neither emits a client event. Poll
- *  fast while armed or a pipeline is in flight, slowly otherwise. */
+/** A GitLab MR's merge/auto-merge state — the auto-merge dropdown + "auto-merge
+ *  enabled" footer. Pass `null` when auto-merge isn't shown so the read doesn't fire.
+ *  Polls because the merge fires SERVER-side once the pipeline passes and neither the
+ *  pipeline completing nor the auto-merge emits a client event: fast while armed or a
+ *  pipeline is in flight, slow otherwise. */
 export function useGlMrMergeState(repo: string, number: number | null) {
   return useQuery({
     queryKey: ["repo", repo, "pr", number ?? 0, "gl-merge-state"] as const,
@@ -4213,26 +4093,18 @@ export function useReopenPr(repo: string, lens: RemoteLens) {
 let optimisticCommentSeq = 0;
 
 /**
- * Optimistically append a synthetic conversation comment to a PR/issue detail
- * cache, with exact-key rollback — so a freshly-posted comment shows instantly
- * instead of waiting on the write + repo-wide refetch (a full glab round trip is
- * ~2-4s on GitLab). The synthetic row carries a collision-proof `optimistic:<n>`
- * id and `viewerDidAuthor: false`, so it offers no edit/delete (its temp id would
- * 404 server-side); the reconciliation refetch replaces it with the real comment,
- * whose real controls then appear. `author` is the viewer's login when the caller
- * has it cheaply, else "You". Only the flat `comments` array is touched; inline
- * review threads live in a separate query. The key is derived from the mutation
- * args at mutate time so a mid-flight repo/number switch never corrupts another
- * key's cache. onSettled keeps the repo-wide invalidation as server-truth
- * reconciliation (what useRepoMutation did before).
+ * Optimistically appends a synthetic conversation comment to a PR/issue detail cache
+ * with exact-key rollback (a full glab round trip is ~2-4s). The synthetic row carries a
+ * collision-proof `optimistic:<n>` id and `viewerDidAuthor: false`, so it offers no
+ * edit/delete (its temp id would 404 server-side); the reconciling refetch replaces it.
+ * Only the flat `comments` array is touched — inline review threads live in another
+ * query.
  */
 function useOptimisticCreateCommentMutation<TData>(
   repo: string,
   kind: "pr" | "issue",
   lens: RemoteLens,
-  // `asBot` is threaded through for the PR path (posts as the review-bot identity
-  // on GitLab; ignored elsewhere). Optional + additive — the issue path and the
-  // existing PR callers never pass it, so their behavior is unchanged.
+  // `asBot` posts as the configured GitLab review-bot identity (ignored elsewhere).
   mutationFn: (args: {
     number: number;
     body: string;
@@ -4270,15 +4142,10 @@ function useOptimisticCreateCommentMutation<TData>(
 }
 
 /**
- * Optimistically patch the flat conversation comments of a PR/issue detail cache
- * (edit replaces one comment's body; delete removes it), with exact-key rollback
- * — so the body swaps / row vanishes instantly instead of waiting on the write +
- * repo-wide refetch (a full glab round trip is ~2-4s on GitLab). Only the flat
- * `comments` array is touched; inline review threads live in a separate query and
- * aren't editable here. `kind` selects the detail subtree ("pr" | "issue"); the
- * key is derived from the mutation args at mutate time so a mid-flight repo/number
- * switch never corrupts another key's cache. onSettled keeps the repo-wide
- * invalidation as server-truth reconciliation (what useRepoMutation did before).
+ * Optimistic edit/delete of a flat conversation comment on a PR/issue detail cache, with
+ * exact-key rollback (a glab round trip is ~2-4s). Only the flat `comments` array is
+ * touched; inline review threads live in a separate query and aren't editable here.
+ * `kind` selects the detail subtree ("pr" | "issue").
  */
 function useOptimisticCommentMutation<
   TArgs extends { number: number; commentId: string },
@@ -4354,14 +4221,9 @@ export function useDeleteIssueComment(repo: string, lens: RemoteLens) {
 }
 
 /**
- * Optimistically patch the NESTED comments of the review-threads cache (edit
- * replaces one comment's body; delete removes it, dropping a thread that empties)
- * with exact-key rollback — mirroring {@link useOptimisticCommentMutation} for the
- * flat conversation comments, but one level down (thread → comments). `commentId`
- * is unique across threads (provider comment ids), so no threadId is needed. The
- * key is derived from the mutation args at mutate time so a mid-flight
- * repo/number switch never corrupts another key's cache; onSettled keeps the
- * repo-wide invalidation as server-truth reconciliation.
+ * Optimistic edit/delete one level down (thread → comments) in the review-threads cache,
+ * with exact-key rollback; a delete that empties a thread drops the thread. `commentId`
+ * is unique across threads (provider comment ids), so no threadId is needed.
  */
 function useOptimisticReviewCommentMutation<
   TArgs extends { number: number; commentId: string },
@@ -4457,7 +4319,6 @@ export function useSetRepoStar(repo: string) {
   const key = ["repo", repo, "star-status"] as const;
   return useMutation({
     mutationFn: (starred: boolean) => api.forgeRepoSetStar(repo, starred),
-    // Optimistic: flip the cached star state at once, roll back on failure.
     onMutate: async (starred: boolean) => {
       await queryClient.cancelQueries({ queryKey: key });
       const previous = queryClient.getQueryData<boolean>(key);
@@ -4494,12 +4355,11 @@ export function useGhScopes(host?: string) {
   });
 }
 
-/** The real avatar URL for a GitHub bot (dependabot, renovate, …), resolved via
- *  `gh api users/<name>[bot]` since bot logins have no `<host>/<login>.png`.
- *  Pass the bare bot name from {@link botLoginName}, or `null` for a non-bot /
- *  off-GitHub handle (disabled — no lookup). The URL is stable, so it's cached
- *  hard; `retry: false` keeps a 404 / offline miss from a retry storm — the
- *  caller falls back to initials on `""`. */
+/** The real avatar URL for a GitHub bot, via `gh api users/<name>[bot]` — bot logins
+ *  have no `<host>/<login>.png`. Pass the bare name from {@link botLoginName}, or `null`
+ *  for a non-bot / off-GitHub handle. Cached hard (the URL is stable); `retry: false`
+ *  keeps a 404/offline miss from a retry storm — the caller falls back to initials on
+ *  `""`. */
 export function useBotAvatarUrl(name: string | null) {
   return useQuery({
     queryKey: ["bot-avatar", name] as const,
@@ -4511,16 +4371,12 @@ export function useBotAvatarUrl(name: string | null) {
   });
 }
 
-/** Batch-resolve commit-author `email → GitHub avatar` for a repo's recent-commits
- *  window and prime the commit-avatar module, so History rows for human authors
- *  whose email isn't a GitHub no-reply and has no Gravatar upgrade from initials.
- *  Call once from each History surface (react-query dedupes by key). GitHub-only:
- *  gated on the repo being open AND its detected provider being GitHub, so a
- *  GitLab/Bitbucket repo never fires the commits-API call. Unlike
- *  {@link useBotAvatarUrl}'s infinite staleTime (a bot's avatar URL is stable), the
- *  recent-commits window shifts as commits land, so this goes stale after 15min
- *  and re-primes newer authors. Best-effort decoration — `retry: false` and the
- *  backend never errors (empty repo / offline → `[]`). */
+/** Batch-resolves commit-author `email → GitHub avatar` for the recent-commits window
+ *  and primes the commit-avatar module, so History rows for authors with no GitHub
+ *  no-reply and no Gravatar upgrade from initials. GitHub-only (gated on the detected
+ *  provider, so a GitLab/Bitbucket repo never fires the commits API). 15min staleTime —
+ *  the window shifts as commits land. Best-effort: `retry: false`, and the backend
+ *  returns `[]` on empty-repo/offline. */
 export function useCommitAuthorAvatarIndex(repo: string) {
   const provider = useForgeStatus(repo).data?.provider;
   const query = useQuery({
@@ -4919,11 +4775,10 @@ export function useGlMemberProjects(repo: string, enabled: boolean) {
   });
 }
 
-// ── Bitbucket settings surface (wave 2/3) ──────────────────────────────────
-//
-// Mirrors the useGl* hooks: repo-keyed reads with staleTime + retry:false, and
-// mutations that invalidate their read on onSettled. The workspaces list is
-// account-scoped (not repo-keyed).
+// ── Bitbucket settings surface ─────────────────────────────────────────────
+// Mirrors the useGl* hooks: repo-keyed reads (staleTime + retry:false) and mutations
+// that invalidate their read onSettled. The workspaces list is account-scoped, not
+// repo-keyed.
 
 /** The viewer's Bitbucket workspaces — the publish target picker. Account-scoped,
  *  so it's NOT repo-keyed; cached broadly since workspaces rarely change. */
@@ -5126,11 +4981,10 @@ export function useBbSchedules(repo: string, enabled: boolean) {
   });
 }
 
-// Create does NOT invalidate immediately: like pipeline variables, the schedules
-// LIST lags a write by ~1s (server replication), so an immediate refetch returns a
-// list WITHOUT the new row and keeps the empty state until a later manual refetch.
-// The caller upserts the row into the cache and schedules ONE delayed invalidate to
-// reconcile the real server row/uuid. Toggle/delete keep their invalidate below.
+// Create does NOT invalidate immediately — same ~1s Bitbucket list-replication lag as
+// pipeline variables (see useBbCreateVariable): the refetch would return a list WITHOUT
+// the new row. The caller upserts the row and schedules ONE delayed invalidate.
+// Toggle/delete keep their immediate invalidate below.
 export function useBbCreateSchedule(repo: string) {
   return useMutation({
     mutationFn: (a: {
@@ -5611,15 +5465,11 @@ export function useEditPr(repo: string, lens: RemoteLens) {
   );
 }
 
-/** Add/remove labels on an issue, MR, or GitHub Discussion.
- *  GitHub uses the node-id path (`labelableId` + `addIds`/`removeIds`); GitLab uses
- *  names (`target` + `number` + `addNames`/`removeNames`). `kind` is the reconcile
- *  discriminator (the args carry no reliable entity id otherwise); `number` every
- *  entity has — for the GitHub node-id path it is used only for invalidation, so a
- *  discussion still sends `0` on the wire (byte-identical to the old default). The
- *  wire `target` derives from `kind`: issue→"issue", mr→"mr", discussion→"issue"
- *  (the old default). Reconciles per-kind on settle instead of the whole-repo
- *  default, since the args now carry a reliable discriminator. */
+/** Add/remove labels on an issue, MR, or GitHub Discussion. GitHub uses the node-id path
+ *  (`labelableId` + `addIds`/`removeIds`); GitLab uses names (`target` + `number` +
+ *  `addNames`/`removeNames`). `kind` is the reconcile discriminator and picks the wire
+ *  `target` (issue→"issue", mr→"mr", discussion→"issue" with number 0, which the node-id
+ *  path ignores). Reconciles per-kind on settle instead of whole-repo. */
 export function useEditPrLabels(repo: string, lens: RemoteLens) {
   const queryClient = useQueryClient();
   return useMutation({

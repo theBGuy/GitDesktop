@@ -72,7 +72,7 @@ export const jiraIssueList = (
 export const jiraIssueView = (site: string, key: string) =>
   invoke<JiraIssueDetails>("jira_issue_view", { site, key });
 
-// ── Write path (phase 2) ────────────────────────────────────────────────────
+// ── Write path ──────────────────────────────────────────────────────────────
 
 /** The linked project's per-project write permissions (server-resolved). Every
  *  flag gates one affordance; a failed probe should be treated as all-false by
@@ -153,7 +153,7 @@ export const jiraIssueAssign = (
 export const jiraUserSearch = (site: string, key: string, query: string) =>
   invoke<ForgeUserRef[]>("jira_user_search", { site, key, query });
 
-// ── Write path (phase 5): due date · priority · labels · comment edit/delete ──
+// ── Write path: due date · priority · labels · comment edit/delete ────────────
 
 /** The site's priority scheme (`/priority`), for the priority picker. */
 export const jiraPriorities = (site: string) =>
@@ -200,10 +200,10 @@ export const jiraCommentDelete = (
   commentId: string,
 ) => invoke<void>("jira_comment_delete", { site, key, commentId });
 
-// ── Write path (phase 6): time tracking (estimates + worklogs) ────────────────
+// ── Write path: time tracking (estimates + worklogs) ──────────────────────────
 // Jira DERIVES these values server-side (adding a worklog decrements remaining,
-// setting original initializes remaining, …), so — unlike the phase-5 field
-// writes — the frontend does NOT patch optimistically; it re-fetches the issue.
+// setting original initializes remaining, …), so — unlike the field writes
+// above — the frontend does NOT patch optimistically; it re-fetches the issue.
 
 /** Set (`"2d"`) or clear (`null`) the issue's original estimate. Clearing while
  *  worklogs exist snaps the original to the current remaining (server behavior). */
