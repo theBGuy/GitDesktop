@@ -89,6 +89,17 @@ chore(deps): bump tauri to 2.x
 Common scopes mirror the feature areas: `repos`, `changes`, `branches`, `history`,
 `pulls`, `actions`, `hooks`, `ai`, `github`, `diff`, `ui`, `settings`, `site`.
 
+### Code comments
+
+Write comments as constraint-statements: the decision plus one sentence of why —
+three lines is plenty for almost anything. A comment earns its place by saying
+something the code can't: an invariant, a deliberately non-obvious choice, a
+cross-module contract, or hard-won external-API/platform behavior. Skip what the
+git history already owns (what the code used to do, which PR changed it, how a
+bug was found), don't narrate the next lines, and don't argue the change is
+correct — that's for the PR description. When you touch a file, trimming its
+comments to this standard in passing is welcome.
+
 ### Changelog
 
 For any **user-facing** change, add a **changelog fragment** — a small Markdown

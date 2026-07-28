@@ -55,6 +55,12 @@ pnpm changelog:preview  # preview pending changelog.d/ fragments
 ## A few house rules (see CONTRIBUTING.md for the rest)
 
 - **Conventional Commits** with a scope: `feat(github,issues): …`, `fix(diff): …`.
+- **Comments state constraints, concisely** — the decision plus one sentence of why
+  (≤3 lines typical). Write only what the code can't show: invariants, deliberate
+  non-obvious choices, cross-module contracts, hard-won external-API/platform
+  behavior. Never change-history or PR references (commit messages own the story),
+  never narrate the next lines or argue the diff is correct. Trim any comment you
+  touch to this standard.
 - **Don't edit `src/components/ui/`** — those are vendored shadcn/Base UI primitives;
   fix at the feature/call-site level.
 - **Keyboard-first, WCAG AA** — wire arrow-key nav for any new selectable list in the

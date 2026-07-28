@@ -53,6 +53,18 @@ files as an error — a red result that isn't yours. To verify YOUR change, run
 `git diff --numstat` (content-only edits show small, balanced counts; a whole-file
 EOL flip shows huge matched +/−). Never "fix" it by converting line endings.
 
+## Code comments
+
+Constraint-statements only: the decision + one sentence of why (≤3 lines
+typical, ~6 for genuinely multi-constraint blocks). KEEP-class content:
+invariants, ordering/locking rules, deliberate non-obvious choices, cross-module
+and IPC contracts, empirically-learned external-API/platform behavior, public-API
+doc contracts. NEVER: what the code used to do or replaced, PR/issue/review
+references, how a bug was caught, worked numeric examples where the principle
+sentence suffices, narrating the next line, arguing the change is correct (the
+commit message and PR own the story). Trim any comment you touch to this
+standard.
+
 ## Frontend conventions
 
 **React best practices.** Before writing or refactoring any React component or
