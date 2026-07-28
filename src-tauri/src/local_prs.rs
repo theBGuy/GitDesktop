@@ -12,8 +12,8 @@
 //! `BaseDirectory::AppData` (its `store.rs::resolve_store_path`), and Tauri's `AppData`
 //! resolver is `dirs::data_dir()/<identifier>` with our identifier
 //! `com.thebguy.gitdesktop` — i.e. `%APPDATA%\com.thebguy.gitdesktop\local-prs.json`
-//! on Windows, `~/Library/Application Support/<id>/` on macOS, `$XDG_DATA_HOME` (or
-//! `~/.local/share`)`/<id>/` on Linux. We resolve it here with the SAME
+//! on Windows, `~/Library/Application Support/<id>/` on macOS, `$XDG_DATA_HOME/<id>/`
+//! (or `~/.local/share/<id>/`) on Linux. We resolve it here with the SAME
 //! `dirs::data_dir()`, so the two processes always agree on the file. Always the real
 //! `local-prs.json` name — the frontend's cold-start `coldstart-` alias is GUI-only.
 //!

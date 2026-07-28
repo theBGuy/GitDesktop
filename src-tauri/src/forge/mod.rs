@@ -1569,9 +1569,9 @@ pub async fn forge_pr_edit(
     }
 }
 
-/// The viewer's + the MR's approval state, behind the abstraction. GitLab-only:
-/// GitHub surfaces approval through the review flow (`reviewDecision` + the Review
-/// menu), so its arm errors — the frontend gates this on `implemented.mrApprove`
+/// The viewer's + the MR's approval state, behind the abstraction. GitLab and
+/// Bitbucket: GitHub surfaces approval through the review flow (`reviewDecision` +
+/// the Review menu), so its arm errors — the frontend gates this on `implemented.mrApprove`
 /// (false for GitHub), so it's never reached there.
 #[tauri::command]
 pub async fn forge_pr_approvals(
@@ -3570,7 +3570,8 @@ mod tests {
     fn only_canonical_hosts_route_away_from_github() {
         assert_eq!(provider_for_host("gitlab.com"), Some(Provider::GitLab));
         assert_eq!(provider_for_host("bitbucket.org"), Some(Provider::Bitbucket));
-        // GitHub.com + Enterprise + self-managed GitLab → None (gh / Phase 1 decide).
+        // GitHub.com + Enterprise + self-managed GitLab → None: gh's own detection stays
+        // authoritative for GitHub; self-managed GitLab resolves later in `detect_non_github`.
         assert_eq!(provider_for_host("github.com"), None);
         assert_eq!(provider_for_host("github.acme.com"), None);
         assert_eq!(provider_for_host("gitlab.acme.com"), None);

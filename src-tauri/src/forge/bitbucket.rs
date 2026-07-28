@@ -6724,7 +6724,7 @@ definitions:
         assert_eq!(user_login(&parsed.reviewers[0]), "Rev One");
     }
 
-    // ── Wave 2/3 (publish + repo management) unit tests ─────────────────────────
+    // ── Publish + repo management unit tests ────────────────────────────────────
 
     #[test]
     fn publish_body_omits_empty_description_and_website() {

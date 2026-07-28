@@ -2065,8 +2065,8 @@ export const forgePrComment = (
     lens,
   });
 
-// MR approve/unapprove and request-changes are GitLab-only controls (GitHub does
-// both via its Review menu); the approvals read drives their states.
+// MR approve/unapprove and request-changes are GitLab + Bitbucket controls (GitHub
+// does both via its Review menu); the approvals read drives their states.
 export const forgePrApprovals = (repoPath: string, number: number) =>
   invoke<ApprovalState>("forge_pr_approvals", { repoPath, number });
 

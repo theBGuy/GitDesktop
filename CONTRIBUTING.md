@@ -97,8 +97,10 @@ something the code can't: an invariant, a deliberately non-obvious choice, a
 cross-module contract, or hard-won external-API/platform behavior. Skip what the
 git history already owns (what the code used to do, which PR changed it, how a
 bug was found), don't narrate the next lines, and don't argue the change is
-correct — that's for the PR description. When you touch a file, trimming its
-comments to this standard in passing is welcome.
+correct — that's for the PR description. Genuinely multi-constraint blocks may
+run to ~6 lines, and measured figures a later reader would otherwise have to
+re-measure (payload sizes, timed runs) may stay and cite their source. When you
+touch a file, trimming its comments to this standard in passing is welcome.
 
 ### Changelog
 

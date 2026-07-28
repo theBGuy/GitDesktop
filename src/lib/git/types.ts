@@ -692,11 +692,11 @@ export interface ForgeImplemented {
    *  approves through its Review menu instead, so it's false there. */
   mrApprove: boolean;
   /** Merging a merge/pull request (strategy + delete-source-branch) — a shared
-   *  control, so true for both GitHub and GitLab. */
+   *  control on all three providers. */
   mrMerge: boolean;
   /** Arming merge-when-pipeline-succeeds (auto-merge) on an MR while its head
-   *  pipeline is in flight — GitLab-only like `mrApprove` (GitHub has no in-app
-   *  PR auto-merge), so it's false for GitHub. */
+   *  pipeline is in flight — GitLab-only (GitHub has no in-app PR auto-merge),
+   *  so it's false elsewhere. */
   mrAutoMerge: boolean;
   /** Editing labels on an issue — a shared control (GitHub by node id, GitLab by
    *  name), so true for both. */

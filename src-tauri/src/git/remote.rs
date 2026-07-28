@@ -1132,7 +1132,7 @@ mod tests {
             Some((format!("origin/{def}"), "origin".into(), false))
         );
         // Prefix: `for-each-ref refs/heads/feat` matches `feat/sub`, whose refname
-        // isn't `refs/heads/feat` → None (the round-3 exact-match guard, end to end).
+        // isn't `refs/heads/feat` → None (the exact-match guard, end to end).
         assert_eq!(track("feat").await, None);
 
         // Gone upstream: track origin/<def>, then delete the remote-tracking ref so

@@ -259,8 +259,8 @@ export function RemotePrView({
   const mergePr = useMergePr(repoPath, lens);
   const closePr = useClosePr(repoPath, lens);
   const reopenPr = useReopenPr(repoPath, lens);
-  // Approval + reviewer state drives the GitLab-only approve toggle and
-  // Request-changes control; only fetched for a ready GitLab repo with an open MR
+  // Approval + reviewer state drives the approve toggle and Request-changes
+  // control (GitLab + Bitbucket); only fetched for a ready repo with an open MR
   // (null disables the read for GitHub / closed MRs).
   const approvals = usePrApprovals(
     repoPath,
@@ -525,8 +525,8 @@ export function RemotePrView({
   async function toggleApproval() {
     const approved = approvals.data?.viewerHasApproved ?? false;
     const action = approved ? unapprovePr : approvePr;
-    // Must mirror usePrApprovals' key exactly — GitLab-only, so the lens segment
-    // is the literal "origin" there; a mismatch makes this optimistic flip a no-op.
+    // Must mirror usePrApprovals' key exactly — its lens segment is always the
+    // literal "origin"; a mismatch makes this optimistic flip a no-op.
     const key = [
       "repo",
       repoPath,
@@ -834,7 +834,7 @@ export function RemotePrView({
   );
   const autoMergeArmed = mergeState.data?.autoMergeEnabled ?? false;
 
-  // Approval display (GitLab-only): a quiet count shown only when there's something
+  // Approval display (GitLab + Bitbucket): a quiet count shown only when there's something
   // to report — someone has approved, or a Premium project requires N approvals.
   const approval = approvals.data;
   const approvalNote =

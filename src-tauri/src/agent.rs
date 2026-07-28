@@ -76,7 +76,7 @@ fn timeout_message(noun: &str, timeout: Duration, hint: bool) -> String {
 }
 
 /// Which agent CLI to drive. Frontend sends `"claude"` / `"codex"` / `"copilot"` /
-/// `"opencode"`; all four run reviews + sessions, host or container.
+/// `"opencode"`; all four run reviews (host) and sessions (host or container).
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum AgentKind {

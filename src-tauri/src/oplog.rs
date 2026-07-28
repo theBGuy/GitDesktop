@@ -15,7 +15,7 @@
 //! `opslog.json` is resolved with the SAME `dirs::data_dir()` the Tauri path layer
 //! uses, joined with the bundle identifier (mirroring `local_prs.rs`):
 //! `%APPDATA%\com.thebguy.gitdesktop\` on Windows, `~/Library/Application
-//! Support/<id>/` on macOS, `$XDG_DATA_HOME` (or `~/.local/share`)`/<id>/` on Linux.
+//! Support/<id>/` on macOS, `$XDG_DATA_HOME/<id>/` (or `~/.local/share/<id>/`) on Linux.
 //!
 //! ## Value-based round-trip (never drop unknown fields)
 //!

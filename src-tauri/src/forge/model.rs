@@ -816,15 +816,16 @@ mod tests {
         // GitHub edits/deletes both PR and issue conversation comments, plus
         // review-thread comments (PullRequestReviewComment nodes).
         assert!(gh.mr_comment_edit && gh.issue_comment_edit && gh.mr_thread_comment_edit);
-        // MR merge is a shared control (both providers); approve/unapprove is the one
-        // GitLab-only write — GitHub approves via the review flow, not this toggle.
+        // MR merge is shared by all three providers; the bodyless approve/unapprove
+        // toggle is GitLab + Bitbucket — GitHub approves through the review flow, not
+        // this toggle.
         assert!(gh.mr_merge && !gh.mr_approve);
         // Auto-merge is GitLab-only (no in-app GitHub PR auto-merge).
         assert!(!gh.mr_auto_merge);
         let bb = Implemented::for_provider(Provider::Bitbucket);
-        // Bitbucket reads that ARE built (Phase 3): PRs, CI pipelines, repo actions.
+        // Bitbucket reads that ARE built: PRs, CI pipelines, repo actions.
         assert!(bb.pull_requests && bb.ci && bb.repo_actions);
-        // Phase 4 PR writes: comment, decline (mr_state), merge, edit, create, and the
+        // PR writes: comment, decline (mr_state), merge, edit, create, and the
         // bodyless approve/unapprove toggle.
         assert!(bb.mr_comment && bb.mr_state && bb.mr_merge && bb.mr_edit && bb.mr_create);
         assert!(bb.mr_approve);
@@ -834,9 +835,9 @@ mod tests {
         assert!(bb.mr_request_changes && bb.mr_reviewers);
         // …and pipeline rerun / cancel / dispatch.
         assert!(bb.ci_rerun && bb.ci_cancel && bb.ci_dispatch);
-        // …plus wave 2/3: insights, publish, and the repo-settings surface.
+        // …plus insights, publish, and the repo-settings surface.
         assert!(bb.insights && bb.publish && bb.repo_settings);
-        // …and wave 4's Bitbucket-only PR-tasks checklist.
+        // …and the Bitbucket-only PR-tasks checklist.
         assert!(bb.pr_tasks);
         // …but issues and releases stay off.
         assert!(!bb.issues && !bb.releases);

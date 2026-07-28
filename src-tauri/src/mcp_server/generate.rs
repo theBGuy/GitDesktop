@@ -1230,7 +1230,7 @@ impl GitDesktopMcp {
         .unwrap_or_default();
 
         // Labels are best-effort: a forge error omits the section entirely rather
-        // than failing the tool (mirrors the spec's best-effort contract).
+        // than failing the tool.
         let available_labels = crate::forge::forge_repo_labels(self.repo.clone(), None)
             .await
             .map(|labels| {

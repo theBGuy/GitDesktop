@@ -3501,13 +3501,13 @@ mod tests {
         assert!(p.create_issues);
         // Absent key → false, never an error.
         assert!(!p.assign_issues);
-        // The phase-5 keys each defend independently.
+        // Each permission key defends independently.
         assert!(p.schedule_issues);
         assert!(!p.edit_issues);
         assert!(p.edit_own_comments);
         // Absent key → false.
         assert!(!p.delete_own_comments);
-        // The phase-6 worklog keys: present-true, present-false, absent-false.
+        // The worklog keys: present-true, present-false, absent-false.
         assert!(p.work_on_issues);
         assert!(!p.edit_own_worklogs);
         assert!(!p.delete_own_worklogs);
@@ -4288,7 +4288,7 @@ mod tests {
     #[test]
     fn map_comment_populates_updated_at_when_present() {
         // A comment whose `updated` differs from `created` (an edited comment) populates
-        // `updated_at`; B5 shows the "(edited)" cue from that.
+        // `updated_at`; the UI shows the "(edited)" cue from it.
         let edited = json!({
             "id": "10001",
             "author": { "accountId": "a1", "displayName": "Bob" },
