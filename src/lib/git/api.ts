@@ -1402,22 +1402,26 @@ export const forgeCommitCommentCreate = (
 export const forgeCommitCommentEdit = (
   repoPath: string,
   args: { sha: string; commentId: string; body: string },
+  lens: RemoteLens,
 ) =>
   invoke<void>("forge_commit_comment_edit", {
     repoPath,
     sha: args.sha,
     commentId: args.commentId,
     body: args.body,
+    lens,
   });
 
 export const forgeCommitCommentDelete = (
   repoPath: string,
   args: { sha: string; commentId: string },
+  lens: RemoteLens,
 ) =>
   invoke<void>("forge_commit_comment_delete", {
     repoPath,
     sha: args.sha,
     commentId: args.commentId,
+    lens,
   });
 
 /** Provider-neutral PR poll for the notification poller + remote pr-sync — the

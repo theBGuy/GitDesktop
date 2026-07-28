@@ -2777,9 +2777,9 @@ fn validate_commit_oid(oid: &str) -> AppResult<()> {
 ///
 /// Origin-pinned (this fn takes no `lens`) even for an upstream-only SHA the History
 /// tab surfaces on a fork: GitHub's fork-network storage serves ANY network SHA via
-/// the fork's own commits endpoint, so the pin does not 404. NOTE the cluster is NOT
-/// uniform — `commit_comments`/`commit_comment_create` are lens-resolved (default
-/// origin) while `commit_comment_edit`/`_delete` are origin-pinned.
+/// the fork's own commits endpoint, so the pin does not 404. The commit-comment ops
+/// around it all resolve through the lens (default origin) instead — a comment lives
+/// in one repo's namespace, so list/create/edit/delete must agree on which repo.
 pub async fn commit_diff(repo_path: &str, oid: &str) -> AppResult<String> {
     validate_commit_oid(oid)?;
     let slug = crate::github::gh_origin_slug(repo_path).await?;
@@ -2925,6 +2925,7 @@ pub async fn commit_comment_edit(
     repo_path: &str,
     comment_id: &str,
     body: &str,
+    lens: Option<&str>,
 ) -> AppResult<()> {
     if body.trim().is_empty() {
         return Err(AppError::InvalidArgument("a comment is required".into()));
@@ -2933,8 +2934,9 @@ pub async fn commit_comment_edit(
         .trim()
         .parse()
         .map_err(|_| AppError::InvalidArgument(format!("invalid comment id: {comment_id}")))?;
-    // Pin the origin slug so a fork's commit comment is edited on the fork, not the parent.
-    let slug = crate::github::gh_origin_slug(repo_path).await?;
+    // A comment must be edited on the repo it was created on, so this inherits the same
+    // lens resolution as list/create.
+    let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
     let endpoint = format!("repos/{slug}/comments/{id}");
     let payload = serde_json::json!({ "body": body });
     run_gh_input(
@@ -2949,13 +2951,18 @@ pub async fn commit_comment_edit(
 
 /// Delete a commit comment (`DELETE repos/{o}/{r}/comments/{id}`). Id parse runs
 /// before the request.
-pub async fn commit_comment_delete(repo_path: &str, comment_id: &str) -> AppResult<()> {
+pub async fn commit_comment_delete(
+    repo_path: &str,
+    comment_id: &str,
+    lens: Option<&str>,
+) -> AppResult<()> {
     let id: u64 = comment_id
         .trim()
         .parse()
         .map_err(|_| AppError::InvalidArgument(format!("invalid comment id: {comment_id}")))?;
-    // Pin the origin slug so a fork's commit comment is deleted on the fork, not the parent.
-    let slug = crate::github::gh_origin_slug(repo_path).await?;
+    // A comment must be deleted on the repo it was created on, so this inherits the same
+    // lens resolution as list/create.
+    let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
     let endpoint = format!("repos/{slug}/comments/{id}");
     run_gh(
         Some(repo_path),

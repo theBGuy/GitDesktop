@@ -1096,6 +1096,7 @@ pub async fn forge_commit_comment_edit(
     sha: String,
     comment_id: String,
     body: String,
+    lens: Option<String>,
 ) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => {
@@ -1104,8 +1105,9 @@ pub async fn forge_commit_comment_edit(
         Some((Provider::Bitbucket, _)) => {
             bitbucket::commit_comment_edit(&repo_path, &sha, &comment_id, &body).await
         }
-        // GitHub edits by comment id alone (sha unused, but kept for the neutral shape).
-        _ => github::commit_comment_edit(&repo_path, &comment_id, &body).await,
+        // GitHub edits by comment id alone (sha unused, but kept for the neutral shape);
+        // `lens` is a GitHub fork-network concept, so only this arm consumes it.
+        _ => github::commit_comment_edit(&repo_path, &comment_id, &body, lens.as_deref()).await,
     }
 }
 
@@ -1116,6 +1118,7 @@ pub async fn forge_commit_comment_delete(
     repo_path: String,
     sha: String,
     comment_id: String,
+    lens: Option<String>,
 ) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => {
@@ -1124,7 +1127,7 @@ pub async fn forge_commit_comment_delete(
         Some((Provider::Bitbucket, _)) => {
             bitbucket::commit_comment_delete(&repo_path, &sha, &comment_id).await
         }
-        _ => github::commit_comment_delete(&repo_path, &comment_id).await,
+        _ => github::commit_comment_delete(&repo_path, &comment_id, lens.as_deref()).await,
     }
 }
 

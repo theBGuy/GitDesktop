@@ -142,12 +142,21 @@ pub async fn commit_comment_create(
     crate::github::pr::commit_comment_create(repo_path, sha, body, path, position, lens).await
 }
 
-pub async fn commit_comment_edit(repo_path: &str, comment_id: &str, body: &str) -> AppResult<()> {
-    crate::github::pr::commit_comment_edit(repo_path, comment_id, body).await
+pub async fn commit_comment_edit(
+    repo_path: &str,
+    comment_id: &str,
+    body: &str,
+    lens: Option<&str>,
+) -> AppResult<()> {
+    crate::github::pr::commit_comment_edit(repo_path, comment_id, body, lens).await
 }
 
-pub async fn commit_comment_delete(repo_path: &str, comment_id: &str) -> AppResult<()> {
-    crate::github::pr::commit_comment_delete(repo_path, comment_id).await
+pub async fn commit_comment_delete(
+    repo_path: &str,
+    comment_id: &str,
+    lens: Option<&str>,
+) -> AppResult<()> {
+    crate::github::pr::commit_comment_delete(repo_path, comment_id, lens).await
 }
 
 #[allow(clippy::too_many_arguments)]

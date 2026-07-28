@@ -79,7 +79,7 @@ async fn rebase_stopped_for_edit(repo: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Which multi-step git operation, if any, is mid-flight â€” drives the
+/// Which multi-step git operation, if any, is mid-flight — drives the
 /// conflict-resolution banner.
 #[tauri::command]
 pub async fn git_op_state(repo_path: String) -> AppResult<RepoOpState> {
@@ -253,7 +253,7 @@ pub(crate) async fn git_revert_core(
 
 /// Returns true when a commit was created. Cherry-picking changes that are
 /// already present makes git stop with an in-progress empty pick; that's not
-/// an error worth surfacing raw â€” clean up with --skip and report false.
+/// an error worth surfacing raw — clean up with --skip and report false.
 #[tauri::command]
 pub async fn git_cherry_pick(
     state: State<'_, AppState>,
@@ -297,8 +297,8 @@ pub struct CherryPickRangeResult {
 /// Copies the given commits (oldest-first) onto `target_branch`, then leaves
 /// you on that branch. Commits whose changes already exist there are skipped
 /// rather than erroring. If any commit conflicts, the whole operation is
-/// rolled back â€” the target branch is reset to its prior tip and you return to
-/// where you started â€” so the repo is never left mid-conflict.
+/// rolled back — the target branch is reset to its prior tip and you return to
+/// where you started — so the repo is never left mid-conflict.
 #[tauri::command]
 pub async fn git_cherry_pick_onto(
     state: State<'_, AppState>,
@@ -1165,7 +1165,7 @@ pub async fn git_stash_list(repo_path: String) -> AppResult<Vec<StashEntry>> {
             else {
                 return None;
             };
-            // %gd is "stash@{N}" â€” the N is the index every other stash
+            // %gd is "stash@{N}" — the N is the index every other stash
             // command addresses.
             let index: u32 = refname
                 .strip_prefix("stash@{")?
@@ -1626,7 +1626,7 @@ pub async fn git_merge_preview(
 }
 
 /// Rebases the current branch onto another. Conflicts leave the rebase in
-/// progress â€” the changes panel's conflict banner takes it from there
+/// progress — the changes panel's conflict banner takes it from there
 /// (continue or abort).
 #[tauri::command]
 pub async fn git_rebase(
@@ -2454,7 +2454,7 @@ pub(crate) async fn rewrite_commits(
         // are all expressible.
     }
 
-    // reset --hard would destroy uncommitted work â€” refuse instead.
+    // reset --hard would destroy uncommitted work — refuse instead.
     let status = run_git(
         Some(repo_path),
         &["status", "--porcelain"],
@@ -2463,7 +2463,7 @@ pub(crate) async fn rewrite_commits(
     .await?;
     if !status.stdout_lossy().trim().is_empty() {
         return Err(AppError::InvalidArgument(
-            "the working tree has uncommitted changes â€” commit or stash them first".into(),
+            "the working tree has uncommitted changes — commit or stash them first".into(),
         ));
     }
 

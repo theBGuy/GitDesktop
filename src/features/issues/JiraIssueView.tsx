@@ -1410,10 +1410,11 @@ export function JiraTimeTrackingSection({
 
 /**
  * One estimate input (original or remaining). Uncontrolled-while-focused: `key`
- * on the display string + `defaultValue` reset it whenever the server value
- * changes (the GitLab TimeTrackingControls idiom). Commits on blur/Enter when
- * the trimmed value both changed and is a valid Jira duration; invalid grammar
- * surfaces an inline warning and blocks the commit. Clear sets it to `null`.
+ * on the display string + `defaultValue` reset the draft text whenever the server
+ * value changes (the GitLab TimeTrackingControls idiom), and the render-time reset
+ * below clears the invalid flag with it. Commits on blur/Enter when the trimmed
+ * value both changed and is a valid Jira duration; invalid grammar surfaces an
+ * inline warning and blocks the commit. Clear sets it to `null`.
  */
 function JiraEstimateInput({
   label,
@@ -1433,6 +1434,13 @@ function JiraEstimateInput({
   // Local invalid flag so the warning renders while the field is focused (the
   // input itself stays uncontrolled).
   const [invalid, setInvalid] = useState(false);
+  // A server-value change remounts the Input via `key` but not this component, so
+  // the flag is reset during render (React's adjust-state-on-prop-change pattern).
+  const [prevDisplay, setPrevDisplay] = useState(currentDisplay);
+  if (prevDisplay !== currentDisplay) {
+    setPrevDisplay(currentDisplay);
+    setInvalid(false);
+  }
 
   function commit(raw: string) {
     const next = raw.trim();

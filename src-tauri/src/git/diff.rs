@@ -403,9 +403,10 @@ pub async fn git_staged_diff(
         "--cached"
     };
 
-    // Translate ignore patterns into git pathspec excludes so matching has
-    // exact gitignore-style glob semantics. ":(exclude)" needs at least one
-    // inclusive pathspec alongside it, hence the leading ".".
+    // Translate ignore patterns into git pathspec excludes — pathspec globs are
+    // close to gitignore semantics, but `*` also matches `/` (wildmatch without
+    // WM_PATHNAME), so `src/*.rs` hides nested files too. ":(exclude)" needs at
+    // least one inclusive pathspec alongside it, hence the leading ".".
     let mut pathspec: Vec<String> = Vec::new();
     for pattern in exclude.unwrap_or_default() {
         let pattern = pattern.trim();

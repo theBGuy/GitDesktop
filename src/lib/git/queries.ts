@@ -1217,11 +1217,15 @@ export function useEditCommitComment(repo: string, lens: RemoteLens) {
     repo,
     lens,
     (args: { sha: string; commentId: string; body?: string }) =>
-      api.forgeCommitCommentEdit(repo, {
-        sha: args.sha,
-        commentId: args.commentId,
-        body: args.body ?? "",
-      }),
+      api.forgeCommitCommentEdit(
+        repo,
+        {
+          sha: args.sha,
+          commentId: args.commentId,
+          body: args.body ?? "",
+        },
+        lens,
+      ),
     (comment, args) => ({ ...comment, body: args.body ?? comment.body }),
   );
 }
@@ -1231,10 +1235,14 @@ export function useDeleteCommitComment(repo: string, lens: RemoteLens) {
     repo,
     lens,
     (args: { sha: string; commentId: string }) =>
-      api.forgeCommitCommentDelete(repo, {
-        sha: args.sha,
-        commentId: args.commentId,
-      }),
+      api.forgeCommitCommentDelete(
+        repo,
+        {
+          sha: args.sha,
+          commentId: args.commentId,
+        },
+        lens,
+      ),
     () => null,
   );
 }
