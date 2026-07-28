@@ -150,7 +150,8 @@ pub struct Implemented {
     pub issue_comment_edit: bool,
     /// Approving / unapproving a merge request via the bodyless toggle. GitLab and
     /// Bitbucket share it; GitHub surfaces approval through the review flow (the
-    /// Review menu) instead — one of the three writes GitHub leaves `false` (see `all`).
+    /// Review menu) instead — one of the three writes whose GitHub analogue lives
+    /// elsewhere (see `all`).
     pub mr_approve: bool,
     /// Merging a merge/pull request (strategy + delete-source-branch). A shared
     /// control on all three providers.

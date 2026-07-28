@@ -151,7 +151,8 @@ sentence suffices, narrating the next line, arguing the change is correct (the
 commit message and PR own the story). Trim any comment you touch to this
 standard.
 Carve-out: measured figures a later reader would otherwise have to re-measure
-(payload sizes, timed runs) may stay and cite their source.
+(payload sizes, timed runs) may stay and cite their source (a PR or run
+reference is fine there).
 
 ⚠ Rust doc-comment rewrites are a clippy surface — a `///` line starting with a
 Markdown bullet char (`+`/`-`/`*`) mid-sentence turns the following lines into

@@ -1983,9 +1983,9 @@ pub struct PrDetails {
 }
 
 /// A merge/pull request's approval summary — who has approved and whether the
-/// viewer has. Provider-neutral, but only GitLab produces it today: GitHub
+/// viewer has. Provider-neutral, produced by GitLab and Bitbucket: GitHub
 /// surfaces approval through the review flow (`reviewDecision` + the Review menu),
-/// not a bodyless toggle, so its forge arm errors and the GitLab-only
+/// not a bodyless toggle, so its forge arm errors and the
 /// approve/unapprove control gates on `implemented.mrApprove` (false for GitHub).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2003,9 +2003,9 @@ pub struct ApprovalState {
     /// Approvals still needed (`0` on Free).
     pub approvals_left: u32,
     /// Whether the signed-in viewer has a "requested changes" reviewer state on
-    /// this MR — the GitLab-only Request-changes control's pressed state. Cleared
-    /// server-side by approving (validated live) or by removing the viewer from
-    /// the reviewers; the direct undo mutation is Premium-only.
+    /// this MR — the Request-changes control's pressed state. Cleared server-side
+    /// by approving (validated live) or by removing the viewer from the reviewers;
+    /// GitLab's direct undo mutation is Premium-only.
     pub viewer_requested_changes: bool,
 }
 

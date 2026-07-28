@@ -517,8 +517,9 @@ export function RemotePrView({
   const quoteReply = (body: string) =>
     makeQuoteReply({ composerRef, setBody: setComposeBody })(body);
 
-  // GitLab approve/unapprove — one toggle keyed on whether the viewer approved.
-  // `user_can_approve` is unreliable on Free (false even when approving works), so
+  // GitLab + Bitbucket approve/unapprove — one toggle keyed on whether the viewer
+  // approved. GitLab's `user_can_approve` is unreliable on Free (false even when
+  // approving works), so
   // don't pre-disable; permission errors surface via toast. The approval status lives
   // in a SEPARATE query, so flip it optimistically — otherwise the label lags a full
   // approve-POST + refetch. Success invalidation reconciles; errors roll back.
@@ -834,8 +835,9 @@ export function RemotePrView({
   );
   const autoMergeArmed = mergeState.data?.autoMergeEnabled ?? false;
 
-  // Approval display (GitLab + Bitbucket): a quiet count shown only when there's something
-  // to report — someone has approved, or a Premium project requires N approvals.
+  // Approval display (GitLab + Bitbucket): a quiet count shown only when there's
+  // something to report — someone approved, or a GitLab Premium project requires
+  // N approvals.
   const approval = approvals.data;
   const approvalNote =
     approval &&

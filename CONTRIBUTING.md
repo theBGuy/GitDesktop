@@ -99,7 +99,8 @@ git history already owns (what the code used to do, which PR changed it, how a
 bug was found), don't narrate the next lines, and don't argue the change is
 correct — that's for the PR description. Genuinely multi-constraint blocks may
 run to ~6 lines, and measured figures a later reader would otherwise have to
-re-measure (payload sizes, timed runs) may stay and cite their source. When you
+re-measure (payload sizes, timed runs) may stay and cite their source (a PR or
+run reference is fine there). When you
 touch a file, trimming its comments to this standard in passing is welcome.
 
 ### Changelog

@@ -60,9 +60,9 @@ pnpm changelog:preview  # preview pending changelog.d/ fragments
   non-obvious choices, cross-module contracts, hard-won external-API/platform
   behavior. Never change-history or PR references (commit messages own the story),
   never narrate the next lines or argue the diff is correct. (Multi-constraint
-  blocks may run ~6 lines; measured figures a later reader would have to
-  re-measure may stay and cite their source.) Trim
-  any comment you touch to this standard.
+  blocks may run ~6 lines; measured figures a later reader would have to re-measure
+  may stay and cite their source — a PR or run reference is fine there.) Trim any
+  comment you touch to this standard.
 - **Don't edit `src/components/ui/`** — those are vendored shadcn/Base UI primitives;
   fix at the feature/call-site level.
 - **Keyboard-first, WCAG AA** — wire arrow-key nav for any new selectable list in the

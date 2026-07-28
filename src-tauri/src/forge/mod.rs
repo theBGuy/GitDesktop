@@ -1608,7 +1608,8 @@ pub async fn forge_pr_approve(repo_path: String, number: u64, lens: Option<Strin
 }
 
 /// Revoke the viewer's approval of a merge request, behind the abstraction.
-/// GitLab-only.
+/// GitLab and Bitbucket; GitHub approvals go through the review flow, so its arm
+/// errors.
 #[tauri::command]
 pub async fn forge_pr_unapprove(repo_path: String, number: u64) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
@@ -2966,9 +2967,8 @@ pub async fn forge_repo_set_archived(repo_path: String, archived: bool) -> AppRe
     }
 }
 
-/// Change the repository's visibility, behind the abstraction (both providers
-/// take "public" / "private" / "internal", with provider-specific rules on
-/// "internal" enforced server-side).
+/// Change the repository's visibility, behind the abstraction. All three take
+/// "public" / "private"; "internal" is GitHub/GitLab-only — Bitbucket rejects it.
 #[tauri::command]
 pub async fn forge_repo_set_visibility(repo_path: String, visibility: String) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
