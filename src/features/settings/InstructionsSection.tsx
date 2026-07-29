@@ -38,9 +38,17 @@ export const InstructionsSection = withForm({
             )}
           </form.AppField>
           <p className="text-xs text-muted-foreground">
-            gitignore-style patterns, one per line. Matching files stay staged
-            and committed as usual, but their diffs are left out of what the AI
-            sees, so noisy folders don't dominate the message.
+            gitignore-style patterns, one per line:{" "}
+            <code className="rounded bg-muted px-1 py-0.5">secrets.env</code>{" "}
+            matches that file at any depth,{" "}
+            <code className="rounded bg-muted px-1 py-0.5">/secrets.env</code>{" "}
+            only the copy at the repo root, and{" "}
+            <code className="rounded bg-muted px-1 py-0.5">vendor/</code> a
+            folder wherever it sits.{" "}
+            <code className="rounded bg-muted px-1 py-0.5">!</code> re-include
+            lines aren't supported. Matching files stay staged and committed as
+            usual, but their diffs are left out of what the AI sees, so noisy
+            folders don't dominate the message.
           </p>
         </div>
         <p className="text-xs text-muted-foreground">

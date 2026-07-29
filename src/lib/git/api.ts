@@ -988,8 +988,12 @@ export const gitBranchFileDiff = (
 
 /** Three-dot `base...compare` diff. `exclude` takes gitignore-style patterns the
  *  backend filters out of the text and file list (counting them in
- *  `excludedFiles`): generation callers pass the user's AI-ignore patterns;
- *  review callers deliberately omit them — a review wants the full diff. */
+ *  `excludedFiles`); generation callers pass the user's AI-ignore patterns here.
+ *  Reviews apply the same patterns but filter client-side after the diff
+ *  resolves (`filterDiffByAiIgnore`) — one recipe for this path and the
+ *  forge-supplied PR diff alike — and only for a NON-agentic run: an agentic
+ *  reviewer reads the worktree and its own tools directly, so filtering the
+ *  diff handed to it would protect nothing. */
 export const gitBranchDiff = (
   repoPath: string,
   base: string,
@@ -2991,6 +2995,17 @@ export const readRepoAiIgnore = (repoPath: string) =>
  *  ones are skipped). */
 export const appendRepoAiIgnore = (repoPath: string, patterns: string[]) =>
   invoke<number>("append_repo_ai_ignore", { repoPath, patterns });
+
+/** Which of `paths` the user's AI-ignore patterns hide, decided by git's own
+ *  gitignore engine — the same matcher the diff-side pathspec translation is
+ *  pinned to. For path lists the frontend holds itself (a remote PR's changed
+ *  files): the paths need not exist in the working tree or index. Returns `[]`
+ *  when nothing matches, or when either list is empty. */
+export const gitFilterAiIgnored = (
+  repoPath: string,
+  paths: string[],
+  exclude: string[],
+) => invoke<string[]>("git_filter_ai_ignored", { repoPath, paths, exclude });
 
 /** Raw contents of `<repo>/.gitdesktop/branch-rules.json`, or null if absent. */
 export const readRepoBranchRules = (repoPath: string) =>

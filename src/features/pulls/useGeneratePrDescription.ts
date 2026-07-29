@@ -15,8 +15,8 @@ interface SuppliedDiff {
   text: string;
   truncated: boolean;
   files: { path: string; added: number; deleted: number; isBinary: boolean }[];
-  /** Changed files the user's AI-ignore patterns hid, when the supplier applies
-   *  them. Absent (remote-PR diffs) ⇒ nothing was hidden to disclose. */
+  /** Changed files the user's AI-ignore patterns hid. Every supplier applies the
+   *  patterns; absent or `0` ⇒ nothing was hidden to disclose. */
   excludedFiles?: number;
 }
 
@@ -85,6 +85,11 @@ export function useGeneratePrDescription(repoPath: string) {
        *  Empty ⇒ no Jira mentions proposed. Mutually exclusive with
        *  `issueCandidates` — `buildPrPrompt` gives natives precedence. */
       jiraCandidates?: JiraCandidate[],
+      /** Which set of changes the "nothing to describe" toasts name. The
+       *  branch-diff path really is describing `base..head`; the open-PR
+       *  supplier describes the change request itself, whose noun follows
+       *  `provider` (GitLab calls it a merge request). */
+      emptyScope: "branch-diff" | "change-request" = "branch-diff",
     ) => {
       await run(
         async (settings) => {
@@ -93,10 +98,14 @@ export function useGeneratePrDescription(repoPath: string) {
             readRepoInstructions(repoPath),
           ]);
           if (diff.files.length === 0) {
+            const scope =
+              emptyScope === "change-request"
+                ? `in this ${provider === "gitlab" ? "merge request" : "pull request"}`
+                : "between these branches";
             toast.error(
               (diff.excludedFiles ?? 0) > 0
-                ? "All changes between these branches match your AI ignore patterns — nothing to describe."
-                : "No changes between these branches to describe.",
+                ? `All changes ${scope} match your AI ignore patterns — nothing to describe.`
+                : `No changes ${scope} to describe.`,
             );
             return null;
           }
@@ -184,10 +193,12 @@ export function useGeneratePrDescription(repoPath: string) {
 
   /** Explicit-supplier path (remote PRs): the caller provides the diff — e.g. an
    *  existing PR's own diff query — so it works even when the head branch isn't
-   *  present locally (fork PRs, unfetched branches). */
+   *  present locally (fork PRs, unfetched branches). The supplier is handed the
+   *  loaded settings so it can apply the user's AI-ignore patterns itself (the
+   *  branch-diff path gets that from the git layer's pathspec excludes). */
   const generateFromDiff = useCallback(
     (
-      getDiff: () => Promise<SuppliedDiff>,
+      getDiff: (settings: AppSettings) => Promise<SuppliedDiff>,
       base: string,
       head: string,
       commitSubjects: string[],
@@ -215,6 +226,7 @@ export function useGeneratePrDescription(repoPath: string) {
         reviewNotes,
         issueCandidates,
         jiraCandidates,
+        "change-request",
       ),
     [runFromDiff],
   );

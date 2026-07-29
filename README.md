@@ -311,7 +311,8 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
   syntax-highlighted code in ~190 languages (light and dark).
 - **Privacy-first** — API keys live in the OS keychain (never in app files), local
   models keep code on your machine, AI-ignore patterns keep sensitive files out of
-  context, and a single switch hides every AI surface.
+  context unless you opt into repo-aware review, and a single switch hides every
+  AI surface.
 - **Keyboard-first** — rebindable shortcuts with GitHub-Desktop-compatible
   defaults, a generated cheat sheet (Ctrl+/), a command palette (Ctrl+K), and
   arrow-key navigation everywhere.
@@ -616,11 +617,17 @@ display can't strand it off-screen.
   - **Global** — Settings → AI instructions (e.g. "Follow Conventional Commits").
   - **Per-repo** — `.gitdesktop/instructions.md` in the repo. Takes precedence.
 - **AI ignore patterns** (keep files out of AI context; they still commit
-  normally), gitignore-style:
+  normally), in `.gitignore` syntax: `secrets.env` hides that file at any depth,
+  `/secrets.env` only the copy at the repo root, `node_modules` or `vendor/` a
+  folder wherever it sits, and `docs/*.log` just that folder's logs. `!`
+  re-include lines aren't supported. A model that reads your repository itself
+  isn't limited by them — that's what the PR panel's **Agentic review** toggle
+  turns on.
   - **Global** — Settings → Excluded files (one pattern per line).
   - **Per-repo** — `.gitdesktop/aiignore` in the repo. A changed file's
     context menu → **Exclude from AI** (file, folder, or file type — or a
-    multi-selection) creates and updates this file for you.
+    multi-selection) creates and updates this file for you, adding anchored
+    lines like `/src/config.ts` and `/vendor/` that mean exactly what you picked.
 - **Keys** live in the OS keychain (Windows Credential Manager, macOS Keychain,
   libsecret). **Hide AI** (Settings → General) hides every AI surface while
   keeping your config.

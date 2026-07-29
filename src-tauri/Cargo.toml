@@ -55,6 +55,12 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # `sha1_hex(file_path)_<old_pos>_<new_pos>` (see forge/gitlab.rs `gl_line_code`).
 # RustCrypto sha1 — hashing only, no extra default features needed.
 sha1 = "0.10"
+# The AI-ignore gitignore engine evaluates patterns in a throwaway EMPTY repo, so
+# only the user's patterns apply (git::ai_ignore). TempDir gives it an
+# unpredictable, exclusively-created path: a guessable one in a shared /tmp lets a
+# local attacker pre-seed `.git/info/exclude`, which outranks core.excludesFile and
+# would silently un-ignore a file. Also a dev-dependency, for test fixtures.
+tempfile = "3"
 
 # Desktop-only: the updater plugin doesn't build for mobile.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]

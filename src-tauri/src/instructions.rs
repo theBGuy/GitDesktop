@@ -37,22 +37,23 @@ pub async fn read_repo_ai_ignore(repo_path: String) -> AppResult<Vec<String>> {
 /// Appends AI-ignore patterns to `<repo>/.gitdesktop/aiignore`, creating the
 /// `.gitdesktop` directory and the file (with a header comment) if absent.
 /// Mirrors `append_to_gitignore` (trim + in-batch de-dupe + skip lines already
-/// present) with two deltas: any leading `/` is stripped — these lines are
-/// consumed as git pathspecs via `:(exclude)<pattern>`, where a leading slash
-/// makes git treat it as an absolute path outside the repo — and a fresh file
-/// is seeded with a header comment (`parse_patterns` and the pathspec builders
-/// both skip `#` lines). Returns the number of patterns actually appended (0
-/// when every pattern was empty or already present).
+/// present), with one delta: a fresh file is seeded with a header comment
+/// (`parse_patterns` and `git::ai_ignore` both skip `#` lines). Lines are stored
+/// verbatim, gitignore-style — in particular a leading `/` is preserved and
+/// anchors the pattern to the repo root, which is how the UI's "exclude THIS
+/// file" actions mean one file rather than every file with that name. Returns
+/// the number of patterns actually appended (0 when every pattern was empty or
+/// already present).
 #[tauri::command]
 pub async fn append_repo_ai_ignore(repo_path: String, patterns: Vec<String>) -> AppResult<usize> {
     const HEADER: &str =
         "# Files excluded from AI context — gitignore-style patterns, one per line.";
 
-    // Normalize (trim + strip leading '/') and de-dupe within the batch
-    // (preserving order).
+    // Normalize (trim only — a leading '/' is meaningful anchoring) and de-dupe
+    // within the batch (preserving order).
     let mut wanted: Vec<String> = Vec::new();
     for p in patterns {
-        let t = p.trim().trim_start_matches('/').to_string();
+        let t = p.trim().to_string();
         if !t.is_empty() && !wanted.contains(&t) {
             wanted.push(t);
         }
@@ -552,22 +553,30 @@ mod tests {
         let (_tmp, dir) = ai_ignore_test_repo();
         let repo = dir.to_string_lossy().into_owned();
 
-        // Leading slash stripped, whitespace-only skipped, in-batch dupes collapsed.
+        // Leading slash PRESERVED (it anchors the pattern to the repo root),
+        // whitespace trimmed, whitespace-only skipped, in-batch dupes collapsed.
         let added = append_repo_ai_ignore(
             repo.clone(),
             vec![
                 "/foo".to_string(),
                 "   ".to_string(),
-                "bar".to_string(),
+                "  bar  ".to_string(),
                 "bar".to_string(),
             ],
         )
         .await
         .unwrap();
-        // The whitespace-only entry and the in-batch dupe collapse: "foo" + "bar".
+        // The whitespace-only entry and the in-batch dupe collapse: "/foo" + "bar".
         assert_eq!(added, 2);
         let parsed = read_repo_ai_ignore(repo.clone()).await.unwrap();
-        assert_eq!(parsed, vec!["foo".to_string(), "bar".to_string()]);
+        assert_eq!(parsed, vec!["/foo".to_string(), "bar".to_string()]);
+
+        // `/foo` and `foo` are DIFFERENT patterns (anchored vs any-depth), so the
+        // unanchored twin is a new line, not a duplicate.
+        let added_unanchored = append_repo_ai_ignore(repo.clone(), vec!["foo".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(added_unanchored, 1);
 
         // An all-duplicates batch leaves the file byte-identical and appends nothing.
         let path = dir.join(".gitdesktop").join("aiignore");

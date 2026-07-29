@@ -403,20 +403,13 @@ pub async fn git_staged_diff(
         "--cached"
     };
 
-    // Translate ignore patterns into git pathspec excludes — pathspec globs are
-    // close to gitignore semantics but not identical: `*` also matches `/`
-    // (wildmatch without WM_PATHNAME) so `src/*.rs` hides nested files too, and
-    // a bare `notes.md` is root-anchored where gitignore matches any depth
-    // (both measured, git 2.51.1). ":(exclude)" needs at least one inclusive
-    // pathspec alongside it, hence the leading ".".
-    let mut pathspec: Vec<String> = Vec::new();
-    for pattern in exclude.unwrap_or_default() {
-        let pattern = pattern.trim();
-        if pattern.is_empty() || pattern.starts_with('#') {
-            continue;
-        }
-        pathspec.push(format!(":(exclude){pattern}"));
-    }
+    // AI-ignore patterns → pathspec excludes, via the one shared engine
+    // (`git::ai_ignore`, which pins gitignore parity with tests). ":(exclude)"
+    // needs at least one inclusive pathspec alongside it, hence the leading ".".
+    let pathspec =
+        crate::git::ai_ignore::pathspecs_for_repo(&repo_path, &exclude.unwrap_or_default())
+            .await
+            .specs;
 
     let mut diff_args: Vec<&str> = vec!["diff", base, "--no-color"];
     let mut stat_args: Vec<&str> = vec!["diff", base, "--numstat", "-z"];
@@ -576,6 +569,84 @@ mod tests {
         let (out, truncated) = truncate_at_file_boundary("diff --git a/a b/a\n+x\n".into(), 1000);
         assert!(!truncated);
         assert!(out.contains("+x"));
+    }
+
+    /// `exclude` filters the staged diff with real gitignore semantics (via
+    /// `git::ai_ignore`): a bare name hides every copy at any depth, a leading
+    /// `/` anchors to the repo root, and `excluded_files` counts what was hidden.
+    #[tokio::test]
+    async fn staged_diff_applies_gitignore_style_excludes() {
+        let _tmp = tempfile::Builder::new()
+            .prefix("gd-staged-exclude-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let dir = _tmp.path().to_path_buf();
+        let repo = dir.to_string_lossy().into_owned();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "t@t.local"],
+            vec!["config", "user.name", "T"],
+        ] {
+            run_git(Some(&repo), &args, DEFAULT_TIMEOUT).await.unwrap();
+        }
+        std::fs::write(dir.join("seed.txt"), "seed\n").unwrap();
+        run_git(Some(&repo), &["add", "-A"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        run_git(Some(&repo), &["commit", "-qm", "seed"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+
+        // Two copies of the same file name, one nested, plus an unrelated file.
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("notes.md"), "root\n").unwrap();
+        std::fs::write(dir.join("docs").join("notes.md"), "nested\n").unwrap();
+        std::fs::write(dir.join("app.rs"), "fn main() {}\n").unwrap();
+        run_git(Some(&repo), &["add", "-A"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+
+        // No excludes → everything staged is present, nothing reported hidden.
+        let all = git_staged_diff(repo.clone(), None, None, None).await.unwrap();
+        assert_eq!(all.files.len(), 3);
+        assert_eq!(all.excluded_files, 0);
+
+        // A bare name hides BOTH copies — gitignore matches at any depth.
+        let bare = git_staged_diff(repo.clone(), None, Some(vec!["notes.md".into()]), None)
+            .await
+            .unwrap();
+        assert_eq!(bare.files.len(), 1);
+        assert!(bare.files.iter().any(|f| f.path == "app.rs"));
+        assert!(
+            !bare.text.contains("docs/notes.md"),
+            "the nested copy is hidden too"
+        );
+        assert_eq!(bare.excluded_files, 2);
+
+        // A leading `/` anchors to the root, sparing the nested copy — and does
+        // NOT wipe the whole diff (it used to read as an absolute path).
+        let anchored = git_staged_diff(repo.clone(), None, Some(vec!["/notes.md".into()]), None)
+            .await
+            .unwrap();
+        assert_eq!(anchored.files.len(), 2);
+        assert!(
+            anchored.files.iter().any(|f| f.path == "docs/notes.md"),
+            "an anchored pattern spares the nested copy"
+        );
+        assert!(!anchored.files.iter().any(|f| f.path == "notes.md"));
+        assert_eq!(anchored.excluded_files, 1);
+
+        // Blank / `#` lines translate to no pathspec at all — same as no excludes.
+        let noop = git_staged_diff(
+            repo,
+            None,
+            Some(vec!["  ".into(), "# comment".into()]),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(noop.files.len(), 3);
+        assert_eq!(noop.excluded_files, 0);
     }
 
     const FILE_HEADER: &str = "diff --git a/f.txt b/f.txt\nindex 000..111 100644\n--- a/f.txt\n+++ b/f.txt\n";

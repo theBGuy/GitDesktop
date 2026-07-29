@@ -60,6 +60,7 @@ import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import type { LineWidget } from "@/features/diff/DiffSurface";
 import { AssigneesPopover } from "@/features/issues/IssueMetaPickers";
 import { JiraRefRow } from "@/features/issues/JiraRefRow";
+import { aiExcludePatterns, filterDiffByAiIgnore } from "@/lib/ai/ignore";
 import { triggerAutomations } from "@/lib/automations/runner";
 import { prOpenEligible } from "@/lib/automations/sync";
 import {
@@ -911,19 +912,36 @@ export function RemotePrView({
       // Reuse the diff already cached by usePrDiff — and, crucially,
       // resolve it from the PR's own diff (not local base..head refs),
       // so this works for fork PRs / unfetched head branches.
-      () =>
-        queryClient
-          .ensureQueryData(prDiffOptions(repoPath, number, lens))
-          .then((text) => ({
-            text,
-            truncated: false,
-            files: prForGen.files.map((f) => ({
-              path: f.path,
-              added: f.additions,
-              deleted: f.deletions,
-              isBinary: false,
-            })),
-          })),
+      async (settings) => {
+        const [text, exclude] = await Promise.all([
+          queryClient.ensureQueryData(prDiffOptions(repoPath, number, lens)),
+          aiExcludePatterns(repoPath, settings.aiIgnorePatterns),
+        ]);
+        const files = prForGen.files.map((f) => ({
+          path: f.path,
+          added: f.additions,
+          deleted: f.deletions,
+          isBinary: false,
+        }));
+        // The forge hands us the whole diff, so unlike the branch-diff path
+        // there are no pathspecs to exclude with — derive a filtered copy with
+        // the shared recipe (also used by both review funnels). NEVER write it
+        // back into the query cache: the same string feeds the Files tab, the
+        // review threads and the AI review panel, all of which want the full
+        // diff.
+        const hidden = await filterDiffByAiIgnore({
+          repoPath,
+          text,
+          files,
+          exclude,
+        });
+        return {
+          text: hidden.text,
+          truncated: false,
+          files: hidden.files,
+          excludedFiles: hidden.excludedFiles,
+        };
+      },
       prForGen.baseRefName,
       prForGen.headRefName,
       prForGen.commits.map((c) => c.headline),

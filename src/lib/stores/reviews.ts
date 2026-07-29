@@ -11,6 +11,7 @@ import {
   type ExternalContext,
   resolveExternalContext,
 } from "@/lib/ai/external-context";
+import { aiExcludePatterns, filterDiffByAiIgnore } from "@/lib/ai/ignore";
 import { resolveReviewerNotesContext } from "@/lib/ai/notes-context";
 import {
   type OwnCommentsContext,
@@ -496,19 +497,57 @@ export async function startReview(
                 : "balanced",
       },
     });
-    const diff = await context.loadDiff();
+    // Agentic run: in repo-aware mode the reviewer explores. Resolved up here
+    // because it also decides whether this run's diff is AI-ignore filtered —
+    // see `excludePatterns` below; the capability breakdown it feeds stays with
+    // the prompt further down.
+    const agenticRun = Boolean(ai.cliRepoAware);
+    // Settings are read here rather than after the diff so the AI-ignore
+    // patterns are in hand before it loads.
+    const appSettings = await loadSettings();
     if (control.cancelled) return;
+    // The user's AI-ignore patterns, applied to a NON-agentic review's diff so a
+    // file the user withheld from generation is withheld from review too. An
+    // agentic run is deliberately unfiltered — its agent reads the checked-out
+    // worktree (CLI) or holds `read_file`/`grep`/`pull_request_diff` (HTTP), so
+    // filtering the diff we hand it would protect nothing. Empty ⇒ every step
+    // below is a no-op, with no extra IPC.
+    const excludePatterns = agenticRun
+      ? []
+      : await aiExcludePatterns(target.repoPath, appSettings.aiIgnorePatterns);
+    if (control.cancelled) return;
+    const loaded = await context.loadDiff();
+    if (control.cancelled) return;
+    const filtered = await filterDiffByAiIgnore({
+      repoPath: target.repoPath,
+      text: loaded.text,
+      files: loaded.files,
+      exclude: excludePatterns,
+    });
+    if (control.cancelled) return;
+    const diff = {
+      text: filtered.text,
+      truncated: loaded.truncated,
+      files: filtered.files,
+    };
     if (!diff.text.trim()) {
       // A no-op run shouldn't linger in the dock; a momentary toast is enough. Drop any
       // queued second mode too — same PR, same empty diff, so it would only load nothing
-      // and toast "No changes" a second time.
-      toast.info("No changes to review.");
+      // and toast "No changes" a second time. An all-excluded diff lands here too, and
+      // says so — "no changes" on a PR that visibly has some reads as a bug.
+      toast.info(
+        filtered.excludedFiles > 0
+          ? "Every changed file matches your AI ignore patterns — nothing to review."
+          : "No changes to review.",
+      );
       queuedRuns.delete(key);
       useReviewStore.getState().remove(key);
       return;
     }
     // Soft prior-review context (skipped when the user asked to ignore it). Runs
-    // on a held slot after the diff loads — never during the queued wait.
+    // on a held slot after the diff loads — never during the queued wait. Takes the
+    // same patterns: its "changes since" delta is a second diff, and filtering only
+    // the main one would leak through it.
     const prior: PriorContext = ignorePrior
       ? {}
       : await resolvePriorContext(
@@ -517,6 +556,7 @@ export async function startReview(
           target.ref,
           mode,
           context.headSha,
+          excludePatterns,
         );
     if (control.cancelled) return;
     patch({ deltaState: prior.deltaState });
@@ -524,7 +564,6 @@ export async function startReview(
     // Review-context knob) — best-effort, never throws. Resolved BEFORE the own/external
     // harvest so the own-comments distill trigger + ledger cap key off the SAME scaled
     // budget, and reused verbatim at buildReviewPrompt (one resolution, used twice).
-    const appSettings = await loadSettings();
     const budgetProfile = await resolveBudgetProfile(
       ai,
       appSettings.reviewContextSize,
@@ -603,14 +642,13 @@ export async function startReview(
     // stream's own `setStatus`. AFTER the cancel check, like every other post-await
     // patch: otherwise a cancel-then-rerun would blank the successor's status.
     patch({ status: "" });
-    // Agentic run: in repo-aware mode the reviewer explores. A CLI provider
-    // reviews with the PR's files on disk and (for the tool-capable CLIs —
+    // What an agentic run (`agenticRun`, resolved above) can actually do. A CLI
+    // provider reviews with the PR's files on disk and (for the tool-capable CLIs —
     // everything but codex) GitDesktop's own read-only MCP tools attached; an
     // HTTP provider (null kind) instead drives a native AI-SDK tool loop with no
     // worktree. Computed before the prompt so it can frame truncation honestly,
     // and to gate `mcpSelf` / `reviewTools` on the stream.
     const kind = providerKind(ai.provider);
-    const agenticRun = Boolean(ai.cliRepoAware);
     const mcpTools = agenticRun && kind !== null && kind !== "codex";
     const httpTools = agenticRun && kind === null;
     const agentic = agenticRun
@@ -648,6 +686,9 @@ export async function startReview(
           deleted: f.deleted,
           isBinary: f.isBinary,
         })),
+        // Always 0 on an agentic run (nothing was filtered), so its prompt is
+        // byte-identical to before — the disclosure line is skipped entirely.
+        excludedFiles: filtered.excludedFiles,
         provider: context.provider,
         budgetProfile,
         agentic,

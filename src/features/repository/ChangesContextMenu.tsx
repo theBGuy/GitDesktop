@@ -5,6 +5,7 @@ import {
   ContextMenuSubContent,
   ContextMenuSubTrigger,
 } from "@/components/ui/context-menu";
+import { aiIgnorePathPattern } from "@/lib/ai/ignore";
 import { copyText } from "@/lib/clipboard";
 import {
   openWithDefault,
@@ -258,7 +259,11 @@ export function ChangesContextMenuItems({
       {aiEnabled && (
         <>
           <ContextMenuSeparator />
-          <ContextMenuItem onClick={() => actions.aiExclude(entry.path)}>
+          <ContextMenuItem
+            onClick={() =>
+              actions.aiExclude(`/${aiIgnorePathPattern(entry.path)}`)
+            }
+          >
             Exclude from AI (add to .gitdesktop/aiignore)
           </ContextMenuItem>
           {folders.length > 0 && (
@@ -270,7 +275,9 @@ export function ChangesContextMenuItems({
                 {folders.map((folder) => (
                   <ContextMenuItem
                     key={folder}
-                    onClick={() => actions.aiExclude(`${folder}/`)}
+                    onClick={() =>
+                      actions.aiExclude(`/${aiIgnorePathPattern(folder)}/`)
+                    }
                   >
                     <span className="font-mono">{folder}/</span>
                   </ContextMenuItem>

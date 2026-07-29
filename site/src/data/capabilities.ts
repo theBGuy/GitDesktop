@@ -279,6 +279,7 @@ export const capabilities: Capability[] = [
     label:
       "Explore repositories — search GitHub, GitLab & Bitbucket, then clone, fork or star",
     ai: false,
+    highlight: true,
   },
   {
     group: "Repository & workspace",
@@ -453,6 +454,12 @@ export const capabilities: Capability[] = [
   {
     group: "AI · generate & review",
     ai: true,
+    label:
+      "Review timeout — agentic reviews get 20 minutes, or pin your own limit",
+  },
+  {
+    group: "AI · generate & review",
+    ai: true,
     label: "Iterative reviews build on the last round & other bots' findings",
   },
   {
@@ -460,6 +467,24 @@ export const capabilities: Capability[] = [
     ai: true,
     label:
       "Re-reviews remember the discussion — triage replies honored, context sized to your model",
+  },
+  {
+    group: "AI · generate & review",
+    ai: true,
+    label:
+      "Reviews converge — a fuller first round, non-blocking leftovers listed apart",
+  },
+  {
+    group: "AI · generate & review",
+    ai: true,
+    label:
+      "Every re-review ends with a verdict — blocking issues remain, or merge when ready",
+  },
+  {
+    group: "AI · generate & review",
+    ai: true,
+    label:
+      "Reviews know where your docs live — one finding names every stale surface",
   },
   {
     group: "AI · generate & review",

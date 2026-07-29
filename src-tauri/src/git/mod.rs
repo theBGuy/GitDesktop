@@ -1,3 +1,4 @@
+pub mod ai_ignore;
 pub mod branches;
 pub mod commit;
 pub mod compare;

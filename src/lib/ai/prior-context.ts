@@ -1,5 +1,6 @@
 import { gitDiffBetweenRefs, gitFetchObjects } from "@/lib/git/api";
 import { getLatestReview } from "@/lib/pulls/reviews-history";
+import { filterDiffByAiIgnore } from "./ignore";
 import type { ReviewDeltaState, ReviewMode } from "./types";
 
 /** Upper bound on the delta fetched from git; the prompt budget trims further. */
@@ -24,6 +25,14 @@ export interface PriorContext {
  * Shared by the interactive review (`src/lib/stores/reviews.ts`) and the
  * automation runner's pr-open / pr-sync paths — both build on a prior the same
  * way. Takes primitives (not a `ReviewTarget`) to avoid a circular import.
+ *
+ * `exclude` is the caller's AI-ignore pattern list, empty for an agentic run.
+ * The delta is a SECOND diff, so filtering only the main one would leak the
+ * very files the user withheld; the backing `gitDiffBetweenRefs` command is
+ * shared with the agentic `diff_refs` tool and deliberately grew no `exclude`
+ * parameter, so the filtering happens here instead. It sits inside the try
+ * below, which fails closed: a filter failure drops the delta rather than
+ * carrying an unfiltered one.
  */
 export async function resolvePriorContext(
   repoPath: string,
@@ -31,6 +40,7 @@ export async function resolvePriorContext(
   ref: string,
   mode: ReviewMode,
   currentHeadSha: string | undefined,
+  exclude: string[] = [],
 ): Promise<PriorContext> {
   const prior = await getLatestReview(repoPath, kind, ref, mode);
   if (!prior?.text.trim()) return {};
@@ -62,9 +72,17 @@ export async function resolvePriorContext(
       DELTA_MAX_BYTES,
     );
     if (delta.reason === "ok") {
+      // No file list to pair with a two-dot delta — its own section keys are
+      // the whole candidate set (and an empty `exclude` costs nothing).
+      const filtered = await filterDiffByAiIgnore({
+        repoPath,
+        text: delta.text,
+        files: [],
+        exclude,
+      });
       return {
         ...base,
-        deltaDiffText: delta.text,
+        deltaDiffText: filtered.text,
         deltaTruncated: delta.truncated,
         deltaState: "ok",
       };

@@ -20,6 +20,7 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { BlameDialog } from "@/features/history/BlameDialog";
 import { FileHistoryDialog } from "@/features/history/FileHistoryDialog";
+import { aiIgnorePathPattern } from "@/lib/ai/ignore";
 import {
   useAppendRepoAiIgnore,
   useAppendToGitignore,
@@ -517,11 +518,15 @@ export function ChangesPanel({ repoPath }: { repoPath: string }) {
     });
   }
 
-  // Bulk AI-exclude: add a root-relative pathspec per selected file. The Rust
-  // side strips leading slashes, de-dupes, and skips lines already present.
+  // Bulk AI-exclude: add a `/path` line per selected file — the leading slash
+  // anchors each pattern to THIS file rather than every file with that name, and
+  // glob metacharacters in the path are escaped so it matches literally. The
+  // Rust side de-dupes and skips lines already present.
   function aiExcludeSelected() {
     if (selectionCount === 0) return;
-    const patterns = selectedEntries.map((e) => e.path);
+    const patterns = selectedEntries.map(
+      (e) => `/${aiIgnorePathPattern(e.path)}`,
+    );
     appendAiIgnore.mutate(patterns, {
       onSuccess: (added) => {
         toast.success(

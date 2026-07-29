@@ -7,6 +7,7 @@ import {
   type ExternalContext,
   resolveExternalContext,
 } from "@/lib/ai/external-context";
+import { aiExcludePatterns, filterDiffByAiIgnore } from "@/lib/ai/ignore";
 import { resolveReviewerNotesContext } from "@/lib/ai/notes-context";
 import {
   type OwnCommentsContext,
@@ -601,6 +602,21 @@ async function generateReviewText(
   signal: AbortSignal,
   onCliId: (id: string) => void,
 ): Promise<ReviewResult | null> {
+  // Read up front so the AI-ignore patterns are in hand before the diff resolves;
+  // the budget profile below still consumes the same single read.
+  const appSettings = await loadSettings();
+  if (signal.aborted) return null;
+  // An automated review is agentic only when the toggle is on AND the provider is
+  // a CLI one: `runCliStream` honors `cliRepoAware` with a detached worktree, but
+  // an automated HTTP review gets no MCP tools and no tool loop, so it can only
+  // ever see the diff we hand it. Non-agentic ⇒ the user's AI-ignore patterns
+  // apply, exactly as they do on every generation path.
+  const agenticRun = Boolean(ai.cliRepoAware) && isCliProvider(ai.provider);
+  const excludePatterns = agenticRun
+    ? []
+    : await aiExcludePatterns(event.repoPath, appSettings.aiIgnorePatterns);
+  if (signal.aborted) return null;
+
   let diff: { text: string; truncated: boolean; files: DiffStatEntry[] };
   if (event.kind === "commit") {
     diff = await gitCommitDiff(event.repoPath, event.hash, DIFF_MAX_BYTES);
@@ -648,8 +664,25 @@ async function generateReviewText(
   // Cancelled while the diff loaded — don't start the model.
   if (signal.aborted) return null;
 
+  // One filter for all five resolution paths above (forge PR diff, branch diff,
+  // commit diff): every one of them lands a whole unified diff here, and only
+  // `gitBranchDiff` could have excluded server-side. Empty patterns ⇒ the input
+  // straight back, no IPC.
+  const filtered = await filterDiffByAiIgnore({
+    repoPath: event.repoPath,
+    text: diff.text,
+    files: diff.files,
+    exclude: excludePatterns,
+  });
+  // Everything the change touched is AI-ignored — same outcome as an empty diff
+  // (the caller reports "skipped — no changes to review"), and nothing to send.
+  if (!filtered.text.trim()) return null;
+  if (signal.aborted) return null;
+
   // Build on a prior review of this PR + mode (no-op when none) so a re-review focuses on
-  // new/unresolved issues — the same soft context the interactive path uses.
+  // new/unresolved issues — the same soft context the interactive path uses. Takes the
+  // same patterns: its "changes since" delta is a second diff, and filtering only the
+  // main one would leak through it.
   const prior: PriorContext =
     event.kind === "commit"
       ? {}
@@ -659,6 +692,7 @@ async function generateReviewText(
           targetRef(event),
           mode,
           event.headSha,
+          excludePatterns,
         );
   if (signal.aborted) return null;
 
@@ -675,7 +709,6 @@ async function generateReviewText(
   // ledger cap key off the SAME budget as the rest of the prompt; reused verbatim at
   // buildReviewPrompt below. Best-effort, never blocks the review. (external + own stay
   // separate harvests — a shared-fetch dedup is the forge-dispatch-dedup backlog item.)
-  const appSettings = await loadSettings();
   const budgetProfile = await resolveBudgetProfile(
     ai,
     appSettings.reviewContextSize,
@@ -749,14 +782,17 @@ async function generateReviewText(
       title: event.title,
       body: event.kind === "commit" ? "" : event.body,
       commitSubjects: event.kind === "commit" ? [] : event.commitSubjects,
-      diffText: diff.text,
+      diffText: filtered.text,
       diffTruncated: diff.truncated,
-      files: diff.files.map((f) => ({
+      files: filtered.files.map((f) => ({
         path: f.path,
         added: f.added,
         deleted: f.deleted,
         isBinary: f.isBinary,
       })),
+      // Always 0 on an agentic run (nothing was filtered), so its prompt is
+      // byte-identical to before — the disclosure line is skipped entirely.
+      excludedFiles: filtered.excludedFiles,
       provider,
       budgetProfile,
       repoInstructions,

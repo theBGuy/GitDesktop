@@ -279,8 +279,10 @@ const agentAbilities = [
           <p class="mt-2 text-sm leading-relaxed text-muted">
             Open a changed file's context menu to keep it out of AI context (the file, its folder,
             or its file type); it's appended to
-            <code class="text-ink">.gitdesktop/aiignore</code>. Patterns also work globally
-            or per repo, and excluded files still commit normally.
+            <code class="text-ink">.gitdesktop/aiignore</code> as a line that means exactly what
+            you picked. Patterns are plain <code class="text-ink">.gitignore</code> syntax, work
+            globally or per repo, and excluded files still commit normally. A repo-aware review
+            reads your files directly, so ignore patterns don't limit it.
           </p>
         </div>
         <div class="min-w-0">

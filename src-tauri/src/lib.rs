@@ -244,6 +244,7 @@ pub fn run() {
             git::ops::git_abort_local_pr_merge,
             git::ops::git_cleanup_orphaned_resolve_worktrees,
             git::ops::git_conflict_preview,
+            git::ai_ignore::git_filter_ai_ignored,
             git::conflict::git_conflict_sides,
             git::conflict::git_resolve_conflict,
             git::conflict::git_checkout_conflict_side,

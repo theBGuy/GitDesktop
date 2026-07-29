@@ -109,20 +109,13 @@ pub async fn git_branch_diff(
     validate_ref(&compare)?;
     let range = format!("{base}...{compare}");
 
-    // Translate ignore patterns into git pathspec excludes — pathspec globs are
-    // close to gitignore semantics but not identical: `*` also matches `/`
-    // (wildmatch without WM_PATHNAME) so `src/*.rs` hides nested files too, and
-    // a bare `notes.md` is root-anchored where gitignore matches any depth
-    // (both measured, git 2.51.1). ":(exclude)" needs at least one inclusive
-    // pathspec alongside it, hence the leading ".".
-    let mut pathspec: Vec<String> = Vec::new();
-    for pattern in exclude.unwrap_or_default() {
-        let pattern = pattern.trim();
-        if pattern.is_empty() || pattern.starts_with('#') {
-            continue;
-        }
-        pathspec.push(format!(":(exclude){pattern}"));
-    }
+    // AI-ignore patterns → pathspec excludes, via the one shared engine
+    // (`git::ai_ignore`, which pins gitignore parity with tests). ":(exclude)"
+    // needs at least one inclusive pathspec alongside it, hence the leading ".".
+    let pathspec =
+        crate::git::ai_ignore::pathspecs_for_repo(&repo_path, &exclude.unwrap_or_default())
+            .await
+            .specs;
 
     let mut diff_args: Vec<&str> = vec!["diff", "--no-color", &range];
     let mut stat_args: Vec<&str> = vec!["diff", "--numstat", "-z", &range];
@@ -817,6 +810,82 @@ mod tests {
         assert_eq!(noop.files.len(), 6);
         assert_eq!(noop.excluded_files, 0);
         assert_eq!(noop.text, all.text);
+    }
+
+    /// AI-ignore patterns are gitignore-style, so a bare NAME matches at any
+    /// depth (not just the repo root), a bare DIRECTORY name hides that
+    /// directory's contents wherever it sits, and a leading `/` anchors to the
+    /// root instead of blanking the whole diff.
+    #[tokio::test]
+    async fn branch_diff_bare_name_matches_at_any_depth() {
+        let (_base, repo) = seed_repo("branchdiff-anydepth").await;
+        let root = std::path::Path::new(&repo);
+
+        std::fs::write(root.join("seed.txt"), "seed\n").unwrap();
+        run(&repo, &["add", "-A"]).await;
+        run(&repo, &["commit", "-qm", "seed"]).await;
+        let base_sha = run(&repo, &["rev-parse", "HEAD"]).await.trim().to_string();
+
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::create_dir_all(root.join("src").join("node_modules")).unwrap();
+        std::fs::write(root.join("notes.md"), "root\n").unwrap();
+        std::fs::write(root.join("docs").join("notes.md"), "nested\n").unwrap();
+        std::fs::write(root.join("keep.txt"), "keep\n").unwrap();
+        std::fs::write(root.join("src").join("node_modules").join("j.js"), "dep\n").unwrap();
+        // `-f`: a user's GLOBAL excludes file may ignore node_modules.
+        run(&repo, &["add", "-A", "-f"]).await;
+        run(&repo, &["commit", "-qm", "work"]).await;
+
+        let bare = git_branch_diff(
+            repo.clone(),
+            base_sha.clone(),
+            "HEAD".into(),
+            None,
+            Some(vec!["notes.md".into()]),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !bare.files.iter().any(|f| f.path == "docs/notes.md"),
+            "a bare name hides the NESTED copy, not just the root one"
+        );
+        assert!(!bare.files.iter().any(|f| f.path == "notes.md"));
+        assert!(bare.files.iter().any(|f| f.path == "keep.txt"));
+        assert_eq!(bare.excluded_files, 2);
+
+        // A leading `/` anchors to the repo root — the nested copy survives, and
+        // the diff is not silently emptied (git used to read it as an abs path).
+        let anchored = git_branch_diff(
+            repo.clone(),
+            base_sha.clone(),
+            "HEAD".into(),
+            None,
+            Some(vec!["/notes.md".into()]),
+        )
+        .await
+        .unwrap();
+        assert!(
+            anchored.files.iter().any(|f| f.path == "docs/notes.md"),
+            "the anchored pattern spares the nested copy"
+        );
+        assert!(!anchored.files.iter().any(|f| f.path == "notes.md"));
+        assert_eq!(anchored.excluded_files, 1);
+
+        // A bare DIRECTORY name (no trailing slash) hides its contents at depth.
+        let dir = git_branch_diff(
+            repo,
+            base_sha,
+            "HEAD".into(),
+            None,
+            Some(vec!["node_modules".into()]),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !dir.files.iter().any(|f| f.path.contains("node_modules")),
+            "`node_modules` hides src/node_modules/j.js"
+        );
+        assert_eq!(dir.excluded_files, 1);
     }
 
     /// A match at a rev is found even after the working tree (and later commits)

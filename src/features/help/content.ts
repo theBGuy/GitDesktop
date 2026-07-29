@@ -933,6 +933,10 @@ caps how long such a review may run before it's stopped: **Auto** allows 5 minut
 the review is agentic — always, for Codex), or pin a fixed limit that applies to every
 agent-CLI review.
 
+**Critical** is the top severity an audit finding can carry — remote code execution,
+execution triggered by content you only clone or open, full compromise, or a mass data
+breach.
+
 **One review at a time — queue the other.** A PR streams one AI review at a time,
 but you don't have to pick between a code review and a security audit: start one
 while the other is running and it **queues**, then starts automatically when the
@@ -951,8 +955,10 @@ Ollama) get a **native, read-only tool loop** instead — with **no review works
 prepare**, so those reviews start instantly (no "Preparing review workspace…" wait).
 Either way it's **read-only end to end** — only read tools exist in the loop, so the
 reviewer can explore but never modify — and the status line shows what it's reading as it
-goes. When a review's diff outgrows the prompt budget, the panel offers one click to turn
-on agentic review for full coverage. A couple of caveats: each tool step is an extra model
+goes. An agentic review reads your repository directly, so your **AI ignore patterns**
+don't limit what it sees — turning it on widens what the reviewer can reach, not just how
+deeply it looks. When a review's diff outgrows the prompt budget, the panel offers one
+click to turn on agentic review for full coverage. A couple of caveats: each tool step is an extra model
 call, so agentic runs are slower and pricier than a one-shot review; and small local models
 (some Ollama models) may not support tool calling — the review fails with a clear message
 suggesting you turn agentic off or pick another model. (Codex reviews already explore the
@@ -1630,9 +1636,16 @@ notes**, and **repository descriptions**.
   \`.gitdesktop/instructions.md\` that takes precedence.
 - **AI-ignore patterns** keep sensitive or noisy files (lockfiles, vendored folders) out
   of the AI's context while still committing them normally — global in Settings, or
-  per-repo via \`.gitdesktop/aiignore\`. No need to hand-edit it: {{secondaryclick}} a changed
-  file → *Exclude from AI* (the file, its folder, or its file type — or a
-  multi-selection) appends to \`.gitdesktop/aiignore\`, creating it if needed.
+  per-repo via \`.gitdesktop/aiignore\`. A model that reads your repository itself isn't
+  limited by them — that's what **Agentic review** on a pull request turns on (see
+  *Pull requests*). They're \`.gitignore\` patterns: \`secrets.env\` hides
+  that file at any depth, \`/secrets.env\` only the copy at the repo root, \`node_modules\`
+  or \`vendor/\` a folder wherever it sits, and \`docs/*.log\` just that folder's logs.
+  \`!\` re-include lines aren't supported. No
+  need to hand-edit the file: {{secondaryclick}} a changed file → *Exclude from AI* (the
+  file, its folder, or its file type — or a multi-selection) appends to
+  \`.gitdesktop/aiignore\`, creating it if needed — an anchored line (\`/src/config.ts\`,
+  \`/vendor/\`) for exactly the file or folder you picked.
 - **Hide AI** (Settings → General) removes every AI surface from the app while keeping
   your configuration.
 
