@@ -109,9 +109,9 @@ pub async fn git_branch_diff(
     validate_ref(&compare)?;
     let range = format!("{base}...{compare}");
 
-    // AI-ignore patterns → pathspec excludes, via the one shared engine
-    // (`git::ai_ignore`, which pins gitignore parity with tests). ":(exclude)"
-    // needs at least one inclusive pathspec alongside it, hence the leading ".".
+    // AI-ignore patterns → pathspec excludes (`git::ai_ignore` owns the
+    // translation). ":(exclude)" needs an inclusive pathspec alongside it,
+    // hence the leading ".".
     let pathspec =
         crate::git::ai_ignore::pathspecs_for_repo(&repo_path, &exclude.unwrap_or_default())
             .await

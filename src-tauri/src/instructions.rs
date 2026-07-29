@@ -35,22 +35,17 @@ pub async fn read_repo_ai_ignore(repo_path: String) -> AppResult<Vec<String>> {
 }
 
 /// Appends AI-ignore patterns to `<repo>/.gitdesktop/aiignore`, creating the
-/// `.gitdesktop` directory and the file (with a header comment) if absent.
-/// Mirrors `append_to_gitignore` (trim + in-batch de-dupe + skip lines already
-/// present), with one delta: a fresh file is seeded with a header comment
-/// (`parse_patterns` and `git::ai_ignore` both skip `#` lines). Lines are stored
-/// verbatim, gitignore-style — in particular a leading `/` is preserved and
-/// anchors the pattern to the repo root, which is how the UI's "exclude THIS
-/// file" actions mean one file rather than every file with that name. Returns
-/// the number of patterns actually appended (0 when every pattern was empty or
-/// already present).
+/// `.gitdesktop` directory and the file (seeded with a `#` header comment) if
+/// absent. Mirrors `append_to_gitignore`: trim, de-dupe in batch, skip lines
+/// already present. Lines are stored verbatim, gitignore-style — a leading `/`
+/// is preserved and anchors the pattern to the repo root. Returns how many
+/// patterns were appended (0 when all were empty or already present).
 #[tauri::command]
 pub async fn append_repo_ai_ignore(repo_path: String, patterns: Vec<String>) -> AppResult<usize> {
     const HEADER: &str =
         "# Files excluded from AI context — gitignore-style patterns, one per line.";
 
-    // Normalize (trim only — a leading '/' is meaningful anchoring) and de-dupe
-    // within the batch (preserving order).
+    // Trim only — a leading '/' is meaningful anchoring — then de-dupe in order.
     let mut wanted: Vec<String> = Vec::new();
     for p in patterns {
         let t = p.trim().to_string();

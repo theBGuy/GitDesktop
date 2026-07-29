@@ -139,10 +139,8 @@ export interface ReviewPromptInput {
   diffTruncated: boolean;
   files: { path: string; added: number; deleted: number; isBinary: boolean }[];
   /** Changed files hidden from this review's diff by the user's AI-ignore
-   *  patterns. Absent/0 ⇒ no disclosure line, so the prompt is byte-for-byte
-   *  identical to an unfiltered review. Mutually exclusive with `agentic` by
-   *  construction: only a NON-agentic run filters its diff, because an agentic
-   *  reviewer reads the worktree (or its own tools) directly. */
+   *  patterns; absent/0 ⇒ no disclosure line. Always 0 alongside `agentic` —
+   *  only a non-agentic run filters its diff. */
   excludedFiles?: number;
   /** Author-provided "Notes for reviewers" — the author's deliberate calls behind
    *  the change. Treated as author input like `body` (NOT soft bot context), so it

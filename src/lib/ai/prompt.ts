@@ -701,10 +701,8 @@ export function buildReviewPrompt(
       `## Commits\n${input.commitSubjects.map((s) => `- ${s}`).join("\n")}`,
     );
   }
-  // A reviewer that invents findings about files it can't see is worse than a
-  // generator that does, so this takes the "do not speculate" wording. Only a
-  // non-agentic run ever supplies a count — an agentic one is unfiltered, and
-  // its prompt stays byte-identical.
+  // Stronger wording than the generator's twin: an invented finding about a
+  // file the reviewer can't see reads as a real one.
   let filesSection = `## Files changed\n${fileSummary || "(none)"}`;
   if ((input.excludedFiles ?? 0) > 0) {
     filesSection += `\n[${input.excludedFiles} additional changed file(s) hidden by the user's AI ignore rules — do not speculate about them]`;

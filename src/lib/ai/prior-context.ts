@@ -28,11 +28,9 @@ export interface PriorContext {
  *
  * `exclude` is the caller's AI-ignore pattern list, empty for an agentic run.
  * The delta is a SECOND diff, so filtering only the main one would leak the
- * very files the user withheld; the backing `gitDiffBetweenRefs` command is
- * shared with the agentic `diff_refs` tool and deliberately grew no `exclude`
- * parameter, so the filtering happens here instead. It sits inside the try
- * below, which fails closed: a filter failure drops the delta rather than
- * carrying an unfiltered one.
+ * very files the user withheld. Filtered inside the try below, which fails
+ * closed: a filter failure drops the delta rather than carrying an unfiltered
+ * one.
  */
 export async function resolvePriorContext(
   repoPath: string,
@@ -72,8 +70,8 @@ export async function resolvePriorContext(
       DELTA_MAX_BYTES,
     );
     if (delta.reason === "ok") {
-      // No file list to pair with a two-dot delta — its own section keys are
-      // the whole candidate set (and an empty `exclude` costs nothing).
+      // No file list pairs with a two-dot delta — its section keys are the
+      // whole candidate set.
       const filtered = await filterDiffByAiIgnore({
         repoPath,
         text: delta.text,

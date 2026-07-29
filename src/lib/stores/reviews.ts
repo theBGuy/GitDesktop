@@ -497,21 +497,17 @@ export async function startReview(
                 : "balanced",
       },
     });
-    // Agentic run: in repo-aware mode the reviewer explores. Resolved up here
-    // because it also decides whether this run's diff is AI-ignore filtered —
-    // see `excludePatterns` below; the capability breakdown it feeds stays with
-    // the prompt further down.
+    // Agentic run: in repo-aware mode the reviewer explores (what it can
+    // actually reach is worked out with the prompt below).
     const agenticRun = Boolean(ai.cliRepoAware);
-    // Settings are read here rather than after the diff so the AI-ignore
-    // patterns are in hand before it loads.
+    // Must resolve before the diff loads — it decides how the diff is filtered.
     const appSettings = await loadSettings();
     if (control.cancelled) return;
-    // The user's AI-ignore patterns, applied to a NON-agentic review's diff so a
-    // file the user withheld from generation is withheld from review too. An
-    // agentic run is deliberately unfiltered — its agent reads the checked-out
-    // worktree (CLI) or holds `read_file`/`grep`/`pull_request_diff` (HTTP), so
-    // filtering the diff we hand it would protect nothing. Empty ⇒ every step
-    // below is a no-op, with no extra IPC.
+    // Applied to a NON-agentic review's diff, so a file withheld from generation
+    // is withheld from review too. An agentic run is deliberately unfiltered —
+    // its agent reads the checked-out worktree (CLI) or holds
+    // `read_file`/`grep`/`pull_request_diff` (HTTP), so filtering the diff we
+    // hand it would protect nothing.
     const excludePatterns = agenticRun
       ? []
       : await aiExcludePatterns(target.repoPath, appSettings.aiIgnorePatterns);
@@ -534,7 +530,7 @@ export async function startReview(
       // A no-op run shouldn't linger in the dock; a momentary toast is enough. Drop any
       // queued second mode too — same PR, same empty diff, so it would only load nothing
       // and toast "No changes" a second time. An all-excluded diff lands here too, and
-      // says so — "no changes" on a PR that visibly has some reads as a bug.
+      // says so rather than claiming a PR with visible changes has none.
       toast.info(
         filtered.excludedFiles > 0
           ? "Every changed file matches your AI ignore patterns — nothing to review."
@@ -545,9 +541,7 @@ export async function startReview(
       return;
     }
     // Soft prior-review context (skipped when the user asked to ignore it). Runs
-    // on a held slot after the diff loads — never during the queued wait. Takes the
-    // same patterns: its "changes since" delta is a second diff, and filtering only
-    // the main one would leak through it.
+    // on a held slot after the diff loads — never during the queued wait.
     const prior: PriorContext = ignorePrior
       ? {}
       : await resolvePriorContext(
@@ -686,8 +680,6 @@ export async function startReview(
           deleted: f.deleted,
           isBinary: f.isBinary,
         })),
-        // Always 0 on an agentic run (nothing was filtered), so its prompt is
-        // byte-identical to before — the disclosure line is skipped entirely.
         excludedFiles: filtered.excludedFiles,
         provider: context.provider,
         budgetProfile,

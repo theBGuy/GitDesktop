@@ -989,11 +989,8 @@ export const gitBranchFileDiff = (
 /** Three-dot `base...compare` diff. `exclude` takes gitignore-style patterns the
  *  backend filters out of the text and file list (counting them in
  *  `excludedFiles`); generation callers pass the user's AI-ignore patterns here.
- *  Reviews apply the same patterns but filter client-side after the diff
- *  resolves (`filterDiffByAiIgnore`) — one recipe for this path and the
- *  forge-supplied PR diff alike — and only for a NON-agentic run: an agentic
- *  reviewer reads the worktree and its own tools directly, so filtering the
- *  diff handed to it would protect nothing. */
+ *  Review callers omit them and filter client-side instead
+ *  (`filterDiffByAiIgnore`), which covers forge-supplied PR diffs too. */
 export const gitBranchDiff = (
   repoPath: string,
   base: string,

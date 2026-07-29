@@ -923,12 +923,10 @@ export function RemotePrView({
           deleted: f.deletions,
           isBinary: false,
         }));
-        // The forge hands us the whole diff, so unlike the branch-diff path
-        // there are no pathspecs to exclude with — derive a filtered copy with
-        // the shared recipe (also used by both review funnels). NEVER write it
-        // back into the query cache: the same string feeds the Files tab, the
-        // review threads and the AI review panel, all of which want the full
-        // diff.
+        // A forge-supplied diff arrives whole, so it is filtered client-side.
+        // NEVER write the result back into the query cache: the same string
+        // feeds the Files tab, the review threads and the AI review panel, all
+        // of which want the full diff.
         const hidden = await filterDiffByAiIgnore({
           repoPath,
           text,

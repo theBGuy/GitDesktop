@@ -41,14 +41,11 @@ pub struct AiIgnorePathspecs {
 /// blanks, `#` comments and `!` un-ignore lines dropped. Returns them with the
 /// number of `!` lines dropped.
 ///
-/// One definition, deliberately shared: the two engines must decide every list
-/// identically, and `!` is the case that can only be made uniform by dropping
-/// it. A pathspec has no un-exclude, so honoring negations is impossible on that
-/// side; letting the gitignore side honor them anyway would hide a file when the
-/// user opens a PR from a local branch and send that same file to a model when
-/// they regenerate an open PR's description. Of the two uniform behaviors,
-/// refusing an un-ignore withholds more — the right way for a privacy feature to
-/// fail.
+/// One definition, deliberately shared: both engines must decide every list
+/// identically, and `!` can only be made uniform by dropping it — a pathspec has
+/// no un-exclude, so honoring negations on the gitignore side alone would hide a
+/// file on one generation path and hand it to a model on another. Of the two
+/// uniform behaviors, refusing an un-ignore withholds more.
 fn actionable_lines(patterns: &[String]) -> (Vec<&str>, usize) {
     let mut lines: Vec<&str> = Vec::new();
     let mut skipped_negations = 0usize;
@@ -156,25 +153,20 @@ pub async fn pathspecs_for_repo(repo_path: &str, patterns: &[String]) -> AiIgnor
 /// An empty throwaway repo, created once per process, that [`filter_ignored`]
 /// runs `check-ignore` inside.
 ///
-/// The AI-ignore patterns must be the ONLY rules in play. Running in the user's
-/// repo adds that repo's `.gitignore` files to the ruleset, which both
-/// over-reports (a tracked-but-gitignored file — a committed lockfile, a
-/// checked-in build artifact — would be declared AI-ignored and the conflict UI
-/// would tell the user it "matches your AI ignore patterns", with no bypass) and
-/// breaks the invariant that this engine and `pathspecs_for` decide alike. An
-/// empty work tree leaves `core.excludesFile` as the only active source.
+/// The AI-ignore patterns must be the ONLY rules in play: running in the user's
+/// repo would add that repo's `.gitignore` files, which both over-reports (a
+/// committed-but-gitignored lockfile declared AI-ignored, with no bypass in the
+/// conflict UI) and breaks the invariant that this engine and `pathspecs_for`
+/// decide alike. An empty work tree leaves `core.excludesFile` as the only
+/// active source. Reused across calls because `is_ai_ignored` runs per
+/// conflicted file; only a successful init is cached (`get_or_try_init` leaves
+/// the cell empty on error).
 ///
-/// Created once and reused: `is_ai_ignored` runs per conflicted file, so a
-/// per-call `git init` would be a spawn storm. Only a successful init is cached
-/// (`get_or_try_init` leaves the cell empty on error).
-///
-/// `TempDir` rather than a pid-derived name because the path must be
-/// unpredictable and never adopted: in a shared `/tmp`, a guessable name lets a
-/// local attacker pre-create `.git/info/exclude` holding `!secrets.env`, which
-/// outranks `core.excludesFile` and would make the conflict gate fail open — and
-/// a reused pid alone could wedge a session on a directory this process cannot
-/// write. TempDir creates exclusively, with owner-only permissions. It lives in a
-/// static, so the OS temp reaper rather than `Drop` is what eventually removes it.
+/// `TempDir` rather than a pid-derived name: in a shared `/tmp` a guessable path
+/// lets a local attacker pre-create `.git/info/exclude` holding `!secrets.env`,
+/// which outranks `core.excludesFile` and fails the conflict gate OPEN. TempDir
+/// creates exclusively, with owner-only permissions; it lives in a static, so the
+/// OS temp reaper rather than `Drop` eventually removes it.
 static NEUTRAL_REPO: OnceCell<tempfile::TempDir> = OnceCell::const_new();
 
 async fn neutral_repo() -> AppResult<PathBuf> {

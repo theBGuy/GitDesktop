@@ -602,15 +602,14 @@ async function generateReviewText(
   signal: AbortSignal,
   onCliId: (id: string) => void,
 ): Promise<ReviewResult | null> {
-  // Read up front so the AI-ignore patterns are in hand before the diff resolves;
-  // the budget profile below still consumes the same single read.
+  // Must resolve before the diff loads — it decides how the diff is filtered.
+  // The budget profile below reuses this one read.
   const appSettings = await loadSettings();
   if (signal.aborted) return null;
   // An automated review is agentic only when the toggle is on AND the provider is
   // a CLI one: `runCliStream` honors `cliRepoAware` with a detached worktree, but
   // an automated HTTP review gets no MCP tools and no tool loop, so it can only
-  // ever see the diff we hand it. Non-agentic ⇒ the user's AI-ignore patterns
-  // apply, exactly as they do on every generation path.
+  // ever see the diff we hand it.
   const agenticRun = Boolean(ai.cliRepoAware) && isCliProvider(ai.provider);
   const excludePatterns = agenticRun
     ? []
@@ -664,25 +663,21 @@ async function generateReviewText(
   // Cancelled while the diff loaded — don't start the model.
   if (signal.aborted) return null;
 
-  // One filter for all five resolution paths above (forge PR diff, branch diff,
-  // commit diff): every one of them lands a whole unified diff here, and only
-  // `gitBranchDiff` could have excluded server-side. Empty patterns ⇒ the input
-  // straight back, no IPC.
+  // One filter for every resolution path above: each lands a whole unified diff
+  // here, and only `gitBranchDiff` could have excluded server-side.
   const filtered = await filterDiffByAiIgnore({
     repoPath: event.repoPath,
     text: diff.text,
     files: diff.files,
     exclude: excludePatterns,
   });
-  // Everything the change touched is AI-ignored — same outcome as an empty diff
-  // (the caller reports "skipped — no changes to review"), and nothing to send.
+  // Everything the change touched is AI-ignored ⇒ the empty-diff outcome (the
+  // caller reports "skipped — no changes to review").
   if (!filtered.text.trim()) return null;
   if (signal.aborted) return null;
 
   // Build on a prior review of this PR + mode (no-op when none) so a re-review focuses on
-  // new/unresolved issues — the same soft context the interactive path uses. Takes the
-  // same patterns: its "changes since" delta is a second diff, and filtering only the
-  // main one would leak through it.
+  // new/unresolved issues — the same soft context the interactive path uses.
   const prior: PriorContext =
     event.kind === "commit"
       ? {}
@@ -790,8 +785,6 @@ async function generateReviewText(
         deleted: f.deleted,
         isBinary: f.isBinary,
       })),
-      // Always 0 on an agentic run (nothing was filtered), so its prompt is
-      // byte-identical to before — the disclosure line is skipped entirely.
       excludedFiles: filtered.excludedFiles,
       provider,
       budgetProfile,

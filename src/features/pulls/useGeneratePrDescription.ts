@@ -85,10 +85,8 @@ export function useGeneratePrDescription(repoPath: string) {
        *  Empty ⇒ no Jira mentions proposed. Mutually exclusive with
        *  `issueCandidates` — `buildPrPrompt` gives natives precedence. */
       jiraCandidates?: JiraCandidate[],
-      /** Which set of changes the "nothing to describe" toasts name. The
-       *  branch-diff path really is describing `base..head`; the open-PR
-       *  supplier describes the change request itself, whose noun follows
-       *  `provider` (GitLab calls it a merge request). */
+      /** Which set of changes the "nothing to describe" toasts name; the
+       *  change-request noun follows `provider` (GitLab: merge request). */
       emptyScope: "branch-diff" | "change-request" = "branch-diff",
     ) => {
       await run(
@@ -194,8 +192,7 @@ export function useGeneratePrDescription(repoPath: string) {
   /** Explicit-supplier path (remote PRs): the caller provides the diff — e.g. an
    *  existing PR's own diff query — so it works even when the head branch isn't
    *  present locally (fork PRs, unfetched branches). The supplier is handed the
-   *  loaded settings so it can apply the user's AI-ignore patterns itself (the
-   *  branch-diff path gets that from the git layer's pathspec excludes). */
+   *  loaded settings so it can apply the user's AI-ignore patterns itself. */
   const generateFromDiff = useCallback(
     (
       getDiff: (settings: AppSettings) => Promise<SuppliedDiff>,
