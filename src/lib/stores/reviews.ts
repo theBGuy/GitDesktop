@@ -500,8 +500,12 @@ export async function startReview(
     // Agentic run: in repo-aware mode the reviewer explores (what it can
     // actually reach is worked out with the prompt below).
     const agenticRun = Boolean(ai.cliRepoAware);
-    // Must resolve before the diff loads — it decides how the diff is filtered.
-    const appSettings = await loadSettings();
+    // Independent of each other, and the settings are only needed by the filter
+    // below — so they ride alongside the diff rather than in front of it.
+    const [loaded, appSettings] = await Promise.all([
+      context.loadDiff(),
+      loadSettings(),
+    ]);
     if (control.cancelled) return;
     // Applied to a NON-agentic review's diff, so a file withheld from generation
     // is withheld from review too. An agentic run is deliberately unfiltered —
@@ -511,8 +515,6 @@ export async function startReview(
     const excludePatterns = agenticRun
       ? []
       : await aiExcludePatterns(target.repoPath, appSettings.aiIgnorePatterns);
-    if (control.cancelled) return;
-    const loaded = await context.loadDiff();
     if (control.cancelled) return;
     const filtered = await filterDiffByAiIgnore({
       repoPath: target.repoPath,

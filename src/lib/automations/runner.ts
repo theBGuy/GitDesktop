@@ -589,6 +589,51 @@ interface ReviewResult {
   thoughts: string;
 }
 
+/** The whole unified diff a review event covers, from whichever source can serve
+ *  it — every branch here lands unfiltered text that the caller then filters. */
+async function resolveDiff(
+  event: AutomationEvent,
+): Promise<{ text: string; truncated: boolean; files: DiffStatEntry[] }> {
+  if (event.kind === "commit") {
+    return gitCommitDiff(event.repoPath, event.hash, DIFF_MAX_BYTES);
+  }
+  if (event.kind === "pr-sync" && event.target.type === "remote") {
+    // Remote pr-sync comes from the provider-neutral head-OID poll: no local base/head
+    // branch, and the head may not be local (fork / pushed elsewhere). Use the provider's
+    // PR diff; it has no numstat, so derive the file summary from the diff text.
+    // Origin-pinned — the poller is origin-scoped, so this tracks the fork's own PRs.
+    const text = await forgePrDiff(
+      event.repoPath,
+      event.target.number,
+      "origin",
+    );
+    return { text, truncated: false, files: filesFromDiff(text) };
+  }
+  if (event.target.type === "remote") {
+    // Remote pr-open: prefer the local branch diff (it carries numstat), but the head
+    // branch isn't guaranteed local — catch-up / ready-flip events cover PRs opened
+    // elsewhere that reach this machine before any fetch lands the ref (observed live:
+    // `git diff` fails on an unfetched head). Fall back to the provider's PR diff.
+    try {
+      return await gitBranchDiff(
+        event.repoPath,
+        event.base,
+        event.head,
+        DIFF_MAX_BYTES,
+      );
+    } catch {
+      const text = await forgePrDiff(
+        event.repoPath,
+        event.target.number,
+        "origin",
+      );
+      return { text, truncated: false, files: filesFromDiff(text) };
+    }
+  }
+  // Local PR targets: both branches are inherently local.
+  return gitBranchDiff(event.repoPath, event.base, event.head, DIFF_MAX_BYTES);
+}
+
 /**
  * Resolves the diff, builds the prompt, and runs the model to completion.
  * `signal` aborts the HTTP stream; `onCliId` reports the CLI run's id so the
@@ -602,9 +647,15 @@ async function generateReviewText(
   signal: AbortSignal,
   onCliId: (id: string) => void,
 ): Promise<ReviewResult | null> {
-  // Must resolve before the diff loads — it decides how the diff is filtered.
-  // The budget profile below reuses this one read.
-  const appSettings = await loadSettings();
+  // Independent of each other, and the settings are only needed by the filter
+  // below (the budget profile reuses the same read) — so they resolve alongside
+  // the diff rather than in front of it.
+  const [diff, appSettings] = await Promise.all([
+    resolveDiff(event),
+    loadSettings(),
+  ]);
+  if (!diff.text.trim()) return null;
+  // Cancelled while the diff loaded — don't start the model.
   if (signal.aborted) return null;
   // An automated review is agentic only when the toggle is on AND the provider is
   // a CLI one: `runCliStream` honors `cliRepoAware` with a detached worktree, but
@@ -616,55 +667,8 @@ async function generateReviewText(
     : await aiExcludePatterns(event.repoPath, appSettings.aiIgnorePatterns);
   if (signal.aborted) return null;
 
-  let diff: { text: string; truncated: boolean; files: DiffStatEntry[] };
-  if (event.kind === "commit") {
-    diff = await gitCommitDiff(event.repoPath, event.hash, DIFF_MAX_BYTES);
-  } else if (event.kind === "pr-sync" && event.target.type === "remote") {
-    // Remote pr-sync comes from the provider-neutral head-OID poll: no local base/head
-    // branch, and the head may not be local (fork / pushed elsewhere). Use the provider's
-    // PR diff; it has no numstat, so derive the file summary from the diff text.
-    // Origin-pinned — the poller is origin-scoped, so this tracks the fork's own PRs.
-    const text = await forgePrDiff(
-      event.repoPath,
-      event.target.number,
-      "origin",
-    );
-    diff = { text, truncated: false, files: filesFromDiff(text) };
-  } else if (event.target.type === "remote") {
-    // Remote pr-open: prefer the local branch diff (it carries numstat), but the head
-    // branch isn't guaranteed local — catch-up / ready-flip events cover PRs opened
-    // elsewhere that reach this machine before any fetch lands the ref (observed live:
-    // `git diff` fails on an unfetched head). Fall back to the provider's PR diff.
-    try {
-      diff = await gitBranchDiff(
-        event.repoPath,
-        event.base,
-        event.head,
-        DIFF_MAX_BYTES,
-      );
-    } catch {
-      const text = await forgePrDiff(
-        event.repoPath,
-        event.target.number,
-        "origin",
-      );
-      diff = { text, truncated: false, files: filesFromDiff(text) };
-    }
-  } else {
-    // Local PR targets: both branches are inherently local.
-    diff = await gitBranchDiff(
-      event.repoPath,
-      event.base,
-      event.head,
-      DIFF_MAX_BYTES,
-    );
-  }
-  if (!diff.text.trim()) return null;
-  // Cancelled while the diff loaded — don't start the model.
-  if (signal.aborted) return null;
-
-  // One filter for every resolution path above: each lands a whole unified diff
-  // here, and only `gitBranchDiff` could have excluded server-side.
+  // One filter for every resolution path in `resolveDiff`: each lands a whole
+  // unified diff here, and only `gitBranchDiff` could have excluded server-side.
   const filtered = await filterDiffByAiIgnore({
     repoPath: event.repoPath,
     text: diff.text,

@@ -31,7 +31,10 @@ export function globLiteralPath(path: string): string {
  * term. [`globLiteralPath`] is NOT an alternative here — its escaped folder
  * form (`src/app/[[]slug]`) matches nothing at all, since git's directory
  * recursion only runs on the literal branch.
+ *
+ * An empty path stays empty: a bare `:(literal)` matches EVERYTHING, and the
+ * Rust commands' `!isEmpty()` guards would wave it through.
  */
 export function literalPathspec(path: string): string {
-  return `:(literal)${path}`;
+  return path ? `:(literal)${path}` : path;
 }

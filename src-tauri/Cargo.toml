@@ -59,7 +59,8 @@ sha1 = "0.10"
 # only the user's patterns apply (git::ai_ignore). TempDir gives it an
 # unpredictable, exclusively-created path: a guessable one in a shared /tmp lets a
 # local attacker pre-seed `.git/info/exclude`, which outranks core.excludesFile and
-# would silently un-ignore a file. Also a dev-dependency, for test fixtures.
+# would silently un-ignore a file. Test fixtures use it as RAII temp dirs too, so
+# a killed or panicking run leaks nothing.
 tempfile = "3"
 
 # Desktop-only: the updater plugin doesn't build for mobile.
@@ -87,7 +88,3 @@ windows-sys = { version = "0.61", features = [
 portable-pty = { path = "vendor/portable-pty" }
 
 [dev-dependencies]
-# RAII temp dirs for tests: a killed or panicking run must not leak fixtures
-# into the system temp dir — TempDir removes the directory on Drop.
-# Already in the dependency graph transitively, so near-zero cost.
-tempfile = "3"

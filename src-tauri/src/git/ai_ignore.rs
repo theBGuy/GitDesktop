@@ -16,9 +16,10 @@
 //! This is a privacy boundary: a pattern that fails to match is a file that
 //! reaches a third-party model.
 
+use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 
+use tempfile::TempPath;
 use tokio::sync::OnceCell;
 
 use crate::error::{AppError, AppResult};
@@ -129,14 +130,20 @@ pub fn pathspecs_for(patterns: &[String], icase: bool) -> AiIgnorePathspecs {
 /// filesystem. Both engines must be driven from THIS one value so they fold case
 /// alike — and from the user's repo, never from wherever a temp dir happens to
 /// live.
+///
+/// `--type=bool` is required, not tidiness: git accepts `1`, `yes`, `on` and a
+/// valueless key as true, and the raw value is whatever the user wrote. Reading
+/// it raw computes false for those, which then FORCES `-c core.ignorecase=false`
+/// onto `check-ignore` — so a `Secrets.env` pattern stops hiding `secrets.env` on
+/// both engines at once (measured, git 2.51.1).
 async fn repo_ignorecase(repo_path: &str) -> bool {
     run_git_raw(
         Some(repo_path),
-        &["config", "--get", "core.ignorecase"],
+        &["config", "--type=bool", "--get", "core.ignorecase"],
         DEFAULT_TIMEOUT,
     )
     .await
-    .map(|out| out.code == 0 && out.stdout_lossy().trim().eq_ignore_ascii_case("true"))
+    .map(|out| out.code == 0 && out.stdout_lossy().trim() == "true")
     .unwrap_or(false)
 }
 
@@ -178,6 +185,11 @@ async fn neutral_repo() -> AppResult<PathBuf> {
                 .map_err(AppError::Io)?;
             let path = dir.path().to_string_lossy().into_owned();
             run_git(Some(&path), &["init", "-q"], DEFAULT_TIMEOUT).await?;
+            // A user's `init.templateDir` can seed `.git/info/exclude`, which
+            // outranks `core.excludesFile` and would join the ruleset.
+            tokio::fs::write(dir.path().join(".git/info/exclude"), "")
+                .await
+                .map_err(AppError::Io)?;
             Ok::<tempfile::TempDir, AppError>(dir)
         })
         .await?;
@@ -212,6 +224,14 @@ async fn neutral_repo() -> AppResult<PathBuf> {
 /// returns a path that no longer compares equal to the one the caller sent — on
 /// a privacy boundary that fails OPEN. It also makes a path containing a newline
 /// representable at all.
+///
+/// The excludes file carries that boundary too, so it must be unguessable and
+/// exclusively created: an emptied or substituted list reports NOTHING ignored.
+/// It is created with `O_EXCL` inside [`neutral_repo`]'s owner-only directory and
+/// written through that same handle, never re-opened by name — so no other user
+/// can pre-create the path, and nothing can be swapped in between the write and
+/// git's read. Removed explicitly below on both arms, with the handle's own drop
+/// as a backstop.
 pub async fn filter_ignored(
     repo_path: &str,
     paths: &[String],
@@ -224,23 +244,22 @@ pub async fn filter_ignored(
     let icase = repo_ignorecase(repo_path).await;
     let neutral = neutral_repo().await?.to_string_lossy().into_owned();
 
-    // pid + nanos + counter: concurrent callers (one per conflicted file) must
-    // not share a name, and the clock alone is too coarse to guarantee that.
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let excludes_file = std::env::temp_dir().join(format!(
-        "gd-aiignore-{}-{}-{}.txt",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0),
-        SEQ.fetch_add(1, Ordering::Relaxed),
-    ));
     let mut body = lines.join("\n");
     body.push('\n');
-    tokio::fs::write(&excludes_file, body)
-        .await
-        .map_err(AppError::Io)?;
+    // Created and written through one exclusive handle, inside the neutral repo's
+    // own directory — see the security note on this function.
+    let dir = neutral.clone();
+    let excludes_file = tokio::task::spawn_blocking(move || -> std::io::Result<TempPath> {
+        let mut file = tempfile::Builder::new()
+            .prefix("excludes-")
+            .suffix(".txt")
+            .tempfile_in(dir)?;
+        file.as_file_mut().write_all(body.as_bytes())?;
+        Ok(file.into_temp_path())
+    })
+    .await
+    .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?
+    .map_err(AppError::Io)?;
 
     let result = async {
         // Forward slashes: a `-c` value is config-parsed, and a Windows temp path's
@@ -609,9 +628,12 @@ mod tests {
         assert_eq!(specs("NOTES.MD")[0], ":(exclude,glob)**/NOTES.MD");
 
         // Flip the REPO's setting; both engines must follow it, and each other.
+        // Written as `1`, NOT `true`: git accepts `1`/`yes`/`on`/a valueless key
+        // as true, so a raw string compare reads this repo as case-SENSITIVE and
+        // forces that onto both engines — agreeing with each other and wrong.
         run_git(
             Some(&repo),
-            &["config", "core.ignorecase", "true"],
+            &["config", "core.ignorecase", "1"],
             DEFAULT_TIMEOUT,
         )
         .await

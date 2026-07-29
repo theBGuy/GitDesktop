@@ -26,7 +26,9 @@ export interface PriorContext {
  * automation runner's pr-open / pr-sync paths — both build on a prior the same
  * way. Takes primitives (not a `ReviewTarget`) to avoid a circular import.
  *
- * `exclude` is the caller's AI-ignore pattern list, empty for an agentic run.
+ * `exclude` is the caller's AI-ignore pattern list — required, not defaulted:
+ * an omitted privacy argument is how the next caller leaks. Empty for an
+ * agentic run.
  * The delta is a SECOND diff, so filtering only the main one would leak the
  * very files the user withheld. Filtered inside the try below, which fails
  * closed: a filter failure drops the delta rather than carrying an unfiltered
@@ -38,7 +40,7 @@ export async function resolvePriorContext(
   ref: string,
   mode: ReviewMode,
   currentHeadSha: string | undefined,
-  exclude: string[] = [],
+  exclude: string[],
 ): Promise<PriorContext> {
   const prior = await getLatestReview(repoPath, kind, ref, mode);
   if (!prior?.text.trim()) return {};
