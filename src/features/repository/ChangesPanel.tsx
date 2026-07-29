@@ -417,24 +417,24 @@ export function ChangesPanel({ repoPath }: { repoPath: string }) {
 
   // Single-file ignore / untrack (the per-row menu); the bulk equivalents are
   // ignoreSelected / untrackSelected below.
-  function ignoreOne(pattern: string) {
+  function ignoreOne(pattern: string, label: string) {
     appendIgnore.mutate([pattern], {
       onSuccess: (added) =>
         toast.success(
           added === 0
-            ? `"${pattern}" is already in .gitignore`
-            : `Added "${pattern}" to .gitignore`,
+            ? `"${label}" is already in .gitignore`
+            : `Added "${label}" to .gitignore`,
         ),
       onError,
     });
   }
-  function aiExcludeOne(pattern: string) {
+  function aiExcludeOne(pattern: string, label: string) {
     appendAiIgnore.mutate([pattern], {
       onSuccess: (added) =>
         toast.success(
           added === 0
-            ? `"${pattern}" is already in .gitdesktop/aiignore`
-            : `Added "${pattern}" to .gitdesktop/aiignore`,
+            ? `"${label}" is already in .gitdesktop/aiignore`
+            : `Added "${label}" to .gitdesktop/aiignore`,
         ),
       onError,
     });

@@ -160,6 +160,15 @@ pub async fn git_checkout_conflict_side(
     path: String,
     side: String,
 ) -> AppResult<()> {
+    git_checkout_conflict_side_core(&state, repo_path, path, side).await
+}
+
+pub(crate) async fn git_checkout_conflict_side_core(
+    state: &AppState,
+    repo_path: String,
+    path: String,
+    side: String,
+) -> AppResult<()> {
     validate_rel_path(&path)?;
     let flag = match side.as_str() {
         "ours" => "--ours",
@@ -175,13 +184,13 @@ pub async fn git_checkout_conflict_side(
     // never opened.
     let spec = crate::git::pathspec::literal(&path);
     run_git_mutating(
-        &state,
+        state,
         &repo_path,
         &["checkout", flag, "--", &spec],
         DEFAULT_TIMEOUT,
     )
     .await?;
-    run_git_mutating(&state, &repo_path, &["add", "--", &spec], DEFAULT_TIMEOUT).await?;
+    run_git_mutating(state, &repo_path, &["add", "--", &spec], DEFAULT_TIMEOUT).await?;
     Ok(())
 }
 
@@ -264,9 +273,15 @@ mod tests {
         (dir, repo)
     }
 
-    /// Builds a real merge conflict on `file.txt` (base → "base", ours → "ours",
-    /// theirs → "theirs") and leaves the repo mid-merge.
-    async fn conflicted_repo(tag: &str) -> (tempfile::TempDir, String) {
+    /// Builds a real merge conflict on `path` (base → "base", ours → "ours",
+    /// theirs → "theirs") and leaves the repo mid-merge. `also_tracked` files are
+    /// committed at the base and never touched by the merge, so a test can modify
+    /// one and assert an operation left it alone.
+    async fn conflicted_repo(
+        tag: &str,
+        path: &str,
+        also_tracked: &[&str],
+    ) -> (tempfile::TempDir, String) {
         let (dir, repo) = temp_repo(tag);
         let git = |args: Vec<&'static str>| {
             let repo = repo.clone();
@@ -275,7 +290,13 @@ mod tests {
         git(vec!["init"]).await;
         git(vec!["config", "user.email", "t@t"]).await;
         git(vec!["config", "user.name", "t"]).await;
-        let file = Path::new(&repo).join("file.txt");
+        let file = Path::new(&repo).join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        for extra in also_tracked {
+            let p = Path::new(&repo).join(extra);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, "sibling base\n").unwrap();
+        }
         std::fs::write(&file, "base\n").unwrap();
         git(vec!["add", "."]).await;
         git(vec!["commit", "-m", "base"]).await;
@@ -294,7 +315,7 @@ mod tests {
 
     #[tokio::test]
     async fn sides_carry_each_stage_and_markers() {
-        let (_dir, repo) = conflicted_repo("sides").await;
+        let (_dir, repo) = conflicted_repo("sides", "file.txt", &[]).await;
         let sides = git_conflict_sides(repo.clone(), "file.txt".into(), vec![])
             .await
             .unwrap();
@@ -309,7 +330,7 @@ mod tests {
     #[tokio::test]
     async fn checkout_side_takes_one_side_and_clears() {
         // ours → the current branch's version, conflict cleared.
-        let (_dir, repo) = conflicted_repo("ours-side").await;
+        let (_dir, repo) = conflicted_repo("ours-side", "file.txt", &[]).await;
         run_git(Some(&repo), &["checkout", "--ours", "--", "file.txt"], DEFAULT_TIMEOUT)
             .await
             .unwrap();
@@ -331,7 +352,7 @@ mod tests {
             .is_empty());
 
         // theirs → the incoming version.
-        let (_dir2, repo2) = conflicted_repo("theirs-side").await;
+        let (_dir2, repo2) = conflicted_repo("theirs-side", "file.txt", &[]).await;
         run_git(Some(&repo2), &["checkout", "--theirs", "--", "file.txt"], DEFAULT_TIMEOUT)
             .await
             .unwrap();
@@ -346,9 +367,63 @@ mod tests {
         );
     }
 
+    /// Taking one side touches ONLY the chosen path. Pathspecs glob, so a raw
+    /// `src/app/[slug]/page.tsx` also sweeps the character-class sibling
+    /// `src/app/s/page.tsx`: `checkout` reverts the user's separate edit to it
+    /// from the index and `add` stages the result, both exiting 0 (measured, git
+    /// 2.51.1).
+    #[tokio::test]
+    async fn checkout_side_does_not_touch_glob_siblings() {
+        let (_dir, repo) = conflicted_repo(
+            "conflict-glob",
+            "src/app/[slug]/page.tsx",
+            &["src/app/s/page.tsx"],
+        )
+        .await;
+        let sibling = Path::new(&repo).join("src/app/s/page.tsx");
+        std::fs::write(&sibling, "SIBLING WIP\n").unwrap();
+
+        let state = AppState::default();
+        git_checkout_conflict_side_core(
+            &state,
+            repo.clone(),
+            "src/app/[slug]/page.tsx".into(),
+            "theirs".into(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(Path::new(&repo).join("src/app/[slug]/page.tsx"))
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "theirs\n",
+            "the chosen file took its side"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&sibling)
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "SIBLING WIP\n",
+            "the glob-sibling keeps its uncommitted edit"
+        );
+        let staged = run_git(
+            Some(&repo),
+            &["diff", "--cached", "--name-only"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap()
+        .stdout_lossy();
+        assert!(
+            !staged.contains("src/app/s/page.tsx"),
+            "the glob-sibling was staged: {staged}"
+        );
+    }
+
     #[tokio::test]
     async fn ai_ignore_pattern_flags_the_path() {
-        let (_dir, repo) = conflicted_repo("ignore").await;
+        let (_dir, repo) = conflicted_repo("ignore", "file.txt", &[]).await;
         let hit = git_conflict_sides(repo.clone(), "file.txt".into(), vec!["*.txt".into()])
             .await
             .unwrap();
@@ -387,7 +462,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_writes_and_clears_the_conflict() {
-        let (_dir, repo) = conflicted_repo("resolve").await;
+        let (_dir, repo) = conflicted_repo("resolve", "file.txt", &[]).await;
         // Before: the path is unmerged (`ls-files -u` lists it).
         let unmerged = run_git(Some(&repo), &["ls-files", "-u"], DEFAULT_TIMEOUT)
             .await

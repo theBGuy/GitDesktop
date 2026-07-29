@@ -14,6 +14,7 @@
 /// uncommitted changes (measured, git 2.51.1). `:(literal)` turns globbing off
 /// for the term. Escaping the metacharacters instead does not work here — the
 /// escaped form of a directory matches nothing at all.
+///
 /// An empty path stays empty: a bare `:(literal)` matches EVERYTHING, and the
 /// callers' `!is_empty()` guards would wave it through.
 pub(crate) fn literal(path: &str) -> String {
@@ -21,4 +22,16 @@ pub(crate) fn literal(path: &str) -> String {
         return String::new();
     }
     format!(":(literal){path}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_stays_empty_and_metacharacters_are_disarmed() {
+        // A bare `:(literal)` would match the whole repo past an is_empty guard.
+        assert_eq!(literal(""), "");
+        assert_eq!(literal("a[b]"), ":(literal)a[b]");
+    }
 }

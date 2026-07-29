@@ -158,6 +158,9 @@ export interface ReviewPromptInput {
   deltaTruncated?: boolean;
   /** Why the delta is present or absent — frames the "Changes since" section. */
   deltaState?: ReviewDeltaState;
+  /** Files the AI-ignore patterns hid from the delta. Distinguishes an emptied
+   *  delta from a genuinely unchanged one. */
+  deltaExcludedFiles?: number;
   /** Pre-formatted findings posted on the remote PR by third-party AI reviewers
    *  (GitHub Copilot, CodeRabbit, …) — soft, re-verifiable context like
    *  `priorFindings`. Absent for local PRs and when none were found. */

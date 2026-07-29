@@ -38,6 +38,10 @@ type Tab = "tracked" | "ignored";
  *  and escaped so a path holding `[`, `*` or `?` matches only itself. */
 const ignorePattern = (path: string) => `/${globLiteralPath(path)}`;
 
+/** How that rule reads to a human — the same anchored path without the glob
+ *  escapes, which are noise to everyone but git. */
+const ignoreLabel = (path: string) => `/${path}`;
+
 /** What a pending confirm dialog will do once accepted. */
 type Pending =
   | { kind: "untrack"; paths: string[] }
@@ -412,7 +416,7 @@ export function RepositoryFilesDialog({
             <ul className="max-h-40 overflow-auto border p-2 text-xs">
               {pending.paths.map((p) => (
                 <li key={p} className="truncate font-mono" title={p}>
-                  {ignorePattern(p)}
+                  {ignoreLabel(p)}
                 </li>
               ))}
             </ul>

@@ -13,6 +13,9 @@ export interface PriorContext {
   deltaDiffText?: string;
   deltaTruncated?: boolean;
   deltaState?: ReviewDeltaState;
+  /** Files the AI-ignore patterns hid from the delta. An emptied delta is
+   *  indistinguishable from "nothing changed" without this. */
+  deltaExcludedFiles?: number;
 }
 
 /**
@@ -32,7 +35,8 @@ export interface PriorContext {
  * The delta is a SECOND diff, so filtering only the main one would leak the
  * very files the user withheld. Filtered inside the try below, which fails
  * closed: a filter failure drops the delta rather than carrying an unfiltered
- * one.
+ * one. The hidden-file count comes back out as `deltaExcludedFiles` — a delta
+ * the filter emptied must not reach the model as "no changes".
  */
 export async function resolvePriorContext(
   repoPath: string,
@@ -85,6 +89,7 @@ export async function resolvePriorContext(
         deltaDiffText: filtered.text,
         deltaTruncated: delta.truncated,
         deltaState: "ok",
+        deltaExcludedFiles: filtered.excludedFiles,
       };
     }
     if (delta.reason === "rewritten") {

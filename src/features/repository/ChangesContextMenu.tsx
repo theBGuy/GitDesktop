@@ -44,12 +44,13 @@ export interface ChangesMenuActions {
   stashFile: (entry: FileEntry) => void;
   viewHistory: (path: string) => void;
   blame: (path: string) => void;
-  ignore: (pattern: string) => void;
-  /** `pathspec` reaches `git rm --cached` as given: a concrete path must arrive
-   *  through `literalPathspec`, a deliberate glob (`*.log`) raw. `label` is
-   *  display only. */
+  /** Every action here takes what git gets and, separately, what the user reads:
+   *  a concrete path is glob-escaped (or `literalPathspec`'d, for the `pathspec`
+   *  that reaches `git rm --cached`) while `label` stays the plain path. A
+   *  deliberate glob (`*.log`) is identical in both. */
+  ignore: (pattern: string, label: string) => void;
   untrack: (pathspec: string, ignorePattern: string, label: string) => void;
-  aiExclude: (pattern: string) => void;
+  aiExclude: (pattern: string, label: string) => void;
   aiExcludeSelected: () => void;
 }
 
@@ -191,7 +192,9 @@ export function ChangesContextMenuItems({
       )}
       <ContextMenuSeparator />
       <ContextMenuItem
-        onClick={() => actions.ignore(`/${globLiteralPath(entry.path)}`)}
+        onClick={() =>
+          actions.ignore(`/${globLiteralPath(entry.path)}`, `/${entry.path}`)
+        }
       >
         Ignore file (add to .gitignore)
       </ContextMenuItem>
@@ -204,7 +207,9 @@ export function ChangesContextMenuItems({
             {folders.map((folder) => (
               <ContextMenuItem
                 key={folder}
-                onClick={() => actions.ignore(`/${globLiteralPath(folder)}/`)}
+                onClick={() =>
+                  actions.ignore(`/${globLiteralPath(folder)}/`, `/${folder}/`)
+                }
               >
                 <span className="font-mono">{folder}/</span>
               </ContextMenuItem>
@@ -213,7 +218,9 @@ export function ChangesContextMenuItems({
         </ContextMenuSub>
       )}
       {extension && (
-        <ContextMenuItem onClick={() => actions.ignore(`*.${extension}`)}>
+        <ContextMenuItem
+          onClick={() => actions.ignore(`*.${extension}`, `*.${extension}`)}
+        >
           Ignore all .{extension} files (add to .gitignore)
         </ContextMenuItem>
       )}
@@ -273,7 +280,12 @@ export function ChangesContextMenuItems({
         <>
           <ContextMenuSeparator />
           <ContextMenuItem
-            onClick={() => actions.aiExclude(`/${globLiteralPath(entry.path)}`)}
+            onClick={() =>
+              actions.aiExclude(
+                `/${globLiteralPath(entry.path)}`,
+                `/${entry.path}`,
+              )
+            }
           >
             Exclude from AI (add to .gitdesktop/aiignore)
           </ContextMenuItem>
@@ -287,7 +299,10 @@ export function ChangesContextMenuItems({
                   <ContextMenuItem
                     key={folder}
                     onClick={() =>
-                      actions.aiExclude(`/${globLiteralPath(folder)}/`)
+                      actions.aiExclude(
+                        `/${globLiteralPath(folder)}/`,
+                        `/${folder}/`,
+                      )
                     }
                   >
                     <span className="font-mono">{folder}/</span>
@@ -298,7 +313,9 @@ export function ChangesContextMenuItems({
           )}
           {extension && (
             <ContextMenuItem
-              onClick={() => actions.aiExclude(`*.${extension}`)}
+              onClick={() =>
+                actions.aiExclude(`*.${extension}`, `*.${extension}`)
+              }
             >
               Exclude all .{extension} files from AI (add to
               .gitdesktop/aiignore)

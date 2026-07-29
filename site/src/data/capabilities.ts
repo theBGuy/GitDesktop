@@ -461,7 +461,7 @@ export const capabilities: Capability[] = [
     group: "AI · generate & review",
     ai: true,
     label:
-      "AI ignore patterns — .gitignore syntax, honored by every generation and review",
+      "AI ignore patterns — .gitignore syntax, keeping chosen files out of generation and review",
   },
   {
     group: "AI · generate & review",
