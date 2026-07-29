@@ -7,6 +7,7 @@ pub mod conflict;
 pub mod diff;
 pub mod history;
 pub mod ops;
+pub mod pathspec;
 pub mod remote;
 pub mod repo;
 pub mod runner;

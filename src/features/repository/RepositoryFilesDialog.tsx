@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
+import { globLiteralPath, literalPathspec } from "@/lib/git/glob";
 import {
   useForceAdd,
   useIgnoredFiles,
@@ -33,8 +34,9 @@ import { cn } from "@/lib/utils";
 
 type Tab = "tracked" | "ignored";
 
-/** The .gitignore rule that untracking a file adds, anchored to the repo root. */
-const ignorePattern = (path: string) => `/${path}`;
+/** The .gitignore rule that untracking a file adds, anchored to the repo root
+ *  and escaped so a path holding `[`, `*` or `?` matches only itself. */
+const ignorePattern = (path: string) => `/${globLiteralPath(path)}`;
 
 /** What a pending confirm dialog will do once accepted. */
 type Pending =
@@ -177,7 +179,10 @@ export function RepositoryFilesDialog({
 
   function runUntrack(paths: string[]) {
     untrack.mutate(
-      { pathspecs: paths, ignorePatterns: paths.map(ignorePattern) },
+      {
+        pathspecs: paths.map(literalPathspec),
+        ignorePatterns: paths.map(ignorePattern),
+      },
       {
         onSuccess: () => {
           toast.success(
@@ -195,7 +200,7 @@ export function RepositoryFilesDialog({
   }
 
   function runForceAdd(paths: string[]) {
-    forceAdd.mutate(paths, {
+    forceAdd.mutate(paths.map(literalPathspec), {
       onSuccess: () => {
         toast.success(`Force-added ${paths.length} items`);
         setSelected(new Set());

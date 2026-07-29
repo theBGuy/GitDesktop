@@ -67,8 +67,7 @@ async fn stage_blob(repo: &str, stage: u8, path: &str) -> AppResult<Option<Strin
 }
 
 /// Whether the path matches any of the user's AI-ignore `exclude` patterns —
-/// the highest-consequence AI-ignore gate in the app, since it decides whether
-/// a conflicted file's contents go to a model.
+/// the gate that decides whether a conflicted file's contents go to a model.
 ///
 /// Must stay on the gitignore engine (`git::ai_ignore::filter_ignored`), which
 /// a test pins to the same truth table as the pathspec side. An `ls-files` +
@@ -143,7 +142,8 @@ pub async fn git_resolve_conflict(
         .await
         .map_err(AppError::Io)?;
     if stage {
-        run_git_mutating(&state, &repo_path, &["add", "--", &path], DEFAULT_TIMEOUT).await?;
+        let spec = crate::git::pathspec::literal(&path);
+        run_git_mutating(&state, &repo_path, &["add", "--", &spec], DEFAULT_TIMEOUT).await?;
     }
     Ok(())
 }
@@ -170,14 +170,18 @@ pub async fn git_checkout_conflict_side(
             )))
         }
     };
+    // Literal pathspec on both steps: a `[slug]`-style path would otherwise take
+    // this side for its glob-siblings too, silently resolving conflicts the user
+    // never opened.
+    let spec = crate::git::pathspec::literal(&path);
     run_git_mutating(
         &state,
         &repo_path,
-        &["checkout", flag, "--", &path],
+        &["checkout", flag, "--", &spec],
         DEFAULT_TIMEOUT,
     )
     .await?;
-    run_git_mutating(&state, &repo_path, &["add", "--", &path], DEFAULT_TIMEOUT).await?;
+    run_git_mutating(&state, &repo_path, &["add", "--", &spec], DEFAULT_TIMEOUT).await?;
     Ok(())
 }
 
@@ -355,8 +359,7 @@ mod tests {
         assert!(!miss.ai_ignored);
 
         // A NESTED copy of the same name: patterns are gitignore-style, so a bare
-        // `file.txt` must flag `docs/file.txt` too — this gate decides whether a
-        // file's contents reach a model, so a missed depth is a leak.
+        // `file.txt` must flag `docs/file.txt` too — a missed depth is a leak.
         std::fs::create_dir_all(Path::new(&repo).join("docs")).unwrap();
         std::fs::write(Path::new(&repo).join("docs").join("file.txt"), "nested\n").unwrap();
         run_git(Some(&repo), &["add", "--", "docs/file.txt"], DEFAULT_TIMEOUT)

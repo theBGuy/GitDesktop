@@ -156,7 +156,8 @@ pub async fn git_discard(
         .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))??;
         return Ok(());
     }
-    run_git_mutating(&state, &repo_path, &["restore", "--", &path], DEFAULT_TIMEOUT).await?;
+    let spec = crate::git::pathspec::literal(&path);
+    run_git_mutating(&state, &repo_path, &["restore", "--", &spec], DEFAULT_TIMEOUT).await?;
     Ok(())
 }
 
@@ -555,10 +556,13 @@ pub(crate) async fn git_discard_paths_core(
         .filter(|p| p.untracked)
         .map(|p| p.path.clone())
         .collect();
+    // Literal pathspecs: a `[slug]`-style path would otherwise also restore its
+    // glob-siblings, discarding edits the user never selected. The untracked half
+    // below takes the path as a filesystem name instead, so it must stay raw.
     let tracked: Vec<String> = paths
         .iter()
         .filter(|p| !p.untracked)
-        .map(|p| p.path.clone())
+        .map(|p| crate::git::pathspec::literal(&p.path))
         .collect();
 
     if !untracked.is_empty() {
@@ -1061,10 +1065,12 @@ pub(crate) async fn replace_file_lines(
     }
 
     // Dirty check BEFORE the edit: any porcelain output for this path means the
-    // file already had staged/unstaged changes, so we must not auto-stage.
+    // file already had staged/unstaged changes, so we must not auto-stage. Literal
+    // pathspec — a glob-sibling's dirtiness must not decide this file's fate.
+    let spec = crate::git::pathspec::literal(file_path);
     let status = run_git(
         Some(repo_path),
-        &["status", "--porcelain", "--", file_path],
+        &["status", "--porcelain", "--", &spec],
         DEFAULT_TIMEOUT,
     )
     .await?;
@@ -1122,12 +1128,7 @@ pub(crate) async fn replace_file_lines(
     // exactly this edit. Lock-free `run_git` — we already hold the repo lock.
     let staged = stage_when_clean && !had_local_changes;
     if staged {
-        run_git(
-            Some(repo_path),
-            &["add", "--", file_path],
-            DEFAULT_TIMEOUT,
-        )
-        .await?;
+        run_git(Some(repo_path), &["add", "--", &spec], DEFAULT_TIMEOUT).await?;
     }
 
     Ok(ApplyLinesResult {
@@ -3880,6 +3881,45 @@ detached
         assert!(
             !std::path::Path::new(&wt_path).exists(),
             "worktree removed after abort"
+        );
+    }
+
+    /// Discarding a path holding glob metacharacters touches ONLY that path.
+    /// Pathspecs glob, so a raw `src/app/[slug]/page.tsx` also restores the
+    /// character-class sibling `src/app/s/page.tsx` — silently destroying
+    /// uncommitted work the user never selected (measured, git 2.51.1).
+    #[tokio::test]
+    async fn discard_paths_does_not_restore_glob_siblings() {
+        let (dir, repo) = setup_repo("discard-glob-sibling").await;
+        std::fs::create_dir_all(dir.path().join("src/app/[slug]")).unwrap();
+        std::fs::create_dir_all(dir.path().join("src/app/s")).unwrap();
+        commit_file(&repo, dir.path(), "src/app/[slug]/page.tsx", "v0\n", "add route").await;
+        commit_file(&repo, dir.path(), "src/app/s/page.tsx", "v0\n", "add sibling").await;
+
+        std::fs::write(dir.path().join("src/app/[slug]/page.tsx"), "throw away\n").unwrap();
+        std::fs::write(dir.path().join("src/app/s/page.tsx"), "PRECIOUS\n").unwrap();
+
+        let state = AppState::default();
+        git_discard_paths_core(
+            &state,
+            repo.clone(),
+            vec![DiscardPath {
+                path: "src/app/[slug]/page.tsx".into(),
+                untracked: false,
+            }],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            nlf(std::fs::read_to_string(dir.path().join("src/app/[slug]/page.tsx")).unwrap()),
+            "v0\n",
+            "the selected file is discarded"
+        );
+        assert_eq!(
+            nlf(std::fs::read_to_string(dir.path().join("src/app/s/page.tsx")).unwrap()),
+            "PRECIOUS\n",
+            "the glob-sibling keeps its uncommitted work"
         );
     }
 

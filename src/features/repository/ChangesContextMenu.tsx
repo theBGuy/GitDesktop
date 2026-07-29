@@ -5,13 +5,13 @@ import {
   ContextMenuSubContent,
   ContextMenuSubTrigger,
 } from "@/components/ui/context-menu";
-import { aiIgnorePathPattern } from "@/lib/ai/ignore";
 import { copyText } from "@/lib/clipboard";
 import {
   openWithDefault,
   openWithProgram,
   revealInExplorer,
 } from "@/lib/git/api";
+import { globLiteralPath, literalPathspec } from "@/lib/git/glob";
 import type { FileEntry } from "@/lib/git/types";
 import { isWindows } from "@/lib/hotkeys/binding";
 import {
@@ -45,6 +45,9 @@ export interface ChangesMenuActions {
   viewHistory: (path: string) => void;
   blame: (path: string) => void;
   ignore: (pattern: string) => void;
+  /** `pathspec` reaches `git rm --cached` as given: a concrete path must arrive
+   *  through `literalPathspec`, a deliberate glob (`*.log`) raw. `label` is
+   *  display only. */
   untrack: (pathspec: string, ignorePattern: string, label: string) => void;
   aiExclude: (pattern: string) => void;
   aiExcludeSelected: () => void;
@@ -187,7 +190,9 @@ export function ChangesContextMenuItems({
         </>
       )}
       <ContextMenuSeparator />
-      <ContextMenuItem onClick={() => actions.ignore(`/${entry.path}`)}>
+      <ContextMenuItem
+        onClick={() => actions.ignore(`/${globLiteralPath(entry.path)}`)}
+      >
         Ignore file (add to .gitignore)
       </ContextMenuItem>
       {folders.length > 0 && (
@@ -199,7 +204,7 @@ export function ChangesContextMenuItems({
             {folders.map((folder) => (
               <ContextMenuItem
                 key={folder}
-                onClick={() => actions.ignore(`/${folder}/`)}
+                onClick={() => actions.ignore(`/${globLiteralPath(folder)}/`)}
               >
                 <span className="font-mono">{folder}/</span>
               </ContextMenuItem>
@@ -217,7 +222,11 @@ export function ChangesContextMenuItems({
           <ContextMenuSeparator />
           <ContextMenuItem
             onClick={() =>
-              actions.untrack(entry.path, `/${entry.path}`, `"${entry.path}"`)
+              actions.untrack(
+                literalPathspec(entry.path),
+                `/${globLiteralPath(entry.path)}`,
+                `"${entry.path}"`,
+              )
             }
           >
             Untrack file (keep on disk)
@@ -232,7 +241,11 @@ export function ChangesContextMenuItems({
                   <ContextMenuItem
                     key={folder}
                     onClick={() =>
-                      actions.untrack(folder, `/${folder}/`, `"${folder}/"`)
+                      actions.untrack(
+                        literalPathspec(folder),
+                        `/${globLiteralPath(folder)}/`,
+                        `"${folder}/"`,
+                      )
                     }
                   >
                     <span className="font-mono">{folder}/</span>
@@ -260,9 +273,7 @@ export function ChangesContextMenuItems({
         <>
           <ContextMenuSeparator />
           <ContextMenuItem
-            onClick={() =>
-              actions.aiExclude(`/${aiIgnorePathPattern(entry.path)}`)
-            }
+            onClick={() => actions.aiExclude(`/${globLiteralPath(entry.path)}`)}
           >
             Exclude from AI (add to .gitdesktop/aiignore)
           </ContextMenuItem>
@@ -276,7 +287,7 @@ export function ChangesContextMenuItems({
                   <ContextMenuItem
                     key={folder}
                     onClick={() =>
-                      actions.aiExclude(`/${aiIgnorePathPattern(folder)}/`)
+                      actions.aiExclude(`/${globLiteralPath(folder)}/`)
                     }
                   >
                     <span className="font-mono">{folder}/</span>
