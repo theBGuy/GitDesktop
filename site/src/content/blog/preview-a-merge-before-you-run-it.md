@@ -179,17 +179,17 @@ The reason is that `-X ours` and `-X theirs` only arbitrate **content** conflict
 told which one wins. They have nothing to say about **structural** ones, where
 the disagreement is about whether the file should exist, or where it lives:
 
-- modify/delete — one side edited it, the other removed it
-- rename/delete — one side moved it, the other deleted it
-- rename/rename — one file moved to two different names
-- file/directory — one side made it a file, the other a directory
+- `modify/delete` — one side edited it, the other removed it
+- `rename/delete` — one side moved it, the other deleted it
+- `rename/rename` — one file moved to two different names
+- `file/directory` — one side made it a file, the other a directory
 
 Git cannot pick a side there, because there is no "side" to pick; the question
 isn't which text wins, it's what the tree should contain. Those stop the merge
 no matter which `-X` you pass.
 
 The boundary isn't "does it look structural", though — it's whether there are
-two texts to choose between. add/add looks structural, but both sides did
+two texts to choose between. `add/add` looks structural, but both sides did
 produce a file at one path, so there *is* a text to pick, and `-X ours` resolves
 it to exit 0. Test the specific case rather than reasoning from the category
 name.
@@ -205,11 +205,12 @@ Two honest caveats, because "touches nothing" is a slight overstatement.
 
 **It writes objects.** `--write-tree` means what it says: the merged tree and any
 merged blobs get written to the object database. How many depends on the merge.
-The `shared.txt` content conflict earlier writes two — a tree, and the blob
-holding the marked-up file. The `doomed.txt` modify/delete writes *none*, because
-its result is byte-identical to a tree Git already had:
+Back in the `shared.txt` repo from earlier, clear the loose-object count to zero
+first so what follows is a clean delta. That content conflict adds two — a tree,
+and the blob holding the marked-up file:
 
 ```sh
+$ git gc --prune=now                   # start from a clean baseline
 $ git count-objects -v | grep '^count:'
 count: 0
 $ git merge-tree --write-tree --name-only main feature >/dev/null
@@ -217,13 +218,19 @@ $ git count-objects -v | grep '^count:'
 count: 2
 ```
 
-They're unreachable the moment they're written — nothing refers to them — but
-"unreachable" is not "gone". Plain `git gc` **packs** them rather than deleting
-them, because `gc.pruneExpire` defaults to two weeks. The count above drops back
-to zero while `git cat-file -t <oid>` still cheerfully answers `tree`, so the
-measurement in that snippet will tell you they've vanished when they haven't.
-Only `git gc --prune=now` actually removes them. The cost is real but small, and
-it does clear itself — on Git's schedule, not on yours.
+Run the same thing in the `doomed.txt` repo and the count doesn't move at all.
+That merge's tree is byte-identical to one Git already had, so there is nothing
+new to write.
+
+The objects that *do* get written are unreachable the moment they land — but
+"unreachable" is not "gone". `git gc` will not delete them: `gc.pruneExpire`
+defaults to two weeks, so an ordinary gc sweeps them into a cruft pack instead.
+The loose count falls back to zero while `git cat-file -t <oid>` still
+cheerfully answers `tree` — so on a current Git the `count-objects` snippet
+above will tell you they have vanished when they have not. (Before 2.41, when
+cruft packs became the default, they simply stayed loose and the count stayed
+at two.) Only `git gc --prune=now` actually removes them. The cost is real but
+small, and it does clear itself — on Git's schedule, not on yours.
 
 **It needs a reasonably current Git.** Both `--write-tree` and `--name-only`
 arrived in Git 2.38, released on 2 October 2022. On anything older, the only
@@ -244,7 +251,7 @@ I write a Git client, so the pitch is obvious enough that I'd rather just say it
 plainly.
 
 Everything above is genuinely worth knowing. Knowing that Git will merge in
-memory for free, and that `-X ours` can't rescue a modify/delete, makes you
+memory for free, and that `-X ours` can't rescue a `modify/delete`, makes you
 harder to surprise. But it's also a shell pipeline you have to remember, at the
 exact moment you're trying to decide something else.
 
