@@ -85,16 +85,16 @@ $ echo $?
 0
 ```
 
-Worth noting for tool authors: exit `0` covers both a real three-way merge and a
-plain fast-forward. `merge-tree` doesn't distinguish them, so if you care about
-the difference you still need `merge-base` to spot the fast-forward case.
+Which leaves that qualifier on exit `1`. It does **not** mean "conflict" by
+itself. Ask to merge a branch that doesn't exist and you get `1` as well — with
+a completely empty stdout, the message going to stderr instead. So test stdout,
+not the code alone: empty output means Git refused, which is "unknown", not "a
+conflict in zero files".
 
-Parse to the blank line and you have your file list. Which brings us back to
-that qualifier on exit `1`: it does **not** mean "conflict" by itself. Ask to
-merge a branch that doesn't exist and you get `1` as well — with a completely
-empty stdout, the message going to stderr instead. So test stdout, not the code
-alone: empty output means Git refused, which is "unknown", not "a conflict in
-zero files".
+Exit `0` is broad in its own way, which matters if you're building on this: it
+covers a real three-way merge, a plain fast-forward, and an already-up-to-date
+branch alike. `merge-tree` doesn't distinguish them, so if those mean different
+things in your interface, you need a `merge-base` check alongside it.
 
 And your working tree never moved:
 
@@ -137,15 +137,24 @@ $ git diff --stat main "$TREE"
  1 file changed, 4 insertions(+)
 ```
 
-Read that stat carefully, though: on a conflicted merge the tree holds the
-marked-up file, so the count includes the conflict markers themselves. With the
-default conflict style, three of those four added lines are the `<<<<<<<`,
-`=======` and `>>>>>>>` you saw in the `cat-file` output — not work you have to
-do. Set `merge.conflictStyle` to `diff3` or `zdiff3` and the same merge reports
-six, because each conflict also carries a `|||||||` section and the base text.
+Read that stat carefully, though: on a content conflict like this one the tree
+holds the marked-up file, so the count includes the conflict markers themselves.
+With the default conflict style, three of those four added lines are the
+`<<<<<<<`, `=======` and `>>>>>>>` you saw in the `cat-file` output — not work
+you have to do. Set `merge.conflictStyle` to `diff3` or `zdiff3` and the same
+merge reports six, because each conflict also carries a `|||||||` section and the
+base text.
 
-Even so, you now know the rough size of the job, the shape of every conflict, and
-which files they're in — and you still haven't run a merge.
+Structural conflicts vary, though, so don't apply that subtraction blindly. A
+`modify/delete` leaves one side's file whole with no markers at all, and its
+stat is pure real change. But a `rename/rename` where both sides also edited the
+file writes markers into *both* paths — thirteen counted insertions, six of them
+markers — and a `file/directory` clash reports a rename to a mangled path rather
+than a file you recognise. Treat the stat as a rough gauge, not an audit.
+
+Even with those caveats you know the rough size of the job, which files are
+involved, and — for the content conflicts — the exact shape of each one. All
+without running a merge.
 
 ## The trap: `-X ours` does less than you think
 
@@ -271,11 +280,12 @@ memory for free, and that `-X ours` can't rescue a `modify/delete`, makes you
 harder to surprise. But it's also a shell pipeline you have to remember, at the
 exact moment you're trying to decide something else.
 
-In [GitDesktop](/features/) that same `merge-tree` call runs before the merge
-button does anything: fast-forward, clean, or conflicted with the file list
-already on screen — and if you change the on-conflict strategy, the preview
-re-runs with that strategy instead of guessing on your behalf. Same command,
-same object database, no pipeline.
+In [GitDesktop](/features/) a `merge-base` check runs before the merge button
+does anything, and that same `merge-tree` call runs when it's needed: already up
+to date, fast-forward, clean, or conflicted with the file list already on screen
+— and if you change the on-conflict strategy, the preview re-runs with that
+strategy instead of guessing on your behalf. Same commands, same object database,
+no pipeline.
 
 Either way, the thing to take away is that the answer was always available. A
 merge is not the only way to find out what a merge would do.
