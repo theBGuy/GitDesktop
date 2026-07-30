@@ -219,7 +219,7 @@ exit 0. When in doubt, run the specific case; the category name is a poor guide.
 
 So if you're predicting the result of a merge that will use a strategy option,
 **re-run `merge-tree` with that option** and report what it actually says.
-Taking a no-strategy conflict list and relabelling it "will auto-resolve" is
+Taking a no-strategy conflict list and relabeling it "will auto-resolve" is
 wrong for exactly the conflicts a person most needs warning about.
 
 ## What it costs

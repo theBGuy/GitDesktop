@@ -129,9 +129,9 @@ only covers `HEAD`.
 This is where I mention that I make a Git client. Everything above is a
 recipe I'd rather nobody had to run under pressure. Knowing that a stash is two
 commits and that the real one has two parents is useful; I'd teach it to
-anyone. But at the moment you actually need it, you're stressed,
-you're guessing at SHAs, and the failure mode is silently restoring the wrong
-half of your work.
+anyone. But at the moment you actually need it, you're stressed, you're
+guessing at SHAs, and the failure mode is silently restoring the wrong half
+of your work.
 
 In [GitDesktop](/#recover) that same `fsck` walk runs behind a list:
 recoverable stashes, each with its message, its date, and a diff you can read
