@@ -6,7 +6,7 @@
   alongside the one you chose — most seriously, **discarding changes could throw
   away another file's uncommitted work**, and resolving a conflict could silently
   resolve a second file the same way. Reading is exact too: a file's history, and
-  its diff in the working tree, in a commit, or against another branch, no longer
-  fold in a neighbour's commits and hunks. *Ignore* and *Exclude from AI* also
+  its diff in the working tree, in a commit, in a stash, or against another
+  branch, no longer fold in a neighbour's commits and hunks. *Ignore* and *Exclude from AI* also
   write a working pattern for a name that ends in a space, which previously
   matched a different file and left the one you picked alone.

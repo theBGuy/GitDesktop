@@ -158,14 +158,19 @@ function filesFromDiff(text: string): DiffStatEntry[] {
   return text
     .split(/^(?=diff --git )/m)
     .filter((s) => s.trim())
-    .map((section) => {
+    .flatMap((section) => {
       // Same decoder splitUnifiedDiff keys sections with — NOT a local regex.
       // `filterDiffByAiIgnore` hides a file by matching a section key against
       // this list, so a different rule here lets an ignored file's name and
       // counts survive the filter and reach the model (a C-quoted path has no
       // bare ` b/` to match).
-      const header = section.slice(0, section.indexOf("\n"));
-      const path = sectionFilePath(section) ?? header;
+      //
+      // An unkeyable section is DROPPED, exactly as splitUnifiedDiff drops it:
+      // a section neither decoder can key is one that was never checked against
+      // the user's patterns, so the two key sets stay identical and the failure
+      // stays closed rather than leaking a header line as a filename.
+      const path = sectionFilePath(section);
+      if (!path) return [];
       let added = 0;
       let deleted = 0;
       for (const line of section.split("\n")) {

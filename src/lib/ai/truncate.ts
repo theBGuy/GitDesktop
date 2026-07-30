@@ -217,9 +217,8 @@ function splitIntoFileSections(diffText: string): FileSection[] {
  * KEEP IN SYNC: src-tauri/src/mcp_server/generate.rs (`budget_diff`,
  * `is_low_value_path`, `split_into_file_sections`, `header_new_path`,
  * `DIFF_CHAR_BUDGET`, `PER_FILE_CAP`) mirrors this for the MCP recipe tools —
- * with the DEFAULT
- * `budget`/`perFileCap`; the review path scales them per model (see
- * context-budget.ts) while the recipe tools keep the constants.
+ * with the DEFAULT `budget`/`perFileCap`; the review path scales them per model
+ * (see context-budget.ts) while the recipe tools keep the constants.
  */
 export function budgetDiff(
   diffText: string,
