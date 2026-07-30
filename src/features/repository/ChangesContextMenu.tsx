@@ -44,12 +44,15 @@ export interface ChangesMenuActions {
   stashFile: (entry: FileEntry) => void;
   viewHistory: (path: string) => void;
   blame: (path: string) => void;
-  /** Every action here takes what git gets and, separately, what the user reads:
-   *  a concrete path is glob-escaped (or `literalPathspec`'d, for the `pathspec`
-   *  that reaches `git rm --cached`) while `label` stays the plain path. A
-   *  deliberate glob (`*.log`) is identical in both. */
+  // The three below take what git gets and, separately, what the user reads: a
+  // concrete path is glob-escaped while `label` stays the plain path. A
+  // deliberate glob (`*.log`) is identical in both.
+  /** `pattern` is a gitignore line — glob-escape a concrete path. */
   ignore: (pattern: string, label: string) => void;
+  /** `pathspec` reaches `git rm --cached` as given, so a concrete path must
+   *  arrive through `literalPathspec` or it removes its glob-siblings too. */
   untrack: (pathspec: string, ignorePattern: string, label: string) => void;
+  /** `pattern` is an AI-ignore line — glob-escape a concrete path. */
   aiExclude: (pattern: string, label: string) => void;
   aiExcludeSelected: () => void;
 }

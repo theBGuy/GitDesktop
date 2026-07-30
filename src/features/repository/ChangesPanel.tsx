@@ -57,13 +57,10 @@ import { ConflictBanner } from "./ConflictBanner";
 import { FileRow } from "./FileRow";
 import { StashesDialog } from "./StashesDialog";
 
-/**
- * A staged rename is "delete old path + add new path"; restoring only the
- * new path would leave the old path's deletion staged, so include both.
- */
-/** The pathspecs that unstage one entry — a rename needs both halves. Literal:
- *  these are paths the user picked, and a `[slug]`-style one would otherwise
- *  unstage its glob-siblings too. */
+/** The pathspecs that unstage one entry — a staged rename is "delete old path +
+ *  add new path", so both halves are needed or the old path's deletion stays
+ *  staged. Literal: these are paths the user picked, and a `[slug]`-style one
+ *  would otherwise unstage its glob-siblings too. */
 function unstagePaths(entry: FileEntry): string[] {
   return (entry.origPath ? [entry.path, entry.origPath] : [entry.path]).map(
     literalPathspec,
