@@ -42,6 +42,33 @@ capability line + changelog fragment — but make the call deliberately, don't s
 captured with the app's *Settings → General → Hide AI features* ON, so they match
 the AI-hidden experience. (See `memory/site-just-git-screenshots.md`.)
 
+## Blog-post copy — anti-AI-tell rules (`site/src/content/blog/`)
+
+Article prose ships under the owner's byline; readers (and the owner) flag AI-sounding
+copy on sight. Hard rules for post text, learned the expensive way on PR #132 — they
+govern phrasing only; technical claims stay empirically probe-verified as ever:
+
+- **No earnestness performance.** Never "honest", "genuinely", "truly" as sincerity
+  markers ("Two honest caveats"), and no valuation tics ("worth knowing", "worth the
+  whole article", "it's worth").
+- **No takeaway scaffolds.** "The thing to take away is…", "here's the part that…",
+  "the key insight…" — state the point, don't announce it.
+- **Antithesis budget.** "X, not Y" / "isn't X — it's Y" a couple of times per post at
+  most, never in adjacent paragraphs; keep it only where the contrast IS the technical
+  point being made.
+- **Em-dash budget.** ≈7 per 1k words (the shipped posts' rate). No paired
+  "— aside —" interrupters; recast with commas or parentheses.
+- **Closers written fresh every post.** The "Or don't do any of this" heading is a
+  series motif; the prose beats under it are not. Never reuse a prior post's scaffold
+  ("I write a Git client, so…", "Same X, same Y, minus Z", "Either way, the thing to
+  take away…").
+- **Numbers trace to transcripts.** Any figure in prose must be visible in a code
+  block the reader has already seen; drop or demonstrate, never assert.
+- **Wrap band.** Prose lines ~76 chars, 81 max; no orphaned short lines
+  mid-paragraph, no one-word paragraph trailers.
+- **Voice constants** (these ARE the house style, keep them): cold second-person
+  open, a one-line Git aphorism to close (new words each time), British spellings.
+
 ## Everyday commands
 
 ```sh
