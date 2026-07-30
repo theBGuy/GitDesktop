@@ -121,7 +121,7 @@ alone.
 ## Monitoring shouldn't require hunting
 
 Another habit I've developed over the years is checking on my projects. Not
-because I enjoy dashboards, but because I genuinely like seeing whether people are
+because I enjoy dashboards, but because I like seeing whether people are
 using the things I've built. How many visitors showed up today? Where did they
 come from? Which repositories are getting attention?
 
@@ -156,9 +156,9 @@ features. I was questioning assumptions.
 
 Why does a pull request require a remote? Why do reviews begin after pushing? Why
 do I have to leave my Git client to understand my project? Why should switching
-AI models change my workflow? Why should updating another branch interrupt the one
-I'm actively working in? Why are some of the best guardrails only available after
-code leaves my machine?
+AI models change my workflow? Why should updating another branch interrupt the
+one I'm actively working in? Why are some of the best guardrails only available
+after code leaves my machine?
 
 Every feature traces back to one of those questions.
 
@@ -183,4 +183,4 @@ build another Git client. It's been to build the one I never have to leave.
 *A version of this essay first appeared
 [on LinkedIn](https://www.linkedin.com/pulse/whole-loop-one-window-evan-goldberg-wbmre/).
 If there's a part of your workflow that always makes you think "why do I have to
-leave?" — I'd genuinely like to hear it.*
+leave?" — I want to hear it.*

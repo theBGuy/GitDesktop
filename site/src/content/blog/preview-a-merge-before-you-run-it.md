@@ -51,8 +51,8 @@ doesn't even apply. You'd have to check it out first.
 
 ## Git will do the merge in memory instead
 
-Since version 2.38, `git merge-tree` can perform a complete, real merge —
-rename detection, the works — and write the result to the object database
+Since version 2.38, `git merge-tree` can perform a complete, real merge
+(rename detection, the works) and write the result to the object database
 without going near your working tree, your index, or `HEAD`:
 
 ```sh
@@ -142,8 +142,8 @@ holds the marked-up file, so the count includes the conflict markers themselves.
 With the default conflict style, three of those four added lines are the
 `<<<<<<<`, `=======` and `>>>>>>>` you saw in the `cat-file` output — not work
 you have to do. Set `merge.conflictStyle` to `diff3` or `zdiff3` and the same
-merge reports six, because each conflict also carries a `|||||||` section and the
-base text.
+merge reports six, because each conflict also carries a `|||||||` section
+and the base text.
 
 Structural conflicts, where the sides disagree about whether a file exists or
 where it lives (more on those below), vary more, so don't apply that
@@ -151,7 +151,7 @@ subtraction blindly. A `modify/delete` leaves one side's file whole with no
 markers at all, and its stat is pure real change. But a `rename/rename` where
 both sides also edited the file writes markers into *both* paths, so the
 count inflates there too, and a `file/directory` clash reports a rename to a
-mangled path rather than a file you recognise. Treat the stat as a rough
+mangled path rather than a file you recognize. Treat the stat as a rough
 gauge, not an audit.
 
 Even with those caveats you know the rough size of the job, which files are
@@ -245,8 +245,8 @@ count: 2
 ```
 
 Run the same thing in the `doomed.txt` repo and the count doesn't move at all.
-That merge's tree is byte-identical to one Git already had, so there is nothing
-new to write.
+That merge's tree is byte-identical to one Git already had, so there is
+nothing new to write.
 
 The objects that *do* get written are unreachable the moment they land — but
 "unreachable" is not "gone". `git gc` will not delete them: `gc.pruneExpire`
@@ -273,8 +273,8 @@ degrade to showing nothing rather than showing something wrong.
 
 ## Or don't do any of this
 
-You can see the pitch coming (I make one of these clients), so here it is,
-plainly.
+You can see the pitch coming (I make one of these clients), so here
+it is, plainly.
 
 None of this is wasted knowledge. Knowing that Git will merge in memory for
 free, and that `-X ours` can't rescue a `modify/delete`, makes you harder to

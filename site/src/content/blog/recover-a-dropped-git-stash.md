@@ -79,7 +79,7 @@ git fsck --unreachable | grep commit | awk '{print $3}' |
 ```
 
 That prints only real stash commits, each with the message you wrote — which is
-usually enough to recognise the one you want.
+usually enough to recognize the one you want.
 
 ## Getting the work back
 
@@ -109,7 +109,7 @@ straight to your tree:
 git stash store -m "recovered" 45199d06
 ```
 
-## The catch worth knowing
+## The catch
 
 This works because the objects are still there, and that isn't forever. `git gc`
 prunes unreachable objects once they age past `gc.pruneExpire`, which defaults to
@@ -117,7 +117,7 @@ two weeks. Garbage collection also runs automatically — `git gc --auto` fires
 during ordinary commands once enough loose objects pile up.
 
 So: a stash you dropped this morning is almost certainly recoverable. One from
-last quarter probably isn't. If you've just realised something important is
+last quarter probably isn't. If you've just realized something important is
 missing, do the `fsck` now and don't run `git gc` first.
 
 One thing that will *not* help: `git reflog`. The stash has its own reflog at
@@ -126,17 +126,17 @@ only covers `HEAD`.
 
 ## Or don't do any of this
 
-I write a Git client, so I'll be honest about the pitch: everything above is a
+This is where I mention that I make a Git client. Everything above is a
 recipe I'd rather nobody had to run under pressure. Knowing that a stash is two
-commits and that the real one has two parents is genuinely useful, and I think
-it's worth knowing. But at the moment you actually need it, you're stressed,
+commits and that the real one has two parents is useful; I'd teach it to
+anyone. But at the moment you actually need it, you're stressed,
 you're guessing at SHAs, and the failure mode is silently restoring the wrong
 half of your work.
 
-In [GitDesktop](/#recover) that same `fsck` walk runs behind a list: recoverable stashes,
-each with its message, its date, and a diff you can read before you commit to
-anything. Same objects, same operation, minus the shell pipeline and minus the
-chance of applying the index twin by mistake.
+In [GitDesktop](/#recover) that same `fsck` walk runs behind a list:
+recoverable stashes, each with its message, its date, and a diff you can read
+before you commit to anything. Same objects, same operation, minus the shell
+pipeline and minus the chance of applying the index twin by mistake.
 
-Either way, the thing to take away is the one that surprises people: it's still
-there. Git is much more reluctant to destroy your work than it looks.
+Either way, remember the part that surprises people: it's still there. Git is
+much more reluctant to destroy your work than it looks.
