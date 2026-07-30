@@ -54,7 +54,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # GitLab multi-line diff-note ranges: a `position.line_range` ref's `line_code` is
 # `sha1_hex(file_path)_<old_pos>_<new_pos>` (see forge/gitlab.rs `gl_line_code`).
 # RustCrypto sha1 — hashing only, no extra default features needed.
-sha1 = "0.10"
+sha1 = "0.11"
 # The AI-ignore gitignore engine evaluates patterns in a throwaway EMPTY repo, so
 # only the user's patterns apply (git::ai_ignore). TempDir gives it an
 # unpredictable, exclusively-created path: a guessable one in a shared /tmp lets a
