@@ -83,15 +83,20 @@ pub struct DetectedTerminal {
     pub path: String,
 }
 
-/// Trims an ignore pattern the way git reads one: trailing whitespace is
-/// insignificant UNLESS backslash-escaped, because `notes\ ` is the only way to
+/// Trims an ignore pattern the way git reads one: a trailing SPACE is
+/// insignificant unless backslash-escaped, because `notes\ ` is the only way to
 /// name a file whose name ends in a space. A blanket `trim()` eats that escape
 /// and silently retargets the pattern at a different file.
+///
+/// Only `' '` — git's `trim_trailing_spaces` (dir.c) special-cases the space
+/// alone, so a trailing TAB is part of the pattern (measured, git 2.51.1:
+/// pattern `foo\t` matches `foo\t` and not `foo`). Trimming it here would
+/// retarget the pattern exactly the way the space case does.
 pub(crate) fn trim_ignore_pattern(pattern: &str) -> &str {
     let rest = pattern.trim_start().trim_end_matches(['\r', '\n']);
     let bytes = rest.as_bytes();
     let mut end = rest.len();
-    while end > 0 && matches!(bytes[end - 1], b' ' | b'\t') {
+    while end > 0 && bytes[end - 1] == b' ' {
         // An odd run of preceding backslashes escapes it; an even run is itself
         // escaped backslashes and leaves the space bare.
         let slashes = bytes[..end - 1].iter().rev().take_while(|&&c| c == b'\\').count();
@@ -1076,6 +1081,9 @@ mod tests {
         // An EVEN run is escaped backslashes, so the space after it is bare.
         assert_eq!(trim_ignore_pattern("/notes\\\\ "), "/notes\\\\");
         assert_eq!(trim_ignore_pattern("   "), "");
+        // A trailing TAB is part of the pattern — git trims spaces only (measured,
+        // 2.51.1: pattern `foo\t` matches `foo\t`, not `foo`).
+        assert_eq!(trim_ignore_pattern("/notes.md\t"), "/notes.md\t");
     }
 
     fn gitignore_test_repo() -> (tempfile::TempDir, PathBuf) {

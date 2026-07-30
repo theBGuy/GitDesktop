@@ -1240,9 +1240,12 @@ async fn stash_files_at(repo: &str, spec: &str) -> AppResult<Vec<StashFile>> {
 /// back to that. `spec` is `stash@{N}` for a live stash or a raw sha.
 async fn stash_file_diff_at(repo: &str, spec: &str, file_path: &str) -> AppResult<FileDiff> {
     let base = format!("{spec}^1");
+    // Literal pathspec: the path comes from the stash's own file list, so a
+    // `[slug]`-style name would splice a glob-sibling's hunks into this file's diff.
+    let path_spec = crate::git::pathspec::literal(file_path);
     let out = run_git(
         Some(repo),
-        &["diff", "--no-color", &base, spec, "--", file_path],
+        &["diff", "--no-color", &base, spec, "--", &path_spec],
         DEFAULT_TIMEOUT,
     )
     .await?;
@@ -1252,7 +1255,7 @@ async fn stash_file_diff_at(repo: &str, spec: &str, file_path: &str) -> AppResul
         let untracked = format!("{spec}^3");
         if let Ok(o) = run_git(
             Some(repo),
-            &["diff", "--no-color", &base, &untracked, "--", file_path],
+            &["diff", "--no-color", &base, &untracked, "--", &path_spec],
             DEFAULT_TIMEOUT,
         )
         .await

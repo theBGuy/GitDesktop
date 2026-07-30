@@ -30,16 +30,18 @@ export function globLiteralPath(path: string): string {
  * Trims an ignore pattern the way git reads one — the mirror of Rust's
  * `trim_ignore_pattern`, which the matcher itself applies.
  *
- * Trailing whitespace is insignificant to git UNLESS backslash-escaped, and a
+ * A trailing SPACE is insignificant to git unless backslash-escaped, and a
  * blanket `trim()` here would strip the escape [`globLiteralPath`] just added
- * before the pattern ever reaches the matcher. A line ending is not part of the
- * pattern either way — callers split a stored list on `\n`, which leaves the CR
- * of a CRLF-stored one behind.
+ * before the pattern ever reaches the matcher. Only the space: git's
+ * `trim_trailing_spaces` special-cases it alone, so a trailing TAB belongs to the
+ * pattern (measured). A line ending is not part of the pattern either way —
+ * callers split a stored list on `\n`, which leaves the CR of a CRLF-stored one
+ * behind.
  */
 export function trimIgnorePattern(pattern: string): string {
   const rest = pattern.trimStart().replace(/[\r\n]+$/, "");
   let end = rest.length;
-  while (end > 0 && (rest[end - 1] === " " || rest[end - 1] === "\t")) {
+  while (end > 0 && rest[end - 1] === " ") {
     let slashes = 0;
     while (rest[end - 2 - slashes] === "\\") slashes++;
     if (slashes % 2 === 1) break;

@@ -23,30 +23,42 @@ const C_ESCAPES: Record<string, number> = {
  */
 function unescapeCQuoted(body: string): string {
   const bytes: number[] = [];
-  for (let i = 0; i < body.length; i++) {
-    const ch = body[i];
-    if (ch !== "\\") {
-      bytes.push(...encoder.encode(ch));
+  let i = 0;
+  while (i < body.length) {
+    if (body[i] !== "\\") {
+      // Encode the whole unescaped RUN at once. Per-index encoding would hand
+      // TextEncoder one UTF-16 code unit at a time, splitting a surrogate pair
+      // into two lone halves that each become U+FFFD — mojibake for any
+      // non-BMP name (`core.quotePath=false` emits those literally, and a
+      // backslash or control char elsewhere in the path still forces quoting).
+      const start = i;
+      while (i < body.length && body[i] !== "\\") i++;
+      bytes.push(...encoder.encode(body.slice(start, i)));
       continue;
     }
-    const next = body[++i];
+    i++; // consume the backslash
+    const next = body[i];
     if (next === undefined) break;
     const mapped = C_ESCAPES[next];
     if (mapped !== undefined) {
       bytes.push(mapped);
+      i++;
       continue;
     }
     if (next >= "0" && next <= "7") {
-      let octal = next;
-      while (octal.length < 3) {
-        const digit = body[i + 1];
-        if (digit === undefined || digit < "0" || digit > "7") break;
-        octal += body[++i];
+      let octal = "";
+      while (octal.length < 3 && body[i] >= "0" && body[i] <= "7") {
+        octal += body[i];
+        i++;
       }
       bytes.push(Number.parseInt(octal, 8) & 0xff);
       continue;
     }
-    bytes.push(...encoder.encode(next));
+    // Unknown escape: keep the character itself, by CODE POINT so a non-BMP one
+    // survives whole.
+    const char = String.fromCodePoint(body.codePointAt(i) as number);
+    bytes.push(...encoder.encode(char));
+    i += char.length;
   }
   return new TextDecoder().decode(new Uint8Array(bytes));
 }

@@ -55,12 +55,16 @@ fn read_settings_object(path: &Path) -> Option<Value> {
 }
 
 /// Parse the newline-delimited `aiIgnorePatterns` string into a pattern list,
-/// matching the frontend split at every generation call site
-/// (`useGenerateCommitMessage` / `useGenerateBranchName`): split on newlines,
-/// trim, drop blank lines and `#` comments.
+/// mirroring the frontend's `ignoreLines` at every generation call site: split on
+/// newlines, trim via [`crate::fsops::trim_ignore_pattern`], drop blank lines and
+/// `#` comments.
+///
+/// The trim must be that one, not `str::trim`: a plain trim eats the backslash
+/// escape in `/notes\ `, and the pattern then matches nothing — handing a file the
+/// user excluded straight to the provider.
 fn parse_ignore_patterns(raw: &str) -> Vec<String> {
     raw.lines()
-        .map(str::trim)
+        .map(crate::fsops::trim_ignore_pattern)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .map(str::to_string)
         .collect()
@@ -153,7 +157,7 @@ mod tests {
             json!({
                 "settings": {
                     "globalInstructions": "Be terse.",
-                    "aiIgnorePatterns": "*.lock\n# a comment\n\n  dist/  \n",
+                    "aiIgnorePatterns": "*.lock\n# a comment\n\n  dist/  \n/notes\\ \n",
                     "unrelated": true,
                 }
             })
@@ -162,8 +166,13 @@ mod tests {
         .unwrap();
         let got = read_from(&path);
         assert_eq!(got.global_instructions, "Be terse.");
-        // Trimmed; blanks and `#` comments dropped; the rest kept in order.
-        assert_eq!(got.ai_ignore_patterns, vec!["*.lock", "dist/"]);
+        // Trimmed; blanks and `#` comments dropped; the rest kept in order. The
+        // last line pins the mirror of `fsops::trim_ignore_pattern`: a plain trim
+        // would eat the escape and stop the pattern matching anything at all.
+        assert_eq!(
+            got.ai_ignore_patterns,
+            vec!["*.lock", "dist/", "/notes\\ "]
+        );
     }
 
     #[test]
