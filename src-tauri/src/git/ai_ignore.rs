@@ -51,7 +51,7 @@ fn actionable_lines(patterns: &[String]) -> (Vec<&str>, usize) {
     let mut lines: Vec<&str> = Vec::new();
     let mut skipped_negations = 0usize;
     for raw in patterns {
-        let line = raw.trim();
+        let line = crate::fsops::trim_ignore_pattern(raw);
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
@@ -442,7 +442,7 @@ mod tests {
 
     /// The measured truth table (git 2.51.1): for each AI-ignore pattern LIST,
     /// exactly which of `FIXTURE` it hides. Both engines must agree with it.
-    const PARITY: [(&[&str], &[&str]); 17] = [
+    const PARITY: [(&[&str], &[&str]); 19] = [
         (
             &["notes.md"],
             &["a/b/notes.md", "docs/notes.md", "notes.md"],
@@ -463,6 +463,11 @@ mod tests {
         ),
         (&["build/"], &["build/x.txt", "docs/build/y.txt"]),
         (&["build"], &["build/x.txt", "docs/build/y.txt"]),
+        // Anchored directory, both spellings: the leading `/` pins it to the repo
+        // root, so the nested `docs/build/` survives where the bare rows above
+        // hide it. This is the shape the *Exclude folder from AI* menu emits.
+        (&["/build/"], &["build/x.txt"]),
+        (&["/build"], &["build/x.txt"]),
         (
             &["node_modules"],
             &["node_modules/pkg/i.js", "src/node_modules/j.js"],
@@ -567,6 +572,31 @@ mod tests {
             .map(|p| p.to_string())
             .filter(|p| !listed.contains(p))
             .collect()
+    }
+
+    /// A trailing space survives into the match, which only a backslash escape
+    /// can express: gitignore strips an unescaped one, so the pattern for a file
+    /// named `notes ` would otherwise hide `notes` instead — the wrong file, and
+    /// the named one left visible.
+    ///
+    /// Gitignore engine only, deliberately: this engine takes arbitrary path
+    /// STRINGS, while the pathspec half matches against the index, and git on
+    /// Windows refuses to index a trailing-space path at all ("Invalid path").
+    #[tokio::test]
+    async fn escaped_trailing_space_matches_only_that_file() {
+        let (_dir, repo) = parity_repo().await;
+        let paths = vec!["notes ".to_string(), "notes".to_string()];
+
+        let escaped = git_filter_ai_ignored(repo.clone(), paths.clone(), vec!["notes\\ ".into()])
+            .await
+            .unwrap();
+        assert_eq!(escaped, vec!["notes ".to_string()]);
+
+        // Unescaped, git strips the space and the match lands on the other file.
+        let bare = git_filter_ai_ignored(repo, paths, vec!["notes ".into()])
+            .await
+            .unwrap();
+        assert_eq!(bare, vec!["notes".to_string()]);
     }
 
     /// The two engines agree with each other AND with the measured table, for

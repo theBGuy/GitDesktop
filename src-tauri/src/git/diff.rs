@@ -288,6 +288,8 @@ pub async fn git_diff_file(
         // Full-file "added" diff for files git doesn't track yet.
         // git maps /dev/null to the platform null device; exit code 1 just
         // means "differences found" for --no-index.
+        // `--no-index` takes FILESYSTEM paths, not pathspecs — `:(literal)` here
+        // fails with "could not access" (measured), so this half stays raw.
         let out = run_git_raw(
             Some(&repo_path),
             &["diff", "--no-index", "--", "/dev/null", &file_path],
@@ -302,11 +304,14 @@ pub async fn git_diff_file(
         }
         out
     } else {
+        // Literal pathspec: a `[slug]`-style path would otherwise splice its
+        // glob-siblings' hunks into this file's diff.
+        let spec = crate::git::pathspec::literal(&file_path);
         let mut args = vec!["diff", "--no-color"];
         if staged {
             args.push("--cached");
         }
-        args.extend(["--", file_path.as_str()]);
+        args.extend(["--", spec.as_str()]);
         run_git(Some(&repo_path), &args, DEFAULT_TIMEOUT).await?
     };
 
@@ -338,9 +343,11 @@ pub async fn git_session_file_diff(
     base: String,
 ) -> AppResult<FileDiff> {
     // base → working tree: captures both committed-turn changes and uncommitted edits.
+    // Literal pathspec so a `[slug]`-style path can't pull in a glob-sibling's hunks.
+    let spec = crate::git::pathspec::literal(&file_path);
     let out = run_git(
         Some(&repo_path),
-        &["diff", "--no-color", &base, "--", &file_path],
+        &["diff", "--no-color", &base, "--", &spec],
         DEFAULT_TIMEOUT,
     )
     .await?;
@@ -351,11 +358,13 @@ pub async fn git_session_file_diff(
     if text.trim().is_empty() {
         let others = run_git(
             Some(&repo_path),
-            &["ls-files", "--others", "--exclude-standard", "--", &file_path],
+            &["ls-files", "--others", "--exclude-standard", "--", &spec],
             DEFAULT_TIMEOUT,
         )
         .await?;
         if !others.stdout_lossy().trim().is_empty() {
+            // `--no-index` takes a FILESYSTEM path, so this one stays raw (see
+            // git_diff_file); only the pathspec-taking probe above is literalized.
             let no_index = run_git_raw(
                 Some(&repo_path),
                 &["diff", "--no-index", "--", "/dev/null", &file_path],

@@ -197,9 +197,12 @@ impl GitDesktopMcp {
     ) -> Result<CallToolResult, McpError> {
         ensure_not_flag(&args.sha, "sha")?;
         let mut a: Vec<&str> = vec!["show", "--no-color", args.sha.as_str()];
-        if let Some(path) = args.path.as_deref() {
+        // `path` is documented as a single file, so it matches only itself — a raw
+        // `[slug]`-style path would splice a glob-sibling's hunks into the answer.
+        let spec = args.path.as_deref().map(crate::git::pathspec::literal);
+        if let Some(spec) = spec.as_deref() {
             a.push("--");
-            a.push(path);
+            a.push(spec);
         }
         diff_text(&self.repo, &a).await
     }
@@ -223,9 +226,11 @@ impl GitDesktopMcp {
         } else {
             a.push("HEAD");
         }
-        if let Some(path) = args.path.as_deref() {
+        // Single documented file, so it matches only itself (see commit_diff).
+        let spec = args.path.as_deref().map(crate::git::pathspec::literal);
+        if let Some(spec) = spec.as_deref() {
             a.push("--");
-            a.push(path);
+            a.push(spec);
         }
         diff_text(&self.repo, &a).await
     }

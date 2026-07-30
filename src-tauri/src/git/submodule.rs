@@ -56,10 +56,17 @@ pub async fn git_submodule_update(
     repo_path: String,
     path: Option<String>,
 ) -> AppResult<()> {
+    // The path comes from `git submodule status`, so it must match itself alone:
+    // the builtin honors pathspec magic, and a raw `libs/[mod]` initializes the
+    // sibling `libs/m` INSTEAD — cloning the wrong repo (measured, git 2.51.1).
+    let spec = path
+        .as_deref()
+        .filter(|p| !p.is_empty())
+        .map(crate::git::pathspec::literal);
     let mut args = vec!["submodule", "update", "--init"];
-    if let Some(p) = path.as_deref().filter(|p| !p.is_empty()) {
+    if let Some(spec) = spec.as_deref() {
         args.push("--");
-        args.push(p);
+        args.push(spec);
     }
     run_git_mutating(&state, &repo_path, &args, NETWORK_TIMEOUT).await?;
     Ok(())

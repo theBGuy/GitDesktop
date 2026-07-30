@@ -45,10 +45,11 @@ pub async fn append_repo_ai_ignore(repo_path: String, patterns: Vec<String>) -> 
     const HEADER: &str =
         "# Files excluded from AI context — gitignore-style patterns, one per line.";
 
-    // Trim only — a leading '/' is meaningful anchoring — then de-dupe in order.
+    // Trim only — a leading '/' is meaningful anchoring, and so is a
+    // backslash-escaped trailing space — then de-dupe in order.
     let mut wanted: Vec<String> = Vec::new();
     for p in patterns {
-        let t = p.trim().to_string();
+        let t = crate::fsops::trim_ignore_pattern(&p).to_string();
         if !t.is_empty() && !wanted.contains(&t) {
             wanted.push(t);
         }
@@ -68,7 +69,10 @@ pub async fn append_repo_ai_ignore(repo_path: String, patterns: Vec<String>) -> 
     // Drop anything already in the file (scoped so the borrow ends before we
     // mutate `content`).
     let to_add: Vec<String> = {
-        let existing: HashSet<&str> = content.lines().map(str::trim).collect();
+        let existing: HashSet<&str> = content
+            .lines()
+            .map(crate::fsops::trim_ignore_pattern)
+            .collect();
         wanted
             .into_iter()
             .filter(|p| !existing.contains(p.as_str()))
@@ -150,7 +154,7 @@ pub async fn write_repo_syntax(repo_path: String, contents: String) -> AppResult
 
 pub fn parse_patterns(text: &str) -> Vec<String> {
     text.lines()
-        .map(str::trim)
+        .map(crate::fsops::trim_ignore_pattern)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .map(String::from)
         .collect()

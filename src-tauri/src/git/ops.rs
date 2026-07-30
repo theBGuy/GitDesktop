@@ -138,34 +138,11 @@ pub async fn git_op_continue(
     Ok(())
 }
 
-/// Discards working-tree changes for one file. Tracked files are restored
-/// from the index; untracked files go to the OS recycle bin.
-#[tauri::command]
-pub async fn git_discard(
-    state: State<'_, AppState>,
-    repo_path: String,
-    path: String,
-    untracked: bool,
-) -> AppResult<()> {
-    if untracked {
-        let full = Path::new(&repo_path).join(&path);
-        tauri::async_runtime::spawn_blocking(move || {
-            trash::delete(&full).map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))
-        })
-        .await
-        .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))??;
-        return Ok(());
-    }
-    let spec = crate::git::pathspec::literal(&path);
-    run_git_mutating(&state, &repo_path, &["restore", "--", &spec], DEFAULT_TIMEOUT).await?;
-    Ok(())
-}
-
 /// Discards selected 1-based lines from an untracked (new) file by deleting them
 /// in place. A new file's diff is all additions, so there is no index/patch to
 /// reverse-apply (reverse-applying a new-file patch would delete the whole file).
 /// The file stays untracked; discarding every line leaves it empty (whole-file
-/// removal is `git_discard`'s recycle-bin path).
+/// removal is `git_discard_paths`' recycle-bin path).
 #[tauri::command]
 pub async fn git_discard_untracked_lines(
     repo_path: String,
@@ -527,7 +504,7 @@ pub(crate) async fn git_stash_all_core(state: &AppState, repo_path: String) -> A
 }
 
 /// One selected file to discard, paired with whether it's untracked (which
-/// decides recycle-bin vs. `git restore`). Mirrors the per-file `git_discard`.
+/// decides recycle-bin vs. `git restore`).
 #[derive(serde::Deserialize)]
 pub struct DiscardPath {
     pub path: String,
@@ -536,7 +513,7 @@ pub struct DiscardPath {
 
 /// Discards working-tree changes for a selection of files: tracked files are
 /// restored from the index, untracked files go to the OS recycle bin. The
-/// scoped analogue of `git_discard` / `git_discard_all`.
+/// scoped analogue of `git_discard_all`.
 #[tauri::command]
 pub async fn git_discard_paths(
     state: State<'_, AppState>,
@@ -677,10 +654,14 @@ pub(crate) async fn git_stash_paths_core(
         );
     }
 
-    let unselected_staged: Vec<&str> = all_staged
+    // Literal pathspecs for the re-feed below: these are concrete paths git just
+    // enumerated, and steps (a)/(c) hand them BACK to git as patterns. A raw
+    // `src/app/[slug]/page.tsx` would reset and re-stage its glob-siblings too —
+    // including selected ones this compound op is mid-way through stashing.
+    let unselected_staged: Vec<String> = all_staged
         .iter()
         .filter(|p| !selected_staged.contains(*p))
-        .map(String::as_str)
+        .map(|p| crate::git::pathspec::literal(p))
         .collect();
 
     let mut stash_args = vec!["stash", "push", "--include-untracked", "--"];
@@ -712,7 +693,7 @@ pub(crate) async fn git_stash_paths_core(
         //    Chunk at 100 for the Windows argv limit (mirror git_discard_paths_core).
         for chunk in unselected_staged.chunks(100) {
             let mut args = vec!["reset", "-q", "--"];
-            args.extend(chunk.iter().copied());
+            args.extend(chunk.iter().map(String::as_str));
             run_git(Some(&repo_path), &args, DEFAULT_TIMEOUT).await?;
         }
         // b. Native pathspec stash of the selection — EXACTLY ONE call (chunking
@@ -730,8 +711,8 @@ pub(crate) async fn git_stash_paths_core(
     let source_arg = format!("--source={full_tree}");
     let mut restore: AppResult<()> = Ok(());
     for chunk in unselected_staged.chunks(100) {
-        let mut args = vec!["restore", "--staged", &source_arg, "--"];
-        args.extend(chunk.iter().copied());
+        let mut args = vec!["restore", "--staged", source_arg.as_str(), "--"];
+        args.extend(chunk.iter().map(String::as_str));
         if let Err(e) = run_git(Some(&repo_path), &args, DEFAULT_TIMEOUT).await {
             restore = Err(e);
             break;

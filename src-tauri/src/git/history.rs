@@ -120,6 +120,9 @@ pub async fn git_file_log(
     }
     let limit_arg = limit.to_string();
     let skip_arg = skip.to_string();
+    // Literal pathspec, honored even under `--follow`: a raw `[slug]`-style path
+    // lists a glob-sibling's commits as this file's history (measured).
+    let spec = crate::git::pathspec::literal(&path);
     let out = run_git(
         Some(&repo_path),
         &[
@@ -131,7 +134,7 @@ pub async fn git_file_log(
             &skip_arg,
             LOG_FORMAT,
             "--",
-            &path,
+            &spec,
         ],
         DEFAULT_TIMEOUT,
     )
@@ -202,6 +205,9 @@ pub async fn git_blame(
     if let Some(sha) = &resolved_rev {
         args.push(sha);
     }
+    // `blame` takes a literal PATH, not a pathspec — it never globbed, and
+    // `:(literal)` makes it fail outright ("no such path in HEAD", measured).
+    // Do not "fix" this the way the diff/log call sites were fixed.
     args.extend(["--", &path]);
     let out = run_git(Some(&repo_path), &args, DEFAULT_TIMEOUT).await?;
     let text = out.stdout_lossy();
@@ -380,6 +386,9 @@ pub async fn git_commit_file_diff(
     file_path: String,
 ) -> AppResult<FileDiff> {
     validate_hash(&hash)?;
+    // Literal pathspec: a raw `[slug]`-style path splices a glob-sibling's hunks
+    // into the commit diff shown for this file (measured).
+    let spec = crate::git::pathspec::literal(&file_path);
     let out = run_git(
         Some(&repo_path),
         &[
@@ -390,7 +399,7 @@ pub async fn git_commit_file_diff(
             "--format=",
             &hash,
             "--",
-            &file_path,
+            &spec,
         ],
         DEFAULT_TIMEOUT,
     )

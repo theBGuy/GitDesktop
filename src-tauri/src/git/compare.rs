@@ -167,6 +167,9 @@ pub async fn git_branch_file_diff(
 ) -> AppResult<FileDiff> {
     validate_ref(&base)?;
     validate_ref(&compare)?;
+    // Literal pathspec: a raw `[slug]`-style path pulls a glob-sibling's hunks
+    // into this file's branch diff (measured).
+    let spec = crate::git::pathspec::literal(&file_path);
     let out = run_git(
         Some(&repo_path),
         &[
@@ -174,7 +177,7 @@ pub async fn git_branch_file_diff(
             "--no-color",
             &format!("{base}...{compare}"),
             "--",
-            &file_path,
+            &spec,
         ],
         DEFAULT_TIMEOUT,
     )

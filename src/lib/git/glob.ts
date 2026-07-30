@@ -14,9 +14,38 @@
  * pathspec ignores the backslash escapes .gitignore accepts (measured, git
  * 2.51.1). `]` outside a class is already literal; a literal backslash is
  * inexpressible on either engine and is left alone (impossible on Windows).
+ *
+ * A trailing space is the one case backslash IS the answer: .gitignore strips
+ * unescaped trailing whitespace, so a file named `notes ` yields the pattern
+ * `notes`, which hides a DIFFERENT file and leaves the named one visible
+ * (measured). Escaping is inert for pathspec, which never strips.
  */
 export function globLiteralPath(path: string): string {
-  return path.replace(/[[*?]/g, (c) => `[${c}]`);
+  return path
+    .replace(/[[*?]/g, (c) => `[${c}]`)
+    .replace(/ +$/, (spaces) => spaces.replaceAll(" ", "\\ "));
+}
+
+/**
+ * Trims an ignore pattern the way git reads one — the mirror of Rust's
+ * `trim_ignore_pattern`, which the matcher itself applies.
+ *
+ * Trailing whitespace is insignificant to git UNLESS backslash-escaped, and a
+ * blanket `trim()` here would strip the escape [`globLiteralPath`] just added
+ * before the pattern ever reaches the matcher. A line ending is not part of the
+ * pattern either way — callers split a stored list on `\n`, which leaves the CR
+ * of a CRLF-stored one behind.
+ */
+export function trimIgnorePattern(pattern: string): string {
+  const rest = pattern.trimStart().replace(/[\r\n]+$/, "");
+  let end = rest.length;
+  while (end > 0 && (rest[end - 1] === " " || rest[end - 1] === "\t")) {
+    let slashes = 0;
+    while (rest[end - 2 - slashes] === "\\") slashes++;
+    if (slashes % 2 === 1) break;
+    end--;
+  }
+  return rest.slice(0, end);
 }
 
 /**

@@ -158,6 +158,9 @@ export function ChangesContextMenuItems({
   const dot = entry.path.lastIndexOf(".");
   const extension =
     dot > entry.path.lastIndexOf("/") + 1 ? entry.path.slice(dot + 1) : null;
+  // `*.` is a deliberate glob, but the extension after it is path-derived and can
+  // hold a metacharacter of its own (`a.ts[x]`), which would widen the match.
+  const extensionPattern = extension && `*.${globLiteralPath(extension)}`;
   const isTracked = entry.unstaged !== "untracked" && entry.staged !== "added";
   const isConflicted =
     entry.unstaged === "conflicted" || entry.staged === "conflicted";
@@ -220,9 +223,9 @@ export function ChangesContextMenuItems({
           </ContextMenuSubContent>
         </ContextMenuSub>
       )}
-      {extension && (
+      {extensionPattern && (
         <ContextMenuItem
-          onClick={() => actions.ignore(`*.${extension}`, `*.${extension}`)}
+          onClick={() => actions.ignore(extensionPattern, `*.${extension}`)}
         >
           Ignore all .{extension} files (add to .gitignore)
         </ContextMenuItem>
@@ -264,12 +267,12 @@ export function ChangesContextMenuItems({
               </ContextMenuSubContent>
             </ContextMenuSub>
           )}
-          {extension && (
+          {extensionPattern && (
             <ContextMenuItem
               onClick={() =>
                 actions.untrack(
-                  `*.${extension}`,
-                  `*.${extension}`,
+                  extensionPattern,
+                  extensionPattern,
                   `*.${extension} files`,
                 )
               }
@@ -314,10 +317,10 @@ export function ChangesContextMenuItems({
               </ContextMenuSubContent>
             </ContextMenuSub>
           )}
-          {extension && (
+          {extensionPattern && (
             <ContextMenuItem
               onClick={() =>
-                actions.aiExclude(`*.${extension}`, `*.${extension}`)
+                actions.aiExclude(extensionPattern, `*.${extension}`)
               }
             >
               Exclude all .{extension} files from AI (add to

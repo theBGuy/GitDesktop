@@ -404,12 +404,6 @@ export const gitCommitDiff = (
     maxBytes: maxBytes ?? null,
   });
 
-export const gitDiscard = (
-  repoPath: string,
-  path: string,
-  untracked: boolean,
-) => invoke<void>("git_discard", { repoPath, path, untracked });
-
 /** Discards selected lines from an untracked (new) file — removes just those
  *  1-based line numbers and rewrites it in place (the file stays untracked).
  *  Used for line/hunk discard of a new file, where reverse-applying a patch

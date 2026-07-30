@@ -1,11 +1,12 @@
 import { gitFilterAiIgnored, readRepoAiIgnore } from "@/lib/git/api";
 import { splitUnifiedDiff } from "@/lib/git/diff-split";
+import { trimIgnorePattern } from "@/lib/git/glob";
 
 /** Lines of a newline-joined ignore-pattern string, dropping blanks + comments. */
 function ignoreLines(patterns: string): string[] {
   return patterns
     .split("\n")
-    .map((line) => line.trim())
+    .map(trimIgnorePattern)
     .filter((line) => line && !line.startsWith("#"));
 }
 

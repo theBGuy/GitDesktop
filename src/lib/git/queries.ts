@@ -2986,15 +2986,6 @@ export function useCreateBranch(repo: string) {
   );
 }
 
-export function useDiscard(repo: string) {
-  return useRepoMutation(
-    repo,
-    (args: { path: string; untracked: boolean }) =>
-      api.gitDiscard(repo, args.path, args.untracked),
-    { invalidate: workingTreeKeys(repo) },
-  );
-}
-
 export function useAppendToGitignore(repo: string) {
   return useRepoMutation(repo, (patterns: string[]) =>
     api.appendToGitignore(repo, patterns),

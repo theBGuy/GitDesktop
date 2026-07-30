@@ -45,8 +45,35 @@ fn ok_text(msg: impl Into<String>) -> Result<CallToolResult, McpError> {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct StagePathsArgs {
-    /// Repo-relative paths to stage (or unstage). Directories and pathspecs are accepted.
+    /// Repo-relative paths to stage (or unstage). Files and directories are
+    /// matched exactly. Set `literal: false` to pass git pathspecs/globs instead.
     paths: Vec<String>,
+    /// Whether each entry names one exact file or directory (the default). Set
+    /// false only to pass a git pathspec or glob such as `*.log`.
+    #[serde(default = "default_true")]
+    literal: bool,
+}
+
+/// `serde(default)` yields `false` for a bool; these flags default to ON.
+fn default_true() -> bool {
+    true
+}
+
+/// Stage/unstage entries as git pathspecs, honoring the tool's `literal` flag.
+///
+/// Defaults to literal because the dominant caller shape is "stage the concrete
+/// paths repo_status just listed", where a raw `src/app/[slug]/page.tsx` also
+/// stages its glob-siblings — silently, with no way to tell from the result.
+/// `:(literal)` still recurses directories, so only a deliberate glob needs
+/// `literal: false`, and that mistake fails loudly ("did not match any files").
+fn stage_pathspecs(paths: Vec<String>, literal: bool) -> Vec<String> {
+    if !literal {
+        return paths;
+    }
+    paths
+        .into_iter()
+        .map(|p| crate::git::pathspec::literal(&p))
+        .collect()
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -242,8 +269,9 @@ impl GitDesktopMcp {
     // ---- RECOVERABLE (ensure_git_write) ----------------------------------
 
     #[tool(
-        description = "Stage files (git add) in the bound repository. Accepts repo-relative paths, \
-                       directories, or pathspecs. Requires --allow-git-write.",
+        description = "Stage files (git add) in the bound repository. Repo-relative paths and \
+                       directories match exactly; set literal=false to pass a pathspec or glob. \
+                       Requires --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn stage_files(
@@ -254,7 +282,8 @@ impl GitDesktopMcp {
         for p in &args.paths {
             ensure_not_flag(p, "path")?;
         }
-        crate::git::stage::git_stage_core(&self.state, self.repo.clone(), args.paths)
+        let paths = stage_pathspecs(args.paths, args.literal);
+        crate::git::stage::git_stage_core(&self.state, self.repo.clone(), paths)
             .await
             .map_err(app_err)?;
         ok_text("staged")
@@ -262,7 +291,9 @@ impl GitDesktopMcp {
 
     #[tool(
         description = "Unstage files (restore from the index; drop from the index in an empty \
-                       repo) in the bound repository. Requires --allow-git-write.",
+                       repo) in the bound repository. Repo-relative paths and directories match \
+                       exactly; set literal=false to pass a pathspec or glob. Requires \
+                       --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn unstage_files(
@@ -273,7 +304,8 @@ impl GitDesktopMcp {
         for p in &args.paths {
             ensure_not_flag(p, "path")?;
         }
-        crate::git::stage::git_unstage_core(&self.state, self.repo.clone(), args.paths)
+        let paths = stage_pathspecs(args.paths, args.literal);
+        crate::git::stage::git_unstage_core(&self.state, self.repo.clone(), paths)
             .await
             .map_err(app_err)?;
         ok_text("unstaged")
@@ -853,7 +885,19 @@ mod tests {
     fn args_stage() -> StagePathsArgs {
         StagePathsArgs {
             paths: vec!["a.txt".into()],
+            literal: true,
         }
+    }
+
+    #[test]
+    fn stage_pathspecs_literalizes_only_when_asked() {
+        let paths = || vec!["src/app/[slug]/page.tsx".to_string(), "*.log".to_string()];
+        assert_eq!(
+            stage_pathspecs(paths(), true),
+            vec![":(literal)src/app/[slug]/page.tsx", ":(literal)*.log"]
+        );
+        // literal:false is the escape hatch for a caller that means the glob.
+        assert_eq!(stage_pathspecs(paths(), false), paths());
     }
 
     /// With ALL flags false, every gated tool must error before doing work. Destructive
