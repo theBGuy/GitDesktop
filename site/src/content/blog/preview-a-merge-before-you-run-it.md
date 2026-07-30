@@ -74,9 +74,9 @@ The exit code is the verdict:
 
 When the merge runs at all, line one is the OID of the merged tree. On a
 conflict, the lines after it are the conflicted paths, then a blank line, then
-the human-readable messages. On a clean merge you get line one and nothing else —
-here against a `sidebranch` that diverged before `main`'s edit and only adds a
-file `main` has never seen:
+the human-readable messages. On a clean merge you get line one and nothing else.
+Here it runs against a `sidebranch` that diverged before `main`'s edit and only
+adds a file `main` has never seen:
 
 ```sh
 $ git merge-tree --write-tree --name-only main sidebranch
@@ -86,8 +86,8 @@ $ echo $?
 ```
 
 Which leaves that qualifier on exit `1`. It does **not** mean "conflict" by
-itself. Ask to merge a branch that doesn't exist and you get `1` as well — with
-a completely empty stdout, the message going to stderr instead. So test stdout,
+itself. Ask to merge a branch that doesn't exist and you get `1` as well, with
+a completely empty stdout and the message going to stderr instead. So test stdout,
 not the code alone: empty output means Git refused, which is "unknown", not "a
 conflict in zero files".
 
@@ -111,7 +111,7 @@ other, without either one being checked out.
 
 ## The merged tree is a real object
 
-That OID on line one isn't a receipt. It's a tree in your object database, and
+That OID on line one is a real tree in your object database, and
 every read-only command that takes a tree will take it.
 
 Want to see what the conflict actually looks like before deciding? Read the file
@@ -145,8 +145,8 @@ you have to do. Set `merge.conflictStyle` to `diff3` or `zdiff3` and the same
 merge reports six, because each conflict also carries a `|||||||` section and the
 base text.
 
-Structural conflicts — where the sides disagree about whether a file exists or
-where it lives, which the next section gets into — vary more, so don't apply that
+Structural conflicts, where the sides disagree about whether a file exists or
+where it lives (more on those below), vary more, so don't apply that
 subtraction blindly. A `modify/delete` leaves one side's file whole with no
 markers at all, and its stat is pure real change. But a `rename/rename` where
 both sides also edited the file writes markers into *both* paths, so the count
@@ -155,13 +155,12 @@ path rather than a file you recognise. Treat the stat as a rough gauge, not an
 audit.
 
 Even with those caveats you know the rough size of the job, which files are
-involved, and — for the content conflicts — the exact shape of each one. All
+involved, and, for the content conflicts, the exact shape of each one. All
 without running a merge.
 
 ## The trap: `-X ours` does less than you think
 
-Here's the part that's worth the whole article, because it's the part that will
-quietly lie to you if you build on it.
+Now for the part that will lie to you if you build on it.
 
 If a preview says "conflict", the obvious next thought is: fine, I'll merge with
 a strategy option and let Git pick a side. So you re-run the preview mentally,
@@ -212,11 +211,11 @@ Git cannot pick a side there, because there is no "side" to pick; the question
 isn't which text wins, it's what the tree should contain. Those stop the merge
 no matter which `-X` you pass.
 
-The boundary isn't "does it look structural", though — it's whether there are
+Don't sort by whether it looks structural, though; sort by whether there are
 two texts to choose between. `add/add` looks structural, but both sides did
 produce a file at one path, so there *is* a text to pick, and `-X ours` resolves
-it to exit 0. Test the specific case rather than reasoning from the category
-name.
+it to exit 0. When in doubt, run the specific case; the category name is a poor
+guide.
 
 So if you're predicting the result of a merge that will use a strategy option,
 **re-run `merge-tree` with that option** and report what it actually says.
@@ -225,7 +224,7 @@ wrong for exactly the conflicts a person most needs warning about.
 
 ## What it costs
 
-Two honest caveats, because "touches nothing" is a slight overstatement.
+"Touches nothing" is a slight overstatement — in two ways.
 
 **It writes objects.** `--write-tree` means what it says: the merged tree and any
 merged blobs get written to the object database. How many depends on the merge.
@@ -266,18 +265,18 @@ DESCRIPTION" — a trivial merge that, in its own words, cannot "handle content
 merges of individual files, rename detection, proper directory/file conflict
 handling, etc."
 
-That mode is still reachable today as `--trivial-merge`, and it's worth knowing
-why you don't want it: it exits **0** even when it reports a conflict. A tool
+That mode is still reachable today as `--trivial-merge`, and the reason you don't
+want it matters: it exits **0** even when it reports a conflict. A tool
 that shells out without checking the version doesn't get an error on old Git —
 it gets a confidently clean answer about a merge that will not be clean. Check
 the version, and degrade to showing nothing rather than showing something wrong.
 
 ## Or don't do any of this
 
-I write a Git client, so the pitch is obvious enough that I'd rather just say it
+You can see the pitch coming (I make one of these clients), so here it is,
 plainly.
 
-Everything above is genuinely worth knowing. Knowing that Git will merge in
+None of this is wasted knowledge. Knowing that Git will merge in
 memory for free, and that `-X ours` can't rescue a `modify/delete`, makes you
 harder to surprise. But it's also a shell pipeline you have to remember, at the
 exact moment you're trying to decide something else.
@@ -286,8 +285,8 @@ In [GitDesktop](/features/) a `merge-base` check runs before the merge button
 does anything, and that same `merge-tree` call runs when it's needed: already up
 to date, fast-forward, clean, or conflicted with the file list already on screen
 — and if you change the on-conflict strategy, the preview re-runs with that
-strategy instead of guessing on your behalf. Same commands, same object database,
-no pipeline.
+strategy instead of guessing on your behalf. It's the same plumbing this post just
+walked through, minus the remembering.
 
-Either way, the thing to take away is that the answer was always available. A
+Shell or client, the point is the same: the answer was always available. A
 merge is not the only way to find out what a merge would do.
