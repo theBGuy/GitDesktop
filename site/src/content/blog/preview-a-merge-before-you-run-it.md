@@ -145,12 +145,14 @@ you have to do. Set `merge.conflictStyle` to `diff3` or `zdiff3` and the same
 merge reports six, because each conflict also carries a `|||||||` section and the
 base text.
 
-Structural conflicts vary, though, so don't apply that subtraction blindly. A
-`modify/delete` leaves one side's file whole with no markers at all, and its
-stat is pure real change. But a `rename/rename` where both sides also edited the
-file writes markers into *both* paths — thirteen counted insertions, six of them
-markers — and a `file/directory` clash reports a rename to a mangled path rather
-than a file you recognise. Treat the stat as a rough gauge, not an audit.
+Structural conflicts — where the sides disagree about whether a file exists or
+where it lives, which the next section gets into — vary more, so don't apply that
+subtraction blindly. A `modify/delete` leaves one side's file whole with no
+markers at all, and its stat is pure real change. But a `rename/rename` where
+both sides also edited the file writes markers into *both* paths, so the count
+inflates there too, and a `file/directory` clash reports a rename to a mangled
+path rather than a file you recognise. Treat the stat as a rough gauge, not an
+audit.
 
 Even with those caveats you know the rough size of the job, which files are
 involved, and — for the content conflicts — the exact shape of each one. All
