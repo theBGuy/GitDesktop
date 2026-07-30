@@ -74,14 +74,20 @@ The exit code is the verdict:
 
 When the merge runs at all, line one is the OID of the merged tree. On a
 conflict, the lines after it are the conflicted paths, then a blank line, then
-the human-readable messages. On a clean merge you get line one and nothing else:
+the human-readable messages. On a clean merge you get line one and nothing else —
+here against a `sidebranch` that diverged before `main`'s edit and only adds a
+file `main` has never seen:
 
 ```sh
 $ git merge-tree --write-tree --name-only main sidebranch
-25f5a925378bfaca7638e006291edcb7374db5bf
+bab3bcfcd19b35a6ecb2881d1602cf080e1cb547
 $ echo $?
 0
 ```
+
+Worth noting for tool authors: exit `0` covers both a real three-way merge and a
+plain fast-forward. `merge-tree` doesn't distinguish them, so if you care about
+the difference you still need `merge-base` to spot the fast-forward case.
 
 Parse to the blank line and you have your file list. Which brings us back to
 that qualifier on exit `1`: it does **not** mean "conflict" by itself. Ask to
@@ -131,8 +137,15 @@ $ git diff --stat main "$TREE"
  1 file changed, 4 insertions(+)
 ```
 
-You now know the size of the job, the shape of every conflict, and which files
-they're in — and you still haven't run a merge.
+Read that stat carefully, though: on a conflicted merge the tree holds the
+marked-up file, so the count includes the conflict markers themselves. With the
+default conflict style, three of those four added lines are the `<<<<<<<`,
+`=======` and `>>>>>>>` you saw in the `cat-file` output — not work you have to
+do. Set `merge.conflictStyle` to `diff3` or `zdiff3` and the same merge reports
+six, because each conflict also carries a `|||||||` section and the base text.
+
+Even so, you now know the rough size of the job, the shape of every conflict, and
+which files they're in — and you still haven't run a merge.
 
 ## The trap: `-X ours` does less than you think
 
@@ -205,12 +218,15 @@ Two honest caveats, because "touches nothing" is a slight overstatement.
 
 **It writes objects.** `--write-tree` means what it says: the merged tree and any
 merged blobs get written to the object database. How many depends on the merge.
-Back in the `shared.txt` repo from earlier, clear the loose-object count to zero
-first so what follows is a clean delta. That content conflict adds two — a tree,
-and the blob holding the marked-up file:
+Back in the throwaway `shared.txt` repo from earlier, clear the loose-object
+count to zero so what follows is a clean delta. Do that *only* in a throwaway
+repo: `git gc --prune=now` discards unreachable objects for good, including
+[stashes you could otherwise still recover](/blog/recover-a-dropped-git-stash/).
+With a clean baseline, the content conflict adds two — a tree, and the blob
+holding the marked-up file:
 
 ```sh
-$ git gc --prune=now                   # start from a clean baseline
+$ git gc --prune=now      # throwaway repos only — destroys unreachable objects
 $ git count-objects -v | grep '^count:'
 count: 0
 $ git merge-tree --write-tree --name-only main feature >/dev/null
