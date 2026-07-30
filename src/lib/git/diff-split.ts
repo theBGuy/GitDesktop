@@ -102,6 +102,29 @@ function newSideToken(headerRest: string): string {
 }
 
 /**
+ * The decoded new-file path of one `diff --git` section.
+ *
+ * The single decoder for anything that has to KEY a section by path. Callers
+ * that key a section and callers that build a parallel file list must use this
+ * same one, or their keys disagree: the AI-ignore filter hides a file by
+ * matching a section key against a file-list entry, and a file list parsed with
+ * a different rule silently survives the filter.
+ */
+export function sectionFilePath(section: string): string | undefined {
+  // Prefer the `+++ b/<path>` line (present for edits); fall back to the
+  // `diff --git` header, which is all a pure rename or a delete carries. Either
+  // side may arrive C-quoted, so the token is located by separator and decoded —
+  // a quoted token starts with `"`, not `b`.
+  const plus = section.match(/^\+\+\+ (.+)$/m);
+  const header = section.match(/^diff --git (.+)$/m);
+  return (
+    (plus?.[1] && newFilePath(plus[1])) ??
+    (header?.[1] && newFilePath(newSideToken(header[1]))) ??
+    undefined
+  );
+}
+
+/**
  * Splits a combined unified diff (e.g. `gh pr diff`) into per-file sections
  * keyed by the new-file path, so each can be fed to the file diff viewer.
  *
@@ -113,15 +136,7 @@ export function splitUnifiedDiff(diff: string): Map<string, string> {
   const sections = new Map<string, string>();
   for (const part of diff.split(/^(?=diff --git )/m)) {
     if (!part.trim()) continue;
-    // Prefer the `+++ b/<path>` line (present for edits); fall back to the
-    // `diff --git` header, which is all a pure rename or a delete carries.
-    // Either side may arrive C-quoted, so the token is located by separator and
-    // decoded — a quoted token starts with `"`, not `b`.
-    const plus = part.match(/^\+\+\+ (.+)$/m);
-    const header = part.match(/^diff --git (.+)$/m);
-    const path =
-      (plus?.[1] && newFilePath(plus[1])) ??
-      (header?.[1] && newFilePath(newSideToken(header[1])));
+    const path = sectionFilePath(part);
     if (path) sections.set(path, part);
   }
   return sections;

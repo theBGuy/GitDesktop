@@ -191,6 +191,11 @@ function headerNewPath(header: string): string | undefined {
   if (token.startsWith('"')) {
     const close = token.lastIndexOf('"');
     token = close > 0 ? token.slice(1, close) : token.slice(1);
+  } else if (token.endsWith("\r")) {
+    // A CRLF-terminated diff leaves the CR on the bare token, and it would then
+    // defeat the `$`-anchored low-value patterns — the lockfile ships whole.
+    // The quoted branch can't carry one: git escapes a CR as `\r` inside quotes.
+    token = token.slice(0, -1);
   }
   return token.startsWith("b/") ? token.slice(2) : undefined;
 }
@@ -210,8 +215,9 @@ function splitIntoFileSections(diffText: string): FileSection[] {
  * first, then cap oversized per-file sections, then hard-cap the total.
  *
  * KEEP IN SYNC: src-tauri/src/mcp_server/generate.rs (`budget_diff`,
- * `is_low_value_path`, `split_into_file_sections`, `DIFF_CHAR_BUDGET`,
- * `PER_FILE_CAP`) mirrors this for the MCP recipe tools — with the DEFAULT
+ * `is_low_value_path`, `split_into_file_sections`, `header_new_path`,
+ * `DIFF_CHAR_BUDGET`, `PER_FILE_CAP`) mirrors this for the MCP recipe tools —
+ * with the DEFAULT
  * `budget`/`perFileCap`; the review path scales them per model (see
  * context-budget.ts) while the recipe tools keep the constants.
  */

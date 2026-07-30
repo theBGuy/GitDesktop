@@ -19,6 +19,11 @@
  * unescaped trailing whitespace, so a file named `notes ` yields the pattern
  * `notes`, which hides a DIFFERENT file and leaves the named one visible
  * (measured). Escaping is inert for pathspec, which never strips.
+ *
+ * That escape is defeated when the name ALREADY ends in a backslash (`notes\ `):
+ * the emitted `notes\\ ` is an even backslash run, so the space reads as
+ * unescaped and is stripped again. Bounded by the same limitation as above — a
+ * literal backslash is inexpressible here — and impossible on Windows.
  */
 export function globLiteralPath(path: string): string {
   return path
@@ -37,6 +42,10 @@ export function globLiteralPath(path: string): string {
  * pattern (measured). A line ending is not part of the pattern either way —
  * callers split a stored list on `\n`, which leaves the CR of a CRLF-stored one
  * behind.
+ *
+ * The LEADING trim is ours, not git's: git keeps leading whitespace (measured).
+ * It is deliberate and unreachable from the menus, which emit only `/`-anchored
+ * patterns; it exists to forgive a hand-typed settings line.
  */
 export function trimIgnorePattern(pattern: string): string {
   const rest = pattern.trimStart().replace(/[\r\n]+$/, "");

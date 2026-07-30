@@ -92,6 +92,11 @@ pub struct DetectedTerminal {
 /// alone, so a trailing TAB is part of the pattern (measured, git 2.51.1:
 /// pattern `foo\t` matches `foo\t` and not `foo`). Trimming it here would
 /// retarget the pattern exactly the way the space case does.
+///
+/// The LEADING trim is ours, not git's: git treats leading whitespace as part of
+/// the pattern (measured — ` notes.md` hides ` notes.md`, not `notes.md`). It is
+/// deliberate and unreachable from the menus, which emit only `/`-anchored
+/// patterns; it exists to forgive a hand-typed settings line.
 pub(crate) fn trim_ignore_pattern(pattern: &str) -> &str {
     let rest = pattern.trim_start().trim_end_matches(['\r', '\n']);
     let bytes = rest.as_bytes();

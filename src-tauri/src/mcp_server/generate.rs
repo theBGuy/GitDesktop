@@ -248,10 +248,6 @@ fn is_low_value_path(path: &str) -> bool {
         || path.ends_with(".snap")
 }
 
-/// Split a diff into `diff --git` file sections, mirroring `splitIntoFileSections`
-/// in truncate.ts: split so each section starts at a `diff --git ` header, drop
-/// whitespace-only parts, and take the `b/<path>` side of the header (falling back
-/// to the whole header line when it doesn't match).
 /// The b-side path of a `diff --git` header. Mirrors `headerNewPath` in
 /// src/lib/ai/truncate.ts. KEEP IN SYNC.
 ///
@@ -272,10 +268,19 @@ fn header_new_path(header: &str) -> Option<String> {
             Some(close) => &rest[..close],
             None => rest,
         };
+    } else if let Some(rest) = token.strip_suffix('\r') {
+        // A CRLF-terminated diff leaves the CR on the bare token, and it would
+        // then defeat the `ends_with` low-value checks — the lockfile ships
+        // whole. The quoted branch can't carry one: git escapes CR as `\r`.
+        token = rest;
     }
     token.strip_prefix("b/").map(str::to_string)
 }
 
+/// Split a diff into `diff --git` file sections, mirroring `splitIntoFileSections`
+/// in truncate.ts: split so each section starts at a `diff --git ` header, drop
+/// whitespace-only parts, and resolve the b-side via [`header_new_path`], which
+/// accepts the bare and C-quoted spellings, falling back to the whole header line.
 fn split_into_file_sections(diff_text: &str) -> Vec<DiffFileSection<'_>> {
     let mut starts: Vec<usize> = Vec::new();
     let bytes = diff_text.as_bytes();
@@ -1787,6 +1792,12 @@ mod tests {
         assert_eq!(
             header_new_path("diff --git a/x b/y.txt b/x b/y.txt").as_deref(),
             Some("y.txt")
+        );
+        // A CRLF-terminated diff leaves the CR on the bare token; keeping it
+        // would defeat the `$`-anchored low-value checks downstream.
+        assert_eq!(
+            header_new_path("diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml\r").as_deref(),
+            Some("pnpm-lock.yaml")
         );
         assert_eq!(header_new_path("diff --git nonsense"), None);
     }

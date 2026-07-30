@@ -27,6 +27,7 @@ import {
   gitCommitDiff,
   readRepoInstructions,
 } from "@/lib/git/api";
+import { sectionFilePath } from "@/lib/git/diff-split";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import type { DiffStatEntry } from "@/lib/git/types";
 import { notifyIfUnfocused } from "@/lib/notify";
@@ -158,8 +159,13 @@ function filesFromDiff(text: string): DiffStatEntry[] {
     .split(/^(?=diff --git )/m)
     .filter((s) => s.trim())
     .map((section) => {
+      // Same decoder splitUnifiedDiff keys sections with — NOT a local regex.
+      // `filterDiffByAiIgnore` hides a file by matching a section key against
+      // this list, so a different rule here lets an ignored file's name and
+      // counts survive the filter and reach the model (a C-quoted path has no
+      // bare ` b/` to match).
       const header = section.slice(0, section.indexOf("\n"));
-      const path = header.match(/ b\/(.+)$/)?.[1] ?? header;
+      const path = sectionFilePath(section) ?? header;
       let added = 0;
       let deleted = 0;
       for (const line of section.split("\n")) {

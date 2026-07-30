@@ -67,9 +67,14 @@ fn default_true() -> bool {
 /// `:(literal)` still recurses directories, so only a deliberate glob needs
 /// `literal: false`, and that mistake fails loudly ("did not match any files").
 ///
-/// Shared by every path-taking write tool, not just staging: `stash_push` sweeps
-/// the files it matches OUT of the working tree, so an over-match there costs a
-/// sibling's uncommitted work.
+/// Used by `stage_files`, `unstage_files` and `stash_push` — not staging alone:
+/// `stash_push` sweeps the files it matches OUT of the working tree, so an
+/// over-match there costs a sibling's uncommitted work.
+///
+/// `discard_changes` deliberately does NOT route through this. It hands paths to
+/// `git_discard_paths_core`, which literalizes the tracked half itself and must
+/// keep the untracked half a plain filesystem name for `trash::delete`. Applying
+/// this helper there would corrupt that half.
 fn literal_pathspecs(paths: Vec<String>, literal: bool) -> Vec<String> {
     if !literal {
         return paths;
