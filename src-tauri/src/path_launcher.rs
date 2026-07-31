@@ -190,7 +190,9 @@ mod platform {
             .chain(std::iter::once(0))
             .flat_map(|u| u.to_le_bytes())
             .collect();
-        env.set_raw_value("Path", &RegValue { bytes, vtype })
+        // winreg 0.56 made `RegValue.bytes` a `Cow<'_, [u8]>`; `.into()` wraps the
+        // owned Vec as `Cow::Owned` with no copy.
+        env.set_raw_value("Path", &RegValue { bytes: bytes.into(), vtype })
             .map_err(AppError::Io)
     }
 
