@@ -68,12 +68,12 @@ function unescapeCQuoted(body: string): string {
  * C-quoted. A bare token can carry a trailing TAB field, which git adds when the
  * name contains a space — cut at the tab rather than trimming, so a name that
  * genuinely ends in a space survives.
+ *
+ * No CR strip here, unlike the `\n`-slicing mirrors in truncate.ts and
+ * generate.rs: both callers pass a `(.+)$` capture, and `.` never matches `\r`.
  */
-function newFilePath(rawToken: string): string | undefined {
-  if (!rawToken) return undefined;
-  // `$` matches before the newline, so a CRLF-terminated diff leaves the CR on
-  // the token. Everything else here must survive verbatim.
-  const token = rawToken.endsWith("\r") ? rawToken.slice(0, -1) : rawToken;
+function newFilePath(token: string): string | undefined {
+  if (!token) return undefined;
   let path: string;
   if (token.startsWith('"')) {
     const close = token.lastIndexOf('"');

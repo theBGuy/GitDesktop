@@ -5,16 +5,16 @@
 //!
 //! Deliberately NOT routed through this, because a caller may legitimately pass
 //! a glob: `git_untrack` and `git_force_add` (the "untrack all `*.log`" menu
-//! form), and the `git_stage_core` / `git_unstage_core` cores — whose GUI
-//! callers literalize at the call site instead (ChangesPanel, RepositoryFilesDialog).
+//! form; call sites literalize — `ChangesContextMenu.tsx:239,258`,
+//! `RepositoryFilesDialog.tsx:187,207`), and the `git_stage_core` /
+//! `git_unstage_core` cores (`ChangesPanel.tsx:412,471,486,546`).
 //!
 //! The MCP write tools do NOT belong on that list: they literalize at the tool
 //! boundary in `mcp_server::write_git::literal_pathspecs`, with `literal: false`
-//! as the deliberate-glob escape hatch. See that helper for the three tools it
-//! covers and why `discard_changes` is the exception.
+//! as the deliberate-glob escape hatch. See that helper for the tools it covers
+//! and why `discard_changes` is the exception.
 //!
-//! Keep this list true. It reads as the authoritative "stays raw" set, and a
-//! stale entry here is exactly how `stash_push` survived one sweep already.
+//! Keep this list true — it reads as the authoritative "stays raw" set.
 
 /// A concrete path as a pathspec that matches only itself.
 ///

@@ -159,16 +159,10 @@ function filesFromDiff(text: string): DiffStatEntry[] {
     .split(/^(?=diff --git )/m)
     .filter((s) => s.trim())
     .flatMap((section) => {
-      // Same decoder splitUnifiedDiff keys sections with — NOT a local regex.
-      // `filterDiffByAiIgnore` hides a file by matching a section key against
-      // this list, so a different rule here lets an ignored file's name and
-      // counts survive the filter and reach the model (a C-quoted path has no
-      // bare ` b/` to match).
-      //
-      // An unkeyable section is DROPPED, exactly as splitUnifiedDiff drops it:
-      // a section neither decoder can key is one that was never checked against
-      // the user's patterns, so the two key sets stay identical and the failure
-      // stays closed rather than leaking a header line as a filename.
+      // Same decoder `splitUnifiedDiff` keys with — a different rule here lets an
+      // AI-ignored file's name and counts survive `filterDiffByAiIgnore` (a
+      // C-quoted path has no bare ` b/`). Unkeyable sections are dropped, as
+      // `splitUnifiedDiff` drops them, so the key sets stay identical.
       const path = sectionFilePath(section);
       if (!path) return [];
       let added = 0;

@@ -609,6 +609,13 @@ mod tests {
     /// Skipped at RUNTIME rather than `#[cfg(unix)]`-gated so the body still
     /// compiles on Windows; a cfg-gated test first compiles on CI, where a typo
     /// costs a red run instead of a local one.
+    ///
+    /// TWO reasons it cannot run on Windows, and the second is the load-bearing
+    /// one: git there refuses to index a trailing-space path at all, AND a
+    /// backslash inside a pathspec is a separator rather than an escape, so
+    /// `**/notes\ ` becomes `**/notes/ ` and the pathspec assertion below would
+    /// be false on Windows even if the fixture could be built. The engines
+    /// genuinely diverge there for this shape — see `globLiteralPath`.
     #[tokio::test]
     async fn escaped_trailing_space_agrees_across_engines() {
         if cfg!(windows) {
