@@ -38,8 +38,11 @@ pub(crate) struct AiGenSettings {
 
 /// Pure resolution of the store's directory, in precedence order (arms 1 and 3 mirror
 /// [`crate::oplog::resolve_store_base`]; arm 2 differs deliberately — this module only
-/// READS, so a test needs no store at all where the oplog needs a writable temp one):
-/// 1. a non-empty `GD_SETTINGS_DIR` override — the escape hatch for headless/test callers;
+/// READS, so a test needs no store at all where the oplog needs a writable temp one).
+/// Under `cfg(test)` an arm 0 precedes all of these: [`store_path`] consults
+/// [`TEST_STORE_DIR`] before calling here, and tests use only that.
+/// 1. a non-empty `GD_SETTINGS_DIR` override — the operator/headless escape hatch for
+///    pointing a run at a store outside the app-data dir (an oplog-sibling knob);
 /// 2. under `cfg!(test)`, NO store, so an in-crate test can never read the developer's
 ///    real settings — a populated store would otherwise decide the test's result;
 /// 3. otherwise the real app-data dir, `tauri-plugin-store` v2's
@@ -52,9 +55,40 @@ fn resolve_store_dir(gd_settings_dir: Option<&str>, is_test: bool) -> Option<Pat
     }
 }
 
+/// In-process test override, consulted before the env arm. A test that needs a store
+/// sets THIS rather than `GD_SETTINGS_DIR`: mutating process env would race every
+/// other test's env reads in the same binary, which on POSIX is unsound, not merely
+/// flaky (the oplog seam refuses env mutation for the same reason).
+#[cfg(test)]
+static TEST_STORE_DIR: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Installs (or clears) the in-process override, returning the previous value so a
+/// caller can restore it. Test-only — [`TEST_STORE_DIR`] does not exist otherwise.
+#[cfg(test)]
+pub(crate) fn swap_test_store_dir(dir: Option<PathBuf>) -> Option<PathBuf> {
+    let mut slot = TEST_STORE_DIR
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    std::mem::replace(&mut *slot, dir)
+}
+
+/// The in-process override currently installed, if any. Test-only.
+#[cfg(test)]
+pub(crate) fn test_store_dir() -> Option<PathBuf> {
+    TEST_STORE_DIR
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
 /// Absolute path of the `settings.json` the frontend store writes —
-/// `<store dir>/settings.json`; see [`resolve_store_dir`] for how the dir is chosen.
+/// `<store dir>/settings.json`. The in-process test override wins when one is
+/// installed; otherwise [`resolve_store_dir`] chooses the dir.
 fn store_path() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(dir) = test_store_dir() {
+        return Some(dir.join(STORE_FILE));
+    }
     let dir = resolve_store_dir(std::env::var("GD_SETTINGS_DIR").ok().as_deref(), cfg!(test))?;
     Some(dir.join(STORE_FILE))
 }

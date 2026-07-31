@@ -243,8 +243,10 @@ export function MarkdownEditor({
   autoFocus?: boolean;
   /** Grow the input (and Preview) to the parent flex column's spare height instead
    *  of the default capped box. Every fill-mode box keeps a min-height floor so a
-   *  short window scrolls the parent rather than collapsing the editor; the
-   *  textarea's floor is `min-h-24`, overridable via `textareaClassName`. */
+   *  short window scrolls the parent rather than collapsing the editor. Only the
+   *  textarea's floor is caller-tunable (`min-h-24`, overridden via
+   *  `textareaClassName`); Preview's stays fixed at `min-h-24`, so a call site that
+   *  raises the textarea's floor gets a slightly shorter minimum in Preview. */
   fill?: boolean;
   textareaClassName?: string;
   actions?: ReactNode;

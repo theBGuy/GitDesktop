@@ -99,6 +99,11 @@ export function TagDetailView({
   const [editPrerelease, setEditPrerelease] = useState(false);
   const [editLatest, setEditLatest] = useState(false);
   const [editSyncUpdater, setEditSyncUpdater] = useState(true);
+  // The submitted decision, captured at submit. The live checkbox can't stand in for
+  // it: phase 1's invalidation refetches the release mid-save, and a `latest.json`
+  // that the clobber has momentarily deleted would flip the gate and drop the latch
+  // while the upload is still running.
+  const [syncArmed, setSyncArmed] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [cleanupTag, setCleanupTag] = useState(false);
   const [createReleaseOpen, setCreateReleaseOpen] = useState(false);
@@ -147,11 +152,11 @@ export function TagDetailView({
     // there is no GitLab arm to fall back to here.
     const canSyncUpdater =
       canWrite && rel.assets.some((a) => a.name === "latest.json");
-    // Arming the sync makes Save two-phase; dismissing between the phases would fire
-    // the manifest upload at a closed dialog, so the whole operation latches. A plain
-    // edit (box off) stays dismissible exactly as it always was.
+    // An armed sync makes Save two-phase; dismissing between the phases would fire the
+    // manifest upload at a closed dialog, so the whole operation latches. A plain edit
+    // (nothing armed) stays dismissible exactly as it always was.
     const savePending = editRelease.isPending || syncUpdaterNotes.isPending;
-    const saveLatched = canSyncUpdater && editSyncUpdater && savePending;
+    const saveLatched = syncArmed && savePending;
     return (
       <div className="flex h-full flex-col">
         <header className="space-y-2 border-b px-4 py-3">
@@ -199,6 +204,7 @@ export function TagDetailView({
                     setEditPrerelease(rel.isPrerelease);
                     setEditLatest(isLatest);
                     setEditSyncUpdater(true);
+                    setSyncArmed(false);
                     setEditOpen(true);
                   }}
                 >
@@ -383,6 +389,7 @@ export function TagDetailView({
                 // so there's nothing to carry into the manifest either.
                 const syncManifest =
                   canSyncUpdater && editSyncUpdater && !!editNotes.trim();
+                setSyncArmed(syncManifest);
                 editRelease.mutate(
                   {
                     tag,
@@ -398,6 +405,7 @@ export function TagDetailView({
                   {
                     onSuccess: () => {
                       if (!syncManifest) {
+                        setSyncArmed(false);
                         toast.success("Release updated");
                         setEditOpen(false);
                         return;
@@ -409,19 +417,19 @@ export function TagDetailView({
                         { tag, notes: editNotes.trim() },
                         {
                           onSuccess: () => {
+                            setSyncArmed(false);
                             toast.success("Release updated");
                             setEditOpen(false);
                           },
                           onError: (err) => {
-                            // `--clobber` deletes before it uploads, so a failure
-                            // here can leave the asset gone rather than stale — and
-                            // re-running this dialog can't recover it (the checkbox
-                            // is gated on the asset that's now missing). The backend
-                            // parks the patched file and names its path, so route
-                            // through toastError: Details carries that path.
+                            setSyncArmed(false);
+                            // Which stage failed decides what recovery is possible —
+                            // only a failed upload leaves a parked copy — so the
+                            // summary stays arm-neutral and the backend's own text
+                            // (carried into Details by toastError) names the specifics.
                             toastError(
                               new Error(
-                                `Release updated — the updater manifest may be missing from the release. Restore it by re-uploading the saved file via Assets → Upload.\n\n${presentError(err).fullText}`,
+                                `Release updated, but the updater manifest may not have been.\n\n${presentError(err).fullText}`,
                               ),
                             );
                             setEditOpen(false);
@@ -429,7 +437,12 @@ export function TagDetailView({
                         },
                       );
                     },
-                    onError,
+                    // The capture dies with the save it was taken for — phase 1
+                    // failing means no phase 2 will ever consume it.
+                    onError: (e) => {
+                      setSyncArmed(false);
+                      onError(e);
+                    },
                   },
                 );
               }}
@@ -499,9 +512,15 @@ export function TagDetailView({
                 )}
                 {canSyncUpdater && (
                   <div className="flex flex-col gap-1">
-                    <label className="flex cursor-pointer items-center gap-2 text-xs">
-                      {/* Frozen while saving: unchecking mid-flight would drop the
-                          latch without stopping the upload already under way. */}
+                    <label
+                      className={`flex items-center gap-2 text-xs ${
+                        savePending
+                          ? "cursor-not-allowed opacity-60"
+                          : "cursor-pointer"
+                      }`}
+                    >
+                      {/* Frozen while saving: toggling mid-flight would misreport the
+                          state of a save whose decision was already captured. */}
                       <Checkbox
                         checked={editSyncUpdater}
                         disabled={savePending}

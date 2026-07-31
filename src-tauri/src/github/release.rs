@@ -429,19 +429,21 @@ fn patch_updater_notes(manifest: &str, notes: &str) -> AppResult<String> {
 
 /// Parks the patched manifest outside the temp dir when the upload fails, under the
 /// `latest.json` BASENAME a re-upload needs (the asset takes its name from the file).
-/// Best-effort: failing here only costs the recovery hint, so it degrades to `None`
-/// rather than masking the upload error that prompted it.
+/// The directory is created EXCLUSIVELY by `Builder::tempdir` before it's persisted —
+/// a guessable name under the shared temp dir could be pre-created as a symlink by a
+/// local attacker and redirect the copy. Best-effort: failing here only costs the
+/// recovery hint, so it degrades to `None` rather than masking the upload error that
+/// prompted it.
 async fn save_updater_recovery_copy(src: std::path::PathBuf) -> Option<String> {
     tokio::task::spawn_blocking(move || {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let dir = std::env::temp_dir().join(format!("gd-updater-recovery-{nanos}"));
-        std::fs::create_dir_all(&dir).ok()?;
-        let dest = dir.join(UPDATER_MANIFEST);
-        std::fs::copy(&src, &dest).ok()?;
-        Some(dest.to_string_lossy().into_owned())
+        let dir = tempfile::Builder::new()
+            .prefix("gd-updater-recovery-")
+            .tempdir()
+            .ok()?;
+        std::fs::copy(&src, dir.path().join(UPDATER_MANIFEST)).ok()?;
+        // Outlives this call by design — the user needs it to re-attach the asset.
+        let kept = dir.keep();
+        Some(kept.join(UPDATER_MANIFEST).to_string_lossy().into_owned())
     })
     .await
     .ok()

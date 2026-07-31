@@ -1510,11 +1510,20 @@ impl GitDesktopMcp {
         // Untracked names never pass through a diff, so the ignore patterns have to
         // be applied to them here — a name is disclosure too. Their hidden count
         // joins the diff's: downstream both mean "in-progress changes hidden".
-        let (untracked_paths, untracked_excluded) =
-            filter_untracked_by_ai_ignore(&self.repo, untracked_paths, &exclude)
-                .await
-                .map_err(app_err)?;
-        diff.excluded_files += untracked_excluded;
+        let filtered = filter_untracked_by_ai_ignore(&self.repo, untracked_paths, &exclude)
+            .await
+            .map_err(app_err)?;
+        let untracked_paths = filtered.paths;
+        // Held BEFORE the fold: only these may be blamed on the patterns below. An
+        // unreadable name is hidden with no pattern configured at all.
+        let tree_pattern_hidden =
+            diff.excluded_files + filtered.excluded.saturating_sub(filtered.unreadable) > 0;
+        let unreadable_note = if filtered.unreadable > 0 {
+            " Some new files were left out because their names aren't readable text."
+        } else {
+            ""
+        };
+        diff.excluded_files += filtered.excluded;
 
         // Nothing in progress → name the branch after what it has already committed.
         let (diff, untracked_paths, commit_subjects) = if diff.files.is_empty()
@@ -1525,14 +1534,20 @@ impl GitDesktopMcp {
             // deliberately takes no commit subjects — they'd describe the CURRENT
             // branch, biasing the name toward the parent branch's story.
             let Some(base) = committed_base_ref(&self.repo).await else {
-                let msg = if diff.excluded_files > 0 {
+                let msg = if tree_pattern_hidden {
                     "All in-progress changes match the AI ignore patterns — nothing to name a \
                      branch after."
+                } else if filtered.unreadable > 0 {
+                    "The only in-progress changes are new files whose names aren't readable text \
+                     — nothing to name a branch after."
                 } else {
                     "No in-progress changes, and no default branch to compare committed work \
                      against."
                 };
-                return Err(McpError::invalid_request(msg, None));
+                return Err(McpError::invalid_request(
+                    format!("{msg}{}", if tree_pattern_hidden { unreadable_note } else { "" }),
+                    None,
+                ));
             };
             let mut committed = crate::git::compare::git_branch_diff(
                 self.repo.clone(),
@@ -1547,7 +1562,8 @@ impl GitDesktopMcp {
                 // Name the side that actually hid something: claiming in-progress
                 // changes existed when the working tree was clean (or vice versa) is
                 // exactly the kind of confident-but-false reason an agent acts on.
-                let msg = match (diff.excluded_files > 0, committed.excluded_files > 0) {
+                let committed_hidden = committed.excluded_files > 0;
+                let msg = match (tree_pattern_hidden, committed_hidden) {
                     (true, true) => "All in-progress and committed changes match the AI ignore \
                                      patterns — nothing to name a branch after."
                         .to_string(),
@@ -1559,13 +1575,25 @@ impl GitDesktopMcp {
                         "All in-progress changes match the AI ignore patterns, and there are no \
                          committed changes vs {base} — nothing to name a branch after."
                     ),
-                    // Covers being ON the default branch and a fully-merged branch.
+                    // Unreadable names are the only in-progress work left to cite; below
+                    // that, being ON the default branch and a fully-merged branch.
+                    (false, false) if filtered.unreadable > 0 => format!(
+                        "The only in-progress changes are new files whose names aren't readable \
+                         text, and there are no committed changes vs {base} — nothing to name a \
+                         branch after."
+                    ),
                     (false, false) => format!(
                         "No in-progress changes, and no committed changes vs {base} — nothing to \
                          name a branch after."
                     ),
                 };
-                return Err(McpError::invalid_request(msg, None));
+                // A pattern arm cited one cause; unreadable names are a second one.
+                let suffix = if tree_pattern_hidden || committed_hidden {
+                    unreadable_note
+                } else {
+                    ""
+                };
+                return Err(McpError::invalid_request(format!("{msg}{suffix}"), None));
             }
             // Fold the working tree's hidden files into the committed diff's
             // disclosure — they're also changes the model can't see (mirrors the TS
@@ -1776,6 +1804,20 @@ async fn untracked_files(repo: &str) -> Result<Vec<String>, crate::error::AppErr
         .collect())
 }
 
+/// What the AI-ignore filter left of an untracked-name list. Mirrors the TS
+/// `filterPathsByAiIgnore` result (src/lib/ai/ignore.ts). KEEP IN SYNC.
+struct FilteredUntracked {
+    /// The names still safe to show a model.
+    paths: Vec<String>,
+    /// Every hidden name — pattern matches and unreadable ones alike, since the
+    /// disclosure counts what the model can't see, not why.
+    excluded: u32,
+    /// The subset hidden for being unreadable, which no pattern could have matched.
+    /// Broken out because a message that blames the user's patterns for these sends
+    /// them to a list that may well be empty.
+    unreadable: u32,
+}
+
 /// The untracked paths the user's AI-ignore patterns leave visible, and how many
 /// they hide. Runs on the same gitignore engine the diff side is pinned to, and
 /// filters here rather than in `untracked_files` so the names reach the engine as the
@@ -1788,16 +1830,20 @@ async fn filter_untracked_by_ai_ignore(
     repo: &str,
     paths: Vec<String>,
     exclude: &[String],
-) -> Result<(Vec<String>, u32), crate::error::AppError> {
+) -> Result<FilteredUntracked, crate::error::AppError> {
     let matched = crate::git::ai_ignore::filter_ignored(repo, &paths, exclude).await?;
     let matched: std::collections::HashSet<String> = matched.into_iter().collect();
     let total = paths.len();
+    let unreadable = paths.iter().filter(|p| p.contains('\u{FFFD}')).count() as u32;
     let kept: Vec<String> = paths
         .into_iter()
         .filter(|p| !matched.contains(p) && !p.contains('\u{FFFD}'))
         .collect();
-    let excluded = (total - kept.len()) as u32;
-    Ok((kept, excluded))
+    Ok(FilteredUntracked {
+        excluded: (total - kept.len()) as u32,
+        paths: kept,
+        unreadable,
+    })
 }
 
 #[cfg(test)]
@@ -2661,19 +2707,23 @@ mod tests {
             "secrets/customer-list.md".to_string(),
             "src/app.rs".to_string(),
         ];
-        let (visible, excluded) =
+        let filtered =
             filter_untracked_by_ai_ignore(&repo_s, untracked, &["secrets/".to_string()])
                 .await
                 .expect("filter untracked");
-        assert_eq!(visible, vec!["src/app.rs".to_string()]);
-        assert_eq!(excluded, 1);
+        assert_eq!(filtered.paths, vec!["src/app.rs".to_string()]);
+        assert_eq!(filtered.excluded, 1);
+        assert_eq!(
+            filtered.unreadable, 0,
+            "a pattern match is not an unreadable name"
+        );
 
         let recipe = assemble_branch_recipe(BranchPieces {
             diff_text: String::new(),
             diff_truncated: false,
             files: vec![],
-            untracked_paths: visible,
-            excluded_files: excluded,
+            untracked_paths: filtered.paths,
+            excluded_files: filtered.excluded,
             recent_branches: vec![],
             commit_subjects: vec![],
             repo_instructions: None,
@@ -2705,11 +2755,14 @@ mod tests {
         git(&repo_s, &["init", "-q"]).await;
 
         let paths = vec!["ok.rs".to_string(), "sec\u{FFFD}ret.md".to_string()];
-        let (visible, excluded) = filter_untracked_by_ai_ignore(&repo_s, paths, &[])
+        let filtered = filter_untracked_by_ai_ignore(&repo_s, paths, &[])
             .await
             .expect("filter untracked");
-        assert_eq!(visible, vec!["ok.rs".to_string()]);
-        assert_eq!(excluded, 1);
+        assert_eq!(filtered.paths, vec!["ok.rs".to_string()]);
+        assert_eq!(filtered.excluded, 1);
+        // Counted apart from the pattern hits, so no message can blame the (empty)
+        // pattern list for it.
+        assert_eq!(filtered.unreadable, 1);
     }
 
     /// `-z` keeps the listed names byte-exact: a name with a space stays whole, and a
@@ -2744,11 +2797,11 @@ mod tests {
         );
     }
 
-    /// `GD_SETTINGS_DIR` is process-global, so the tests that depend on the settings
-    /// store take this lock: one sets the override, the other requires it unset. Any
+    /// The store override is process-wide, so the tests that depend on the settings
+    /// store take this lock: one installs an override, the other requires none. Any
     /// future test driving `build_commit_recipe` or `build_pr_recipe` reads the store
-    /// too and must join the lock (and set the override through the guard below).
-    /// Poisoning is ignored — the guarded state is an env var, not invariant data.
+    /// too and must join the lock (and install its override through the guard below).
+    /// Poisoning is ignored — the guarded state is one override slot, not invariant data.
     static SETTINGS_STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn settings_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -2757,25 +2810,23 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Sets `GD_SETTINGS_DIR` for as long as it's held and restores the prior value on
-    /// drop — panics included, so a failing test can't leave the override standing for
-    /// whichever test is next through the lock.
-    struct SettingsDirOverride(Option<std::ffi::OsString>);
+    /// Points the settings reader at `dir` for as long as it's held and restores the
+    /// prior override on drop — panics included, so a failing test can't leave one
+    /// standing for whichever test is next through the lock. In-process, never process
+    /// env: `setenv` racing the other tests' env reads is unsound, not just flaky.
+    struct SettingsDirOverride(Option<std::path::PathBuf>);
 
     impl SettingsDirOverride {
         fn set(dir: &std::path::Path) -> Self {
-            let previous = std::env::var_os("GD_SETTINGS_DIR");
-            std::env::set_var("GD_SETTINGS_DIR", dir);
-            Self(previous)
+            Self(crate::app_store::swap_test_store_dir(Some(
+                dir.to_path_buf(),
+            )))
         }
     }
 
     impl Drop for SettingsDirOverride {
         fn drop(&mut self) {
-            match self.0.take() {
-                Some(previous) => std::env::set_var("GD_SETTINGS_DIR", previous),
-                None => std::env::remove_var("GD_SETTINGS_DIR"),
-            }
+            crate::app_store::swap_test_store_dir(self.0.take());
         }
     }
 
@@ -2784,18 +2835,18 @@ mod tests {
     #[test]
     fn settings_dir_override_restores_after_a_panic() {
         let _guard = settings_lock();
-        let before = std::env::var_os("GD_SETTINGS_DIR");
+        let before = crate::app_store::test_store_dir();
         let dir = std::env::temp_dir();
 
         let result = std::panic::catch_unwind(|| {
             let _override = SettingsDirOverride::set(&dir);
-            assert!(std::env::var_os("GD_SETTINGS_DIR").is_some());
+            assert!(crate::app_store::test_store_dir().is_some());
             panic!("boom");
         });
 
         assert!(result.is_err(), "the probe must actually panic");
         assert_eq!(
-            std::env::var_os("GD_SETTINGS_DIR"),
+            crate::app_store::test_store_dir(),
             before,
             "the override must not outlive the test that set it"
         );

@@ -36,10 +36,12 @@ pub struct AiIgnorePathspecs {
     /// crate's staticlib/cdylib targets make `pub` no defence against dead_code.
     #[allow(dead_code)]
     pub skipped_negations: usize,
-    /// How many backslash escapes could only be re-encoded as `?` rather than an
-    /// exact one-character class (see [`escapes_to_classes`]). Each one can
-    /// over-exclude a sibling name, never leak the escaped one. Unconsumed so
-    /// far, and `pub` is no defence against dead_code here.
+    /// How many pattern pieces this translation had to over-broaden — a
+    /// class-special escape or a backslash-carrying bracket expression becoming
+    /// `?`, or an unterminated `[` that a later emitted class closed (see
+    /// [`rewrite_for_pathspec`]). Each one can over-exclude a sibling name, never
+    /// leak the named one. Unconsumed so far, and `pub` is no defence against
+    /// dead_code here.
     #[allow(dead_code)]
     pub widened: usize,
 }
@@ -70,8 +72,8 @@ fn actionable_lines(patterns: &[String]) -> (Vec<&str>, usize) {
     (lines, skipped_negations)
 }
 
-/// Rewrites gitignore's `\<c>` escapes into the only spelling the pathspec engine
-/// reads the same way, returning the count that had to be widened.
+/// Rewrites one gitignore pattern into the spelling the pathspec engine reads the
+/// same way, returning the count that had to be widened.
 ///
 /// On WINDOWS a backslash inside a pathspec argv element is normalized to `/`
 /// before matching, so an escape that gitignore honors excludes NOTHING there —
@@ -82,55 +84,160 @@ fn actionable_lines(patterns: &[String]) -> (Vec<&str>, usize) {
 /// one-character bracket class is exact on both engines, so `\<c>` becomes
 /// `[<c>]`.
 ///
-/// Two routes exist beside that class. `/` becomes a bare `/`: no bracket class
-/// matches a separator under `,glob`, while gitignore's `\/` does, so the class
-/// form would open the same hole it closes. The five class-special escapes
+/// Three escapes route around that class. `/` becomes a bare `/`: no bracket
+/// class matches a separator under `,glob`, while gitignore's `\/` does, so the
+/// class form would open the same hole it closes. A NON-ASCII character also goes
+/// bare — a class matches byte-wise, so `[日]` asks for one stray byte of a
+/// three-byte character and matches nothing, while bare is exact because no
+/// non-ASCII character is a glob metacharacter. The five class-special escapes
 /// (`]`, `^`, `!`, `-`, `\`) and a dangling backslash have their own meaning
 /// inside a class, so they degrade to `?`, a single-char wildcard that can only
-/// over-exclude — [`AiIgnorePathspecs::widened`] counts those.
+/// over-exclude.
+///
+/// A bracket EXPRESSION the user wrote is git's own syntax, not ours to
+/// translate: it is copied whole, or — when it carries a backslash anywhere
+/// inside — replaced whole by a single `?`. Rewriting one member in place would
+/// silently change the class's membership (`a[b\-c]d` would become the class
+/// `{b,?,c}` and stop matching `a-d`, which gitignore hides). `?` is a strict
+/// superset of any bracket, since neither matches `/`, so the swap stays
+/// fail-closed. [`AiIgnorePathspecs::widened`] counts both `?` routes.
 ///
 /// A backslash here is ALWAYS a gitignore escape and never a Windows path
 /// separator — the lists are documented as .gitignore syntax. So a
 /// Windows-path-shaped rule matches nothing it looks like it should: `src\foo.ts`
 /// names the literal `srcfoo.ts`, uniformly on both engines.
 ///
-/// One shape genuinely diverges, in the safe direction: a line ending `\/` leaves
-/// a real trailing `/` here, so [`pathspecs_for`] files it as a directory and
-/// hides its contents, while gitignore strips that slash and aborts on the
-/// dangling `foo\` residue, matching NOTHING (measured, git 2.51.1: excludes line
-/// `foo\/` hides neither `foo/x.txt` nor `foo`, where `foo/` hides `foo/x.txt`).
-/// Uncounted — `widened` means the `?` fallbacks — and unreachable from the
-/// menus, which never emit a trailing `\/`.
-fn escapes_to_classes(pattern: &str) -> (String, usize) {
+/// Beside the widened brackets, one shape diverges in the same safe direction: a
+/// line ending `\/` leaves a real trailing `/` here, so [`pathspecs_for`] files it
+/// as a directory and hides its contents, while gitignore strips that slash and
+/// aborts on the dangling `foo\` residue, matching NOTHING (measured, git 2.51.1:
+/// excludes line `foo\/` hides neither `foo/x.txt` nor `foo`, where `foo/` hides
+/// `foo/x.txt`). Uncounted, and unreachable from the menus, which never emit a
+/// trailing `\/`.
+fn rewrite_for_pathspec(pattern: &str) -> (String, usize) {
+    let chars: Vec<char> = pattern.chars().collect();
     let mut out = String::with_capacity(pattern.len());
     let mut widened = 0usize;
-    let mut chars = pattern.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
+    let mut i = 0usize;
+    // An unterminated `[` copied into `out` and not yet closed — see the arm below.
+    let mut dangling_open = false;
+    while i < chars.len() {
+        if chars[i] == '[' {
+            match bracket_end(&chars, i) {
+                Some(end) => {
+                    let expr: String = chars[i..=end].iter().collect();
+                    if expr.contains('\\') {
+                        out.push('?');
+                        widened += 1;
+                    } else {
+                        out.push_str(&expr);
+                    }
+                    i = end + 1;
+                }
+                // Unterminated. Gitignore abandons the whole pattern, matching
+                // NOTHING, and a copied `[` matches nothing too — UNLESS a later
+                // escape emits a class whose `]` closes it, which the arm below
+                // counts as the over-exclusion it is (measured, git 2.51.1:
+                // gitignore `a[b\xc` hides nothing, our `**/a[b[x]c` hides
+                // `abc`/`a[c`/`axc`).
+                None => {
+                    out.push('[');
+                    dangling_open = true;
+                    i += 1;
+                }
+            }
             continue;
         }
-        match chars.next() {
+        if chars[i] != '\\' {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        match chars.get(i + 1).copied() {
             Some('/') => out.push('/'),
+            // A bracket class matches BYTE-wise, so `[日]` would ask for one
+            // stray byte of a 3-byte character and match nothing. Bare is exact
+            // instead: a non-ASCII char is never a glob metacharacter.
+            Some(e) if !e.is_ascii() => out.push(e),
             Some(e) if !matches!(e, ']' | '^' | '!' | '-' | '\\') => {
                 out.push('[');
                 out.push(e);
                 out.push(']');
+                // This `]` is the first one in `out`, so it closes the dangling
+                // `[` rather than this class — turning the run into a real class
+                // where gitignore matched nothing at all.
+                if dangling_open {
+                    widened += 1;
+                    dangling_open = false;
+                }
             }
             _ => {
                 out.push('?');
                 widened += 1;
             }
         }
+        i += if i + 1 < chars.len() { 2 } else { 1 };
     }
     (out, widened)
+}
+
+/// Index of the `]` closing the bracket expression opening at `open`, or `None`
+/// when it is unterminated.
+///
+/// Follows wildmatch's own parse, which four details make non-obvious: a leading
+/// `!` or `^` negates; a `]` in first position is a member rather than the
+/// terminator; a backslash escapes the next character; and a POSIX class
+/// `[:name:]` is consumed whole, so the `]` ending it is not the terminator
+/// either. Miss any of them and the scan stops at a false terminator, splitting
+/// the class — which then has a member rewritten in place and silently changes
+/// what it accepts.
+///
+/// `[:name:]` alone: git's wildmatch has no `[=x=]` equivalence or `[.x.]`
+/// collating form (measured, git 2.51.1 — both match nothing rather than acting
+/// as a class), so treating their brackets as ordinary characters is what agrees
+/// with it.
+fn bracket_end(chars: &[char], open: usize) -> Option<usize> {
+    let mut i = open + 1;
+    if matches!(chars.get(i).copied(), Some('!' | '^')) {
+        i += 1;
+    }
+    if matches!(chars.get(i).copied(), Some(']')) {
+        i += 1;
+    }
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 2,
+            '[' if matches!(chars.get(i + 1).copied(), Some(':')) => {
+                match posix_class_end(chars, i) {
+                    Some(end) => i = end + 1,
+                    None => i += 1,
+                }
+            }
+            ']' => return Some(i),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Index of the `]` ending the POSIX class `[:name:]` opening at `open`, or
+/// `None` when no `:]` follows (then the `[` is an ordinary member).
+fn posix_class_end(chars: &[char], open: usize) -> Option<usize> {
+    let mut i = open + 2;
+    while i + 1 < chars.len() {
+        if chars[i] == ':' && chars[i + 1] == ']' {
+            return Some(i + 1);
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Translates gitignore-style lines into `:(exclude,glob)` pathspec terms.
 ///
 /// Pure — no git call, no IO. Blanks, comments and `!` lines are dropped by the
 /// shared [`actionable_lines`]. Per surviving line: backslash escapes are
-/// re-encoded by [`escapes_to_classes`] first (the pathspec engine cannot read
+/// re-encoded by [`rewrite_for_pathspec`] first (the pathspec engine cannot read
 /// them), then a trailing `/` marks a directory, and a line is *anchored* when it
 /// starts with `/` or still contains a `/` (exactly gitignore's rule). Unanchored
 /// lines get a `**/` prefix so they match at any depth; a non-directory line also
@@ -172,7 +279,7 @@ pub fn pathspecs_for(patterns: &[String], icase: bool) -> AiIgnorePathspecs {
         // Escapes are re-encoded BEFORE anything classifies the line: `anchored`
         // reads `/`, and Windows git reads a surviving backslash as one — so a
         // raw `a\b.ts` would be filed unanchored and then matched as `a/b.ts`.
-        let (line, w) = escapes_to_classes(line);
+        let (line, w) = rewrite_for_pathspec(line);
         widened += w;
         let is_dir = line.ends_with('/');
         let core = line.strip_suffix('/').unwrap_or(line.as_str());
@@ -517,6 +624,66 @@ mod tests {
         // alone. Windows pathspec matching would read it the other way round, on
         // that platform alone — which is exactly what the re-encode removes.
         assert_eq!(specs("src\\foo.ts")[0], ":(exclude,glob)**/src[f]oo.ts");
+
+        // An escaped non-ASCII character goes BARE. A class is byte-wise, so
+        // `[日]` names one byte of a three-byte character and matches nothing.
+        assert_eq!(
+            specs("docs/\\日本語.md")[0],
+            ":(exclude,glob)docs/日本語.md"
+        );
+    }
+
+    /// A bracket expression the user wrote is git's own syntax: copied whole when
+    /// it holds no escape, and swapped whole for `?` when it does. Rewriting a
+    /// single member in place would change which characters the class accepts.
+    #[test]
+    fn user_bracket_expressions_pass_through_or_widen_whole() {
+        // Verbatim: plain class, negated (both spellings), and `]` as the first
+        // member — all parsed the same way by both engines.
+        for pattern in ["a[b-c]d", "a[!b]d", "a[^b]d", "a[]]d", "weird[[]1].txt"] {
+            let out = pathspecs_for(&[pattern.to_string()], false);
+            assert_eq!(out.specs[0], format!(":(exclude,glob)**/{pattern}"));
+            assert_eq!(out.widened, 0, "pattern {pattern:?}");
+        }
+
+        // An escape anywhere inside widens the WHOLE class: `a[b?c]d` would be
+        // the class `{b,?,c}`, which stops matching the `a-d` that gitignore hides.
+        let out = pathspecs_for(&["a[b\\-c]d".to_string()], false);
+        assert_eq!(out.specs[0], ":(exclude,glob)**/a?d");
+        assert_eq!(out.widened, 1);
+        // The scan steps over an escaped `]` rather than stopping at it, or the
+        // class would be split at a false terminator.
+        assert_eq!(
+            pathspecs_for(&["a[b\\]c]d".to_string()], false).specs[0],
+            ":(exclude,glob)**/a?d"
+        );
+
+        // A POSIX class holds a `]` that does NOT terminate the expression.
+        // Escape-free, so it survives whole.
+        for pattern in ["a[[:digit:]]d", "a[[:alpha:][:digit:]]d", "a[![:digit:]]d"] {
+            let out = pathspecs_for(&[pattern.to_string()], false);
+            assert_eq!(out.specs[0], format!(":(exclude,glob)**/{pattern}"));
+            assert_eq!(out.widened, 0, "pattern {pattern:?}");
+        }
+        // With an escape after the class, the WHOLE expression widens — stopping
+        // the scan at the class's `]` would instead rewrite one member and drop
+        // the `a-d` that gitignore hides.
+        let out = pathspecs_for(&["a[[:digit:]\\-]d".to_string()], false);
+        assert_eq!(out.specs[0], ":(exclude,glob)**/a?d");
+        assert_eq!(out.widened, 1);
+        // A lone `[:` with no `:]` is an ordinary member, not a class.
+        assert_eq!(specs("a[[:x]d")[0], ":(exclude,glob)**/a[[:x]d");
+
+        // Unterminated: both engines abandon the pattern and match nothing, and
+        // the copied `[` keeps the pathspec side there.
+        assert_eq!(specs("a[b")[0], ":(exclude,glob)**/a[b");
+        assert_eq!(specs("a[")[0], ":(exclude,glob)**/a[");
+        // …unless a later escape emits a class whose `]` closes the dangling `[`,
+        // making it a real class where gitignore matched nothing. Fail-closed, so
+        // the emission stands — but it is counted, not silent.
+        let reclosed = pathspecs_for(&["a[b\\xc".to_string()], false);
+        assert_eq!(reclosed.specs[0], ":(exclude,glob)**/a[b[x]c");
+        assert_eq!(reclosed.widened, 1);
     }
 
     /// The five class-special escapes (and a dangling backslash) fall back to
@@ -563,12 +730,23 @@ mod tests {
     }
 
     /// Every fixture path in the parity repo, repo-relative and sorted.
-    const FIXTURE: [&str; 22] = [
+    const FIXTURE: [&str; 27] = [
+        // A bracket expression's members (`a-d`/`abd`) plus a name only the
+        // widened `?` reaches (`aXd`), so a class and its widening are
+        // distinguishable.
+        "a-d",
         // `a/b.ts` beside `srcfoo.ts`/`src/foo.ts`: the pair of shapes that tell a
         // backslash ESCAPE apart from a Windows path separator (the `\/` and
         // `\f` rows below).
         "a/b.ts",
         "a/b/notes.md",
+        // A digit member for the POSIX-class rows, and a name holding a literal
+        // `[` so the unterminated-bracket rows have something they could wrongly
+        // hide (git accepts `[` in a filename on every platform).
+        "a5d",
+        "aXd",
+        "a[b",
+        "abd",
         "app.log",
         // Each `?`-widened escape with a sibling only the wildcard reaches, so
         // the fail-closed asymmetry has a witness (`widened_escapes_…` below).
@@ -598,7 +776,7 @@ mod tests {
 
     /// The measured truth table (git 2.51.1): for each AI-ignore pattern LIST,
     /// exactly which of `FIXTURE` it hides. Both engines must agree with it.
-    const PARITY: [(&[&str], &[&str]); 22] = [
+    const PARITY: [(&[&str], &[&str]); 27] = [
         (
             &["notes.md"],
             &["a/b/notes.md", "docs/notes.md", "notes.md"],
@@ -674,6 +852,23 @@ mod tests {
         // class matches a separator under `,glob`, so `\/` becomes a bare `/` —
         // which must also anchor the line exactly as gitignore anchors it.
         (&["a\\/b.ts"], &["a/b.ts"]),
+        // A bracket expression the USER wrote, carrying no escape: copied through
+        // untouched, and the two engines read it identically (a range here, so
+        // `a-d` is NOT a member — only `abd` is in this fixture).
+        (&["a[b-c]d"], &["abd"]),
+        // An escaped NON-ASCII character goes bare. As a one-character class it
+        // would ask for a single byte of a three-byte character and match nothing,
+        // while gitignore hides the file — the fail-open direction.
+        (&["docs/\\日本語.md"], &["docs/日本語.md"]),
+        // A POSIX class carries its own `]`, which the terminator scan must step
+        // over. Escape-free, so it passes through verbatim and both engines read
+        // the same class.
+        (&["a[[:digit:]]d"], &["a5d"]),
+        // An unterminated `[` is abandoned by BOTH engines — an agreement row
+        // that happens to hide nothing, which is exactly the claim worth pinning:
+        // the copied `[` must not start matching on the pathspec side.
+        (&["a["], &[]),
+        (&["a[b"], &[]),
     ];
 
     /// A `.gitignore` line the fixture repo carries but the AI-ignore lists never
@@ -975,9 +1170,16 @@ mod tests {
         let (_dir, repo) = parity_repo().await;
         let all: Vec<String> = FIXTURE.iter().map(|p| p.to_string()).collect();
 
-        for (pattern, literal, only_by_wildcard) in [
-            ("bang\\!.txt", "bang!.txt", "bangX.txt"),
-            ("hat\\^.txt", "hat^.txt", "hatX.txt"),
+        for (pattern, gitignore_hides, only_by_wildcard) in [
+            ("bang\\!.txt", &["bang!.txt"][..], "bangX.txt"),
+            ("hat\\^.txt", &["hat^.txt"][..], "hatX.txt"),
+            // A bracket carrying an escape widens to `?` as a whole; gitignore
+            // reads the class literally, so `a-d` and `abd` are its members.
+            ("a[b\\-c]d", &["a-d", "abd"][..], "aXd"),
+            // The same, with a POSIX class ahead of the escape. Rewriting the
+            // escape in place would leave `a[[:digit:]?]d` — digits plus `?` —
+            // which stops hiding the `a-d` that gitignore hides.
+            ("a[[:digit:]\\-]d", &["a-d", "a5d"][..], "abd"),
         ] {
             let by_gitignore: BTreeSet<String> = git_filter_ai_ignored(
                 repo.clone(),
@@ -990,8 +1192,11 @@ mod tests {
             .collect();
             assert_eq!(
                 by_gitignore,
-                [literal.to_string()].into_iter().collect::<BTreeSet<_>>(),
-                "gitignore engine hides exactly the escaped name, patterns {pattern:?}"
+                gitignore_hides
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<BTreeSet<_>>(),
+                "gitignore engine hides exactly the named files, patterns {pattern:?}"
             );
 
             let by_pathspec = hidden_by_pathspec(&repo, &[pattern]).await;

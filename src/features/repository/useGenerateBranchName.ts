@@ -136,9 +136,14 @@ export function useGenerateBranchName(repoPath: string) {
         }
 
         // Nothing to name it after — say which side (if either) was emptied by
-        // the ignore patterns rather than genuinely having no changes.
+        // the ignore patterns rather than genuinely having no changes. Only the
+        // PATTERN-hidden files may be attributed to the patterns: an unreadable
+        // name is hidden with no pattern configured at all, and blaming the
+        // user's list would send them to an empty settings page.
         const treeHidden =
-          diff !== null && (diff.excludedFiles > 0 || untracked.excluded > 0);
+          diff !== null &&
+          (diff.excludedFiles > 0 ||
+            untracked.excluded - untracked.unreadable > 0);
         const committedHidden =
           committed !== null && committed.excludedFiles > 0;
         let message: string;
@@ -152,6 +157,9 @@ export function useGenerateBranchName(repoPath: string) {
           message = fallback
             ? `All your in-progress changes match your AI ignore patterns, and there are no net changes vs ${fallback.base} to name a branch after.`
             : "All changes match your AI ignore patterns — nothing to name a branch after.";
+        } else if (untracked.unreadable > 0) {
+          message =
+            "Nothing to name a branch after — the only new files have names that aren't readable text.";
         } else if (fallback) {
           message = opts.useWorkingTree
             ? `No in-progress changes, and no net changes vs ${fallback.base} to name a branch after.`
@@ -162,6 +170,12 @@ export function useGenerateBranchName(repoPath: string) {
           // Defensive: the caller disables the affordance in this state, and
           // with no working tree read there are no in-progress changes to cite.
           message = "Nothing to name this branch after.";
+        }
+        // A pattern arm cited one cause; unreadable names are a second one, and
+        // the arms below it are only reachable when there are none.
+        if (untracked.unreadable > 0 && (treeHidden || committedHidden)) {
+          message +=
+            " Some new files were also left out because their names aren't readable text.";
         }
         toast.error(message);
         return null;

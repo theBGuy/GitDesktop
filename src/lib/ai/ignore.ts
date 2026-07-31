@@ -31,23 +31,48 @@ export async function aiExcludePatterns(
   return [...repoIgnore, ...ignoreLines(aiIgnorePatterns)];
 }
 
+/** U+FFFD, what a lossy UTF-8 decode leaves where the bytes weren't valid. Built
+ *  from its code point, never written literally: the character is invisible in
+ *  source and a re-encode that mangled it would silently unguard the check below. */
+const REPLACEMENT_CHAR = String.fromCharCode(0xfffd);
+
 /**
  * The survivors of a bare path list under the user's AI-ignore patterns, plus
  * how many were hidden — for prompt inputs that carry file NAMES with no diff to
- * route through `filterDiffByAiIgnore` (untracked files). An empty `paths` or
- * `exclude` returns the input untouched, before any IPC.
+ * route through `filterDiffByAiIgnore` (untracked files).
+ *
+ * A name carrying U+FFFD is dropped whatever the patterns say: `git status` is
+ * decoded lossily, so a non-UTF-8 path arrives mangled and can match no rule the
+ * user could write — it fails CLOSED, ahead of the pattern check. `excluded`
+ * counts every hidden name (the model can't see either kind), while `unreadable`
+ * breaks out the subset no pattern could have matched — a caller explaining
+ * itself must not blame the user's patterns for those. KEEP IN SYNC with
+ * `filter_untracked_by_ai_ignore` (src-tauri/src/mcp_server/generate.rs). With
+ * nothing left to check, or no patterns, the survivors are returned before any IPC.
  */
 export async function filterPathsByAiIgnore(input: {
   repoPath: string;
   paths: string[];
   exclude: string[];
-}): Promise<{ paths: string[]; excluded: number }> {
+}): Promise<{ paths: string[]; excluded: number; unreadable: number }> {
   const { repoPath, paths, exclude } = input;
-  if (paths.length === 0 || exclude.length === 0) return { paths, excluded: 0 };
-  const hidden = new Set(await gitFilterAiIgnored(repoPath, paths, exclude));
-  if (hidden.size === 0) return { paths, excluded: 0 };
-  const kept = paths.filter((p) => !hidden.has(p));
-  return { paths: kept, excluded: paths.length - kept.length };
+  const decodable = paths.filter((p) => !p.includes(REPLACEMENT_CHAR));
+  const unreadable = paths.length - decodable.length;
+  if (decodable.length === 0 || exclude.length === 0) {
+    return { paths: decodable, excluded: unreadable, unreadable };
+  }
+  const hidden = new Set(
+    await gitFilterAiIgnored(repoPath, decodable, exclude),
+  );
+  if (hidden.size === 0) {
+    return { paths: decodable, excluded: unreadable, unreadable };
+  }
+  const kept = decodable.filter((p) => !hidden.has(p));
+  return {
+    paths: kept,
+    excluded: unreadable + (decodable.length - kept.length),
+    unreadable,
+  };
 }
 
 /**
