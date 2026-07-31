@@ -539,6 +539,14 @@ export const forgeReleaseEdit = (
     latest,
   });
 
+/** Re-points the release's `latest.json` updater manifest at `notes`, leaving its
+ *  version, dates and platform signatures untouched. GitHub-only. */
+export const forgeReleaseSyncUpdaterNotes = (
+  repoPath: string,
+  tag: string,
+  notes: string,
+) => invoke<void>("forge_release_sync_updater_notes", { repoPath, tag, notes });
+
 /** GitHub's auto-generated release notes (suggested title + body), for preview. */
 export const ghReleaseGenerateNotes = (
   repoPath: string,
@@ -781,8 +789,10 @@ export const gitDiscardPaths = (
 export const gitStashAll = (repoPath: string) =>
   invoke<void>("git_stash_all", { repoPath });
 
+// True when a stash entry was actually created (a pathspec matching nothing
+// no-ops at exit 0); the GUI ignores it today — the MCP surface consumes it.
 export const gitStashPaths = (repoPath: string, paths: string[]) =>
-  invoke<void>("git_stash_paths", { repoPath, paths });
+  invoke<boolean>("git_stash_paths", { repoPath, paths });
 
 export const gitStashPop = (repoPath: string) =>
   invoke<void>("git_stash_pop", { repoPath });

@@ -1,7 +1,7 @@
 import { useCallback } from "react";
 import { toast } from "sonner";
 import { useAiStream } from "@/features/conversations/useAiStream";
-import { aiExcludePatterns } from "@/lib/ai/ignore";
+import { aiExcludePatterns, filterPathsByAiIgnore } from "@/lib/ai/ignore";
 import { buildBranchNamePrompt, extractBranchName } from "@/lib/ai/prompt";
 import {
   gitBranchDiff,
@@ -61,17 +61,6 @@ export function useGenerateBranchName(repoPath: string) {
           settings.aiIgnorePatterns,
         );
 
-        const [diff, repoInstructions] = await Promise.all([
-          opts.useWorkingTree
-            ? gitStagedDiff(repoPath, {
-                maxBytes: RAW_DIFF_MAX_BYTES,
-                exclude,
-                worktree: true,
-              })
-            : null,
-          readRepoInstructions(repoPath),
-        ]);
-
         // `git diff HEAD` omits untracked files; bring their names in so a
         // branch made of all-new files can still be named.
         const untrackedPaths = opts.useWorkingTree
@@ -80,13 +69,27 @@ export function useGenerateBranchName(repoPath: string) {
               .map((e) => e.path)
           : [];
 
-        if (diff && (diff.files.length > 0 || untrackedPaths.length > 0)) {
+        const [diff, repoInstructions, untracked] = await Promise.all([
+          opts.useWorkingTree
+            ? gitStagedDiff(repoPath, {
+                maxBytes: RAW_DIFF_MAX_BYTES,
+                exclude,
+                worktree: true,
+              })
+            : null,
+          readRepoInstructions(repoPath),
+          // Untracked names never pass through a diff, so the ignore patterns
+          // have to be applied to them here — a name is disclosure too.
+          filterPathsByAiIgnore({ repoPath, paths: untrackedPaths, exclude }),
+        ]);
+
+        if (diff && (diff.files.length > 0 || untracked.paths.length > 0)) {
           return buildBranchNamePrompt({
             diffText: diff.text,
             diffTruncated: diff.truncated,
             files: diff.files,
-            untrackedPaths,
-            excludedFiles: diff.excludedFiles,
+            untrackedPaths: untracked.paths,
+            excludedFiles: diff.excludedFiles + untracked.excluded,
             commitSubjects: opts.workingTreeSubjects,
             recentBranches: opts.recentBranches,
             repoInstructions,
@@ -117,10 +120,14 @@ export function useGenerateBranchName(repoPath: string) {
             diffTruncated: committed.truncated,
             files: committed.files,
             untrackedPaths: [],
-            // Both sides' hidden files. A file hidden in BOTH diffs counts
-            // twice — deliberately: the sum errs toward disclosing more than is
-            // hidden, never less, and there's no per-path list to dedupe on.
-            excludedFiles: committed.excludedFiles + (diff?.excludedFiles ?? 0),
+            // Both sides' hidden files, plus the working tree's hidden
+            // untracked names. A file hidden in BOTH diffs counts twice —
+            // deliberately: the sum errs toward disclosing more than is hidden,
+            // never less, and there's no per-path list to dedupe on.
+            excludedFiles:
+              committed.excludedFiles +
+              (diff?.excludedFiles ?? 0) +
+              untracked.excluded,
             commitSubjects: fallback.subjects,
             recentBranches: opts.recentBranches,
             repoInstructions,
@@ -130,7 +137,8 @@ export function useGenerateBranchName(repoPath: string) {
 
         // Nothing to name it after — say which side (if either) was emptied by
         // the ignore patterns rather than genuinely having no changes.
-        const treeHidden = diff !== null && diff.excludedFiles > 0;
+        const treeHidden =
+          diff !== null && (diff.excludedFiles > 0 || untracked.excluded > 0);
         const committedHidden =
           committed !== null && committed.excludedFiles > 0;
         let message: string;

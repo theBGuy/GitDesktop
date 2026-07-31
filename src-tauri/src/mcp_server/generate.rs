@@ -1495,7 +1495,7 @@ impl GitDesktopMcp {
         let exclude = self.ai_ignore_patterns(&settings).await?;
 
         // Whole-worktree diff vs HEAD (the TS uses git_staged_diff with worktree=true).
-        let diff = crate::git::diff::git_staged_diff(
+        let mut diff = crate::git::diff::git_staged_diff(
             self.repo.clone(),
             Some(RAW_DIFF_MAX_BYTES),
             Some(exclude.clone()),
@@ -1507,6 +1507,14 @@ impl GitDesktopMcp {
         // `git diff HEAD` omits untracked files; list their paths so a branch made
         // entirely of new files can still be named (mirrors the in-app call site).
         let untracked_paths = untracked_files(&self.repo).await.map_err(app_err)?;
+        // Untracked names never pass through a diff, so the ignore patterns have to
+        // be applied to them here — a name is disclosure too. Their hidden count
+        // joins the diff's: downstream both mean "in-progress changes hidden".
+        let (untracked_paths, untracked_excluded) =
+            filter_untracked_by_ai_ignore(&self.repo, untracked_paths, &exclude)
+                .await
+                .map_err(app_err)?;
+        diff.excluded_files += untracked_excluded;
 
         // Nothing in progress → name the branch after what it has already committed.
         let (diff, untracked_paths, commit_subjects) = if diff.files.is_empty()
@@ -1748,21 +1756,43 @@ async fn committed_base_ref(repo: &str) -> Option<String> {
     None
 }
 
-/// Untracked (new) file paths, `git ls-files --others --exclude-standard`.
+/// Untracked (new) file paths, NUL-separated and raw — these names are matched
+/// against the user's AI-ignore rules, so any rewriting of them fails OPEN. Without
+/// `-z` git C-quotes a name holding a quote, backslash, or non-ASCII byte
+/// (`"caf\303\251.txt"`), and trimming would fold a trailing-space name onto a
+/// different name's spelling; either way the rule that covers it stops matching.
 async fn untracked_files(repo: &str) -> Result<Vec<String>, crate::error::AppError> {
     let out = crate::git::runner::run_git(
         Some(repo),
-        &["ls-files", "--others", "--exclude-standard"],
+        &["ls-files", "--others", "--exclude-standard", "-z"],
         crate::git::runner::DEFAULT_TIMEOUT,
     )
     .await?;
     Ok(out
         .stdout_lossy()
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
+        .split('\0')
+        .filter(|p| !p.is_empty())
         .map(str::to_string)
         .collect())
+}
+
+/// The untracked paths the user's AI-ignore patterns leave visible, and how many
+/// they hide. Runs on the same gitignore engine the diff side is pinned to, and
+/// filters at this call site so `untracked_files` stays raw for other callers.
+async fn filter_untracked_by_ai_ignore(
+    repo: &str,
+    paths: Vec<String>,
+    exclude: &[String],
+) -> Result<(Vec<String>, u32), crate::error::AppError> {
+    let hidden = crate::git::ai_ignore::filter_ignored(repo, &paths, exclude).await?;
+    if hidden.is_empty() {
+        return Ok((paths, 0));
+    }
+    let hidden: std::collections::HashSet<String> = hidden.into_iter().collect();
+    let total = paths.len();
+    let kept: Vec<String> = paths.into_iter().filter(|p| !hidden.contains(p)).collect();
+    let excluded = (total - kept.len()) as u32;
+    Ok((kept, excluded))
 }
 
 #[cfg(test)]
@@ -2606,6 +2636,177 @@ mod tests {
             branch_commit_subjects(&repo_s, &base_sha).await,
             vec!["fix: second".to_string(), "feat: first".to_string()],
             "git log order — newest first"
+        );
+    }
+
+    /// Untracked file NAMES are a disclosure of their own: an ignored one is dropped
+    /// from the recipe's file list and counted in the hidden-files note instead.
+    #[tokio::test]
+    async fn branch_untracked_paths_drop_ai_ignored_names() {
+        let base_dir = tempfile::Builder::new()
+            .prefix("gd-untracked-ignore-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo = base_dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        git(&repo_s, &["init", "-q"]).await;
+
+        let untracked = vec![
+            "secrets/customer-list.md".to_string(),
+            "src/app.rs".to_string(),
+        ];
+        let (visible, excluded) =
+            filter_untracked_by_ai_ignore(&repo_s, untracked, &["secrets/".to_string()])
+                .await
+                .expect("filter untracked");
+        assert_eq!(visible, vec!["src/app.rs".to_string()]);
+        assert_eq!(excluded, 1);
+
+        let recipe = assemble_branch_recipe(BranchPieces {
+            diff_text: String::new(),
+            diff_truncated: false,
+            files: vec![],
+            untracked_paths: visible,
+            excluded_files: excluded,
+            recent_branches: vec![],
+            commit_subjects: vec![],
+            repo_instructions: None,
+            global_instructions: String::new(),
+        });
+        assert!(recipe.prompt.contains("src/app.rs (new file)"));
+        assert!(
+            !recipe.prompt.contains("customer-list"),
+            "an ignored untracked name must never reach the prompt"
+        );
+        assert!(recipe
+            .prompt
+            .contains("[1 additional changed file(s) hidden by the user's AI ignore rules]"));
+    }
+
+    /// `-z` keeps the listed names byte-exact: a name with a space stays whole, and a
+    /// non-ASCII one arrives raw rather than C-quoted (`"caf\303\251.txt"`), which is
+    /// what makes it comparable to the AI-ignore rules at all. The other quoted shapes
+    /// — a trailing space, an embedded quote or backslash — can't be fixtured on
+    /// Windows, which rejects those filenames outright.
+    #[tokio::test]
+    async fn untracked_files_reads_names_verbatim() {
+        let base_dir = tempfile::Builder::new()
+            .prefix("gd-untracked-names-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo = base_dir.path().join("repo");
+        std::fs::create_dir_all(repo.join("sub dir")).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        git(&repo_s, &["init", "-q"]).await;
+
+        std::fs::write(repo.join("plain.rs"), "x\n").unwrap();
+        std::fs::write(repo.join("sub dir").join("a b.md"), "x\n").unwrap();
+        std::fs::write(repo.join("café.txt"), "x\n").unwrap();
+
+        let mut names = untracked_files(&repo_s).await.expect("list untracked");
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "café.txt".to_string(),
+                "plain.rs".to_string(),
+                "sub dir/a b.md".to_string(),
+            ]
+        );
+    }
+
+    /// `GD_SETTINGS_DIR` is process-global, so the tests that depend on the settings
+    /// store take this lock: one sets the override, the other requires it unset.
+    /// Poisoning is ignored — the guarded state is an env var, not invariant data.
+    static SETTINGS_STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn settings_lock() -> std::sync::MutexGuard<'static, ()> {
+        SETTINGS_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// A repo whose only in-progress changes are two untracked files, one of them
+    /// covered by the repo's own `.gitdesktop/aiignore`. Returns the temp dir (kept
+    /// alive by the caller) and the repo path.
+    async fn branch_ignore_fixture() -> (tempfile::TempDir, String) {
+        let base_dir = tempfile::Builder::new()
+            .prefix("gd-branch-untracked-recipe-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo = base_dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".gitdesktop")).unwrap();
+        std::fs::create_dir_all(repo.join("secrets")).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        git(&repo_s, &["init", "-q"]).await;
+        git(&repo_s, &["config", "user.email", "t@t.local"]).await;
+        git(&repo_s, &["config", "user.name", "T"]).await;
+        // The ignore file is committed with the seed, so the only untracked names are
+        // the two below and the hidden count is exact.
+        std::fs::write(repo.join(".gitdesktop").join("aiignore"), "secrets/\n").unwrap();
+        std::fs::write(repo.join("seed"), "seed\n").unwrap();
+        git(&repo_s, &["add", "-A"]).await;
+        git(&repo_s, &["commit", "-qm", "seed"]).await;
+
+        std::fs::write(repo.join("secrets").join("customer-list.md"), "x\n").unwrap();
+        std::fs::write(repo.join("new-feature.rs"), "x\n").unwrap();
+        (base_dir, repo_s)
+    }
+
+    /// The branch recipe counts ignored UNTRACKED names in its hidden-files note: the
+    /// fold has to happen before the note is assembled, or an ignored new file goes
+    /// undisclosed. Exact counts hold because no settings store is read under
+    /// `cfg(test)` (app_store's `resolve_store_dir`), so the repo's own ignore file is
+    /// the whole pattern set.
+    #[tokio::test]
+    async fn branch_recipe_counts_ignored_untracked_names() {
+        let _guard = settings_lock();
+        let (_tmp, repo_s) = branch_ignore_fixture().await;
+
+        let mcp = GitDesktopMcp::with_options(repo_s, false, false, false, false);
+        let recipe = mcp.build_branch_recipe().await.expect("assemble recipe");
+
+        assert!(recipe.prompt.contains("new-feature.rs (new file)"));
+        assert!(
+            !recipe.prompt.contains("customer-list"),
+            "an ignored untracked name must never reach the prompt"
+        );
+        assert!(
+            recipe
+                .prompt
+                .contains("[1 additional changed file(s) hidden by the user's AI ignore rules]"),
+            "exactly one hidden file, folded in before the note was assembled:\n{}",
+            recipe.prompt
+        );
+    }
+
+    /// The store IS consulted when one is resolvable — pinned through the override arm
+    /// with a pattern a user could really hold (`*` hides everything, so the recipe
+    /// must refuse and say why). The twin above owes its exactness to the arm that
+    /// keeps the developer's real store out of every test.
+    #[tokio::test]
+    async fn branch_recipe_reads_the_resolved_settings_store() {
+        let _guard = settings_lock();
+        let (tmp, repo_s) = branch_ignore_fixture().await;
+        let store_dir = tmp.path().join("store");
+        std::fs::create_dir_all(&store_dir).unwrap();
+        std::fs::write(
+            store_dir.join("settings.json"),
+            r#"{"settings":{"aiIgnorePatterns":"*"}}"#,
+        )
+        .unwrap();
+
+        std::env::set_var("GD_SETTINGS_DIR", &store_dir);
+        let mcp = GitDesktopMcp::with_options(repo_s, false, false, false, false);
+        let result = mcp.build_branch_recipe().await;
+        std::env::remove_var("GD_SETTINGS_DIR");
+
+        let err = result.expect_err("every change is ignored — nothing to name");
+        assert!(
+            err.message.contains("match the AI ignore patterns"),
+            "message: {}",
+            err.message
         );
     }
 

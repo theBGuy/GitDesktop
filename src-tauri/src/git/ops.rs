@@ -567,28 +567,32 @@ pub(crate) async fn git_discard_paths_core(
 
 /// Stashes only the selected files (their tracked changes plus any untracked
 /// matches), leaving the rest of the working tree in place. Creates a single
-/// stash entry; `git stash push` with a pathspec no-ops cleanly if nothing matches.
+/// stash entry; `git stash push` with a pathspec no-ops cleanly if nothing
+/// matches. `true` means an entry was actually created.
 #[tauri::command]
 pub async fn git_stash_paths(
     state: State<'_, AppState>,
     repo_path: String,
     paths: Vec<String>,
-) -> AppResult<()> {
+) -> AppResult<bool> {
     git_stash_paths_core(&state, repo_path, paths).await
 }
 
+/// `Ok(false)` when the selection matched nothing and no stash entry was
+/// created — the caller decides how to report that, since `git stash push`
+/// itself exits 0 either way.
 pub(crate) async fn git_stash_paths_core(
     state: &AppState,
     repo_path: String,
     mut paths: Vec<String>,
-) -> AppResult<()> {
+) -> AppResult<bool> {
     // An empty-string entry is not a valid pathspec (`fatal: empty string is not a
     // valid pathspec`) and would fail every git call below; drop those. Do NOT trim
     // whitespace — space-prefixed/suffixed filenames are legal and GUI paths arrive
     // verbatim from `git status`, so trimming would corrupt them.
     paths.retain(|p| !p.is_empty());
     if paths.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
 
     // A native `git stash push -- <paths>` always snapshots the WHOLE index into
@@ -667,11 +671,19 @@ pub(crate) async fn git_stash_paths_core(
     let mut stash_args = vec!["stash", "push", "--include-untracked", "--"];
     stash_args.extend(paths.iter().map(String::as_str));
 
+    // A pathspec matching nothing still exits 0, so this stdout line is the only
+    // signal that no entry was created; `run_git` pins `LC_ALL=C` to keep it stable.
+    fn created_entry(out: &crate::git::runner::GitOutput) -> bool {
+        !out.stdout_lossy()
+            .trim_start()
+            .starts_with("No local changes to save")
+    }
+
     // Fast path: no other staged file to protect, so the native pathspec stash is
     // already exact.
     if unselected_staged.is_empty() {
-        run_git(Some(&repo_path), &stash_args, DEFAULT_TIMEOUT).await?;
-        return Ok(());
+        let out = run_git(Some(&repo_path), &stash_args, DEFAULT_TIMEOUT).await?;
+        return Ok(created_entry(&out));
     }
 
     // Snapshot the full index so the unselected files' exact staged blobs can be
@@ -686,9 +698,9 @@ pub(crate) async fn git_stash_paths_core(
         .to_string();
 
     // Do the mutation, then ALWAYS restore the unselected index — even if the stash
-    // step errors, else the unselected staged files are left unstaged. `Result::and`
-    // lets the primary (mutate) error win; otherwise the restore error surfaces.
-    let mutate: AppResult<()> = async {
+    // step errors, else the unselected staged files are left unstaged. The chaining
+    // below lets the primary (mutate) error win; otherwise the restore error surfaces.
+    let mutate: AppResult<bool> = async {
         // a. Unstage the unselected staged paths (index only; worktree untouched).
         //    Chunk at 100 for the Windows argv limit (mirror git_discard_paths_core).
         for chunk in unselected_staged.chunks(100) {
@@ -699,8 +711,8 @@ pub(crate) async fn git_stash_paths_core(
         // b. Native pathspec stash of the selection — EXACTLY ONE call (chunking
         //    would create multiple stash entries). The `^2` index-commit is now
         //    clean: the index holds only the selected staged changes.
-        run_git(Some(&repo_path), &stash_args, DEFAULT_TIMEOUT).await?;
-        Ok(())
+        let out = run_git(Some(&repo_path), &stash_args, DEFAULT_TIMEOUT).await?;
+        Ok(created_entry(&out))
     }
     .await;
 
@@ -719,7 +731,7 @@ pub(crate) async fn git_stash_paths_core(
         }
     }
 
-    mutate.and(restore)
+    mutate.and_then(|created| restore.map(|()| created))
 }
 
 /// Stops tracking the files matching `pathspecs` (each a file, a folder, or a
@@ -882,12 +894,16 @@ pub struct UnignoreRule {
 /// Removes gitignore rule lines (matched by exact trimmed content) from their
 /// source files — the "remove rule" / stop-ignoring action. Matching by content
 /// (not line number) keeps it safe if the file shifted since it was read.
+///
+/// Trimming is git's own (`trim_ignore_pattern`), not `str::trim`: a blanket trim
+/// collapses `/notes\ ` and `/notes\` to the same key, so unignoring either rule
+/// would delete both lines.
 #[tauri::command]
 pub async fn git_unignore_rules(repo_path: String, rules: Vec<UnignoreRule>) -> AppResult<()> {
     let mut by_source: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
     for r in rules {
-        let pat = r.pattern.trim().to_string();
+        let pat = crate::fsops::trim_ignore_pattern(&r.pattern).to_string();
         if r.source.trim().is_empty() || pat.is_empty() {
             continue;
         }
@@ -908,8 +924,8 @@ pub async fn git_unignore_rules(repo_path: String, rules: Vec<UnignoreRule>) -> 
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => return Err(AppError::Io(e)),
         };
-        // Strip a leading UTF-8 BOM for processing (otherwise it rides on the
-        // first line and breaks the `trim() == pattern` match), and restore it
+        // Strip a leading UTF-8 BOM for processing (it is not whitespace, so it
+        // rides on the first line and breaks the pattern match), and restore it
         // on write. Preserve the file's existing line-ending convention — `lines()`
         // drops both \n and \r\n, so a naive `join("\n")` would silently rewrite a
         // Windows CRLF .gitignore to LF.
@@ -920,7 +936,11 @@ pub async fn git_unignore_rules(repo_path: String, rules: Vec<UnignoreRule>) -> 
         let ending = if content.contains("\r\n") { "\r\n" } else { "\n" };
         let kept: Vec<&str> = content
             .lines()
-            .filter(|l| !patterns.iter().any(|p| l.trim() == p))
+            .filter(|l| {
+                !patterns
+                    .iter()
+                    .any(|p| crate::fsops::trim_ignore_pattern(l) == p)
+            })
             .collect();
         let mut next = kept.join(ending);
         // Keep the trailing newline if the original had one, even when every
@@ -3355,6 +3375,29 @@ mod tests {
         assert_eq!(out, "\n");
     }
 
+    /// Two rules that a blanket `trim()` collapses into one key — `/notes\ `
+    /// names a file whose name ends in a space, `/notes\` one ending in a
+    /// backslash — must be removable independently. Trimming the escape away
+    /// deletes the wrong line as well as the right one.
+    #[tokio::test]
+    async fn unignore_removes_only_the_targeted_escaped_rule() {
+        let body = "/notes\\ \n/notes\\\nkeep\n";
+
+        let (dir, repo) = gitignore_dir("escaped-space", body);
+        git_unignore_rules(repo, vec![rule("/notes\\ ")]).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(".gitignore")).unwrap(),
+            "/notes\\\nkeep\n"
+        );
+
+        let (dir2, repo2) = gitignore_dir("escaped-slash", body);
+        git_unignore_rules(repo2, vec![rule("/notes\\")]).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir2.path().join(".gitignore")).unwrap(),
+            "/notes\\ \nkeep\n"
+        );
+    }
+
     #[tokio::test]
     async fn unignore_strips_and_restores_bom() {
         // A UTF-8 BOM ahead of the first (targeted) rule must not block the match.
@@ -4226,10 +4269,70 @@ detached
         std::fs::write(dir.path().join("a.txt"), "changed\n").unwrap();
 
         let state = AppState::default();
-        git_stash_paths_core(&state, repo.clone(), vec![])
+        let created = git_stash_paths_core(&state, repo.clone(), vec![])
             .await
             .unwrap();
 
+        assert!(!created);
         assert_eq!(stash_count(&repo).await, 0);
+    }
+
+    /// A selection that matches nothing reports `false`. `git stash push` exits 0
+    /// on that path, so without the return the MCP tool answers "stashed" for a
+    /// no-op and the agent believes work was put away.
+    #[tokio::test]
+    async fn selection_matching_nothing_reports_no_stash() {
+        let (dir, repo) = setup_repo("stash-no-match").await;
+        commit_file(&repo, dir.path(), "A", "a0\n", "add A").await;
+        // An unrelated uncommitted change, so the repo is NOT clean overall.
+        std::fs::write(dir.path().join("A"), "a1\n").unwrap();
+
+        let state = AppState::default();
+        let created = git_stash_paths_core(&state, repo.clone(), vec!["nonexistent.txt".into()])
+            .await
+            .unwrap();
+
+        assert!(!created, "nothing matched, so no stash entry was created");
+        assert_eq!(stash_count(&repo).await, 0);
+        // The unrelated change is untouched.
+        assert_eq!(
+            nlf(std::fs::read_to_string(dir.path().join("A")).unwrap()),
+            "a1\n"
+        );
+    }
+
+    /// The index-protecting slow path reports the same way: the selection matches
+    /// nothing while another file stays staged.
+    #[tokio::test]
+    async fn slow_path_selection_matching_nothing_reports_no_stash() {
+        let (dir, repo) = setup_repo("stash-no-match-slow").await;
+        commit_file(&repo, dir.path(), "A", "a0\n", "add A").await;
+        std::fs::write(dir.path().join("A"), "a1\n").unwrap();
+        git(&repo, &["add", "A"]).await;
+
+        let state = AppState::default();
+        let created = git_stash_paths_core(&state, repo.clone(), vec!["nonexistent.txt".into()])
+            .await
+            .unwrap();
+
+        assert!(!created);
+        assert_eq!(stash_count(&repo).await, 0);
+        // A survived the reset/restore round trip with its staged blob intact.
+        assert_eq!(nlf(git(&repo, &["show", ":A"]).await), "a1\n");
+    }
+
+    #[tokio::test]
+    async fn real_selection_reports_a_stash_was_created() {
+        let (dir, repo) = setup_repo("stash-reports-created").await;
+        commit_file(&repo, dir.path(), "B", "b0\n", "add B").await;
+        std::fs::write(dir.path().join("B"), "b1\n").unwrap();
+
+        let state = AppState::default();
+        let created = git_stash_paths_core(&state, repo.clone(), vec!["B".into()])
+            .await
+            .unwrap();
+
+        assert!(created);
+        assert_eq!(stash_count(&repo).await, 1);
     }
 }

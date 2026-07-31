@@ -36,12 +36,26 @@ pub(crate) struct AiGenSettings {
     pub(crate) ai_ignore_patterns: Vec<String>,
 }
 
-/// Resolve the absolute path of the `settings.json` the frontend store writes.
-/// Mirrors `tauri-plugin-store` v2's `BaseDirectory::AppData` resolution
-/// (`dirs::data_dir()/<identifier>`) — see [`crate::local_prs::store_path`].
+/// Pure resolution of the store's directory, in precedence order (mirrors
+/// [`crate::oplog::resolve_store_base`]):
+/// 1. a non-empty `GD_SETTINGS_DIR` override — the escape hatch for headless/test callers;
+/// 2. under `cfg!(test)`, NO store, so an in-crate test can never read the developer's
+///    real settings — a populated store would otherwise decide the test's result;
+/// 3. otherwise the real app-data dir, `tauri-plugin-store` v2's
+///    `BaseDirectory::AppData` resolution (see [`crate::local_prs::store_path`]).
+fn resolve_store_dir(gd_settings_dir: Option<&str>, is_test: bool) -> Option<PathBuf> {
+    match gd_settings_dir {
+        Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
+        _ if is_test => None,
+        _ => Some(dirs::data_dir()?.join(APP_IDENTIFIER)),
+    }
+}
+
+/// Absolute path of the `settings.json` the frontend store writes —
+/// `<store dir>/settings.json`; see [`resolve_store_dir`] for how the dir is chosen.
 fn store_path() -> Option<PathBuf> {
-    let data = dirs::data_dir()?;
-    Some(data.join(APP_IDENTIFIER).join(STORE_FILE))
+    let dir = resolve_store_dir(std::env::var("GD_SETTINGS_DIR").ok().as_deref(), cfg!(test))?;
+    Some(dir.join(STORE_FILE))
 }
 
 /// Read the `"settings"` object from the store file, or `None` when the file is
@@ -127,6 +141,37 @@ mod tests {
             return AiGenSettings::default();
         };
         parse_ai_generation_settings(&settings)
+    }
+
+    /// The three resolution arms. Arm 3 pins PRODUCTION resolution byte-for-byte
+    /// against the rule the Tauri path layer uses; arm 2 is why no test in this crate
+    /// can be decided by whatever the developer's real store happens to hold.
+    #[test]
+    fn store_dir_resolution_arms() {
+        assert_eq!(
+            resolve_store_dir(Some("C:/tmp/gd-store"), true),
+            Some(PathBuf::from("C:/tmp/gd-store")),
+            "an explicit override wins, in tests and out"
+        );
+        assert_eq!(
+            resolve_store_dir(Some(""), false),
+            Some(dirs::data_dir().unwrap().join(APP_IDENTIFIER)),
+            "an EMPTY override is no override"
+        );
+        assert_eq!(resolve_store_dir(None, true), None, "no store under cfg(test)");
+        assert_eq!(
+            resolve_store_dir(None, false),
+            Some(dirs::data_dir().unwrap().join(APP_IDENTIFIER)),
+            "production: dirs::data_dir()/<identifier>, unchanged by the seam"
+        );
+        // …and the file the production arm points at is the frontend's own store.
+        assert_eq!(
+            resolve_store_dir(None, false).unwrap().join(STORE_FILE),
+            dirs::data_dir()
+                .unwrap()
+                .join(APP_IDENTIFIER)
+                .join("settings.json")
+        );
     }
 
     #[test]

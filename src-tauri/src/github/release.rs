@@ -407,6 +407,92 @@ pub async fn gh_release_delete_asset(
     Ok(())
 }
 
+/// Tauri's updater manifest, attached to a release as an asset of this exact name.
+const UPDATER_MANIFEST: &str = "latest.json";
+
+/// Replaces the manifest's `notes` and nothing else — `version`, `pub_date` and
+/// every platform's URL + signature must survive verbatim or installed apps stop
+/// trusting the update. Absent `notes` is added. Re-serializing alphabetizes the
+/// keys (serde_json's Map is a BTreeMap without `preserve_order`), so the result
+/// isn't byte-diffable against CI's original; values are preserved and the
+/// manifest itself carries no signature over its own bytes.
+fn patch_updater_notes(manifest: &str, notes: &str) -> AppResult<String> {
+    let mut value: serde_json::Value = serde_json::from_str(manifest)
+        .map_err(|e| AppError::Gh(format!("could not parse {UPDATER_MANIFEST}: {e}")))?;
+    let obj = value.as_object_mut().ok_or_else(|| {
+        AppError::Gh(format!("{UPDATER_MANIFEST} is not a JSON object"))
+    })?;
+    obj.insert("notes".to_string(), serde_json::Value::String(notes.to_string()));
+    serde_json::to_string_pretty(&value)
+        .map_err(|e| AppError::Gh(format!("could not write {UPDATER_MANIFEST}: {e}")))
+}
+
+/// Re-points a release's updater manifest at `notes`, so apps updating from that
+/// release show the same body the release page does. Download → patch → re-upload
+/// with `--clobber`, which gh implements as delete-THEN-upload: the manifest is
+/// briefly absent, and a failed upload leaves it deleted rather than stale, so
+/// callers must tell the user it may need restoring. The uploaded file's BASENAME
+/// becomes the asset name (a `file#label` argument sets only the display label),
+/// so the patched copy keeps its `latest.json` name.
+pub async fn gh_release_sync_updater_notes(
+    repo_path: &str,
+    tag: &str,
+    notes: &str,
+) -> AppResult<()> {
+    validate_tag(tag)?;
+    let slug = crate::github::gh_origin_slug(repo_path).await?;
+    let dir = tokio::task::spawn_blocking(tempfile::tempdir)
+        .await
+        .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))??;
+    let dir_arg = dir.path().to_string_lossy().to_string();
+    run_gh(
+        Some(repo_path),
+        &[
+            "release",
+            "download",
+            tag,
+            "--repo",
+            &slug,
+            "--pattern",
+            UPDATER_MANIFEST,
+            "--dir",
+            &dir_arg,
+            "--clobber",
+        ],
+        GH_NETWORK_TIMEOUT,
+    )
+    .await?;
+    let path = dir.path().join(UPDATER_MANIFEST);
+    let file_arg = path.to_string_lossy().to_string();
+    let (tag_owned, notes_owned) = (tag.to_string(), notes.to_string());
+    tokio::task::spawn_blocking(move || -> AppResult<()> {
+        let current = std::fs::read_to_string(&path).map_err(|e| {
+            AppError::Gh(format!(
+                "could not read {UPDATER_MANIFEST} for {tag_owned}: {e}"
+            ))
+        })?;
+        std::fs::write(&path, patch_updater_notes(&current, &notes_owned)?)?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))??;
+    run_gh(
+        Some(repo_path),
+        &[
+            "release",
+            "upload",
+            tag,
+            &file_arg,
+            "--repo",
+            &slug,
+            "--clobber",
+        ],
+        GH_NETWORK_TIMEOUT,
+    )
+    .await?;
+    Ok(())
+}
+
 /// Downloads one asset (by exact name, used as the glob pattern) into `dir`.
 #[tauri::command]
 pub async fn gh_release_download_asset(
@@ -440,4 +526,46 @@ pub async fn gh_release_download_asset(
     )
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MANIFEST: &str = r#"{
+      "version": "0.6.0",
+      "notes": "old notes",
+      "pub_date": "2026-07-31T00:00:00Z",
+      "platforms": {
+        "windows-x86_64": { "signature": "sig-abc", "url": "https://example/app.exe" }
+      }
+    }"#;
+
+    #[test]
+    fn patch_updater_notes_replaces_only_the_notes() {
+        let out = patch_updater_notes(MANIFEST, "new notes").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["notes"], "new notes");
+        assert_eq!(v["version"], "0.6.0");
+        assert_eq!(v["pub_date"], "2026-07-31T00:00:00Z");
+        assert_eq!(v["platforms"]["windows-x86_64"]["signature"], "sig-abc");
+        assert_eq!(
+            v["platforms"]["windows-x86_64"]["url"],
+            "https://example/app.exe"
+        );
+    }
+
+    #[test]
+    fn patch_updater_notes_adds_absent_notes() {
+        let out = patch_updater_notes(r#"{"version":"1.0.0"}"#, "fresh").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["notes"], "fresh");
+        assert_eq!(v["version"], "1.0.0");
+    }
+
+    #[test]
+    fn patch_updater_notes_rejects_a_non_object() {
+        assert!(patch_updater_notes("[1, 2]", "x").is_err());
+        assert!(patch_updater_notes("not json", "x").is_err());
+    }
 }

@@ -18,18 +18,12 @@
  * A trailing space is the one case backslash IS the answer: .gitignore strips
  * unescaped trailing whitespace, so a file named `notes ` yields the pattern
  * `notes`, which hides a DIFFERENT file and leaves the named one visible
- * (measured).
+ * (measured). The escape is written in the idiomatic .gitignore spelling users
+ * read in their own files; the pathspec engine cannot parse a backslash at all
+ * (it is a SEPARATOR there), so Rust's `pathspecs_for` re-encodes it as `[ ]`
+ * before matching rather than this emitting the class form directly.
  *
- * That escape fixes the gitignore engine ONLY, and the two AI-ignore engines
- * diverge on WINDOWS for this shape: a backslash in a pathspec is a SEPARATOR,
- * not an escape, so an emitted `notes\ ` term normalizes to `notes/ ` and
- * matches nothing (measured, git 2.51.1.windows.1: `:(glob)a\b.ts` matches
- * `a/b.ts`, while `:(glob)a/b\.ts` matches nothing). Unix honors the escape,
- * which is why the cross-engine test passes on CI. Pre-existing, not introduced
- * here — the pathspec side never matched this shape either way.
- *
- * The escape is also defeated when the name ALREADY ends in a backslash
- * (`notes\ `):
+ * The escape is defeated when the name ALREADY ends in a backslash (`notes\ `):
  * the emitted `notes\\ ` is an even backslash run, so the space reads as
  * unescaped and is stripped again. Bounded by the same limitation as above — a
  * literal backslash is inexpressible here — and impossible on Windows.

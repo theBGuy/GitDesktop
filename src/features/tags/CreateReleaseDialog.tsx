@@ -248,9 +248,11 @@ export function CreateReleaseDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex max-h-[85vh] flex-col sm:max-w-2xl">
+      {/* A fixed height (not a cap): release bodies routinely run thousands of
+          lines, so the notes editor claims the dialog's whole spare height. */}
+      <DialogContent className="flex h-[85vh] flex-col sm:max-w-2xl">
         <form
-          className="flex min-h-0 flex-col gap-4"
+          className="flex min-h-0 flex-1 flex-col gap-4"
           onSubmit={(e) => {
             e.preventDefault();
             form.handleSubmit();
@@ -267,7 +269,7 @@ export function CreateReleaseDialog({
           </DialogHeader>
 
           {/* Fields scroll; header and submit footer stay pinned. */}
-          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+          <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <Label htmlFor="rel-tag">Tag</Label>
@@ -351,7 +353,7 @@ export function CreateReleaseDialog({
               )}
             </form.AppField>
 
-            <div className="space-y-1.5">
+            <div className="flex flex-1 flex-col gap-1.5">
               <div className="flex items-center justify-between gap-2">
                 <Label>Release notes</Label>
                 {existingTags.length > 0 && (
@@ -399,7 +401,9 @@ export function CreateReleaseDialog({
                 onChange={(v) => form.setFieldValue("notes", v)}
                 placeholder="What's changed… (or generate notes above)"
                 rows={8}
-                textareaClassName="max-h-72 min-h-32 resize-y font-mono"
+                fill
+                // No `resize-y`: a manual drag height fights the flex sizing.
+                textareaClassName="min-h-32 font-mono"
                 actions={
                   // GitLab's only generator is the AI one — with AI hidden the
                   // menu would hold a single disabled item, so hide it entirely.

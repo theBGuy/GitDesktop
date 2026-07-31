@@ -32,6 +32,25 @@ export async function aiExcludePatterns(
 }
 
 /**
+ * The survivors of a bare path list under the user's AI-ignore patterns, plus
+ * how many were hidden — for prompt inputs that carry file NAMES with no diff to
+ * route through `filterDiffByAiIgnore` (untracked files). An empty `paths` or
+ * `exclude` returns the input untouched, before any IPC.
+ */
+export async function filterPathsByAiIgnore(input: {
+  repoPath: string;
+  paths: string[];
+  exclude: string[];
+}): Promise<{ paths: string[]; excluded: number }> {
+  const { repoPath, paths, exclude } = input;
+  if (paths.length === 0 || exclude.length === 0) return { paths, excluded: 0 };
+  const hidden = new Set(await gitFilterAiIgnored(repoPath, paths, exclude));
+  if (hidden.size === 0) return { paths, excluded: 0 };
+  const kept = paths.filter((p) => !hidden.has(p));
+  return { paths: kept, excluded: paths.length - kept.length };
+}
+
+/**
  * Drops every AI-ignored file from an already-resolved unified diff and its
  * changed-file list, client-side — the one recipe for both diff sources, since
  * the pathspec-exclude route (`gitBranchDiff`'s `exclude`) only exists where

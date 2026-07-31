@@ -1137,6 +1137,10 @@ provider differences).
 - See every tag and **create a tag** (also available from a commit in History).
 - **Create a release** from a tag: set the title and notes, mark it a **pre-release** or
   **draft**, and publish. Releases show badges (**Latest**, **Pre-release**, **Draft**).
+- **Edit a release** — revise its title and notes any time, in an editor that fills the
+  dialog. When the release carries a \`latest.json\` updater manifest, the dialog offers
+  to update the manifest's notes in the same save, so the "what's new" that installed
+  apps show on update matches the release page.
 {{ai}}- **Generate release notes with AI** — draft the notes from the commits and
   changelog between this tag and the previous one, then edit before publishing.{{/ai}}
 

@@ -3242,6 +3242,14 @@ export function useEditRelease(repo: string) {
   );
 }
 
+/** Syncs the release's `latest.json` updater manifest to the edited notes. Repo
+ *  mutation like the asset upload — replacing the asset changes its size/stats. */
+export function useSyncUpdaterNotes(repo: string) {
+  return useRepoMutation(repo, (args: { tag: string; notes: string }) =>
+    api.forgeReleaseSyncUpdaterNotes(repo, args.tag, args.notes),
+  );
+}
+
 /** GitHub's auto-generated release notes (for the preview-then-edit flow). */
 export function useGithubReleaseNotes(repo: string) {
   return useMutation({

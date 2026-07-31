@@ -26,6 +26,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
+import { presentError } from "@/lib/error-summary";
 import {
   forgeFeatureReady,
   useCheckoutCommit,
@@ -38,6 +39,7 @@ import {
   usePushTag,
   useReleaseDetails,
   useReleaseList,
+  useSyncUpdaterNotes,
   useTagList,
   useUploadReleaseAsset,
 } from "@/lib/git/queries";
@@ -81,6 +83,7 @@ export function TagDetailView({
   const tagList = useTagList(repoPath);
   const releaseList = useReleaseList(repoPath, ghReady);
   const editRelease = useEditRelease(repoPath);
+  const syncUpdaterNotes = useSyncUpdaterNotes(repoPath);
   const deleteRelease = useDeleteRelease(repoPath);
   const uploadAsset = useUploadReleaseAsset(repoPath);
   const deleteAsset = useDeleteReleaseAsset(repoPath);
@@ -95,6 +98,7 @@ export function TagDetailView({
   const [editNotes, setEditNotes] = useState("");
   const [editPrerelease, setEditPrerelease] = useState(false);
   const [editLatest, setEditLatest] = useState(false);
+  const [editSyncUpdater, setEditSyncUpdater] = useState(true);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [cleanupTag, setCleanupTag] = useState(false);
   const [createReleaseOpen, setCreateReleaseOpen] = useState(false);
@@ -137,6 +141,11 @@ export function TagDetailView({
 
   // ── Release view ───────────────────────────────────────────────────────────
   if (rel) {
+    // The updater manifest is a GitHub-only Tauri asset (`canWrite` is the same
+    // GitHub-or-pending shape the other release writes use), so the sync affordance
+    // only makes sense on a release that actually ships one.
+    const canSyncUpdater =
+      canWrite && rel.assets.some((a) => a.name === "latest.json");
     return (
       <div className="flex h-full flex-col">
         <header className="space-y-2 border-b px-4 py-3">
@@ -183,6 +192,7 @@ export function TagDetailView({
                     setEditNotes(rel.body);
                     setEditPrerelease(rel.isPrerelease);
                     setEditLatest(isLatest);
+                    setEditSyncUpdater(true);
                     setEditOpen(true);
                   }}
                 >
@@ -350,12 +360,25 @@ export function TagDetailView({
           </div>
         </ScrollArea>
 
-        <Dialog open={editOpen} onOpenChange={setEditOpen}>
-          <DialogContent className="flex max-h-[85vh] flex-col sm:max-w-lg">
+        {/* Latched while the manifest uploads: dismissing mid-sync would hide a
+            partial state the user still needs to act on. */}
+        <Dialog
+          open={editOpen}
+          onOpenChange={(o) => {
+            if (!syncUpdaterNotes.isPending) setEditOpen(o);
+          }}
+        >
+          {/* A fixed height (not a cap): release bodies routinely run thousands of
+              lines, so the notes editor claims the dialog's whole spare height. */}
+          <DialogContent className="flex h-[85vh] flex-col sm:max-w-2xl">
             <form
-              className="flex min-h-0 flex-col gap-4"
+              className="flex min-h-0 flex-1 flex-col gap-4"
               onSubmit={(e) => {
                 e.preventDefault();
+                // Empty notes leave the body untouched (the edit skips `--notes`),
+                // so there's nothing to carry into the manifest either.
+                const syncManifest =
+                  canSyncUpdater && editSyncUpdater && !!editNotes.trim();
                 editRelease.mutate(
                   {
                     tag,
@@ -370,8 +393,35 @@ export function TagDetailView({
                   },
                   {
                     onSuccess: () => {
-                      toast.success("Release updated");
-                      setEditOpen(false);
+                      if (!syncManifest) {
+                        toast.success("Release updated");
+                        setEditOpen(false);
+                        return;
+                      }
+                      // The body edit has already landed, so a manifest failure is
+                      // partial state, not a failed save: close and disclose it —
+                      // re-submitting would only repeat the edit.
+                      syncUpdaterNotes.mutate(
+                        { tag, notes: editNotes.trim() },
+                        {
+                          onSuccess: () => {
+                            toast.success("Release updated");
+                            setEditOpen(false);
+                          },
+                          onError: (err) => {
+                            // `--clobber` deletes before it uploads, so a failure
+                            // here can leave the asset gone, not merely stale.
+                            toast.error(
+                              "Release updated — the updater manifest may be missing.",
+                              {
+                                duration: 8000,
+                                description: `${presentError(err).summary} — save this release again with "Also update the updater manifest" on to restore it.`,
+                              },
+                            );
+                            setEditOpen(false);
+                          },
+                        },
+                      );
                     },
                     onError,
                   },
@@ -385,20 +435,24 @@ export function TagDetailView({
                 </DialogDescription>
               </DialogHeader>
               {/* Fields scroll; header and submit footer stay pinned. */}
-              <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+              <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">
                 <Input
                   value={editTitle}
                   onChange={(e) => setEditTitle(e.target.value)}
                   placeholder="Title"
                 />
-                <MarkdownEditor
-                  aria-label="Release notes"
-                  value={editNotes}
-                  onChange={setEditNotes}
-                  placeholder="Notes…"
-                  rows={8}
-                  textareaClassName="max-h-72 min-h-24 resize-y font-mono"
-                />
+                <div className="flex flex-1 flex-col">
+                  <MarkdownEditor
+                    aria-label="Release notes"
+                    value={editNotes}
+                    onChange={setEditNotes}
+                    placeholder="Notes…"
+                    rows={8}
+                    fill
+                    // No `resize-y`: a manual drag height fights the flex sizing.
+                    textareaClassName="min-h-24 font-mono"
+                  />
+                </div>
                 {/* GitLab has neither pre-release nor a per-release latest flag. */}
                 {!isGitLab && (
                   <div className="flex flex-wrap gap-x-6 gap-y-2">
@@ -436,17 +490,36 @@ export function TagDetailView({
                     </div>
                   </div>
                 )}
+                {canSyncUpdater && (
+                  <div className="flex flex-col gap-1">
+                    <label className="flex cursor-pointer items-center gap-2 text-xs">
+                      <Checkbox
+                        checked={editSyncUpdater}
+                        onCheckedChange={(c) => setEditSyncUpdater(c === true)}
+                      />
+                      Also update the updater manifest (latest.json)
+                    </label>
+                    <p className="text-muted-foreground text-[11px]">
+                      Keeps the notes installed apps see on update in sync with
+                      this edit.
+                    </p>
+                  </div>
+                )}
               </div>
               <DialogFooter>
                 <Button
                   type="button"
                   variant="outline"
+                  disabled={syncUpdaterNotes.isPending}
                   onClick={() => setEditOpen(false)}
                 >
                   Cancel
                 </Button>
-                <Button type="submit" disabled={editRelease.isPending}>
-                  {editRelease.isPending && (
+                <Button
+                  type="submit"
+                  disabled={editRelease.isPending || syncUpdaterNotes.isPending}
+                >
+                  {(editRelease.isPending || syncUpdaterNotes.isPending) && (
                     <Spinner data-icon="inline-start" />
                   )}
                   Save

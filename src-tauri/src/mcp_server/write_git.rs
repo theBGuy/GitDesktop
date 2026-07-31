@@ -68,8 +68,9 @@ fn default_true() -> bool {
 /// `literal: false`. Getting that wrong fails loudly for stage/unstage
 /// ("did not match any files", measured exit 128) — but NOT for `stash_push`:
 /// `git stash push` with a matched-nothing pathspec no-ops at exit 0
-/// ("No local changes to save", measured), so that tool reports success on a
-/// literalized glob that stashed nothing.
+/// ("No local changes to save", measured), so `git_stash_paths_core` reports
+/// whether an entry was created and the tool answers "nothing was stashed"
+/// rather than letting the exit code speak.
 ///
 /// Used by `stage_files`, `unstage_files` and `stash_push` — not staging alone:
 /// `stash_push` sweeps the files it matches OUT of the working tree, so an
@@ -536,10 +537,18 @@ impl GitDesktopMcp {
                 ensure_not_flag(p, "path")?;
             }
             let paths = literal_pathspecs(args.paths, args.literal);
-            crate::git::ops::git_stash_paths_core(&self.state, self.repo.clone(), paths)
-                .await
-                .map_err(app_err)?;
-            ok_text("stashed selected paths")
+            let stashed = crate::git::ops::git_stash_paths_core(
+                &self.state,
+                self.repo.clone(),
+                paths,
+            )
+            .await
+            .map_err(app_err)?;
+            if stashed {
+                ok_text("stashed selected paths")
+            } else {
+                ok_text("no changes matched the given paths — nothing was stashed")
+            }
         }
     }
 

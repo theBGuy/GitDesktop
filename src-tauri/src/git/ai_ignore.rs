@@ -36,6 +36,12 @@ pub struct AiIgnorePathspecs {
     /// crate's staticlib/cdylib targets make `pub` no defence against dead_code.
     #[allow(dead_code)]
     pub skipped_negations: usize,
+    /// How many backslash escapes could only be re-encoded as `?` rather than an
+    /// exact one-character class (see [`escapes_to_classes`]). Each one can
+    /// over-exclude a sibling name, never leak the escaped one. Unconsumed so
+    /// far, and `pub` is no defence against dead_code here.
+    #[allow(dead_code)]
+    pub widened: usize,
 }
 
 /// The lines of an AI-ignore list that either engine acts on: trimmed, with
@@ -64,15 +70,63 @@ fn actionable_lines(patterns: &[String]) -> (Vec<&str>, usize) {
     (lines, skipped_negations)
 }
 
+/// Rewrites gitignore's `\<c>` escapes into the only spelling the pathspec engine
+/// reads the same way, returning the count that had to be widened.
+///
+/// A backslash inside a pathspec argv element is normalized to `/` before
+/// matching, so an escape that gitignore honors excludes NOTHING there — on this
+/// privacy boundary that fails open (measured, git 2.51.1.windows.1:
+/// `:(glob)sub\b.ts` matches `sub/b.ts`, `:(glob)sub/b\.ts` matches nothing).
+/// A one-character bracket class is exact on both engines, so `\<c>` becomes
+/// `[<c>]`.
+///
+/// Two characters take other routes. `/` becomes a bare `/`: no bracket class
+/// matches a separator under `,glob`, while gitignore's `\/` does, so the class
+/// form would open the same hole it closes. (A line ending `\/` therefore ends in
+/// a real `/` and classifies as a directory, which is what gitignore's own
+/// raw-byte scan for a trailing slash decides too.) `]`, `^`, `!`, `-`, `\` — and
+/// a trailing lone backslash — have their own meaning inside a class, so they
+/// degrade to `?`, a single-char wildcard that can only over-exclude.
+///
+/// A backslash here is ALWAYS a gitignore escape and never a Windows path
+/// separator — the lists are documented as .gitignore syntax. So a
+/// Windows-path-shaped rule matches nothing it looks like it should: `src\foo.ts`
+/// names the literal `srcfoo.ts`, uniformly on both engines.
+fn escapes_to_classes(pattern: &str) -> (String, usize) {
+    let mut out = String::with_capacity(pattern.len());
+    let mut widened = 0usize;
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('/') => out.push('/'),
+            Some(e) if !matches!(e, ']' | '^' | '!' | '-' | '\\') => {
+                out.push('[');
+                out.push(e);
+                out.push(']');
+            }
+            _ => {
+                out.push('?');
+                widened += 1;
+            }
+        }
+    }
+    (out, widened)
+}
+
 /// Translates gitignore-style lines into `:(exclude,glob)` pathspec terms.
 ///
 /// Pure — no git call, no IO. Blanks, comments and `!` lines are dropped by the
-/// shared [`actionable_lines`]. Per surviving line: a trailing `/` marks a
-/// directory, and a line is *anchored* when it starts with `/` or still contains
-/// a `/` (exactly gitignore's rule). Unanchored lines get a `**/` prefix so they
-/// match at any depth; a non-directory line also emits a `<pattern>/**` term,
-/// which is what makes a bare `node_modules` hide the directory's contents and
-/// matches nothing extra for a real file.
+/// shared [`actionable_lines`]. Per surviving line: backslash escapes are
+/// re-encoded by [`escapes_to_classes`] first (the pathspec engine cannot read
+/// them), then a trailing `/` marks a directory, and a line is *anchored* when it
+/// starts with `/` or still contains a `/` (exactly gitignore's rule). Unanchored
+/// lines get a `**/` prefix so they match at any depth; a non-directory line also
+/// emits a `<pattern>/**` term, which is what makes a bare `node_modules` hide
+/// the directory's contents and matches nothing extra for a real file.
 ///
 /// Every term carries `,glob` magic, and that is load-bearing twice over: it
 /// makes a leading `**/` match at depth zero (so a bare name hits the repo root
@@ -103,10 +157,16 @@ pub fn pathspecs_for(patterns: &[String], icase: bool) -> AiIgnorePathspecs {
         "exclude,glob"
     };
     let mut specs: Vec<String> = Vec::new();
+    let mut widened = 0usize;
 
     for line in lines {
+        // Escapes are re-encoded BEFORE anything classifies the line: `anchored`
+        // reads `/`, and Windows git reads a surviving backslash as one — so a
+        // raw `a\b.ts` would be filed unanchored and then matched as `a/b.ts`.
+        let (line, w) = escapes_to_classes(line);
+        widened += w;
         let is_dir = line.ends_with('/');
-        let core = line.strip_suffix('/').unwrap_or(line);
+        let core = line.strip_suffix('/').unwrap_or(line.as_str());
         let anchored = core.starts_with('/') || core.contains('/');
         let core = core.strip_prefix('/').unwrap_or(core);
         if core.is_empty() {
@@ -122,6 +182,7 @@ pub fn pathspecs_for(patterns: &[String], icase: bool) -> AiIgnorePathspecs {
     AiIgnorePathspecs {
         specs,
         skipped_negations,
+        widened,
     }
 }
 
@@ -325,7 +386,7 @@ pub async fn git_filter_ai_ignored(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::runner::run_git;
+    use crate::git::runner::{run_git, run_git_input};
     use std::collections::BTreeSet;
     use std::path::Path;
 
@@ -399,6 +460,76 @@ mod tests {
         assert!(specs("!docs/notes.md").is_empty());
     }
 
+    /// Backslash escapes come out as one-character classes, the only spelling
+    /// both engines read alike — a surviving backslash is a separator to Windows
+    /// git, so the term would exclude nothing and the file would reach a model.
+    #[test]
+    fn escapes_become_one_character_classes() {
+        assert_eq!(
+            specs("/notes\\ "),
+            [":(exclude,glob)notes[ ]", ":(exclude,glob)notes[ ]/**"]
+        );
+        assert_eq!(
+            specs("weird\\[1].txt"),
+            [
+                ":(exclude,glob)**/weird[[]1].txt",
+                ":(exclude,glob)**/weird[[]1].txt/**"
+            ]
+        );
+        assert_eq!(
+            specs("star\\*.txt"),
+            [
+                ":(exclude,glob)**/star[*].txt",
+                ":(exclude,glob)**/star[*].txt/**"
+            ]
+        );
+        assert_eq!(
+            specs("q\\?.txt"),
+            [":(exclude,glob)**/q[?].txt", ":(exclude,glob)**/q[?].txt/**"]
+        );
+        // `\#` and a hand-typed `\!` are how gitignore names a file whose name
+        // starts with a comment/negation marker; only the second needs widening.
+        assert_eq!(
+            specs("\\#notes.md")[0],
+            ":(exclude,glob)**/[#]notes.md"
+        );
+
+        // An escaped separator: no bracket class matches `/` under `,glob`, so
+        // this one re-encodes to a bare `/` — which also anchors the line, exactly
+        // as gitignore anchors it.
+        assert_eq!(specs("a\\/b.ts")[0], ":(exclude,glob)a/b.ts");
+
+        // A Windows-path-shaped rule is NOT a path: the backslash escapes the
+        // `f`, so the term names the literal `srcfoo.ts` and leaves `src/foo.ts`
+        // alone. Windows pathspec matching would read it the other way round, on
+        // that platform alone — which is exactly what the re-encode removes.
+        assert_eq!(specs("src\\foo.ts")[0], ":(exclude,glob)**/src[f]oo.ts");
+    }
+
+    /// The five class-special escapes (and a dangling backslash) fall back to
+    /// `?`, counted so a caller could disclose it. Over-excluding a sibling name
+    /// is the safe direction on a privacy boundary; leaking the named file is not.
+    #[test]
+    fn class_special_escapes_widen_to_a_wildcard() {
+        for (pattern, want) in [
+            ("bang\\!.txt", ":(exclude,glob)**/bang?.txt"),
+            ("br\\].txt", ":(exclude,glob)**/br?.txt"),
+            ("hat\\^.txt", ":(exclude,glob)**/hat?.txt"),
+            ("dash\\-.txt", ":(exclude,glob)**/dash?.txt"),
+            ("back\\\\.txt", ":(exclude,glob)**/back?.txt"),
+            ("dangling\\", ":(exclude,glob)**/dangling?"),
+        ] {
+            let out = pathspecs_for(&[pattern.to_string()], false);
+            assert_eq!(out.specs[0], want, "pattern {pattern:?}");
+            assert_eq!(out.widened, 1, "pattern {pattern:?}");
+        }
+        // An exact class is not a widening — including the Windows-path-shaped
+        // rule, whose `\f` is an ordinary escape however much it reads as a
+        // separator.
+        assert_eq!(pathspecs_for(&["/notes\\ ".into()], false).widened, 0);
+        assert_eq!(pathspecs_for(&["src\\foo.ts".into()], false).widened, 0);
+    }
+
     #[test]
     fn drops_blanks_comments_and_negations() {
         let out = pathspecs_for(
@@ -419,7 +550,11 @@ mod tests {
     }
 
     /// Every fixture path in the parity repo, repo-relative and sorted.
-    const FIXTURE: [&str; 15] = [
+    const FIXTURE: [&str; 18] = [
+        // `a/b.ts` beside `srcfoo.ts`/`src/foo.ts`: the pair of shapes that tell a
+        // backslash ESCAPE apart from a Windows path separator (the `\/` and
+        // `\f` rows below).
+        "a/b.ts",
         "a/b/notes.md",
         "app.log",
         "build/x.txt",
@@ -436,13 +571,15 @@ mod tests {
         "keep.txt",
         "node_modules/pkg/i.js",
         "notes.md",
+        "src/foo.ts",
         "src/node_modules/j.js",
+        "srcfoo.ts",
         "weird[1].txt",
     ];
 
     /// The measured truth table (git 2.51.1): for each AI-ignore pattern LIST,
     /// exactly which of `FIXTURE` it hides. Both engines must agree with it.
-    const PARITY: [(&[&str], &[&str]); 19] = [
+    const PARITY: [(&[&str], &[&str]); 22] = [
         (
             &["notes.md"],
             &["a/b/notes.md", "docs/notes.md", "notes.md"],
@@ -504,6 +641,20 @@ mod tests {
         // a character class and protects nothing — the `weird[1].txt` row above.
         (&["weird[[]1].txt"], &["weird[1].txt"]),
         (&["/weird[[]1].txt"], &["weird[1].txt"]),
+        // The hand-typed gitignore spelling of the same escape. Only the
+        // gitignore engine reads a backslash, so this row is what pins the
+        // pathspec side's re-encode of it.
+        (&["weird\\[1].txt"], &["weird[1].txt"]),
+        // A backslash is ALWAYS a gitignore escape, never a Windows separator:
+        // `src\foo.ts` escapes the `f` and names the literal `srcfoo.ts`, leaving
+        // `src/foo.ts` visible. This row is what keeps that uniform across
+        // engines — Windows pathspec matching would otherwise read the backslash
+        // as a separator and hide the OTHER file, on that platform alone.
+        (&["src\\foo.ts"], &["srcfoo.ts"]),
+        // The one escape that is not a bracket class on the pathspec side: no
+        // class matches a separator under `,glob`, so `\/` becomes a bare `/` —
+        // which must also anchor the line exactly as gitignore anchors it.
+        (&["a\\/b.ts"], &["a/b.ts"]),
     ];
 
     /// A `.gitignore` line the fixture repo carries but the AI-ignore lists never
@@ -600,24 +751,17 @@ mod tests {
         assert_eq!(bare, vec!["notes".to_string()]);
     }
 
-    /// The PATHSPEC engine's half of the escaped-trailing-space shape, which the
-    /// PARITY table cannot carry: git on Windows rejects a trailing-space path
-    /// outright ("Invalid path"), so it can never enter that fixture's index.
-    /// Pairs with [`escaped_trailing_space_matches_only_that_file`], which covers
-    /// the gitignore engine on every platform — together they are the parity
-    /// check for `\ `, split by platform deliberately.
+    /// Both engines on one WORKING-TREE fixture, for the escaped-trailing-space
+    /// shape the PARITY table cannot carry: git on Windows rejects a
+    /// trailing-space path outright ("Invalid path"), so it can never enter that
+    /// fixture's index. Skipped there for that reason alone — the pathspec half
+    /// itself now holds on every platform, which
+    /// [`escaped_trailing_space_excluded_by_pathspec_everywhere`] pins through the
+    /// object database instead.
     ///
     /// Skipped at RUNTIME rather than `#[cfg(unix)]`-gated so the body still
     /// compiles on Windows; a cfg-gated test first compiles on CI, where a typo
     /// costs a red run instead of a local one.
-    ///
-    /// TWO reasons it cannot run on Windows, and the second is the load-bearing
-    /// one: git there refuses to index a trailing-space path at all, AND a
-    /// backslash inside a pathspec is a separator rather than an escape, so the
-    /// `notes\ ` this anchored pattern emits becomes `notes/ ` and the pathspec
-    /// assertion below would be false there even if the fixture could be built.
-    /// The engines
-    /// genuinely diverge there for this shape — see `globLiteralPath`.
     #[tokio::test]
     async fn escaped_trailing_space_agrees_across_engines() {
         if cfg!(windows) {
@@ -679,6 +823,95 @@ mod tests {
         let want: BTreeSet<String> = ["notes ".to_string()].into_iter().collect();
         assert_eq!(by_pathspec, want, "pathspec engine");
         assert_eq!(by_gitignore, want, "gitignore engine");
+    }
+
+    /// The pathspec engine hides an escaped-trailing-space file on EVERY platform
+    /// — the regression that matters, since it is Windows where a raw `\ ` term
+    /// silently excluded nothing and handed `notes ` to a model.
+    ///
+    /// Built straight in the object database (`hash-object` → `mktree`) and
+    /// diffed tree against empty tree: no commit, no checkout and no index, which
+    /// is the only way a trailing-space path exists at all under Windows git.
+    #[tokio::test]
+    async fn escaped_trailing_space_excluded_by_pathspec_everywhere() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-aiignore-tree-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo = dir.path().to_string_lossy().into_owned();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "t@t.local"],
+            vec!["config", "user.name", "T"],
+            vec!["config", "core.ignorecase", "false"],
+        ] {
+            run_git(Some(&repo), &args, DEFAULT_TIMEOUT).await.unwrap();
+        }
+
+        let git_out = |args: Vec<String>, input: Option<String>| {
+            let repo = repo.clone();
+            async move {
+                let argref: Vec<&str> = args.iter().map(String::as_str).collect();
+                // NOT trimmed: a fixture name ends in a space, and the caller
+                // below compares those names byte for byte.
+                run_git_input(Some(&repo), &argref, input.as_deref(), DEFAULT_TIMEOUT)
+                    .await
+                    .unwrap()
+                    .stdout_lossy()
+            }
+        };
+
+        let blob = git_out(
+            vec!["hash-object".into(), "-w".into(), "--stdin".into()],
+            Some("x\n".into()),
+        )
+        .await
+        .trim()
+        .to_string();
+        let files = ["notes ", "notes", "keep.txt"];
+        let rows: String = files
+            .iter()
+            .map(|p| format!("100644 blob {blob}\t{p}\n"))
+            .collect();
+        let tree = git_out(vec!["mktree".into()], Some(rows))
+            .await
+            .trim()
+            .to_string();
+        let empty = git_out(vec!["mktree".into()], Some(String::new()))
+            .await
+            .trim()
+            .to_string();
+
+        // Exactly what *Exclude from AI* writes for a file named `notes `.
+        let terms = pathspecs_for_repo(&repo, &["/notes\\ ".to_string()])
+            .await
+            .specs;
+        let mut args: Vec<String> = vec![
+            "diff".into(),
+            "--name-only".into(),
+            empty,
+            tree,
+            "--".into(),
+            ".".into(),
+        ];
+        args.extend(terms);
+        let listed: BTreeSet<String> = git_out(args, None)
+            .await
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect();
+
+        let hidden: BTreeSet<String> = files
+            .iter()
+            .map(|p| p.to_string())
+            .filter(|p| !listed.contains(p))
+            .collect();
+        assert_eq!(
+            hidden,
+            ["notes ".to_string()].into_iter().collect::<BTreeSet<_>>(),
+            "only the trailing-space file is hidden; listed = {listed:?}"
+        );
     }
 
     /// The two engines agree with each other AND with the measured table, for
