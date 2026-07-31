@@ -71,7 +71,7 @@ tauri-plugin-updater = "2"
 # resolver can find a tool added to PATH AFTER the app launched (Windows never
 # pushes PATH edits into a running process). See agent.rs `registry_path_dirs`.
 [target.'cfg(windows)'.dependencies]
-winreg = "0.55"
+winreg = "0.56"
 # Broadcasting WM_SETTINGCHANGE so a freshly-added PATH entry (the "add gitdesktop
 # to PATH" launcher) reaches new terminals without a logout. See path_launcher.rs.
 windows-sys = { version = "0.61", features = [
