@@ -400,9 +400,9 @@ export function CreateReleaseDialog({
                 value={notes}
                 onChange={(v) => form.setFieldValue("notes", v)}
                 placeholder="What's changed… (or generate notes above)"
-                rows={8}
                 fill
-                // No `resize-y`: a manual drag height fights the flex sizing.
+                // No `rows`/`resize-y` in fill mode: the explicit floor plus
+                // `flex-1` set the height, and a manual drag fights the flex sizing.
                 textareaClassName="min-h-32 font-mono"
                 actions={
                   // GitLab's only generator is the AI one — with AI hidden the

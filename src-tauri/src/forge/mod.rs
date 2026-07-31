@@ -1891,9 +1891,10 @@ pub async fn forge_release_edit(
     }
 }
 
-/// Sync a release's `latest.json` updater manifest to the edited notes. GitHub-only:
-/// the manifest is a Tauri-updater asset, and neither GitLab nor Bitbucket carries
-/// the release-asset concept it hangs off.
+/// Sync a release's `latest.json` updater manifest to the edited notes. GitHub-only —
+/// not for want of release assets (GitLab has those), but because the Tauri updater
+/// feed this app ships is a `latest.json` attached to a GitHub release; a GitLab
+/// release simply isn't where any installed app looks for its update.
 #[tauri::command]
 pub async fn forge_release_sync_updater_notes(
     repo_path: String,
@@ -1902,7 +1903,7 @@ pub async fn forge_release_sync_updater_notes(
 ) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => Err(AppError::InvalidArgument(
-            "GitLab releases have no updater manifest.".into(),
+            "The updater manifest is published on GitHub releases only.".into(),
         )),
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
             "Bitbucket releases aren't supported yet.".into(),

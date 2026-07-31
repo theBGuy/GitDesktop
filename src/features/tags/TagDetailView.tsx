@@ -141,11 +141,17 @@ export function TagDetailView({
 
   // ── Release view ───────────────────────────────────────────────────────────
   if (rel) {
-    // The updater manifest is a GitHub-only Tauri asset (`canWrite` is the same
-    // GitHub-or-pending shape the other release writes use), so the sync affordance
-    // only makes sense on a release that actually ships one.
+    // The updater manifest is a GitHub-only Tauri asset, so the sync affordance only
+    // makes sense on a release that actually ships one. Deliberately STRICTER than
+    // the other release writes (`canManage` also opens on a ready GitLab repo):
+    // there is no GitLab arm to fall back to here.
     const canSyncUpdater =
       canWrite && rel.assets.some((a) => a.name === "latest.json");
+    // Arming the sync makes Save two-phase; dismissing between the phases would fire
+    // the manifest upload at a closed dialog, so the whole operation latches. A plain
+    // edit (box off) stays dismissible exactly as it always was.
+    const savePending = editRelease.isPending || syncUpdaterNotes.isPending;
+    const saveLatched = canSyncUpdater && editSyncUpdater && savePending;
     return (
       <div className="flex h-full flex-col">
         <header className="space-y-2 border-b px-4 py-3">
@@ -360,12 +366,10 @@ export function TagDetailView({
           </div>
         </ScrollArea>
 
-        {/* Latched while the manifest uploads: dismissing mid-sync would hide a
-            partial state the user still needs to act on. */}
         <Dialog
           open={editOpen}
           onOpenChange={(o) => {
-            if (!syncUpdaterNotes.isPending) setEditOpen(o);
+            if (!saveLatched) setEditOpen(o);
           }}
         >
           {/* A fixed height (not a cap): release bodies routinely run thousands of
@@ -410,13 +414,15 @@ export function TagDetailView({
                           },
                           onError: (err) => {
                             // `--clobber` deletes before it uploads, so a failure
-                            // here can leave the asset gone, not merely stale.
-                            toast.error(
-                              "Release updated — the updater manifest may be missing.",
-                              {
-                                duration: 8000,
-                                description: `${presentError(err).summary} — save this release again with "Also update the updater manifest" on to restore it.`,
-                              },
+                            // here can leave the asset gone rather than stale — and
+                            // re-running this dialog can't recover it (the checkbox
+                            // is gated on the asset that's now missing). The backend
+                            // parks the patched file and names its path, so route
+                            // through toastError: Details carries that path.
+                            toastError(
+                              new Error(
+                                `Release updated — the updater manifest may be missing from the release. Restore it by re-uploading the saved file via Assets → Upload.\n\n${presentError(err).fullText}`,
+                              ),
                             );
                             setEditOpen(false);
                           },
@@ -447,9 +453,10 @@ export function TagDetailView({
                     value={editNotes}
                     onChange={setEditNotes}
                     placeholder="Notes…"
-                    rows={8}
                     fill
-                    // No `resize-y`: a manual drag height fights the flex sizing.
+                    // No `rows`/`resize-y` in fill mode: the explicit floor plus
+                    // `flex-1` set the height, and a manual drag fights the flex
+                    // sizing.
                     textareaClassName="min-h-24 font-mono"
                   />
                 </div>
@@ -493,8 +500,11 @@ export function TagDetailView({
                 {canSyncUpdater && (
                   <div className="flex flex-col gap-1">
                     <label className="flex cursor-pointer items-center gap-2 text-xs">
+                      {/* Frozen while saving: unchecking mid-flight would drop the
+                          latch without stopping the upload already under way. */}
                       <Checkbox
                         checked={editSyncUpdater}
+                        disabled={savePending}
                         onCheckedChange={(c) => setEditSyncUpdater(c === true)}
                       />
                       Also update the updater manifest (latest.json)
@@ -510,18 +520,13 @@ export function TagDetailView({
                 <Button
                   type="button"
                   variant="outline"
-                  disabled={syncUpdaterNotes.isPending}
+                  disabled={saveLatched}
                   onClick={() => setEditOpen(false)}
                 >
                   Cancel
                 </Button>
-                <Button
-                  type="submit"
-                  disabled={editRelease.isPending || syncUpdaterNotes.isPending}
-                >
-                  {(editRelease.isPending || syncUpdaterNotes.isPending) && (
-                    <Spinner data-icon="inline-start" />
-                  )}
+                <Button type="submit" disabled={savePending}>
+                  {savePending && <Spinner data-icon="inline-start" />}
                   Save
                 </Button>
               </DialogFooter>

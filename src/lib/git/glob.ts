@@ -19,9 +19,11 @@
  * unescaped trailing whitespace, so a file named `notes ` yields the pattern
  * `notes`, which hides a DIFFERENT file and leaves the named one visible
  * (measured). The escape is written in the idiomatic .gitignore spelling users
- * read in their own files; the pathspec engine cannot parse a backslash at all
- * (it is a SEPARATOR there), so Rust's `pathspecs_for` re-encodes it as `[ ]`
- * before matching rather than this emitting the class form directly.
+ * read in their own files. It reaches the pathspec engine only through Rust's
+ * `pathspecs_for`, which re-encodes it as `[ ]` first: on WINDOWS a backslash in
+ * a pathspec is a SEPARATOR rather than an escape, so the raw form matched
+ * NOTHING there while Unix honored it (measured, git 2.51.1.windows.1). The
+ * class form is what makes both platforms agree.
  *
  * The escape is defeated when the name ALREADY ends in a backslash (`notes\ `):
  * the emitted `notes\\ ` is an even backslash run, so the space reads as

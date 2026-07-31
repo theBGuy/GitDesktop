@@ -262,7 +262,8 @@ export const capabilities: Capability[] = [
   },
   {
     group: "CI, tags & releases",
-    label: "Tags, releases & cross-platform assets",
+    label:
+      "Tags, releases & cross-platform assets — edit notes, sync the updater manifest",
   },
   {
     group: "CI, tags & releases",

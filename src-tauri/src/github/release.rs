@@ -427,13 +427,34 @@ fn patch_updater_notes(manifest: &str, notes: &str) -> AppResult<String> {
         .map_err(|e| AppError::Gh(format!("could not write {UPDATER_MANIFEST}: {e}")))
 }
 
+/// Parks the patched manifest outside the temp dir when the upload fails, under the
+/// `latest.json` BASENAME a re-upload needs (the asset takes its name from the file).
+/// Best-effort: failing here only costs the recovery hint, so it degrades to `None`
+/// rather than masking the upload error that prompted it.
+async fn save_updater_recovery_copy(src: std::path::PathBuf) -> Option<String> {
+    tokio::task::spawn_blocking(move || {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("gd-updater-recovery-{nanos}"));
+        std::fs::create_dir_all(&dir).ok()?;
+        let dest = dir.join(UPDATER_MANIFEST);
+        std::fs::copy(&src, &dest).ok()?;
+        Some(dest.to_string_lossy().into_owned())
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 /// Re-points a release's updater manifest at `notes`, so apps updating from that
 /// release show the same body the release page does. Download → patch → re-upload
 /// with `--clobber`, which gh implements as delete-THEN-upload: the manifest is
-/// briefly absent, and a failed upload leaves it deleted rather than stale, so
-/// callers must tell the user it may need restoring. The uploaded file's BASENAME
-/// becomes the asset name (a `file#label` argument sets only the display label),
-/// so the patched copy keeps its `latest.json` name.
+/// briefly absent, and a failed upload leaves it deleted rather than stale. That
+/// makes the failure unrecoverable from the UI alone (the release no longer has the
+/// asset to re-download), so a failed upload parks the patched copy on disk and
+/// names its path in the error for a manual re-attach.
 pub async fn gh_release_sync_updater_notes(
     repo_path: &str,
     tag: &str,
@@ -464,19 +485,17 @@ pub async fn gh_release_sync_updater_notes(
     .await?;
     let path = dir.path().join(UPDATER_MANIFEST);
     let file_arg = path.to_string_lossy().to_string();
-    let (tag_owned, notes_owned) = (tag.to_string(), notes.to_string());
+    let (patch_path, notes_owned) = (path.clone(), notes.to_string());
     tokio::task::spawn_blocking(move || -> AppResult<()> {
-        let current = std::fs::read_to_string(&path).map_err(|e| {
-            AppError::Gh(format!(
-                "could not read {UPDATER_MANIFEST} for {tag_owned}: {e}"
-            ))
-        })?;
-        std::fs::write(&path, patch_updater_notes(&current, &notes_owned)?)?;
+        // Local filesystem failures stay `Io` — surfacing them as `Gh` would blame
+        // GitHub for a problem on this machine.
+        let current = std::fs::read_to_string(&patch_path).map_err(AppError::Io)?;
+        std::fs::write(&patch_path, patch_updater_notes(&current, &notes_owned)?)?;
         Ok(())
     })
     .await
     .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))??;
-    run_gh(
+    let upload = run_gh(
         Some(repo_path),
         &[
             "release",
@@ -489,7 +508,19 @@ pub async fn gh_release_sync_updater_notes(
         ],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await;
+    if let Err(e) = upload {
+        return Err(match save_updater_recovery_copy(path).await {
+            Some(saved) => AppError::Gh(format!(
+                "{e}\n\nThe patched {UPDATER_MANIFEST} was saved to {saved} — upload \
+                 that file to the release to restore the manifest."
+            )),
+            None => AppError::Gh(format!(
+                "{e}\n\nThe patched {UPDATER_MANIFEST} could not be saved locally, so \
+                 the release may now have no updater manifest."
+            )),
+        });
+    }
     Ok(())
 }
 

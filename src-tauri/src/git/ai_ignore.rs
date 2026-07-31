@@ -73,25 +73,34 @@ fn actionable_lines(patterns: &[String]) -> (Vec<&str>, usize) {
 /// Rewrites gitignore's `\<c>` escapes into the only spelling the pathspec engine
 /// reads the same way, returning the count that had to be widened.
 ///
-/// A backslash inside a pathspec argv element is normalized to `/` before
-/// matching, so an escape that gitignore honors excludes NOTHING there — on this
-/// privacy boundary that fails open (measured, git 2.51.1.windows.1:
+/// On WINDOWS a backslash inside a pathspec argv element is normalized to `/`
+/// before matching, so an escape that gitignore honors excludes NOTHING there —
+/// on this privacy boundary that fails open (measured, git 2.51.1.windows.1:
 /// `:(glob)sub\b.ts` matches `sub/b.ts`, `:(glob)sub/b\.ts` matches nothing).
-/// A one-character bracket class is exact on both engines, so `\<c>` becomes
+/// Unix honors the escape, so the raw form worked there and only there; the
+/// re-encode is what makes both platforms and both engines answer alike. A
+/// one-character bracket class is exact on both engines, so `\<c>` becomes
 /// `[<c>]`.
 ///
-/// Two characters take other routes. `/` becomes a bare `/`: no bracket class
+/// Two routes exist beside that class. `/` becomes a bare `/`: no bracket class
 /// matches a separator under `,glob`, while gitignore's `\/` does, so the class
-/// form would open the same hole it closes. (A line ending `\/` therefore ends in
-/// a real `/` and classifies as a directory, which is what gitignore's own
-/// raw-byte scan for a trailing slash decides too.) `]`, `^`, `!`, `-`, `\` — and
-/// a trailing lone backslash — have their own meaning inside a class, so they
-/// degrade to `?`, a single-char wildcard that can only over-exclude.
+/// form would open the same hole it closes. The five class-special escapes
+/// (`]`, `^`, `!`, `-`, `\`) and a dangling backslash have their own meaning
+/// inside a class, so they degrade to `?`, a single-char wildcard that can only
+/// over-exclude — [`AiIgnorePathspecs::widened`] counts those.
 ///
 /// A backslash here is ALWAYS a gitignore escape and never a Windows path
 /// separator — the lists are documented as .gitignore syntax. So a
 /// Windows-path-shaped rule matches nothing it looks like it should: `src\foo.ts`
 /// names the literal `srcfoo.ts`, uniformly on both engines.
+///
+/// One shape genuinely diverges, in the safe direction: a line ending `\/` leaves
+/// a real trailing `/` here, so [`pathspecs_for`] files it as a directory and
+/// hides its contents, while gitignore strips that slash and aborts on the
+/// dangling `foo\` residue, matching NOTHING (measured, git 2.51.1: excludes line
+/// `foo\/` hides neither `foo/x.txt` nor `foo`, where `foo/` hides `foo/x.txt`).
+/// Uncounted — `widened` means the `?` fallbacks — and unreachable from the
+/// menus, which never emit a trailing `\/`.
 fn escapes_to_classes(pattern: &str) -> (String, usize) {
     let mut out = String::with_capacity(pattern.len());
     let mut widened = 0usize;
@@ -498,6 +507,10 @@ mod tests {
         // this one re-encodes to a bare `/` — which also anchors the line, exactly
         // as gitignore anchors it.
         assert_eq!(specs("a\\/b.ts")[0], ":(exclude,glob)a/b.ts");
+        // At the END of a line that bare `/` is a directory marker, so this shape
+        // hides a directory's contents where gitignore matches nothing at all —
+        // the documented fail-closed divergence, pinned so it can't drift.
+        assert_eq!(specs("foo\\/"), [":(exclude,glob)**/foo/**"]);
 
         // A Windows-path-shaped rule is NOT a path: the backslash escapes the
         // `f`, so the term names the literal `srcfoo.ts` and leaves `src/foo.ts`
@@ -550,13 +563,17 @@ mod tests {
     }
 
     /// Every fixture path in the parity repo, repo-relative and sorted.
-    const FIXTURE: [&str; 18] = [
+    const FIXTURE: [&str; 22] = [
         // `a/b.ts` beside `srcfoo.ts`/`src/foo.ts`: the pair of shapes that tell a
         // backslash ESCAPE apart from a Windows path separator (the `\/` and
         // `\f` rows below).
         "a/b.ts",
         "a/b/notes.md",
         "app.log",
+        // Each `?`-widened escape with a sibling only the wildcard reaches, so
+        // the fail-closed asymmetry has a witness (`widened_escapes_…` below).
+        "bang!.txt",
+        "bangX.txt",
         "build/x.txt",
         "buildfile.txt",
         "deep/app.log",
@@ -568,6 +585,8 @@ mod tests {
         // real filesystem on every CI platform; the decomposable case (`café.md`)
         // is covered by the filesystem-free test below.
         "docs/日本語.md",
+        "hatX.txt",
+        "hat^.txt",
         "keep.txt",
         "node_modules/pkg/i.js",
         "notes.md",
@@ -940,6 +959,53 @@ mod tests {
             assert_eq!(
                 by_gitignore, want,
                 "gitignore engine, patterns {patterns:?}"
+            );
+        }
+    }
+
+    /// The `?`-widened escapes hold the fail-CLOSED invariant, which is the most
+    /// the PARITY table could never state: those shapes are the one place the two
+    /// engines are allowed to disagree, and the direction is the whole point.
+    ///
+    /// The gitignore engine hides exactly the escaped name; the pathspec engine
+    /// must hide AT LEAST it. Over-excluding a sibling costs a file the model
+    /// could have seen; under-excluding hands over the file the user named.
+    #[tokio::test]
+    async fn widened_escapes_over_exclude_and_never_under_exclude() {
+        let (_dir, repo) = parity_repo().await;
+        let all: Vec<String> = FIXTURE.iter().map(|p| p.to_string()).collect();
+
+        for (pattern, literal, only_by_wildcard) in [
+            ("bang\\!.txt", "bang!.txt", "bangX.txt"),
+            ("hat\\^.txt", "hat^.txt", "hatX.txt"),
+        ] {
+            let by_gitignore: BTreeSet<String> = git_filter_ai_ignored(
+                repo.clone(),
+                all.clone(),
+                vec![pattern.to_string()],
+            )
+            .await
+            .unwrap()
+            .into_iter()
+            .collect();
+            assert_eq!(
+                by_gitignore,
+                [literal.to_string()].into_iter().collect::<BTreeSet<_>>(),
+                "gitignore engine hides exactly the escaped name, patterns {pattern:?}"
+            );
+
+            let by_pathspec = hidden_by_pathspec(&repo, &[pattern]).await;
+            assert!(
+                by_gitignore.is_subset(&by_pathspec),
+                "pathspec engine must hide at least what gitignore hides; \
+                 pattern {pattern:?} gave {by_pathspec:?}"
+            );
+            // Strictly more, here: the `?` also swallows the sibling. Asserted so
+            // the subset check above can't pass by the two sets being equal for
+            // some unrelated reason.
+            assert!(
+                by_pathspec.contains(only_by_wildcard),
+                "pattern {pattern:?} should also sweep {only_by_wildcard}"
             );
         }
     }

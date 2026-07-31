@@ -1778,19 +1778,24 @@ async fn untracked_files(repo: &str) -> Result<Vec<String>, crate::error::AppErr
 
 /// The untracked paths the user's AI-ignore patterns leave visible, and how many
 /// they hide. Runs on the same gitignore engine the diff side is pinned to, and
-/// filters at this call site so `untracked_files` stays raw for other callers.
+/// filters here rather than in `untracked_files` so the names reach the engine as the
+/// bytes the rules were written against, unnormalized.
+///
+/// A name carrying U+FFFD is hidden unconditionally: the path was not valid UTF-8, the
+/// lossy decode already replaced those bytes, and no rule can match what the user
+/// actually named — so it fails CLOSED (a real U+FFFD in a name is hidden too).
 async fn filter_untracked_by_ai_ignore(
     repo: &str,
     paths: Vec<String>,
     exclude: &[String],
 ) -> Result<(Vec<String>, u32), crate::error::AppError> {
-    let hidden = crate::git::ai_ignore::filter_ignored(repo, &paths, exclude).await?;
-    if hidden.is_empty() {
-        return Ok((paths, 0));
-    }
-    let hidden: std::collections::HashSet<String> = hidden.into_iter().collect();
+    let matched = crate::git::ai_ignore::filter_ignored(repo, &paths, exclude).await?;
+    let matched: std::collections::HashSet<String> = matched.into_iter().collect();
     let total = paths.len();
-    let kept: Vec<String> = paths.into_iter().filter(|p| !hidden.contains(p)).collect();
+    let kept: Vec<String> = paths
+        .into_iter()
+        .filter(|p| !matched.contains(p) && !p.contains('\u{FFFD}'))
+        .collect();
     let excluded = (total - kept.len()) as u32;
     Ok((kept, excluded))
 }
@@ -2684,6 +2689,29 @@ mod tests {
             .contains("[1 additional changed file(s) hidden by the user's AI ignore rules]"));
     }
 
+    /// A name that lost bytes to the lossy decode (invalid UTF-8 on disk — reachable on
+    /// Linux/macOS, not creatable on Windows, so it's fed in as a String here) can match
+    /// no rule the user could write, and is hidden on that basis alone: no pattern is
+    /// configured here, and it is still dropped and counted.
+    #[tokio::test]
+    async fn untracked_names_that_lost_bytes_are_hidden() {
+        let base_dir = tempfile::Builder::new()
+            .prefix("gd-untracked-lossy-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo = base_dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        git(&repo_s, &["init", "-q"]).await;
+
+        let paths = vec!["ok.rs".to_string(), "sec\u{FFFD}ret.md".to_string()];
+        let (visible, excluded) = filter_untracked_by_ai_ignore(&repo_s, paths, &[])
+            .await
+            .expect("filter untracked");
+        assert_eq!(visible, vec!["ok.rs".to_string()]);
+        assert_eq!(excluded, 1);
+    }
+
     /// `-z` keeps the listed names byte-exact: a name with a space stays whole, and a
     /// non-ASCII one arrives raw rather than C-quoted (`"caf\303\251.txt"`), which is
     /// what makes it comparable to the AI-ignore rules at all. The other quoted shapes
@@ -2717,7 +2745,9 @@ mod tests {
     }
 
     /// `GD_SETTINGS_DIR` is process-global, so the tests that depend on the settings
-    /// store take this lock: one sets the override, the other requires it unset.
+    /// store take this lock: one sets the override, the other requires it unset. Any
+    /// future test driving `build_commit_recipe` or `build_pr_recipe` reads the store
+    /// too and must join the lock (and set the override through the guard below).
     /// Poisoning is ignored — the guarded state is an env var, not invariant data.
     static SETTINGS_STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -2725,6 +2755,50 @@ mod tests {
         SETTINGS_STORE_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Sets `GD_SETTINGS_DIR` for as long as it's held and restores the prior value on
+    /// drop — panics included, so a failing test can't leave the override standing for
+    /// whichever test is next through the lock.
+    struct SettingsDirOverride(Option<std::ffi::OsString>);
+
+    impl SettingsDirOverride {
+        fn set(dir: &std::path::Path) -> Self {
+            let previous = std::env::var_os("GD_SETTINGS_DIR");
+            std::env::set_var("GD_SETTINGS_DIR", dir);
+            Self(previous)
+        }
+    }
+
+    impl Drop for SettingsDirOverride {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(previous) => std::env::set_var("GD_SETTINGS_DIR", previous),
+                None => std::env::remove_var("GD_SETTINGS_DIR"),
+            }
+        }
+    }
+
+    /// The restore is what keeps a failing store test from deciding the next one, so it
+    /// has to survive an unwind — the `boom` panic in this test's output is expected.
+    #[test]
+    fn settings_dir_override_restores_after_a_panic() {
+        let _guard = settings_lock();
+        let before = std::env::var_os("GD_SETTINGS_DIR");
+        let dir = std::env::temp_dir();
+
+        let result = std::panic::catch_unwind(|| {
+            let _override = SettingsDirOverride::set(&dir);
+            assert!(std::env::var_os("GD_SETTINGS_DIR").is_some());
+            panic!("boom");
+        });
+
+        assert!(result.is_err(), "the probe must actually panic");
+        assert_eq!(
+            std::env::var_os("GD_SETTINGS_DIR"),
+            before,
+            "the override must not outlive the test that set it"
+        );
     }
 
     /// A repo whose only in-progress changes are two untracked files, one of them
@@ -2797,12 +2871,12 @@ mod tests {
         )
         .unwrap();
 
-        std::env::set_var("GD_SETTINGS_DIR", &store_dir);
+        let _override = SettingsDirOverride::set(&store_dir);
         let mcp = GitDesktopMcp::with_options(repo_s, false, false, false, false);
-        let result = mcp.build_branch_recipe().await;
-        std::env::remove_var("GD_SETTINGS_DIR");
-
-        let err = result.expect_err("every change is ignored — nothing to name");
+        let err = mcp
+            .build_branch_recipe()
+            .await
+            .expect_err("every change is ignored — nothing to name");
         assert!(
             err.message.contains("match the AI ignore patterns"),
             "message: {}",

@@ -418,9 +418,9 @@ commit that hasn't been pushed yet.
   tip and leaves the new branch untracked, so its first push publishes it under its own name.
 
 Plus tag and submodule management, and releases — publish, edit, and delete them
-with asset uploads; when a release carries a `latest.json` updater manifest,
-editing its notes can refresh the manifest in the same save, so apps updating
-from that release show the notes you just wrote.
+with asset uploads; when a **GitHub** release carries a `latest.json` updater
+manifest, editing its notes can refresh the manifest in the same save, so apps
+updating from that release show the notes you just wrote.
 
 **Syncing** — fetch / pull / push, with the ahead/behind counts shown right on
 the Push and Pull buttons; pull is

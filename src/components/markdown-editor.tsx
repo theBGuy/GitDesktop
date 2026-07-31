@@ -241,8 +241,10 @@ export function MarkdownEditor({
   rows?: number;
   disabled?: boolean;
   autoFocus?: boolean;
-  /** Grow the input (and Preview) to the parent flex column's spare height,
-   *  instead of the default capped box. The caller owns a `min-h-0` column. */
+  /** Grow the input (and Preview) to the parent flex column's spare height instead
+   *  of the default capped box. Every fill-mode box keeps a min-height floor so a
+   *  short window scrolls the parent rather than collapsing the editor; the
+   *  textarea's floor is `min-h-24`, overridable via `textareaClassName`. */
   fill?: boolean;
   textareaClassName?: string;
   actions?: ReactNode;
@@ -469,7 +471,7 @@ export function MarkdownEditor({
         rows={rows}
         disabled={disabled}
         className={cn(
-          fill && "min-h-0 flex-1",
+          fill && "min-h-24 flex-1",
           textareaClassName,
           mode === "preview" && "hidden",
         )}

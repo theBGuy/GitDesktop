@@ -36,8 +36,9 @@ pub(crate) struct AiGenSettings {
     pub(crate) ai_ignore_patterns: Vec<String>,
 }
 
-/// Pure resolution of the store's directory, in precedence order (mirrors
-/// [`crate::oplog::resolve_store_base`]):
+/// Pure resolution of the store's directory, in precedence order (arms 1 and 3 mirror
+/// [`crate::oplog::resolve_store_base`]; arm 2 differs deliberately — this module only
+/// READS, so a test needs no store at all where the oplog needs a writable temp one):
 /// 1. a non-empty `GD_SETTINGS_DIR` override — the escape hatch for headless/test callers;
 /// 2. under `cfg!(test)`, NO store, so an in-crate test can never read the developer's
 ///    real settings — a populated store would otherwise decide the test's result;
@@ -143,9 +144,11 @@ mod tests {
         parse_ai_generation_settings(&settings)
     }
 
-    /// The three resolution arms. Arm 3 pins PRODUCTION resolution byte-for-byte
-    /// against the rule the Tauri path layer uses; arm 2 is why no test in this crate
-    /// can be decided by whatever the developer's real store happens to hold.
+    /// The three resolution arms. Arm 3 pins the production output as stable —
+    /// `dirs::data_dir()/<identifier>/settings.json` — so the seam can't quietly move
+    /// it; agreement with the Tauri path layer's own resolution is a contract this
+    /// can't check (no Tauri code runs here). Arm 2 is why no test in this crate can
+    /// be decided by whatever the developer's real store happens to hold.
     #[test]
     fn store_dir_resolution_arms() {
         assert_eq!(
