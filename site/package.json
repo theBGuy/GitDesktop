@@ -11,13 +11,13 @@
   "dependencies": {
     "@astrojs/rss": "^4.0.19",
     "@astrojs/sitemap": "^3.7.3",
-    "@fontsource-variable/jetbrains-mono": "^5.2.5",
-    "@tailwindcss/vite": "^4.3.0",
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
+    "@tailwindcss/vite": "^4.3.3",
     "astro": "^6.4.7",
-    "tailwindcss": "^4.3.0",
+    "tailwindcss": "^4.3.3",
     "vite": "^7.3.5"
   },
   "devDependencies": {
-    "sharp": "^0.35.1"
+    "sharp": "^0.35.3"
   }
 }
