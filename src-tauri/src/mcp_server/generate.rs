@@ -1788,7 +1788,9 @@ mod tests {
             header_new_path("diff --git \"a/caf\\303\\251.txt\" \"b/caf\\303\\251.txt\"").as_deref(),
             Some("caf\\303\\251.txt")
         );
-        // A path containing " b/" resolves on the LAST separator.
+        // A path containing " b/" resolves on the LAST separator — a pinned
+        // convention, not correctness: the bare header is inherently ambiguous
+        // for such names, and the contract here is TS/Rust agreement.
         assert_eq!(
             header_new_path("diff --git a/x b/y.txt b/x b/y.txt").as_deref(),
             Some("y.txt")

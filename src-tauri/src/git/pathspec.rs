@@ -5,9 +5,13 @@
 //!
 //! Deliberately NOT routed through this, because a caller may legitimately pass
 //! a glob: `git_untrack` and `git_force_add` (the "untrack all `*.log`" menu
-//! form; call sites literalize — `ChangesContextMenu.tsx:239,258`,
-//! `RepositoryFilesDialog.tsx:187,207`), and the `git_stage_core` /
-//! `git_unstage_core` cores (`ChangesPanel.tsx:412,471,486,546`).
+//! form), plus the `git_stage_core` / `git_unstage_core` / `git_stash_paths_core`
+//! cores — the stash one literalizes only its internal re-feed (`ops.rs:664`),
+//! never the caller's `paths`. Their callers literalize instead: untrack
+//! `ChangesContextMenu.tsx:239,258`, `ChangesPanel.tsx:546`,
+//! `RepositoryFilesDialog.tsx:187`; force-add `RepositoryFilesDialog.tsx:207`;
+//! stage `ChangesPanel.tsx:412,471,486`; unstage the `unstagePaths` helper
+//! (`ChangesPanel.tsx:64`); stash `ChangesPanel.tsx:624`.
 //!
 //! The MCP write tools do NOT belong on that list: they literalize at the tool
 //! boundary in `mcp_server::write_git::literal_pathspecs`, with `literal: false`

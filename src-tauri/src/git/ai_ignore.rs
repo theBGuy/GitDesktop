@@ -465,7 +465,8 @@ mod tests {
         (&["build"], &["build/x.txt", "docs/build/y.txt"]),
         // Anchored directory, both spellings: the leading `/` pins it to the repo
         // root, so the nested `docs/build/` survives where the bare rows above
-        // hide it. This is the shape the *Exclude folder from AI* menu emits.
+        // hide it. The trailing-slash form is what *Exclude folder from AI*
+        // emits; the slashless twin pins the same anchoring for a typed line.
         (&["/build/"], &["build/x.txt"]),
         (&["/build"], &["build/x.txt"]),
         (
@@ -612,9 +613,10 @@ mod tests {
     ///
     /// TWO reasons it cannot run on Windows, and the second is the load-bearing
     /// one: git there refuses to index a trailing-space path at all, AND a
-    /// backslash inside a pathspec is a separator rather than an escape, so
-    /// `**/notes\ ` becomes `**/notes/ ` and the pathspec assertion below would
-    /// be false on Windows even if the fixture could be built. The engines
+    /// backslash inside a pathspec is a separator rather than an escape, so the
+    /// `notes\ ` this anchored pattern emits becomes `notes/ ` and the pathspec
+    /// assertion below would be false there even if the fixture could be built.
+    /// The engines
     /// genuinely diverge there for this shape — see `globLiteralPath`.
     #[tokio::test]
     async fn escaped_trailing_space_agrees_across_engines() {

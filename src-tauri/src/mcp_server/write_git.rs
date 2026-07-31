@@ -65,7 +65,11 @@ fn default_true() -> bool {
 /// paths repo_status just listed", where a raw `src/app/[slug]/page.tsx` also
 /// matches its glob-siblings — silently, with no way to tell from the result.
 /// `:(literal)` still recurses directories, so only a deliberate glob needs
-/// `literal: false`, and that mistake fails loudly ("did not match any files").
+/// `literal: false`. Getting that wrong fails loudly for stage/unstage
+/// ("did not match any files", measured exit 128) — but NOT for `stash_push`:
+/// `git stash push` with a matched-nothing pathspec no-ops at exit 0
+/// ("No local changes to save", measured), so that tool reports success on a
+/// literalized glob that stashed nothing.
 ///
 /// Used by `stage_files`, `unstage_files` and `stash_push` — not staging alone:
 /// `stash_push` sweeps the files it matches OUT of the working tree, so an

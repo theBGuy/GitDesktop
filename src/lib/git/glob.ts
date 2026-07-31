@@ -20,7 +20,7 @@
  * `notes`, which hides a DIFFERENT file and leaves the named one visible
  * (measured).
  *
- * NOTE that fixes the gitignore engine ONLY, and the two AI-ignore engines
+ * That escape fixes the gitignore engine ONLY, and the two AI-ignore engines
  * diverge on WINDOWS for this shape: a backslash in a pathspec is a SEPARATOR,
  * not an escape, so an emitted `notes\ ` term normalizes to `notes/ ` and
  * matches nothing (measured, git 2.51.1.windows.1: `:(glob)a\b.ts` matches
@@ -28,7 +28,8 @@
  * which is why the cross-engine test passes on CI. Pre-existing, not introduced
  * here — the pathspec side never matched this shape either way.
  *
- * That escape is defeated when the name ALREADY ends in a backslash (`notes\ `):
+ * The escape is also defeated when the name ALREADY ends in a backslash
+ * (`notes\ `):
  * the emitted `notes\\ ` is an even backslash run, so the space reads as
  * unescaped and is stripped again. Bounded by the same limitation as above — a
  * literal backslash is inexpressible here — and impossible on Windows.
@@ -52,8 +53,8 @@ export function globLiteralPath(path: string): string {
  * behind.
  *
  * The LEADING trim is ours, not git's: git keeps leading whitespace (measured).
- * It is deliberate and unreachable from the menus, which emit only `/`-anchored
- * patterns; it exists to forgive a hand-typed settings line.
+ * It is deliberate and unreachable from the menus, whose patterns all begin
+ * with `/` or `*`; it exists to forgive a hand-typed settings line.
  */
 export function trimIgnorePattern(pattern: string): string {
   const rest = pattern.trimStart().replace(/[\r\n]+$/, "");

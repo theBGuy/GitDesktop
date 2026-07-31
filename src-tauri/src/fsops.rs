@@ -95,8 +95,8 @@ pub struct DetectedTerminal {
 ///
 /// The LEADING trim is ours, not git's: git treats leading whitespace as part of
 /// the pattern (measured — ` notes.md` hides ` notes.md`, not `notes.md`). It is
-/// deliberate and unreachable from the menus, which emit only `/`-anchored
-/// patterns; it exists to forgive a hand-typed settings line.
+/// deliberate and unreachable from the menus, whose patterns all begin with `/`
+/// or `*`; it exists to forgive a hand-typed settings line.
 pub(crate) fn trim_ignore_pattern(pattern: &str) -> &str {
     let rest = pattern.trim_start().trim_end_matches(['\r', '\n']);
     let bytes = rest.as_bytes();
