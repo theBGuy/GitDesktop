@@ -415,13 +415,26 @@ const UPDATER_MANIFEST: &str = "latest.json";
 /// trusting the update. Absent `notes` is added. Re-serializing alphabetizes the
 /// keys (serde_json's Map is a BTreeMap without `preserve_order`), so the result
 /// isn't byte-diffable against CI's original; values are preserved and the
-/// manifest itself carries no signature over its own bytes.
+/// manifest itself carries no signature over its own bytes. Rejects anything that
+/// doesn't carry the updater shape (string `version` + object `platforms`), so an
+/// unrelated asset that merely shares the name is never rewritten.
 fn patch_updater_notes(manifest: &str, notes: &str) -> AppResult<String> {
     let mut value: serde_json::Value = serde_json::from_str(manifest)
         .map_err(|e| AppError::Gh(format!("could not parse {UPDATER_MANIFEST}: {e}")))?;
     let obj = value.as_object_mut().ok_or_else(|| {
         AppError::Gh(format!("{UPDATER_MANIFEST} is not a JSON object"))
     })?;
+    // Gate the shape here, before anything uploads: the re-upload clobbers, so
+    // rewriting a same-named asset that isn't an updater manifest (a repo's own
+    // version pointer, say) would destroy it. Failing on this path deletes nothing.
+    if !obj.get("version").is_some_and(serde_json::Value::is_string)
+        || !obj.get("platforms").is_some_and(serde_json::Value::is_object)
+    {
+        return Err(AppError::Gh(format!(
+            "{UPDATER_MANIFEST} isn't a Tauri updater manifest (no version + \
+             platforms) — it was left unchanged."
+        )));
+    }
     obj.insert("notes".to_string(), serde_json::Value::String(notes.to_string()));
     serde_json::to_string_pretty(&value)
         .map_err(|e| AppError::Gh(format!("could not write {UPDATER_MANIFEST}: {e}")))
@@ -590,15 +603,32 @@ mod tests {
 
     #[test]
     fn patch_updater_notes_adds_absent_notes() {
-        let out = patch_updater_notes(r#"{"version":"1.0.0"}"#, "fresh").unwrap();
+        let out = patch_updater_notes(
+            r#"{"version":"1.0.0","platforms":{"linux-x86_64":{"signature":"s","url":"u"}}}"#,
+            "fresh",
+        )
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["notes"], "fresh");
         assert_eq!(v["version"], "1.0.0");
+        assert_eq!(v["platforms"]["linux-x86_64"]["signature"], "s");
     }
 
     #[test]
     fn patch_updater_notes_rejects_a_non_object() {
         assert!(patch_updater_notes("[1, 2]", "x").is_err());
         assert!(patch_updater_notes("not json", "x").is_err());
+    }
+
+    /// A same-named asset that isn't an updater manifest must survive untouched —
+    /// the re-upload clobbers, so a false accept would destroy it.
+    #[test]
+    fn patch_updater_notes_rejects_a_foreign_same_named_asset() {
+        assert!(patch_updater_notes(r#"{"foo":1}"#, "x").is_err());
+        // Right keys, wrong types.
+        assert!(patch_updater_notes(r#"{"version":1,"platforms":{}}"#, "x").is_err());
+        assert!(
+            patch_updater_notes(r#"{"version":"1.0.0","platforms":[]}"#, "x").is_err()
+        );
     }
 }

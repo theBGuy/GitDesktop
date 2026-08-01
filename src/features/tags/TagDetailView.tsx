@@ -27,6 +27,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { presentError } from "@/lib/error-summary";
+import { UPDATER_MANIFEST_NAME } from "@/lib/git/api";
 import {
   forgeFeatureReady,
   useCheckoutCommit,
@@ -151,7 +152,7 @@ export function TagDetailView({
     // the other release writes (`canManage` also opens on a ready GitLab repo):
     // there is no GitLab arm to fall back to here.
     const canSyncUpdater =
-      canWrite && rel.assets.some((a) => a.name === "latest.json");
+      canWrite && rel.assets.some((a) => a.name === UPDATER_MANIFEST_NAME);
     // An armed sync makes Save two-phase; dismissing between the phases would fire the
     // manifest upload at a closed dialog, so the whole operation latches. A plain edit
     // (nothing armed) stays dismissible exactly as it always was.

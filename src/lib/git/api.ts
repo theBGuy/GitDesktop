@@ -539,6 +539,10 @@ export const forgeReleaseEdit = (
     latest,
   });
 
+/** The release asset Tauri's updater polls. KEEP IN SYNC with `UPDATER_MANIFEST`
+ *  in src-tauri/src/github/release.rs — the sync command matches on this name. */
+export const UPDATER_MANIFEST_NAME = "latest.json";
+
 /** Re-points the release's `latest.json` updater manifest at `notes`, leaving its
  *  version, dates and platform signatures untouched. GitHub-only. */
 export const forgeReleaseSyncUpdaterNotes = (
