@@ -90,8 +90,39 @@ export async function createAiClient(
         abortSignal: req.abortSignal,
         ...(providerOptions ? { providerOptions } : {}),
       });
-      for await (const chunk of result.textStream) {
-        yield chunk;
+      // `textStream` forwards ONLY text deltas and routes an in-stream provider
+      // error to the default `onError` (console.error), so a failed run ends
+      // cleanly and reads as a short success. `fullStream` lets it throw instead.
+      try {
+        for await (const part of result.fullStream) {
+          switch (part.type) {
+            case "text-delta":
+              yield part.text;
+              break;
+            case "error":
+              throw new Error(errorMessage(part.error));
+            case "abort":
+              throw new DOMException(
+                "The generation was cancelled.",
+                "AbortError",
+              );
+            // Remaining parts carry no text; this call passes no tools, so no
+            // tool part can arrive.
+            default:
+              break;
+          }
+        }
+      } catch (e) {
+        // An abort surfaces either as the part above or as a thrown AbortError
+        // mid-await; both must keep the AbortError name, which consumers gate
+        // cancellation on (a cancel is "no result", never a partial buffer).
+        if (
+          req.abortSignal?.aborted ||
+          (e instanceof DOMException && e.name === "AbortError")
+        ) {
+          throw new DOMException("The generation was cancelled.", "AbortError");
+        }
+        throw new Error(errorMessage(e));
       }
     },
     async testConnection() {

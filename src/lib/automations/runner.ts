@@ -18,6 +18,7 @@ import { buildReviewPrompt } from "@/lib/ai/prompt";
 import { isCliProvider, isLocalProvider } from "@/lib/ai/providers";
 import { reviewTimeoutSecs } from "@/lib/ai/review-timeout";
 import { runCliStream } from "@/lib/ai/stream";
+import { safeSlice } from "@/lib/ai/truncate";
 import type { AiSettings, PromptProvider, ReviewMode } from "@/lib/ai/types";
 import {
   forgePrComment,
@@ -131,6 +132,28 @@ function targetRef(event: PrAutomationEvent): string {
 
 function modeLabel(mode: ReviewMode): "security audit" | "review" {
   return mode === "security" ? "security audit" : "review";
+}
+
+/** Longest whole body {@link looksLikeProviderError} will judge, and how much of it
+ *  the thrown message quotes back. */
+const ERROR_SHAPE_MAX_CHARS = 300;
+const ERROR_SHAPE_CLIP_CHARS = 200;
+
+/**
+ * Last-resort net for a CLI/provider that reports a failure as a successful review —
+ * an outage once posted "API Error: 500 …" as a real automated PR comment (2026-07-29).
+ * Scoped to a SHORT, single-paragraph WHOLE body, so a genuine review that merely quotes
+ * an error can't trip it; the parser-side twin guards agent.rs's claude result branch.
+ */
+function looksLikeProviderError(text: string): boolean {
+  const body = text.trim();
+  if (body.length > ERROR_SHAPE_MAX_CHARS) return false;
+  if (/\n[ \t\r]*\n/.test(body)) return false;
+  return (
+    body.startsWith("API Error") ||
+    body.startsWith("Claude AI usage limit reached") ||
+    (body.includes("limit reached") && body.includes("resets"))
+  );
 }
 
 /**
@@ -444,6 +467,26 @@ async function run(
         continue;
       }
       const { text, thoughts } = result;
+      // Both gates throw BEFORE deliver and persistReviewHistory, so a bad run
+      // neither posts a comment nor advances the pr-sync watermark — it lands in
+      // the catch below (failure toast + inbox row with Re-run + released claim).
+      if (!text.trim()) {
+        throw new Error(
+          `The AI ${label} run produced no text — nothing was posted.`,
+        );
+      }
+      if (looksLikeProviderError(text)) {
+        const body = text.trim();
+        // Ellipsis only when the quote was actually cut, so a short error reads as the
+        // complete message it is.
+        const quoted =
+          body.length > ERROR_SHAPE_CLIP_CHARS
+            ? `${safeSlice(body, ERROR_SHAPE_CLIP_CHARS)}…`
+            : body;
+        throw new Error(
+          `The AI ${label} run returned an error message instead of a review: "${quoted}" — nothing was posted.`,
+        );
+      }
       // The delivered comment body carries the final review text ONLY — the
       // agentic narration is persisted to history for later inspection, never
       // posted (buildAiCommentBody + deliver both take `text`).

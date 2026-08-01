@@ -18,6 +18,28 @@ const LOGIN_COMMAND = {
   opencode: "opencode auth login",
 } as const;
 
+/** Longest terminal text we will accept as an error reason — mirrors the
+ *  runner-side error-shape tripwire's ceiling. */
+const MAX_ERROR_TEXT = 300;
+
+/**
+ * The message for an errored terminal event. Short single-paragraph terminal text on an
+ * errored run is the CLI's own error message (probe-verified); anything longer or
+ * multi-paragraph is run output, which must never be presented as the failure reason —
+ * a run failed by its terminal reason alone carries the truncated body there.
+ */
+export function terminalErrorMessage(text: string): string {
+  const trimmed = text.trim();
+  if (
+    !trimmed ||
+    trimmed.length > MAX_ERROR_TEXT ||
+    /\n[ \t\r]*\n/.test(trimmed)
+  ) {
+    return "The run ended with an error.";
+  }
+  return trimmed;
+}
+
 /**
  * Builds an {@link AiClient} backed by a locally-installed agent CLI
  * (claude/codex/copilot/opencode), adapting the Tier-1 (non-repo-aware, zero-tools)
@@ -136,7 +158,8 @@ export function createCliClient(settings: AiSettings): AiClient {
             // An errored run throws BEFORE the tail is yielded, matching the
             // `error`-kind branch — a failed run never paints its final text
             // into the caller's draft field.
-            if (event.isError) throw new Error("The run ended with an error.");
+            if (event.isError)
+              throw new Error(terminalErrorMessage(event.text));
             // The terminal event carries the authoritative full text. A coalescing
             // CLI (Codex emits NO deltas — only this final text) has emitted nothing
             // yet, so yield the untold tail; streaming CLIs already emitted it all.

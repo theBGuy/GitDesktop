@@ -118,8 +118,15 @@ export function ConflictResolveView({
       globalInstructions: settings.data?.globalInstructions ?? "",
     });
     setPhase("streaming");
-    await run(reviewAi, { system, prompt, repoPath });
+    const completed = await run(reviewAi, { system, prompt, repoPath });
     if (gen !== genRef.current) return;
+    // A failed or cancelled run leaves a partial (or provider-error) buffer behind;
+    // proposing a "resolution" from it would corrupt the file. The hook toasted the
+    // error already — just let the user retry.
+    if (!completed) {
+      setPhase("idle");
+      return;
+    }
 
     const merged = extractResolvedContent(textRef.current);
     if (!merged.trim()) {

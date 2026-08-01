@@ -135,8 +135,13 @@ pub struct AgentInfo {
 }
 
 /// Streaming events sent to the frontend over the review channel.
+///
+/// `rename_all` renames VARIANT tags only, so `rename_all_fields` is load-bearing
+/// for the TS mirror (`src/lib/ai/agent.ts`): without it `Done.is_error` arrived as
+/// `undefined` and every failed run read as a success, publishing provider error
+/// text as review content. `review_event_wire_shape_is_camel_case` pins the shape.
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ReviewEvent {
     /// A chunk of assistant text to append to the rendered review.
     Delta { text: String },
@@ -1203,7 +1208,8 @@ fn parse_codex_line(
 /// Parses one line of Copilot CLI `--output-format json` (JSONL). Streams
 /// `message_delta.deltaContent` as narration, keeps the latest
 /// `assistant.message.content` as the final text, emits `Done` at `result`
-/// (its `exitCode` decides success). Setup/MCP/skills/reasoning events ignored.
+/// (a `session.error` or a non-zero `exitCode` fails the run).
+/// Setup/MCP/skills/reasoning events ignored.
 ///
 /// A `\n\n` is lazily PREPENDED to the first non-empty delta after a completed
 /// message, so the delta buffer still ENDS WITH `Done.text` (frontend invariant).
@@ -1213,6 +1219,7 @@ fn parse_copilot_line(
     last_message: &mut String,
     emitted_text: &mut bool,
     pending_sep: &mut bool,
+    saw_error: &mut bool,
 ) -> Option<ReviewEvent> {
     let line = line.trim();
     if line.is_empty() {
@@ -1280,11 +1287,16 @@ fn parse_copilot_line(
             if last_message.is_empty() {
                 *last_message = msg.to_string();
             }
-            None // the terminal `result` carries the exit code; surface there
+            // Latch: the CLI still exits 0 after a session error, which would ship the
+            // error message as a successful answer. A later genuine recovery now fails
+            // the run too — acceptable for a CLI whose only verdict is the exit code.
+            *saw_error = true;
+            None // surfaced at the terminal `result`
         }
         "result" => {
             *saw_terminal = true;
-            let is_error = v.get("exitCode").and_then(|c| c.as_i64()).unwrap_or(0) != 0;
+            let is_error =
+                *saw_error || v.get("exitCode").and_then(|c| c.as_i64()).unwrap_or(0) != 0;
             Some(ReviewEvent::Done {
                 text: std::mem::take(last_message),
                 is_error,
@@ -1409,12 +1421,17 @@ fn parse_opencode_line(
 /// completed TEXT block, so the delta buffer still ENDS WITH `Done.text` (the
 /// raw `result`, never separator-prefixed) — the frontend's suffix-strip relies
 /// on that.
+///
+/// `synthetic_error` carries the text of a synthetic API-error assistant message
+/// forward to the terminal line; see `claude_result_is_error` for why the CLI's
+/// own `is_error` flag can't be trusted alone.
 fn parse_claude_line(
     line: &str,
     saw_result: &mut bool,
     tool_inputs: &mut std::collections::HashMap<i64, (String, String)>,
     emitted_text: &mut bool,
     pending_sep: &mut bool,
+    synthetic_error: &mut Option<String>,
 ) -> Option<ReviewEvent> {
     let line = line.trim();
     if line.is_empty() {
@@ -1496,20 +1513,94 @@ fn parse_claude_line(
                 _ => None,
             }
         }
+        // A synthetic API-error message (no stream_event deltas back it, so nothing
+        // was streamed): stash its text — the terminal line repeats it as `result`.
+        "assistant" => {
+            let msg = v.get("message")?;
+            let synthetic = v
+                .get("is_api_error_message")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false)
+                || msg.get("model").and_then(|m| m.as_str()) == Some("<synthetic>");
+            if synthetic {
+                let text: String = msg
+                    .get("content")
+                    .and_then(|c| c.as_array())
+                    .map(|parts| {
+                        parts
+                            .iter()
+                            .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !text.trim().is_empty() {
+                    *synthetic_error = Some(text.trim().to_string());
+                }
+            }
+            None
+        }
         "result" => {
             *saw_result = true;
+            let text = v
+                .get("result")
+                .and_then(|s| s.as_str())
+                .unwrap_or_default()
+                .to_string();
             Some(ReviewEvent::Done {
-                text: v
-                    .get("result")
-                    .and_then(|s| s.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                is_error: v.get("is_error").and_then(|b| b.as_bool()).unwrap_or(false),
+                is_error: claude_result_is_error(&v, &text, synthetic_error.as_deref()),
+                text,
                 cost_usd: v.get("total_cost_usd").and_then(|c| c.as_f64()),
             })
         }
         _ => None,
     }
+}
+
+/// Whether a Claude terminal `result` line reports a FAILED run.
+///
+/// The CLI exits 0 and reports `subtype: "success"` even on an API error, and
+/// some versions ship usage-limit / API-error text as the `result` with
+/// `is_error: false` — so the flag alone once shipped an error message as a real
+/// PR review comment. Structural signals first, then a narrow text net.
+fn claude_result_is_error(v: &serde_json::Value, text: &str, synthetic_error: Option<&str>) -> bool {
+    if v.get("is_error").and_then(|b| b.as_bool()).unwrap_or(false) {
+        return true;
+    }
+    if v.get("api_error_status").is_some_and(|s| !s.is_null()) {
+        return true;
+    }
+    // Absent on older CLIs — only a PRESENT, non-"completed" reason is a signal.
+    if v.get("terminal_reason")
+        .and_then(|r| r.as_str())
+        .is_some_and(|r| r != "completed")
+    {
+        return true;
+    }
+    let trimmed = text.trim();
+    if synthetic_error.is_some_and(|s| s == trimmed) {
+        return true;
+    }
+    // Best-effort net behind the structural signals above, for limit messages that
+    // arrive with none of them (2026-07-29 incident: an "API Error: 500" body was
+    // posted as a review). Deliberately narrow — a real review that merely mentions
+    // limits is multi-paragraph and far longer.
+    !trimmed.is_empty()
+        && trimmed.chars().count() <= 300
+        && !has_blank_line(trimmed)
+        && (trimmed.starts_with("API Error")
+            || trimmed.starts_with("Claude AI usage limit reached")
+            || (trimmed.contains("limit reached") && trimmed.contains("resets")))
+}
+
+/// Whether `text` contains a paragraph break — two newlines separated only by
+/// blanks, so CRLF bodies count. Mirrors `/\n[ \t\r]*\n/` in the runner-side twin
+/// (`src/lib/automations/runner.ts`); the two nets must stay semantically aligned.
+fn has_blank_line(text: &str) -> bool {
+    text.match_indices('\n').any(|(i, _)| {
+        text[i + 1..]
+            .trim_start_matches([' ', '\t', '\r'])
+            .starts_with('\n')
+    })
 }
 
 /// Kills the entire process tree of a host-mode agent child on cancel/timeout.
@@ -1641,6 +1732,10 @@ async fn stream_agent(
     // claude/copilot: lazy `\n\n` between successive text blocks/messages.
     let mut emitted_text = false;
     let mut pending_sep = false;
+    // claude: text of a synthetic API-error message, matched against the terminal
+    // `result`. copilot: a `session.error` was seen (its exit code lies).
+    let mut claude_synthetic_error: Option<String> = None;
+    let mut copilot_saw_error = false;
     let mut cancelled = false;
     let mut timed_out = false;
 
@@ -1669,6 +1764,7 @@ async fn stream_agent(
                                 &mut claude_tool_inputs,
                                 &mut emitted_text,
                                 &mut pending_sep,
+                                &mut claude_synthetic_error,
                             ),
                             AgentKind::Codex => {
                                 parse_codex_line(&l, &mut saw_result, &mut last_message)
@@ -1679,6 +1775,7 @@ async fn stream_agent(
                                 &mut last_message,
                                 &mut emitted_text,
                                 &mut pending_sep,
+                                &mut copilot_saw_error,
                             ),
                             AgentKind::Opencode => parse_opencode_line(
                                 &l,
@@ -2438,14 +2535,25 @@ mod tests {
         let mut saw = false;
         let mut acc = std::collections::HashMap::new();
         let (mut emitted, mut pending) = (false, false);
+        let mut syn = None;
         let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","name":"Read","input":{}}}}"#;
         let d1 = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"file_pa"}}}"#;
         let d2 = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"th\":\"src/x.ts\"}"}}}"#;
         let stop = r#"{"type":"stream_event","event":{"type":"content_block_stop","index":1}}"#;
-        assert!(parse_claude_line(start, &mut saw, &mut acc, &mut emitted, &mut pending).is_none());
-        assert!(parse_claude_line(d1, &mut saw, &mut acc, &mut emitted, &mut pending).is_none());
-        assert!(parse_claude_line(d2, &mut saw, &mut acc, &mut emitted, &mut pending).is_none());
-        let ev = parse_claude_line(stop, &mut saw, &mut acc, &mut emitted, &mut pending).unwrap();
+        assert!(
+            parse_claude_line(start, &mut saw, &mut acc, &mut emitted, &mut pending, &mut syn)
+                .is_none()
+        );
+        assert!(
+            parse_claude_line(d1, &mut saw, &mut acc, &mut emitted, &mut pending, &mut syn)
+                .is_none()
+        );
+        assert!(
+            parse_claude_line(d2, &mut saw, &mut acc, &mut emitted, &mut pending, &mut syn)
+                .is_none()
+        );
+        let ev = parse_claude_line(stop, &mut saw, &mut acc, &mut emitted, &mut pending, &mut syn)
+            .unwrap();
         match ev {
             ReviewEvent::Tool { tool, target } => {
                 assert_eq!(tool, "read");
@@ -2467,6 +2575,7 @@ mod tests {
         let mut saw = false;
         let mut acc = std::collections::HashMap::new();
         let (mut emitted, mut pending) = (false, false);
+        let mut syn = None;
         let mut buffer = String::new();
 
         // Text block 1: "Looking at the code." then its stop.
@@ -2485,7 +2594,9 @@ mod tests {
             (t1a, Some("Looking at ")),
             (t1b, Some("the code.")),
         ] {
-            let ev = parse_claude_line(line, &mut saw, &mut acc, &mut emitted, &mut pending).unwrap();
+            let ev =
+                parse_claude_line(line, &mut saw, &mut acc, &mut emitted, &mut pending, &mut syn)
+                    .unwrap();
             match ev {
                 ReviewEvent::Delta { text } => {
                     assert_eq!(text, expect.unwrap());
@@ -2495,14 +2606,15 @@ mod tests {
             }
         }
         // Block-1 stop arms the separator; the tool block's stop leaves it armed.
-        parse_claude_line(stop1, &mut saw, &mut acc, &mut emitted, &mut pending);
+        parse_claude_line(stop1, &mut saw, &mut acc, &mut emitted, &mut pending, &mut syn);
         assert!(pending, "a text block's stop arms the separator");
-        parse_claude_line(tstart, &mut saw, &mut acc, &mut emitted, &mut pending);
-        parse_claude_line(tstop, &mut saw, &mut acc, &mut emitted, &mut pending);
+        parse_claude_line(tstart, &mut saw, &mut acc, &mut emitted, &mut pending, &mut syn);
+        parse_claude_line(tstop, &mut saw, &mut acc, &mut emitted, &mut pending, &mut syn);
         assert!(pending, "a tool block's stop leaves the pending separator intact");
 
         // Block-2's first delta is prefixed `\n\n`.
-        let ev = parse_claude_line(t2, &mut saw, &mut acc, &mut emitted, &mut pending).unwrap();
+        let ev =
+            parse_claude_line(t2, &mut saw, &mut acc, &mut emitted, &mut pending, &mut syn).unwrap();
         match ev {
             ReviewEvent::Delta { text } => {
                 assert_eq!(text, "\n\nThe fix is X.");
@@ -2510,9 +2622,11 @@ mod tests {
             }
             other => panic!("expected Delta, got {other:?}"),
         }
-        parse_claude_line(stop2, &mut saw, &mut acc, &mut emitted, &mut pending);
+        parse_claude_line(stop2, &mut saw, &mut acc, &mut emitted, &mut pending, &mut syn);
 
-        let done = parse_claude_line(result, &mut saw, &mut acc, &mut emitted, &mut pending).unwrap();
+        let done =
+            parse_claude_line(result, &mut saw, &mut acc, &mut emitted, &mut pending, &mut syn)
+                .unwrap();
         match done {
             ReviewEvent::Done { text, .. } => {
                 assert_eq!(text, "The fix is X.", "Done.text is the raw result, no separator");
@@ -2525,21 +2639,185 @@ mod tests {
         }
     }
 
+    // Real Claude CLI terminal lines (probed 2026-08-01, v2.1.220, with the app's
+    // flags), abridged to the fields the parser reads plus a few real neighbours.
+    const CL_SUCCESS: &str = r#"{"is_error":false,"stop_reason":"end_turn","terminal_reason":"completed","subtype":"success","api_error_status":null,"result":"OK","type":"result","total_cost_usd":0.036494}"#;
+    const CL_API_ERROR: &str = r#"{"is_error":true,"terminal_reason":"api_error","subtype":"success","api_error_status":404,"result":"There's an issue with the selected model (bogus-model-xyz). It may not exist or you may not have access to it.","type":"result","total_cost_usd":0}"#;
+    const CL_SYNTHETIC: &str = r#"{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"There's an issue with the selected model (bogus-model-xyz). It may not exist or you may not have access to it."}]},"error":"model_not_found","is_api_error_message":true}"#;
+
+    /// Feeds fixture lines through one parser state and returns the terminal `Done`.
+    fn claude_done(lines: &[&str]) -> (String, bool) {
+        let mut saw = false;
+        let mut acc = std::collections::HashMap::new();
+        let (mut emitted, mut pending) = (false, false);
+        let mut syn = None;
+        let mut last = None;
+        for line in lines {
+            last = parse_claude_line(line, &mut saw, &mut acc, &mut emitted, &mut pending, &mut syn);
+        }
+        assert!(saw, "the fixture must end with a terminal result");
+        match last.expect("the terminal result emits Done") {
+            ReviewEvent::Done { text, is_error, .. } => (text, is_error),
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn claude_probed_success_line_is_not_an_error() {
+        let (text, is_error) = claude_done(&[CL_SUCCESS]);
+        assert_eq!(text, "OK");
+        assert!(!is_error);
+    }
+
+    #[test]
+    fn claude_probed_api_error_line_is_an_error() {
+        let (text, is_error) = claude_done(&[CL_API_ERROR]);
+        assert!(is_error);
+        assert!(text.starts_with("There's an issue with the selected model"));
+    }
+
+    #[test]
+    fn review_event_wire_shape_is_camel_case() {
+        // Pins the IPC contract with the TS mirror (src/lib/ai/agent.ts): the fields
+        // the frontend reads by name must be exactly these, in camelCase.
+        let done = serde_json::to_value(ReviewEvent::Done {
+            text: "body".to_string(),
+            is_error: true,
+            cost_usd: Some(0.5),
+        })
+        .expect("Done serializes");
+        let obj = done.as_object().expect("Done is a JSON object");
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["costUsd", "isError", "kind", "text"]);
+        assert_eq!(obj["kind"], "done");
+        assert_eq!(obj["isError"], true);
+        assert_eq!(obj["costUsd"], 0.5);
+        assert!(obj.get("is_error").is_none(), "snake_case field must not ship");
+        assert!(obj.get("cost_usd").is_none(), "snake_case field must not ship");
+
+        // Variant tags are camelCase too (single-word ones are casing-identical).
+        let err = serde_json::to_value(ReviewEvent::Error {
+            message: "boom".to_string(),
+        })
+        .expect("Error serializes");
+        assert_eq!(err["kind"], "error");
+        let native = serde_json::to_value(ReviewEvent::NativeSession {
+            id: "ses_1".to_string(),
+        })
+        .expect("NativeSession serializes");
+        assert_eq!(native["kind"], "nativeSession");
+        assert_eq!(native["id"], "ses_1");
+    }
+
+    #[test]
+    fn claude_is_error_flag_alone_is_decisive() {
+        // The flag pinned in ISOLATION: no api_error_status, no terminal_reason, and
+        // result text no other signal can catch.
+        let line = r#"{"type":"result","subtype":"success","is_error":true,"result":"The run stopped early."}"#;
+        let (text, is_error) = claude_done(&[line]);
+        assert!(is_error);
+        assert_eq!(text, "The run stopped early.");
+    }
+
+    #[test]
+    fn claude_structural_signals_outrank_is_error_false() {
+        // Both shapes claim success in `is_error`; the structural fields say otherwise.
+        let status = r#"{"type":"result","subtype":"success","is_error":false,"api_error_status":529,"result":"Overloaded"}"#;
+        assert!(claude_done(&[status]).1, "api_error_status is decisive");
+        let reason = r#"{"type":"result","subtype":"success","is_error":false,"terminal_reason":"api_error","result":"Something went wrong."}"#;
+        assert!(claude_done(&[reason]).1, "a non-completed terminal_reason is decisive");
+    }
+
+    #[test]
+    fn claude_result_echoing_a_synthetic_error_is_an_error() {
+        // The live-bug shape: an API failure reported with no structural signal at all,
+        // caught only because the synthetic assistant message repeated the same text.
+        let result = r#"{"type":"result","subtype":"success","is_error":false,"result":"There's an issue with the selected model (bogus-model-xyz). It may not exist or you may not have access to it."}"#;
+        assert!(claude_done(&[CL_SYNTHETIC, result]).1);
+        // Without the synthetic message ahead of it, that same line has no signal.
+        assert!(!claude_done(&[result]).1);
+        // The `<synthetic>` model is the fallback when the flag is absent.
+        let by_model = r#"{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"There's an issue with the selected model (bogus-model-xyz). It may not exist or you may not have access to it."}]}}"#;
+        assert!(claude_done(&[by_model, result]).1);
+    }
+
+    #[test]
+    fn claude_limit_messages_are_caught_without_structural_signals() {
+        let usage = r#"{"type":"result","subtype":"success","is_error":false,"result":"Claude AI usage limit reached|1753980000"}"#;
+        assert!(claude_done(&[usage]).1);
+        let session = r#"{"type":"result","subtype":"success","is_error":false,"result":"5-hour limit reached ∙ resets 3am"}"#;
+        assert!(claude_done(&[session]).1);
+    }
+
+    #[test]
+    fn claude_a_real_review_mentioning_limits_stays_successful() {
+        // The net must never fire on a genuine review body: it is multi-paragraph and
+        // far past the length bound even though it says "limit reached" mid-prose.
+        let review = r#"{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","result":"Review of the retry path.\n\nIt swallows the 429 response, so a caller that hits the rate limit reached state never learns why the request failed. That matters here because the surrounding code assumes a thrown error, and the silent None flows into the cache as if it were a successful empty result, which later reads cannot tell apart from real data.\n\nSuggest surfacing the status instead.","total_cost_usd":0.02}"#;
+        let (text, is_error) = claude_done(&[review]);
+        assert!(text.chars().count() > 300, "fixture must exceed the net's bound");
+        assert!(!is_error);
+    }
+
+    #[test]
+    fn claude_long_single_paragraph_clears_the_net_on_length_alone() {
+        // The length bound pinned in ISOLATION: this body matches a net pattern and has
+        // no paragraph break, so only its size keeps a real long answer out of the net.
+        let body = format!(
+            "API Error handling is the subject of this answer, {}",
+            "which runs on in a single paragraph without a blank line anywhere. ".repeat(5)
+        );
+        assert!(body.chars().count() > 300, "fixture must exceed the bound");
+        let line = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": body,
+        })
+        .to_string();
+        assert!(!claude_done(&[&line]).1);
+    }
+
+    #[test]
+    fn claude_crlf_paragraph_break_clears_the_net() {
+        // CRLF bodies are multi-paragraph too — the blank-line check must see
+        // `\r\n\r\n`, matching the runner-side twin's /\n[ \t\r]*\n/.
+        let line = r#"{"type":"result","subtype":"success","is_error":false,"result":"API Error: 500 while fetching the diff.\r\n\r\nRetried once, then the review completed."}"#;
+        let (text, is_error) = claude_done(&[line]);
+        assert!(text.chars().count() <= 300, "length must not be what clears it");
+        assert!(!is_error);
+    }
+
+    #[test]
+    fn claude_absent_terminal_reason_stays_successful() {
+        // Back-compat: older CLIs emit neither `terminal_reason` nor `api_error_status`.
+        let old = r#"{"type":"result","subtype":"success","is_error":false,"result":"OK"}"#;
+        let (text, is_error) = claude_done(&[old]);
+        assert_eq!(text, "OK");
+        assert!(!is_error);
+    }
+
     #[test]
     fn copilot_lazy_separator_between_assistant_messages() {
         // Deltas across two assistant messages get exactly one `\n\n` between them.
         let (mut term, mut msg) = (false, String::new());
-        let (mut emitted, mut pending) = (false, false);
+        let (mut emitted, mut pending, mut err) = (false, false, false);
         let d1 = r#"{"type":"assistant.message_delta","data":{"deltaContent":"First."}}"#;
         let m1 = r#"{"type":"assistant.message","data":{"content":"First."}}"#;
         let d2 = r#"{"type":"assistant.message_delta","data":{"deltaContent":"Second."}}"#;
 
-        let ev = parse_copilot_line(d1, &mut term, &mut msg, &mut emitted, &mut pending).unwrap();
+        let ev = parse_copilot_line(d1, &mut term, &mut msg, &mut emitted, &mut pending, &mut err)
+            .unwrap();
         assert!(matches!(ev, ReviewEvent::Delta { text } if text == "First."));
         // A completed message arms the separator; the next delta is prefixed once.
-        assert!(parse_copilot_line(m1, &mut term, &mut msg, &mut emitted, &mut pending).is_none());
+        assert!(
+            parse_copilot_line(m1, &mut term, &mut msg, &mut emitted, &mut pending, &mut err)
+                .is_none()
+        );
         assert!(pending);
-        let ev = parse_copilot_line(d2, &mut term, &mut msg, &mut emitted, &mut pending).unwrap();
+        let ev = parse_copilot_line(d2, &mut term, &mut msg, &mut emitted, &mut pending, &mut err)
+            .unwrap();
         assert!(matches!(ev, ReviewEvent::Delta { text } if text == "\n\nSecond."));
         assert!(!pending, "the separator is consumed by the first following delta");
     }
@@ -2548,11 +2826,79 @@ mod tests {
     fn copilot_first_delta_has_no_separator() {
         // The very first delta of a run must not be prefixed (nothing emitted before).
         let (mut term, mut msg) = (false, String::new());
-        let (mut emitted, mut pending) = (false, false);
+        let (mut emitted, mut pending, mut err) = (false, false, false);
         let d = r#"{"type":"assistant.message_delta","data":{"deltaContent":"Hello."}}"#;
-        let ev = parse_copilot_line(d, &mut term, &mut msg, &mut emitted, &mut pending).unwrap();
+        let ev =
+            parse_copilot_line(d, &mut term, &mut msg, &mut emitted, &mut pending, &mut err)
+                .unwrap();
         assert!(matches!(ev, ReviewEvent::Delta { text } if text == "Hello."));
         assert!(emitted);
+    }
+
+    // Real Copilot CLI `--output-format json` terminal lines.
+    const CP_SESSION_ERROR: &str = r#"{"type":"session.error","data":{"message":"API rate limit exceeded for this session."}}"#;
+    const CP_RESULT_OK: &str = r#"{"type":"result","exitCode":0}"#;
+
+    #[test]
+    fn copilot_session_error_fails_the_run_despite_exit_zero() {
+        // The CLI exits 0 after a session error, which once shipped the error text as
+        // a successful answer; the latch makes the terminal `result` report failure.
+        let (mut term, mut msg) = (false, String::new());
+        let (mut emitted, mut pending, mut err) = (false, false, false);
+        assert!(
+            parse_copilot_line(
+                CP_SESSION_ERROR,
+                &mut term,
+                &mut msg,
+                &mut emitted,
+                &mut pending,
+                &mut err
+            )
+            .is_none()
+        );
+        assert!(err);
+        let ev = parse_copilot_line(
+            CP_RESULT_OK,
+            &mut term,
+            &mut msg,
+            &mut emitted,
+            &mut pending,
+            &mut err,
+        )
+        .unwrap();
+        match ev {
+            ReviewEvent::Done { text, is_error, .. } => {
+                assert!(is_error, "a session.error fails the run whatever the exit code");
+                // The error message is the failure reason the frontend shows.
+                assert_eq!(text, "API rate limit exceeded for this session.");
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+        assert!(term);
+    }
+
+    #[test]
+    fn copilot_clean_run_stays_successful() {
+        let (mut term, mut msg) = (false, String::new());
+        let (mut emitted, mut pending, mut err) = (false, false, false);
+        let m = r#"{"type":"assistant.message","data":{"content":"All good."}}"#;
+        parse_copilot_line(m, &mut term, &mut msg, &mut emitted, &mut pending, &mut err);
+        let ev = parse_copilot_line(
+            CP_RESULT_OK,
+            &mut term,
+            &mut msg,
+            &mut emitted,
+            &mut pending,
+            &mut err,
+        )
+        .unwrap();
+        match ev {
+            ReviewEvent::Done { text, is_error, .. } => {
+                assert!(!is_error);
+                assert_eq!(text, "All good.");
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
     }
 
     #[test]

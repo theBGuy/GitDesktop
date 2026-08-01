@@ -719,6 +719,13 @@ export async function startReview(
       },
     });
     if (control.cancelled) return;
+    // The stream's final text, read from the store so it covers the CLI and HTTP paths
+    // alike; a cancelled run returned above, so this is never a mid-stream fragment.
+    const finalText = useReviewStore.getState().texts[key] ?? "";
+    // A run that settled with nothing failed, however the provider reported it — throw
+    // so it rides the catch below (error phase + inbox row) rather than settling "done"
+    // and announcing a review that isn't there.
+    if (!finalText.trim()) throw new Error("The review run produced no text.");
     // A run WITH tools closes its own coverage gap, so only a non-agentic run that
     // saw a truncated diff drives the panel's upgrade nudge.
     patch({
@@ -728,10 +735,8 @@ export async function startReview(
       endedAt: Date.now(),
     });
     void notifyReviewDone(title, mode, true, target);
-    // Persist the finished review so the NEXT run can use it as soft context. The final
-    // text is read from the store (covers CLI and HTTP paths); a cancelled run returns
-    // above, so no mid-stream fragment is stored. Best-effort.
-    const finalText = useReviewStore.getState().texts[key] ?? "";
+    // Persist the finished review so the NEXT run can use it as soft context.
+    // Best-effort.
     // The agentic run's narration, peeled off at settle — persisted as display-only
     // metadata (omitted when empty; the next run's soft context reads `text` alone).
     const thoughts = useReviewStore.getState().entries[key]?.thoughts;

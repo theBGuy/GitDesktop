@@ -51,6 +51,7 @@ import {
 } from "@/lib/pulls/queries";
 import type { PersistedReview } from "@/lib/pulls/reviews-history";
 import { useSecretPreview, useSettings } from "@/lib/settings/queries";
+import { useConfirm } from "@/lib/stores/confirm";
 import {
   type ReviewContext,
   type ReviewTarget,
@@ -273,6 +274,20 @@ export function PrReviewPanel({
 
   async function post() {
     if (!onPost || !text.trim() || posting) return;
+    // A failed OR cancelled run keeps whatever streamed before it stopped, and that
+    // partial text stays postable — publishing an unfinished review is consequential,
+    // so confirm first, naming which way the run ended.
+    if (phase === "error" || phase === "cancelled") {
+      const ok = await useConfirm.getState().ask({
+        title: "Post partial review?",
+        body:
+          phase === "cancelled"
+            ? "This run was cancelled before it finished, so the text may be incomplete. Post it as a comment anyway?"
+            : "This run failed before completing, so the text may be incomplete. Post it as a comment anyway?",
+        confirmLabel: "Post anyway",
+      });
+      if (!ok) return;
+    }
     const label = mode === "security" ? "security audit" : "review";
     const body = buildAiCommentBody({
       kind: label,
