@@ -431,8 +431,8 @@ fn patch_updater_notes(manifest: &str, notes: &str) -> AppResult<String> {
         || !obj.get("platforms").is_some_and(serde_json::Value::is_object)
     {
         return Err(AppError::Gh(format!(
-            "{UPDATER_MANIFEST} isn't a Tauri updater manifest (no version + \
-             platforms) — it was left unchanged."
+            "{UPDATER_MANIFEST} isn't a Tauri updater manifest (needs a string \
+             `version` and an object `platforms`) — it was left unchanged."
         )));
     }
     obj.insert("notes".to_string(), serde_json::Value::String(notes.to_string()));
