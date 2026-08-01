@@ -158,8 +158,9 @@ export function useGenerateBranchName(repoPath: string) {
             ? `All your in-progress changes match your AI ignore patterns, and there are no net changes vs ${fallback.base} to name a branch after.`
             : "All changes match your AI ignore patterns — nothing to name a branch after.";
         } else if (untracked.unreadable > 0) {
-          message =
-            "Nothing to name a branch after — the only new files have names that aren't readable text.";
+          message = fallback
+            ? `The only in-progress changes are new files whose names aren't readable text, and there are no net changes vs ${fallback.base} to name a branch after.`
+            : "Nothing to name a branch after — the only new files have names that aren't readable text.";
         } else if (fallback) {
           message = opts.useWorkingTree
             ? `No in-progress changes, and no net changes vs ${fallback.base} to name a branch after.`

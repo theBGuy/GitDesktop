@@ -192,6 +192,14 @@ fn rewrite_for_pathspec(pattern: &str) -> (String, usize) {
 /// the class — which then has a member rewritten in place and silently changes
 /// what it accepts.
 ///
+/// The fourth turns on the FIRST `]` after `[:`, not on a `[:`…`:]` search: when
+/// that `]` is `:`-preceded it ends a class, otherwise the `[` is an ordinary
+/// member and the same `]` terminates the whole expression (measured, git 2.51.1:
+/// `a[d[:]b` and `a[d[:x]b` both hide `adb`/`a[b`, so the first `]` terminated).
+/// Over-scanning to a later `:]` is the mirror-image error — it runs past the
+/// real terminator. [`posix_class_end`] holds one deliberate divergence from that
+/// rule; see its note.
+///
 /// `[:name:]` alone: git's wildmatch has no `[=x=]` equivalence or `[.x.]`
 /// collating form (measured, git 2.51.1 — both match nothing rather than acting
 /// as a class), so treating their brackets as ordinary characters is what agrees
@@ -221,16 +229,27 @@ fn bracket_end(chars: &[char], open: usize) -> Option<usize> {
 }
 
 /// Index of the `]` ending the POSIX class `[:name:]` opening at `open`, or
-/// `None` when no `:]` follows (then the `[` is an ordinary member).
+/// `None` when this bracket is not one (then the `[` is an ordinary member).
+///
+/// Takes the FIRST `]` after `[:` and accepts a class only when that `]` is
+/// `:`-preceded, which is wildmatch's own test. Hunting for the first `:]`
+/// ANYWHERE instead over-scans past the `]` wildmatch stopped at and swallows the
+/// real class terminator — which on the widening route drops names gitignore
+/// hides (measured, git 2.51.1: `a[[:x]\-b:]c]d` hides `ax-b:]c]d`, which the
+/// `**/a?d` an over-scan produces does not).
+///
+/// The extra `close >= open + 4` is OURS, not wildmatch's: it demands a non-empty
+/// class name, where wildmatch accepts the empty `[::]` and then abandons the
+/// whole pattern (measured: excludes line `a[d[::]b` hides nothing, while
+/// rejecting `[::]` would make it the class `{d,[,:}` and hide `adb`/`a[b`). So
+/// we diverge on `[::]`-degenerates alone, and only fail-CLOSED — a pattern
+/// carrying one matches nothing at all on the gitignore side, so any term we emit
+/// is a superset of nothing.
 fn posix_class_end(chars: &[char], open: usize) -> Option<usize> {
-    let mut i = open + 2;
-    while i + 1 < chars.len() {
-        if chars[i] == ':' && chars[i + 1] == ']' {
-            return Some(i + 1);
-        }
-        i += 1;
-    }
-    None
+    // The name spans `open + 2..close - 1` (`close - 1` is the closing `:`), so
+    // `close >= open + 4` is the non-empty-name demand described above.
+    let close = (open + 2..chars.len()).find(|&i| chars[i] == ']')?;
+    (close >= open + 4 && chars[close - 1] == ':').then_some(close)
 }
 
 /// Translates gitignore-style lines into `:(exclude,glob)` pathspec terms.
@@ -671,8 +690,34 @@ mod tests {
         let out = pathspecs_for(&["a[[:digit:]\\-]d".to_string()], false);
         assert_eq!(out.specs[0], ":(exclude,glob)**/a?d");
         assert_eq!(out.widened, 1);
-        // A lone `[:` with no `:]` is an ordinary member, not a class.
+        // An inner `[:` whose first `]` is not `:`-preceded is an ordinary member,
+        // and that same `]` terminates the expression — even when a later `:]`
+        // exists. Scanning to the later `:]` would swallow the real terminator and
+        // collapse the stretch to `**/a?d`, which stops matching the
+        // `ax-b:]c]d` that gitignore hides.
         assert_eq!(specs("a[[:x]d")[0], ":(exclude,glob)**/a[[:x]d");
+        let split = pathspecs_for(&["a[[:x]\\-b:]c]d".to_string()], false);
+        assert_eq!(split.specs[0], ":(exclude,glob)**/a[[:x]?b:]c]d");
+        assert_eq!(split.widened, 1);
+
+        // `[:]` is not a class on either side (its `]` is not `:`-preceded).
+        assert_eq!(specs("a[[:]]d")[0], ":(exclude,glob)**/a[[:]]d");
+        // `[::]` is where we are deliberately STRICTER than wildmatch, which
+        // accepts the empty name and abandons the pattern. Behaviour still agrees
+        // here only because the emitted term keeps the `[::]`, so the pathspec
+        // engine abandons it too — both hide nothing (measured).
+        assert_eq!(specs("a[[::]]d")[0], ":(exclude,glob)**/a[[::]]d");
+        assert_eq!(specs("a[d[::]b")[0], ":(exclude,glob)**/a[d[::]b");
+        let kept = pathspecs_for(&["a[[::]\\-b]d".to_string()], false);
+        assert_eq!(kept.specs[0], ":(exclude,glob)**/a[[::]?b]d");
+        assert_eq!(kept.widened, 1);
+        // The one shape where the stricter guard changes BEHAVIOUR: the escape
+        // sits inside the expression we end early, so the `[::]` is widened away
+        // and the term matches names gitignore abandons entirely. Over-exclusion,
+        // never a leak.
+        let diverged = pathspecs_for(&["a[\\x[::]d".to_string()], false);
+        assert_eq!(diverged.specs[0], ":(exclude,glob)**/a?d");
+        assert_eq!(diverged.widened, 1);
 
         // Unterminated: both engines abandon the pattern and match nothing, and
         // the copied `[` keeps the pathspec side there.
@@ -1126,6 +1171,133 @@ mod tests {
             ["notes ".to_string()].into_iter().collect::<BTreeSet<_>>(),
             "only the trailing-space file is hidden; listed = {listed:?}"
         );
+    }
+
+    /// A widened bracket still hides everything the gitignore engine hides —
+    /// asserted as a DIRECTION, not as an emitted term, so a future translation
+    /// that widens differently stays covered as long as it stays fail-closed.
+    ///
+    /// `a[[:x]\-b:]c]d` is the shape that catches an over-scanning terminator
+    /// search. Its first `]` is not `:`-preceded, so wildmatch reads the inner `[`
+    /// as an ordinary member and ends the class right there; a scan that hunted
+    /// for a later `:]` instead would swallow the real terminator, collapse the
+    /// pattern to a three-character match, and quietly stop hiding the long names
+    /// gitignore hides — a leak, on the engine that guards the model boundary.
+    ///
+    /// Built in the object database because the fixture names contain `:`, which
+    /// Windows will not accept in a filename — `parity_repo` cannot carry them.
+    #[tokio::test]
+    async fn widened_bracket_never_under_excludes_the_gitignore_set() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-aiignore-posix-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo = dir.path().to_string_lossy().into_owned();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "t@t.local"],
+            vec!["config", "user.name", "T"],
+            vec!["config", "core.ignorecase", "false"],
+        ] {
+            run_git(Some(&repo), &args, DEFAULT_TIMEOUT).await.unwrap();
+        }
+
+        let git_out = |args: Vec<String>, input: Option<String>| {
+            let repo = repo.clone();
+            async move {
+                let argref: Vec<&str> = args.iter().map(String::as_str).collect();
+                run_git_input(Some(&repo), &argref, input.as_deref(), DEFAULT_TIMEOUT)
+                    .await
+                    .unwrap()
+                    .stdout_lossy()
+            }
+        };
+
+        let blob = git_out(
+            vec!["hash-object".into(), "-w".into(), "--stdin".into()],
+            Some("x\n".into()),
+        )
+        .await
+        .trim()
+        .to_string();
+        // `ax-…`/`a[-…` are class members of `[[:x]`; `axQ…` differs only where
+        // gitignore has a literal `-`, so it witnesses the widening; `aZ-…` and
+        // `aXd` are the controls neither engine may hide.
+        let files = [
+            "ax-b:]c]d",
+            "a[-b:]c]d",
+            "axQb:]c]d",
+            "aZ-b:]c]d",
+            "aXd",
+        ];
+        let rows: String = files
+            .iter()
+            .map(|p| format!("100644 blob {blob}\t{p}\n"))
+            .collect();
+        let tree = git_out(vec!["mktree".into()], Some(rows))
+            .await
+            .trim()
+            .to_string();
+        let empty = git_out(vec!["mktree".into()], Some(String::new()))
+            .await
+            .trim()
+            .to_string();
+
+        let patterns = vec!["a[[:x]\\-b:]c]d".to_string()];
+        let terms = pathspecs_for_repo(&repo, &patterns).await.specs;
+        let mut args: Vec<String> = vec![
+            "diff".into(),
+            "--name-only".into(),
+            empty,
+            tree,
+            "--".into(),
+            ".".into(),
+        ];
+        args.extend(terms);
+        let listed: BTreeSet<String> = git_out(args, None)
+            .await
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect();
+        let by_pathspec: BTreeSet<String> = files
+            .iter()
+            .map(|p| p.to_string())
+            .filter(|p| !listed.contains(p))
+            .collect();
+
+        let by_gitignore: BTreeSet<String> = git_filter_ai_ignored(
+            repo.clone(),
+            files.iter().map(|p| p.to_string()).collect(),
+            patterns,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+
+        // Fixture precondition: without this the subset check below is vacuous,
+        // and this is the exact name an over-scan drops.
+        assert!(
+            by_gitignore.contains("ax-b:]c]d"),
+            "fixture must exercise the shape; gitignore hid {by_gitignore:?}"
+        );
+        assert!(
+            by_gitignore.is_subset(&by_pathspec),
+            "pathspec must hide at least the gitignore set; \
+             gitignore {by_gitignore:?} vs pathspec {by_pathspec:?}"
+        );
+        // Strictly more, so the subset check cannot pass by the widening having
+        // silently become an exact translation of something else.
+        assert!(
+            by_pathspec.contains("axQb:]c]d"),
+            "the widened member should also sweep the witness; pathspec {by_pathspec:?}"
+        );
+        // The controls stay visible on BOTH engines — a widening, not a wildcard.
+        for control in ["aZ-b:]c]d", "aXd"] {
+            assert!(!by_pathspec.contains(control), "pathspec swept {control}");
+            assert!(!by_gitignore.contains(control), "gitignore swept {control}");
+        }
     }
 
     /// The two engines agree with each other AND with the measured table, for
