@@ -289,8 +289,10 @@ export const usePlanStore = create<PlanState>((set, get) => {
               // restart superseded) — a killed process may emit one on the way out.
               if (!superseded())
                 patch(id, {
+                  // The terminal event's OWN text — never the delta accumulation,
+                  // whose narration could pass the error-shape net as the "reason".
                   error: terminalErrorMessage(
-                    finalText,
+                    ev.text,
                     "The planner reported an error.",
                   ),
                 });

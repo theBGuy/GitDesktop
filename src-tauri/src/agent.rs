@@ -157,7 +157,11 @@ pub enum ReviewEvent {
         tool: String,
         target: Option<String>,
     },
-    /// Terminal success: the full final review text plus run metadata.
+    /// Terminal event, success or failure: on success `text` is the full final
+    /// answer; on `is_error` it carries what the CLI reported at termination — an
+    /// error message when the CLI gave one (copilot `session.error`, claude API /
+    /// limit text), possibly run output on cap-style stops, which is why consumers
+    /// surface it as the reason only when error-shaped (`terminalErrorMessage`).
     Done {
         text: String,
         is_error: bool,
@@ -1605,8 +1609,8 @@ fn claude_result_is_error(v: &serde_json::Value, text: &str, synthetic_error: Op
 /// Whether `text` contains a paragraph break — two newlines separated only by
 /// blanks, so CRLF bodies count. Mirrors `/\n[ \t\r]*\n/` in the TS twins
 /// (`looksLikeProviderError` in `src/lib/automations/runner.ts`,
-/// `terminalErrorMessage` in `src/lib/ai/cli-client.ts`); all three predicates
-/// must stay semantically aligned.
+/// `terminalErrorMessage` in `src/lib/ai/terminal-error.ts`); all three
+/// predicates must stay semantically aligned.
 fn has_blank_line(text: &str) -> bool {
     text.match_indices('\n').any(|(i, _)| {
         text[i + 1..]
