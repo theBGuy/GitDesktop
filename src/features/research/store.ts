@@ -354,7 +354,11 @@ export const useResearchStore = create<ResearchState>((set, get) => {
               status: "",
             });
           } else if (ev.kind === "done") {
-            if (ev.text.length > finalText.length) finalText = ev.text;
+            // Prefer the terminal event's authoritative full text — except on an
+            // errored Done, whose text is the failure reason and must not fold
+            // into the transcript (visible on the superseded path).
+            if (!ev.isError && ev.text.length > finalText.length)
+              finalText = ev.text;
             if (ev.costUsd != null) patch(id, { costUsd: ev.costUsd });
             // Whole-message agents (e.g. Codex) stream no deltas — fold the final
             // text in so the transcript shows it after its tool steps (uniform with

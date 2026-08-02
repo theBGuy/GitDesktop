@@ -1216,7 +1216,8 @@ fn parse_codex_line(
 /// `exitCode` fails the run. Setup/MCP/skills/reasoning events ignored.
 ///
 /// A `\n\n` is lazily PREPENDED to the first non-empty delta after a completed
-/// message, so the delta buffer still ENDS WITH `Done.text` (frontend invariant).
+/// message, so the delta buffer still ENDS WITH `Done.text` (frontend invariant —
+/// success path only; an errored `Done` carries the failure reason instead).
 fn parse_copilot_line(
     line: &str,
     saw_terminal: &mut bool,
