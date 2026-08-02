@@ -137,10 +137,9 @@ pub struct AgentInfo {
 /// Streaming events sent to the frontend over the review channel.
 ///
 /// `rename_all` renames VARIANT tags only, so `rename_all_fields` is load-bearing
-/// for the TS mirror (`src/lib/ai/agent.ts`): without it `Done.is_error` arrived as
-/// `undefined` and every failure reported through `Done` (claude, copilot) read as a
-/// success, publishing provider error text as review content — the `Error` variant's
-/// single-word field was unaffected. `review_event_wire_shape_is_camel_case` pins it.
+/// for the TS mirror (`src/lib/ai/agent.ts`): without it a multi-word field like
+/// `Done.is_error` reaches TS as `undefined`, silently — a failure reported through
+/// `Done` then reads as a success. `review_event_wire_shape_is_camel_case` pins it.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ReviewEvent {
@@ -1208,9 +1207,9 @@ fn parse_codex_line(
 
 /// Parses one line of Copilot CLI `--output-format json` (JSONL). Streams
 /// `message_delta.deltaContent` as narration, keeps the latest
-/// `assistant.message.content` as the final text, emits `Done` at `result`
-/// (a `session.error` or a non-zero `exitCode` fails the run).
-/// Setup/MCP/skills/reasoning events ignored.
+/// `assistant.message.content` as the final text, emits `Done` at `result` — a
+/// `session.error` (whose message becomes the failure reason) or a non-zero
+/// `exitCode` fails the run. Setup/MCP/skills/reasoning events ignored.
 ///
 /// A `\n\n` is lazily PREPENDED to the first non-empty delta after a completed
 /// message, so the delta buffer still ENDS WITH `Done.text` (frontend invariant).
@@ -1220,7 +1219,7 @@ fn parse_copilot_line(
     last_message: &mut String,
     emitted_text: &mut bool,
     pending_sep: &mut bool,
-    saw_error: &mut bool,
+    error_message: &mut Option<String>,
 ) -> Option<ReviewEvent> {
     let line = line.trim();
     if line.is_empty() {
@@ -1280,26 +1279,33 @@ fn parse_copilot_line(
             })
         }
         "session.error" => {
-            let msg = v
-                .get("data")
-                .and_then(|d| d.get("message"))
-                .and_then(|m| m.as_str())
-                .unwrap_or("Copilot reported an error.");
-            if last_message.is_empty() {
-                *last_message = msg.to_string();
-            }
-            // Latch: the CLI still exits 0 after a session error, which would ship the
-            // error message as a successful answer. A later genuine recovery now fails
-            // the run too — acceptable for a CLI whose only verdict is the exit code.
-            *saw_error = true;
+            // The CLI still exits 0 after a session error, so this message is the only
+            // failure reason there is — keep it whole, whatever prose already streamed.
+            // A later genuine recovery now fails the run too; acceptable for a CLI whose
+            // only other verdict is the exit code.
+            *error_message = Some(
+                v.get("data")
+                    .and_then(|d| d.get("message"))
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("Copilot reported an error.")
+                    .to_string(),
+            );
             None // surfaced at the terminal `result`
         }
         "result" => {
             *saw_terminal = true;
-            let is_error =
-                *saw_error || v.get("exitCode").and_then(|c| c.as_i64()).unwrap_or(0) != 0;
+            // An errored `Done` carries the REASON, not the prose (which stays in the
+            // delta stream): the buffer-ends-with-`Done.text` peel runs only on a
+            // successful settle — both frontend consumers reject on `is_error` first.
+            let (text, is_error) = match error_message.take() {
+                Some(msg) => (msg, true),
+                None => (
+                    std::mem::take(last_message),
+                    v.get("exitCode").and_then(|c| c.as_i64()).unwrap_or(0) != 0,
+                ),
+            };
             Some(ReviewEvent::Done {
-                text: std::mem::take(last_message),
+                text,
                 is_error,
                 cost_usd: None,
             })
@@ -1557,12 +1563,16 @@ fn parse_claude_line(
     }
 }
 
+/// Longest body the error-shape net will judge. Three copies must agree: this one,
+/// `ERROR_SHAPE_MAX_CHARS` (automations runner) and `MAX_ERROR_TEXT` (terminal-error).
+const ERROR_TEXT_MAX_CHARS: usize = 300;
+
 /// Whether a Claude terminal `result` line reports a FAILED run.
 ///
 /// The CLI exits 0 and reports `subtype: "success"` even on an API error, and
 /// some versions ship usage-limit / API-error text as the `result` with
-/// `is_error: false` — so the flag alone once shipped an error message as a real
-/// PR review comment. Structural signals first, then a narrow text net.
+/// `is_error: false` — the flag alone cannot be trusted. Structural signals
+/// first, then a narrow text net.
 fn claude_result_is_error(v: &serde_json::Value, text: &str, synthetic_error: Option<&str>) -> bool {
     if v.get("is_error").and_then(|b| b.as_bool()).unwrap_or(false) {
         return true;
@@ -1581,12 +1591,11 @@ fn claude_result_is_error(v: &serde_json::Value, text: &str, synthetic_error: Op
     if synthetic_error.is_some_and(|s| s == trimmed) {
         return true;
     }
-    // Best-effort net behind the structural signals above, for limit messages that
-    // arrive with none of them (2026-07-29 incident: an "API Error: 500" body was
-    // posted as a review). Deliberately narrow — a real review that merely mentions
-    // limits is multi-paragraph and far longer.
+    // Best-effort net behind the structural signals above, for limit / API-error
+    // bodies that arrive with none of them. Deliberately narrow — a real review
+    // that merely mentions limits is multi-paragraph and far longer.
     !trimmed.is_empty()
-        && trimmed.chars().count() <= 300
+        && trimmed.chars().count() <= ERROR_TEXT_MAX_CHARS
         && !has_blank_line(trimmed)
         && (trimmed.starts_with("API Error")
             || trimmed.starts_with("Claude AI usage limit reached")
@@ -1736,9 +1745,10 @@ async fn stream_agent(
     let mut emitted_text = false;
     let mut pending_sep = false;
     // claude: text of a synthetic API-error message, matched against the terminal
-    // `result`. copilot: a `session.error` was seen (its exit code lies).
+    // `result`. copilot: a `session.error`'s message — the run's failure reason,
+    // since its exit code lies.
     let mut claude_synthetic_error: Option<String> = None;
-    let mut copilot_saw_error = false;
+    let mut copilot_error: Option<String> = None;
     let mut cancelled = false;
     let mut timed_out = false;
 
@@ -1778,7 +1788,7 @@ async fn stream_agent(
                                 &mut last_message,
                                 &mut emitted_text,
                                 &mut pending_sep,
-                                &mut copilot_saw_error,
+                                &mut copilot_error,
                             ),
                             AgentKind::Opencode => parse_opencode_line(
                                 &l,
@@ -2805,7 +2815,8 @@ mod tests {
     fn copilot_lazy_separator_between_assistant_messages() {
         // Deltas across two assistant messages get exactly one `\n\n` between them.
         let (mut term, mut msg) = (false, String::new());
-        let (mut emitted, mut pending, mut err) = (false, false, false);
+        let (mut emitted, mut pending) = (false, false);
+        let mut err: Option<String> = None;
         let d1 = r#"{"type":"assistant.message_delta","data":{"deltaContent":"First."}}"#;
         let m1 = r#"{"type":"assistant.message","data":{"content":"First."}}"#;
         let d2 = r#"{"type":"assistant.message_delta","data":{"deltaContent":"Second."}}"#;
@@ -2829,7 +2840,8 @@ mod tests {
     fn copilot_first_delta_has_no_separator() {
         // The very first delta of a run must not be prefixed (nothing emitted before).
         let (mut term, mut msg) = (false, String::new());
-        let (mut emitted, mut pending, mut err) = (false, false, false);
+        let (mut emitted, mut pending) = (false, false);
+        let mut err: Option<String> = None;
         let d = r#"{"type":"assistant.message_delta","data":{"deltaContent":"Hello."}}"#;
         let ev =
             parse_copilot_line(d, &mut term, &mut msg, &mut emitted, &mut pending, &mut err)
@@ -2844,10 +2856,11 @@ mod tests {
 
     #[test]
     fn copilot_session_error_fails_the_run_despite_exit_zero() {
-        // The CLI exits 0 after a session error, which once shipped the error text as
-        // a successful answer; the latch makes the terminal `result` report failure.
+        // The CLI exits 0 after a session error, so exit code alone would report the
+        // error text as a successful answer; the stash makes `result` report failure.
         let (mut term, mut msg) = (false, String::new());
-        let (mut emitted, mut pending, mut err) = (false, false, false);
+        let (mut emitted, mut pending) = (false, false);
+        let mut err: Option<String> = None;
         assert!(
             parse_copilot_line(
                 CP_SESSION_ERROR,
@@ -2859,7 +2872,7 @@ mod tests {
             )
             .is_none()
         );
-        assert!(err);
+        assert_eq!(err.as_deref(), Some("API rate limit exceeded for this session."));
         let ev = parse_copilot_line(
             CP_RESULT_OK,
             &mut term,
@@ -2881,9 +2894,47 @@ mod tests {
     }
 
     #[test]
+    fn copilot_session_error_after_prose_reports_the_reason_not_the_prose() {
+        // Prose already streamed when the session errors: `Done.text` must still be the
+        // REASON — the frontend refuses run output as an error message, and the prose
+        // survives in the delta stream regardless.
+        let (mut term, mut msg) = (false, String::new());
+        let (mut emitted, mut pending) = (false, false);
+        let mut err: Option<String> = None;
+        let prose = r#"{"type":"assistant.message","data":{"content":"Here is my review of the retry path."}}"#;
+        parse_copilot_line(prose, &mut term, &mut msg, &mut emitted, &mut pending, &mut err);
+        assert_eq!(msg, "Here is my review of the retry path.");
+        parse_copilot_line(
+            CP_SESSION_ERROR,
+            &mut term,
+            &mut msg,
+            &mut emitted,
+            &mut pending,
+            &mut err,
+        );
+        let ev = parse_copilot_line(
+            CP_RESULT_OK,
+            &mut term,
+            &mut msg,
+            &mut emitted,
+            &mut pending,
+            &mut err,
+        )
+        .unwrap();
+        match ev {
+            ReviewEvent::Done { text, is_error, .. } => {
+                assert!(is_error);
+                assert_eq!(text, "API rate limit exceeded for this session.");
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn copilot_clean_run_stays_successful() {
         let (mut term, mut msg) = (false, String::new());
-        let (mut emitted, mut pending, mut err) = (false, false, false);
+        let (mut emitted, mut pending) = (false, false);
+        let mut err: Option<String> = None;
         let m = r#"{"type":"assistant.message","data":{"content":"All good."}}"#;
         parse_copilot_line(m, &mut term, &mut msg, &mut emitted, &mut pending, &mut err);
         let ev = parse_copilot_line(

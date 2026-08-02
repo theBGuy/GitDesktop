@@ -8,9 +8,9 @@ import {
 import { toastError } from "@/lib/toast";
 import type { AgentToolKind } from "./agent";
 import { cancelAgentReview, providerKind, runAgentReview } from "./agent";
-import { terminalErrorMessage } from "./cli-client";
 import { createAiClient, runAgenticStream } from "./client";
 import { isCliProvider } from "./providers";
+import { terminalErrorMessage } from "./terminal-error";
 import type { AiSettings } from "./types";
 
 export interface CliStreamOpts {
@@ -370,9 +370,10 @@ export function useAiTextStream() {
             if (isCurrent()) abortRef.current = a;
           },
         });
-        // A cancel can also settle cleanly (a killed CLI run returns with no
-        // terminal event), so success is "no throw AND not cancelled".
-        return !cancelledRef.current;
+        // A cancel can also settle cleanly (a killed CLI run returns with no terminal
+        // event), so success is "no throw AND not cancelled" — and a superseded run
+        // must report failure rather than read the newer run's reset cancel flag.
+        return isCurrent() && !cancelledRef.current;
       } catch (e) {
         if (!cancelledRef.current && isCurrent()) toastError(e);
         return false;

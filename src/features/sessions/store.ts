@@ -8,6 +8,7 @@ import {
   type TranscriptSegment,
 } from "@/lib/ai/agent";
 import { cleanupContainerSandbox, stopTestContainer } from "@/lib/ai/sandbox";
+import { terminalErrorMessage } from "@/lib/ai/terminal-error";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import {
   commitWorktreeAll,
@@ -436,8 +437,10 @@ async function runTurn(
             ...(ev.isError
               ? {
                   status: "error",
-                  error:
-                    last.narration || ev.text || "The agent reported an error.",
+                  error: terminalErrorMessage(
+                    ev.text,
+                    "The agent reported an error.",
+                  ),
                 }
               : {}),
           });

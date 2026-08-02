@@ -16,6 +16,7 @@ import {
   extractPlanDraft,
   validatePlanPaths,
 } from "@/lib/ai/prompt";
+import { terminalErrorMessage } from "@/lib/ai/terminal-error";
 import { gitListTracked, readRepoInstructions } from "@/lib/git/api";
 import { notify } from "@/lib/notify";
 import { loadSettings } from "@/lib/settings/api";
@@ -288,7 +289,10 @@ export const usePlanStore = create<PlanState>((set, get) => {
               // restart superseded) — a killed process may emit one on the way out.
               if (!superseded())
                 patch(id, {
-                  error: finalText || "The planner reported an error.",
+                  error: terminalErrorMessage(
+                    finalText,
+                    "The planner reported an error.",
+                  ),
                 });
             }
           } else if (ev.kind === "error") {

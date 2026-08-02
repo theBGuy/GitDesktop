@@ -18,6 +18,7 @@ import {
   buildResearchPrompt,
   extractResearchReport,
 } from "@/lib/ai/prompt";
+import { terminalErrorMessage } from "@/lib/ai/terminal-error";
 import { readRepoInstructions } from "@/lib/git/api";
 import { notify } from "@/lib/notify";
 import { loadSettings } from "@/lib/settings/api";
@@ -368,7 +369,10 @@ export const useResearchStore = create<ResearchState>((set, get) => {
               // restart superseded) — a killed process may emit one on the way out.
               if (!superseded())
                 patch(id, {
-                  error: finalText || "The research agent reported an error.",
+                  error: terminalErrorMessage(
+                    finalText,
+                    "The research agent reported an error.",
+                  ),
                 });
             }
           } else if (ev.kind === "error") {

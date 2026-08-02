@@ -7,6 +7,7 @@ import {
   runAgentReview,
 } from "./agent";
 import { PROVIDER_LABELS } from "./providers";
+import { terminalErrorMessage } from "./terminal-error";
 import type { AiClient, AiSettings, AiStreamRequest } from "./types";
 
 /** The `<CLI> login` command each agent uses to authenticate — mirrors the
@@ -17,28 +18,6 @@ const LOGIN_COMMAND = {
   copilot: "copilot login",
   opencode: "opencode auth login",
 } as const;
-
-/** Longest terminal text we will accept as an error reason — mirrors the
- *  runner-side error-shape tripwire's ceiling. */
-const MAX_ERROR_TEXT = 300;
-
-/**
- * The message for an errored terminal event. Short single-paragraph terminal text on an
- * errored run is the CLI's own error message (probe-verified); anything longer or
- * multi-paragraph is run output — e.g. a run failed by its terminal reason alone
- * carries its truncated body there — and must never be presented as the reason.
- */
-export function terminalErrorMessage(text: string): string {
-  const trimmed = text.trim();
-  if (
-    !trimmed ||
-    trimmed.length > MAX_ERROR_TEXT ||
-    /\n[ \t\r]*\n/.test(trimmed)
-  ) {
-    return "The run ended with an error.";
-  }
-  return trimmed;
-}
 
 /**
  * Builds an {@link AiClient} backed by a locally-installed agent CLI

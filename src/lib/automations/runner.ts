@@ -141,9 +141,10 @@ const ERROR_SHAPE_CLIP_CHARS = 200;
 
 /**
  * Last-resort net for a CLI/provider that reports a failure as a successful review —
- * an outage once posted "API Error: 500 …" as a real automated PR comment (2026-07-29).
- * Scoped to a SHORT, single-paragraph WHOLE body, so a genuine review that merely quotes
- * an error can't trip it; the parser-side twin guards agent.rs's claude result branch.
+ * this is the unattended path, so an error body that slips through gets posted to a
+ * real PR. Scoped to a SHORT, single-paragraph WHOLE body, so a genuine review that
+ * merely quotes an error can't trip it; the parser-side twin guards agent.rs's claude
+ * result branch.
  */
 function looksLikeProviderError(text: string): boolean {
   const body = text.trim();
