@@ -25,8 +25,8 @@ const MAX_ERROR_TEXT = 300;
 /**
  * The message for an errored terminal event. Short single-paragraph terminal text on an
  * errored run is the CLI's own error message (probe-verified); anything longer or
- * multi-paragraph is run output, which must never be presented as the failure reason —
- * a run failed by its terminal reason alone carries the truncated body there.
+ * multi-paragraph is run output — e.g. a run failed by its terminal reason alone
+ * carries its truncated body there — and must never be presented as the reason.
  */
 export function terminalErrorMessage(text: string): string {
   const trimmed = text.trim();

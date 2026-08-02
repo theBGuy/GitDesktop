@@ -141,7 +141,8 @@ export async function runCliStream({
             settled = true;
             onCost?.(event.costUsd);
             // An errored run keeps whatever streamed — partial text plus the error, no strip.
-            // Its terminal text is the CLI's error message, not review content: surface it.
+            // Surface the terminal text as the reason only when it's error-shaped
+            // (terminalErrorMessage refuses run output, e.g. a body ended by session.error).
             if (event.isError) {
               reject(new Error(terminalErrorMessage(event.text)));
               return;

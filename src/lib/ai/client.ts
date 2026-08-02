@@ -106,8 +106,9 @@ export async function createAiClient(
                 "The generation was cancelled.",
                 "AbortError",
               );
-            // Remaining parts carry no text; this call passes no tools, so no
-            // tool part can arrive.
+            // Non-answer parts (reasoning deltas included) are dropped on purpose —
+            // only answer text belongs in a draft; no tools are passed, so no tool
+            // part can arrive.
             default:
               break;
           }

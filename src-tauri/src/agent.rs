@@ -138,8 +138,9 @@ pub struct AgentInfo {
 ///
 /// `rename_all` renames VARIANT tags only, so `rename_all_fields` is load-bearing
 /// for the TS mirror (`src/lib/ai/agent.ts`): without it `Done.is_error` arrived as
-/// `undefined` and every failed run read as a success, publishing provider error
-/// text as review content. `review_event_wire_shape_is_camel_case` pins the shape.
+/// `undefined` and every failure reported through `Done` (claude, copilot) read as a
+/// success, publishing provider error text as review content — the `Error` variant's
+/// single-word field was unaffected. `review_event_wire_shape_is_camel_case` pins it.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ReviewEvent {
@@ -1593,8 +1594,10 @@ fn claude_result_is_error(v: &serde_json::Value, text: &str, synthetic_error: Op
 }
 
 /// Whether `text` contains a paragraph break — two newlines separated only by
-/// blanks, so CRLF bodies count. Mirrors `/\n[ \t\r]*\n/` in the runner-side twin
-/// (`src/lib/automations/runner.ts`); the two nets must stay semantically aligned.
+/// blanks, so CRLF bodies count. Mirrors `/\n[ \t\r]*\n/` in the TS twins
+/// (`looksLikeProviderError` in `src/lib/automations/runner.ts`,
+/// `terminalErrorMessage` in `src/lib/ai/cli-client.ts`); all three predicates
+/// must stay semantically aligned.
 fn has_blank_line(text: &str) -> bool {
     text.match_indices('\n').any(|(i, _)| {
         text[i + 1..]
