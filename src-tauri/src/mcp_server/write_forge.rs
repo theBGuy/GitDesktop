@@ -227,6 +227,11 @@ struct UpdateReleaseArgs {
     /// New prerelease state (GitHub only). Omit to keep the current state.
     #[serde(default)]
     prerelease: Option<bool>,
+    /// Whether to also point the release's `latest.json` Tauri updater manifest at
+    /// the new notes (GitHub only, and only when the release carries that asset).
+    /// Defaults to true; set false to leave the manifest alone.
+    #[serde(default)]
+    sync_updater_notes: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -382,6 +387,65 @@ struct CloseDiscussionArgs {
     /// to "RESOLVED".
     #[serde(default)]
     reason: String,
+}
+
+/// Tauri's updater manifest, attached to a release as an asset of this exact name.
+/// Mirrors `github::release`'s own constant (private to that module) and the
+/// frontend's `UPDATER_MANIFEST_NAME`.
+const UPDATER_MANIFEST: &str = "latest.json";
+
+/// Point a just-edited release's updater manifest at `notes`, mirroring the in-app
+/// editor's gate: GitHub only, and only when the release actually ships a
+/// `latest.json` asset. `None` = a gate skipped it (the common case — most repos
+/// have no manifest), `Some(Err)` = a ready-to-report sentence for the caller to
+/// disclose alongside the successful edit — each failure arm words its own, so
+/// neither asserts a manifest exists when that is exactly what went unverified.
+/// `current` is the pre-edit release read when the tool already needed one; an
+/// edit can't change the asset list.
+async fn sync_release_updater_notes(
+    repo: &str,
+    tag: &str,
+    notes: &str,
+    current: Option<&crate::github::release::ReleaseDetails>,
+) -> Option<Result<(), String>> {
+    // `detect_non_github` returning None IS the GitHub arm (forge's resilient
+    // default); GitLab/Bitbucket releases carry no Tauri updater manifest.
+    if crate::forge::detect_non_github(repo).await.is_some() {
+        return None;
+    }
+    let fetched;
+    let release = match current {
+        Some(r) => r,
+        None => {
+            match crate::forge::forge_release_view(repo.to_string(), tag.to_string()).await {
+                Ok(r) => {
+                    fetched = r;
+                    &fetched
+                }
+                // Can't tell whether a manifest is attached — report rather than
+                // let silence read as "this release has none".
+                Err(e) => {
+                    return Some(Err(format!(
+                        "The release was updated, but whether it carries a \
+                         {UPDATER_MANIFEST} updater manifest could not be checked: {e}"
+                    )))
+                }
+            }
+        }
+    };
+    if !release.assets.iter().any(|a| a.name == UPDATER_MANIFEST) {
+        return None;
+    }
+    Some(
+        crate::github::release::gh_release_sync_updater_notes(repo, tag, notes)
+            .await
+            .map_err(|e| {
+                format!(
+                    "The release was updated, but its {UPDATER_MANIFEST} updater manifest \
+                     was not: {e}"
+                )
+            }),
+    )
 }
 
 #[tool_router(router = write_forge_router, vis = "pub(crate)")]
@@ -1019,8 +1083,12 @@ impl GitDesktopMcp {
         description = "Edit a release's title and/or notes (and, on GitHub, its draft/prerelease \
                        state) by tag in the bound repository's forge (GitHub or GitLab, per its \
                        remote; Bitbucket releases aren't supported). Omitted fields keep their \
-                       current value (the current release is read first to preserve them). Requires \
-                       --allow-remote-write.",
+                       current value (the current release is read first to preserve them). When \
+                       `notes` are given and the release carries a `latest.json` Tauri updater \
+                       manifest (GitHub only), the manifest's notes are synced to match, so \
+                       installed apps show the same \"what's new\" as the release page — pass \
+                       `sync_updater_notes: false` to leave it alone. Releases without that asset \
+                       are unaffected. Requires --allow-remote-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn update_release(
@@ -1028,6 +1096,15 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<UpdateReleaseArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
+        // Captured before the fallbacks below consume `args.notes`. Empty/whitespace
+        // notes leave the release body untouched (the edit skips `--notes`), so there
+        // is nothing to carry into the manifest — syncing them would blank it.
+        let notes_to_sync = args
+            .notes
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(str::to_string);
         // forge_release_edit sends title/notes AND applies prerelease/draft explicitly
         // (gh's `--flag=<bool>` form), so an omitted flag would otherwise be forced to its
         // param default. Read the current release to preserve whatever the caller didn't
@@ -1074,7 +1151,26 @@ impl GitDesktopMcp {
         )
         .await
         .map_err(app_err)?;
-        json_result(&serde_json::json!({ "tag": args.tag, "action": "updated" }))
+        let mut result = serde_json::json!({ "tag": args.tag, "action": "updated" });
+        // The edit already landed, so a manifest-sync failure is a caveat on a
+        // successful result, never a tool error — and its text carries the recovery
+        // path for a clobbered manifest, so it ships verbatim.
+        if let Some(sync_notes) = notes_to_sync.filter(|_| args.sync_updater_notes != Some(false)) {
+            match sync_release_updater_notes(&self.repo, &args.tag, &sync_notes, current.as_ref())
+                .await
+            {
+                Some(Ok(())) => {
+                    result["updater_manifest"] = serde_json::Value::String(format!(
+                        "Updater manifest ({UPDATER_MANIFEST}) synced to the edited notes."
+                    ));
+                }
+                Some(Err(disclosure)) => {
+                    result["updater_manifest_error"] = serde_json::Value::String(disclosure);
+                }
+                None => {}
+            }
+        }
+        json_result(&result)
     }
 
     #[tool(
@@ -1570,6 +1666,7 @@ mod tests {
             notes: Some("n".into()),
             draft: Some(false),
             prerelease: Some(false),
+            sync_updater_notes: None,
         })));
         assert_gated!(h.create_review_thread(Parameters(CreateReviewThreadArgs {
             number: 1,

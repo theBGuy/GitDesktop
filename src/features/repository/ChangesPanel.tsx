@@ -622,12 +622,18 @@ export function ChangesPanel({ repoPath }: { repoPath: string }) {
     // Literal pathspecs so a `[slug]`-style path can't sweep a sibling's work
     // into the stash; `targets` stays raw for the toast below.
     stashPaths.mutate(targets.map(literalPathspec), {
-      onSuccess: () => {
-        toast.success(
-          targets.length === 1
-            ? `Stashed ${targets[0]}`
-            : `Stashed ${targets.length} files`,
-        );
+      // `matched` is false when the paths matched nothing, so no stash exists to
+      // report — the files were already gone by the time git ran.
+      onSuccess: (matched) => {
+        if (matched) {
+          toast.success(
+            targets.length === 1
+              ? `Stashed ${targets[0]}`
+              : `Stashed ${targets.length} files`,
+          );
+        } else {
+          toast.info("Nothing to stash");
+        }
         finish();
       },
       onError: (e) => {

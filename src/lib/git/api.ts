@@ -794,8 +794,7 @@ export const gitStashAll = (repoPath: string) =>
   invoke<void>("git_stash_all", { repoPath });
 
 // True when a stash entry was actually created (a pathspec matching nothing
-// no-ops at exit 0). No caller reads it yet; it's carried so a caller that
-// stashes a selection can tell "nothing matched" from a real stash.
+// no-ops at exit 0).
 export const gitStashPaths = (repoPath: string, paths: string[]) =>
   invoke<boolean>("git_stash_paths", { repoPath, paths });
 

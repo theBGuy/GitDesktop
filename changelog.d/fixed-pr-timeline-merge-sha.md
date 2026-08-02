@@ -1,0 +1,1 @@
+- A merged pull request's timeline now shows the commit it was merged as.

@@ -368,20 +368,28 @@ pub(crate) async fn git_delete_remote_branch_core(
     }
 }
 
-/// The repository's default branch: origin's HEAD when known, otherwise a
-/// local "main"/"master" if one exists.
+/// The repository's default branch: the HEAD a remote points at — `origin` first,
+/// then every other remote in `git remote` order, so a clone made with `-o <name>`
+/// resolves too — otherwise a local "main"/"master" if one exists.
+///
+/// Local refs only, no network: this runs in read paths and takes no `State`, so a
+/// remote whose `refs/remotes/<remote>/HEAD` symref was never written (a hand-added
+/// one) falls through to the local-name fallback.
 #[tauri::command]
 pub async fn git_default_branch(repo_path: String) -> AppResult<Option<String>> {
-    let out = run_git_raw(
-        Some(&repo_path),
-        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-        DEFAULT_TIMEOUT,
-    )
-    .await?;
-    if out.code == 0 {
-        let full = out.stdout_lossy().trim().to_string();
-        let name = full.strip_prefix("origin/").unwrap_or(&full).to_string();
-        if !name.is_empty() {
+    // Best-effort: an unlistable remote set just leaves no remote HEAD to consult,
+    // which the local-name fallback below already covers.
+    let mut remotes = crate::git::remote::git_remotes(repo_path.clone())
+        .await
+        .unwrap_or_default();
+    // Origin first when present (a stable sort keeps the rest in `git remote` order).
+    remotes.sort_by_key(|r| r != "origin");
+    for remote in remotes {
+        let head_ref = format!("refs/remotes/{remote}/HEAD");
+        let prefix = format!("refs/remotes/{remote}/");
+        if let Some(name) =
+            crate::git::remote::read_symbolic_ref(&repo_path, &head_ref, &prefix).await?
+        {
             return Ok(Some(name));
         }
     }
@@ -822,8 +830,8 @@ fn unique_suffix() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_create_branch_args, git_branches, git_create_branch_core, parse_upstream_track,
-        validate_ref_name,
+        build_create_branch_args, git_branches, git_create_branch_core, git_default_branch,
+        parse_upstream_track, validate_ref_name,
     };
     use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
     use crate::state::AppState;
@@ -1119,6 +1127,104 @@ mod tests {
         assert_eq!(
             solo.upstream_remote, None,
             "an untracked branch carries no upstream remote"
+        );
+    }
+
+    /// `git clone -o upstream` writes `refs/remotes/upstream/HEAD` and no origin ref
+    /// at all, so resolution has to consult whatever remotes the repo actually has.
+    /// The source branch is named `trunk` — a name the local main/master fallback
+    /// can never produce, so only the remote HEAD can satisfy this.
+    #[tokio::test]
+    async fn default_branch_resolves_a_clone_whose_remote_isnt_origin() {
+        let (_base, base) = temp_base("default-branch-upstream");
+        let src = base.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let src_s = src.to_string_lossy().into_owned();
+        init_repo(&src_s, "r.txt").await;
+        run(&src_s, &["branch", "-m", "trunk"]).await;
+
+        let clone_s = base.join("clone").to_string_lossy().into_owned();
+        run_git(
+            None,
+            &["clone", "-q", "-o", "upstream", &src_s, &clone_s],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .expect("local clone succeeds");
+
+        assert_eq!(
+            git_default_branch(clone_s).await.expect("resolves"),
+            Some("trunk".to_string()),
+            "the only remote's HEAD answers even when it isn't named origin"
+        );
+    }
+
+    /// With several remotes, origin still wins — it is tried before the others
+    /// regardless of where `git remote` lists it.
+    #[tokio::test]
+    async fn default_branch_prefers_origin_over_other_remotes() {
+        let (_base, base) = temp_base("default-branch-origin-wins");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+
+        init_repo(&repo_s, "r.txt").await;
+        // URLs are the repo's own path — nothing is ever fetched; the HEAD symrefs
+        // are written by hand, exactly as a clone would leave them. `canonical` sorts
+        // before `origin`, so it is the remote a naive "first listed wins" would pick.
+        for remote in ["canonical", "origin"] {
+            run(&repo_s, &["remote", "add", remote, &repo_s]).await;
+            let head = format!("refs/remotes/{remote}/{remote}-head");
+            run(&repo_s, &["update-ref", &head, "HEAD"]).await;
+            run(
+                &repo_s,
+                &[
+                    "symbolic-ref",
+                    &format!("refs/remotes/{remote}/HEAD"),
+                    &head,
+                ],
+            )
+            .await;
+        }
+        assert!(
+            run(&repo_s, &["remote"])
+                .await
+                .trim()
+                .starts_with("canonical"),
+            "fixture must list a non-origin remote first for this to discriminate"
+        );
+
+        assert_eq!(
+            git_default_branch(repo_s).await.expect("resolves"),
+            Some("origin-head".to_string()),
+            "origin's HEAD wins over another remote's"
+        );
+    }
+
+    /// No remote HEAD to read: local `main`/`master` answer, anything else is `None`.
+    /// A remote whose HEAD symref was never written (a hand-added one) must fall
+    /// through here rather than reaching for the network.
+    #[tokio::test]
+    async fn default_branch_falls_back_to_local_names() {
+        let (_base, base) = temp_base("default-branch-fallback");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+
+        init_repo(&repo_s, "r.txt").await;
+        run(&repo_s, &["branch", "-m", "master"]).await;
+        assert_eq!(
+            git_default_branch(repo_s.clone()).await.expect("resolves"),
+            Some("master".to_string()),
+            "a remote-less repo falls back to its local master"
+        );
+
+        run(&repo_s, &["remote", "add", "upstream", &repo_s]).await;
+        run(&repo_s, &["branch", "-m", "topic"]).await;
+        assert_eq!(
+            git_default_branch(repo_s).await.expect("resolves"),
+            None,
+            "a remote with no HEAD symref and no main/master resolves to nothing"
         );
     }
 }

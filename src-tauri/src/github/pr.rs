@@ -2563,8 +2563,12 @@ pub async fn gh_pr_reactions(
 /// feeding the Conversation tab. The backend maps a GitHub `timelineItems`
 /// `__typename` onto a variant; an unclassifiable node is skipped, never a panic.
 /// Every `actor`/`date`/oid defaults to `""` for GitHub nulls.
+///
+/// `rename_all` renames VARIANT tags only, so `rename_all_fields` is load-bearing
+/// for the TS mirror (`src/lib/git/types.ts`): without it `Merged.commit_oid` reaches
+/// TS as `undefined` and a merged PR silently loses its merge commit.
 #[derive(Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum PrTimelineEventOut {
     /// `HeadRefForcePushedEvent` — the head branch was force-pushed.
     ForcePushed {
@@ -4885,6 +4889,28 @@ github.acme.com
         // An unrecognized/missing __typename is skipped (None), not a panic.
         assert!(node(serde_json::json!({ "__typename": "SomeOtherEvent" })).is_none());
         assert!(node(serde_json::json!({ "actor": {"login": "a"} })).is_none());
+    }
+
+    #[test]
+    fn merged_timeline_event_wire_shape_is_camel_case() {
+        // Pins the IPC contract with the TS mirror (src/lib/git/types.ts): `commit_oid`
+        // is the enum's only multi-word field, and the frontend reads it as `commitOid`.
+        let merged = serde_json::to_value(PrTimelineEventOut::Merged {
+            actor: "alice".to_string(),
+            commit_oid: Some("deadbeef".to_string()),
+            date: "2026-05-12T12:01:23Z".to_string(),
+        })
+        .expect("Merged serializes");
+        let obj = merged.as_object().expect("Merged is a JSON object");
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["actor", "commitOid", "date", "kind"]);
+        assert_eq!(obj["kind"], "merged");
+        assert_eq!(obj["commitOid"], "deadbeef");
+        assert!(
+            obj.get("commit_oid").is_none(),
+            "snake_case field must not ship"
+        );
     }
 
     #[test]

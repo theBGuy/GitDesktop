@@ -373,7 +373,7 @@ pub async fn git_remote_default_branch(
 /// Read a symbolic ref and strip `prefix` off its target, returning the tail
 /// (the branch name). `None` when the ref is unset — `git symbolic-ref` exits
 /// non-zero — or its target doesn't start with `prefix`.
-async fn read_symbolic_ref(
+pub(crate) async fn read_symbolic_ref(
     repo_path: &str,
     symref: &str,
     prefix: &str,
