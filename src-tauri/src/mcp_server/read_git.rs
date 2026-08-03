@@ -320,7 +320,9 @@ fn parse_remote_v(listing: &str) -> (Vec<&str>, std::collections::HashMap<&str, 
             names.push(name);
         }
         if let Some(url) = rest.strip_suffix(" (fetch)") {
-            fetch_urls.insert(name, url);
+            // First-wins, like `names` above: `get-url` answers with a remote's FIRST
+            // url, so agreeing by construction survives a second fetch row.
+            fetch_urls.entry(name).or_insert(url);
         }
     }
     (names, fetch_urls)

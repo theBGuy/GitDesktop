@@ -369,9 +369,9 @@ function LiveTaskRow({
  *
  *  Re-run just fires `task.rerun()` — it does NOT remove the row here. The row is
  *  removed inside the runner only once the replacement run actually registers, so
- *  a re-run that can't start (rule disabled since, or a claim/watermark still held
- *  by the canceled run unwinding) leaves the row in place as a retry target and
- *  toasts why. Dismiss removes the row outright. */
+ *  a re-run that can't start (rule disabled since, or a claim or already-covered
+ *  head still held by the canceled run unwinding) leaves the row in place as a
+ *  retry target and toasts why. Dismiss removes the row outright. */
 function StoppedTaskRow({
   task,
   crossRepo,

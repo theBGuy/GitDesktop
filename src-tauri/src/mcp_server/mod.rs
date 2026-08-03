@@ -915,6 +915,51 @@ mod tests {
         assert_eq!(per_module, 119);
     }
 
+    /// The exact set of tools a connected agent is told may destroy state. Annotations are
+    /// what a client gates its confirmation prompt on, so this list moves only when a
+    /// change INTENDS to move it — a tool that silently drops state the caller never named
+    /// (or lands a not-trivially-recoverable outcome) belongs here.
+    #[test]
+    fn destructive_tools_are_exactly_this_set() {
+        let handler = handler(false, false, false, false);
+        let mut destructive: Vec<String> = handler
+            .tool_router
+            .list_all()
+            .into_iter()
+            .filter(|t| {
+                t.annotations
+                    .as_ref()
+                    .and_then(|a| a.destructive_hint)
+                    .unwrap_or(false)
+            })
+            .map(|t| t.name.to_string())
+            .collect();
+        destructive.sort();
+        assert_eq!(
+            destructive,
+            vec![
+                "assign_jira_issue",
+                "delete_branch",
+                "delete_remote_branch",
+                "delete_tag",
+                "discard_all_changes",
+                "discard_changes",
+                "drop_stash",
+                "force_push",
+                "merge_branch",
+                "merge_pull_request",
+                "request_reviewers",
+                "reset_to_commit",
+                "set_issue_assignees",
+                "set_issue_milestone",
+                "set_pull_request_assignees",
+                "set_review_notes",
+                "update_jira_issue",
+                "update_release",
+            ]
+        );
+    }
+
     /// `ensure_key_in_project` gates a key-taking Jira tool to the linked project: the
     /// prefix (before the last `-`) must equal `link.project_key`, case-insensitively.
     /// A different project (same site) or a key with no `-` is refused, and the error

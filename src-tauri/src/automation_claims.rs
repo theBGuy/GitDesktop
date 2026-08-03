@@ -3,9 +3,9 @@
 //! Automations (AI PR reviews on pr-open / pr-sync / commit) dispatch in the frontend.
 //! Two GitDesktop instances watching the SAME repository (a main checkout and a linked
 //! worktree share a worktree-stable identity) would each decide to run and post the
-//! same PAID review: the pre-existing dedup is per-process only (an in-memory debounce
-//! map plus a tauri-store watermark whose cache is per-process, and which is written
-//! only AFTER the slow AI call). So the claim must be atomic at the OS level:
+//! same PAID review: the pre-existing dedup is per-process only (an in-memory per-PR
+//! fired-head list plus a tauri-store covered set whose cache is per-process, and which
+//! is written only AFTER the slow AI call). So the claim must be atomic at the OS level:
 //! `OpenOptions::create_new` — an atomic exclusive-create on every platform we target
 //! — on a claim file under app-data, taken at DISPATCH time. Deliberately NOT via the
 //! tauri-store plugin: that plugin's per-process cache is what we're routing around.

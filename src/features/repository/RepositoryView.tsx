@@ -219,8 +219,9 @@ export function RepositoryView() {
   // OS notifications for PR/check and workflow-run events while this repo is open.
   usePrNotifications(repoPath ?? "");
   useRunNotifications(repoPath ?? "");
-  // Auto re-review open PRs (local + remote) whose head branch gets new
-  // commits — pr-sync, gated by the runner's opt-in + the heads that mode covered.
+  // Auto re-review open LOCAL PRs whose head branch gets new commits — pr-sync,
+  // gated by the runner's opt-in + the heads that mode already covered. (Remote PR
+  // heads come from usePrNotifications above and the background sync poller.)
   useWatchPrHeads(repoPath ?? "");
   // Reclaim any local-PR resolve worktrees leaked by a crash mid-resolve (runs
   // once per repo, after the local-PR list loads so active ones are spared).

@@ -3,13 +3,10 @@ import { getDismissedHead } from "./dismissals";
 import { triggerAutomations } from "./runner";
 
 /**
- * Per-`(kind, repo, ref)` EVERY head we already fired a pr-sync event for, so each
- * head fires at most once instead of on every poll tick — watchers can call
- * `maybeFireSync` freely. Every head is kept rather than just the last one: an
- * eventually-consistent poll can serve the PREVIOUS head right after a push, and a
- * last-head-only dedup would let that stale head fire a second time. Intentionally
- * never reclaimed (the dedup must survive a repo view unmounting); bounded by the
- * real pushes per PR seen this session, and resets on restart.
+ * Per-`(kind, repo, ref)` EVERY head already fired for, `sameSha`-matched — an
+ * eventually-consistent poll can re-serve a PREVIOUS head right after a push, and that
+ * stale head must not fire again. Never reclaimed (the dedup must survive a repo view
+ * unmounting); bounded by the real pushes per PR this session, and resets on restart.
  */
 const firedHeads = new Map<string, string[]>();
 

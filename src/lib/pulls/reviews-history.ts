@@ -156,8 +156,10 @@ export async function getLatestReview(
     .sort((a, b) => b.finishedAt - a.finishedAt)[0];
 }
 
-/** Every persisted review for a PR (both modes), newest first — for the
- *  "Previous reviews" disclosure. */
+/** Every persisted review for a PR (both modes), newest first. Two consumers, so
+ *  narrowing what this returns is not a UI-only change: the "Previous reviews"
+ *  disclosure, and the runner's pr-sync gate, which reads the whole retained set to
+ *  decide whether a head was already covered. */
 export async function listReviews(
   repo: string,
   kind: "remote" | "local",

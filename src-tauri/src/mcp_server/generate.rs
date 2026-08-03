@@ -3014,8 +3014,8 @@ mod tests {
         git(&repo_s, &["add", "-A"]).await;
         git(&repo_s, &["commit", "-qm", "seed"]).await;
 
-        // No origin at all: one hand-named remote, its tracking ref, and the local
-        // branch of the same name.
+        // No origin at all: one hand-named remote, its tracking ref + HEAD symref (what a
+        // `clone -o upstream` writes), and the local branch of the same name.
         git(
             &repo_s,
             &["remote", "add", "upstream", "https://example.invalid/r.git"],
@@ -3024,6 +3024,15 @@ mod tests {
         git(
             &repo_s,
             &["update-ref", "refs/remotes/upstream/main", "HEAD"],
+        )
+        .await;
+        git(
+            &repo_s,
+            &[
+                "symbolic-ref",
+                "refs/remotes/upstream/HEAD",
+                "refs/remotes/upstream/main",
+            ],
         )
         .await;
 

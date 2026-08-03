@@ -272,11 +272,9 @@ async function run(
     }
     matched++;
     // pr-sync is opt-in per PR: re-review only a PR already reviewed in this mode, and
-    // never for ANY head this mode already covered — an eventually-consistent poll can
-    // re-serve an older head after a push, so a head *change* alone isn't new work.
-    // Every retained record is checked, not just the newest: the history store prunes to
-    // MAX_PER_GROUP records per (kind, ref, mode), and that window is what absorbs an
-    // A→B→A head flap.
+    // never for ANY head that mode covered — a poll can re-serve an older head after a
+    // push, which isn't new work. Every retained record counts, so the flap window is
+    // the history store's MAX_PER_GROUP per (kind, ref, mode).
     if (event.kind === "pr-sync") {
       const headSha = event.headSha ?? "";
       const covered = (
