@@ -5,8 +5,8 @@ name: frontend
 # workflow leaves it stuck "Expected" forever (GitHub required-checks docs).
 # The path-filtered push:master run is the backstop re-validating the true
 # merged tree, since a PR green against a stale base merges stale-green (the
-# push run only detects; the PR run gates). No other workflow builds the root
-# toolchain — the rest cover src-tauri/**, site/, and changelog fragments.
+# push run only detects; the PR run gates). No other PR workflow builds the
+# root toolchain — the rest cover src-tauri/**, site/, and changelog fragments.
 
 on:
   pull_request:

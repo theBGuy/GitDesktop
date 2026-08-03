@@ -2,8 +2,8 @@ name: changelog
 
 # Requires a changelog.d/ fragment when a PR changes code. "fragment" is a
 # required status check on master (repo ruleset), so this gate blocks the merge.
-# Escape hatches unchanged: the `no-changelog` label (a job-level `if:` skip
-# still reports success to a required check), or `skip-changelog` in the title.
+# Escape hatches: the `no-changelog` label (exempts only the fragment
+# requirement — the format check always runs), or `skip-changelog` in the title.
 
 on:
   pull_request:
@@ -23,7 +23,6 @@ permissions:
 jobs:
   fragment:
     runs-on: ubuntu-latest
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-changelog') }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -34,7 +33,10 @@ jobs:
       # over it at release time. Uses only node built-ins, no install needed.
       - name: Validate changelog.d fragment format
         run: node scripts/changelog-draft.mjs --check
+      # Step-level on purpose: hoisting this to the job would skip the format
+      # check above, letting a malformed fragment merge under the label.
       - name: Require a changelog.d/ fragment for code changes
+        if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-changelog') }}
         shell: bash
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
