@@ -6,8 +6,12 @@
 //! where a provider can't do the thing rather than failing silently.
 //!
 //! Gated on `allow_remote_write` ([`GitDesktopMcp::ensure_remote_write`]) — a SEPARATE
-//! opt-in from `--allow-write`; enabling one never grants the other. Only
-//! `merge_pull_request` is annotated destructive (a merge isn't trivially reversible).
+//! opt-in from `--allow-write`; enabling one never grants the other. A tool is annotated
+//! destructive when it can drop state the caller never named, OR when its outcome isn't
+//! trivially recoverable: the set-style tools whose payload REPLACES a whole collection
+//! or clears a field by omission (`request_reviewers`, `set_issue_assignees`,
+//! `set_pull_request_assignees`, `set_issue_milestone`) fall in the first class,
+//! `merge_pull_request` and `update_release` in the second.
 
 use std::collections::HashMap;
 
@@ -229,8 +233,8 @@ struct UpdateReleaseArgs {
     prerelease: Option<bool>,
     /// Whether to also point the release's `latest.json` Tauri updater manifest at
     /// the new notes (GitHub only, and only when the release carries that asset).
-    /// Defaults to true; set false to leave the manifest alone. Only applies when
-    /// `notes` are given — without them the manifest is left alone.
+    /// Defaults to true, and only applies when `notes` are given; set false to leave
+    /// the manifest alone.
     #[serde(default)]
     sync_updater_notes: Option<bool>,
 }
@@ -751,7 +755,7 @@ impl GitDesktopMcp {
                        desired set of logins — it REPLACES the current reviewers (an empty list \
                        clears them), it is not additive. See list_assignable_users for candidate \
                        logins. Requires --allow-remote-write.",
-        annotations(read_only_hint = false, destructive_hint = false)
+        annotations(read_only_hint = false, destructive_hint = true)
     )]
     async fn request_reviewers(
         &self,
@@ -878,7 +882,7 @@ impl GitDesktopMcp {
                        is the FULL desired set of logins — it REPLACES the current assignees (an \
                        empty list clears them). See list_assignable_users. Requires \
                        --allow-remote-write.",
-        annotations(read_only_hint = false, destructive_hint = false)
+        annotations(read_only_hint = false, destructive_hint = true)
     )]
     async fn set_issue_assignees(
         &self,
@@ -902,7 +906,7 @@ impl GitDesktopMcp {
                        `assignees` is the FULL desired set of logins — it REPLACES the current \
                        assignees (an empty list clears them). See list_assignable_users. Requires \
                        --allow-remote-write.",
-        annotations(read_only_hint = false, destructive_hint = false)
+        annotations(read_only_hint = false, destructive_hint = true)
     )]
     async fn set_pull_request_assignees(
         &self,
@@ -1299,7 +1303,7 @@ impl GitDesktopMcp {
                        forge (GitHub or GitLab, per its remote; Bitbucket issues aren't supported). \
                        `milestone` is the `number` of the chosen entry from list_milestones; omit \
                        it to CLEAR the milestone. Requires --allow-remote-write.",
-        annotations(read_only_hint = false, destructive_hint = false)
+        annotations(read_only_hint = false, destructive_hint = true)
     )]
     async fn set_issue_milestone(
         &self,

@@ -1765,11 +1765,13 @@ async fn branch_commit_subjects(repo: &str, base: &str) -> Vec<String> {
 }
 
 /// The ref a branch's COMMITTED work is compared against for naming: the repo's
-/// default branch, preferring the remote-tracking `origin/<default>` over the local
+/// default branch, preferring a remote-tracking `<remote>/<default>` over the local
 /// `<default>`. `git_default_branch` returns the SHORT LOCAL name even when it
 /// derived it from a remote's HEAD, and that local branch may be stale (skewing the
 /// three-dot diff) or not exist at all — so verify both and prefer the remote.
-/// `None` = no default branch, or neither ref resolves ⇒ no fallback is possible.
+/// Remotes are probed in `git_default_branch`'s own order: origin, then the rest as
+/// `git remote` lists them.
+/// `None` = no default branch, or no ref resolves ⇒ no fallback is possible.
 async fn committed_base_ref(repo: &str) -> Option<String> {
     let default = crate::git::branches::git_default_branch(repo.to_string())
         .await
@@ -1777,6 +1779,16 @@ async fn committed_base_ref(repo: &str) -> Option<String> {
         .flatten()?;
     if ref_exists(repo, &format!("refs/remotes/origin/{default}")).await {
         return Some(format!("origin/{default}"));
+    }
+    // Only now pay for a remote listing — origin answers almost every repo. A clone
+    // made with `-o <name>` keeps its remote-tracking refs under that name instead.
+    let remotes = crate::git::remote::git_remotes(repo.to_string())
+        .await
+        .unwrap_or_default();
+    for remote in remotes.iter().filter(|r| r.as_str() != "origin") {
+        if ref_exists(repo, &format!("refs/remotes/{remote}/{default}")).await {
+            return Some(format!("{remote}/{default}"));
+        }
     }
     if ref_exists(repo, &format!("refs/heads/{default}")).await {
         return Some(default);
@@ -2977,6 +2989,48 @@ mod tests {
             committed_base_ref(&repo_s).await,
             None,
             "no resolvable default branch ⇒ no committed-work fallback"
+        );
+    }
+
+    /// A `clone -o upstream` repo: the only remote-tracking ref lives under
+    /// `upstream/`, and the base must follow it rather than the same-named local
+    /// branch, which is exactly the copy that goes stale.
+    #[tokio::test]
+    async fn committed_base_ref_resolves_a_non_origin_remote() {
+        let base = tempfile::Builder::new()
+            .prefix("gd-basref-upstream-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo = base.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+
+        git(&repo_s, &["init", "-q"]).await;
+        git(&repo_s, &["config", "user.email", "t@t.local"]).await;
+        git(&repo_s, &["config", "user.name", "T"]).await;
+        // Pin the branch name regardless of the host's init.defaultBranch.
+        git(&repo_s, &["symbolic-ref", "HEAD", "refs/heads/main"]).await;
+        std::fs::write(repo.join("a.txt"), "hello\n").unwrap();
+        git(&repo_s, &["add", "-A"]).await;
+        git(&repo_s, &["commit", "-qm", "seed"]).await;
+
+        // No origin at all: one hand-named remote, its tracking ref, and the local
+        // branch of the same name.
+        git(
+            &repo_s,
+            &["remote", "add", "upstream", "https://example.invalid/r.git"],
+        )
+        .await;
+        git(
+            &repo_s,
+            &["update-ref", "refs/remotes/upstream/main", "HEAD"],
+        )
+        .await;
+
+        assert_eq!(
+            committed_base_ref(&repo_s).await,
+            Some("upstream/main".to_string()),
+            "a non-origin remote's tracking ref wins over the local branch"
         );
     }
 }

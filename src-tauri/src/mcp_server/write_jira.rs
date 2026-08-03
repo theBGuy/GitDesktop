@@ -4,8 +4,10 @@
 //! LINKED project. Every tool runs the same order: `ensure_remote_write` FIRST, then
 //! [`GitDesktopMcp::jira_link`] resolves the project server-side (the single source of
 //! truth — no `site`/`projectKey` param), then the shared [`crate::forge::jira`] cores
-//! (never the `#[tauri::command]` wrappers). All annotated non-read-only and
-//! non-destructive: a Jira write is a mutation, but none is trivially irreversible.
+//! (never the `#[tauri::command]` wrappers). All annotated non-read-only; none is
+//! trivially irreversible, so only the two that drop state the caller never named are
+//! annotated destructive — `update_jira_issue` (its `labels` payload replaces the whole
+//! set) and `assign_jira_issue` (an omitted `account_id` unassigns).
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -251,7 +253,7 @@ impl GitDesktopMcp {
                        hint when the repo has none) and takes no site/project param (the key must \
                        belong to the linked project). Requires \
                        --allow-remote-write. Returns a confirmation as JSON.",
-        annotations(read_only_hint = false, destructive_hint = false)
+        annotations(read_only_hint = false, destructive_hint = true)
     )]
     async fn assign_jira_issue(
         &self,
@@ -284,7 +286,7 @@ impl GitDesktopMcp {
                        hint when the repo has none) and takes no site/project param (the key must \
                        belong to the linked project). Requires --allow-remote-write. Returns the \
                        applied changes as JSON.",
-        annotations(read_only_hint = false, destructive_hint = false)
+        annotations(read_only_hint = false, destructive_hint = true)
     )]
     async fn update_jira_issue(
         &self,

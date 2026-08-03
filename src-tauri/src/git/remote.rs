@@ -341,11 +341,7 @@ pub async fn git_remote_default_branch(
 ) -> AppResult<String> {
     ensure_remote_exists(&repo_path, &remote).await?;
 
-    // `refs/remotes/<remote>/HEAD` → its target `refs/remotes/<remote>/<branch>`.
-    let head_ref = format!("refs/remotes/{remote}/HEAD");
-    let ref_prefix = format!("refs/remotes/{remote}/");
-
-    if let Some(branch) = read_symbolic_ref(&repo_path, &head_ref, &ref_prefix).await? {
+    if let Some(branch) = remote_head_branch(&repo_path, &remote).await? {
         return Ok(branch);
     }
 
@@ -361,7 +357,7 @@ pub async fn git_remote_default_branch(
     )
     .await?;
 
-    read_symbolic_ref(&repo_path, &head_ref, &ref_prefix)
+    remote_head_branch(&repo_path, &remote)
         .await?
         .ok_or_else(|| {
             AppError::InvalidArgument(format!(
@@ -370,10 +366,21 @@ pub async fn git_remote_default_branch(
         })
 }
 
+/// The branch `refs/remotes/<remote>/HEAD` points at, or `None` when that symref
+/// is unset (never written for a hand-added remote). Local read, no network.
+pub(crate) async fn remote_head_branch(repo_path: &str, remote: &str) -> AppResult<Option<String>> {
+    read_symbolic_ref(
+        repo_path,
+        &format!("refs/remotes/{remote}/HEAD"),
+        &format!("refs/remotes/{remote}/"),
+    )
+    .await
+}
+
 /// Read a symbolic ref and strip `prefix` off its target, returning the tail
 /// (the branch name). `None` when the ref is unset — `git symbolic-ref` exits
 /// non-zero — or its target doesn't start with `prefix`.
-pub(crate) async fn read_symbolic_ref(
+async fn read_symbolic_ref(
     repo_path: &str,
     symref: &str,
     prefix: &str,

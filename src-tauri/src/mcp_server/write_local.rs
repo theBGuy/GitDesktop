@@ -6,7 +6,9 @@
 //! or remote write ever happens here.
 //!
 //! - **Writes** (create/amend those records) are gated on `allow_write` (via
-//!   [`GitDesktopMcp::ensure_write`]) and annotated non-read-only, non-destructive.
+//!   [`GitDesktopMcp::ensure_write`]) and annotated non-read-only. Only `set_review_notes`
+//!   is annotated destructive: it replaces a branch's whole note (an empty body clears
+//!   it), and that hand-written text has no history or forge copy to recover from.
 //! - **Reads** (list/get) are UNGATED, like every other read tool — this is the user's
 //!   own local app-data, not the forge.
 
@@ -247,7 +249,7 @@ impl GitDesktopMcp {
                        Verifies `branch` exists as a local branch first. An empty (or \
                        whitespace-only) body CLEARS any existing deposit for the branch. Returns \
                        `{ branch, saved }` where `saved` is false when an empty body cleared it.",
-        annotations(read_only_hint = false, destructive_hint = false)
+        annotations(read_only_hint = false, destructive_hint = true)
     )]
     async fn set_review_notes(
         &self,

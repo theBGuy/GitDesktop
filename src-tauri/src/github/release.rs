@@ -468,8 +468,8 @@ async fn save_updater_recovery_copy(src: std::path::PathBuf) -> Option<String> {
 /// with `--clobber`, which gh implements as delete-THEN-upload: the manifest is
 /// briefly absent, and a failed upload leaves it deleted rather than stale. That
 /// makes the failure unrecoverable from the UI alone (the release no longer has the
-/// asset to re-download), so a failed upload parks the patched copy on disk and
-/// names its path in the error for a manual re-attach.
+/// asset to re-download), so a failed upload parks the patched copy on disk when it
+/// can, naming its path in the error for a manual re-attach.
 pub async fn gh_release_sync_updater_notes(
     repo_path: &str,
     tag: &str,

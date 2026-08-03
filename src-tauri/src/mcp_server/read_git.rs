@@ -278,19 +278,52 @@ impl GitDesktopMcp {
         description = "List the repository's remotes with their URLs (credentials redacted). Returns JSON."
     )]
     async fn remotes(&self) -> Result<CallToolResult, McpError> {
-        let names = crate::git::remote::git_remotes(self.repo.clone())
-            .await
-            .map_err(app_err)?;
+        // One `git remote -v` instead of a listing plus a `get-url` per remote.
+        let listing = crate::git::runner::run_git(
+            Some(&self.repo),
+            &["remote", "-v"],
+            crate::git::runner::DEFAULT_TIMEOUT,
+        )
+        .await
+        .map_err(app_err)?;
+        let listing = listing.stdout_lossy();
+        let (names, fetch_urls) = parse_remote_v(&listing);
         let mut out = Vec::with_capacity(names.len());
         for name in names {
-            let url = crate::git::remote::git_remote_url(self.repo.clone(), name.clone())
-                .await
-                .map(|u| redact_url_credentials(&u))
-                .unwrap_or_default();
+            let url = match fetch_urls.get(name) {
+                Some(url) => redact_url_credentials(url),
+                // No fetch row means `remote.<name>.url` is unset, where git's own
+                // `get-url` answers with the name itself — keep reporting that.
+                None => crate::git::remote::git_remote_url(self.repo.clone(), name.to_string())
+                    .await
+                    .map(|u| redact_url_credentials(&u))
+                    .unwrap_or_default(),
+            };
             out.push(serde_json::json!({ "name": name, "url": url }));
         }
         json_result(&out)
     }
+}
+
+/// Splits `git remote -v` output into the remote names (first seen wins, keeping git's
+/// order) and each remote's FETCH url. Names come from EVERY row because a remote with
+/// no configured URL emits one bare `name\t` row and no `(fetch)` row at all; the url
+/// comes from the `(fetch)` row alone, which is the URL `git remote get-url` reports.
+fn parse_remote_v(listing: &str) -> (Vec<&str>, std::collections::HashMap<&str, &str>) {
+    let mut names: Vec<&str> = Vec::new();
+    let mut fetch_urls: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for line in listing.lines() {
+        let Some((name, rest)) = line.split_once('\t') else {
+            continue;
+        };
+        if !names.contains(&name) {
+            names.push(name);
+        }
+        if let Some(url) = rest.strip_suffix(" (fetch)") {
+            fetch_urls.insert(name, url);
+        }
+    }
+    (names, fetch_urls)
 }
 
 /// Redacts an in-URL credential (the `user:pass@` / `token@` userinfo) from an
@@ -379,4 +412,52 @@ async fn read_file_core(
     };
 
     Ok(cap_head(raw, READ_FILE_MAX_BYTES))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A remote with no `remote.<name>.url` emits ONE bare row — name, TAB, nothing —
+    /// and no `(fetch)` row, so it must survive the parse on the name side alone. Its
+    /// absence from the url map is what routes the tool to its `get-url` arm (git
+    /// answers that with the remote's own name). Measured against git 2.51.1.windows.1.
+    #[test]
+    fn a_remote_without_a_url_keeps_its_name_and_gets_no_url() {
+        let (names, urls) = parse_remote_v("nourl\t");
+        assert_eq!(names, vec!["nourl"]);
+        assert!(urls.get("nourl").is_none());
+    }
+
+    /// A remote carrying several push URLs emits exactly one `(fetch)` row (the FIRST
+    /// url) plus one `(push)` row per url — and `git remote get-url` returns that same
+    /// first url, so taking the fetch row keeps the reported url identical to what the
+    /// per-remote `get-url` calls used to report. Measured against git 2.51.1.windows.1.
+    #[test]
+    fn a_multi_url_remote_reports_the_fetch_url_once() {
+        let (names, urls) = parse_remote_v(
+            "origin\thttps://example.com/first.git (fetch)\n\
+             origin\thttps://example.com/first.git (push)\n\
+             origin\thttps://example.com/second.git (push)",
+        );
+        assert_eq!(names, vec!["origin"]);
+        assert_eq!(
+            urls.get("origin").copied(),
+            Some("https://example.com/first.git")
+        );
+    }
+
+    /// The ordinary shape: fetch + push rows for one url, folded to a single name.
+    #[test]
+    fn a_single_url_remote_yields_one_name_and_its_url() {
+        let (names, urls) = parse_remote_v(
+            "origin\thttps://example.com/a.git (fetch)\n\
+             origin\thttps://example.com/a.git (push)",
+        );
+        assert_eq!(names, vec!["origin"]);
+        assert_eq!(
+            urls.get("origin").copied(),
+            Some("https://example.com/a.git")
+        );
+    }
 }

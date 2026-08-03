@@ -368,17 +368,6 @@ pub(crate) async fn git_delete_remote_branch_core(
     }
 }
 
-/// The branch `refs/remotes/<remote>/HEAD` points at, or `None` when that symref
-/// is unset.
-async fn remote_head_branch(repo_path: &str, remote: &str) -> AppResult<Option<String>> {
-    crate::git::remote::read_symbolic_ref(
-        repo_path,
-        &format!("refs/remotes/{remote}/HEAD"),
-        &format!("refs/remotes/{remote}/"),
-    )
-    .await
-}
-
 /// The repository's default branch: the HEAD a remote points at — `origin` first,
 /// then every other remote in `git remote` order, so a clone made with `-o <name>`
 /// resolves too — otherwise a local "main"/"master" if one exists.
@@ -390,7 +379,7 @@ async fn remote_head_branch(repo_path: &str, remote: &str) -> AppResult<Option<S
 pub async fn git_default_branch(repo_path: String) -> AppResult<Option<String>> {
     // Origin answers almost every repo, so probe it before paying for a remote
     // listing — the common case stays at one git spawn.
-    if let Some(name) = remote_head_branch(&repo_path, "origin").await? {
+    if let Some(name) = crate::git::remote::remote_head_branch(&repo_path, "origin").await? {
         return Ok(Some(name));
     }
     // Only now list, and sweep the OTHER remotes in `git remote` order — a clone made
@@ -400,7 +389,7 @@ pub async fn git_default_branch(repo_path: String) -> AppResult<Option<String>> 
         .await
         .unwrap_or_default();
     for remote in remotes.iter().filter(|r| r.as_str() != "origin") {
-        if let Some(name) = remote_head_branch(&repo_path, remote).await? {
+        if let Some(name) = crate::git::remote::remote_head_branch(&repo_path, remote).await? {
             return Ok(Some(name));
         }
     }

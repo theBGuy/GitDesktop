@@ -3,12 +3,15 @@ import { getDismissedHead } from "./dismissals";
 import { triggerAutomations } from "./runner";
 
 /**
- * Per-`(kind, repo, ref)` last head we already fired a pr-sync event for, so a head
- * change fires at most once instead of on every poll tick — watchers can call
- * `maybeFireSync` freely. Intentionally never reclaimed: the dedup must survive a
- * repo view unmounting. One small entry per PR seen this session; resets on restart.
+ * Per-`(kind, repo, ref)` EVERY head we already fired a pr-sync event for, so each
+ * head fires at most once instead of on every poll tick — watchers can call
+ * `maybeFireSync` freely. Every head is kept rather than just the last one: an
+ * eventually-consistent poll can serve the PREVIOUS head right after a push, and a
+ * last-head-only dedup would let that stale head fire a second time. Intentionally
+ * never reclaimed (the dedup must survive a repo view unmounting); bounded by the
+ * real pushes per PR seen this session, and resets on restart.
  */
-const lastFiredHead = new Map<string, string>();
+const firedHeads = new Map<string, string[]>();
 
 /**
  * Whether two commit SHAs refer to the same commit, tolerating short-vs-full.
@@ -42,17 +45,21 @@ export interface SyncCandidate {
 }
 
 /**
- * Fires a `pr-sync` automation event when an open PR's head has advanced since
- * the last time we fired for it. Deduped by head, so an unchanged PR observed on
- * every poll never re-fires. The runner gates whether to actually review (only a
- * PR already reviewed in a mode, whose head is past that mode's watermark).
+ * Fires a `pr-sync` automation event for an open PR's head we haven't fired for
+ * this session. Deduped by head, so an unchanged PR observed on every poll never
+ * re-fires — and neither does a head the poll re-serves after moving off it. The
+ * runner gates whether to actually review (only a PR already reviewed in a mode,
+ * on a head that mode hasn't already covered).
  */
 export function maybeFireSync(c: SyncCandidate): void {
   if (!c.currentHeadSha) return;
   const key = `${c.kind}:${c.repoPath}#${c.ref}`;
-  const prior = lastFiredHead.get(key);
-  if (prior !== undefined && sameSha(prior, c.currentHeadSha)) return;
-  lastFiredHead.set(key, c.currentHeadSha);
+  const fired = firedHeads.get(key);
+  // sameSha rather than set membership: the same head arrives short from one
+  // provider and full from another, and both must count as already fired.
+  if (fired?.some((sha) => sameSha(sha, c.currentHeadSha))) return;
+  if (fired) fired.push(c.currentHeadSha);
+  else firedHeads.set(key, [c.currentHeadSha]);
   triggerAutomations({
     kind: "pr-sync",
     repoPath: c.repoPath,

@@ -5,6 +5,12 @@
 //! two UNGATED reads (list_stashes, preview_merge); and DESTRUCTIVE mutations gated on
 //! [`GitDesktopMcp::ensure_destructive`], which requires BOTH flags.
 //!
+//! The `destructive_hint` annotation and that gate answer DIFFERENT questions and don't
+//! track 1:1: the hint states what a call can silently discard, the ladder is the
+//! server-side capability the operator granted. `merge_branch` is hint-destructive
+//! without being ladder-destructive — its "ours"/"theirs" strategy drops one side of
+//! every conflicting hunk, across files the caller never named.
+//!
 //! Mutations delegate to the matching `git_*_core`, which routes through `self.state`'s
 //! per-repo lock (`run_git_mutating`) so concurrent MCP calls don't fight over
 //! `.git/index.lock`. User-supplied branch/rev/path strings go through
@@ -587,7 +593,7 @@ impl GitDesktopMcp {
                        merge commit; `strategy` (\"ours\"/\"theirs\") auto-resolves conflicting \
                        hunks. Real conflicts leave the repo in a normal merge-conflict state. \
                        Requires --allow-git-write.",
-        annotations(read_only_hint = false, destructive_hint = false)
+        annotations(read_only_hint = false, destructive_hint = true)
     )]
     async fn merge_branch(
         &self,

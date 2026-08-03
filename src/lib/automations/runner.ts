@@ -33,7 +33,11 @@ import { repoIdentity } from "@/lib/git/repo-identity";
 import type { DiffStatEntry } from "@/lib/git/types";
 import { notifyIfUnfocused } from "@/lib/notify";
 import { listLocalPrs, updateLocalPr } from "@/lib/pulls/local";
-import { getLatestReview, saveReview } from "@/lib/pulls/reviews-history";
+import {
+  getLatestReview,
+  listReviews,
+  saveReview,
+} from "@/lib/pulls/reviews-history";
 import { queryClient } from "@/lib/query-client";
 import { effectiveReviewAi, loadSettings } from "@/lib/settings/api";
 import { pushNotification } from "@/lib/stores/notifications";
@@ -123,7 +127,7 @@ const CLAIM_HEARTBEAT_MS = 5 * 60 * 1000;
  *  the claim age out so a second instance can recover the head. */
 const CLAIM_HEARTBEAT_MAX_BEATS = 30;
 
-/** The store key for a PR target, used to look up its review-history watermark. */
+/** The store key for a PR target, used to look up its review-history records. */
 function targetRef(event: PrAutomationEvent): string {
   return event.target.type === "remote"
     ? String(event.target.number)
@@ -219,7 +223,7 @@ export function triggerAutomations(event: AutomationEvent): void {
  *  - `matched`: rules that exist AND apply (past the `only` + branch gates). 0 = the rule
  *    genuinely no longer applies.
  *  - `attempted`: runs actually started. `matched > 0 && attempted === 0` means a claim or
- *    watermark blocked it — retryable. */
+ *    an already-covered head blocked it — retryable. */
 interface RunOutcome {
   matched: number;
   attempted: number;
@@ -268,16 +272,16 @@ async function run(
     }
     matched++;
     // pr-sync is opt-in per PR: re-review only a PR already reviewed in this mode, and
-    // only once its head advanced past the persisted review's headSha (the per-mode
-    // watermark) — so it never re-fires for a head that mode already covered.
+    // never for ANY head this mode already covered — an eventually-consistent poll can
+    // re-serve an older head after a push, so a head *change* alone isn't new work.
+    // Every retained record is checked, not just the newest: the history store prunes to
+    // MAX_PER_GROUP records per (kind, ref, mode), and that window is what absorbs an
+    // A→B→A head flap.
     if (event.kind === "pr-sync") {
       const headSha = event.headSha ?? "";
-      const prior = await getLatestReview(
-        event.repoPath,
-        event.target.type,
-        targetRef(event),
-        action,
-      );
+      const covered = (
+        await listReviews(event.repoPath, event.target.type, targetRef(event))
+      ).filter((r) => r.mode === action);
       // A CANCELLED re-review persists the dismissed head, so a cancelled head doesn't
       // re-fire after an app relaunch — only a genuinely newer head does.
       const dismissedHead = await getDismissedHead(
@@ -290,8 +294,8 @@ async function run(
       // 12-char poll head vs a full-40 seed) counts as "already reviewed" and
       // doesn't re-fire a redundant review each poll tick.
       if (
-        !prior ||
-        sameSha(prior.headSha, headSha) ||
+        covered.length === 0 ||
+        covered.some((r) => sameSha(r.headSha, headSha)) ||
         sameSha(dismissedHead ?? "", headSha)
       ) {
         continue;
@@ -416,8 +420,8 @@ async function run(
       staleKey = undefined;
     }
     // On cancel, persist the dismissed PR head so a cancelled re-review doesn't re-fire
-    // after relaunch (cancel advances no history watermark). PR events with a headSha
-    // only; best-effort. Not written on non-cancel failures, which stay retryable.
+    // after relaunch (cancel marks no head covered). PR events with a headSha only;
+    // best-effort. Not written on non-cancel failures, which stay retryable.
     const dismissOnCancel = () => {
       if (event.kind === "commit" || !event.headSha) return;
       void setDismissedHead(
@@ -470,8 +474,8 @@ async function run(
       }
       const { text, thoughts } = result;
       // Both gates throw BEFORE deliver and persistReviewHistory, so a bad run
-      // neither posts a comment nor advances the pr-sync watermark — it lands in
-      // the catch below (failure toast + inbox row with Re-run + released claim).
+      // neither posts a comment nor marks this head covered for pr-sync — it lands
+      // in the catch below (failure toast + inbox row with Re-run + released claim).
       if (!text.trim()) {
         throw new Error(
           `The AI ${label} run produced no text — nothing was posted.`,
@@ -500,7 +504,7 @@ async function run(
       });
       await deliver(event, action, body, text, notify);
       // Seed the review-history store so the next run (manual or auto) builds on these
-      // findings and this headSha becomes the pr-sync watermark. Best-effort.
+      // findings and this headSha joins the heads pr-sync treats as covered. Best-effort.
       if (event.kind === "pr-open" || event.kind === "pr-sync") {
         await persistReviewHistory(
           event,
@@ -617,8 +621,8 @@ export function rerunAutomation(
         // The rule genuinely no longer applies (disabled / conditions changed).
         toast.info(`Automated ${label} for this ${noun} is turned off.`);
       } else if (attempted === 0) {
-        // A rule applies but a held claim or sync watermark blocked it. The stopped row is
-        // kept — retry once that clears.
+        // A rule applies but a held claim or an already-covered head blocked it. The
+        // stopped row is kept — retry once that clears.
         toast.info(
           `Couldn't re-run the ${label} — another run already covers this head (still finishing or ran elsewhere). The row is kept; try again in a moment.`,
         );
