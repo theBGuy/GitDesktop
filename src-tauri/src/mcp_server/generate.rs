@@ -1767,7 +1767,7 @@ async fn branch_commit_subjects(repo: &str, base: &str) -> Vec<String> {
 /// The ref a branch's COMMITTED work is compared against for naming: the repo's
 /// default branch, preferring the remote-tracking `origin/<default>` over the local
 /// `<default>`. `git_default_branch` returns the SHORT LOCAL name even when it
-/// derived it from `origin/HEAD`, and that local branch may be stale (skewing the
+/// derived it from a remote's HEAD, and that local branch may be stale (skewing the
 /// three-dot diff) or not exist at all — so verify both and prefer the remote.
 /// `None` = no default branch, or neither ref resolves ⇒ no fallback is possible.
 async fn committed_base_ref(repo: &str) -> Option<String> {

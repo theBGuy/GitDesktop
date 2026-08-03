@@ -394,14 +394,27 @@ struct CloseDiscussionArgs {
 /// frontend's `UPDATER_MANIFEST_NAME`.
 const UPDATER_MANIFEST: &str = "latest.json";
 
+/// The notes an updater-manifest sync should carry, or `None` when it must not run.
+/// Empty/whitespace notes leave the release body untouched (the edit trims and skips
+/// `--notes`), so syncing them would blank a live manifest; `Some(false)` is the
+/// caller's opt-out. The text is TRIMMED, matching what the edit wrote to the body.
+fn updater_notes_to_sync(notes: Option<&str>, sync: Option<bool>) -> Option<String> {
+    if sync == Some(false) {
+        return None;
+    }
+    notes
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+}
+
 /// Point a just-edited release's updater manifest at `notes`, mirroring the in-app
-/// editor's gate: GitHub only, and only when the release actually ships a
-/// `latest.json` asset. `None` = a gate skipped it (the common case — most repos
-/// have no manifest), `Some(Err)` = a ready-to-report sentence for the caller to
-/// disclose alongside the successful edit — each failure arm words its own, so
-/// neither asserts a manifest exists when that is exactly what went unverified.
-/// `current` is the pre-edit release read when the tool already needed one; an
-/// edit can't change the asset list.
+/// editor's gate: GitHub only, and only when the release ships a `latest.json` asset.
+/// `None` = a gate skipped it, `Some(Err)` = a ready-to-report sentence for the caller
+/// to disclose alongside the successful edit (each failure arm words its own, so
+/// neither asserts a manifest exists when that is what went unverified). `current` is
+/// the pre-edit release read when the tool already needed one — an edit can't change
+/// the asset list.
 async fn sync_release_updater_notes(
     repo: &str,
     tag: &str,
@@ -1088,23 +1101,20 @@ impl GitDesktopMcp {
                        manifest (GitHub only), the manifest's notes are synced to match, so \
                        installed apps show the same \"what's new\" as the release page — pass \
                        `sync_updater_notes: false` to leave it alone. Releases without that asset \
-                       are unaffected. Requires --allow-remote-write.",
-        annotations(read_only_hint = false, destructive_hint = false)
+                       are unaffected. Syncing REPLACES the `latest.json` asset \
+                       (delete-then-upload), so a failed upload can leave the release without a \
+                       manifest; `updater_manifest_error` then carries the recovery details, \
+                       including the patched copy's path when one could be parked. Requires \
+                       --allow-remote-write.",
+        annotations(read_only_hint = false, destructive_hint = true)
     )]
     async fn update_release(
         &self,
         Parameters(args): Parameters<UpdateReleaseArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
-        // Captured before the fallbacks below consume `args.notes`. Empty/whitespace
-        // notes leave the release body untouched (the edit skips `--notes`), so there
-        // is nothing to carry into the manifest — syncing them would blank it.
-        let notes_to_sync = args
-            .notes
-            .as_deref()
-            .map(str::trim)
-            .filter(|n| !n.is_empty())
-            .map(str::to_string);
+        // Decided before the fallbacks below consume `args.notes`.
+        let notes_to_sync = updater_notes_to_sync(args.notes.as_deref(), args.sync_updater_notes);
         // forge_release_edit sends title/notes AND applies prerelease/draft explicitly
         // (gh's `--flag=<bool>` form), so an omitted flag would otherwise be forced to its
         // param default. Read the current release to preserve whatever the caller didn't
@@ -1155,7 +1165,7 @@ impl GitDesktopMcp {
         // The edit already landed, so a manifest-sync failure is a caveat on a
         // successful result, never a tool error — and its text carries the recovery
         // path for a clobbered manifest, so it ships verbatim.
-        if let Some(sync_notes) = notes_to_sync.filter(|_| args.sync_updater_notes != Some(false)) {
+        if let Some(sync_notes) = notes_to_sync {
             match sync_release_updater_notes(&self.repo, &args.tag, &sync_notes, current.as_ref())
                 .await
             {
@@ -1762,5 +1772,28 @@ mod tests {
             .await
             .expect_err("expected an unknown-kind rejection");
         assert!(err.to_string().contains("kind must be"), "got: {}", err);
+    }
+
+    /// The updater-sync gate: a sync only fires for notes the edit actually wrote,
+    /// and never against the caller's opt-out. Syncing empty notes would blank a
+    /// live manifest, since the edit itself skips `--notes` for them.
+    #[test]
+    fn updater_notes_to_sync_gates_empty_notes_and_the_opt_out() {
+        assert_eq!(updater_notes_to_sync(None, None), None, "no notes, no sync");
+        assert_eq!(
+            updater_notes_to_sync(Some("   "), None),
+            None,
+            "whitespace-only notes leave the body untouched, so nothing to sync"
+        );
+        assert_eq!(
+            updater_notes_to_sync(Some("n"), Some(false)),
+            None,
+            "the caller's opt-out wins over real notes"
+        );
+        assert_eq!(
+            updater_notes_to_sync(Some(" n "), None),
+            Some("n".to_string()),
+            "the synced text is trimmed, like the text the edit wrote"
+        );
     }
 }

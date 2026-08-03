@@ -368,6 +368,17 @@ pub(crate) async fn git_delete_remote_branch_core(
     }
 }
 
+/// The branch `refs/remotes/<remote>/HEAD` points at, or `None` when that symref
+/// is unset.
+async fn remote_head_branch(repo_path: &str, remote: &str) -> AppResult<Option<String>> {
+    crate::git::remote::read_symbolic_ref(
+        repo_path,
+        &format!("refs/remotes/{remote}/HEAD"),
+        &format!("refs/remotes/{remote}/"),
+    )
+    .await
+}
+
 /// The repository's default branch: the HEAD a remote points at — `origin` first,
 /// then every other remote in `git remote` order, so a clone made with `-o <name>`
 /// resolves too — otherwise a local "main"/"master" if one exists.
@@ -377,19 +388,19 @@ pub(crate) async fn git_delete_remote_branch_core(
 /// one) falls through to the local-name fallback.
 #[tauri::command]
 pub async fn git_default_branch(repo_path: String) -> AppResult<Option<String>> {
-    // Best-effort: an unlistable remote set just leaves no remote HEAD to consult,
-    // which the local-name fallback below already covers.
-    let mut remotes = crate::git::remote::git_remotes(repo_path.clone())
+    // Origin answers almost every repo, so probe it before paying for a remote
+    // listing — the common case stays at one git spawn.
+    if let Some(name) = remote_head_branch(&repo_path, "origin").await? {
+        return Ok(Some(name));
+    }
+    // Only now list, and sweep the OTHER remotes in `git remote` order — a clone made
+    // with `-o <name>` keeps its HEAD there. Best-effort: an unlistable remote set
+    // just leaves no remote HEAD to consult, which the fallback below already covers.
+    let remotes = crate::git::remote::git_remotes(repo_path.clone())
         .await
         .unwrap_or_default();
-    // Origin first when present (a stable sort keeps the rest in `git remote` order).
-    remotes.sort_by_key(|r| r != "origin");
-    for remote in remotes {
-        let head_ref = format!("refs/remotes/{remote}/HEAD");
-        let prefix = format!("refs/remotes/{remote}/");
-        if let Some(name) =
-            crate::git::remote::read_symbolic_ref(&repo_path, &head_ref, &prefix).await?
-        {
+    for remote in remotes.iter().filter(|r| r.as_str() != "origin") {
+        if let Some(name) = remote_head_branch(&repo_path, remote).await? {
             return Ok(Some(name));
         }
     }
