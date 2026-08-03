@@ -623,7 +623,7 @@ export function ChangesPanel({ repoPath }: { repoPath: string }) {
     // into the stash; `targets` stays raw for the toast below.
     stashPaths.mutate(targets.map(literalPathspec), {
       // `matched` is false when the paths matched nothing, so no stash exists to
-      // report — the files were already gone by the time git ran.
+      // report — the selection no longer had changes when git ran.
       onSuccess: (matched) => {
         if (matched) {
           toast.success(

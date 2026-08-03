@@ -229,7 +229,8 @@ struct UpdateReleaseArgs {
     prerelease: Option<bool>,
     /// Whether to also point the release's `latest.json` Tauri updater manifest at
     /// the new notes (GitHub only, and only when the release carries that asset).
-    /// Defaults to true; set false to leave the manifest alone.
+    /// Defaults to true; set false to leave the manifest alone. Only applies when
+    /// `notes` are given — without them the manifest is left alone.
     #[serde(default)]
     sync_updater_notes: Option<bool>,
 }
