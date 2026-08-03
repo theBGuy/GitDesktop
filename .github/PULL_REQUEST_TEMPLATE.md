@@ -34,7 +34,7 @@ the codebase but authored the solution manually." Write "None." if no AI was use
 - [ ] PR title follows [Conventional Commits](https://www.conventionalcommits.org/) (e.g. `feat(pulls): ...`).
 - [ ] `pnpm lint` passes (Biome).
 - [ ] `cargo test --manifest-path src-tauri/Cargo.toml` passes (if Rust was touched).
-- [ ] Added a `changelog.d/` fragment for any user-facing change (`<added|changed|fixed>-<slug>.md`, human-written — see [`changelog.d/README.md`](../changelog.d/README.md)).
+- [ ] Added a `changelog.d/` fragment for any user-facing change (`<added|changed|fixed>-<slug>.md`, human-written — see [`changelog.d/README.md`](../changelog.d/README.md)). Required check: `src/` or `src-tauri/` changes need one, else the `no-changelog` label or `skip-changelog` in the title.
 - [ ] New UI supports keyboard navigation and meets WCAG AA; destructive paths confirm clearly.
 - [ ] No secrets, tokens, or private paths are committed.
 - [ ] Any AI assistance used is disclosed above (or "None.").

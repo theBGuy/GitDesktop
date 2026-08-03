@@ -113,6 +113,11 @@ humans** — a clear sentence about what changed for the user, not a copy of you
 commit subject. One file per change means parallel branches never conflict on the
 changelog; see [`changelog.d/README.md`](changelog.d/README.md) for the format.
 
+CI enforces this: `fragment` is a required status check on `master`, so a PR that
+touches `src/` or `src-tauri/` without adding a fragment can't merge. If a change
+genuinely doesn't need one, label the PR `no-changelog` or put `skip-changelog`
+in the title.
+
 Don't edit `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md) directly — the
 fragments are assembled there at release time. Preview the pending changelog with
 `pnpm changelog:preview`; `pnpm changelog` still drafts starting-point bullets
@@ -175,7 +180,9 @@ the utmost care.
 2. Keep PRs small and focused; one logical change per PR is easiest to review.
 3. Link the issue it addresses (`Closes #123`).
 4. Run `pnpm lint` and, if you touched Rust, `cargo test --manifest-path src-tauri/Cargo.toml`.
-5. Add a `changelog.d/` fragment if the change is user-facing (see the Changelog section).
+5. Add a `changelog.d/` fragment if the change is user-facing — the required
+   `fragment` check blocks merge on `src/` or `src-tauri/` changes without one
+   (see the Changelog section for the escape hatches).
 6. Fill out the PR template — including screenshots or a short screen recording
    for UI changes.
 

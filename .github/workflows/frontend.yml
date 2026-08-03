@@ -3,10 +3,10 @@ name: frontend
 # Builds + typechecks the root frontend on EVERY PR — no paths filter, because
 # `build` is a required status check on master's ruleset and a paths-skipped
 # workflow leaves it stuck "Expected" forever (GitHub required-checks docs).
-# The path-filtered push:master run is the backstop that re-validates the true
-# merged tree: a PR green against a stale base merges stale-green. Filters are
-# harmless there (the push run detects; only the PR run gates). Nothing else
-# covers the root toolchain — rust-tests.yml is src-tauri/**, Pages builds site/.
+# The path-filtered push:master run is the backstop re-validating the true
+# merged tree, since a PR green against a stale base merges stale-green (the
+# push run only detects; the PR run gates). No other workflow builds the root
+# toolchain — the rest cover src-tauri/**, site/, and changelog fragments.
 
 on:
   pull_request:
@@ -23,6 +23,7 @@ on:
       - "vite.config.ts"
       - "tsconfig*.json"
       - "biome.json"
+      - ".gitignore" # live biome input (vcs.useIgnoreFile)
       - ".github/workflows/frontend.yml"
 
 # One in-flight run per ref; a superseded push cancels the stale run instead of

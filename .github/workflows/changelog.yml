@@ -2,14 +2,20 @@ name: changelog
 
 # Requires a changelog.d/ fragment when a PR changes code. "fragment" is a
 # required status check on master (repo ruleset), so this gate blocks the merge.
-# Escape hatches unchanged: label the PR `no-changelog` (a job-level `if:` skip
-# still reports success to a required check), or put `skip-changelog` in the title.
+# Escape hatches unchanged: the `no-changelog` label (a job-level `if:` skip
+# still reports success to a required check), or `skip-changelog` in the title.
 
 on:
   pull_request:
-    # labeled/unlabeled: toggling no-changelog must re-run this check now that
-    # it is required (the default PR event types miss label changes).
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    # labeled/unlabeled/edited: no-changelog toggles and skip-changelog title
+    # edits must re-run this now-required check; default types cover neither.
+    types: [opened, synchronize, reopened, labeled, unlabeled, edited]
+
+# One in-flight run per ref; label and title events can fire several runs at
+# one SHA, and only the newest should decide a required check.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read

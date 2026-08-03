@@ -527,6 +527,11 @@ async function main() {
       say(
         `  git pull --rebase origin master && git tag -f ${tag} && git push --atomic origin master ${tag}`,
       );
+      say(
+        dim(
+          "  (Rejected for protected-branch/rules instead? The account lost master's ruleset bypass — rebasing won't help.)",
+        ),
+      );
       rl.close();
       process.exit(1);
     }
