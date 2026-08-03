@@ -25,6 +25,9 @@ permissions:
 
 jobs:
   build:
+    # Distinct display name: master's ruleset requires the context "build"
+    # (frontend.yml); same-named check runs would make site's build gate it too.
+    name: site build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

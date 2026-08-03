@@ -512,6 +512,8 @@ async function main() {
   } else {
     // One atomic push — both refs land or neither does. We push the tag
     // explicitly: it is lightweight, so --follow-tags would silently skip it.
+    // Rides the ruleset's Repository-admin always-bypass (build + fragment are
+    // required checks); losing that bypass rejects this push, tag included.
     const push = spawnSync(
       "git",
       ["push", "--atomic", "origin", "master", tag],

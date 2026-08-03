@@ -1,14 +1,18 @@
 name: frontend
 
-# Builds + typechecks the root frontend on PRs that touch it. This is the gate
-# that turns toolchain breakage red BEFORE merge — e.g. dependabot's vite 8->7
-# workspace-convergence downgrade (PRs #59/#62) previously merged all-green:
-# rust-tests.yml only covers src-tauri/**, changelog.yml only checks fragments,
-# and Cloudflare Pages builds site/ on its own lockfile, so nothing exercised
-# the root vite/plugin-react/rolldown toolchain on pull_request.
+# Builds + typechecks the root frontend on EVERY PR — no paths filter, because
+# `build` is a required status check on master's ruleset and a paths-skipped
+# workflow leaves it stuck "Expected" forever (GitHub required-checks docs).
+# The path-filtered push:master run is the backstop that re-validates the true
+# merged tree: a PR green against a stale base merges stale-green. Filters are
+# harmless there (the push run detects; only the PR run gates). Nothing else
+# covers the root toolchain — rust-tests.yml is src-tauri/**, Pages builds site/.
 
 on:
   pull_request:
+  push:
+    branches:
+      - master
     paths:
       - "package.json"
       - "pnpm-lock.yaml"
@@ -20,6 +24,12 @@ on:
       - "tsconfig*.json"
       - "biome.json"
       - ".github/workflows/frontend.yml"
+
+# One in-flight run per ref; a superseded push cancels the stale run instead of
+# stacking a second one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
