@@ -709,7 +709,7 @@ export function RemotePrView({
           // A queued merge was accepted but hasn't landed, so announce the state
           // once — mirroring the auto-merge arm — instead of a "Merged" success
           // that the queue detail would immediately contradict.
-          if (outcome.queued ?? false) {
+          if (outcome.queued) {
             toast.success(
               outcome.cleanupWarning ?? `Merge queued for #${number}`,
             );

@@ -608,7 +608,6 @@ pub struct PrMergeOutcome {
     /// prose: `cleanup_warning` carries the human detail, but a programmatic caller
     /// (the MCP merge tool, the frontend) must branch on this rather than parse a
     /// message — and must not treat the PR as merged or its branch as deleted.
-    #[serde(default)]
     pub queued: bool,
 }
 
@@ -1541,9 +1540,8 @@ pub async fn gh_pr_list(
         args.push(&limit_str);
     }
     // Stack membership needs its own endpoint (`gh pr list --json` has no stack
-    // field), and it depends only on the slug — so it rides ALONGSIDE the list
-    // rather than adding a gh spawn + round-trip to the list's critical path.
-    // Open rows only: a closed list describes merges already made.
+    // field) and depends only on the slug. Open rows only: a closed list describes
+    // merges already made.
     let want_stacks = state == "open";
     let (out, stacks) = tokio::join!(run_gh(Some(&repo_path), &args, GH_TIMEOUT), async {
         if !want_stacks {
