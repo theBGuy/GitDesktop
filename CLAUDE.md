@@ -31,7 +31,9 @@ don't wait to be asked:**
    record. **Never edit `## [Unreleased]` in `CHANGELOG.md` directly** — fragments
    are assembled there at release time, and one file per change keeps parallel
    branches conflict-free. Preview with `pnpm changelog:preview`; conventions live
-   in `changelog.d/README.md`.
+   in `changelog.d/README.md`. CI keys on paths: the required `fragment` check
+   fires on any `src/` or `src-tauri/` change; one that needs no fragment takes
+   the `no-changelog` label or `skip-changelog` in the PR title.
 
 When a change alters **existing** behavior, grep README / site / help for the old
 wording (e.g. the feature's old phrase) rather than updating spots from memory — stale

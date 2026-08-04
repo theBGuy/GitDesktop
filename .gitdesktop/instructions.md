@@ -57,7 +57,9 @@ gap per file.
 4. **Changelog fragment** — `changelog.d/<added|changed|fixed>-<slug>.md`, whose
    body is the finished Keep a Changelog bullet, written for humans. Never edit
    `## [Unreleased]` in `CHANGELOG.md` directly; fragments are assembled there at
-   release time.
+   release time. The `fragment` check is required on master and keys on paths:
+   any `src/` or `src-tauri/` change needs a fragment, the `no-changelog` label,
+   or `skip-changelog` in the PR title.
 
 When a change alters **existing** behavior, grep all four surfaces for the old
 wording rather than updating the spots you remember — stale copies of the same

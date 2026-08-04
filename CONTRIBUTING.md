@@ -113,10 +113,10 @@ humans** — a clear sentence about what changed for the user, not a copy of you
 commit subject. One file per change means parallel branches never conflict on the
 changelog; see [`changelog.d/README.md`](changelog.d/README.md) for the format.
 
-CI enforces this: `fragment` is a required status check on `master`, so a PR that
-touches `src/` or `src-tauri/` without adding a fragment can't merge. If a change
-genuinely doesn't need one, label the PR `no-changelog` or put `skip-changelog`
-in the title.
+CI keys on paths, not user impact: `fragment` is a required status check on
+`master`, so a PR that touches `src/` or `src-tauri/` without adding a fragment
+can't merge. If a change genuinely doesn't need one, label the PR `no-changelog`
+or put `skip-changelog` in the title.
 
 Don't edit `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md) directly — the
 fragments are assembled there at release time. Preview the pending changelog with

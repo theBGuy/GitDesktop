@@ -167,7 +167,10 @@ warrants; non-AI features in both site views) → in-app guide
 `src/features/help/content.ts` → a `changelog.d/<added|changed|fixed>-<slug>.md`
 fragment (its body is the finished Keep-a-Changelog bullet). **Never hand-edit
 `## [Unreleased]` in `CHANGELOG.md`** — it's *generated* from the fragments at
-release time; one file per change keeps parallel branches conflict-free.
+release time; one file per change keeps parallel branches conflict-free. The
+`fragment` check is **required** on master and keys on paths — any `src/` or
+`src-tauri/` change needs a fragment, the `no-changelog` label, or
+`skip-changelog` in the PR title.
 
 **In a delegated package the spec's `Docs-sync:` field is authoritative:**
 apply exactly what it lists (those files are thereby in scope); "orchestrator

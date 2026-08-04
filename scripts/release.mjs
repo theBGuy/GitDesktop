@@ -532,6 +532,11 @@ async function main() {
           "  (Rejected for protected-branch/rules instead? The account lost master's ruleset bypass — rebasing won't help.)",
         ),
       );
+      say(
+        dim(
+          `   To undo the release commit entirely (restores the fragments): git reset --hard HEAD~1 && git tag -d ${tag}`,
+        ),
+      );
       rl.close();
       process.exit(1);
     }

@@ -43,10 +43,10 @@ jobs:
           HEAD: ${{ github.event.pull_request.head.sha }}
           TITLE: ${{ github.event.pull_request.title }}
         run: |
-          changed=$(git diff --name-only "$BASE" "$HEAD")
+          changed=$(git diff --name-only "$BASE...$HEAD")
           printf '%s\n' "$changed"
           if grep -qE '^(src|src-tauri)/' <<< "$changed"; then
-            if grep -qE '^changelog\.d/.+\.md$' <<< "$changed"; then
+            if grep -E '^changelog\.d/' <<< "$changed" | grep -qiE '^changelog\.d/(added|changed|fixed)-[^/]+\.md$'; then
               echo "Changelog fragment present — thanks!"
             elif grep -qiF 'skip-changelog' <<< "$TITLE"; then
               echo "'skip-changelog' in the PR title — fragment not required."

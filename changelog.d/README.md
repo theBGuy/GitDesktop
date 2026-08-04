@@ -12,10 +12,10 @@ the updater's "what's new" both come from it), so marketing-site work — blog
 posts, comparison pages, anything under `site/` — gets **no fragment**, however
 user-facing it is on the web.
 
-CI enforces this with the `fragment` required check on `master`. It fires on any
-`src/` or `src-tauri/` change regardless of user impact, so a change that
-genuinely needs no fragment — an internal refactor, say — takes the
-`no-changelog` label or `skip-changelog` in the PR title.
+CI keys on paths, not user impact: the `fragment` required check on `master`
+fires on any `src/` or `src-tauri/` change, so a change that genuinely needs no
+fragment — an internal refactor, say — takes the `no-changelog` label or
+`skip-changelog` in the PR title.
 
 ## Format
 
