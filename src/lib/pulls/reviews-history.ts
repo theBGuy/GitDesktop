@@ -160,7 +160,8 @@ async function read(
   });
 }
 
-/** The most recent review for a specific PR + mode, or undefined if none. */
+/** The most recent review for a specific PR + mode, or undefined if none. `fresh`
+ *  re-reads the store from disk first — see {@link read}. */
 export async function getLatestReview(
   repo: string,
   kind: "remote" | "local",
@@ -177,7 +178,8 @@ export async function getLatestReview(
 /** Every persisted review for a PR (both modes), newest first. Two consumers, so
  *  narrowing what this returns is not a UI-only change: the "Previous reviews"
  *  disclosure, and the runner's pr-sync gate, which reads the whole retained set to
- *  decide whether a head was already covered. */
+ *  decide whether a head was already covered. `fresh` re-reads the store from disk
+ *  first — see {@link read}. */
 export async function listReviews(
   repo: string,
   kind: "remote" | "local",

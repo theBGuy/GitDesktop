@@ -31,10 +31,24 @@ function getStore(): Promise<Store> {
   return storePromise;
 }
 
+// Serialize every read-modify-write AND every fresh read on this store through one
+// in-process queue: a reload replaces the whole in-memory map from disk, so one
+// landing between a writer's `set` and its flush would persist the pre-write state
+// and silently drop the dismissal. Mirrors automations/store.ts and
+// reviews-history.ts. In-process only; cross-window races remain out of scope.
+let opChain: Promise<unknown> = Promise.resolve();
+function serialize<T>(op: () => Promise<T>): Promise<T> {
+  const run = opChain.then(op, op);
+  // Keep the queue alive whether `op` fulfilled or rejected; callers still get `run`.
+  opChain = run.catch(() => undefined);
+  return run;
+}
+
 // Re-read the store from disk, tolerating a store file that doesn't exist yet:
 // `load()` tolerates a missing file but `reload()` rejects with a raw io error
 // until the first `save()` creates it. Falls back to the in-memory state on ANY
-// failure. Mirrors the same guard in reviews-history.ts.
+// failure. Mirrors the same guard in reviews-history.ts. Call inside the serialized
+// queue so it can't land between a set and its flush.
 async function reloadRaw(): Promise<void> {
   const store = await getStore();
   try {
@@ -66,20 +80,45 @@ async function keyFor(repo: string): Promise<string> {
   );
 }
 
-/** The head SHA last dismissed for a PR + mode, or undefined if none. `fresh`
- *  reloads from disk first — the automation gates must read this watermark as
- *  fresh as the claim they pair with (see reviews-history.ts's `read`), since the
- *  plugin-store's per-process cache is otherwise loaded once at launch. */
-export async function getDismissedHead(
+/** Reads the merged map, optionally re-reading the store from disk first. `fresh`
+ *  is what the automation gates need: the plugin-store's per-process cache is
+ *  otherwise loaded once at launch, so a gate would decide on state predating
+ *  another instance's dismissal. Reload and read run inside the queue, ordered with
+ *  any in-flight write. */
+async function readDismissals(
+  repo: string,
+  opts?: { fresh?: boolean },
+): Promise<DismissalMap> {
+  if (!opts?.fresh) return readMerged(repo);
+  return serialize(async () => {
+    await reloadRaw();
+    return readMerged(repo);
+  });
+}
+
+const isReviewMode = (v: string): v is ReviewMode =>
+  v === "general" || v === "security";
+
+/** Every mode's dismissed head for ONE PR, in a single read. The automation gates
+ *  check both modes per event, and each `fresh` read reloads (and queues behind any
+ *  write) — so they take the whole PR's cells at once instead of once per mode.
+ *  `fresh` re-reads the store from disk first — see {@link readDismissals}. */
+export async function getDismissedHeadMap(
   repo: string,
   kind: "remote" | "local",
   ref: string,
-  mode: ReviewMode,
   opts?: { fresh?: boolean },
-): Promise<string | undefined> {
-  if (opts?.fresh) await reloadRaw();
-  const all = await readMerged(repo);
-  return all[cellKey(kind, ref, mode)];
+): Promise<Partial<Record<ReviewMode, string>>> {
+  const all = await readDismissals(repo, opts);
+  const prefix = `${kind}#${ref}#`;
+  const byMode: Partial<Record<ReviewMode, string>> = {};
+  for (const [cell, headSha] of Object.entries(all)) {
+    if (!cell.startsWith(prefix)) continue;
+    // Suffix comes from the store, so it's untrusted — keep only real modes.
+    const mode = cell.slice(prefix.length);
+    if (isReviewMode(mode)) byMode[mode] = headSha;
+  }
+  return byMode;
 }
 
 /** Records the head SHA dismissed for a PR + mode (overwriting any prior). */
@@ -90,13 +129,18 @@ export async function setDismissedHead(
   mode: ReviewMode,
   headSha: string,
 ): Promise<void> {
-  const store = await getStore();
-  const key = await keyFor(repo);
-  const all = (await store.get<DismissalMap>(key)) ?? {};
-  await store.set(key, { ...all, [cellKey(kind, ref, mode)]: headSha });
-  // Flush now rather than on autoSave's ~100ms debounce: the gates reload from
-  // disk, so a fresh read inside that window would discard this dismissal.
-  await store.save();
+  return serialize(async () => {
+    const store = await getStore();
+    // Reload before the read-modify-write: this rewrites the whole per-repo map, so
+    // basing it on a launch-time cache would drop another instance's cells.
+    await reloadRaw();
+    const key = await keyFor(repo);
+    const all = (await store.get<DismissalMap>(key)) ?? {};
+    await store.set(key, { ...all, [cellKey(kind, ref, mode)]: headSha });
+    // Flush past autoSave's ~100ms debounce so the next queued reload reads this
+    // write back instead of a pre-write snapshot.
+    await store.save();
+  });
 }
 
 /**
@@ -112,12 +156,16 @@ export async function clearDismissedHead(
   ref: string,
   mode: ReviewMode,
 ): Promise<void> {
-  const store = await getStore();
-  const key = await keyFor(repo);
-  const all = (await store.get<DismissalMap>(key)) ?? {};
-  delete all[cellKey(kind, ref, mode)];
-  await store.set(key, all);
-  // Same flush as setDismissedHead: an unsaved clear would be undone by the next
-  // fresh gate read, re-blocking the re-run this call exists to unblock.
-  await store.save();
+  return serialize(async () => {
+    const store = await getStore();
+    // Same reload-first rationale as setDismissedHead.
+    await reloadRaw();
+    const key = await keyFor(repo);
+    const all = (await store.get<DismissalMap>(key)) ?? {};
+    delete all[cellKey(kind, ref, mode)];
+    await store.set(key, all);
+    // Flush for the same reason: an unflushed clear would be undone by the next
+    // queued reload, re-blocking the re-run this call exists to unblock.
+    await store.save();
+  });
 }

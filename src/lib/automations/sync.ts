@@ -1,5 +1,5 @@
-import { getLatestReview } from "@/lib/pulls/reviews-history";
-import { getDismissedHead } from "./dismissals";
+import { listReviews } from "@/lib/pulls/reviews-history";
+import { getDismissedHeadMap } from "./dismissals";
 import { triggerAutomations } from "./runner";
 
 /**
@@ -187,16 +187,18 @@ export async function prOpenEligible(
 ): Promise<boolean> {
   try {
     const modes = ["general", "security"] as const;
+    // One fresh read of each store for the whole PR instead of one per mode: `fresh`
+    // reloads from disk and queues behind any writer. This is a gate, so it must see
+    // another instance's just-written record, not this process's launch-time cache.
+    const reviews = await listReviews(repoPath, "remote", ref, { fresh: true });
+    const dismissedByMode = await getDismissedHeadMap(repoPath, "remote", ref, {
+      fresh: true,
+    });
     for (const mode of modes) {
-      // `fresh` on both: this is a gate, so it must see another instance's
-      // just-written record rather than this process's launch-time store cache.
-      const prior = await getLatestReview(repoPath, "remote", ref, mode, {
-        fresh: true,
-      });
+      // Newest-first, so this mode's first entry is the latest review for it.
+      const prior = reviews.find((r) => r.mode === mode);
       if (prior) continue; // this mode already reviewed — no need on its account
-      const dismissed = await getDismissedHead(repoPath, "remote", ref, mode, {
-        fresh: true,
-      });
+      const dismissed = dismissedByMode[mode];
       // A dismissed head matching the current head means this mode was deliberately
       // skipped for this head — it doesn't need a review either.
       if (dismissed && sameSha(dismissed, currentHeadSha)) continue;

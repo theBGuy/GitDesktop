@@ -34,8 +34,8 @@ import type { DiffStatEntry } from "@/lib/git/types";
 import { notifyIfUnfocused } from "@/lib/notify";
 import { listLocalPrs, updateLocalPr } from "@/lib/pulls/local";
 import {
-  getLatestReview,
   listReviews,
+  type PersistedReview,
   saveReview,
 } from "@/lib/pulls/reviews-history";
 import { queryClient } from "@/lib/query-client";
@@ -49,7 +49,7 @@ import {
 import { errorMessage, invoke } from "@/lib/tauri/invoke";
 import {
   clearDismissedHead,
-  getDismissedHead,
+  getDismissedHeadMap,
   setDismissedHead,
 } from "./dismissals";
 import { useAutomationResults } from "./results";
@@ -258,6 +258,26 @@ async function run(
 
   const settings = await loadSettings();
   const notify = settings.notifications.automations;
+  // ONE fresh read of each gate store per event, not one per action: `fresh` reloads
+  // from disk and queues behind any writer, and pr-reviews.json carries every review's
+  // full markdown. The gates below derive per action from these snapshots — they're the
+  // post-delivery authority, so they must see another instance's just-written record
+  // rather than this process's launch-time cache. Commit events have no PR to gate on.
+  const gateReviews: PersistedReview[] =
+    event.kind === "commit"
+      ? []
+      : await listReviews(event.repoPath, event.target.type, targetRef(event), {
+          fresh: true,
+        });
+  const gateDismissed: Partial<Record<ReviewMode, string>> =
+    event.kind === "commit"
+      ? {}
+      : await getDismissedHeadMap(
+          event.repoPath,
+          event.target.type,
+          targetRef(event),
+          { fresh: true },
+        );
   for (const { action, conditions } of actions) {
     if (only && action !== only) continue;
     if (
@@ -277,22 +297,10 @@ async function run(
     // the history store's MAX_PER_GROUP per (kind, ref, mode).
     if (event.kind === "pr-sync") {
       const headSha = event.headSha ?? "";
-      // `fresh` on both gate reads: they're the post-delivery authority, so they must
-      // see another instance's just-written record, not this process's launch-time cache.
-      const covered = (
-        await listReviews(event.repoPath, event.target.type, targetRef(event), {
-          fresh: true,
-        })
-      ).filter((r) => r.mode === action);
+      const covered = gateReviews.filter((r) => r.mode === action);
       // A CANCELLED re-review persists the dismissed head, so a cancelled head doesn't
       // re-fire after an app relaunch — only a genuinely newer head does.
-      const dismissedHead = await getDismissedHead(
-        event.repoPath,
-        event.target.type,
-        targetRef(event),
-        action,
-        { fresh: true },
-      );
+      const dismissedHead = gateDismissed[action];
       // sameSha (not `===`) so a short-vs-full sha for the SAME head (Bitbucket's
       // 12-char poll head vs a full-40 seed) counts as "already reviewed" and
       // doesn't re-fire a redundant review each poll tick.
@@ -309,22 +317,11 @@ async function run(
     // a head this mode already dismissed. Mirror of the pr-sync gate, inverted — pr-sync
     // requires a prior review, pr-open requires its absence.
     if (event.kind === "pr-open") {
-      // `fresh` for the same reason as the pr-sync gate above.
-      const prior = await getLatestReview(
-        event.repoPath,
-        event.target.type,
-        targetRef(event),
-        action,
-        { fresh: true },
-      );
+      // The hoisted list is newest-first, so this mode's first entry IS its latest
+      // review — the same record `getLatestReview` would return.
+      const prior = gateReviews.find((r) => r.mode === action);
       if (prior) continue;
-      const dismissedHead = await getDismissedHead(
-        event.repoPath,
-        event.target.type,
-        targetRef(event),
-        action,
-        { fresh: true },
-      );
+      const dismissedHead = gateDismissed[action];
       if (event.headSha && sameSha(dismissedHead ?? "", event.headSha)) {
         continue;
       }
