@@ -534,7 +534,7 @@ async function main() {
       );
       say(
         dim(
-          `   To undo the release commit entirely (restores the fragments): git reset --hard HEAD~1 && git tag -d ${tag}`,
+          `  To undo the release commit entirely (restores the fragments): git reset --hard HEAD~1 && git tag -d ${tag}`,
         ),
       );
       rl.close();

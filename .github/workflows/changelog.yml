@@ -46,7 +46,12 @@ jobs:
           changed=$(git diff --name-only "$BASE...$HEAD")
           printf '%s\n' "$changed"
           if grep -qE '^(src|src-tauri)/' <<< "$changed"; then
-            if grep -E '^changelog\.d/' <<< "$changed" | grep -qiE '^changelog\.d/(added|changed|fixed)-[^/]+\.md$'; then
+            # A deleted fragment must not satisfy the gate: presence scans an
+            # exclude-deletions view; the src detection above stays unfiltered.
+            present=$(git diff --name-only --diff-filter=d "$BASE...$HEAD")
+            # Directory match stays case-sensitive; only the basename folds
+            # (mirrors FRAGMENT_RE's /i scope + readdirSync's top-level scan).
+            if grep -E '^changelog\.d/' <<< "$present" | grep -qiE '^changelog\.d/(added|changed|fixed)-[^/]+\.md$'; then
               echo "Changelog fragment present — thanks!"
             elif grep -qiF 'skip-changelog' <<< "$TITLE"; then
               echo "'skip-changelog' in the PR title — fragment not required."
