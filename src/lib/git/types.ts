@@ -1422,6 +1422,30 @@ export interface PrRef {
  *  arms ignore it, so the frontend gates the lens UI to GitHub forks. */
 export type RemoteLens = "origin" | "upstream";
 
+/** A PR's membership in a stack — a linear chain where each PR targets the one
+ *  below it. Absent/null means unstacked; merged members stay in the stack, so
+ *  `size` never shrinks. GitHub supplies it natively, GitLab's is inferred from
+ *  how a chain of MRs targets each other, and Bitbucket never has stacks. */
+export interface PrStackInfo {
+  /** Stack identity: GitHub stack number as a string; GitLab "mr-<iid>". */
+  id: string;
+  /** 1 = bottom of the stack (merges first). */
+  position: number;
+  size: number;
+}
+
+/** One member of a stack, for the detail view's Stack section. Merging a member
+ *  atomically merges every unmerged member below it, bottom-up. */
+export interface PrStackMember {
+  number: number;
+  title: string;
+  /** "open" | "merged" | "closed" */
+  state: string;
+  position: number;
+  headRefName: string;
+  baseRefName: string;
+}
+
 export interface PrInfo {
   number: number;
   url: string;
@@ -1440,6 +1464,8 @@ export interface PrInfo {
    *  Bitbucket has no batch pipeline endpoint. "" for GitHub/GitLab (their CI
    *  fetch keys on PR number / MR iid, not the SHA). */
   headSha: string;
+  /** Stack membership, driving the row's position badge. Null/absent = unstacked. */
+  stack?: PrStackInfo | null;
 }
 
 /** A PR's rolled-up CI signal for the list-row icon. "none" = no checks. */
@@ -1678,6 +1704,10 @@ export interface PrDetails {
   /** Whether the repository allows the rebase-merge method. GitHub only; `null` =
    *  unknown — do not gate on `null`. */
   rebaseMergeAllowed: boolean | null;
+  /** Stack membership. Null/absent = unstacked (the Stack section renders nothing). */
+  stack?: PrStackInfo | null;
+  /** Every member of `stack`, bottom-first; empty when the PR is unstacked. */
+  stackMembers: PrStackMember[];
 }
 
 /** A reviewer who has submitted a verdict, as supplied by the backend (GitLab

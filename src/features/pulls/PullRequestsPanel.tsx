@@ -2,6 +2,7 @@ import {
   CheckCircleIcon,
   ClockIcon,
   GitPullRequestIcon,
+  StackSimpleIcon,
   XCircleIcon,
 } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
@@ -365,7 +366,25 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
               )}
             </p>
             <p className="mt-0.5 truncate pl-4 text-[11px] text-muted-foreground">
-              #{pr.number} ·{" "}
+              #{pr.number}
+              {/* Ahead of the branch names so the row's truncation can't eat it.
+                  Text carries the meaning; the label is self-contained so the
+                  glyph reads on its own. */}
+              {pr.stack && (
+                <>
+                  {" · "}
+                  <span
+                    className="inline-flex items-center gap-1 align-middle"
+                    role="img"
+                    title={`Stack position ${pr.stack.position} of ${pr.stack.size}`}
+                    aria-label={`Stack position ${pr.stack.position} of ${pr.stack.size}`}
+                  >
+                    <StackSimpleIcon className="size-3 shrink-0 text-muted-foreground" />
+                    {pr.stack.position}/{pr.stack.size}
+                  </span>
+                </>
+              )}
+              {" · "}
               {pr.author ? `${displayLogin(pr.author.login)} · ` : ""}
               {pr.createdAt ? `${formatRelativeTime(pr.createdAt)} · ` : ""}
               {pr.headRefName} → {pr.baseRefName}

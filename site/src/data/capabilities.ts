@@ -194,6 +194,11 @@ export const capabilities: Capability[] = [
     label:
       "Fork · Upstream lens — browse & work a fork's PRs and issues or the parent's",
   },
+  {
+    group: "Pull requests & review",
+    label:
+      "Stacked PRs — position badges and a stack navigator; on GitHub, merge a stack bottom-up in one go",
+  },
 
   // — Forges & trackers —
   {

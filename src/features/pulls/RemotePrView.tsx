@@ -163,6 +163,7 @@ import {
   type SuggestionApply,
   threadToMarkdown,
 } from "./ReviewThreads";
+import { StackSection, stackMergeDisclosure } from "./StackSection";
 import { SubmitReviewDialog } from "./SubmitReviewDialog";
 import { useGeneratePrDescription } from "./useGeneratePrDescription";
 import {
@@ -329,6 +330,7 @@ export function RemotePrView({
   const pendingPrSection = useUiStore((s) => s.pendingPrSection);
   const setPendingPrSection = useUiStore((s) => s.setPendingPrSection);
   const selectedPr = useUiStore((s) => s.selectedPr);
+  const selectPr = useUiStore((s) => s.selectPr);
   // The activity dock's "View" lands here via a pending hint; switch to the
   // review sub-tab once, then clear it. Guarded on this being the *selected* PR
   // so a still-mounted lagging view (deferredPr) can't swallow the hint first.
@@ -424,6 +426,31 @@ export function RemotePrView({
       !details.data?.isDraft &&
       details.data?.state === "OPEN" &&
       !busy,
+  );
+
+  // Palette twins of the Stack section's arrow keys: step one position up or down
+  // the stack. Clamped at both ends — a stack is a dependency chain, so wrapping
+  // from the top back to the bottom would misrepresent the order. Gated on this
+  // being the *selected* PR so a still-mounted lagging view can't answer first.
+  const isSelectedPr =
+    selectedPr?.kind === "remote" && selectedPr.id === String(number);
+  function goToStackNeighbor(delta: 1 | -1) {
+    const info = details.data?.stack;
+    if (!info) return;
+    const target = (details.data?.stackMembers ?? []).find(
+      (m) => m.position === info.position + delta,
+    );
+    if (target) selectPr({ kind: "remote", id: String(target.number) });
+  }
+  useHotkeyAction(
+    "pr-stack-next",
+    () => goToStackNeighbor(1),
+    isSelectedPr && !!details.data?.stack,
+  );
+  useHotkeyAction(
+    "pr-stack-previous",
+    () => goToStackNeighbor(-1),
+    isSelectedPr && !!details.data?.stack,
   );
 
   const [composeBody, setComposeBody] = useState("");
@@ -835,6 +862,18 @@ export function RemotePrView({
     mergeState.data?.pipelineStatus ?? "",
   );
   const autoMergeArmed = mergeState.data?.autoMergeEnabled ?? false;
+  // What a stacked merge lands beyond the PR on screen — null when this PR is
+  // unstacked or everything below it already merged, leaving today's copy right.
+  // Gated on `providerKey`, not raw `provider`: forge status can be pending or
+  // failed here (canMerge deliberately stays on for GitHub then), and an
+  // unresolved host resolves to GitHub — so the scope is disclosed rather than
+  // silently dropped on the one provider that really does cascade-merge.
+  const stackMerge = stackMergeDisclosure(
+    pr?.stack,
+    pr?.stackMembers,
+    prNoun,
+    providerKey === "github",
+  );
 
   // Approval display (GitLab + Bitbucket): a quiet count shown only when there's
   // something to report — someone approved, or a GitLab Premium project requires
@@ -1304,6 +1343,14 @@ export function RemotePrView({
             }}
           />
         )}
+        {/* Stack members, bottom-first — self-hiding for an unstacked PR, so an
+            unstacked header is unchanged. */}
+        <StackSection
+          stack={pr.stack}
+          members={pr.stackMembers}
+          currentNumber={number}
+          onSelect={(n) => selectPr({ kind: "remote", id: String(n) })}
+        />
         <ChecksRollup
           checks={pr.checks}
           repoPath={repoPath}
@@ -2257,6 +2304,8 @@ export function RemotePrView({
         pending={mergeAuto ? armAutoMerge.isPending : mergePr.isPending}
         onConfirm={confirmMerge}
         auto={mergeAuto}
+        stackNotice={stackMerge?.notice}
+        confirmLabel={stackMerge?.confirmLabel}
       />
 
       <EditTitleBodyDialog

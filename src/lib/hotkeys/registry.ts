@@ -692,6 +692,18 @@ export const ACTIONS = [
     category: "Pull requests",
     defaultBinding: null,
   },
+  {
+    id: "pr-stack-next",
+    label: "Next pull request in stack",
+    category: "Pull requests",
+    defaultBinding: null,
+  },
+  {
+    id: "pr-stack-previous",
+    label: "Previous pull request in stack",
+    category: "Pull requests",
+    defaultBinding: null,
+  },
 ] as const satisfies readonly ActionDef[];
 
 export type ActionId = (typeof ACTIONS)[number]["id"];

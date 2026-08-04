@@ -307,6 +307,8 @@ export function MergePrDialog({
   pending,
   onConfirm,
   auto = false,
+  stackNotice,
+  confirmLabel,
 }: {
   open: boolean;
   onClose: () => void;
@@ -330,6 +332,12 @@ export function MergePrDialog({
   /** Arms merge-when-pipeline-succeeds instead of merging now (GitLab-only) —
    *  reframes the copy + confirm button; the delete-branch checkbox rides the arm. */
   auto?: boolean;
+  /** Extra scope a stacked merge takes with it — a stacked merge is atomic and
+   *  bottom-up, so the PRs below this one merge too. Absent = unstacked. */
+  stackNotice?: string;
+  /** Overrides the confirm button's label so a stacked merge can name how many
+   *  PRs it lands. Absent = the strategy label, unchanged. */
+  confirmLabel?: string;
 }) {
   return (
     <Dialog
@@ -362,6 +370,9 @@ export function MergePrDialog({
             )}
           </DialogDescription>
         </DialogHeader>
+        {/* A stacked merge lands more than the PR on screen — say so above the
+            options, never only on the confirm button. */}
+        {stackNotice && <p className="text-xs text-warning">{stackNotice}</p>}
         {/* Deleting the head after merge is offered only when it's actually
             possible: never for the default branch (hidden — the forge refuses),
             and disabled with a reason when a branch rule blocks its deletion. */}
@@ -399,7 +410,7 @@ export function MergePrDialog({
           </Button>
           <Button disabled={pending} onClick={onConfirm}>
             {pending && <Spinner data-icon="inline-start" />}
-            {auto ? "Enable auto-merge" : strategyLabel}
+            {auto ? "Enable auto-merge" : (confirmLabel ?? strategyLabel)}
           </Button>
         </DialogFooter>
       </DialogContent>

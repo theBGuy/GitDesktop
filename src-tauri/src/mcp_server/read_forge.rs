@@ -135,8 +135,11 @@ impl GitDesktopMcp {
                        Without `limit`, returns the provider default (GitHub ~30; GitLab and \
                        Bitbucket a full page); pass `limit` to raise or lower that cap. Per-call \
                        ceiling: GitHub 1000, GitLab 100, Bitbucket 50 — a larger `limit` returns \
-                       the ceiling (no pagination). Requires the forge's authenticated \
-                       CLI/credential. Returns JSON."
+                       the ceiling (no pagination). Open rows carry a `stack` object \
+                       ({id, position, size}, position 1 = bottom and merges first) when the \
+                       PR belongs to a stack — GitHub stacks, or a chain of GitLab MRs each \
+                       targeting the next one's source branch; null otherwise. Requires the \
+                       forge's authenticated CLI/credential. Returns JSON."
     )]
     async fn list_pull_requests(
         &self,
@@ -159,7 +162,10 @@ impl GitDesktopMcp {
     #[tool(
         description = "Get a pull request's full details (title, body, state, reviews, comments, \
                        files) by number from the repository's forge (GitHub, GitLab, or Bitbucket, \
-                       per its remote). For just the conversation — including file:line review \
+                       per its remote). A stacked PR also carries `stack` ({id, position, size}) \
+                       and `stackMembers`, the whole stack bottom→top with each layer's state — \
+                       merged layers included, since merging one layer merges every unmerged \
+                       layer below it. For just the conversation — including file:line review \
                        threads — see list_pull_request_comments. Returns JSON."
     )]
     async fn get_pull_request(

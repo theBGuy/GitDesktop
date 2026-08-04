@@ -624,6 +624,8 @@ fn from_bb_pr(p: BbPr) -> PrInfo {
             .and_then(|s| s.commit.as_ref())
             .map(|c| c.hash.clone())
             .unwrap_or_default(),
+        // Bitbucket has no stacked-PR concept.
+        stack: None,
     }
 }
 
@@ -1222,6 +1224,9 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         merge_commit_allowed: None,
         squash_merge_allowed: None,
         rebase_merge_allowed: None,
+        // Bitbucket has no stacked-PR concept.
+        stack: None,
+        stack_members: Vec::new(),
     })
 }
 

@@ -851,6 +851,25 @@ GitLab works too**: sign \`glab\` in to your instance (from Accounts, or
 automatically. Its issues, CI pipelines, and
 releases work too (see their sections below).
 
+## Stacked pull requests
+
+When a pull request is part of a **stack** — a chain where each PR targets the one below it
+instead of the base branch — its row in the list carries a **position badge** (*2/3*), and
+the PR view gains a **Stack** section listing every member from the bottom of the stack up,
+with the one you're reading marked. Select a member — click it, or move through the section
+with **↑ / ↓** — to open that pull request. The command palette ({{kbd:command-palette}}) also
+carries **Next pull request in stack** and **Previous pull request in stack**, offered from
+the pull-request view while you have a stacked one open; both are palette commands with no
+default shortcut, so give them one in **Settings → Keyboard** if you want it on the keys.
+
+Where the stack comes from depends on the forge: on **GitHub** it's the **native
+stacked-PR API**, and on **GitLab** a chain of merge requests is **detected automatically**.
+
+On **GitHub**, merging is **stack-aware**: merging a stacked pull request merges it *and*
+every still-open pull request below it, bottom-up, as a single operation, so the stack
+lands in dependency order without you walking it by hand. The merge dialog **lists exactly
+which pull requests will merge**, in the order they'll go in, before you confirm.
+
 ## Bitbucket PRs
 
 Point the app at a **Bitbucket Cloud** repo (connect with an Atlassian API token in
