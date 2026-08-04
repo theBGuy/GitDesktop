@@ -7,59 +7,64 @@ pillar: ai-you-own
 tags: ["ai", "workflow"]
 ---
 
-I don't keep AI out of my own workflow. I use it every day, and I build
-GitDesktop with it. The switch that hides every AI feature in the app was
-still in the plan from day one.
+I use AI constantly. It writes commit messages I would have typed myself.
+It drafts pull request descriptions. It reviews my code before I open a
+pull request — sometimes it catches something I missed, sometimes it just
+saves me five minutes. GitDesktop has all of those features. It also has
+a setting called "Hide AI features."
 
-## Stuffed into everything
+Why build AI into a Git client and then make it disappear? Because I
+don't think software should decide how people work.
 
-People don't trust AI products. The energy use bothers them. The general
-feeling is that AI keeps being put in everyone's face when it just doesn't
-need to be.
+## AI isn't the product
 
-That feeling is all over Reddit: AI stuffed into everything, whether it's
-necessary to the product or not. Everyone's trying to force this AI-native
-flow, and not everything needs it.
+It's easy to look at developer tools right now and feel like every
+application has become an AI application. Sometimes that's useful.
+Sometimes it's just another button you have to ignore. Everyone's trying
+to force this AI-native flow, and not everything needs it.
 
-And I build an AI-native Git client.
+I didn't want GitDesktop to end up as an assistant with a Git client
+somewhere underneath it. I wanted a Git client first. The goal was
+[**the whole loop, one window**](/blog/the-whole-loop-one-window/) long
+before the first AI feature existed.
 
-## What the switch actually does
+## The switch isn't cosmetic
 
-GitDesktop's settings have a checkbox under General: "Hide AI features."
-Turn it on and the AI is gone. The generate buttons leave the commit box
-and the pull request dialogs. Whole settings sections disappear. The user
-guide drops its AI chapters. The Agent tab's code never even loads.
+Turn on "Hide AI features" (one checkbox under General) and GitDesktop
+doesn't gray out a few buttons. The generate actions disappear from the
+commit box and the pull request dialogs. Whole settings sections are
+removed. The user guide drops its AI chapters. The Agent tab's code never
+even loads. Even [this website](/) has the switch: a "Just Git" view that
+hides the AI features from the pitch.
 
-Even [this website](/) has the switch — a "Just Git" view that hides the
-AI features from the pitch.
+What's left is simply GitDesktop. You can open, view, and completely
+manage [pull requests](/#pull-requests) from your local client — issues
+and discussions the same way. You can cut tags, publish releases, manage
+your worktrees, edit your unpushed history, and check your
+[repository insights](/integrations/) without opening a browser. You can
+recover lost work from the operation history, and protect branches
+locally with the kind of [branch rules](/features/) GitHub doesn't offer
+on a private repository unless you're on a paid plan. The workflow stays
+complete. Only the optional layer disappears.
 
-## The Git client that's left
+## Agency matters
 
-So what's left when you turn it all off? A full-featured Git client,
-without the jumping back and forth to GitHub.
+I think AI is genuinely useful — I use it every day. I also think people should
+decide when it belongs in their workflow. So GitDesktop never calls a
+model on its own. Nothing happens unless you ask for it; the one
+exception is an automation you wrote yourself, and even that only runs
+the rule you gave it.
 
-You can open, view, and completely manage
-[pull requests](/#pull-requests) from your local client — issues and
-discussions the same way. You can cut tags and publish releases. You can
-check [repository insights](/integrations/) without opening a browser. And
-you can protect branches locally: the kind of [branch rules](/features/)
-GitHub doesn't offer on a private repository unless you're on a paid plan.
-In GitDesktop they work offline, on any repository.
+When you do use it, you choose where the requests go. Bring your own API
+key. Run Ollama locally, so the calls never leave your machine. Or don't
+use AI at all. The software shouldn't make that decision for you.
 
-[**The whole loop, one window**](/blog/the-whole-loop-one-window/) was
-never about the AI.
+## Software you can trust
 
-## When you leave it on
+Trust isn't only about security or privacy. It's about knowing what your
+tools will do. When you disable a feature, it should actually disappear.
+When you don't want AI in your workflow, your Git client shouldn't keep
+reminding you that it exists.
 
-The switch isn't the only boundary. GitDesktop never calls AI on its own —
-nothing runs unless you invoke it. The only thing that runs unattended is
-an automation: a rule you wrote yourself, maybe to review each pull
-request when it opens. Even then, nothing happens that you didn't set up.
-
-When you do use the AI, the model is your choice: your own API key, or a
-local Ollama where the calls never leave your machine.
-
-## Not everything needs it
-
-I don't keep AI out of my own workflow. But that's my workflow, not yours.
-Everyone should have that agency, that option.
+I use AI every day. But that's my workflow. One of the design goals
+behind GitDesktop is that you never have to make it yours.
