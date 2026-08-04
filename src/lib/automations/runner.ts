@@ -277,8 +277,12 @@ async function run(
     // the history store's MAX_PER_GROUP per (kind, ref, mode).
     if (event.kind === "pr-sync") {
       const headSha = event.headSha ?? "";
+      // `fresh` on both gate reads: they're the post-delivery authority, so they must
+      // see another instance's just-written record, not this process's launch-time cache.
       const covered = (
-        await listReviews(event.repoPath, event.target.type, targetRef(event))
+        await listReviews(event.repoPath, event.target.type, targetRef(event), {
+          fresh: true,
+        })
       ).filter((r) => r.mode === action);
       // A CANCELLED re-review persists the dismissed head, so a cancelled head doesn't
       // re-fire after an app relaunch — only a genuinely newer head does.
@@ -287,6 +291,7 @@ async function run(
         event.target.type,
         targetRef(event),
         action,
+        { fresh: true },
       );
       // sameSha (not `===`) so a short-vs-full sha for the SAME head (Bitbucket's
       // 12-char poll head vs a full-40 seed) counts as "already reviewed" and
@@ -304,11 +309,13 @@ async function run(
     // a head this mode already dismissed. Mirror of the pr-sync gate, inverted — pr-sync
     // requires a prior review, pr-open requires its absence.
     if (event.kind === "pr-open") {
+      // `fresh` for the same reason as the pr-sync gate above.
       const prior = await getLatestReview(
         event.repoPath,
         event.target.type,
         targetRef(event),
         action,
+        { fresh: true },
       );
       if (prior) continue;
       const dismissedHead = await getDismissedHead(
@@ -316,6 +323,7 @@ async function run(
         event.target.type,
         targetRef(event),
         action,
+        { fresh: true },
       );
       if (event.headSha && sameSha(dismissedHead ?? "", event.headSha)) {
         continue;

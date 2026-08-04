@@ -188,9 +188,15 @@ export async function prOpenEligible(
   try {
     const modes = ["general", "security"] as const;
     for (const mode of modes) {
-      const prior = await getLatestReview(repoPath, "remote", ref, mode);
+      // `fresh` on both: this is a gate, so it must see another instance's
+      // just-written record rather than this process's launch-time store cache.
+      const prior = await getLatestReview(repoPath, "remote", ref, mode, {
+        fresh: true,
+      });
       if (prior) continue; // this mode already reviewed — no need on its account
-      const dismissed = await getDismissedHead(repoPath, "remote", ref, mode);
+      const dismissed = await getDismissedHead(repoPath, "remote", ref, mode, {
+        fresh: true,
+      });
       // A dismissed head matching the current head means this mode was deliberately
       // skipped for this head — it doesn't need a review either.
       if (dismissed && sameSha(dismissed, currentHeadSha)) continue;

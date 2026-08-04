@@ -143,14 +143,32 @@ function prune(records: PersistedReview[]): PersistedReview[] {
   return kept;
 }
 
+/** Reads the merged records, optionally re-reading the store from disk first.
+ *  `fresh` is what the automation gates need: the automation claim is an OS-atomic
+ *  lock covering CONCURRENT runs only — after delivery THIS store's record is the
+ *  authority, and the plugin-store's per-process cache is otherwise launch-time, so
+ *  a second instance would gate on "never reviewed" and re-review. Runs inside the
+ *  serialize queue so the reload is ordered with in-flight mutations. */
+async function read(
+  repo: string,
+  opts?: { fresh?: boolean },
+): Promise<PersistedReview[]> {
+  if (!opts?.fresh) return readMerged(repo);
+  return serialize(async () => {
+    await reloadRaw();
+    return readMerged(repo);
+  });
+}
+
 /** The most recent review for a specific PR + mode, or undefined if none. */
 export async function getLatestReview(
   repo: string,
   kind: "remote" | "local",
   ref: string,
   mode: ReviewMode,
+  opts?: { fresh?: boolean },
 ): Promise<PersistedReview | undefined> {
-  const all = await readMerged(repo);
+  const all = await read(repo, opts);
   return all
     .filter((r) => r.kind === kind && r.ref === ref && r.mode === mode)
     .sort((a, b) => b.finishedAt - a.finishedAt)[0];
@@ -164,8 +182,9 @@ export async function listReviews(
   repo: string,
   kind: "remote" | "local",
   ref: string,
+  opts?: { fresh?: boolean },
 ): Promise<PersistedReview[]> {
-  const all = await readMerged(repo);
+  const all = await read(repo, opts);
   return all
     .filter((r) => r.kind === kind && r.ref === ref)
     .sort((a, b) => b.finishedAt - a.finishedAt);

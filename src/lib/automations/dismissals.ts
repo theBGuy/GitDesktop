@@ -31,6 +31,19 @@ function getStore(): Promise<Store> {
   return storePromise;
 }
 
+// Re-read the store from disk, tolerating a store file that doesn't exist yet:
+// `load()` tolerates a missing file but `reload()` rejects with a raw io error
+// until the first `save()` creates it. Falls back to the in-memory state on ANY
+// failure. Mirrors the same guard in reviews-history.ts.
+async function reloadRaw(): Promise<void> {
+  const store = await getStore();
+  try {
+    await store.reload({ ignoreDefaults: true });
+  } catch {
+    // Missing file — the next save() creates it.
+  }
+}
+
 // Reads merge in any records still under a legacy checkout-path key (folded onto
 // the identity key by the next write via `keyFor`).
 async function readMerged(repo: string): Promise<DismissalMap> {
@@ -53,13 +66,18 @@ async function keyFor(repo: string): Promise<string> {
   );
 }
 
-/** The head SHA last dismissed for a PR + mode, or undefined if none. */
+/** The head SHA last dismissed for a PR + mode, or undefined if none. `fresh`
+ *  reloads from disk first — the automation gates must read this watermark as
+ *  fresh as the claim they pair with (see reviews-history.ts's `read`), since the
+ *  plugin-store's per-process cache is otherwise loaded once at launch. */
 export async function getDismissedHead(
   repo: string,
   kind: "remote" | "local",
   ref: string,
   mode: ReviewMode,
+  opts?: { fresh?: boolean },
 ): Promise<string | undefined> {
+  if (opts?.fresh) await reloadRaw();
   const all = await readMerged(repo);
   return all[cellKey(kind, ref, mode)];
 }
@@ -76,6 +94,9 @@ export async function setDismissedHead(
   const key = await keyFor(repo);
   const all = (await store.get<DismissalMap>(key)) ?? {};
   await store.set(key, { ...all, [cellKey(kind, ref, mode)]: headSha });
+  // Flush now rather than on autoSave's ~100ms debounce: the gates reload from
+  // disk, so a fresh read inside that window would discard this dismissal.
+  await store.save();
 }
 
 /**
@@ -96,4 +117,7 @@ export async function clearDismissedHead(
   const all = (await store.get<DismissalMap>(key)) ?? {};
   delete all[cellKey(kind, ref, mode)];
   await store.set(key, all);
+  // Same flush as setDismissedHead: an unsaved clear would be undone by the next
+  // fresh gate read, re-blocking the re-run this call exists to unblock.
+  await store.save();
 }
