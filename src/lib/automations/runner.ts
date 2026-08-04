@@ -258,14 +258,11 @@ async function run(
 
   const settings = await loadSettings();
   const notify = settings.notifications.automations;
-  // The gate stores, read once and shared by an event's per-action gate checks, then
-  // dropped after any action that actually RAN (see the loop's `finally`): a review takes
-  // minutes, and in that window another window can cancel — releasing the claim and
-  // flushing a dismissal — so a later action must re-read rather than decide on a
-  // pre-loop snapshot. `fresh` reloads from disk and queues behind any writer, and
-  // pr-reviews.json carries every review's full markdown, so the sharing is what keeps a
-  // two-mode event from paying for both twice. Taken LAZILY: an event whose actions are
-  // all filtered out reads nothing, and commit events never reach the gates below.
+  // The gate stores, read once and shared by an event's per-action gate checks: `fresh`
+  // reloads from disk and queues behind any writer, and pr-reviews.json carries every
+  // review's full markdown, so sharing is what keeps a two-mode event from paying twice.
+  // Taken LAZILY — an event whose actions are all filtered out reads nothing, and commit
+  // events never reach the gates below.
   let gateSnapshot: {
     reviews: PersistedReview[];
     dismissed: Partial<Record<ReviewMode, string>>;
@@ -273,20 +270,21 @@ async function run(
   // Memoizes the resolved object rather than the promise — the action loop is sequential,
   // so two calls can never be in flight across these awaits.
   const gateState = async (prEvent: PrAutomationEvent) => {
-    gateSnapshot ??= {
-      reviews: await listReviews(
-        prEvent.repoPath,
-        prEvent.target.type,
-        targetRef(prEvent),
-        { fresh: true },
-      ),
-      dismissed: await getDismissedHeadMap(
-        prEvent.repoPath,
-        prEvent.target.type,
-        targetRef(prEvent),
-        { fresh: true },
-      ),
-    };
+    if (!gateSnapshot) {
+      // Separate stores with independent queues, so neither read waits on the other.
+      const [reviews, dismissed] = await Promise.all([
+        listReviews(prEvent.repoPath, prEvent.target.type, targetRef(prEvent), {
+          fresh: true,
+        }),
+        getDismissedHeadMap(
+          prEvent.repoPath,
+          prEvent.target.type,
+          targetRef(prEvent),
+          { fresh: true },
+        ),
+      ]);
+      gateSnapshot = { reviews, dismissed };
+    }
     return gateSnapshot;
   };
   for (const { action, conditions } of actions) {

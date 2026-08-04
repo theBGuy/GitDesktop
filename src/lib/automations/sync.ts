@@ -1,6 +1,7 @@
 import { listReviews } from "@/lib/pulls/reviews-history";
 import { getDismissedHeadMap } from "./dismissals";
 import { triggerAutomations } from "./runner";
+import { ALL_ACTION_IDS } from "./types";
 
 /**
  * Per-`(kind, repo, ref)` EVERY head already fired for, `sameSha`-matched — an
@@ -186,15 +187,15 @@ export async function prOpenEligible(
   currentHeadSha: string,
 ): Promise<boolean> {
   try {
-    const modes = ["general", "security"] as const;
-    // One fresh read of each store for the whole PR instead of one per mode: `fresh`
-    // reloads from disk and queues behind any writer. This is a gate, so it must see
-    // another instance's just-written record, not this process's launch-time cache.
-    const reviews = await listReviews(repoPath, "remote", ref, { fresh: true });
-    const dismissedByMode = await getDismissedHeadMap(repoPath, "remote", ref, {
-      fresh: true,
-    });
-    for (const mode of modes) {
+    // One fresh read of each store for the whole PR instead of one per mode, and the two
+    // concurrently — separate stores, independent queues. `fresh` reloads from disk and
+    // queues behind any writer: this is a gate, so it must see another instance's
+    // just-written record, not this process's launch-time cache.
+    const [reviews, dismissedByMode] = await Promise.all([
+      listReviews(repoPath, "remote", ref, { fresh: true }),
+      getDismissedHeadMap(repoPath, "remote", ref, { fresh: true }),
+    ]);
+    for (const mode of ALL_ACTION_IDS) {
       // Newest-first, so this mode's first entry is the latest review for it.
       const prior = reviews.find((r) => r.mode === mode);
       if (prior) continue; // this mode already reviewed — no need on its account
