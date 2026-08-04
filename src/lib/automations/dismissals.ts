@@ -2,6 +2,7 @@ import { load, type Store } from "@tauri-apps/plugin-store";
 import type { ReviewMode } from "@/lib/ai/types";
 import { identityKeyFor, repoIdentity } from "@/lib/git/repo-identity";
 import { storeName } from "@/lib/test-mode";
+import { ALL_ACTION_IDS } from "./types";
 
 /**
  * Persistent "dismissed head" watermarks for pr-sync automations. Cancelling an
@@ -96,8 +97,10 @@ async function readDismissals(
   });
 }
 
+// Derived from the action registry rather than another copy of the literal pair, so a
+// new mode can't be silently dropped here (`ActionId` IS `ReviewMode`).
 const isReviewMode = (v: string): v is ReviewMode =>
-  v === "general" || v === "security";
+  (ALL_ACTION_IDS as readonly string[]).includes(v);
 
 /** Every mode's dismissed head for ONE PR, in a single read. The automation gates
  *  check both modes per event, and each `fresh` read reloads (and queues behind any
@@ -114,9 +117,11 @@ export async function getDismissedHeadMap(
   const byMode: Partial<Record<ReviewMode, string>> = {};
   for (const [cell, headSha] of Object.entries(all)) {
     if (!cell.startsWith(prefix)) continue;
-    // Suffix comes from the store, so it's untrusted — keep only real modes.
+    // Cell and value both come from the store, so both are untrusted — keep only real
+    // modes, and only string heads (a hand-edited value would throw inside sameSha).
     const mode = cell.slice(prefix.length);
-    if (isReviewMode(mode)) byMode[mode] = headSha;
+    if (isReviewMode(mode) && typeof headSha === "string")
+      byMode[mode] = headSha;
   }
   return byMode;
 }
