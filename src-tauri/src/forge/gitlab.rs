@@ -305,47 +305,87 @@ fn from_glab_mr(m: GlabMr) -> PrInfo {
 /// source branch but exposes no stack object, so we reconstruct the same relation
 /// from the list.
 ///
-/// Only unambiguous LINEAR chains of two or more MRs are marked: a source branch
-/// shared by two open MRs identifies no unique parent, and an MR with two open
-/// children is a branching stack — GitHub disallows those and we mirror it by
-/// leaving the whole chain unmarked rather than guessing an order. Pure —
-/// unit-tested.
+/// Only unambiguous LINEAR chains of two or more MRs are marked, and ambiguity is
+/// judged per CONNECTED COMPONENT, not per link: a source branch shared by two
+/// open MRs identifies no unique parent, and an MR with two open children is a
+/// branching stack — GitHub disallows those, so a component containing either
+/// shape is left entirely unmarked rather than re-rooted at the break (an MR
+/// whose own base is ambiguous is not a stack bottom). Pure — unit-tested.
 fn infer_mr_stacks(open: &[(u64, &str, &str)]) -> HashMap<u64, (String, u32, u32)> {
     let mut sources: HashMap<&str, Vec<u64>> = HashMap::new();
     for (iid, head, _) in open {
         sources.entry(*head).or_default().push(*iid);
     }
 
+    // Candidate links join a component even when they're AMBIGUOUS — that's what
+    // lets one bad link poison its whole chain instead of silently splitting it.
+    let mut neighbors: HashMap<u64, Vec<u64>> = HashMap::new();
     let mut has_parent: std::collections::HashSet<u64> = std::collections::HashSet::new();
     let mut children: HashMap<u64, Vec<u64>> = HashMap::new();
+    let mut ambiguous: std::collections::HashSet<u64> = std::collections::HashSet::new();
     for (iid, _, base) in open {
-        // A target branch that is exactly ONE open MR's source branch is a stack
-        // link; zero means this MR sits on a plain branch, two is ambiguous.
-        let Some([parent]) = sources.get(*base).map(Vec::as_slice) else {
-            continue;
-        };
-        if *parent == *iid {
-            continue;
+        // The open MRs offering this target branch as their source. An MR can't be
+        // its own parent (a self-targeting MR just sits on a plain branch).
+        let candidates: Vec<u64> = sources
+            .get(*base)
+            .map(|c| c.iter().copied().filter(|p| p != iid).collect())
+            .unwrap_or_default();
+        for parent in &candidates {
+            neighbors.entry(*iid).or_default().push(*parent);
+            neighbors.entry(*parent).or_default().push(*iid);
         }
-        has_parent.insert(*iid);
-        children.entry(*parent).or_default().push(*iid);
+        match candidates.as_slice() {
+            // No open MR owns this branch — a genuine chain bottom.
+            [] => {}
+            [parent] => {
+                has_parent.insert(*iid);
+                children.entry(*parent).or_default().push(*iid);
+            }
+            _ => {
+                ambiguous.insert(*iid);
+            }
+        }
+    }
+    for (parent, kids) in &children {
+        if kids.len() > 1 {
+            ambiguous.insert(*parent);
+        }
     }
 
     let mut result = HashMap::new();
-    for (bottom, _, _) in open.iter().filter(|(iid, _, _)| !has_parent.contains(iid)) {
+    let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    // Walk components in list order so the output never depends on hash iteration.
+    for (start, _, _) in open {
+        if !seen.insert(*start) {
+            continue;
+        }
+        let mut component = vec![*start];
+        let mut queue = vec![*start];
+        while let Some(node) = queue.pop() {
+            for next in neighbors.get(&node).into_iter().flatten() {
+                if seen.insert(*next) {
+                    component.push(*next);
+                    queue.push(*next);
+                }
+            }
+        }
+        if component.iter().any(|iid| ambiguous.contains(iid)) {
+            continue;
+        }
+        // Unambiguous: every link is unique in both directions, so the component is
+        // one chain. A component whose every MR has a parent is a cycle — no bottom,
+        // nothing emitted.
+        let Some(bottom) = component.iter().find(|iid| !has_parent.contains(iid)) else {
+            continue;
+        };
         let mut chain = vec![*bottom];
         let mut cursor = *bottom;
-        while let Some(kids) = children.get(&cursor) {
-            let [next] = kids.as_slice() else {
-                // Branching — abandon this whole chain.
-                chain.clear();
+        // Bounded by the component: an unambiguous component can't join a cycle to a
+        // parentless bottom, so this is belt-and-braces against an infinite walk.
+        while chain.len() < component.len() {
+            let Some([next]) = children.get(&cursor).map(Vec::as_slice) else {
                 break;
             };
-            // Defensive: a cycle can't reach a parentless bottom, but never loop.
-            if chain.contains(next) {
-                chain.clear();
-                break;
-            }
             cursor = *next;
             chain.push(cursor);
         }
@@ -7635,6 +7675,22 @@ mod tests {
             (1, "feat-a", "main"),
             (2, "feat-a", "release"),
             (3, "feat-b", "feat-a"),
+        ])
+        .is_empty());
+    }
+
+    #[test]
+    fn infer_mr_stacks_unmarks_the_whole_component_not_just_the_bad_link() {
+        // A backport shape: !10 and !11 both source feat-a (onto main and release),
+        // !12 stacks on feat-a, !13 on !12. !12's base is an ambiguous open-MR head,
+        // so !12 is NOT a bottom — dropping only the bad link would re-root the
+        // chain there and report [12, 13] as a stack. The ambiguity poisons the
+        // whole component instead.
+        assert!(infer_mr_stacks(&[
+            (10, "feat-a", "main"),
+            (11, "feat-a", "release"),
+            (12, "feat-b", "feat-a"),
+            (13, "feat-c", "feat-b"),
         ])
         .is_empty());
     }

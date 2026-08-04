@@ -867,8 +867,9 @@ stacked-PR API**, and on **GitLab** a chain of merge requests is **detected auto
 
 On **GitHub**, merging is **stack-aware**: merging a stacked pull request merges it *and*
 every still-open pull request below it, bottom-up, as a single operation, so the stack
-lands in dependency order without you walking it by hand. The merge dialog **lists exactly
-which pull requests will merge**, in the order they'll go in, before you confirm.
+lands in dependency order without you walking it by hand. Before you confirm, the merge
+dialog **spells out the full scope of the merge** — naming each pull request it will merge,
+in the order they'll go in, whenever it has the list.
 
 ## Bitbucket PRs
 
@@ -1775,10 +1776,10 @@ bindings (formatted for your platform) — rebind any of them in **Settings → 
 
 ## Moving around
 
-- **↑ / ↓** navigate every list — files, commits, branches, PRs, runs, sessions, and the
-  side rails (Settings, Repository settings, and this guide). **Shift + ↑ / ↓** extends a
-  selection in History. **Enter** opens the highlighted item; **Esc** closes dialogs and
-  menus.
+- **↑ / ↓** navigate every list — files, commits, branches, PRs, stack members, runs,
+  sessions, and the side rails (Settings, Repository settings, and this guide).
+  **Shift + ↑ / ↓** extends a selection in History. **Enter** opens the highlighted item;
+  **Esc** closes dialogs and menus.
 - **Tabs:** {{kbd:tab-changes}} Changes · {{kbd:tab-history}} History ·
   {{kbd:tab-compare}} Compare · {{kbd:tab-pulls}} Pull Requests · {{kbd:tab-actions}}
   Actions · {{kbd:tab-issues}} Issues · {{kbd:tab-discussions}} Discussions ·

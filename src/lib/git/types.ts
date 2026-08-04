@@ -1423,9 +1423,11 @@ export interface PrRef {
 export type RemoteLens = "origin" | "upstream";
 
 /** A PR's membership in a stack — a linear chain where each PR targets the one
- *  below it. Absent/null means unstacked; merged members stay in the stack, so
- *  `size` never shrinks. GitHub supplies it natively, GitLab's is inferred from
- *  how a chain of MRs targets each other, and Bitbucket never has stacks. */
+ *  below it. Absent/null means unstacked. Provenance differs per forge and `id`
+ *  carries it: GitHub's is native (numeric id) and keeps merged members, so
+ *  `size` never shrinks; GitLab's is inferred over OPEN MRs ("mr-<iid>" id), so
+ *  a merged layer leaves the chain and both `position` and `size` shrink — and a
+ *  two-MR chain losing one stops being marked at all. Bitbucket has no stacks. */
 export interface PrStackInfo {
   /** Stack identity: GitHub stack number as a string; GitLab "mr-<iid>". */
   id: string;
@@ -1434,8 +1436,9 @@ export interface PrStackInfo {
   size: number;
 }
 
-/** One member of a stack, for the detail view's Stack section. Merging a member
- *  atomically merges every unmerged member below it, bottom-up. */
+/** One member of a stack, for the detail view's Stack section. On GitHub merging
+ *  a member atomically merges every still-open member below it, bottom-up; GitLab
+ *  merges that MR alone and retargets the next, so nothing cascades there. */
 export interface PrStackMember {
   number: number;
   title: string;

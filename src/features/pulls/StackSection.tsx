@@ -24,6 +24,16 @@ function memberPresentation(state: string) {
   }
 }
 
+/** Whether this is a forge-NATIVE stack, which merges atomically bottom-up, as
+ *  opposed to an inferred chain whose members merge one at a time. The `id` shape
+ *  is the contract, and both minting sites are the whole universe: `github/pr.rs`
+ *  stringifies the numeric stack number, `forge/gitlab.rs` synthesizes
+ *  "mr-<bottom-iid>". Provenance the payload carries itself, so a pending or
+ *  failed forge-status probe can't skew it in either direction. */
+export function isNativeStack(stack: PrStackInfo | null | undefined): boolean {
+  return stack != null && !stack.id.startsWith("mr-");
+}
+
 /** Members sorted bottom-first, the order a stack merges in. */
 function byPosition(members: PrStackMember[]): PrStackMember[] {
   return members.toSorted((a, b) => a.position - b.position);
@@ -119,7 +129,7 @@ export function StackSection({
       {/* The rows are the members we actually have, so they — not the summary's
           `size`, fetched on a separate hop — set the denominator. */}
       <p className="text-xs font-medium text-muted-foreground">
-        Stack · {stack.position} of {rows.length || stack.size}
+        Stack · {stack.position} of {rows.length}
       </p>
       {/* Capped like the checks rollup so a deep stack can't push the tab row
           out of the header; arrow-nav scrolls the active row into view. */}

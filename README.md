@@ -494,7 +494,8 @@ workflow against any two branches with no remote at all).
   stacks** come straight from its API; on **GitLab**, chains of merge requests are
   **detected automatically**. On GitHub, merging is **stack-aware**: merging a stacked pull
   request merges it *and* every still-open pull request below it, bottom-up, as one
-  operation, and the merge dialog lists exactly which pull requests will merge.
+  operation — and the merge dialog spells out that full scope before you confirm, naming
+  the pull requests it will merge, in order, whenever it has the list.
 - **Record management** — open a local PR's context menu in the list to **Archive / Unarchive**
   or **Delete** it (Delete confirms; the branches are untouched), also from the command
   palette.

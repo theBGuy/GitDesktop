@@ -163,9 +163,10 @@ impl GitDesktopMcp {
         description = "Get a pull request's full details (title, body, state, reviews, comments, \
                        files) by number from the repository's forge (GitHub, GitLab, or Bitbucket, \
                        per its remote). A stacked PR also carries `stack` ({id, position, size}) \
-                       and `stackMembers`, the whole stack bottom→top with each layer's state — \
-                       merged layers included, since merging one layer merges every unmerged \
-                       layer below it. For just the conversation — including file:line review \
+                       and `stackMembers`, the whole stack bottom→top with each layer's state. On \
+                       GitHub merged layers stay listed, because merging one layer also merges \
+                       every unmerged layer below it; a GitLab chain is inferred from the open \
+                       MRs and each MR merges on its own. For just the conversation — including file:line review \
                        threads — see list_pull_request_comments. Returns JSON."
     )]
     async fn get_pull_request(

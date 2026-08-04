@@ -483,7 +483,8 @@ pub struct PrListLabel {
 #[serde(rename_all = "camelCase")]
 pub struct PrStackInfo {
     /// Stack identity: GitHub's stack number as a string; GitLab synthesized
-    /// "mr-<bottom-iid>". Stable within a repo.
+    /// "mr-<bottom-iid>". Stable within one inference pass — GitLab's re-roots
+    /// when the bottom MR merges and leaves the open list.
     pub id: String,
     /// 1 = bottom of the stack (merges first).
     pub position: u32,
@@ -659,10 +660,11 @@ pub async fn gh_pr_merge(
     Ok(PrMergeOutcome { cleanup_warning })
 }
 
-/// Whether the PR is a stack member, per the nullable `stack` object on its REST
-/// payload. `false` on ANY failure (network, a host without stacks, an
-/// unparseable body): the legacy merge path then runs, and GitHub rejects a
-/// stacked merge there with its own actionable error.
+/// Whether the PR is a stack member — the same `pull_stack_ref` reading the detail
+/// view uses, so the merge path can never cascade a stack the detail view didn't
+/// show. `false` on ANY failure (network, a host without stacks, an unparseable or
+/// incomplete `stack` object): the legacy merge path then runs, and GitHub rejects
+/// a stacked merge there with its own actionable error.
 async fn gh_pr_is_stacked(repo_path: &str, slug: &str, number: u64) -> bool {
     let endpoint = format!("repos/{slug}/pulls/{number}");
     let Ok(out) = run_gh_raw(Some(repo_path), &["api", &endpoint], GH_TIMEOUT).await else {
@@ -671,10 +673,7 @@ async fn gh_pr_is_stacked(repo_path: &str, slug: &str, number: u64) -> bool {
     if out.code != 0 {
         return false;
     }
-    serde_json::from_str::<serde_json::Value>(&out.stdout_lossy())
-        .ok()
-        .and_then(|v| v.get("stack").cloned())
-        .is_some_and(|s| s.is_object())
+    pull_stack_ref(&out.stdout_lossy()).is_some()
 }
 
 /// A merge-async response — the `PUT` acknowledgement and every poll share it.
@@ -739,8 +738,14 @@ async fn gh_pr_merge_async(
         GH_NETWORK_TIMEOUT,
     )
     .await?;
-    let mut current: MergeAsyncStatus = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse the merge response: {e}")))?;
+    // The PUT already succeeded, so the merge may be running — an unreadable
+    // acknowledgement is uncertainty, not a failed merge, and must read that way.
+    let mut current: MergeAsyncStatus =
+        serde_json::from_str(&out.stdout_lossy()).map_err(|_| {
+            AppError::Gh(format!(
+                "GitHub accepted the merge of #{number} but its response couldn't be read — refresh the pull request to check whether it completed."
+            ))
+        })?;
     let uuid = current
         .details
         .as_ref()
@@ -1258,6 +1263,17 @@ struct GhPullStackRef {
     size: Option<u32>,
 }
 
+/// The `stack` triple (stack number, position, size) from a REST pull payload;
+/// `None` when the PR is unstacked (the key is absent or JSON null) or the object
+/// is incomplete. The detail view and the merge path BOTH decide "is this PR
+/// stacked?" through here, so they can never disagree — a divergence would let one
+/// cascade a merge the other never disclosed. Pure — unit-tested.
+fn pull_stack_ref(body: &str) -> Option<(u64, u32, u32)> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let stack: GhPullStackRef = serde_json::from_value(value.get("stack")?.clone()).ok()?;
+    Some((stack.number?, stack.position?, stack.size?))
+}
+
 /// Map a stack's `pull_requests` (bottom→top) onto neutral members with 1-based
 /// positions. A merged layer stays a member and reads "merged" whatever its raw
 /// `state` says. Pure — unit-tested.
@@ -1289,7 +1305,9 @@ fn stack_members_from(prs: &[GhStackPr]) -> Vec<PrStackMember> {
 /// The repo's OPEN stacks as a PR-number → membership map, for the list join.
 /// Best-effort by contract: any failure (a host without the endpoint, network,
 /// unparseable body) yields an empty map and the list renders exactly as it did
-/// before stacks — stack data must never fail or block a PR list.
+/// before stacks — stack data must never fail or block a PR list. One page only:
+/// past 100 open stacks the surplus goes unmarked rather than paginating a
+/// decoration onto the list's critical path.
 async fn gh_open_stack_memberships(
     repo_path: &str,
     slug: &str,
@@ -1350,13 +1368,7 @@ async fn gh_pr_stack(
     if out.code != 0 {
         return unstacked;
     }
-    // `stack` is absent or JSON null for an unstacked PR — both read as None here.
-    let stack = serde_json::from_str::<serde_json::Value>(&out.stdout_lossy())
-        .ok()
-        .and_then(|v| v.get("stack").cloned())
-        .and_then(|s| serde_json::from_value::<GhPullStackRef>(s).ok());
-    let Some((id, position, size)) = stack.and_then(|s| Some((s.number?, s.position?, s.size?)))
-    else {
+    let Some((id, position, size)) = pull_stack_ref(&out.stdout_lossy()) else {
         return unstacked;
     };
 
@@ -4727,7 +4739,7 @@ mod tests {
         parse_auth_accounts, parse_pr_url_repo, reconstruct_pr_diff,
         reject_upstream_create_metadata, rest_comment_to_out, rest_commit_to_out,
         rest_pull_to_pr_info, rest_review_to_out, rollup_state_to_ci, scrape_pr_ref,
-        split_commit_message, stack_members_from, upstream_pulls_endpoint, GhPrFile,
+        pull_stack_ref, split_commit_message, stack_members_from, upstream_pulls_endpoint, GhPrFile,
         GhPrRestComment, GhPrRestCommit, GhPrRestCommitGitAuthor, GhPrRestCommitInner,
         GhPrRestPull, GhPrRestReview, GhStackEntry, MergeAsyncOutcome, MergeAsyncStatus, PrDetails,
         PrInfo, PrStackInfo, PrStackMember, PrTimelineEventOut, RawLogin,
@@ -4851,6 +4863,31 @@ mod tests {
         .unwrap();
         let stack = joined.stack.expect("stack should round-trip");
         assert_eq!((stack.id.as_str(), stack.position, stack.size), ("9", 2, 3));
+    }
+
+    /// The single reading that decides stacked-or-not on BOTH the detail and the
+    /// merge path — a drift here silently changes which PRs cascade on merge.
+    #[test]
+    fn pull_stack_ref_reads_the_nullable_stack_object() {
+        // The live shape: `stack` on a plain REST pull read.
+        assert_eq!(
+            pull_stack_ref(
+                r#"{"number":22,"stack":{"id":133465,"number":22,"position":1,"size":2,
+                    "base":{"ref":"main","sha":"cafe"}}}"#
+            ),
+            Some((22, 1, 2))
+        );
+        // Unstacked, both spellings.
+        assert_eq!(pull_stack_ref(r#"{"number":22,"stack":null}"#), None);
+        assert_eq!(pull_stack_ref(r#"{"number":22}"#), None);
+        // An incomplete triple is NOT a stack — the merge path must not cascade on
+        // a membership the detail view couldn't render.
+        assert_eq!(pull_stack_ref(r#"{"stack":{"number":22,"position":1}}"#), None);
+        assert_eq!(pull_stack_ref(r#"{"stack":{"position":1,"size":2}}"#), None);
+        assert_eq!(pull_stack_ref(r#"{"stack":{}}"#), None);
+        // Garbage in, no verdict out.
+        assert_eq!(pull_stack_ref("not json"), None);
+        assert_eq!(pull_stack_ref(r#"{"stack":"yes"}"#), None);
     }
 
     #[test]

@@ -163,7 +163,11 @@ import {
   type SuggestionApply,
   threadToMarkdown,
 } from "./ReviewThreads";
-import { StackSection, stackMergeDisclosure } from "./StackSection";
+import {
+  isNativeStack,
+  StackSection,
+  stackMergeDisclosure,
+} from "./StackSection";
 import { SubmitReviewDialog } from "./SubmitReviewDialog";
 import { useGeneratePrDescription } from "./useGeneratePrDescription";
 import {
@@ -864,15 +868,15 @@ export function RemotePrView({
   const autoMergeArmed = mergeState.data?.autoMergeEnabled ?? false;
   // What a stacked merge lands beyond the PR on screen — null when this PR is
   // unstacked or everything below it already merged, leaving today's copy right.
-  // Gated on `providerKey`, not raw `provider`: forge status can be pending or
-  // failed here (canMerge deliberately stays on for GitHub then), and an
-  // unresolved host resolves to GitHub — so the scope is disclosed rather than
-  // silently dropped on the one provider that really does cascade-merge.
+  // Only a NATIVE stack cascades, and that's read off the stack's own id rather
+  // than the detected provider: forge status can be pending or failed here
+  // (canMerge deliberately stays on then), which would otherwise drop the
+  // disclosure on GitHub and invent one on GitLab.
   const stackMerge = stackMergeDisclosure(
     pr?.stack,
     pr?.stackMembers,
     prNoun,
-    providerKey === "github",
+    isNativeStack(pr?.stack),
   );
 
   // Approval display (GitLab + Bitbucket): a quiet count shown only when there's
