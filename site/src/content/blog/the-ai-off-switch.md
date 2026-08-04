@@ -22,15 +22,15 @@ Because I don't think software should decide how people work.
 ## AI isn't the product
 
 It's easy to look at developer tools right now and feel like every
-application has become an AI application. Sometimes that's useful.
-Sometimes it's just another button you have to ignore.
+application has become an AI application. Sometimes that's useful. Other
+times it's another button you have to ignore.
 
 I didn't want GitDesktop to end up as an assistant with a Git client
 somewhere underneath it. I wanted a Git client first. The goal was
 [the whole loop, one window](/blog/the-whole-loop-one-window/) long
 before the first AI feature existed.
 
-## The switch isn't cosmetic
+## What the switch actually does
 
 Turn on "Hide AI features" (one checkbox under General) and GitDesktop
 doesn't gray out a few buttons. The generate actions disappear from the
@@ -43,7 +43,7 @@ What's left is simply GitDesktop.
 
 You can manage [pull requests](/#pull-requests), issues, discussions,
 releases, worktrees, interactive rebases, repository insights, and
-[local branch rules](/features/) without opening a browser.
+[local branch protection](/features/) without opening a browser.
 
 The workflow is still complete.
 
@@ -51,10 +51,9 @@ Only the optional layer disappears.
 
 ## Agency matters
 
-I think AI is genuinely useful. I also think people should decide when
-it belongs in their workflow. So GitDesktop never calls a model on its
-own. The only thing that runs automatically is a rule you created
-yourself.
+I think AI is genuinely useful. I also think people should decide when it
+belongs in their workflow. So GitDesktop never calls a model on its own. The
+only thing that runs automatically is an automation you turned on yourself.
 
 When you do use it, you choose where the requests go. Bring your own API
 key. Run Ollama locally, so the calls never leave your machine. Or don't
@@ -74,5 +73,4 @@ That's my workflow.
 
 It doesn't have to be yours.
 
-One of the design goals behind GitDesktop is that it never assumes
-otherwise.
+One of the design goals behind GitDesktop is that it never assumes otherwise.
