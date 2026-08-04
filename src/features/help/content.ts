@@ -867,9 +867,11 @@ stacked-PR API**, and on **GitLab** a chain of merge requests is **detected auto
 
 On **GitHub**, merging is **stack-aware**: merging a stacked pull request merges it *and*
 every still-open pull request below it, bottom-up, as a single operation, so the stack
-lands in dependency order without you walking it by hand. Before you confirm, the merge
-dialog **spells out the full scope of the merge** — naming each pull request it will merge,
-in the order they'll go in, whenever it has the list.
+lands in dependency order without you walking it by hand — or, when the base branch uses a
+**merge queue**, is handed to the queue and lands when it clears, the head branch left in
+place for it. Before you confirm, the merge dialog **spells out the full scope of the
+merge** — naming each pull request it will merge, in the order they'll go in, whenever it
+has the list.
 
 ## Bitbucket PRs
 

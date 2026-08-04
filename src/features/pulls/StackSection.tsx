@@ -8,7 +8,8 @@ import { cn } from "@/lib/utils";
  *  provider's own word at a neutral tone rather than being read as "open" — the
  *  word always carries the meaning, so color is never the only signal. */
 function memberPresentation(state: string) {
-  switch (state.toLowerCase()) {
+  const key = state.trim().toLowerCase();
+  switch (key) {
     case "merged":
       return { Icon: CheckIcon, tone: "text-merged", word: "merged" };
     case "closed":
@@ -16,10 +17,12 @@ function memberPresentation(state: string) {
     case "open":
       return { Icon: CircleIcon, tone: "text-success", word: "open" };
     default:
+      // A member can arrive with no state at all; "unknown" keeps a word beside
+      // the icon, which is the only thing carrying the status.
       return {
         Icon: CircleIcon,
         tone: "text-muted-foreground",
-        word: state.toLowerCase(),
+        word: key || "unknown",
       };
   }
 }
@@ -62,42 +65,73 @@ function numberList(members: PrStackMember[]): string {
   return `${nums.slice(0, -1).join(", ")}, and ${nums.at(-1)}`;
 }
 
-/** The merge dialog's extra-scope sentence + confirm label for a stacked PR, or
- *  null when the merge lands this PR alone. `atomic` is the whole gate: only
- *  GitHub cascade-merges a stack bottom-up, while GitLab merges one MR and
- *  retargets the next — disclosing extra scope there would describe a merge that
- *  never happens. `prNoun` carries the provider wording. */
-export function stackMergeDisclosure(
-  stack: PrStackInfo | null | undefined,
-  members: PrStackMember[] | undefined,
-  prNoun: string,
-  atomic: boolean,
-): { notice: string; confirmLabel: string } | null {
-  if (!stack || !atomic) return null;
-  const position = `This ${prNoun} is position ${stack.position} of ${stack.size} in a stack.`;
+/** The merge dialog's extra-scope sentence, plus a confirm label when the scope is
+ *  known well enough to count. Null when the merge lands this PR alone. `atomic`
+ *  gates the known-stack arms: only GitHub cascade-merges a stack bottom-up, while
+ *  GitLab merges one MR and retargets the next, so disclosing extra scope there
+ *  would describe a merge that never happens. `prNoun` carries the provider
+ *  wording. */
+export function stackMergeDisclosure({
+  stack,
+  members,
+  stackUnknown,
+  prNoun,
+  atomic,
+  hostCascades,
+}: {
+  stack: PrStackInfo | null | undefined;
+  members: PrStackMember[] | undefined;
+  /** The stack probe failed, so a null `stack` means unknown, not unstacked. */
+  stackUnknown: boolean;
+  prNoun: string;
+  /** This KNOWN stack cascades — `isNativeStack`, read off the stack's own id. */
+  atomic: boolean;
+  /** The detected host is one where stacked merges CAN cascade. Only the unknown
+   *  arm may use this: with no stack object there is no id to sniff, so host
+   *  detection is the sole signal left — every other arm prefers the id, which
+   *  survives a pending or failed forge probe. Best signal available rather than
+   *  a guarantee (an unresolved provider routes GHES here too, and GHES has no
+   *  stacks API), which is why that arm only ever hedges. */
+  hostCascades: boolean;
+}): { notice: string; confirmLabel?: string } | null {
   const tail = "the stack merges bottom-up as one operation.";
-  // No members at all above the bottom means the member fetch failed, not that
-  // nothing is below — name the scope without a count rather than fall through
-  // to copy that promises a single-PR merge.
-  if ((members ?? []).length === 0) {
-    if (stack.position <= 1) return null;
+  if (stack) {
+    if (!atomic) return null;
+    const position = `This ${prNoun} is position ${stack.position} of ${stack.size} in a stack.`;
+    // Known stack, missing member list: the members hop failed, not "nothing is
+    // below" — name the scope without a count. (The arm below covers having no
+    // stack info at all, which is a weaker claim still.)
+    if ((members ?? []).length === 0) {
+      if (stack.position <= 1) return null;
+      return {
+        notice: `${position} Merging it also merges every still-open ${prNoun} below it — ${tail}`,
+        confirmLabel: "Merge stack",
+      };
+    }
+    const below = stackMergeBelow(stack, members);
+    if (below.length === 0) return null;
     return {
-      notice: `${position} Merging it also merges every still-open ${prNoun} below it — ${tail}`,
-      confirmLabel: "Merge stack",
+      notice: `${position} Merging it also merges ${numberList(below)} below it — ${tail}`,
+      confirmLabel: `Merge ${below.length + 1} ${prNoun}s`,
     };
   }
-  const below = stackMergeBelow(stack, members);
-  if (below.length === 0) return null;
+  // No stack info at all. An unknown is NOT a stack: most such failures land on
+  // ordinary unstacked PRs, so the copy hedges and the confirm label keeps its
+  // count-free default rather than promising a stack merge that likely isn't one.
+  if (!stackUnknown || !hostCascades) return null;
   return {
-    notice: `${position} Merging it also merges ${numberList(below)} below it — ${tail}`,
-    confirmLabel: `Merge ${below.length + 1} ${prNoun}s`,
+    notice:
+      "Couldn't confirm whether this pull request is part of a stack. " +
+      "If it is, merging it also merges every still-open pull request below it " +
+      "— check on GitHub before confirming if unsure.",
   };
 }
 
 /**
  * The detail view's Stack section: the members of the open PR's stack, listed
  * bottom-first (merge order) with the one being read marked. Renders nothing at
- * all for an unstacked PR — no header, no placeholder. The data rides the
+ * all for an UNSTACKED PR — no header, no placeholder; a stacked PR whose member
+ * list is missing still gets the header and a muted note. The data rides the
  * caller's PR-details query, so this has no loading state of its own.
  */
 export function StackSection({
@@ -113,8 +147,27 @@ export function StackSection({
   currentNumber: number;
   onSelect: (number: number) => void;
 }) {
-  const rows = stack ? byPosition(members ?? []) : [];
-  if (!stack || rows.length === 0) return null;
+  if (!stack) return null;
+  const rows = byPosition(members ?? []);
+
+  // Members ride a second fetch that can fail while the stack summary succeeds
+  // (the backend emits the summary with an empty member list then) — still say
+  // the PR is stacked, rather than hiding membership over a missing list.
+  if (rows.length === 0) {
+    return (
+      <div>
+        {/* Denominator source differs per arm and must stay that way: with no
+            rows to count, the summary's own `size` is all there is; the max
+            keeps a `position` past it from reading "3 of 2". */}
+        <p className="text-xs font-medium text-muted-foreground">
+          Stack · {stack.position} of {Math.max(stack.size, stack.position)}
+        </p>
+        <p className="mt-1.5 text-xs text-muted-foreground">
+          Couldn't load the stack's members.
+        </p>
+      </div>
+    );
+  }
 
   // `listKeyboardNav` calls no hooks, so it's safe to build after the early return.
   const onKeyDown = listKeyboardNav({
@@ -127,9 +180,10 @@ export function StackSection({
   return (
     <div>
       {/* The rows are the members we actually have, so they — not the summary's
-          `size`, fetched on a separate hop — set the denominator. */}
+          `size`, fetched on a separate hop — set the denominator; the max keeps
+          a server `position` past the last row from reading "3 of 2". */}
       <p className="text-xs font-medium text-muted-foreground">
-        Stack · {stack.position} of {rows.length}
+        Stack · {stack.position} of {Math.max(rows.length, stack.position)}
       </p>
       {/* Capped like the checks rollup so a deep stack can't push the tab row
           out of the header; arrow-nav scrolls the active row into view. */}

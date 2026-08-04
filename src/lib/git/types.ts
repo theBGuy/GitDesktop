@@ -1711,6 +1711,11 @@ export interface PrDetails {
   stack?: PrStackInfo | null;
   /** Every member of `stack`, bottom-first; empty when the PR is unstacked. */
   stackMembers: PrStackMember[];
+  /** True when the stack probe itself FAILED, so a null `stack` above means
+   *  "unknown", not "known unstacked" — the two are not interchangeable on a
+   *  merge path that can cascade. GitHub-only this wave (only GitHub cascades);
+   *  the GitLab and Bitbucket arms always report false. */
+  stackUnknown: boolean;
 }
 
 /** A reviewer who has submitted a verdict, as supplied by the backend (GitLab

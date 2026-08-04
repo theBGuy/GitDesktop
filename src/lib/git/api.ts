@@ -2225,12 +2225,14 @@ export const ghPrMinimizeComment = (
 export const ghPrUnminimizeComment = (repoPath: string, commentId: string) =>
   invoke<void>("gh_pr_unminimize_comment", { repoPath, commentId });
 
-/** Outcome of a successful forge merge. The PR merged; `cleanupWarning` is a
- *  human-readable caveat when the post-merge remote head-branch deletion failed
- *  (GitHub-only by construction — GitLab and Bitbucket fold branch deletion into
- *  the atomic server-side merge, so they never warn). A merge *failure* rejects
- *  the invoke instead. `null` means merged and cleaned up cleanly. */
+/** Outcome of an ACCEPTED forge merge (a failure rejects the invoke instead).
+ *  `queued` means the forge took the merge but hasn't completed it — the PR is
+ *  NOT merged yet. `cleanupWarning` carries the human-readable detail either
+ *  way: on the merged path that the post-merge remote head-branch deletion
+ *  failed (GitHub-only — GitLab and Bitbucket fold deletion into their atomic
+ *  merge); on the queued path, what was queued. `null` = nothing to add. */
 export interface PrMergeOutcome {
+  queued: boolean;
   cleanupWarning: string | null;
 }
 

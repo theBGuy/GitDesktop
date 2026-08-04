@@ -166,7 +166,10 @@ impl GitDesktopMcp {
                        and `stackMembers`, the whole stack bottom→top with each layer's state. On \
                        GitHub merged layers stay listed, because merging one layer also merges \
                        every unmerged layer below it; a GitLab chain is inferred from the open \
-                       MRs and each MR merges on its own. For just the conversation — including file:line review \
+                       MRs and each MR merges on its own. When `stack` is null AND `stackUnknown` \
+                       is true, the stack status could NOT be checked — that is not a guarantee \
+                       the PR is unstacked, so verify on GitHub before merging it. For just the \
+                       conversation — including file:line review \
                        threads — see list_pull_request_comments. Returns JSON."
     )]
     async fn get_pull_request(

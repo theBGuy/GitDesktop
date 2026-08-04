@@ -1630,9 +1630,11 @@ pub async fn forge_pr_unapprove(repo_path: String, number: u64) -> AppResult<()>
 /// is GitHub-only.
 ///
 /// `cleanup_warning` on the returned [`PrMergeOutcome`](crate::github::pr::PrMergeOutcome)
-/// means the PR merged but post-merge branch cleanup failed — GitHub-only, since
-/// GitLab/Bitbucket fold branch deletion into the server-side merge. A merge FAILURE
-/// is still an `Err`.
+/// means the merge was accepted with a caveat — either the PR merged but post-merge
+/// branch cleanup failed, or (`queued`) a stacked PR went to a merge QUEUE and hasn't
+/// landed, so cleanup was skipped. Both are GitHub-only: GitLab/Bitbucket fold branch
+/// deletion into the server-side merge and have no stacked-merge queue. A merge
+/// FAILURE is still an `Err`.
 #[tauri::command]
 pub async fn forge_pr_merge(
     repo_path: String,

@@ -332,8 +332,10 @@ export function MergePrDialog({
   /** Arms merge-when-pipeline-succeeds instead of merging now (GitLab-only) —
    *  reframes the copy + confirm button; the delete-branch checkbox rides the arm. */
   auto?: boolean;
-  /** Extra scope a stacked merge takes with it — a stacked merge is atomic and
-   *  bottom-up, so the PRs below this one merge too. Absent = unstacked. */
+  /** Extra scope this merge takes with it, shown above the options. Absent =
+   *  nothing extra to disclose: unstacked, a host whose stacked merges don't
+   *  cascade, or nothing still open below. Present is usually a cascading stack,
+   *  but can also be a hedge — that stack membership couldn't be confirmed. */
   stackNotice?: string;
   /** Overrides the confirm button's label so a stacked merge can name how many
    *  PRs it lands. Absent = the strategy label, unchanged. */

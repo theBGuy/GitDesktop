@@ -1224,9 +1224,10 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         merge_commit_allowed: None,
         squash_merge_allowed: None,
         rebase_merge_allowed: None,
-        // Bitbucket has no stacked-PR concept.
+        // Bitbucket has no stacked-PR concept — never stacked, never unknown.
         stack: None,
         stack_members: Vec::new(),
+        stack_unknown: false,
     })
 }
 

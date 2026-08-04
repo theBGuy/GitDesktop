@@ -23,7 +23,7 @@ use crate::github::pr::{
     ApprovalState, CommitCommentOut, DraftCommentIn, ExternalReviewItem, PrAuthor, PrCheckOut,
     PrCiStatus, PrCommitOut, PrDetails, PrFileOut, PrInfo, PrListLabel, PrPollInfo, PrRef,
     PrStackInfo, PrStackMember, PrThreadOut, PrTimelineEventOut, RepoLabel, ReviewSubmitOut,
-    ReviewThreadOut,
+    ReviewThreadOut, STACKS_TIMEOUT,
 };
 use crate::github::release::{ReleaseAsset, ReleaseDetails, ReleaseInfo};
 use crate::state::AppState;
@@ -402,8 +402,10 @@ fn infer_mr_stacks(open: &[(u64, &str, &str)]) -> HashMap<u64, (String, u32, u32
 }
 
 /// Fill each row's `stack` from the chains inferred over the SAME list. Membership
-/// is only as complete as the list in hand — a `limit`-truncated list can hide a
-/// chain's other layers, and merged layers are gone from an open list entirely.
+/// is only as complete as the list in hand: callers pass the full open page (a
+/// truncated list would hide a chain's bottom and mis-position the rows above it),
+/// so the real limits are >100 open MRs and merged layers, which an open list has
+/// dropped entirely.
 fn apply_mr_stacks(prs: &mut [PrInfo]) {
     let rows: Vec<(u64, &str, &str)> = prs
         .iter()
@@ -471,10 +473,20 @@ pub async fn list_prs(repo_path: &str, state: &str, limit: Option<u32>) -> AppRe
             )));
         }
     };
-    // GitLab pages at `per_page` (max 100); default to a full page. When a `limit` is
-    // asked, request at most that many per state and truncate the merged result to it
-    // (a "closed" filter fans out over two states, so the raw total can exceed `limit`).
-    let per_page = limit.map_or(100, |n| n.clamp(1, 100));
+    // GitLab pages at `per_page` (max 100). The OPEN set always requests a full page
+    // regardless of `limit`: stack inference reads the whole open list, and a
+    // server-side truncation would hide a chain's bottom and mis-position the rows
+    // above it. Paying for a full page on a small `limit` is therefore DELIBERATE —
+    // narrowing this fetch back down would silently corrupt the positions rather
+    // than merely returning fewer rows. A `limit` narrows the RESULT after inference
+    // instead. Closed states have no inference, so they keep the cheaper
+    // `limit`-sized page (a "closed" filter fans out over two states, so the raw
+    // total can exceed `limit`).
+    let per_page = if state == "open" {
+        100
+    } else {
+        limit.map_or(100, |n| n.clamp(1, 100))
+    };
     let mut prs = Vec::new();
     for s in states {
         let endpoint = format!("projects/{enc}/merge_requests?state={s}&per_page={per_page}");
@@ -484,8 +496,8 @@ pub async fn list_prs(repo_path: &str, state: &str, limit: Option<u32>) -> AppRe
         prs.extend(mrs.into_iter().map(from_glab_mr));
     }
     // Chains are inferred over the open set only — a closed list's rows describe
-    // merges already made. Inferred before truncation, so a `limit` narrows what's
-    // shown without distorting the chains.
+    // merges already made. Inference sees the full page (see `per_page`), so a
+    // `limit` narrows what's returned without distorting positions.
     if state == "open" {
         apply_mr_stacks(&mut prs);
     }
@@ -1045,7 +1057,15 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
     let changes_args = ["api", changes_endpoint.as_str()];
     let (out, open_prs) = tokio::join!(
         run_glab(Some(repo_path), &changes_args, GLAB_NETWORK_TIMEOUT),
-        async { list_prs(repo_path, "open", None).await.unwrap_or_default() },
+        // BOUNDED as well as concurrent: glab's own ceiling is 120s, and a stack
+        // decoration must never gate the MR view for that long. Elapsing falls back
+        // to no chain, exactly like an errored list.
+        async {
+            tokio::time::timeout(STACKS_TIMEOUT, list_prs(repo_path, "open", None))
+                .await
+                .unwrap_or_else(|_| Ok(Vec::new()))
+                .unwrap_or_default()
+        },
     );
     let out = out?;
     let (stack, stack_members) = mr_stack_from_rows(&open_prs, number);
@@ -1268,6 +1288,9 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         rebase_merge_allowed: None,
         stack,
         stack_members,
+        // Inference failing open has no disclosure consequence here: a GitLab merge
+        // never cascades, so an unknown chain can't hide a multi-MR merge.
+        stack_unknown: false,
     })
 }
 
@@ -7677,6 +7700,70 @@ mod tests {
             (3, "feat-b", "feat-a"),
         ])
         .is_empty());
+    }
+
+    /// Rows as `list_prs` returns them: stacks already annotated, state in GitLab's
+    /// uppercase neutral casing.
+    fn row(number: u64, head: &str, base: &str, stack: Option<(&str, u32, u32)>) -> PrInfo {
+        PrInfo {
+            number,
+            url: String::new(),
+            title: format!("MR {number}"),
+            base_ref_name: base.to_string(),
+            head_ref_name: head.to_string(),
+            is_draft: false,
+            state: "OPEN".to_string(),
+            author: None,
+            labels: Vec::new(),
+            created_at: String::new(),
+            head_sha: String::new(),
+            stack: stack.map(|(id, position, size)| PrStackInfo {
+                id: id.to_string(),
+                position,
+                size,
+            }),
+        }
+    }
+
+    #[test]
+    fn mr_stack_from_rows_filters_by_id_sorts_and_lowercases_state() {
+        // Two chains plus an unstacked MR; the chain rows are deliberately out of
+        // position order in the list.
+        let open = vec![
+            row(2, "a2", "a1", Some(("mr-1", 2, 2))),
+            row(9, "solo", "main", None),
+            row(6, "b2", "b1", Some(("mr-5", 2, 2))),
+            row(1, "a1", "main", Some(("mr-1", 1, 2))),
+            row(5, "b1", "release", Some(("mr-5", 1, 2))),
+        ];
+
+        let (stack, members) = mr_stack_from_rows(&open, 2);
+        let stack = stack.expect("MR 2 is in a chain");
+        assert_eq!((stack.id.as_str(), stack.position, stack.size), ("mr-1", 2, 2));
+        // Only the SAME chain's rows, sorted bottom→top — never the other chain's.
+        assert_eq!(
+            members.iter().map(|m| m.number).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(members[0].position, 1);
+        assert_eq!(members[0].head_ref_name, "a1");
+        assert_eq!(members[0].base_ref_name, "main");
+        assert_eq!(members[0].title, "MR 1");
+        // Provider-neutral lowercase, from GitLab's uppercase row state.
+        assert_eq!(members[0].state, "open");
+
+        // The other chain resolves independently.
+        let (stack, members) = mr_stack_from_rows(&open, 6);
+        assert_eq!(stack.expect("MR 6 is in a chain").id, "mr-5");
+        assert_eq!(
+            members.iter().map(|m| m.number).collect::<Vec<_>>(),
+            vec![5, 6]
+        );
+
+        // An unstacked MR, and one absent from the list entirely.
+        assert!(mr_stack_from_rows(&open, 9).0.is_none());
+        assert!(mr_stack_from_rows(&open, 9).1.is_empty());
+        assert!(mr_stack_from_rows(&open, 404).0.is_none());
     }
 
     #[test]

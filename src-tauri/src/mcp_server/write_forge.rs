@@ -650,14 +650,17 @@ impl GitDesktopMcp {
         )
         .await
         .map_err(app_err)?;
+        // A QUEUED merge has not landed and its branch was deliberately left alone —
+        // an agent branching on these fields must not read it as merged/deleted.
         let mut result = serde_json::json!({
             "pull_request": args.number,
-            "action": "merged",
+            "action": if outcome.queued { "queued" } else { "merged" },
             "strategy": strategy,
-            "deleted_branch": args.delete_branch,
+            "deleted_branch": args.delete_branch && !outcome.queued,
         });
-        // The merge succeeded; a cleanup_warning means only the branch deletion failed —
-        // surface it as a caveat, not a tool error (the merge isn't reversible from here).
+        // The merge was accepted; a cleanup_warning means either the branch deletion
+        // failed or the merge is queued — a caveat, not a tool error (neither is
+        // reversible from here).
         if let Some(warning) = outcome.cleanup_warning {
             result["cleanup_warning"] = serde_json::Value::String(warning);
         }
