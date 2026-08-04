@@ -27,7 +27,7 @@ Sometimes it's just another button you have to ignore.
 
 I didn't want GitDesktop to end up as an assistant with a Git client
 somewhere underneath it. I wanted a Git client first. The goal was
-[**the whole loop, one window**](/blog/the-whole-loop-one-window/) long
+[the whole loop, one window](/blog/the-whole-loop-one-window/) long
 before the first AI feature existed.
 
 ## The switch isn't cosmetic
@@ -51,10 +51,10 @@ Only the optional layer disappears.
 
 ## Agency matters
 
-I think AI is genuinely useful — I use it every day. I also think people
-should decide when it belongs in their workflow. So GitDesktop never
-calls a model on its own. Nothing happens unless you ask for it. The only
-thing that runs automatically is a rule you created yourself.
+I think AI is genuinely useful. I also think people should decide when
+it belongs in their workflow. So GitDesktop never calls a model on its
+own. The only thing that runs automatically is a rule you created
+yourself.
 
 When you do use it, you choose where the requests go. Bring your own API
 key. Run Ollama locally, so the calls never leave your machine. Or don't
@@ -64,10 +64,9 @@ Optional means optional.
 
 ## Software you can trust
 
-Trust isn't only about security or privacy. It's about knowing what your
-tools will do. When you disable a feature, it should actually disappear.
-When you don't want AI in your workflow, your Git client shouldn't keep
-reminding you that it exists.
+Trust is knowing what your tools will do. When you hide a feature, it
+should actually disappear. When you don't want AI in your workflow, your
+Git client shouldn't keep reminding you that it exists.
 
 I use AI every day.
 
