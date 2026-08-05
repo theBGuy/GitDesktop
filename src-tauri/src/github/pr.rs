@@ -4851,16 +4851,15 @@ fn scrape_pr_ref(stdout: &str) -> (u64, String) {
 mod tests {
     use super::{
         classify_merge_async, external_items_from_thread_nodes, host_from_url, is_diff_too_large,
-        map_timeline_node, parse_actions_run_job, real_check_time, real_time_or_empty,
-        parse_auth_accounts, parse_pr_url_repo, reconstruct_pr_diff,
+        map_timeline_node, parse_actions_run_job, parse_auth_accounts, parse_pr_url_repo,
+        pull_stack_ref, real_check_time, real_time_or_empty, reconstruct_pr_diff,
         reject_upstream_create_metadata, rest_comment_to_out, rest_commit_to_out,
         rest_pull_to_pr_info, rest_review_to_out, rollup_state_to_ci, scrape_pr_ref,
-        pull_stack_ref, split_commit_message, stack_members_from, stack_memberships_from,
-        upstream_pulls_endpoint, GhPrFile,
-        GhPrRestComment, GhPrRestCommit, GhPrRestCommitGitAuthor, GhPrRestCommitInner,
-        GhPrRestPull, GhPrRestReview, GhStackEntry, MergeAsyncOutcome, MergeAsyncStatus, PrDetails,
-        PrMergeOutcome,
-        PrInfo, PrStackInfo, PrStackMember, PrTimelineEventOut, RawLogin,
+        split_commit_message, stack_members_from, stack_memberships_from, upstream_pulls_endpoint,
+        GhPrFile, GhPrRestComment, GhPrRestCommit, GhPrRestCommitGitAuthor,
+        GhPrRestCommitInner, GhPrRestPull, GhPrRestReview, GhStackEntry, MergeAsyncOutcome,
+        MergeAsyncStatus, PrDetails, PrInfo, PrMergeOutcome, PrStackInfo, PrStackMember,
+        PrTimelineEventOut, RawLogin,
     };
     use crate::error::AppError;
 

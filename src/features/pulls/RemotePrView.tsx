@@ -434,25 +434,32 @@ export function RemotePrView({
   );
 
   // Palette twins of the Stack section's arrow keys: step one position up or down
-  // the stack. Clamped at both ends — a stack is a dependency chain, so wrapping
-  // from the top back to the bottom would misrepresent the order.
-  function goToStackNeighbor(delta: 1 | -1) {
+  // the stack. Each action is enabled only when a member actually sits at that
+  // position, so it DISABLES at the stack's ends (never wrapping — a stack is a
+  // dependency chain) and whenever the member list is missing, rather than
+  // offering a command that would silently do nothing.
+  function stackNeighbor(delta: 1 | -1) {
     const info = details.data?.stack;
-    if (!info) return;
-    const target = (details.data?.stackMembers ?? []).find(
+    if (!info) return undefined;
+    return (details.data?.stackMembers ?? []).find(
       (m) => m.position === info.position + delta,
     );
+  }
+  function goToStackNeighbor(delta: 1 | -1) {
+    // Re-resolved on activation: `enabled` is a render snapshot, while `run` reads
+    // live state through useEffectEvent.
+    const target = stackNeighbor(delta);
     if (target) selectPr({ kind: "remote", id: String(target.number) });
   }
   useHotkeyAction(
     "pr-stack-next",
     () => goToStackNeighbor(1),
-    isSelectedPr && !!details.data?.stack,
+    isSelectedPr && !!stackNeighbor(1),
   );
   useHotkeyAction(
     "pr-stack-previous",
     () => goToStackNeighbor(-1),
-    isSelectedPr && !!details.data?.stack,
+    isSelectedPr && !!stackNeighbor(-1),
   );
 
   const [composeBody, setComposeBody] = useState("");
