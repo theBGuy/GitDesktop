@@ -395,7 +395,7 @@ export function StackOffer({
             : `Pull requests to add to stack #${offer.stackNumber}`
         }
         tabIndex={0}
-        className="mt-1.5 max-h-48 overflow-y-auto border"
+        className="mt-1.5 max-h-48 overflow-y-auto border outline-none focus-visible:ring-1 focus-visible:ring-ring/50"
       >
         {rows.map((row, i) => (
           <div
