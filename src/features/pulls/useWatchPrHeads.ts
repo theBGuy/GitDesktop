@@ -3,6 +3,7 @@ import { useEffect, useMemo } from "react";
 import { maybeFireSync } from "@/lib/automations/sync";
 import { gitBranchTips } from "@/lib/git/api";
 import { useLocalPrs } from "@/lib/pulls/queries";
+import { useAiEnabled } from "@/lib/settings/queries";
 
 /**
  * Watches each OPEN LOCAL PR's head branch for new commits and fires a `pr-sync`
@@ -13,6 +14,9 @@ import { useLocalPrs } from "@/lib/pulls/queries";
  * by head; the runner gates whether to actually re-review. Mount once per repo.
  */
 export function useWatchPrHeads(repoPath: string) {
+  // This poll exists only to feed automations, which pause with AI hidden — so it
+  // stops entirely, and cached tips can't dispatch after the flip.
+  const aiEnabled = useAiEnabled();
   const prs = useLocalPrs(repoPath);
   const openPrs = useMemo(
     () => (prs.data ?? []).filter((p) => p.status === "open"),
@@ -26,12 +30,13 @@ export function useWatchPrHeads(repoPath: string) {
   const tips = useQuery({
     queryKey: ["branch-tips", repoPath, headBranches],
     queryFn: () => gitBranchTips(repoPath, headBranches),
-    enabled: Boolean(repoPath) && headBranches.length > 0,
+    enabled: Boolean(repoPath) && headBranches.length > 0 && aiEnabled,
     refetchInterval: 10_000,
     refetchIntervalInBackground: false,
   });
 
   useEffect(() => {
+    if (!aiEnabled) return;
     const data = tips.data;
     if (!data) return;
     for (const pr of openPrs) {
@@ -49,5 +54,5 @@ export function useWatchPrHeads(repoPath: string) {
         commitSubjects: [],
       });
     }
-  }, [tips.data, openPrs, repoPath]);
+  }, [tips.data, openPrs, repoPath, aiEnabled]);
 }

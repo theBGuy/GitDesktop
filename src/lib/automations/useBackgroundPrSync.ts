@@ -49,6 +49,9 @@ export function useBackgroundPrSync(): void {
     retry: false,
     queryFn: async () => {
       const settings = await loadSettings();
+      // Hiding AI features pauses automations, so a paused tick makes no forge call.
+      // Settings are read per tick, so flipping it takes effect on the next one.
+      if (settings.hideAi) return { polled: 0 };
       // No recents → nothing to watch; skip the config read and the loop.
       if (settings.recentRepos.length === 0) return { polled: 0 };
       const config = await loadAutomations();

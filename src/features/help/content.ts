@@ -1650,8 +1650,9 @@ notes**, and **repository descriptions**.
   file, its folder, or its file type — or a multi-selection) appends to
   \`.gitdesktop/aiignore\`, creating it if needed — an anchored line (\`/src/config.ts\`,
   \`/vendor/\`) for exactly the file or folder you picked.
-- **Hide AI** (Settings → General) removes every AI surface from the app while keeping
-  your configuration.
+- **Hide AI** (Settings → General) removes every AI surface from the app and pauses your
+  automations — nothing runs or posts while it's on. Your configuration and rules are
+  kept, and automations start again when you turn AI features back on.
 
 ## Automations
 
@@ -1797,7 +1798,8 @@ there's an equivalent.`,
 
 Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
 
-- **General** — hide AI features, keep running in the **system tray** on close (so
+- **General** — hide AI features (which also pauses your automations until you show them
+  again — your rules are kept), keep running in the **system tray** on close (so
   background work continues; launching the app again while it's running —
   tray-hidden or not — focuses the existing window), **create pull requests as drafts**
   by default (off by default — pre-checks the Create-PR dialog's draft box, still

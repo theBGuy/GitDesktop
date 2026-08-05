@@ -11,7 +11,7 @@ import {
 } from "@/lib/git/queries";
 import type { PrPollInfo } from "@/lib/git/types";
 import { notifyIfUnfocused } from "@/lib/notify";
-import { useSettings } from "@/lib/settings/queries";
+import { useAiEnabled, useSettings } from "@/lib/settings/queries";
 import {
   type NotificationTone,
   pushNotification,
@@ -30,6 +30,9 @@ export function usePrNotifications(repoPath: string) {
   const settings = useSettings();
   const gh = useForgeStatus(repoPath);
   const automations = useAutomations();
+  // Hiding AI features pauses automations, so the automation arms below go inert —
+  // but the poll itself keeps running for the non-AI notifications it also drives.
+  const aiEnabled = useAiEnabled();
   const prefs = settings.data?.notifications;
   const anyNotif = Boolean(
     prefs && (prefs.prChecks !== "off" || prefs.prActivity || prefs.prReviews),
@@ -64,7 +67,7 @@ export function usePrNotifications(repoPath: string) {
   const enabled =
     repoPath !== "" &&
     forgeFeatureReady(gh.data, "pullRequests") &&
-    (anyNotif || hasPrSync || hasPrOpen);
+    (anyNotif || ((hasPrSync || hasPrOpen) && aiEnabled));
 
   const poll = useQuery({
     queryKey: ["repo", repoPath, "pr-poll"] as const,
@@ -96,7 +99,7 @@ export function usePrNotifications(repoPath: string) {
     // head branch isn't local (forks / pushed elsewhere). Gated on hasPrSync so
     // notification-only users get no fan-out. The poll payload has no body/commit
     // subjects — the PR diff is the source of truth.
-    if (hasPrSync) {
+    if (hasPrSync && aiEnabled) {
       for (const pr of snapshot.values()) {
         if (pr.state === "OPEN" && pr.headSha) {
           maybeFireSync({
@@ -118,7 +121,7 @@ export function usePrNotifications(repoPath: string) {
     // from the same open+headSha snapshot plus author/createdAt/isDraft.
     // `maybeCatchUpMissedOpen` owns the recency/ownership/draft/already-reviewed
     // gating and fires at most one per tick.
-    if (hasPrOpen) {
+    if (hasPrOpen && aiEnabled) {
       const candidates = [...snapshot.values()]
         .filter((pr) => pr.state === "OPEN" && pr.headSha)
         .map((pr) => ({

@@ -240,6 +240,10 @@ async function run(
   only?: ReviewMode,
   replacesKey?: string,
 ): Promise<RunOutcome> {
+  // Hiding AI features PAUSES automations: while `hideAi` is set no rule may fire,
+  // post, toast, or notify. Rules are kept and resume when AI is shown again.
+  const settings = await loadSettings();
+  if (settings.hideAi) return { matched: 0, attempted: 0 };
   const config = await loadAutomations();
   const repo = await repoAutomationsFor(config, event.repoPath);
   const actions = effectiveActions(config, repo, event.kind);
@@ -256,7 +260,6 @@ async function run(
   const head = event.kind === "commit" ? undefined : event.head;
   const base = event.kind === "commit" ? undefined : event.base;
 
-  const settings = await loadSettings();
   const notify = settings.notifications.automations;
   // The gate stores, read once and shared by an event's per-action gate checks: `fresh`
   // reloads from disk and queues behind any writer, and pr-reviews.json carries every
@@ -622,6 +625,12 @@ export function rerunAutomation(
   const noun = event.kind === "commit" ? "commit" : "pull request";
   void (async () => {
     try {
+      // The dismissal clear below mutates BEFORE run()'s own pause gate, so a paused
+      // re-run has to stop here — clearing nothing and running nothing.
+      if ((await loadSettings()).hideAi) {
+        toast.info("Automations are paused while AI features are hidden.");
+        return;
+      }
       // Best-effort ONLY here: a cleared-dismissal failure must not block the
       // re-run (it just means the pr-sync gate might skip; we then toast retryable).
       if (event.kind !== "commit") {

@@ -194,6 +194,10 @@ export function PrReviewPanel({
     enabled: Boolean(cliKind),
     staleTime: 60_000,
   });
+  // Viewing a PR expresses no model-config intent, so the provider catalog is
+  // fetched only once the user reaches the picker — sticky, so the list stays put
+  // for the rest of the panel's life.
+  const [modelsWanted, setModelsWanted] = useState(false);
   const available = useAvailableModels(
     reviewAi ?? {
       provider,
@@ -202,6 +206,8 @@ export function PrReviewPanel({
       openaiCompatibleBaseUrl: "",
     },
     Boolean(keyPreview.data),
+    undefined,
+    { enabled: modelsWanted },
   );
   const models = available.data?.models ?? [];
 
@@ -307,7 +313,14 @@ export function PrReviewPanel({
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="space-y-2 border-b p-3">
-        <div className="grid grid-cols-2 gap-2">
+        {/* DOM capture, not Base UI event props. Pointer-down is load-bearing:
+            WebKit doesn't focus buttons on click, and the Select moves focus into
+            a portalled popup outside this container. */}
+        <div
+          className="grid grid-cols-2 gap-2"
+          onFocusCapture={() => setModelsWanted(true)}
+          onPointerDownCapture={() => setModelsWanted(true)}
+        >
           <Select
             value={provider}
             onValueChange={(v) => {
@@ -351,7 +364,13 @@ export function PrReviewPanel({
               }
             />
             <ComboboxContent>
-              <ComboboxEmpty>Uses the typed id as-is</ComboboxEmpty>
+              {/* `isFetching`, never `isPending` — a catalog that was never
+                  requested must not read as loading. */}
+              <ComboboxEmpty>
+                {available.isFetching
+                  ? "Loading models…"
+                  : "Uses the typed id as-is"}
+              </ComboboxEmpty>
               <ComboboxList>
                 {(item: string) => (
                   <ComboboxItem key={item} value={item}>

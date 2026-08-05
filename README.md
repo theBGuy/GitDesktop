@@ -632,8 +632,9 @@ display can't strand it off-screen.
     multi-selection) creates and updates this file for you, adding anchored
     lines like `/src/config.ts` and `/vendor/` that mean exactly what you picked.
 - **Keys** live in the OS keychain (Windows Credential Manager, macOS Keychain,
-  libsecret). **Hide AI** (Settings → General) hides every AI surface while
-  keeping your config.
+  libsecret). **Hide AI** (Settings → General) hides every AI surface and
+  pauses your automations while keeping your config — rules start firing again
+  when you turn AI features back on.
 
 ## Updates
 

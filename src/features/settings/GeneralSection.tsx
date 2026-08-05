@@ -1,8 +1,11 @@
+import { WarningIcon } from "@phosphor-icons/react";
 import { useSelector } from "@tanstack/react-store";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { PRIVACY_POLICY_URL, resetAnalyticsId } from "@/lib/analytics";
+import { useAutomations } from "@/lib/automations/queries";
+import { anyAutomationEnabled } from "@/lib/automations/types";
 import { withForm } from "@/lib/form";
 import { settingsFormOpts } from "./settings-form";
 
@@ -18,6 +21,13 @@ export const GeneralSection = withForm({
   ...settingsFormOpts,
   render: function GeneralSectionRender({ form }) {
     const autoFetchOn = useSelector(form.store, (s) => s.values.autoFetch);
+    // Keyed off the DRAFT value so the consequence shows before Save commits it, and
+    // stands as the standing explanation once hiding AI is saved on.
+    const hideAiOn = useSelector(form.store, (s) => s.values.hideAi);
+    const automations = useAutomations();
+    const automationsPaused =
+      hideAiOn &&
+      Boolean(automations.data && anyAutomationEnabled(automations.data));
     return (
       <section className="space-y-4">
         <div>
@@ -38,9 +48,22 @@ export const GeneralSection = withForm({
           </form.AppField>
           <p className="text-xs text-muted-foreground">
             Hides the AI commit-message and pull-request helpers, the AI review
-            panel, and the AI and Automations settings sections. Your configured
-            provider and API keys are kept — they're just not shown.
+            panel, and the AI and Automations settings sections, and pauses your
+            automations. Your provider, API keys, and rules are kept —
+            automations run again once you turn AI features back on.
           </p>
+          {automationsPaused && (
+            <p
+              role="status"
+              className="flex items-start gap-1.5 text-xs text-warning"
+            >
+              <WarningIcon className="size-4 shrink-0" />
+              <span>
+                Automations you've turned on won't run while AI features are
+                hidden — they start again when you turn this off.
+              </span>
+            </p>
+          )}
         </div>
         <div className="space-y-1.5">
           <form.AppField name="closeToTray">

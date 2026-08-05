@@ -113,12 +113,14 @@ async function fetchProviderModels(
 
 /**
  * Live model list for the current provider, falling back to the static
- * suggestions when there's no key or the request fails.
+ * suggestions when there's no key or the request fails. `opts.enabled` lets a
+ * caller defer the provider request until the user shows intent to pick a model.
  */
 export function useAvailableModels(
   settings: AiSettings,
   keySaved: boolean,
   allowedHosts?: readonly string[],
+  opts?: { enabled?: boolean },
 ) {
   return useQuery({
     queryKey: [
@@ -140,6 +142,7 @@ export function useAvailableModels(
       }
       return { models: fallbackModels(settings), live: false };
     },
+    enabled: opts?.enabled ?? true,
     staleTime: 5 * 60 * 1000,
   });
 }

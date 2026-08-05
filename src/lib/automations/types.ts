@@ -133,6 +133,29 @@ export function effectiveActions(
 }
 
 /**
+ * Whether the user has ANY automation turned on anywhere — the question behind the
+ * Settings → General note that hiding AI features pauses them. A repo override can
+ * enable a cell the global config leaves off, so overrides count on their own.
+ */
+export function anyAutomationEnabled(config: AutomationsConfigV2): boolean {
+  // Each `?? {}` fallback is annotated: an unannotated one widens `Object.values`
+  // to `any[]`, which would silently accept a misspelled `.enabled`.
+  const globalOn = Object.values(config.lifecycles).some((lifecycle) => {
+    const actions: LifecycleConfig["actions"] = lifecycle?.actions ?? {};
+    return Object.values(actions).some((a) => a?.enabled === true);
+  });
+  if (globalOn) return true;
+  return Object.values(config.repos).some((repo) => {
+    const lifecycles: RepoOverride["lifecycles"] = repo?.lifecycles ?? {};
+    return Object.values(lifecycles).some((overrides) => {
+      const cells: Partial<Record<ActionId, RepoActionOverride>> =
+        overrides ?? {};
+      return Object.values(cells).some((o) => o?.enabled === true);
+    });
+  });
+}
+
+/**
  * Whether an event's branch(es) satisfy an action's branch conditions. An action
  * runs iff `enabled` (checked by the caller) AND (`include` empty OR ≥1 include
  * glob matches) AND no `exclude` glob matches. Commit events test `event.branch`;
