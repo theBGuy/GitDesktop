@@ -60,6 +60,7 @@ import {
   DiffSurface,
   HIGHLIGHT_MAX_LINES,
   useFileContent,
+  useShikiRouting,
 } from "./DiffSurface";
 import { ImagePanes } from "./ImageDiff";
 
@@ -609,8 +610,7 @@ function StagingDiffView({
   // Whole-file highlight context + expand. The staging view renders every hunk
   // regardless, so content mode may engage for big diffs too — bounded by the
   // file highlight budget, not the read-only surface's render cap. `pending`
-  // holds the paint so the diff is built once in its final layout. (No lazy
-  // built-in Shiki grammar gating on this path — known gap.)
+  // holds the paint so the diff is built once in its final layout.
   const { content, pending: contentPending } = useFileContent(
     repoPath,
     deferredPath,
@@ -621,20 +621,35 @@ function StagingDiffView({
     longestLine > DIFF_MAX_LINE_CHARS ? undefined : contentRevs,
     HIGHLIGHT_MAX_LINES,
   );
+  // `blocked` is omitted: a mega-line file never reaches this view —
+  // WorkingTreeDiff routes it to the whole-file DiffSurface fallback first.
+  const { holdForGrammar, grammarState, workerAsts } = useShikiRouting({
+    filePath: deferredPath,
+    text: displayText,
+    content: content ?? null,
+    contentPending,
+    syntaxMap,
+    customLanguages,
+  });
   // The whole-file diff (every hunk) — never capped, so all hunks stay stageable.
   // Built from the shortened DISPLAY text; the original text still backs every
   // stage/unstage/discard patch (see WorkingTreeDiff). Null while content reads
   // are pending: don't build an intermediate diff the arriving reads would
   // immediately restructure.
+  // grammarState + workerAsts are deliberate rebuild TRIGGERS: createDiffFile
+  // reads the loaded grammar via module state (isShikiLang), not a passed value,
+  // so only their identity change forces the rebuild that picks it up.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: grammarState is an intentional rebuild trigger, read via module state not directly
   const diffFile = useMemo(
     () =>
-      contentPending
+      contentPending || holdForGrammar
         ? null
         : createDiffFile(
             deferredPath,
             displayText,
             { syntaxMap, customLanguages },
             content ?? undefined,
+            workerAsts ?? undefined,
           ),
     [
       deferredPath,
@@ -643,6 +658,9 @@ function StagingDiffView({
       customLanguages,
       content,
       contentPending,
+      holdForGrammar,
+      grammarState,
+      workerAsts,
     ],
   );
 
@@ -729,12 +747,13 @@ function StagingDiffView({
     };
   }, [diffFile, hunks]);
 
-  // Whole-file reads still settling: render nothing rather than build a hunk-only
-  // diff we'd immediately restructure (the single-paint fix). Must precede the
-  // empty-state placeholder so loading never reads as "No changes to show". The
-  // effects above guard on `!diffFile`, so they no-op while pending and re-bind on
-  // the single build.
-  if (contentPending) return null;
+  // Whole-file reads still settling, or a lazy built-in Shiki grammar still
+  // loading: render nothing rather than build a diff we'd immediately restructure
+  // or re-highlight (the single-paint gate). Must precede the empty-state
+  // placeholder so loading never reads as "No changes to show". The effects above
+  // guard on `!diffFile`, so they no-op while pending and re-bind on the single
+  // build.
+  if (contentPending || holdForGrammar) return null;
   if (!diffFile) return <DiffPlaceholder message="No changes to show" />;
   // A line-1 hunk has no `@@` row to host its buttons — synthetic header instead.
   const firstNeedsHeader =

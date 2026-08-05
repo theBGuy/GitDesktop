@@ -457,6 +457,127 @@ export function useFileContent(
   );
 }
 
+/**
+ * Shiki routing for one diff: lazily loading the built-in grammar it needs,
+ * holding the paint until that settles, triggering the rebuild that picks it up,
+ * and off-thread worker ASTs for an over-budget Shiki-routed diff. Shared by
+ * both {@link createDiffFile} call sites so the two surfaces route identically.
+ */
+export function useShikiRouting({
+  filePath,
+  text,
+  content,
+  contentPending,
+  blocked = false,
+  syntaxMap,
+  customLanguages,
+}: {
+  /** Deferred path of the file whose diff is being built. */
+  filePath: string;
+  /** The exact text that will be handed to createDiffFile (already capped/shortened). */
+  text: string;
+  /** Whole-file old/new content (content mode), or null. */
+  content: { old: string; new: string } | null;
+  /** Content-mode reads still settling — worker requests must wait on this. */
+  contentPending: boolean;
+  /** Surface is showing a placeholder, not a diff (mega-line block). */
+  blocked?: boolean;
+  syntaxMap?: Record<string, string>;
+  customLanguages?: CustomLanguage[];
+}): {
+  holdForGrammar: boolean;
+  grammarState: Record<string, "ready" | "failed">;
+  workerAsts: WorkerAsts | null;
+} {
+  const isDark = useIsDark();
+
+  // Built-in Shiki grammars load lazily (off the startup bundle). Hold the paint
+  // until the load settles rather than rebuild on arrival (highlight pop-in).
+  // Track "ready" OR "failed" so a failed import still releases the gate — a
+  // missing grammar must fall back to hljs/plain, never deadlock the pane.
+  const [grammarState, setGrammarState] = useState<
+    Record<string, "ready" | "failed">
+  >({});
+  const lang = useMemo(
+    () => diffLang(filePath, syntaxMap),
+    [filePath, syntaxMap],
+  );
+  useEffect(() => {
+    if (
+      !lang ||
+      // A blocked mega file shows a placeholder, not a diff — don't fetch a
+      // grammar it will never render.
+      blocked ||
+      !isBuiltinShikiLang(lang) ||
+      isShikiLang(lang) ||
+      grammarState[lang] !== undefined ||
+      // Over the Shiki budget (a builtin-Shiki lang is Shiki-routed, so that's
+      // the budget that applies) the main thread never tokenizes this file —
+      // the worker loads its own grammar copy. Loading here too would waste the
+      // fetch AND flip grammarState, rebuilding the interim hljs paint to plain.
+      overHighlightBudget(text.length, true)
+    )
+      return;
+    let cancelled = false;
+    ensureBuiltinShikiLang(lang).then((ok) => {
+      if (!cancelled)
+        setGrammarState((s) => ({ ...s, [lang]: ok ? "ready" : "failed" }));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [lang, grammarState, text.length, blocked]);
+
+  // A built-in Shiki grammar this diff needs is still loading (never seen a
+  // "ready"/"failed" result for it): hold the paint. `isShikiLang(lang)` already
+  // true means it loaded (this or an earlier diff), so it isn't pending.
+  const grammarPending =
+    !!lang &&
+    isBuiltinShikiLang(lang) &&
+    !isShikiLang(lang) &&
+    !grammarState[lang];
+
+  // Off-thread highlighting, Shiki-only: an over-budget Shiki-routed file would
+  // otherwise get the view clone's hljs pass — the engine those languages are
+  // routed OFF on purpose. An over-budget hljs file sends NO request (the clone
+  // already highlights it correctly, ≤15K lines). A builtin Shiki lang whose
+  // grammar the main thread hasn't loaded also routes here — the worker loads
+  // its own copy. A custom `tmGrammar` routes directly: its registration happens
+  // lazily inside createDiffFile with no rebuild trigger, and the grammar (unlike
+  // module state) is available on the first render.
+  const tmGrammar = useMemo(
+    () =>
+      lang
+        ? (customLanguages?.find((c) => c.id === lang)?.tmGrammar ?? null)
+        : null,
+    [lang, customLanguages],
+  );
+  const useShikiWorker =
+    !!lang &&
+    (isShikiLang(lang) || isBuiltinShikiLang(lang) || tmGrammar != null);
+  const overBudget = !!lang && overHighlightBudget(text.length, useShikiWorker);
+  const workerAsts = useWorkerHighlight({
+    // Shiki-routed + over budget only. Don't request while whole-file reads are
+    // still settling — the worker input would be built on interim text and
+    // superseded. (Over budget we never hold the paint on grammarPending, so it
+    // isn't gated on here.)
+    enabled: overBudget && useShikiWorker && !contentPending,
+    filePath,
+    text,
+    lang: lang ?? null,
+    isDark,
+    content,
+    tmGrammar,
+  });
+
+  // Over budget the main thread never Shiki-tokenizes, so holding the paint for
+  // a grammar only the worker needs would just delay the interim paint. Under
+  // budget, hold — so the lazy-grammar rebuild still lands in one paint.
+  const holdForGrammar = grammarPending && !overBudget;
+
+  return { holdForGrammar, grammarState, workerAsts };
+}
+
 /** The per-side line -> render() maps the vendored DiffView consumes. */
 type AnchorExtendData = Record<string, { data: { render: () => ReactNode } }>;
 
@@ -566,90 +687,15 @@ function RenderedDiff({
   const activeRepo = useUiStore((s) => s.repoPath);
   const { syntaxMap, customLanguages } = useEffectiveSyntax(activeRepo);
 
-  // Built-in Shiki grammars load lazily (off the startup bundle). Hold the paint
-  // until the load settles rather than rebuild on arrival (highlight pop-in).
-  // Track "ready" OR "failed" so a failed import still releases the gate — a
-  // missing grammar must fall back to hljs/plain, never deadlock the pane.
-  const [grammarState, setGrammarState] = useState<
-    Record<string, "ready" | "failed">
-  >({});
-  const lang = useMemo(
-    () => diffLang(deferredPath, syntaxMap),
-    [deferredPath, syntaxMap],
-  );
-  useEffect(() => {
-    if (
-      !lang ||
-      // A blocked mega file shows a placeholder, not a diff — don't fetch a
-      // grammar it will never render.
-      blocked ||
-      !isBuiltinShikiLang(lang) ||
-      isShikiLang(lang) ||
-      grammarState[lang] !== undefined ||
-      // Over the Shiki budget (a builtin-Shiki lang is Shiki-routed, so that's
-      // the budget that applies) the main thread never tokenizes this file —
-      // the worker loads its own grammar copy. Loading here too would waste the
-      // fetch AND flip grammarState, rebuilding the interim hljs paint to plain.
-      overHighlightBudget(shown.length, true)
-    )
-      return;
-    let cancelled = false;
-    ensureBuiltinShikiLang(lang).then((ok) => {
-      if (!cancelled)
-        setGrammarState((s) => ({ ...s, [lang]: ok ? "ready" : "failed" }));
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [lang, grammarState, shown.length, blocked]);
-
-  // A built-in Shiki grammar this diff needs is still loading (never seen a
-  // "ready"/"failed" result for it): hold the paint. `isShikiLang(lang)` already
-  // true means it loaded (this or an earlier diff), so it isn't pending.
-  const grammarPending =
-    !!lang &&
-    isBuiltinShikiLang(lang) &&
-    !isShikiLang(lang) &&
-    !grammarState[lang];
-
-  // Off-thread highlighting, Shiki-only: an over-budget Shiki-routed file would
-  // otherwise get the view clone's hljs pass — the engine those languages are
-  // routed OFF on purpose. An over-budget hljs file sends NO request (the clone
-  // already highlights it correctly, ≤15K lines). A builtin Shiki lang whose
-  // grammar the main thread hasn't loaded also routes here — the worker loads
-  // its own copy. A custom `tmGrammar` routes directly: its registration happens
-  // lazily inside createDiffFile with no rebuild trigger, and the grammar (unlike
-  // module state) is available on the first render.
-  const tmGrammar = useMemo(
-    () =>
-      lang
-        ? (customLanguages?.find((c) => c.id === lang)?.tmGrammar ?? null)
-        : null,
-    [lang, customLanguages],
-  );
-  const useShikiWorker =
-    !!lang &&
-    (isShikiLang(lang) || isBuiltinShikiLang(lang) || tmGrammar != null);
-  const overBudget =
-    !!lang && overHighlightBudget(shown.length, useShikiWorker);
-  const workerAsts = useWorkerHighlight({
-    // Shiki-routed + over budget only. Don't request while whole-file reads are
-    // still settling — the worker input would be built on interim text and
-    // superseded. (Over budget we never hold the paint on grammarPending, so it
-    // isn't gated on here.)
-    enabled: overBudget && useShikiWorker && !contentPending,
+  const { holdForGrammar, grammarState, workerAsts } = useShikiRouting({
     filePath: deferredPath,
     text: shown,
-    lang: lang ?? null,
-    isDark,
     content: content ?? null,
-    tmGrammar,
+    contentPending,
+    blocked,
+    syntaxMap,
+    customLanguages,
   });
-
-  // Over budget the main thread never Shiki-tokenizes, so holding the paint for
-  // a grammar only the worker needs would just delay the interim paint. Under
-  // budget, hold — so the lazy-grammar rebuild still lands in one paint.
-  const holdForGrammar = grammarPending && !overBudget;
 
   // grammarState + workerAsts are deliberate rebuild TRIGGERS: createDiffFile
   // reads the loaded grammar via module state (isShikiLang), not a passed value,
