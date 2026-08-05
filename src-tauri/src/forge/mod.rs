@@ -1555,6 +1555,11 @@ pub async fn forge_pr_reviewer_candidates(
 
 /// Edit a merge/pull request's title/body, behind the abstraction — the shared
 /// edit dialog. GitHub PATCHes the pull; GitLab PUTs title/description.
+///
+/// `base` retargets the request at its new base/target branch; `None` leaves it
+/// alone on every provider (each arm omits its field rather than echoing the
+/// current value). A stacked GitHub PR's base is server-locked — the 422 explaining
+/// that passes through, so the stack must be dissolved first.
 #[tauri::command]
 pub async fn forge_pr_edit(
     repo_path: String,
@@ -1562,13 +1567,82 @@ pub async fn forge_pr_edit(
     title: String,
     body: String,
     lens: Option<String>,
+    base: Option<String>,
 ) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
-        Some((Provider::GitLab, _)) => gitlab::edit_mr(&repo_path, number, &title, &body).await,
-        Some((Provider::Bitbucket, _)) => {
-            bitbucket::edit_pr(&repo_path, number, &title, &body).await
+        Some((Provider::GitLab, _)) => {
+            gitlab::edit_mr(&repo_path, number, &title, &body, base.as_deref()).await
         }
-        _ => github::edit_pr(&repo_path, number, &title, &body, lens).await,
+        Some((Provider::Bitbucket, _)) => {
+            bitbucket::edit_pr(&repo_path, number, &title, &body, base.as_deref()).await
+        }
+        _ => github::edit_pr(&repo_path, number, &title, &body, lens, base.as_deref()).await,
+    }
+}
+
+/// Group open pull requests into a NEW stack, `pull_requests` bottom→top. GitHub
+/// only: GitLab infers stacks from targeting alone and Bitbucket has no concept of
+/// them, so both arms error rather than falling through to the gh path.
+#[tauri::command]
+pub async fn forge_stack_create(
+    repo_path: String,
+    pull_requests: Vec<u64>,
+    lens: Option<String>,
+) -> AppResult<crate::github::pr::StackWriteOutcome> {
+    match detect_non_github(&repo_path).await {
+        Some((Provider::GitLab, _)) => Err(AppError::InvalidArgument(
+            "GitLab detects stacks automatically when a merge request targets another open merge \
+             request's branch — there's nothing to create here."
+                .into(),
+        )),
+        Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
+            "Bitbucket doesn't support stacked pull requests.".into(),
+        )),
+        _ => crate::github::pr::gh_stack_create(repo_path, pull_requests, lens).await,
+    }
+}
+
+/// Append pull requests to an existing stack, on TOP only. GitHub only, for the
+/// same reason as [`forge_stack_create`].
+#[tauri::command]
+pub async fn forge_stack_add(
+    repo_path: String,
+    stack_number: u64,
+    pull_requests: Vec<u64>,
+    lens: Option<String>,
+) -> AppResult<crate::github::pr::StackWriteOutcome> {
+    match detect_non_github(&repo_path).await {
+        Some((Provider::GitLab, _)) => Err(AppError::InvalidArgument(
+            "GitLab detects stacks automatically when a merge request targets another open merge \
+             request's branch — there's nothing to add here."
+                .into(),
+        )),
+        Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
+            "Bitbucket doesn't support stacked pull requests.".into(),
+        )),
+        _ => crate::github::pr::gh_stack_add(repo_path, stack_number, pull_requests, lens).await,
+    }
+}
+
+/// Dissolve a stack — every member unstacks at once, and the pull requests stay
+/// open on their branches. GitHub only, for the same reason as
+/// [`forge_stack_create`].
+#[tauri::command]
+pub async fn forge_stack_dissolve(
+    repo_path: String,
+    stack_number: u64,
+    lens: Option<String>,
+) -> AppResult<()> {
+    match detect_non_github(&repo_path).await {
+        Some((Provider::GitLab, _)) => Err(AppError::InvalidArgument(
+            "GitLab detects stacks automatically when a merge request targets another open merge \
+             request's branch — there's nothing to dissolve here."
+                .into(),
+        )),
+        Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
+            "Bitbucket doesn't support stacked pull requests.".into(),
+        )),
+        _ => crate::github::pr::gh_stack_dissolve(repo_path, stack_number, lens).await,
     }
 }
 

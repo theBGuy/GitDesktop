@@ -197,7 +197,12 @@ export const capabilities: Capability[] = [
   {
     group: "Pull requests & review",
     label:
-      "Stacked PRs — position badges and a stack navigator; on GitHub, merge a stack bottom-up in one go",
+      "Stacked PRs — position badges and a stack navigator; create, extend, or dissolve a stack from the PR view; on GitHub, merge a stack bottom-up in one go",
+  },
+  {
+    group: "Pull requests & review",
+    label:
+      "Retarget a pull request's base branch from the edit dialog — on GitHub, GitLab, and Bitbucket",
   },
 
   // — Forges & trackers —

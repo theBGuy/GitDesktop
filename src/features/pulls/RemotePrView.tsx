@@ -11,12 +11,20 @@ import {
   PencilSimpleIcon,
   RobotIcon,
   SparkleIcon,
+  WarningIcon,
   XCircleIcon,
   XIcon,
 } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
@@ -34,8 +42,16 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Label } from "@/components/ui/label";
 import { Markdown } from "@/components/ui/markdown";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import {
@@ -98,6 +114,7 @@ import {
   usePrApprovals,
   usePrDetails,
   usePrDiff,
+  usePrList,
   usePrReactions,
   usePrReviewThreads,
   usePrTimeline,
@@ -107,6 +124,9 @@ import {
   useSetPrAssignees,
   useSetPrDraft,
   useSetPrReviewers,
+  useStackAdd,
+  useStackCreate,
+  useStackDissolve,
   useThreadReply,
   useThreadResolve,
   useToggleReaction,
@@ -114,6 +134,7 @@ import {
   useUnminimizeComment,
   useUnrequestChangesPr,
 } from "@/lib/git/queries";
+import { detectStackOffer } from "@/lib/git/stack-chains";
 import {
   type ApprovalState,
   type ForgeProvider,
@@ -132,6 +153,7 @@ import {
 } from "@/lib/pulls/review-drafts";
 import { useRepoLens } from "@/lib/repo-lens/queries";
 import { useAiEnabled } from "@/lib/settings/queries";
+import { useConfirm } from "@/lib/stores/confirm";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
@@ -165,10 +187,13 @@ import {
 } from "./ReviewThreads";
 import {
   isNativeStack,
+  StackOffer,
+  type StackOfferHandle,
   StackSection,
   stackMergeDisclosure,
 } from "./StackSection";
 import { SubmitReviewDialog } from "./SubmitReviewDialog";
+import { useBranchPickerOptions } from "./useBranchPickerOptions";
 import { useGeneratePrDescription } from "./useGeneratePrDescription";
 import {
   composeBodyWithJiraRefs,
@@ -462,6 +487,109 @@ export function RemotePrView({
     isSelectedPr && !!stackNeighbor(-1),
   );
 
+  // Stack writes are GitHub-only, and the chain that would be stacked is read
+  // off the OPEN PR list. Keep this gate strict: it's a second list fetch, and
+  // an already-stacked PR (or one whose stack probe failed, where a null stack
+  // means "unknown") has nothing to offer.
+  const offerEnabled =
+    providerKey === "github" &&
+    details.data?.state === "OPEN" &&
+    canEdit &&
+    !details.data?.stack &&
+    !(details.data?.stackUnknown ?? false);
+  const offerList = usePrList(repoPath, offerEnabled, "open", 100, lens);
+  const stackCreate = useStackCreate(repoPath, lens);
+  const stackAdd = useStackAdd(repoPath, lens);
+  const stackDissolve = useStackDissolve(repoPath, lens);
+  // The offer's own expansion lives in the component; the palette twins reach it
+  // through this handle so both entry points land on the same Confirm button.
+  const offerRef = useRef<StackOfferHandle>(null);
+  const openPrs = offerEnabled ? (offerList.data ?? []) : [];
+  const currentRow = openPrs.find((p) => p.number === number);
+  const stackOffer = currentRow ? detectStackOffer(currentRow, openPrs) : null;
+  // The offer's members in the same bottom→top order, dropped if a member has
+  // somehow left the list between detection and render.
+  const offerRows = (stackOffer?.members ?? []).flatMap((n) => {
+    const row = openPrs.find((p) => p.number === n);
+    return row
+      ? [{ number: row.number, title: row.title, headRefName: row.headRefName }]
+      : [];
+  });
+  const stackWriteError = stackCreate.error ?? stackAdd.error ?? null;
+
+  function confirmStackOffer() {
+    if (!stackOffer) return;
+    if (stackOffer.kind === "create") {
+      stackCreate.mutate(stackOffer.members, {
+        onSuccess: (outcome) =>
+          toast.success(
+            `Stack created — ${outcome.members.length} pull requests`,
+          ),
+      });
+      return;
+    }
+    const { stackNumber } = stackOffer;
+    stackAdd.mutate(
+      { stackNumber, pullRequests: stackOffer.members },
+      { onSuccess: () => toast.success(`Added to stack #${stackNumber}`) },
+    );
+  }
+
+  // A failed write's message belongs beside the affordance, not in a toast — so
+  // Cancel clears it along with the preview.
+  function cancelStackOffer() {
+    stackCreate.reset();
+    stackAdd.reset();
+  }
+
+  // The stack number the dissolve writes, parsed once. A native stack's id is a
+  // numeric string by contract, so a value that won't parse means the contract
+  // broke — null then withdraws the affordance (and its palette twin with it)
+  // rather than sending the forge a NaN.
+  const dissolveStackNumber = (() => {
+    const info = details.data?.stack;
+    if (!isNativeStack(info)) return null;
+    const parsed = Number(info?.id);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  })();
+  // Dissolve is offered only for a stack GitDesktop can actually write: a
+  // GitHub-native one (a GitLab-inferred chain has no stack to dissolve).
+  const canDissolveStack =
+    dissolveStackNumber !== null && details.data?.state === "OPEN" && canEdit;
+
+  async function dissolveStack() {
+    const info = details.data?.stack;
+    if (!info || dissolveStackNumber === null) return;
+    const count = details.data?.stackMembers.length || info.size;
+    const ok = await useConfirm.getState().ask({
+      title: `Dissolve stack #${info.id}?`,
+      body: `Its ${count} pull requests stay open on their branches — they just stop merging together as a stack.`,
+      confirmLabel: "Dissolve stack",
+      confirmVariant: "destructive",
+    });
+    if (!ok) return;
+    stackDissolve.mutate(dissolveStackNumber, {
+      onSuccess: () => toast.success(`Dissolved stack #${info.id}`),
+      onError,
+    });
+  }
+
+  useHotkeyAction(
+    "pr-stack-create",
+    () => offerRef.current?.expand(),
+    isSelectedPr && stackOffer?.kind === "create",
+  );
+  useHotkeyAction(
+    "pr-stack-add",
+    () => offerRef.current?.expand(),
+    isSelectedPr && stackOffer?.kind === "add",
+  );
+  useHotkeyAction(
+    "pr-stack-dissolve",
+    () => void dissolveStack(),
+    isSelectedPr && canDissolveStack && !stackDissolve.isPending,
+  );
+
   const [composeBody, setComposeBody] = useState("");
   const [deletingCommentId, setDeletingCommentId] = useState<string | null>(
     null,
@@ -487,6 +615,10 @@ export function RemotePrView({
   const jiraLink = useJiraLink(repoPath);
   const canJiraMention =
     !canLinkIssues && provider === "bitbucket" && !!jiraLink.data;
+  // The edit dialog's base-branch picker (seeded on each open, below). It rides
+  // the dialog's local state rather than the shared form, which the issue views
+  // reuse and which has no base field.
+  const [editBase, setEditBase] = useState("");
   const edit = useEditTitleBody({
     onSave: async ({ title, body }) => {
       await editPr.mutateAsync({
@@ -500,10 +632,29 @@ export function RemotePrView({
             : canLinkIssues
               ? composeBodyWithRefs(body, linkedIssues)
               : body,
+        // Retarget only when the picker actually moved: an unchanged base is
+        // still a forge write, and GitHub rejects one on a stacked PR.
+        base:
+          editBase && editBase !== details.data?.baseRefName
+            ? editBase
+            : undefined,
       });
     },
     successToast: "Pull request updated",
   });
+  // Local branches for the base picker, fetched only while the dialog is open.
+  // The PR's current base is force-kept: it may be archived, or (fork/upstream
+  // lens) have no local branch at all, and it must stay displayable either way.
+  const { items: branchItems, annotations: branchAnnotations } =
+    useBranchPickerOptions(repoPath, edit.open, [
+      details.data?.baseRefName,
+      defaultBranch.data,
+    ]);
+  const currentBase = details.data?.baseRefName ?? "";
+  const baseItems =
+    currentBase && !(currentBase in branchItems)
+      ? { [currentBase]: currentBase, ...branchItems }
+      : branchItems;
   // Shared chip state machine — enabled only while the edit dialog is open. The
   // body's own trailing refs are peeled into chips at open (`resetWith` in
   // openEdit), so body text and chips are never two sources of truth.
@@ -947,6 +1098,9 @@ export function RemotePrView({
   // because TS doesn't carry the outer `!pr` guard into these hoisted closures.
   const prForGen = pr;
   function openEditWithChips() {
+    // Seed the base picker from the PR as it stands, so a re-open never carries
+    // a previous session's unsaved pick.
+    setEditBase(prForGen.baseRefName);
     if (canLinkIssues) {
       // Native active: numeric refs → chips; any trailing Jira line rides back in
       // `text` so an unedited save can't drop it.
@@ -1079,6 +1233,14 @@ export function RemotePrView({
   };
 
   const isOpen = pr.state === "OPEN";
+  // GitHub owns a native stack's bases — retargeting one out from under the stack
+  // is rejected, so the edit dialog's picker says why instead of letting the save
+  // fail. An inferred (GitLab) chain or an unknown stack stays editable:
+  // retargeting mid-chain is legitimate there and the server arbitrates.
+  const baseLockedNote =
+    pr.stack && isNativeStack(pr.stack)
+      ? `Part of stack #${pr.stack.id} — dissolve the stack to change the base branch.`
+      : null;
   // Split reviewers so the editable picker only ever manages humans: bot requests
   // (e.g. GitHub Copilot) are display-only chips and must never ride through the
   // popover's onChange as a desired reviewer. GitLab/Bitbucket never set isBot.
@@ -1364,13 +1526,29 @@ export function RemotePrView({
           />
         )}
         {/* Stack members, bottom-first — self-hiding for an unstacked PR, so an
-            unstacked header is unchanged. */}
+            unstacked header is unchanged. Mutually exclusive with the offer
+            below it: an offer only exists while this PR is unstacked. */}
         <StackSection
           stack={pr.stack}
           members={pr.stackMembers}
           currentNumber={number}
           onSelect={(n) => selectPr({ kind: "remote", id: String(n) })}
+          onDissolve={canDissolveStack ? dissolveStack : undefined}
+          dissolving={stackDissolve.isPending}
         />
+        {stackOffer && (
+          <StackOffer
+            ref={offerRef}
+            offer={stackOffer}
+            rows={offerRows}
+            pending={stackCreate.isPending || stackAdd.isPending}
+            error={
+              stackWriteError ? presentError(stackWriteError).summary : null
+            }
+            onConfirm={confirmStackOffer}
+            onCancel={cancelStackOffer}
+          />
+        )}
         <ChecksRollup
           checks={pr.checks}
           repoPath={repoPath}
@@ -2344,27 +2522,36 @@ export function RemotePrView({
         onGenerate={aiEnabled ? runGenerate : undefined}
         generating={prGen.generating}
         belowBody={
-          canLinkIssues ? (
-            <LinkedIssuesField
-              repoPath={repoPath}
-              lens={lens}
-              chips={linkedIssues}
-              onToggleKeyword={toggleIssueKeyword}
-              onRemove={removeIssue}
-              onPick={pickIssue}
-              disabled={prGen.generating}
+          <>
+            <BaseBranchField
+              value={editBase}
+              items={baseItems}
+              annotations={branchAnnotations}
+              onChange={setEditBase}
+              lockedNote={baseLockedNote}
             />
-          ) : canJiraMention ? (
-            <LinkedIssuesField
-              variant="jira"
-              repoPath={repoPath}
-              link={jiraLink.data ?? null}
-              jiraChips={jiraChips}
-              onRemove={removeJiraChip}
-              onPick={pickJiraChip}
-              disabled={prGen.generating}
-            />
-          ) : undefined
+            {canLinkIssues ? (
+              <LinkedIssuesField
+                repoPath={repoPath}
+                lens={lens}
+                chips={linkedIssues}
+                onToggleKeyword={toggleIssueKeyword}
+                onRemove={removeIssue}
+                onPick={pickIssue}
+                disabled={prGen.generating}
+              />
+            ) : canJiraMention ? (
+              <LinkedIssuesField
+                variant="jira"
+                repoPath={repoPath}
+                link={jiraLink.data ?? null}
+                jiraChips={jiraChips}
+                onRemove={removeJiraChip}
+                onPick={pickJiraChip}
+                disabled={prGen.generating}
+              />
+            ) : null}
+          </>
         }
         bodyActions={
           !aiEnabled ? undefined : prGen.generating ? (
@@ -2468,6 +2655,68 @@ export function RemotePrView({
           })
         }
       />
+    </div>
+  );
+}
+
+/**
+ * The edit dialog's base-branch picker, injected at this call site rather than
+ * added to the shared dialog (the issue views reuse it and have no base). Follows
+ * the create-PR base picker's composition — an `items` map so the closed trigger
+ * shows a label, never a raw value.
+ */
+function BaseBranchField({
+  value,
+  items,
+  annotations,
+  onChange,
+  lockedNote,
+}: {
+  value: string;
+  items: Record<string, string>;
+  annotations: Record<string, ReactNode>;
+  onChange: (value: string) => void;
+  /** Why the picker is locked; present ⇒ disabled. Rendered as visible text
+   *  beside the control, never a `title` on it — a disabled control fires no
+   *  tooltip, so the reason would be unreachable. */
+  lockedNote: string | null;
+}) {
+  const id = useId();
+  const locked = lockedNote !== null;
+  return (
+    <div className="space-y-2">
+      <Label htmlFor={id}>Base branch</Label>
+      <Select
+        items={items}
+        value={value || null}
+        onValueChange={(v) => {
+          if (v) onChange(v);
+        }}
+        disabled={locked}
+      >
+        <SelectTrigger id={id} className="w-full">
+          <SelectValue />
+        </SelectTrigger>
+        {/* Branch names run long — let the popup size to its widest option
+            (min = trigger width, max = 28rem), like the create-PR picker. */}
+        <SelectContent
+          alignItemWithTrigger={false}
+          className="w-auto min-w-(--anchor-width) max-w-[28rem]"
+        >
+          {Object.entries(items).map(([branch, display]) => (
+            <SelectItem key={branch} value={branch}>
+              <span className="min-w-0 flex-1 truncate">{display}</span>
+              {annotations[branch]}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {lockedNote && (
+        <p className="flex items-start gap-1 text-xs text-warning">
+          <WarningIcon className="mt-px size-3.5 shrink-0" aria-hidden />
+          {lockedNote}
+        </p>
+      )}
     </div>
   );
 }

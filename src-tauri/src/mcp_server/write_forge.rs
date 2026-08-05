@@ -116,6 +116,30 @@ struct UpdatePullRequestArgs {
     /// New body (markdown). Omit to keep the current body.
     #[serde(default)]
     body: Option<String>,
+    /// New base branch. Omit to keep. A stacked GitHub PR's base can't change while
+    /// stacked — dissolve its stack first.
+    #[serde(default)]
+    base: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct CreatePullRequestStackArgs {
+    /// The pull request numbers, ordered BOTTOM→TOP (at least two).
+    pull_requests: Vec<u64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct AddToPullRequestStackArgs {
+    /// The stack's number, from a member PR's `stack.id` (get_pull_request).
+    stack_number: u64,
+    /// The pull request numbers to append on top, ordered BOTTOM→TOP.
+    pull_requests: Vec<u64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct StackNumberArg {
+    /// The stack's number, from a member PR's `stack.id` (get_pull_request).
+    stack_number: u64,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -679,10 +703,11 @@ impl GitDesktopMcp {
     }
 
     #[tool(
-        description = "Edit a pull request's title and/or body (by number) in the bound \
-                       repository's forge (GitHub, GitLab, or Bitbucket, per its remote). Omitted \
-                       fields keep their current value (the current PR is read first to preserve \
-                       them). Requires --allow-remote-write.",
+        description = "Edit a pull request's title, body, and/or base branch (by number) in the \
+                       bound repository's forge (GitHub, GitLab, or Bitbucket, per its remote). \
+                       Omitted fields keep their current value (title and body are read from the \
+                       current PR first to preserve them; an omitted `base` is simply not sent). \
+                       Requires --allow-remote-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn update_pull_request(
@@ -692,6 +717,7 @@ impl GitDesktopMcp {
         self.ensure_remote_write()?;
         // forge_pr_edit replaces BOTH title and body, so fetch the current PR to fill
         // whichever the caller omitted — otherwise an omitted field would be wiped.
+        // `base` needs no such read: None means the arm omits the field entirely.
         let (title, body) = if args.title.is_none() || args.body.is_none() {
             let pr = crate::forge::forge_pr_view(self.repo.clone(), args.number, None)
                 .await
@@ -700,10 +726,90 @@ impl GitDesktopMcp {
         } else {
             (args.title.unwrap(), args.body.unwrap())
         };
-        crate::forge::forge_pr_edit(self.repo.clone(), args.number, title, body, None)
+        crate::forge::forge_pr_edit(self.repo.clone(), args.number, title, body, None, args.base)
             .await
             .map_err(app_err)?;
         json_result(&serde_json::json!({ "pull_request": args.number, "action": "updated" }))
+    }
+
+    #[tool(
+        description = "Group open pull requests into a NEW stack in the bound repository. GitHub \
+                       only: GitLab detects a stack automatically when a merge request targets \
+                       another open merge request's branch, and Bitbucket has no stacks — both \
+                       arms return an actionable error. `pull_requests` is ordered BOTTOM→TOP and \
+                       is NOT sorted for you: each PR's base branch must be the previous PR's head \
+                       branch, and at least two PRs are required. Inspect membership afterwards \
+                       with get_pull_request (`stack`, `stackMembers`); how a stack merges is \
+                       described on merge_pull_request. Requires --allow-remote-write.",
+        annotations(read_only_hint = false, destructive_hint = false)
+    )]
+    async fn create_pull_request_stack(
+        &self,
+        Parameters(args): Parameters<CreatePullRequestStackArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_remote_write()?;
+        let outcome =
+            crate::forge::forge_stack_create(self.repo.clone(), args.pull_requests, None)
+                .await
+                .map_err(app_err)?;
+        json_result(&serde_json::json!({
+            "stack": outcome.stack_number,
+            "members": outcome.members,
+            "action": "created",
+        }))
+    }
+
+    #[tool(
+        description = "Append pull requests to an existing stack in the bound repository, on TOP \
+                       only (there is no insert-in-the-middle form). GitHub only: GitLab detects a \
+                       stack automatically when a merge request targets another open merge \
+                       request's branch, and Bitbucket has no stacks. `pull_requests` is ordered \
+                       BOTTOM→TOP and the first one's base branch must be the current top PR's \
+                       head branch. Inspect membership with get_pull_request (`stack`, \
+                       `stackMembers`); how a stack merges is described on merge_pull_request. \
+                       Requires --allow-remote-write.",
+        annotations(read_only_hint = false, destructive_hint = false)
+    )]
+    async fn add_to_pull_request_stack(
+        &self,
+        Parameters(args): Parameters<AddToPullRequestStackArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_remote_write()?;
+        let outcome = crate::forge::forge_stack_add(
+            self.repo.clone(),
+            args.stack_number,
+            args.pull_requests,
+            None,
+        )
+        .await
+        .map_err(app_err)?;
+        json_result(&serde_json::json!({
+            "stack": outcome.stack_number,
+            "members": outcome.members,
+            "action": "extended",
+        }))
+    }
+
+    #[tool(
+        description = "Dissolve a stack in the bound repository. This unstacks the WHOLE stack — \
+                       every member leaves at once, not just one PR — and there is no per-PR \
+                       removal. The pull requests themselves stay OPEN on their branches; only \
+                       the grouping goes away, so re-forming it means create_pull_request_stack \
+                       again. GitHub only: GitLab detects a stack automatically when a merge \
+                       request targets another open merge request's branch, and Bitbucket has no \
+                       stacks. Read membership with get_pull_request (`stack`, `stackMembers`) \
+                       before dissolving. Requires --allow-remote-write.",
+        annotations(read_only_hint = false, destructive_hint = true)
+    )]
+    async fn dissolve_pull_request_stack(
+        &self,
+        Parameters(args): Parameters<StackNumberArg>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_remote_write()?;
+        crate::forge::forge_stack_dissolve(self.repo.clone(), args.stack_number, None)
+            .await
+            .map_err(app_err)?;
+        json_result(&serde_json::json!({ "stack": args.stack_number, "action": "dissolved" }))
     }
 
     #[tool(
@@ -1634,7 +1740,22 @@ mod tests {
             number: 1,
             title: Some("t".into()),
             body: Some("b".into()),
+            base: None,
         })));
+        assert_gated!(
+            h.create_pull_request_stack(Parameters(CreatePullRequestStackArgs {
+                pull_requests: vec![1, 2],
+            }))
+        );
+        assert_gated!(
+            h.add_to_pull_request_stack(Parameters(AddToPullRequestStackArgs {
+                stack_number: 1,
+                pull_requests: vec![3],
+            }))
+        );
+        assert_gated!(
+            h.dissolve_pull_request_stack(Parameters(StackNumberArg { stack_number: 1 }))
+        );
         assert_gated!(
             h.set_pull_request_draft(Parameters(SetPullRequestDraftArgs {
                 number: 1,

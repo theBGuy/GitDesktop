@@ -806,8 +806,12 @@ before any automated review runs, and that review reads them as context; on GitH
 GitLab the code reviews and security audits you start yourself read them too — so a
 deliberate, documented decision isn't re-flagged. Notes present here also ground the
 **AI-generated** description{{/ai}}. Press {{key:mod+enter}} from any field to submit either the
-**Create** or the **Edit** dialog.{{ai}} While a PR dialog is open, {{kbd:generate-commit-message}}
-runs its **Generate** for you.{{/ai}}
+**Create** or the **Edit** dialog. The **Edit** dialog also carries a **base branch**
+select, so you can **retarget** a pull request at a different branch without recreating it —
+on GitHub, GitLab, and Bitbucket alike. On a **stacked GitHub** pull request that select is
+disabled, since the stack decides what each member targets: dissolve the stack first (see
+*Stacked pull requests* below) and the base is yours to change again.{{ai}} While a PR dialog
+is open, {{kbd:generate-commit-message}} runs its **Generate** for you.{{/ai}}
 
 ## GitLab merge requests
 
@@ -865,6 +869,26 @@ it on the keys.
 
 Where the stack comes from depends on the forge: on **GitHub** it's the **native
 stacked-PR API**, and on **GitLab** a chain of merge requests is **detected automatically**.
+
+On **GitHub** you can also build the stack yourself, from the pull-request view. Whenever
+your open pull requests already form a chain — each one targeting the branch below it — the
+**Stack** area offers to **create a stack** out of that chain, or to **add it to** the stack
+this pull request already sits on, and shows you a **preview** of exactly what will be
+stacked, bottom to top, before anything is created. Confirm it and the chain becomes a real
+stack: one that navigates as a unit and **merges bottom-up as a single operation**. (GitLab
+finds stacked merge requests on its own and Bitbucket has no stacks, so this is
+GitHub-only.)
+
+A stacked pull request's **Stack** section also offers **Dissolve**, behind a confirmation.
+Dissolving takes the stack apart and nothing else: every pull request in it **stays open on
+its branch** — they just stop merging together. GitHub's API offers no way to reorder a
+stack in place, so to change the order, dissolve the stack and create it again in the order
+you want.
+
+**Create pull request stack**, **Add to pull request stack**, and **Dissolve pull request
+stack** are in the command palette ({{kbd:command-palette}}) too, offered from the
+pull-request view whenever they apply. Like the stack navigation commands they have no
+default shortcut, so give them one in **Settings → Keyboard** if you want them on the keys.
 
 On **GitHub**, merging is **stack-aware**: merging a stacked pull request merges it *and*
 every still-open pull request below it, bottom-up, as a single operation, so the stack

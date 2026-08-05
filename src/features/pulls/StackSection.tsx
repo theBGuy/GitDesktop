@@ -1,8 +1,22 @@
 import { CheckIcon, CircleIcon, XIcon } from "@phosphor-icons/react";
+import {
+  type Ref,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+} from "react";
+import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 import { clipTitle } from "@/lib/clip-title";
+import type { StackOffer as StackOfferKind } from "@/lib/git/stack-chains";
 import type { PrStackInfo, PrStackMember } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { cn } from "@/lib/utils";
+
+// Re-exported from its `lib` home so this file stays the one import site for
+// everything stack-shaped in the PR views.
+export { isNativeStack } from "@/lib/git/stack-chains";
 
 /** Icon + word + tone for a stack member's state. An unrecognized state keeps the
  *  provider's own word at a neutral tone rather than being read as "open" — the
@@ -25,16 +39,6 @@ function memberPresentation(state: string) {
         word: key || "unknown",
       };
   }
-}
-
-/** Whether this is a forge-NATIVE stack, which merges atomically bottom-up, as
- *  opposed to an inferred chain whose members merge one at a time. The `id` shape
- *  is the contract, and both minting sites are the whole universe: `github/pr.rs`
- *  stringifies the numeric stack number, `forge/gitlab.rs` synthesizes
- *  "mr-<bottom-iid>". Provenance the payload carries itself, so a pending or
- *  failed forge-status probe can't skew it in either direction. */
-export function isNativeStack(stack: PrStackInfo | null | undefined): boolean {
-  return stack != null && !stack.id.startsWith("mr-");
 }
 
 /** Members sorted bottom-first, the order a stack merges in. */
@@ -139,6 +143,8 @@ export function StackSection({
   members,
   currentNumber,
   onSelect,
+  onDissolve,
+  dissolving,
 }: {
   stack: PrStackInfo | null | undefined;
   members: PrStackMember[] | undefined;
@@ -146,6 +152,10 @@ export function StackSection({
    *  `aria-current`. It stays focusable so arrow-key nav can start from it. */
   currentNumber: number;
   onSelect: (number: number) => void;
+  /** Runs the caller's confirmed dissolve. Absent ⇒ no Dissolve affordance —
+   *  the caller owns the eligibility (native stack, open, writable). */
+  onDissolve?: () => void;
+  dissolving?: boolean;
 }) {
   if (!stack) return null;
   const rows = byPosition(members ?? []);
@@ -159,9 +169,11 @@ export function StackSection({
         {/* Denominator source differs per arm and must stay that way: with no
             rows to count, the summary's own `size` is all there is; the max
             keeps a `position` past it from reading "3 of 2". */}
-        <p className="text-xs font-medium text-muted-foreground">
-          Stack · {stack.position} of {Math.max(stack.size, stack.position)}
-        </p>
+        <StackHeader
+          label={`Stack · ${stack.position} of ${Math.max(stack.size, stack.position)}`}
+          onDissolve={onDissolve}
+          dissolving={dissolving}
+        />
         <p className="mt-1.5 text-xs text-muted-foreground">
           Couldn't load the stack's members.
         </p>
@@ -182,9 +194,11 @@ export function StackSection({
       {/* The rows are the members we actually have, so they — not the summary's
           `size`, fetched on a separate hop — set the denominator; the max keeps
           a server `position` past the last row from reading "3 of 2". */}
-      <p className="text-xs font-medium text-muted-foreground">
-        Stack · {stack.position} of {Math.max(rows.length, stack.position)}
-      </p>
+      <StackHeader
+        label={`Stack · ${stack.position} of ${Math.max(rows.length, stack.position)}`}
+        onDissolve={onDissolve}
+        dissolving={dissolving}
+      />
       {/* Capped like the checks rollup so a deep stack can't push the tab row
           out of the header; arrow-nav scrolls the active row into view. */}
       <div
@@ -228,6 +242,210 @@ export function StackSection({
           );
         })}
       </div>
+    </div>
+  );
+}
+
+/** The section's header line, plus the optional Dissolve action. The button is
+ *  always visible (no hover-reveal) and its label carries the meaning — the
+ *  destructive tone only arrives on hover/focus. */
+function StackHeader({
+  label,
+  onDissolve,
+  dissolving,
+}: {
+  label: string;
+  onDissolve?: () => void;
+  dissolving?: boolean;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <p className="min-w-0 flex-1 truncate text-xs font-medium text-muted-foreground">
+        {label}
+      </p>
+      {onDissolve && (
+        <Button
+          variant="ghost"
+          size="xs"
+          className="shrink-0 cursor-pointer text-muted-foreground hover:text-destructive focus-visible:text-destructive"
+          disabled={dissolving}
+          onClick={onDissolve}
+        >
+          {dissolving && <Spinner data-icon="inline-start" />}
+          Dissolve
+        </Button>
+      )}
+    </div>
+  );
+}
+
+/** Imperative surface for the palette twins of the offer's button: expand the
+ *  preview from outside, exactly as pressing the button does. */
+export interface StackOfferHandle {
+  expand: () => void;
+}
+
+/** One offer member, as the detail view derives it from the open PR list. */
+export interface StackOfferRow {
+  number: number;
+  title: string;
+  headRefName: string;
+}
+
+/**
+ * The contextual stack offer that takes StackSection's place on an UNSTACKED
+ * PR whose branch chain can be stacked. Collapsed it's one quiet line plus its
+ * button; pressing the button (or the palette twin) expands an inline preview
+ * of exactly what will be written, with Confirm/Cancel — never a modal, since
+ * the offer is contextual to what's already on screen.
+ */
+export function StackOffer({
+  offer,
+  rows,
+  pending,
+  error,
+  onConfirm,
+  onCancel,
+  ref,
+}: {
+  offer: StackOfferKind;
+  /** The offer's members, bottom→top — same order as `offer.members`. */
+  rows: StackOfferRow[];
+  pending: boolean;
+  /** The write's failure message, shown verbatim: the forge's 422s name the
+   *  exact rule that was broken, which no rewrite of ours would improve. */
+  error: string | null;
+  onConfirm: () => void;
+  /** Collapses the preview; the caller also clears any error with it. */
+  onCancel: () => void;
+  ref?: Ref<StackOfferHandle>;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const confirmRef = useRef<HTMLButtonElement>(null);
+  // A different offer (another PR, or the chain changed under us) starts
+  // collapsed — a render-time reset, not an effect.
+  const offerKey =
+    offer.kind === "add"
+      ? `add:${offer.stackNumber}:${offer.baseSize}:${offer.members.join(",")}`
+      : `create:${offer.members.join(",")}`;
+  const [lastKey, setLastKey] = useState(offerKey);
+  if (offerKey !== lastKey) {
+    setLastKey(offerKey);
+    setExpanded(false);
+  }
+  // Expanding replaces the button that was focused, so focus has to be moved
+  // deliberately or a keyboard user lands back on the document.
+  useEffect(() => {
+    if (expanded) confirmRef.current?.focus();
+  }, [expanded]);
+  // The focus call covers an ALREADY-expanded offer, where the effect above
+  // won't re-fire; the first expansion is the effect's, since Confirm hasn't
+  // mounted yet at this point.
+  useImperativeHandle(
+    ref,
+    () => ({
+      expand: () => {
+        setExpanded(true);
+        confirmRef.current?.focus();
+      },
+    }),
+    [],
+  );
+
+  const count = offer.members.length;
+  const line =
+    offer.kind === "create"
+      ? `These ${count} pull requests form a chain.`
+      : `This chain sits on stack #${offer.stackNumber}.`;
+
+  if (!expanded) {
+    return (
+      <div className="flex items-center gap-2">
+        <p className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+          {line}
+        </p>
+        <Button
+          variant="outline"
+          size="xs"
+          className="shrink-0 cursor-pointer"
+          onClick={() => setExpanded(true)}
+        >
+          {offer.kind === "create" ? "Create stack" : "Add to stack"}
+        </Button>
+      </div>
+    );
+  }
+
+  const confirmLabel =
+    offer.kind === "create"
+      ? `Create stack (${count} pull requests)`
+      : count === 1
+        ? `Add to stack #${offer.stackNumber}`
+        : `Add ${count} to stack #${offer.stackNumber}`;
+
+  return (
+    <div>
+      <p className="text-xs font-medium text-muted-foreground">{line}</p>
+      {/* Static preview — nothing here is selectable, so it takes no keyboard
+          nav; the members' own rows live in the PR list. Capped like the Stack
+          section so a long chain can't push the tab row out of the header. */}
+      <div className="mt-1.5 max-h-48 overflow-y-auto border">
+        {rows.map((row, i) => (
+          <div
+            key={row.number}
+            className="flex w-full items-center gap-2 border-b px-3 py-1.5 text-xs last:border-b-0"
+          >
+            {/* The position each member will LAND at: an append starts above the
+                stack's existing members, a new stack starts at 1. */}
+            <span className="w-4 shrink-0 text-right text-muted-foreground tabular-nums">
+              {(offer.kind === "add" ? offer.baseSize : 0) + i + 1}
+            </span>
+            <span className="shrink-0 font-mono text-muted-foreground">
+              #{row.number}
+            </span>
+            <span
+              className="min-w-0 flex-1 truncate"
+              onMouseEnter={clipTitle(row.title)}
+            >
+              {row.title}
+            </span>
+          </div>
+        ))}
+      </div>
+      <p className="mt-1.5 text-xs text-muted-foreground">
+        {offer.kind === "create"
+          ? "They'll merge as one stack, bottom to top."
+          : "It'll merge with the stack, bottom to top."}
+      </p>
+      <div className="mt-1.5 flex items-center gap-2">
+        <Button
+          ref={confirmRef}
+          size="xs"
+          className="cursor-pointer"
+          disabled={pending}
+          onClick={onConfirm}
+        >
+          {pending && <Spinner data-icon="inline-start" />}
+          {confirmLabel}
+        </Button>
+        <Button
+          variant="outline"
+          size="xs"
+          className="cursor-pointer"
+          disabled={pending}
+          onClick={() => {
+            setExpanded(false);
+            onCancel();
+          }}
+        >
+          Cancel
+        </Button>
+      </div>
+      {error && (
+        <p role="alert" className="mt-1.5 text-xs text-destructive">
+          {error}
+        </p>
+      )}
     </div>
   );
 }

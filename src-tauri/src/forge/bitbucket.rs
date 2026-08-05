@@ -624,8 +624,9 @@ fn from_bb_pr(p: BbPr) -> PrInfo {
             .and_then(|s| s.commit.as_ref())
             .map(|c| c.hash.clone())
             .unwrap_or_default(),
-        // Bitbucket has no stacked-PR concept.
+        // Bitbucket has no stacked-PR concept — nothing to probe, so nothing unknown.
         stack: None,
+        stack_unknown: false,
     }
 }
 
@@ -2462,18 +2463,29 @@ struct BbReviewer {
 }
 
 /// Build the reviewer-safe edit body: title + description + the existing reviewer
-/// uuids. Pure (testable). Omitting `reviewers` from a Bitbucket PR PUT WIPES them
-/// (Renovate-confirmed), so we always echo the existing set.
-fn build_edit_body(title: &str, body: &str, reviewer_uuids: &[String]) -> serde_json::Value {
+/// uuids, plus `destination` when retargeting. Pure (testable). Omitting
+/// `reviewers` from a Bitbucket PR PUT WIPES them (Renovate-confirmed), so we
+/// always echo the existing set; `destination` has no such semantics — omitting it
+/// keeps the PR's current target branch.
+fn build_edit_body(
+    title: &str,
+    body: &str,
+    reviewer_uuids: &[String],
+    base: Option<&str>,
+) -> serde_json::Value {
     let reviewers: Vec<serde_json::Value> = reviewer_uuids
         .iter()
         .map(|u| serde_json::json!({ "uuid": u }))
         .collect();
-    serde_json::json!({
+    let mut payload = serde_json::json!({
         "title": title,
         "description": body,
         "reviewers": reviewers,
-    })
+    });
+    if let Some(base) = base {
+        payload["destination"] = serde_json::json!({ "branch": { "name": base } });
+    }
+    payload
 }
 
 /// Read a PR's current reviewer uuids — the echo every mutating PR PUT needs
@@ -2494,14 +2506,21 @@ async fn read_reviewer_uuids(
         .collect())
 }
 
-/// Edit a pull request's title/body (`PUT …/pullrequests/{n}`). Only OPEN PRs are
-/// mutable. A Bitbucket PR PUT that omits `reviewers` WIPES them, so we first read the
-/// existing reviewer uuids and echo them back alongside the new title/description.
-pub async fn edit_pr(repo_path: &str, number: u64, title: &str, body: &str) -> AppResult<()> {
+/// Edit a pull request's title/body (`PUT …/pullrequests/{n}`), and its destination
+/// branch when `target` is given. Only OPEN PRs are mutable. A Bitbucket PR PUT that
+/// omits `reviewers` WIPES them, so we first read the existing reviewer uuids and
+/// echo them back alongside the new title/description.
+pub async fn edit_pr(
+    repo_path: &str,
+    number: u64,
+    title: &str,
+    body: &str,
+    target: Option<&str>,
+) -> AppResult<()> {
     let creds = http::load_credentials().await?;
     let base = repo_base(repo_path).await?;
     let uuids = read_reviewer_uuids(&creds, &base, number).await?;
-    let payload = build_edit_body(title, body, &uuids);
+    let payload = build_edit_body(title, body, &uuids, target);
     let path = format!("{base}/pullrequests/{number}");
     http::bb_put_json::<serde_json::Value>(&creds, &path, &payload, "pull request").await?;
     Ok(())
@@ -6320,7 +6339,12 @@ mod tests {
 
     #[test]
     fn edit_body_echoes_reviewers_alongside_title_and_description() {
-        let body = build_edit_body("T", "D", &["{uuid-1}".to_string(), "{uuid-2}".to_string()]);
+        let body = build_edit_body(
+            "T",
+            "D",
+            &["{uuid-1}".to_string(), "{uuid-2}".to_string()],
+            None,
+        );
         assert_eq!(body["title"], "T");
         assert_eq!(body["description"], "D");
         let reviewers = body["reviewers"].as_array().unwrap();
@@ -6331,11 +6355,26 @@ mod tests {
 
     #[test]
     fn edit_body_with_no_reviewers_sends_empty_array_not_omitted() {
-        let body = build_edit_body("T", "D", &[]);
+        let body = build_edit_body("T", "D", &[], None);
         // The reviewers key is present (an empty array), so we never accidentally omit
         // it — which would WIPE reviewers on a PR that had them.
         assert!(body["reviewers"].is_array());
         assert_eq!(body["reviewers"].as_array().unwrap().len(), 0);
+    }
+
+    /// `destination` rides the edit body only when retargeting: unlike `reviewers`,
+    /// omitting it keeps the PR's current target branch.
+    #[test]
+    fn edit_body_carries_destination_only_when_retargeting() {
+        let plain = build_edit_body("T", "D", &[], None);
+        assert!(plain.get("destination").is_none());
+
+        let retarget = build_edit_body("T", "D", &[], Some("main"));
+        assert_eq!(retarget["destination"]["branch"]["name"], "main");
+        // Every other field is untouched by the retarget.
+        assert_eq!(retarget["title"], plain["title"]);
+        assert_eq!(retarget["description"], plain["description"]);
+        assert_eq!(retarget["reviewers"], plain["reviewers"]);
     }
 
     #[test]

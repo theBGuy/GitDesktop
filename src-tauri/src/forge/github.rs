@@ -234,6 +234,7 @@ pub async fn edit_pr(
     title: &str,
     body: &str,
     lens: Option<String>,
+    base: Option<&str>,
 ) -> AppResult<()> {
     crate::github::pr::gh_pr_edit(
         repo_path.to_string(),
@@ -241,6 +242,7 @@ pub async fn edit_pr(
         title.to_string(),
         body.to_string(),
         lens,
+        base.map(str::to_string),
     )
     .await
 }

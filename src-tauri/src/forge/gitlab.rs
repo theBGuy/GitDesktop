@@ -294,8 +294,10 @@ fn from_glab_mr(m: GlabMr) -> PrInfo {
         // GitLab queries CI by MR iid (headPipeline), never by SHA — leave it empty.
         head_sha: String::new(),
         // GitLab has no stack object; chains are inferred over a whole open list
-        // (see `infer_mr_stacks`), which a single MR can't do.
+        // (see `infer_mr_stacks`), which a single MR can't do. That inference is pure
+        // over rows already in hand — it has no probe to fail, so never unknown.
         stack: None,
+        stack_unknown: false,
     }
 }
 
@@ -2044,10 +2046,37 @@ pub async fn set_mr_draft(repo_path: &str, number: u64, draft: bool) -> AppResul
     Ok(())
 }
 
-/// Edit a merge request's title/description. Mirrors `gh_pr_edit` (empty-title
-/// guard; an empty body clears the description). Validated live: `-f` keeps
-/// multi-line/comma/`=`/`@`/leading-`-` values intact.
-pub async fn edit_mr(repo_path: &str, number: u64, title: &str, body: &str) -> AppResult<()> {
+/// The PUT argv for an MR edit. `target_branch` is appended ONLY when retargeting:
+/// an absent field leaves the MR's target untouched.
+fn edit_mr_args(endpoint: &str, title: &str, body: &str, base: Option<&str>) -> Vec<String> {
+    let mut args = vec![
+        "api".to_string(),
+        "--method".to_string(),
+        "PUT".to_string(),
+        endpoint.to_string(),
+        "-f".to_string(),
+        format!("title={title}"),
+        "-f".to_string(),
+        format!("description={body}"),
+    ];
+    if let Some(base) = base {
+        args.push("-f".to_string());
+        args.push(format!("target_branch={base}"));
+    }
+    args
+}
+
+/// Edit a merge request's title/description, and its target branch when `base` is
+/// given. Mirrors `gh_pr_edit` (empty-title guard; an empty body clears the
+/// description). Validated live: `-f` keeps multi-line/comma/`=`/`@`/leading-`-`
+/// values intact.
+pub async fn edit_mr(
+    repo_path: &str,
+    number: u64,
+    title: &str,
+    body: &str,
+    base: Option<&str>,
+) -> AppResult<()> {
     let title = title.trim();
     if title.is_empty() {
         return Err(AppError::InvalidArgument(
@@ -2056,16 +2085,9 @@ pub async fn edit_mr(repo_path: &str, number: u64, title: &str, body: &str) -> A
     }
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/merge_requests/{number}");
-    let title_arg = format!("title={title}");
-    let desc_arg = format!("description={body}");
-    run_glab(
-        Some(repo_path),
-        &[
-            "api", "--method", "PUT", &endpoint, "-f", &title_arg, "-f", &desc_arg,
-        ],
-        GLAB_NETWORK_TIMEOUT,
-    )
-    .await?;
+    let args = edit_mr_args(&endpoint, title, body, base);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_glab(Some(repo_path), &arg_refs, GLAB_NETWORK_TIMEOUT).await?;
     Ok(())
 }
 
@@ -7646,6 +7668,30 @@ pub async fn repo_readme(
 mod tests {
     use super::*;
 
+    /// The MR edit PUT sends `target_branch` only when retargeting — the no-base
+    /// form must stay byte-identical to the title/description-only request.
+    #[test]
+    fn edit_mr_args_append_target_branch_only_when_given() {
+        let plain = edit_mr_args("projects/9/merge_requests/7", "T", "D", None);
+        assert_eq!(
+            plain,
+            vec![
+                "api",
+                "--method",
+                "PUT",
+                "projects/9/merge_requests/7",
+                "-f",
+                "title=T",
+                "-f",
+                "description=D",
+            ]
+        );
+
+        let retarget = edit_mr_args("projects/9/merge_requests/7", "T", "D", Some("main"));
+        assert_eq!(retarget[..plain.len()], plain[..]);
+        assert_eq!(retarget[plain.len()..], ["-f", "target_branch=main"]);
+    }
+
     /// `(iid, position, size)` per MR, sorted — the readable shape of an inference.
     fn chain_of(open: &[(u64, &str, &str)]) -> Vec<(u64, String, u32, u32)> {
         let mut rows: Vec<(u64, String, u32, u32)> = infer_mr_stacks(open)
@@ -7722,6 +7768,7 @@ mod tests {
                 position,
                 size,
             }),
+            stack_unknown: false,
         }
     }
 

@@ -1449,6 +1449,15 @@ export interface PrStackMember {
   baseRefName: string;
 }
 
+/** What a stack create/add write returns: the stack it landed on and the members
+ *  the forge confirmed, so the caller reports the forge's truth rather than the
+ *  set it asked for (GitHub can reorder or reject a member). */
+export interface StackWriteOutcome {
+  stackNumber: number;
+  /** Member PR numbers, bottom→top, as the forge confirmed them. */
+  members: number[];
+}
+
 export interface PrInfo {
   number: number;
   url: string;
@@ -1469,6 +1478,11 @@ export interface PrInfo {
   headSha: string;
   /** Stack membership, driving the row's position badge. Null/absent = unstacked. */
   stack?: PrStackInfo | null;
+  /** Whether the list's stack join FAILED, making every row's `stack` unreliable.
+   *  Tri-state: absent or false = the join answered (zero stacks is a real answer);
+   *  true = it failed, so a row showing no stack may still be stacked. The join is
+   *  fail-open per list, so this flag is uniform across the page. */
+  stackUnknown?: boolean;
 }
 
 /** A PR's rolled-up CI signal for the list-row icon. "none" = no checks. */

@@ -400,10 +400,11 @@ impl ServerHandler for GitDesktopMcp {
              AND local issues (create/comment/status and equivalents). These are review artifacts \
              stored in GitDesktop's app data — never git commits and never remote/forge writes. \
              (2) --allow-remote-write enables the full forge remote-write surface under the \
-             authenticated forge identity: the PR lifecycle (create/merge/edit), reviewers, \
-             labels, assignees and approvals, review threads, CI actions, releases, GitHub \
-             discussions, issue writes (create/comment/close/reopen), and the linked-Jira issue \
-             writes (comment/transition/create/assign). These are REAL, publicly \
+             authenticated forge identity: the PR lifecycle (create/merge/edit, plus GitHub PR \
+             stack create/add/dissolve), reviewers, labels, assignees and approvals, review \
+             threads, CI actions, releases, GitHub discussions, issue writes \
+             (create/comment/close/reopen), and the linked-Jira issue writes \
+             (comment/transition/create/assign). These are REAL, publicly \
              visible writes to the repository's forge and are not freely reversible. (One \
              exception: creating a PR pushes `head` to origin first — a local-git write — so \
              create_pull_request ALSO requires --allow-git-write, not just --allow-remote-write.) (3) \
@@ -898,7 +899,7 @@ mod tests {
     }
 
     /// The combined router's tool count must equal the sum of the per-module counts.
-    /// Each term derives from the module's own router, so only the `== 119` literal needs
+    /// Each term derives from the module's own router, so only the `== 122` literal needs
     /// touching — and only when a change intends to move the total.
     #[test]
     fn combined_router_tool_count_is_sum_of_modules() {
@@ -912,7 +913,7 @@ mod tests {
             + GitDesktopMcp::write_git_router().list_all().len()
             + GitDesktopMcp::generate_router().list_all().len();
         assert_eq!(handler.tool_router.list_all().len(), per_module);
-        assert_eq!(per_module, 119);
+        assert_eq!(per_module, 122);
     }
 
     /// The exact set of tools a connected agent is told may destroy state. Annotations are
@@ -944,6 +945,7 @@ mod tests {
                 "delete_tag",
                 "discard_all_changes",
                 "discard_changes",
+                "dissolve_pull_request_stack",
                 "drop_stash",
                 "force_push",
                 "merge_branch",

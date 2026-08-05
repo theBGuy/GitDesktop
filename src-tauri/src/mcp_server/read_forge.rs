@@ -138,7 +138,9 @@ impl GitDesktopMcp {
                        the ceiling (no pagination). Open rows carry a `stack` object \
                        ({id, position, size}, position 1 = bottom and merges first) when the \
                        PR belongs to a stack — GitHub stacks, or a chain of GitLab MRs each \
-                       targeting the next one's source branch; null otherwise. Requires the \
+                       targeting the next one's source branch; null otherwise. On GitHub, \
+                       `stackUnknown: true` on a row means the stack check itself failed — \
+                       null there is not proof the PR is unstacked. Requires the \
                        forge's authenticated CLI/credential. Returns JSON."
     )]
     async fn list_pull_requests(

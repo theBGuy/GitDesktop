@@ -704,6 +704,24 @@ export const ACTIONS = [
     category: "Pull requests",
     defaultBinding: null,
   },
+  {
+    id: "pr-stack-create",
+    label: "Create pull request stack",
+    category: "Pull requests",
+    defaultBinding: null,
+  },
+  {
+    id: "pr-stack-add",
+    label: "Add to pull request stack",
+    category: "Pull requests",
+    defaultBinding: null,
+  },
+  {
+    id: "pr-stack-dissolve",
+    label: "Dissolve pull request stack",
+    category: "Pull requests",
+    defaultBinding: null,
+  },
 ] as const satisfies readonly ActionDef[];
 
 export type ActionId = (typeof ACTIONS)[number]["id"];

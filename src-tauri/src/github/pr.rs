@@ -534,6 +534,12 @@ pub struct PrInfo {
     /// joined in from a supplementary call — hence the serde default.
     #[serde(default)]
     pub stack: Option<PrStackInfo>,
+    /// The list's stack probe FAILED, so `stack` being `None` proves nothing — these
+    /// rows may be stacked without showing it. `false` (the default) means the join
+    /// answered, empty or not. Callers that act on membership must treat `true` as
+    /// "don't know", never as "not stacked".
+    #[serde(default)]
+    pub stack_unknown: bool,
 }
 
 /// Submits a review: `action` is "approve", "comment", or "request_changes".
@@ -1379,27 +1385,63 @@ fn stack_memberships_from(
     map
 }
 
+/// Flatten `--paginate --slurp` output — an outer array of PAGES, each itself the
+/// endpoint's own array — into one list. Pure: `--slurp` nests one level deeper
+/// than an unpaginated body, so reading the outer array as the payload would drop
+/// every stack.
+fn flatten_slurped_pages(pages: Vec<Vec<serde_json::Value>>) -> Vec<serde_json::Value> {
+    pages.into_iter().flatten().collect()
+}
+
 /// The repo's OPEN stacks as a PR-number → membership map, for the list join.
-/// Best-effort by contract: the list renders exactly as it did before stacks on
-/// any fail-open cause — no such endpoint (GHES), network error, unparseable
-/// body, or exceeding [`STACKS_TIMEOUT`] at the call site. One page only: past
-/// 100 open stacks the surplus goes unmarked rather than paginating a decoration.
+/// `None` is the tri-state the list needs: the probe FAILED (no such endpoint on
+/// GHES, spawn error, non-zero exit, unparseable body — a caller-side
+/// [`STACKS_TIMEOUT`] counts too), so rows may be stacked without showing it.
+/// `Some(map)`, empty included, means the read answered.
+///
+/// Paginated because merge-dissolved stacks PERSIST in this list as `open: false`:
+/// on a long-lived repo the residue fills the early pages and the live stacks the
+/// join actually needs sit past them.
 async fn gh_open_stack_memberships(
     repo_path: &str,
     slug: &str,
-) -> std::collections::HashMap<u64, PrStackInfo> {
-    let empty = std::collections::HashMap::new();
+) -> Option<std::collections::HashMap<u64, PrStackInfo>> {
     let endpoint = format!("repos/{slug}/stacks?per_page=100");
-    let Ok(out) = run_gh_raw(Some(repo_path), &["api", &endpoint], GH_TIMEOUT).await else {
-        return empty;
-    };
+    let out = run_gh_raw(
+        Some(repo_path),
+        &["api", "--paginate", "--slurp", &endpoint],
+        GH_TIMEOUT,
+    )
+    .await
+    .ok()?;
     if out.code != 0 {
-        return empty;
+        return None;
     }
-    let Ok(raw) = serde_json::from_str::<Vec<serde_json::Value>>(&out.stdout_lossy()) else {
-        return empty;
-    };
-    stack_memberships_from(raw)
+    let pages =
+        serde_json::from_str::<Vec<Vec<serde_json::Value>>>(&out.stdout_lossy()).ok()?;
+    Some(stack_memberships_from(flatten_slurped_pages(pages)))
+}
+
+/// Decorate list rows with their stack membership. `stacks` is `None` when the
+/// probe failed: every row is then marked `stack_unknown`, because an absent badge
+/// would otherwise read as a firm "not stacked" and let a caller stack rows that
+/// already are.
+fn apply_stack_join(
+    prs: &mut [PrInfo],
+    stacks: Option<&std::collections::HashMap<u64, PrStackInfo>>,
+) {
+    match stacks {
+        Some(map) => {
+            for pr in prs {
+                pr.stack = map.get(&pr.number).cloned();
+            }
+        }
+        None => {
+            for pr in prs {
+                pr.stack_unknown = true;
+            }
+        }
+    }
 }
 
 /// What the detail view learned about a PR's stack. `unknown` is the tri-state
@@ -1483,6 +1525,111 @@ async fn gh_stack_members(repo_path: &str, slug: &str, stack_number: u64) -> Vec
         .unwrap_or_default()
 }
 
+/// What a stack create/add confirmed: the stack's number and its members
+/// bottom→top, as the forge returned them.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct StackWriteOutcome {
+    pub stack_number: u64,
+    pub members: Vec<u64>,
+}
+
+/// The `gh api` argv for the two stack-MEMBERSHIP writes. `-F` (typed), not `-f`:
+/// the endpoint rejects string items. The values are formatted `u64`s, so gh's
+/// leading-`@` file-read magic on `-F` is unreachable here.
+fn stack_write_args(endpoint: &str, pull_requests: &[u64]) -> Vec<String> {
+    let mut args = vec![
+        "api".to_string(),
+        "--method".to_string(),
+        "POST".to_string(),
+        endpoint.to_string(),
+    ];
+    for number in pull_requests {
+        args.push("-F".to_string());
+        args.push(format!("pull_requests[]={number}"));
+    }
+    args
+}
+
+/// Read a create/add response into [`StackWriteOutcome`]; `op` names the operation
+/// in the error. An unreadable success body is an error, never a default outcome —
+/// the caller reports these members back to the user as what the forge confirmed.
+fn stack_write_outcome_from(body: &str, op: &str) -> AppResult<StackWriteOutcome> {
+    let entry: GhStackEntry = serde_json::from_str(body)
+        .map_err(|e| AppError::Gh(format!("could not parse the {op} response: {e}")))?;
+    let Some(stack_number) = entry.number else {
+        return Err(AppError::Gh(format!(
+            "the {op} response carried no stack number"
+        )));
+    };
+    let members: Vec<u64> = entry.pull_requests.iter().filter_map(|p| p.number).collect();
+    if members.is_empty() {
+        return Err(AppError::Gh(format!(
+            "the {op} response listed no stack members"
+        )));
+    }
+    Ok(StackWriteOutcome {
+        stack_number,
+        members,
+    })
+}
+
+/// Group open PRs into a NEW stack (`POST /repos/{slug}/stacks`). `pull_requests`
+/// is BOTTOM→TOP and the server neither sorts nor bridges it: each PR's base ref
+/// must be the previous PR's head ref, and two members are the minimum.
+#[tauri::command]
+pub async fn gh_stack_create(
+    repo_path: String,
+    pull_requests: Vec<u64>,
+    lens: Option<String>,
+) -> AppResult<StackWriteOutcome> {
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
+    let endpoint = format!("repos/{slug}/stacks");
+    let args = stack_write_args(&endpoint, &pull_requests);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = run_gh(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT).await?;
+    stack_write_outcome_from(&out.stdout_lossy(), "stack create")
+}
+
+/// Append PRs to an existing stack (`POST /repos/{slug}/stacks/{n}/add`). TOP only:
+/// the endpoint has no insert-in-the-middle form, and the same base-ref adjacency
+/// rule as create applies to the joint.
+#[tauri::command]
+pub async fn gh_stack_add(
+    repo_path: String,
+    stack_number: u64,
+    pull_requests: Vec<u64>,
+    lens: Option<String>,
+) -> AppResult<StackWriteOutcome> {
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
+    let endpoint = format!("repos/{slug}/stacks/{stack_number}/add");
+    let args = stack_write_args(&endpoint, &pull_requests);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = run_gh(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT).await?;
+    stack_write_outcome_from(&out.stdout_lossy(), "stack add")
+}
+
+/// Dissolve a stack (`POST /repos/{slug}/stacks/{n}/unstack`, 204). Sends NO body:
+/// the endpoint ignores one and always unstacks the WHOLE stack, so naming members
+/// would imply a partial-remove that doesn't exist. The PRs stay open on their
+/// branches — only the grouping goes.
+#[tauri::command]
+pub async fn gh_stack_dissolve(
+    repo_path: String,
+    stack_number: u64,
+    lens: Option<String>,
+) -> AppResult<()> {
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
+    let endpoint = format!("repos/{slug}/stacks/{stack_number}/unstack");
+    run_gh(
+        Some(&repo_path),
+        &["api", "--method", "POST", &endpoint],
+        GH_NETWORK_TIMEOUT,
+    )
+    .await?;
+    Ok(())
+}
+
 /// How long any supplementary STACK probe may take before its caller gives up and
 /// renders without it. Bounds the four DECORATION reads — GitHub list, both hops
 /// of the GitHub detail probe, and the GitLab detail's open-MR list — well inside
@@ -1545,10 +1692,13 @@ pub async fn gh_pr_list(
     let want_stacks = state == "open";
     let (out, stacks) = tokio::join!(run_gh(Some(&repo_path), &args, GH_TIMEOUT), async {
         if !want_stacks {
-            return std::collections::HashMap::new();
+            // A closed list SKIPS the probe by design (it describes merges already
+            // made) — an answer of "nothing to decorate", not a failed read.
+            return Some(std::collections::HashMap::new());
         }
         // BOUNDED, not merely concurrent: the join removes the serial cost, the
-        // timeout removes the stall. A decoration must never hold the list.
+        // timeout removes the stall. A decoration must never hold the list — but a
+        // timed-out probe is UNKNOWN, so it collapses to `None`, not an empty map.
         tokio::time::timeout(
             STACKS_TIMEOUT,
             gh_open_stack_memberships(&repo_path, &slug),
@@ -1558,11 +1708,7 @@ pub async fn gh_pr_list(
     });
     let mut prs: Vec<PrInfo> = serde_json::from_str(&out?.stdout_lossy())
         .map_err(|e| AppError::Gh(format!("could not parse gh pr list: {e}")))?;
-    // Strictly additive — `gh_open_stack_memberships` never errors, it just
-    // returns nothing when stacks are unavailable.
-    for pr in &mut prs {
-        pr.stack = stacks.get(&pr.number).cloned();
-    }
+    apply_stack_join(&mut prs, stacks.as_ref());
     Ok(prs)
 }
 
@@ -1729,7 +1875,66 @@ pub async fn gh_pr_list_ci(
 // API now rejects outright), so PR edits go through `gh api` instead: REST
 // for title/body, GraphQL mutations for labels.
 
-/// Updates a PR's title and body via the REST API.
+/// The PATCH argv for a PR edit. `base` is appended ONLY when retargeting: an
+/// absent field leaves the PR's base branch untouched.
+fn pr_edit_args(endpoint: &str, title: &str, body: &str, base: Option<&str>) -> Vec<String> {
+    let mut args = vec![
+        "api".to_string(),
+        "--method".to_string(),
+        "PATCH".to_string(),
+        endpoint.to_string(),
+        "-f".to_string(),
+        format!("title={title}"),
+        "-f".to_string(),
+        format!("body={body}"),
+    ];
+    if let Some(base) = base {
+        args.push("-f".to_string());
+        args.push(format!("base={base}"));
+    }
+    args
+}
+
+/// Build a failed `gh api` call's message from BOTH streams. `gh api` prints only
+/// `gh: <top-level message> (HTTP <code>)` to stderr and leaves the per-field
+/// explanation in the response body on stdout, which the stderr-only path discards —
+/// a rejected base retarget would read "Validation Failed" with no reason. Details
+/// already present in stderr are not repeated; an unreadable body degrades to the
+/// stderr-only message.
+fn gh_api_error_message(stderr: &str, stdout: &str, code: i32) -> String {
+    let trimmed = stderr.trim();
+    let mut message = if trimmed.is_empty() {
+        format!("gh exited with code {code}")
+    } else {
+        trimmed.to_string()
+    };
+    let Ok(body) = serde_json::from_str::<serde_json::Value>(stdout) else {
+        return message;
+    };
+    let details = body
+        .get("errors")
+        .and_then(|e| e.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    for detail in details
+        .iter()
+        .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+    {
+        if !message.contains(detail) {
+            message.push(' ');
+            message.push_str(detail);
+        }
+    }
+    message
+}
+
+/// Updates a PR's title and body via the REST API, and its base branch when `base`
+/// is given. A STACKED PR's base is server-locked (422 "Cannot change the base
+/// branch because the pull request is part of a stack.") — that explanation rides
+/// `errors[]` in the response body, so this arm reads both streams via
+/// [`gh_api_error_message`] rather than `run_gh`'s stderr-only path.
 #[tauri::command]
 pub async fn gh_pr_edit(
     repo_path: String,
@@ -1737,6 +1942,7 @@ pub async fn gh_pr_edit(
     title: String,
     body: String,
     lens: Option<String>,
+    base: Option<String>,
 ) -> AppResult<()> {
     let title = title.trim();
     if title.is_empty() {
@@ -1745,21 +1951,16 @@ pub async fn gh_pr_edit(
     // Lens slug into a literal `repos/<slug>/…` path — `gh api` has no `-R` flag.
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let endpoint = format!("repos/{slug}/pulls/{number}");
-    run_gh(
-        Some(&repo_path),
-        &[
-            "api",
-            "--method",
-            "PATCH",
-            &endpoint,
-            "-f",
-            &format!("title={title}"),
-            "-f",
-            &format!("body={body}"),
-        ],
-        GH_NETWORK_TIMEOUT,
-    )
-    .await?;
+    let args = pr_edit_args(&endpoint, title, &body, base.as_deref());
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = run_gh_raw(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT).await?;
+    if out.code != 0 {
+        return Err(AppError::Gh(gh_api_error_message(
+            &out.stderr,
+            &out.stdout_lossy(),
+            out.code,
+        )));
+    }
     Ok(())
 }
 
@@ -4555,8 +4756,9 @@ fn rest_pull_to_pr_info(p: GhPrRestPull) -> PrInfo {
         created_at: String::new(),
         head_sha: String::new(),
         // The duplicate probe only needs identity — stack membership is the PR
-        // list's and the detail view's job.
+        // list's and the detail view's job, so neither field is probed here.
         stack: None,
+        stack_unknown: false,
     }
 }
 
@@ -4850,18 +5052,39 @@ fn scrape_pr_ref(stdout: &str) -> (u64, String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_merge_async, external_items_from_thread_nodes, host_from_url, is_diff_too_large,
-        map_timeline_node, parse_actions_run_job, parse_auth_accounts, parse_pr_url_repo,
-        pull_stack_ref, real_check_time, real_time_or_empty, reconstruct_pr_diff,
-        reject_upstream_create_metadata, rest_comment_to_out, rest_commit_to_out,
-        rest_pull_to_pr_info, rest_review_to_out, rollup_state_to_ci, scrape_pr_ref,
-        split_commit_message, stack_members_from, stack_memberships_from, upstream_pulls_endpoint,
-        GhPrFile, GhPrRestComment, GhPrRestCommit, GhPrRestCommitGitAuthor,
-        GhPrRestCommitInner, GhPrRestPull, GhPrRestReview, GhStackEntry, MergeAsyncOutcome,
-        MergeAsyncStatus, PrDetails, PrInfo, PrMergeOutcome, PrStackInfo, PrStackMember,
-        PrTimelineEventOut, RawLogin,
+        apply_stack_join, classify_merge_async, external_items_from_thread_nodes,
+        flatten_slurped_pages, gh_api_error_message, host_from_url, is_diff_too_large,
+        map_timeline_node, parse_actions_run_job,
+        parse_auth_accounts, parse_pr_url_repo, pr_edit_args, pull_stack_ref, real_check_time,
+        real_time_or_empty, reconstruct_pr_diff, reject_upstream_create_metadata,
+        rest_comment_to_out, rest_commit_to_out, rest_pull_to_pr_info, rest_review_to_out,
+        rollup_state_to_ci, scrape_pr_ref, split_commit_message, stack_members_from,
+        stack_memberships_from, stack_write_args, stack_write_outcome_from,
+        upstream_pulls_endpoint, GhPrFile, GhPrRestComment, GhPrRestCommit,
+        GhPrRestCommitGitAuthor, GhPrRestCommitInner, GhPrRestPull, GhPrRestReview, GhStackEntry,
+        MergeAsyncOutcome, MergeAsyncStatus, PrDetails, PrInfo, PrMergeOutcome, PrStackInfo,
+        PrStackMember, PrTimelineEventOut, RawLogin,
     };
     use crate::error::AppError;
+
+    /// A bare list row — only the identity the stack join reads is meaningful.
+    fn pr_row(number: u64) -> PrInfo {
+        PrInfo {
+            number,
+            url: String::new(),
+            title: format!("PR {number}"),
+            base_ref_name: "main".to_string(),
+            head_ref_name: format!("feat-{number}"),
+            is_draft: false,
+            state: "OPEN".to_string(),
+            author: None,
+            labels: Vec::new(),
+            created_at: String::new(),
+            head_sha: String::new(),
+            stack: None,
+            stack_unknown: false,
+        }
+    }
 
     fn file(status: &str, filename: &str, patch: Option<&str>) -> GhPrFile {
         GhPrFile {
@@ -5113,6 +5336,234 @@ mod tests {
         assert_eq!(map[&62].position, 2);
         assert_eq!(map[&62].id, "60");
         assert_eq!(map.len(), 5);
+    }
+
+    /// `--slurp` wraps each page in an outer array, so the join must flatten one
+    /// level before parsing — a stack on page 2 is otherwise invisible.
+    #[test]
+    fn slurped_pages_flatten_into_one_stack_list() {
+        let pages: Vec<Vec<serde_json::Value>> = serde_json::from_str(
+            r#"[
+              [{"number":10,"open":false,"pull_requests":[{"number":11},{"number":12}]}],
+              [{"number":20,"open":true,"pull_requests":[{"number":21},{"number":22}]}]
+            ]"#,
+        )
+        .unwrap();
+        let raw = flatten_slurped_pages(pages);
+        assert_eq!(raw.len(), 2);
+        let map = stack_memberships_from(raw);
+        // The live stack from the SECOND page is the one the join needs.
+        assert_eq!(map[&21].id, "20");
+        assert_eq!(map[&22].position, 2);
+        // Page 1's dissolved residue still contributes nothing.
+        assert!(!map.contains_key(&11));
+
+        // An empty page list is a valid answer, not an error.
+        assert!(flatten_slurped_pages(Vec::new()).is_empty());
+    }
+
+    /// The stack create/add body: repeated `-F pull_requests[]=` pairs in the given
+    /// order (the server treats it as bottom→top and does not sort).
+    #[test]
+    fn stack_write_args_repeat_the_typed_array_field() {
+        let args = stack_write_args("repos/o/r/stacks", &[7, 8, 9]);
+        assert_eq!(
+            args,
+            vec![
+                "api",
+                "--method",
+                "POST",
+                "repos/o/r/stacks",
+                "-F",
+                "pull_requests[]=7",
+                "-F",
+                "pull_requests[]=8",
+                "-F",
+                "pull_requests[]=9",
+            ]
+        );
+    }
+
+    /// Both write shapes parse to the stack number plus its members bottom→top; an
+    /// unreadable success body errors NAMING the operation rather than defaulting.
+    #[test]
+    fn stack_write_outcome_reads_the_live_response_shapes() {
+        // Create returns the full stack object.
+        let created = stack_write_outcome_from(
+            r#"{"id":123,"number":22,"node_id":"S_kg","url":"https://api.github.com/…",
+                "base":{"ref":"main"},"open":true,"created_at":"2026-08-05T00:00:00Z",
+                "pull_requests":[{"number":21,"title":"a"},{"number":23,"title":"b"}]}"#,
+            "stack create",
+        )
+        .unwrap();
+        assert_eq!(created.stack_number, 22);
+        assert_eq!(created.members, vec![21, 23]);
+
+        // Add returns the UPDATED stack — the appended PR last (top).
+        let extended = stack_write_outcome_from(
+            r#"{"number":22,"open":true,
+                "pull_requests":[{"number":21},{"number":23},{"number":25}]}"#,
+            "stack add",
+        )
+        .unwrap();
+        assert_eq!(extended.stack_number, 22);
+        assert_eq!(extended.members, vec![21, 23, 25]);
+
+        // `let else` rather than unwrap_err: the outcome is a wire type, not a Debug one.
+        // Unparseable body: an error that names the operation.
+        let Err(err) = stack_write_outcome_from("not json", "stack create") else {
+            panic!("an unreadable body must not yield an outcome");
+        };
+        assert!(
+            matches!(err, AppError::Gh(ref m) if m.contains("stack create")),
+            "got: {err}"
+        );
+
+        // Readable but missing the number: still an error, never a zero stack.
+        let Err(err) = stack_write_outcome_from(r#"{"pull_requests":[{"number":21}]}"#, "stack add")
+        else {
+            panic!("a numberless stack must not yield an outcome");
+        };
+        assert!(
+            matches!(err, AppError::Gh(ref m) if m.contains("stack number")),
+            "got: {err}"
+        );
+
+        // Readable with no members: the outcome would claim an empty stack.
+        let memberless = r#"{"number":22,"pull_requests":[]}"#;
+        let Err(err) = stack_write_outcome_from(memberless, "stack create") else {
+            panic!("a memberless stack must not yield an outcome");
+        };
+        assert!(
+            matches!(err, AppError::Gh(ref m) if m.contains("members")),
+            "got: {err}"
+        );
+    }
+
+    /// The PR edit PATCH sends `base` only when retargeting — the no-base form must
+    /// stay byte-identical to the title/body-only request.
+    #[test]
+    fn pr_edit_args_append_base_only_when_given() {
+        let plain = pr_edit_args("repos/o/r/pulls/7", "T", "B", None);
+        assert_eq!(
+            plain,
+            vec![
+                "api",
+                "--method",
+                "PATCH",
+                "repos/o/r/pulls/7",
+                "-f",
+                "title=T",
+                "-f",
+                "body=B",
+            ]
+        );
+
+        let retarget = pr_edit_args("repos/o/r/pulls/7", "T", "B", Some("main"));
+        assert_eq!(retarget[..plain.len()], plain[..]);
+        assert_eq!(retarget[plain.len()..], ["-f", "base=main"]);
+    }
+
+    /// gh puts only the top-level message on stderr and the REASON in the body's
+    /// `errors[]`, so the edit arm must read both — the stacked-base rejection is
+    /// unactionable otherwise.
+    #[test]
+    fn gh_api_error_message_recovers_the_body_detail() {
+        // The probed stacked-base 422. (Line breaks sit BETWEEN tokens — one inside a
+        // string value would make the fixture invalid JSON and silently test the
+        // fallback arm instead.)
+        let stacked = gh_api_error_message(
+            "gh: Validation Failed (HTTP 422)\n",
+            r#"{"message":"Validation Failed","errors":[{
+                "message":"Cannot change the base branch because the pull request is part of a stack.",
+                "resource":"PullRequest","field":"base","code":"invalid"}]}"#,
+            1,
+        );
+        assert!(stacked.starts_with("gh: Validation Failed (HTTP 422)"), "got: {stacked}");
+        assert!(stacked.contains("part of a stack."), "got: {stacked}");
+
+        // A top-level-message-only body adds nothing — no `errors[]`, no duplication.
+        let plain = gh_api_error_message(
+            "gh: Not Found (HTTP 404)",
+            r#"{"message":"Not Found","documentation_url":"https://docs.github.com/…"}"#,
+            1,
+        );
+        assert_eq!(plain, "gh: Not Found (HTTP 404)");
+
+        // A detail gh already echoed on stderr is not appended twice.
+        let echoed = gh_api_error_message(
+            "gh: Validation Failed (HTTP 422) — Base branch was invalid",
+            r#"{"errors":[{"message":"Base branch was invalid"}]}"#,
+            1,
+        );
+        assert_eq!(echoed, "gh: Validation Failed (HTTP 422) — Base branch was invalid");
+
+        // Unparseable stdout degrades to today's stderr-only message.
+        assert_eq!(
+            gh_api_error_message("gh: Server Error (HTTP 500)", "<html>nope</html>", 1),
+            "gh: Server Error (HTTP 500)"
+        );
+
+        // Empty stderr falls back the way `run_gh` does, and still gains the detail.
+        let codeonly = gh_api_error_message("  \n", r#"{"errors":[{"message":"Nope."}]}"#, 22);
+        assert_eq!(codeonly, "gh exited with code 22 Nope.");
+    }
+
+    /// The list join's tri-state. A FAILED probe must mark every row unknown: an
+    /// absent badge would otherwise read as a firm "not stacked" and let a caller
+    /// stack rows that already are.
+    #[test]
+    fn stack_join_marks_every_row_unknown_only_when_the_probe_failed() {
+        fn rows() -> Vec<PrInfo> {
+            vec![pr_row(21), pr_row(23)]
+        }
+
+        // Probe failed: all rows unknown, none decorated.
+        let mut failed = rows();
+        apply_stack_join(&mut failed, None);
+        assert!(failed.iter().all(|p| p.stack_unknown));
+        assert!(failed.iter().all(|p| p.stack.is_none()));
+
+        // Answered but empty (no stacks in the repo): nothing unknown.
+        let empty = std::collections::HashMap::new();
+        let mut none_stacked = rows();
+        apply_stack_join(&mut none_stacked, Some(&empty));
+        assert!(none_stacked.iter().all(|p| !p.stack_unknown));
+        assert!(none_stacked.iter().all(|p| p.stack.is_none()));
+
+        // Answered with a partial map: only the member is decorated, still no unknowns.
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            21,
+            PrStackInfo {
+                id: "22".to_string(),
+                position: 1,
+                size: 2,
+            },
+        );
+        let mut joined = rows();
+        apply_stack_join(&mut joined, Some(&map));
+        assert_eq!(joined[0].stack.as_ref().unwrap().id, "22");
+        assert!(joined[1].stack.is_none());
+        assert!(joined.iter().all(|p| !p.stack_unknown));
+    }
+
+    /// `stackUnknown` rides the wire as a camelCase bool the frontend can read, and
+    /// its serde default keeps every non-GitHub payload deserializing.
+    #[test]
+    fn pr_info_pins_stack_unknown_on_the_wire() {
+        let mut row = pr_row(21);
+        row.stack_unknown = true;
+        let v = serde_json::to_value(&row).unwrap();
+        assert_eq!(v["stackUnknown"], true);
+
+        // A payload without the field (every pre-stack producer) reads as "answered".
+        let parsed: PrInfo = serde_json::from_str(
+            r#"{"number":21,"url":"","title":"t","baseRefName":"main","headRefName":"f",
+                "isDraft":false,"state":"OPEN"}"#,
+        )
+        .unwrap();
+        assert!(!parsed.stack_unknown);
     }
 
     #[test]

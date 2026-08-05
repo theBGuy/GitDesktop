@@ -5467,8 +5467,49 @@ export function useSetRulesetEnforcement(repo: string) {
 export function useEditPr(repo: string, lens: RemoteLens) {
   return useRepoMutation(
     repo,
-    (args: { number: number; title: string; body: string }) =>
-      api.forgePrEdit(repo, args.number, args.title, args.body, lens),
+    (args: {
+      number: number;
+      title: string;
+      body: string;
+      /** Retarget the PR onto this base branch. Omit to leave the base alone —
+       *  a no-op retarget is still a forge write, and GitHub rejects one on a
+       *  stacked PR. */
+      base?: string;
+    }) =>
+      api.forgePrEdit(
+        repo,
+        args.number,
+        args.title,
+        args.body,
+        lens,
+        args.base,
+      ),
+  );
+}
+
+/** Stack a chain of open PRs (bottom→top) into a new stack. Takes the default
+ *  whole-repo invalidation: stacking rewrites every member's base and position,
+ *  so the PR detail, the list, and each member's own row all go stale at once —
+ *  the same reasoning as the PR-lifecycle mutations beside it. */
+export function useStackCreate(repo: string, lens: RemoteLens) {
+  return useRepoMutation(repo, (pullRequests: number[]) =>
+    api.forgeStackCreate(repo, pullRequests, lens),
+  );
+}
+
+/** Append a chain of open PRs (bottom→top) to an existing stack. */
+export function useStackAdd(repo: string, lens: RemoteLens) {
+  return useRepoMutation(
+    repo,
+    (args: { stackNumber: number; pullRequests: number[] }) =>
+      api.forgeStackAdd(repo, args.stackNumber, args.pullRequests, lens),
+  );
+}
+
+/** Dissolve a stack — its members stay open on their branches, unstacked. */
+export function useStackDissolve(repo: string, lens: RemoteLens) {
+  return useRepoMutation(repo, (stackNumber: number) =>
+    api.forgeStackDissolve(repo, stackNumber, lens),
   );
 }
 

@@ -122,6 +122,7 @@ import type {
   SecurityFeature,
   SecurityStatus,
   SessionHealth,
+  StackWriteOutcome,
   StagedDiff,
   StashEntry,
   StashFile,
@@ -2906,13 +2907,63 @@ export const fundingSet = (repoPath: string, content: string) =>
 export const fundingDelete = (repoPath: string) =>
   invoke<void>("funding_delete", { repoPath });
 
+/** Edits a PR's title/body, and — when `base` is supplied — retargets it. An
+ *  omitted `base` reaches the backend as `None` and leaves the base branch
+ *  untouched, so an unchanged picker never sends a retarget the forge could
+ *  reject (GitHub refuses to move a stacked PR's base). */
 export const forgePrEdit = (
   repoPath: string,
   number: number,
   title: string,
   body: string,
   lens: RemoteLens,
-) => invoke<void>("forge_pr_edit", { repoPath, number, title, body, lens });
+  base?: string,
+) =>
+  invoke<void>("forge_pr_edit", {
+    repoPath,
+    number,
+    title,
+    body,
+    lens,
+    // Explicit null for "no retarget", the same wire shape every other optional
+    // arg here uses — an `undefined` value is dropped by IPC serialization.
+    base: base ?? null,
+  });
+
+/** Create a stack from `pullRequests` (bottom→top; the forge validates that each
+ *  targets the one below it). */
+export const forgeStackCreate = (
+  repoPath: string,
+  pullRequests: number[],
+  lens: RemoteLens,
+) =>
+  invoke<StackWriteOutcome>("forge_stack_create", {
+    repoPath,
+    pullRequests,
+    lens,
+  });
+
+/** Append `pullRequests` (bottom→top) to an existing stack. GitHub only appends
+ *  on top, so the caller must have checked the attach point is the stack's top. */
+export const forgeStackAdd = (
+  repoPath: string,
+  stackNumber: number,
+  pullRequests: number[],
+  lens: RemoteLens,
+) =>
+  invoke<StackWriteOutcome>("forge_stack_add", {
+    repoPath,
+    stackNumber,
+    pullRequests,
+    lens,
+  });
+
+/** Dissolve a stack: its members stay open on their branches, unstacked. */
+export const forgeStackDissolve = (
+  repoPath: string,
+  stackNumber: number,
+  lens: RemoteLens,
+) => invoke<void>("forge_stack_dissolve", { repoPath, stackNumber, lens });
 
 export const forgeRepoLabels = (repoPath: string, lens: RemoteLens) =>
   invoke<RepoLabel[]>("forge_repo_labels", { repoPath, lens });

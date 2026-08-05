@@ -44,9 +44,11 @@ function isNoiseLine(line: string): boolean {
   return false;
 }
 
-/** Strip a leading `error:` / `fatal:` prefix git tacks onto its diagnostics. */
+/** Strip the leading tool prefix a diagnostic carries — git's `error:`/`fatal:`,
+ *  or `gh:` on a GitHub CLI failure. The kind label already names the tool, so
+ *  the prefix only eats room in a one-line summary. */
 function stripGitPrefix(line: string): string {
-  return line.replace(/^(?:error|fatal):\s*/i, "").trim();
+  return line.replace(/^(?:error|fatal|gh):\s*/i, "").trim();
 }
 
 /** First meaningful line of a message, prefix-stripped. Falls back to the first
