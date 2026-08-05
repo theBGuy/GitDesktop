@@ -7789,6 +7789,9 @@ mod tests {
         assert!(infer_mr_stacks(&[]).is_empty());
         // A self-targeting MR can't be its own parent.
         assert!(infer_mr_stacks(&[(1, "feat-a", "feat-a")]).is_empty());
+        // A 2-cycle (each MR targets the other's source branch) has no parentless
+        // bottom, so the component yields nothing rather than looping.
+        assert!(infer_mr_stacks(&[(1, "feat-a", "feat-b"), (2, "feat-b", "feat-a")]).is_empty());
     }
 
     #[test]

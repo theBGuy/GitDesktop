@@ -630,8 +630,13 @@ impl GitDesktopMcp {
         description = "Merge a pull request (by number) in the bound repository's forge (GitHub, \
                        GitLab, or Bitbucket, per its remote), under the authenticated forge user. \
                        `strategy` is \"merge\" (default), \"squash\", or \"rebase\" (rebase is \
-                       GitHub-only). A merge is NOT trivially reversible. Optionally deletes the \
-                       head branch. Requires --allow-remote-write.",
+                       GitHub-only). A merge is NOT trivially reversible. On GitHub a stack merges \
+                       bottom-up: merging a stacked PR ALSO merges every still-open PR below it in \
+                       its stack, in one irreversible step — read `stack` and `stackMembers` via \
+                       get_pull_request first to see what would go with it. Optionally deletes the \
+                       head branch. The result's `action` is \"merged\", or \"queued\" when a merge \
+                       queue took the merge — queued means NOT yet merged: the head branch is left \
+                       in place and `deleted_branch` is false. Requires --allow-remote-write.",
         annotations(read_only_hint = false, destructive_hint = true)
     )]
     async fn merge_pull_request(
