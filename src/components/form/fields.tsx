@@ -170,9 +170,15 @@ export function CheckboxField({
   );
 }
 
-export function SelectField({
+/** The presentational half of {@link SelectField}: label + items-mapped select,
+ *  driven by a plain value/onChange pair. Split out so surfaces with no bound
+ *  form field (e.g. a picker injected into a dialog's slot) get the same control
+ *  instead of re-implementing it. */
+export function SelectControl({
   label,
   items,
+  value,
+  onValueChange,
   disabled,
   annotations,
   sizeToContent = false,
@@ -180,6 +186,9 @@ export function SelectField({
   label?: ReactNode;
   /** value → display label; option order follows the object's key order. */
   items: Record<string, string>;
+  /** The selected key; "" (or a key absent from `items`) shows no selection. */
+  value: string;
+  onValueChange: (value: string) => void;
   disabled?: boolean;
   /** Optional per-option trailing content (e.g. status chips), keyed by value.
    *  Rendered after a truncating label; keys with no entry render label-only.
@@ -190,7 +199,6 @@ export function SelectField({
    *  values like branch names. Overlong options truncate with an ellipsis. */
   sizeToContent?: boolean;
 }) {
-  const field = useFieldContext<string>();
   const id = useId();
   // Opt-in rich rows: wrap the label so it can truncate and leave room for a
   // trailing annotation. Plain callers keep the exact prior markup.
@@ -200,9 +208,9 @@ export function SelectField({
       {label && <Label htmlFor={id}>{label}</Label>}
       <Select
         items={items}
-        value={field.state.value || null}
+        value={value || null}
         onValueChange={(v) => {
-          if (v) field.handleChange(v);
+          if (v) onValueChange(v);
         }}
         disabled={disabled}
       >
@@ -219,14 +227,14 @@ export function SelectField({
               }
             : {})}
         >
-          {Object.entries(items).map(([value, display]) =>
+          {Object.entries(items).map(([optionValue, display]) =>
             rich ? (
-              <SelectItem key={value} value={value}>
+              <SelectItem key={optionValue} value={optionValue}>
                 <span className="min-w-0 flex-1 truncate">{display}</span>
-                {annotations?.[value]}
+                {annotations?.[optionValue]}
               </SelectItem>
             ) : (
-              <SelectItem key={value} value={value}>
+              <SelectItem key={optionValue} value={optionValue}>
                 {display}
               </SelectItem>
             ),
@@ -234,5 +242,34 @@ export function SelectField({
         </SelectContent>
       </Select>
     </div>
+  );
+}
+
+/** {@link SelectControl} driven by the enclosing bound form field — see there
+ *  for what each prop does. */
+export function SelectField({
+  label,
+  items,
+  disabled,
+  annotations,
+  sizeToContent = false,
+}: {
+  label?: ReactNode;
+  items: Record<string, string>;
+  disabled?: boolean;
+  annotations?: Record<string, ReactNode>;
+  sizeToContent?: boolean;
+}) {
+  const field = useFieldContext<string>();
+  return (
+    <SelectControl
+      label={label}
+      items={items}
+      value={field.state.value}
+      onValueChange={(v) => field.handleChange(v)}
+      disabled={disabled}
+      annotations={annotations}
+      sizeToContent={sizeToContent}
+    />
   );
 }

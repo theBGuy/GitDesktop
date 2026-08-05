@@ -21,7 +21,6 @@ import {
   type ReactNode,
   useEffect,
   useEffectEvent,
-  useId,
   useMemo,
   useRef,
   useState,
@@ -29,6 +28,7 @@ import {
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
+import { SelectControl } from "@/components/form/fields";
 import {
   MarkdownEditor,
   type MarkdownEditorHandle,
@@ -43,16 +43,8 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Label } from "@/components/ui/label";
 import { Markdown } from "@/components/ui/markdown";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import {
@@ -135,7 +127,12 @@ import {
   useUnminimizeComment,
   useUnrequestChangesPr,
 } from "@/lib/git/queries";
-import { detectStackOffer, isNativeStack } from "@/lib/git/stack-chains";
+import {
+  detectStackOffer,
+  isNativeStack,
+  offerIdentity,
+  STACK_OFFER_PAGE_LIMIT,
+} from "@/lib/git/stack-chains";
 import {
   type ApprovalState,
   type ForgeProvider,
@@ -490,14 +487,22 @@ export function RemotePrView({
   // Stack writes are GitHub-only, and the chain that would be stacked is read
   // off the OPEN PR list. Keep this gate strict: it's a second list fetch, and
   // an already-stacked PR (or one whose stack probe failed, where a null stack
-  // means "unknown") has nothing to offer.
+  // means "unknown") has nothing to offer. A FORK PR still pays for that fetch
+  // (plus its stacks join) before `detectStackOffer` refuses it — PrDetails
+  // carries no cross-repository marker, so the gate can't see it from here.
   const offerEnabled =
     providerKey === "github" &&
     details.data?.state === "OPEN" &&
     canEdit &&
     !details.data?.stack &&
     !(details.data?.stackUnknown ?? false);
-  const offerList = usePrList(repoPath, offerEnabled, "open", 100, lens);
+  const offerList = usePrList(
+    repoPath,
+    offerEnabled,
+    "open",
+    STACK_OFFER_PAGE_LIMIT,
+    lens,
+  );
   const stackCreate = useStackCreate(repoPath, lens);
   const stackAdd = useStackAdd(repoPath, lens);
   const stackDissolve = useStackDissolve(repoPath, lens);
@@ -547,18 +552,20 @@ export function RemotePrView({
     stackAdd.reset();
   }
 
-  // This component is NOT remounted per PR (RepositoryView renders it without a
-  // key), so a stack write's error — and its pending flag — would otherwise
-  // outlive the PR they belong to and render under the next PR's offer before
-  // any write. The ref makes the mount pass a no-op: there's nothing to clear
-  // yet, and clearing is only ever correct when the PR actually changed.
-  const stackWritePr = useRef(number);
+  // Write state belongs to ONE offer on ONE PR: this component isn't remounted
+  // per PR (RepositoryView renders it without a key), and a list refetch can
+  // reshape the chain under the same PR. Either way a surviving error — or
+  // pending flag — would render against an offer it was never fired for, so
+  // both triggers reset through this one path. The ref makes the mount pass a
+  // no-op: there's nothing to clear yet.
+  const stackWriteKey = `${number}|${stackOffer ? offerIdentity(stackOffer) : ""}`;
+  const stackWriteFor = useRef(stackWriteKey);
   const resetStackWrites = useEffectEvent(() => cancelStackOffer());
   useEffect(() => {
-    if (stackWritePr.current === number) return;
-    stackWritePr.current = number;
+    if (stackWriteFor.current === stackWriteKey) return;
+    stackWriteFor.current = stackWriteKey;
     resetStackWrites();
-  }, [number]);
+  }, [stackWriteKey]);
 
   // The stack number the dissolve writes, parsed once. A native stack's id is a
   // numeric string by contract, so a value that won't parse means the contract
@@ -2699,36 +2706,19 @@ function BaseBranchField({
    *  tooltip, so the reason would be unreachable. */
   lockedNote: string | null;
 }) {
-  const id = useId();
-  const locked = lockedNote !== null;
   return (
     <div className="space-y-2">
-      <Label htmlFor={id}>Base branch</Label>
-      <Select
+      {/* sizeToContent: branch names run long, so the popup sizes to its widest
+          option rather than the trigger — same as the create-PR picker. */}
+      <SelectControl
+        label="Base branch"
         items={items}
-        value={value || null}
-        onValueChange={(v) => {
-          if (v) onChange(v);
-        }}
-        disabled={locked}
-      >
-        <SelectTrigger id={id} className="w-full">
-          <SelectValue />
-        </SelectTrigger>
-        {/* Branch names run long — let the popup size to its widest option
-            (min = trigger width, max = 28rem), like the create-PR picker. */}
-        <SelectContent
-          alignItemWithTrigger={false}
-          className="w-auto min-w-(--anchor-width) max-w-[28rem]"
-        >
-          {Object.entries(items).map(([branch, display]) => (
-            <SelectItem key={branch} value={branch}>
-              <span className="min-w-0 flex-1 truncate">{display}</span>
-              {annotations[branch]}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
+        value={value}
+        onValueChange={onChange}
+        annotations={annotations}
+        disabled={lockedNote !== null}
+        sizeToContent
+      />
       {lockedNote && (
         <p className="flex items-start gap-1 text-xs text-warning">
           <WarningIcon className="mt-px size-3.5 shrink-0" aria-hidden />

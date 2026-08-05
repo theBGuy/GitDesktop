@@ -876,9 +876,11 @@ your open pull requests already form a chain — each one targeting the branch b
 **Stack** area offers to **create a stack** out of that chain, or to **add it to** the stack
 this pull request already sits on, and shows you a **preview** of exactly what will be
 stacked, bottom to top, before anything is created. Confirm it and the chain becomes a real
-stack: one that navigates as a unit and **merges bottom-up as a single operation**. (GitLab
-finds stacked merge requests on its own and Bitbucket has no stacks, so this is
-GitHub-only.)
+stack: one that navigates as a unit and **merges bottom-up as a single operation**. Only
+this repository's own pull requests can chain — a **fork** pull request never joins a
+stack — and where a repository has more open pull requests than fit one page, the offer
+stays quiet rather than guess at a chain it can't see whole. (GitLab finds stacked merge
+requests on its own and Bitbucket has no stacks, so this is GitHub-only.)
 
 A stacked pull request's **Stack** section also offers **Dissolve**, behind a confirmation.
 Dissolving takes the stack apart and nothing else: every pull request in it **stays open on

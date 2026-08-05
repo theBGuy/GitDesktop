@@ -493,17 +493,18 @@ workflow against any two branches with no remote at all).
   (with palette commands for the next and previous PR in the stack). GitHub's **native
   stacks** come straight from its API; on **GitLab**, chains of merge requests are
   **detected automatically** — and on **GitHub** you can **build the stack yourself** from
-  the PR view: when your open pull requests already form a chain, GitDesktop offers to
-  **create a stack** from it, or to **add it to** the stack the PR already sits on, with a
-  **preview** of exactly what will be stacked, bottom → top, before anything is created.
-  **Dissolve** (confirmed) takes a stack apart again and leaves every pull request open on
-  its branch. On GitHub, merging is **stack-aware**: merging a stacked pull request merges
-  it *and* every still-open pull request below it, bottom-up, as one operation — or, when
-  the base branch uses a **merge queue**, hands the stack to the queue to land when it
-  clears. The merge dialog spells out that full scope before you confirm, naming the pull
-  requests it will merge, in order, whenever it has the list. Separately, the **Edit**
-  dialog can **retarget a PR's base branch** on **GitHub**, **GitLab**, and **Bitbucket** —
-  on a stacked GitHub PR the picker asks you to dissolve the stack first.
+  the PR view: when your open pull requests already form a chain (same-repo PRs, in a list
+  it can see whole), GitDesktop offers to **create a stack** from it, or to **add it to**
+  the stack the PR already sits on, with a **preview** of exactly what will be stacked,
+  bottom → top, before anything is created. **Dissolve** (confirmed) takes a stack apart
+  again and leaves every pull request open on its branch. On GitHub, merging is
+  **stack-aware**: merging a stacked pull request merges it *and* every still-open pull
+  request below it, bottom-up, as one operation — or, when the base branch uses a **merge
+  queue**, hands the stack to the queue to land when it clears. The merge dialog spells out
+  that full scope before you confirm, naming the pull requests it will merge, in order,
+  whenever it has the list. Separately, the **Edit** dialog can **retarget a PR's base
+  branch** on **GitHub**, **GitLab**, and **Bitbucket** — on a stacked GitHub PR the picker
+  asks you to dissolve the stack first.
 - **Record management** — open a local PR's context menu in the list to **Archive / Unarchive**
   or **Delete** it (Delete confirms; the branches are untouched), also from the command
   palette.

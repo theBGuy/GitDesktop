@@ -10,7 +10,8 @@ export interface BranchPickerOptions {
   /** Selectable branch names in git order; session + archived branches excluded
    *  (archived ones in `keep` are retained). */
   names: string[];
-  /** value → label map for `field.SelectField`. */
+  /** value → label map for the select controls (`field.SelectField` and the
+   *  form-agnostic `SelectControl`). */
   items: Record<string, string>;
   /** value → trailing status chips; only branches with a chip appear here. */
   annotations: Record<string, ReactNode>;

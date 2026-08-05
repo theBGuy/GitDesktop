@@ -9,7 +9,10 @@ import {
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { clipTitle } from "@/lib/clip-title";
-import type { StackOffer as StackOfferKind } from "@/lib/git/stack-chains";
+import {
+  offerIdentity,
+  type StackOffer as StackOfferKind,
+} from "@/lib/git/stack-chains";
 import type { PrStackInfo, PrStackMember } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { cn } from "@/lib/utils";
@@ -319,10 +322,7 @@ export function StackOffer({
   const confirmRef = useRef<HTMLButtonElement>(null);
   // A different offer (another PR, or the chain changed under us) starts
   // collapsed — a render-time reset, not an effect.
-  const offerKey =
-    offer.kind === "add"
-      ? `add:${offer.stackNumber}:${offer.baseSize}:${offer.members.join(",")}`
-      : `create:${offer.members.join(",")}`;
+  const offerKey = offerIdentity(offer);
   const [lastKey, setLastKey] = useState(offerKey);
   if (offerKey !== lastKey) {
     setLastKey(offerKey);

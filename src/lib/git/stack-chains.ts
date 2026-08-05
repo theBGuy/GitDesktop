@@ -1,5 +1,10 @@
 import type { PrInfo, PrStackInfo } from "./types";
 
+/** The open-PR page size an offer is detected over. Exported so the caller's
+ *  fetch limit and the truncation guard below can't drift apart — a page this
+ *  full may be hiding the chain's real bottom. */
+export const STACK_OFFER_PAGE_LIMIT = 100;
+
 /** Whether this is a forge-NATIVE stack, which merges atomically bottom-up, as
  *  opposed to an inferred chain whose members merge one at a time. The `id` shape
  *  is the contract, and both minting sites are the whole universe: `github/pr.rs`
@@ -26,6 +31,19 @@ export type StackOffer =
       members: number[];
     };
 
+/**
+ * A string that changes whenever ANY field of an offer changes — the single
+ * definition of "this is a different offer". Every consumer that caches state
+ * against an offer (the preview's expansion, the write mutations' error and
+ * pending flags) keys on this, so a field added to {@link StackOffer} can't be
+ * remembered in one cache and forgotten in another.
+ */
+export function offerIdentity(offer: StackOffer): string {
+  return offer.kind === "add"
+    ? `add:${offer.stackNumber}:${offer.baseSize}:${offer.members.join(",")}`
+    : `create:${offer.members.join(",")}`;
+}
+
 /** Whether a row is already part of a stack — such rows are chain NEIGHBORS but
  *  never offer members (you can't stack what's stacked). */
 function isStacked(pr: PrInfo | undefined): boolean {
@@ -51,10 +69,14 @@ function isStacked(pr: PrInfo | undefined): boolean {
  * mid-stack attachment); an unstacked chain needs two members before GitHub
  * will make a stack of it.
  *
- * A row flagged `stackUnknown` voids the whole list: the list's stack join is
- * fail-open, so on a failed join every row arrives looking unstacked and a
- * "create" preview would assert something false about PRs that are already
- * stacked.
+ * Rows excluded from the chain entirely: anything the forge no longer reports
+ * OPEN, and `crossRepository` fork PRs (their head lives in another repo, so
+ * they can never be stack members).
+ *
+ * Two fail-closed guards void the whole list rather than offering over a
+ * partial view of it — a row flagged `stackUnknown` (the stack join is
+ * fail-open, so a failed join makes every row LOOK unstacked), and a full page
+ * (see {@link STACK_OFFER_PAGE_LIMIT}).
  *
  * The caller guarantees GitHub, `current` open, unstacked, and not
  * `stackUnknown`.
@@ -67,10 +89,18 @@ export function detectStackOffer(
   // checked before the state filter so a marked row can't be filtered away
   // ahead of its own warning.
   if (open.some((p) => p.stackUnknown === true)) return null;
-  // Only rows the forge still reports OPEN take part. The caller passes an open
-  // list, so this is a belt-and-braces guard that also keeps the function total
-  // against a row with a missing/odd state.
-  const rows = open.filter((p) => (p.state ?? "").toUpperCase() === "OPEN");
+  // A full page may be a TRUNCATED view. That's not a near-miss: a stack
+  // bottom's base can be any branch, so a chain whose real bottom sits off-page
+  // still forms a valid create — the forge would accept it and mint a partial
+  // stack rooted mid-chain. A silently wrong write beats no offer, so refuse.
+  if (open.length >= STACK_OFFER_PAGE_LIMIT) return null;
+  // Only rows the forge still reports OPEN take part, and fork PRs never can:
+  // their head lives in another repository. The caller passes an open list, so
+  // the state half is also a totality guard against an odd/missing state.
+  const rows = open.filter(
+    (p) =>
+      (p.state ?? "").toUpperCase() === "OPEN" && p.crossRepository !== true,
+  );
   if (isStacked(current)) return null;
   if (!rows.some((p) => p.number === current.number)) return null;
   const byNumber = new Map(rows.map((p) => [p.number, p]));

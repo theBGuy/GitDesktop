@@ -1483,6 +1483,9 @@ export interface PrInfo {
    *  true = it failed, so a row showing no stack may still be stacked. The join is
    *  fail-open per list, so this flag is uniform across the page. */
   stackUnknown?: boolean;
+  /** True when the head branch lives in ANOTHER repository — a fork PR, which can
+   *  never be a stack member. Absent/false = same-repo. */
+  crossRepository?: boolean;
 }
 
 /** A PR's rolled-up CI signal for the list-row icon. "none" = no checks. */

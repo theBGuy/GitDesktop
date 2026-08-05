@@ -298,6 +298,9 @@ fn from_glab_mr(m: GlabMr) -> PrInfo {
         // over rows already in hand — it has no probe to fail, so never unknown.
         stack: None,
         stack_unknown: false,
+        // The fork marker gates GITHUB stack membership; `glab mr list` carries no
+        // equivalent here, so it stays false rather than guessing.
+        cross_repository: false,
     }
 }
 
@@ -7769,6 +7772,7 @@ mod tests {
                 size,
             }),
             stack_unknown: false,
+            cross_repository: false,
         }
     }
 

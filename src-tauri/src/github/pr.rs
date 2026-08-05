@@ -540,6 +540,12 @@ pub struct PrInfo {
     /// "don't know", never as "not stacked".
     #[serde(default)]
     pub stack_unknown: bool,
+    /// The head branch lives in a FORK, so this PR can never be a stack member
+    /// (GitHub stacks are same-repo only) and its head name may collide with a
+    /// same-repo branch. Populated by the GitHub list arm alone (gh's
+    /// `isCrossRepository`, hence the alias); other providers leave it false.
+    #[serde(default, alias = "isCrossRepository")]
+    pub cross_repository: bool,
 }
 
 /// Submits a review: `action` is "approve", "comment", or "request_changes".
@@ -1637,8 +1643,8 @@ pub async fn gh_stack_dissolve(
 /// the legacy path, so it keeps the full `GH_TIMEOUT`.
 pub(crate) const STACKS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-const PR_LIST_FIELDS: &str =
-    "number,url,title,baseRefName,headRefName,isDraft,state,author,labels,createdAt";
+const PR_LIST_FIELDS: &str = "number,url,title,baseRefName,headRefName,isDraft,state,author,\
+     labels,createdAt,isCrossRepository";
 
 /// PRs for the Pull Requests list. `state` is "open" or "closed"; closed
 /// uses the search qualifier so merged PRs are included, matching the
@@ -4760,9 +4766,10 @@ fn rest_pull_to_pr_info(p: GhPrRestPull) -> PrInfo {
         created_at: String::new(),
         head_sha: String::new(),
         // The duplicate probe only needs identity — stack membership is the PR
-        // list's and the detail view's job, so neither field is probed here.
+        // list's and the detail view's job, so none of these are probed here.
         stack: None,
         stack_unknown: false,
+        cross_repository: false,
     }
 }
 
@@ -5063,7 +5070,7 @@ mod tests {
         real_time_or_empty, reconstruct_pr_diff, reject_upstream_create_metadata,
         rest_comment_to_out, rest_commit_to_out, rest_pull_to_pr_info, rest_review_to_out,
         rollup_state_to_ci, scrape_pr_ref, split_commit_message, stack_members_from,
-        stack_memberships_from, stack_write_args, stack_write_outcome_from,
+        stack_memberships_from, stack_write_args, stack_write_outcome_from, PR_LIST_FIELDS,
         upstream_pulls_endpoint, GhPrFile, GhPrRestComment, GhPrRestCommit,
         GhPrRestCommitGitAuthor, GhPrRestCommitInner, GhPrRestPull, GhPrRestReview, GhStackEntry,
         MergeAsyncOutcome, MergeAsyncStatus, PrDetails, PrInfo, PrMergeOutcome, PrStackInfo,
@@ -5087,6 +5094,7 @@ mod tests {
             head_sha: String::new(),
             stack: None,
             stack_unknown: false,
+            cross_repository: false,
         }
     }
 
@@ -5582,6 +5590,48 @@ mod tests {
         )
         .unwrap();
         assert!(!parsed.stack_unknown);
+    }
+
+    /// `cross_repository` reads gh's `isCrossRepository` but ships to the frontend as
+    /// `crossRepository` — the two names differ, so both directions are pinned. A
+    /// silent mismatch here would mark every fork PR same-repo and let the chain
+    /// detector build through it.
+    #[test]
+    fn pr_info_reads_gh_is_cross_repository_and_ships_camel_case() {
+        // gh's list row spells it `isCrossRepository` (the alias).
+        let fork: PrInfo = serde_json::from_str(
+            r#"{"number":21,"url":"","title":"t","baseRefName":"main","headRefName":"main",
+                "isDraft":false,"state":"OPEN","isCrossRepository":true}"#,
+        )
+        .unwrap();
+        assert!(fork.cross_repository);
+
+        // Serialization uses the camelCase field name the frontend contract pins.
+        let v = serde_json::to_value(&fork).unwrap();
+        assert_eq!(v["crossRepository"], true);
+        assert!(v.get("isCrossRepository").is_none());
+
+        // Absent (every non-GitHub producer, and gh rows predating the field) = same-repo.
+        let same: PrInfo = serde_json::from_str(
+            r#"{"number":21,"url":"","title":"t","baseRefName":"main","headRefName":"f",
+                "isDraft":false,"state":"OPEN"}"#,
+        )
+        .unwrap();
+        assert!(!same.cross_repository);
+        assert_eq!(serde_json::to_value(&same).unwrap()["crossRepository"], false);
+    }
+
+    /// The list query must actually ASK for the fork marker — the field defaults to
+    /// false, so omitting it from the gh projection fails silently.
+    #[test]
+    fn pr_list_fields_request_the_fork_marker() {
+        let fields: Vec<&str> = PR_LIST_FIELDS.split(',').collect();
+        assert!(fields.contains(&"isCrossRepository"), "got: {PR_LIST_FIELDS}");
+        // The line-continuation join must not have leaked whitespace into a field name.
+        assert!(
+            fields.iter().all(|f| f.trim() == *f && !f.is_empty()),
+            "got: {PR_LIST_FIELDS}"
+        );
     }
 
     #[test]

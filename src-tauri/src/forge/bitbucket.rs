@@ -624,9 +624,11 @@ fn from_bb_pr(p: BbPr) -> PrInfo {
             .and_then(|s| s.commit.as_ref())
             .map(|c| c.hash.clone())
             .unwrap_or_default(),
-        // Bitbucket has no stacked-PR concept — nothing to probe, so nothing unknown.
+        // Bitbucket has no stacked-PR concept — nothing to probe, so nothing unknown,
+        // and no stack-membership gate for a fork head to inform.
         stack: None,
         stack_unknown: false,
+        cross_repository: false,
     }
 }
 
@@ -2507,7 +2509,7 @@ async fn read_reviewer_uuids(
 }
 
 /// Edit a pull request's title/body (`PUT …/pullrequests/{n}`), and its destination
-/// branch when `target` is given. Only OPEN PRs are mutable. A Bitbucket PR PUT that
+/// branch when `base` is given. Only OPEN PRs are mutable. A Bitbucket PR PUT that
 /// omits `reviewers` WIPES them, so we first read the existing reviewer uuids and
 /// echo them back alongside the new title/description.
 pub async fn edit_pr(
@@ -2515,13 +2517,13 @@ pub async fn edit_pr(
     number: u64,
     title: &str,
     body: &str,
-    target: Option<&str>,
+    base: Option<&str>,
 ) -> AppResult<()> {
     let creds = http::load_credentials().await?;
-    let base = repo_base(repo_path).await?;
-    let uuids = read_reviewer_uuids(&creds, &base, number).await?;
-    let payload = build_edit_body(title, body, &uuids, target);
-    let path = format!("{base}/pullrequests/{number}");
+    let api_base = repo_base(repo_path).await?;
+    let uuids = read_reviewer_uuids(&creds, &api_base, number).await?;
+    let payload = build_edit_body(title, body, &uuids, base);
+    let path = format!("{api_base}/pullrequests/{number}");
     http::bb_put_json::<serde_json::Value>(&creds, &path, &payload, "pull request").await?;
     Ok(())
 }
