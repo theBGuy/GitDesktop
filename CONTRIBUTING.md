@@ -141,7 +141,10 @@ that call on purpose.
 Writing a **blog post**? Post copy follows the anti-AI-tell rules in
 [CLAUDE.md](CLAUDE.md#blog-post-copy--anti-ai-tell-rules-sitesrccontentblog) —
 phrasing, wrap band, and voice; spelling and personal voice follow the post's
-byline author.
+byline author. To schedule a post, give it a future `pubDate` (bare date =
+midnight UTC): it stays out of production builds — while remaining visible in
+dev and Pages previews — until the daily `site-scheduled-publish` cron
+rebuilds the site shortly after 00:00 UTC on its date.
 
 ### UI changes
 

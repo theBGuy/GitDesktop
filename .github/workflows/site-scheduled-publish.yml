@@ -1,19 +1,25 @@
 name: site-scheduled-publish
 
 # Publishes future-dated blog posts. getPosts() (site/src/lib/posts.ts) hides
-# posts whose pubDate is ahead of build time, and builds only happen on push
-# or deploy-hook fire — so this cron re-fires the production build just after
-# the UTC midnight that flips a pubDate from future to past. A no-op rebuild
-# on quiet days is the accepted cost (it also re-bakes release.ts facts).
+# posts whose pubDate is ahead of build time — outside DEV and Pages previews —
+# and builds only happen on push or deploy-hook fire, so this cron re-fires the
+# production build just after the UTC midnight that flips a pubDate from
+# future to past. A no-op rebuild on quiet days is the accepted cost (it also
+# re-bakes release.ts facts).
+#
+# GitHub disables schedules in public repos after 60 days without repository
+# activity — if scheduled posts ever stop appearing, check the workflow's
+# state in the Actions UI; workflow_dispatch is the manual recovery path.
 #
 # CLOUDFLARE_PAGES_DEPLOY_HOOK is the same Pages deploy-hook URL secret that
 # site-rebuild.yml uses. Treat it like a credential.
 
 on:
   schedule:
-    # Nominal 00:10 UTC; GitHub can delay scheduled runs by minutes or more,
-    # so pubDate precision is "that day", not "that minute".
-    - cron: "10 0 * * *"
+    # 00:37 UTC: off the top of the hour, which GitHub documents as its
+    # highest-load (most-delayed) cron window. Runs can still slip, so
+    # pubDate precision is "that day", not "that minute".
+    - cron: "37 0 * * *"
   workflow_dispatch:
 
 permissions: {}
@@ -31,9 +37,15 @@ jobs:
         run: |
           if [ -z "$HOOK" ]; then
             # Unlike site-rebuild.yml's soft skip, silence here would mean
-            # scheduled posts never publish — fail loudly.
+            # scheduled posts never publish — fail the run instead.
             echo "CLOUDFLARE_PAGES_DEPLOY_HOOK not set - scheduled posts cannot publish." >&2
             exit 1
           fi
-          curl -fsS -X POST "$HOOK" > /dev/null
+          # A green run means Cloudflare ACCEPTED the hook, not that the
+          # deploy succeeded — watching the deploy result would need a CF API
+          # credential in Actions, which this repo deliberately keeps out.
+          # Schema/render errors in a scheduled post are still caught earlier,
+          # by site.yml on its PR (the content loader validates every entry).
+          curl -fsS --retry 3 --retry-all-errors --retry-delay 10 \
+            -X POST "$HOOK" > /dev/null
           echo "Pages rebuild triggered."
