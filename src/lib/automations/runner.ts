@@ -617,7 +617,8 @@ async function run(
  * cancelled run wrote one, and the pr-sync `sameSha(dismissedHead, headSha)` gate would
  * otherwise make the re-run a silent no-op. The run then flows through the normal pipeline
  * scoped to `only`. If the rule was disabled since, nothing matches and we toast rather
- * than leave a dead button.
+ * than leave a dead button. While AI features are hidden it stops before the clear —
+ * a paused re-run must not consume the watermark.
  */
 export function rerunAutomation(
   event: AutomationEvent,

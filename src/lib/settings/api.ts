@@ -176,8 +176,9 @@ export interface AppSettings {
    *  security audits alike). Absent — settings written before this shipped — reads as
    *  `"auto"`, the backend's tier defaults. */
   reviewTimeout?: ReviewTimeout;
-  /** Hide every AI surface (commit/PR helpers, review panel, AI settings) and pause
-   *  automations — no new automated run starts while set (an in-flight run finishes).
+  /** Hide every AI surface — commit/PR helpers, review panel, and the AI-related
+   *  settings sections (AI, Slash commands, MCP servers, Automations) — and pause
+   *  automations: no new automated run starts while set (an in-flight run finishes).
    *  Provider config, API keys, and rules are kept. */
   hideAi: boolean;
   /** OS notifications (sent only while the window is unfocused). */
