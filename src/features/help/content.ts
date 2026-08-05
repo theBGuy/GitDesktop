@@ -859,8 +859,9 @@ the PR view gains a **Stack** section listing every member from the bottom of th
 with the one you're reading marked. Select a member — click it, or move through the section
 with **↑ / ↓** — to open that pull request. The command palette ({{kbd:command-palette}}) also
 carries **Next pull request in stack** and **Previous pull request in stack**, offered from
-the pull-request view while you have a stacked one open; both are palette commands with no
-default shortcut, so give them one in **Settings → Keyboard** if you want it on the keys.
+the pull-request view whenever there's another member in that direction; both are palette
+commands with no default shortcut, so give them one in **Settings → Keyboard** if you want
+it on the keys.
 
 Where the stack comes from depends on the forge: on **GitHub** it's the **native
 stacked-PR API**, and on **GitLab** a chain of merge requests is **detected automatically**.
