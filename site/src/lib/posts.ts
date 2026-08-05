@@ -7,8 +7,15 @@ export type Post = CollectionEntry<"blog">;
 // and a draft would be invisible on the very branch deploy you want to read it
 // on. PUBLIC_SHOW_DRAFTS is set only in the Pages "Preview" environment.
 // Both branches are literal `import.meta.env` reads, so they DCE cleanly.
-const showDrafts =
+const showUnpublished =
   import.meta.env.DEV || import.meta.env.PUBLIC_SHOW_DRAFTS === "true";
+
+// One cutoff for the entire build so every surface agrees on which posts
+// exist. A future pubDate behaves exactly like `draft: true` until the
+// site-scheduled-publish cron re-fires the production build after the UTC
+// midnight that flips it — a date gate alone publishes nothing, because
+// builds only happen on push or deploy-hook fire.
+const buildTime = Date.now();
 
 /**
  * The ONLY way to read posts. Every route, the feed, the tag pages and
@@ -18,7 +25,8 @@ const showDrafts =
 export async function getPosts(): Promise<Post[]> {
   const posts = await getCollection(
     "blog",
-    ({ data }) => showDrafts || !data.draft,
+    ({ data }) =>
+      showUnpublished || (!data.draft && data.pubDate.valueOf() <= buildTime),
   );
   return posts.sort(
     (a, b) => b.data.pubDate.valueOf() - a.data.pubDate.valueOf(),

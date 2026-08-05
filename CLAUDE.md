@@ -83,6 +83,11 @@ back-catalogue in the same change rather than grandfathering it.
   author's own writing, never from patterns shared by previously generated posts
   (two generated texts agreeing is one drafting process sampled twice, not
   evidence of a house style).
+- **Scheduling.** A future `pubDate` keeps a post out of production builds — it
+  behaves like a draft (visible in DEV and Pages previews) until the daily
+  `site-scheduled-publish` cron rebuilds the site after 00:00 UTC on its date.
+  A bare date means midnight UTC — 8pm ET the evening before; add a time
+  component (`2026-08-05T13:00:00Z`) to target a later hour.
 
 ## Everyday commands
 

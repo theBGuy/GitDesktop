@@ -1,0 +1,39 @@
+name: site-scheduled-publish
+
+# Publishes future-dated blog posts. getPosts() (site/src/lib/posts.ts) hides
+# posts whose pubDate is ahead of build time, and builds only happen on push
+# or deploy-hook fire — so this cron re-fires the production build just after
+# the UTC midnight that flips a pubDate from future to past. A no-op rebuild
+# on quiet days is the accepted cost (it also re-bakes release.ts facts).
+#
+# CLOUDFLARE_PAGES_DEPLOY_HOOK is the same Pages deploy-hook URL secret that
+# site-rebuild.yml uses. Treat it like a credential.
+
+on:
+  schedule:
+    # Nominal 00:10 UTC; GitHub can delay scheduled runs by minutes or more,
+    # so pubDate precision is "that day", not "that minute".
+    - cron: "10 0 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  rebuild:
+    # The cron would otherwise run — and red-fail on the missing secret —
+    # in forks that enable Actions.
+    if: github.repository == 'theBGuy/GitDesktop'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Cloudflare Pages rebuild
+        env:
+          HOOK: ${{ secrets.CLOUDFLARE_PAGES_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            # Unlike site-rebuild.yml's soft skip, silence here would mean
+            # scheduled posts never publish — fail loudly.
+            echo "CLOUDFLARE_PAGES_DEPLOY_HOOK not set - scheduled posts cannot publish." >&2
+            exit 1
+          fi
+          curl -fsS -X POST "$HOOK" > /dev/null
+          echo "Pages rebuild triggered."
