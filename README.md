@@ -312,7 +312,7 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
 - **Privacy-first** — API keys live in the OS keychain (never in app files), local
   models keep code on your machine, AI-ignore patterns keep sensitive files out of
   context unless you opt into repo-aware review, and a single switch hides every
-  AI surface.
+  AI surface and pauses your automations.
 - **Keyboard-first** — rebindable shortcuts with GitHub-Desktop-compatible
   defaults, a generated cheat sheet (Ctrl+/), a command palette (Ctrl+K), and
   arrow-key navigation everywhere.

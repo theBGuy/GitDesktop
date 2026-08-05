@@ -176,13 +176,14 @@ export interface AppSettings {
    *  security audits alike). Absent — settings written before this shipped — reads as
    *  `"auto"`, the backend's tier defaults. */
   reviewTimeout?: ReviewTimeout;
-  /** Hide every AI surface (commit/PR helpers, review panel, AI settings).
-   *  Provider config and API keys are kept, just not shown. */
+  /** Hide every AI surface (commit/PR helpers, review panel, AI settings) and pause
+   *  automations — no new automated run starts while set (an in-flight run finishes).
+   *  Provider config, API keys, and rules are kept. */
   hideAi: boolean;
   /** OS notifications (sent only while the window is unfocused). */
   notifications: NotificationSettings;
-  /** Hide the app to the system tray on window close (so background work like
-   *  AI reviews keeps running) instead of quitting. */
+  /** Hide the app to the system tray on window close (so background work keeps
+   *  running) instead of quitting. */
   closeToTray: boolean;
   /** How write-capable agent sessions are isolated. "worktree" = the throwaway
    *  git worktree only (host, full-auto); "container" = also run inside an

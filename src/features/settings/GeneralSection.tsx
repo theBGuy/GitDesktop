@@ -59,8 +59,8 @@ export const GeneralSection = withForm({
             >
               <WarningIcon className="size-4 shrink-0" />
               <span>
-                Automations you've turned on won't run while AI features are
-                hidden — they start again when you turn this off.
+                You have automations turned on — they won't run while AI
+                features are hidden.
               </span>
             </p>
           )}
