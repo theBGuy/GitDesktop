@@ -51,6 +51,18 @@ jobs:
       - name: Build the marketing site
         run: pnpm --filter site build
 
+      # A second build with unpublished posts (drafts + future-dated) visible,
+      # so a scheduled post's own route renders BEFORE its publication day —
+      # the cron publish is unattended, and this is the only pre-merge render
+      # of that page (getStaticPaths filters it from the plain build).
+      # Overwrites site/dist, which is safe while nothing after this uploads
+      # or deploys it; if an artifact step is ever added, run this variant
+      # first or give it its own --outDir.
+      - name: Build with unpublished posts
+        env:
+          PUBLIC_SHOW_DRAFTS: "true"
+        run: pnpm --filter site build
+
       # Check-only (biome ci never writes); `pnpm lint` locally is --write.
       # Verified green against git's LF blobs — a Windows checkout reports CRLF
       # format diffs on untouched files, but CI checks out LF.

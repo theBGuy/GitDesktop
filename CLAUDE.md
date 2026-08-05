@@ -83,12 +83,14 @@ back-catalogue in the same change rather than grandfathering it.
   author's own writing, never from patterns shared by previously generated posts
   (two generated texts agreeing is one drafting process sampled twice, not
   evidence of a house style).
-- **Scheduling.** A future `pubDate` keeps a post out of production builds — it
-  behaves like a draft (visible in DEV and Pages previews) until the daily
-  `site-scheduled-publish` cron rebuilds the site shortly after 00:00 UTC.
-  Use a **bare date**: it means midnight UTC (still the prior evening in US
-  time zones), and because the cron builds once per day, a time component
-  never targets an hour — it only delays publication to the NEXT day's run.
+Blog mechanics (not copy) — **scheduling**: a future `pubDate` keeps a post
+out of production builds — it behaves like a draft (visible in DEV and Pages
+previews) until the daily `site-scheduled-publish` cron (00:37 UTC nominal;
+GitHub can delay runs, so precision is the day, not the hour) rebuilds the
+site. Use a **bare date** — midnight UTC, still the prior evening in US time
+zones. A time component doesn't schedule an hour: the post appears on the
+first daily build after its timestamp, so anything later than ~00:37 UTC
+waits for the next day.
 
 ## Everyday commands
 

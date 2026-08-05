@@ -2,10 +2,11 @@ import { type CollectionEntry, getCollection } from "astro:content";
 
 export type Post = CollectionEntry<"blog">;
 
-// The textbook `import.meta.env.PROD` gate breaks draft PREVIEWS: Cloudflare
-// Pages preview deployments also run `astro build`, so PROD is true there too
-// and a draft would be invisible on the very branch deploy you want to read it
-// on. PUBLIC_SHOW_DRAFTS is set only in the Pages "Preview" environment.
+// The textbook `import.meta.env.PROD` gate breaks unpublished-post PREVIEWS:
+// Cloudflare Pages preview deployments also run `astro build`, so PROD is true
+// there too and an unpublished post (draft or future-dated) would be invisible
+// on the very branch deploy you want to proof it on. PUBLIC_SHOW_DRAFTS is set
+// only in the Pages "Preview" environment.
 // Both branches are literal `import.meta.env` reads, so they DCE cleanly.
 const showUnpublished =
   import.meta.env.DEV || import.meta.env.PUBLIC_SHOW_DRAFTS === "true";
@@ -19,8 +20,9 @@ const buildTime = Date.now();
 
 /**
  * The ONLY way to read posts. Every route, the feed, the tag pages and
- * prev/next must go through this — a draft leaking into /rss.xml because one
- * caller reached for `getCollection("blog")` directly is the classic blog bug.
+ * prev/next must go through this — an unpublished post (draft or future-dated)
+ * leaking into /rss.xml because one caller reached for `getCollection("blog")`
+ * directly is the classic blog bug.
  */
 export async function getPosts(): Promise<Post[]> {
   const posts = await getCollection(

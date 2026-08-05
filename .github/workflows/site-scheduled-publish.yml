@@ -30,6 +30,7 @@ jobs:
     # in forks that enable Actions.
     if: github.repository == 'theBGuy/GitDesktop'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Trigger Cloudflare Pages rebuild
         env:
@@ -46,6 +47,7 @@ jobs:
           # credential in Actions, which this repo deliberately keeps out.
           # Schema/render errors in a scheduled post are still caught earlier,
           # by site.yml on its PR (the content loader validates every entry).
-          curl -fsS --retry 3 --retry-all-errors --retry-delay 10 \
+          curl -fsS --connect-timeout 10 --max-time 30 \
+            --retry 3 --retry-all-errors --retry-delay 10 \
             -X POST "$HOOK" > /dev/null
           echo "Pages rebuild triggered."

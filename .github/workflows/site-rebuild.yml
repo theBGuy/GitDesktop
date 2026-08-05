@@ -21,6 +21,7 @@ permissions: {}
 jobs:
   rebuild:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Trigger Cloudflare Pages rebuild
         env:
@@ -33,5 +34,7 @@ jobs:
             echo "CLOUDFLARE_PAGES_DEPLOY_HOOK not set — skipping (site will refresh on the next site commit instead)."
             exit 0
           fi
-          curl -fsS -X POST "$HOOK" > /dev/null
+          curl -fsS --connect-timeout 10 --max-time 30 \
+            --retry 3 --retry-all-errors --retry-delay 10 \
+            -X POST "$HOOK" > /dev/null
           echo "Pages rebuild triggered for $TAG."
