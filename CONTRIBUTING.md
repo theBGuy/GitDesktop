@@ -146,7 +146,8 @@ date (midnight UTC): the post stays out of production builds, while remaining
 visible in dev and Pages previews, until the daily `site-scheduled-publish`
 cron (00:37 UTC nominal; precision is the day, not the hour) rebuilds the
 site. A time component doesn't pick an hour — the post appears on the first
-daily build after its timestamp.
+production build after its timestamp, whether that's the daily cron or an
+earlier push/release rebuild.
 
 ### UI changes
 
