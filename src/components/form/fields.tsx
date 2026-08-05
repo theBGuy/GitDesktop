@@ -1,4 +1,4 @@
-import { type ReactNode, useId } from "react";
+import { type ComponentProps, type ReactNode, useId } from "react";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -253,13 +253,7 @@ export function SelectField({
   disabled,
   annotations,
   sizeToContent = false,
-}: {
-  label?: ReactNode;
-  items: Record<string, string>;
-  disabled?: boolean;
-  annotations?: Record<string, ReactNode>;
-  sizeToContent?: boolean;
-}) {
+}: Omit<ComponentProps<typeof SelectControl>, "value" | "onValueChange">) {
   const field = useFieldContext<string>();
   return (
     <SelectControl

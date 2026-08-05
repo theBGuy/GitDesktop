@@ -381,10 +381,22 @@ export function StackOffer({
   return (
     <div>
       <p className="text-xs font-medium text-muted-foreground">{line}</p>
-      {/* Static preview — nothing here is selectable, so it takes no keyboard
-          nav; the members' own rows live in the PR list. Capped like the Stack
-          section so a long chain can't push the tab row out of the header. */}
-      <div className="mt-1.5 max-h-48 overflow-y-auto border">
+      {/* The rows stay non-interactive (the members' own rows live in the PR
+          list), but the scroller itself is a tab stop so its overflow is
+          keyboard-scrollable — WebKit, unlike Chromium, doesn't make scrollers
+          focusable on its own, and this preview is the pre-write safety check.
+          Capped like the Stack section so a long chain can't push the tab row
+          out of the header. */}
+      <div
+        role="group"
+        aria-label={
+          offer.kind === "create"
+            ? "Pull requests to stack, bottom to top"
+            : `Pull requests to add to stack #${offer.stackNumber}`
+        }
+        tabIndex={0}
+        className="mt-1.5 max-h-48 overflow-y-auto border"
+      >
         {rows.map((row, i) => (
           <div
             key={row.number}
