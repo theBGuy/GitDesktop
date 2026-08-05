@@ -48,7 +48,7 @@ export const GeneralSection = withForm({
           </form.AppField>
           <p className="text-xs text-muted-foreground">
             Hides the AI commit-message and pull-request helpers, the AI review
-            panel, and the AI and Automations settings sections, and pauses your
+            panel, and the AI-related settings sections, and pauses your
             automations. Your provider, API keys, and rules are kept —
             automations run again once you turn AI features back on.
           </p>
@@ -76,9 +76,9 @@ export const GeneralSection = withForm({
           </form.AppField>
           <p className="text-xs text-muted-foreground">
             Closing the window hides GitDesktop to the system tray instead of
-            quitting, so background work like AI reviews keeps running. Reopen
-            from the tray icon, or use its Quit menu to exit. Turn this off to
-            make closing quit the app.
+            quitting, so background work keeps running. Reopen from the tray
+            icon, or use its Quit menu to exit. Turn this off to make closing
+            quit the app.
           </p>
         </div>
         <div className="space-y-1.5">

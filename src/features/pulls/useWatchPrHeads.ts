@@ -12,6 +12,7 @@ import { useAiEnabled } from "@/lib/settings/queries";
  * remote PRs, `usePrNotifications` watches the GitHub head OID, which also covers
  * heads that aren't local — forks / pushed elsewhere.) `maybeFireSync` debounces
  * by head; the runner gates whether to actually re-review. Mount once per repo.
+ * Both the poll and the dispatch are paused while AI features are hidden.
  */
 export function useWatchPrHeads(repoPath: string) {
   // This poll exists only to feed automations, which pause with AI hidden — so it

@@ -68,7 +68,7 @@ import { providerLabel } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useJiraLink } from "@/lib/jira/queries";
 import type { RecentRepo } from "@/lib/settings/api";
-import { useSettings } from "@/lib/settings/queries";
+import { useAiEnabled, useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { RemoteUrlDialog } from "./RemoteUrlDialog";
@@ -95,6 +95,9 @@ const RepoSettingsDialog = lazy(() =>
 export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   const gh = useForgeStatus(repoPath);
   const settings = useSettings();
+  // Automations are paused while AI features are hidden, so every way into the
+  // per-repo grid goes with them — an editable rule that can't run misleads.
+  const aiEnabled = useAiEnabled();
   const repoName = useUiStore((s) => s.repoName);
   const setRepoTab = useUiStore((s) => s.setRepoTab);
   const fork = useForkRepo(repoPath);
@@ -207,7 +210,7 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   );
   useHotkeyAction("repository-statistics", () => setRepoTab("insights"));
   useHotkeyAction("manage-files", () => setFilesOpen(true));
-  useHotkeyAction("automations", () => setAutomationsOpen(true));
+  useHotkeyAction("automations", () => setAutomationsOpen(true), aiEnabled);
   useHotkeyAction("link-jira-project", () => setJiraOpen(true));
   useHotkeyAction(
     "repository-settings",
@@ -351,10 +354,12 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
           <FilesIcon />
           Manage files…
         </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => setAutomationsOpen(true)}>
-          <LightningIcon />
-          Automations…
-        </DropdownMenuItem>
+        {aiEnabled && (
+          <DropdownMenuItem onClick={() => setAutomationsOpen(true)}>
+            <LightningIcon />
+            Automations…
+          </DropdownMenuItem>
+        )}
         <DropdownMenuItem onClick={() => setJiraOpen(true)}>
           <KanbanIcon />
           {jiraLink.data ? "Change Jira project…" : "Link Jira project…"}

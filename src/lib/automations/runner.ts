@@ -221,7 +221,7 @@ export function triggerAutomations(event: AutomationEvent): void {
 
 /** What a {@link run} pass did, so a re-run can tell outcomes apart:
  *  - `matched`: rules that exist AND apply (past the `only` + branch gates). 0 = the rule
- *    genuinely no longer applies.
+ *    no longer applies, or automations are paused (Hide AI).
  *  - `attempted`: runs actually started. `matched > 0 && attempted === 0` means a claim or
  *    an already-covered head blocked it — retryable. */
 interface RunOutcome {
@@ -230,18 +230,21 @@ interface RunOutcome {
 }
 
 /**
- * Runs the automation rules matching `event`. `only` scopes a re-run to a single mode.
- * `replacesKey` is the stopped row a re-run replaces — removed the instant its replacement
- * registers, so the stopped row survives whenever nothing registers. Returns a
- * {@link RunOutcome} so a re-run can tell "rule gone" from "blocked" from "started".
+ * Runs the automation rules matching `event`, unless AI features are hidden — that
+ * pauses automations, so it returns immediately with a zero outcome. `only` scopes a
+ * re-run to a single mode. `replacesKey` is the stopped row a re-run replaces — removed
+ * the instant its replacement registers, so the stopped row survives whenever nothing
+ * registers. Returns a {@link RunOutcome} so a re-run can tell "rule gone" from
+ * "blocked" from "started".
  */
 async function run(
   event: AutomationEvent,
   only?: ReviewMode,
   replacesKey?: string,
 ): Promise<RunOutcome> {
-  // Hiding AI features PAUSES automations: while `hideAi` is set no rule may fire,
-  // post, toast, or notify. Rules are kept and resume when AI is shown again.
+  // Hiding AI features PAUSES automations: no NEW run starts while `hideAi` is set
+  // (an in-flight run still completes and delivers — deliberate). Rules are kept and
+  // resume when AI is shown again.
   const settings = await loadSettings();
   if (settings.hideAi) return { matched: 0, attempted: 0 };
   const config = await loadAutomations();

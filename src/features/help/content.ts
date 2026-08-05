@@ -1650,9 +1650,9 @@ notes**, and **repository descriptions**.
   file, its folder, or its file type — or a multi-selection) appends to
   \`.gitdesktop/aiignore\`, creating it if needed — an anchored line (\`/src/config.ts\`,
   \`/vendor/\`) for exactly the file or folder you picked.
-- **Hide AI** (Settings → General) removes every AI surface from the app and pauses your
-  automations — nothing runs or posts while it's on. Your configuration and rules are
-  kept, and automations start again when you turn AI features back on.
+- **Hide AI** (Settings → General) hides the AI surfaces and pauses your automations —
+  nothing new runs or posts while it's on. Your configuration and rules are kept, and
+  automations start again when you turn AI features back on.
 
 ## Automations
 

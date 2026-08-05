@@ -576,7 +576,8 @@ enable it**, and each task can **confirm before it runs**.
 
 **Automations** — a lifecycle grid (on commit / on PR opened / on new commits to a
 reviewed PR) that runs AI review or security audit automatically, with per-action
-branch conditions, Save/Discard drafts, global defaults, and per-repo overrides.
+branch conditions, Save/Discard drafts, global defaults, and per-repo overrides
+(paused while **Hide AI** is on).
 
 **Integrations** — open in any editor or terminal (auto-detected, point at any
 executable, or set a full custom command with a `{path}` placeholder), and tunable
@@ -632,9 +633,9 @@ display can't strand it off-screen.
     multi-selection) creates and updates this file for you, adding anchored
     lines like `/src/config.ts` and `/vendor/` that mean exactly what you picked.
 - **Keys** live in the OS keychain (Windows Credential Manager, macOS Keychain,
-  libsecret). **Hide AI** (Settings → General) hides every AI surface and
-  pauses your automations while keeping your config — rules start firing again
-  when you turn AI features back on.
+  libsecret). **Hide AI** (Settings → General) hides the AI surfaces and pauses
+  your automations while keeping your config — rules start firing again when you
+  turn AI features back on.
 
 ## Updates
 
