@@ -1587,8 +1587,8 @@ pub async fn gh_stack_create(
     let endpoint = format!("repos/{slug}/stacks");
     let args = stack_write_args(&endpoint, &pull_requests);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let out = run_gh(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT).await?;
-    stack_write_outcome_from(&out.stdout_lossy(), "stack create")
+    let body = run_gh_api_write(&repo_path, &arg_refs).await?;
+    stack_write_outcome_from(&body, "stack create")
 }
 
 /// Append PRs to an existing stack (`POST /repos/{slug}/stacks/{n}/add`). TOP only:
@@ -1605,8 +1605,8 @@ pub async fn gh_stack_add(
     let endpoint = format!("repos/{slug}/stacks/{stack_number}/add");
     let args = stack_write_args(&endpoint, &pull_requests);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let out = run_gh(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT).await?;
-    stack_write_outcome_from(&out.stdout_lossy(), "stack add")
+    let body = run_gh_api_write(&repo_path, &arg_refs).await?;
+    stack_write_outcome_from(&body, "stack add")
 }
 
 /// Dissolve a stack (`POST /repos/{slug}/stacks/{n}/unstack`, 204). Sends NO body:
@@ -1621,12 +1621,7 @@ pub async fn gh_stack_dissolve(
 ) -> AppResult<()> {
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let endpoint = format!("repos/{slug}/stacks/{stack_number}/unstack");
-    run_gh(
-        Some(&repo_path),
-        &["api", "--method", "POST", &endpoint],
-        GH_NETWORK_TIMEOUT,
-    )
-    .await?;
+    run_gh_api_write(&repo_path, &["api", "--method", "POST", &endpoint]).await?;
     Ok(())
 }
 
@@ -1923,11 +1918,27 @@ fn gh_api_error_message(stderr: &str, stdout: &str, code: i32) -> String {
         .filter(|m| !m.is_empty())
     {
         if !message.contains(detail) {
-            message.push(' ');
+            message.push_str(" — ");
             message.push_str(detail);
         }
     }
     message
+}
+
+/// Run a `gh api` WRITE, returning its stdout body. Unlike `run_gh`, a failure
+/// carries BOTH streams through [`gh_api_error_message`] — these endpoints put the
+/// reason for a 422 in the response body, which a stderr-only error discards.
+async fn run_gh_api_write(repo_path: &str, args: &[&str]) -> AppResult<String> {
+    let out = run_gh_raw(Some(repo_path), args, GH_NETWORK_TIMEOUT).await?;
+    let stdout = out.stdout_lossy();
+    if out.code != 0 {
+        return Err(AppError::Gh(gh_api_error_message(
+            &out.stderr,
+            &stdout,
+            out.code,
+        )));
+    }
+    Ok(stdout)
 }
 
 /// Updates a PR's title and body via the REST API, and its base branch when `base`
@@ -1953,14 +1964,7 @@ pub async fn gh_pr_edit(
     let endpoint = format!("repos/{slug}/pulls/{number}");
     let args = pr_edit_args(&endpoint, title, &body, base.as_deref());
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let out = run_gh_raw(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT).await?;
-    if out.code != 0 {
-        return Err(AppError::Gh(gh_api_error_message(
-            &out.stderr,
-            &out.stdout_lossy(),
-            out.code,
-        )));
-    }
+    run_gh_api_write(&repo_path, &arg_refs).await?;
     Ok(())
 }
 
@@ -5479,8 +5483,11 @@ mod tests {
                 "resource":"PullRequest","field":"base","code":"invalid"}]}"#,
             1,
         );
-        assert!(stacked.starts_with("gh: Validation Failed (HTTP 422)"), "got: {stacked}");
-        assert!(stacked.contains("part of a stack."), "got: {stacked}");
+        assert_eq!(
+            stacked,
+            "gh: Validation Failed (HTTP 422) — Cannot change the base branch because the pull \
+             request is part of a stack."
+        );
 
         // A top-level-message-only body adds nothing — no `errors[]`, no duplication.
         let plain = gh_api_error_message(
@@ -5506,7 +5513,18 @@ mod tests {
 
         // Empty stderr falls back the way `run_gh` does, and still gains the detail.
         let codeonly = gh_api_error_message("  \n", r#"{"errors":[{"message":"Nope."}]}"#, 22);
-        assert_eq!(codeonly, "gh exited with code 22 Nope.");
+        assert_eq!(codeonly, "gh exited with code 22 — Nope.");
+
+        // Two details each get their own separator.
+        let multi = gh_api_error_message(
+            "gh: Validation Failed (HTTP 422)",
+            r#"{"errors":[{"message":"First."},{"message":"Second."}]}"#,
+            1,
+        );
+        assert_eq!(
+            multi,
+            "gh: Validation Failed (HTTP 422) — First. — Second."
+        );
     }
 
     /// The list join's tri-state. A FAILED probe must mark every row unknown: an

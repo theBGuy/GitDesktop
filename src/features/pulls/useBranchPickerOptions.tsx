@@ -17,9 +17,10 @@ export interface BranchPickerOptions {
 }
 
 /**
- * Branch options for the create-PR pickers: the filtered name list, the
- * value→label map, and per-branch status chips (checked out in another
- * worktree) that a `SelectField` renders after each option.
+ * Branch options for the PR branch pickers — create's head/base pair and the
+ * edit dialog's base picker: the filtered name list, the value→label map, and
+ * per-branch status chips (checked out in another worktree) rendered after each
+ * option.
  *
  * Agent-session branches (`gd/session/*`) are always excluded — they're
  * app-internal and submitting one would push it — and **archived** branches are

@@ -90,8 +90,8 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
   panels (MR comments/commits/diff; an issue's labels/assignees/milestone rail;
   pipeline jobs with logs and a branch CI badge; release notes with asset links):
   - **Merge requests** — comment (edit/delete your own), close/reopen, edit title &
-    description, react with emoji (on descriptions and comments), edit labels &
-    assignees, **approve / unapprove**,
+    description, retarget the target branch, react with emoji (on descriptions and
+    comments), edit labels & assignees, **approve / unapprove**,
     request changes, and **merge** (merge/squash) — including **auto-merge** when the
     pipeline succeeds (cancelable in place) — plus **create** (push-and-open, drafts,
     duplicate-MR detection)
@@ -214,10 +214,10 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
     - **`--allow-write`** — this repo's local PRs & issues (GitDesktop's own app-data
       artifacts; nothing is pushed)
     - **`--allow-remote-write`** — real forge writes under your identity (`gh` / `glab` /
-      Bitbucket token): create/merge/update PRs, request reviewers, edit labels &
-      assignees, approve or resolve review threads, rerun or dispatch CI, cut releases,
-      and file or comment on issues (creating a PR pushes its head branch, so it also
-      needs `--allow-git-write`)
+      Bitbucket token): create/merge/update PRs, create/extend/dissolve GitHub PR stacks,
+      request reviewers, edit labels & assignees, approve or resolve review threads, rerun
+      or dispatch CI, cut releases, and file or comment on issues (creating a PR pushes its
+      head branch, so it also needs `--allow-git-write`)
     - **`--allow-git-write`** — recoverable git ops (stage, commit, branch,
       push/pull/fetch, stash, merge, rebase, cherry-pick, tags)
     - **`--allow-destructive`** — the irreversible ones (discard, reset, force-push,

@@ -14,10 +14,6 @@ import type { PrStackInfo, PrStackMember } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { cn } from "@/lib/utils";
 
-// Re-exported from its `lib` home so this file stays the one import site for
-// everything stack-shaped in the PR views.
-export { isNativeStack } from "@/lib/git/stack-chains";
-
 /** Icon + word + tone for a stack member's state. An unrecognized state keeps the
  *  provider's own word at a neutral tone rather than being read as "open" — the
  *  word always carries the meaning, so color is never the only signal. */
@@ -289,7 +285,6 @@ export interface StackOfferHandle {
 export interface StackOfferRow {
   number: number;
   title: string;
-  headRefName: string;
 }
 
 /**

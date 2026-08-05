@@ -46,8 +46,10 @@ function isStacked(pr: PrInfo | undefined): boolean {
  *
  * On top of that shared topology sit the GitHub write rules: a chain that
  * bottoms out on a stacked PR can only be APPENDED, and only when that PR is
- * its stack's open top (GitHub rejects mid-stack attachment); an unstacked
- * chain needs two members before GitHub will make a stack of it.
+ * the stack's top member — merged members still count toward `size`, so a stack
+ * whose top has merged offers nothing (fail-closed, since GitHub rejects
+ * mid-stack attachment); an unstacked chain needs two members before GitHub
+ * will make a stack of it.
  *
  * A row flagged `stackUnknown` voids the whole list: the list's stack join is
  * fail-open, so on a failed join every row arrives looking unstacked and a

@@ -649,9 +649,10 @@ request** dialog offers an **Add upstream remote** button that wires it up for y
 
 Browse open/closed PRs and open one in a full in-app view: description, commits, changed
 files with diffs, and CI checks. From there you can **comment** (with quote-reply),
-**review** (approve / comment / request changes), **edit** the title and body, manage
-**labels**, **assignees**, and **reviewers** (request a review from a collaborator — the
-picker excludes the PR author, whom GitHub won't let you request), flip a PR between
+**review** (approve / comment / request changes), **edit** the title and body (and
+**retarget** the base branch, unless the PR is stacked), manage **labels**,
+**assignees**, and **reviewers** (request a review from a collaborator — the picker
+excludes the PR author, whom GitHub won't let you request), flip a PR between
 **draft** and **ready for review** in either direction (a footer **Ready for review** /
 **Convert to draft** pair, also reachable from the command palette),
 **merge** (merge commit, squash, or rebase, with optional branch deletion), and **close**.
@@ -819,7 +820,7 @@ Point the app at a **GitLab** repo and the same tab lists its **merge requests**
 closed/merged) next to any local PRs. Open one for the description, comments, commits, and a
 highlighted **diff** (with an **Open on GitLab** link) — and the GitLab MR writes:
 **comment** on it (and **edit** or **delete** your own comments), **close / reopen** it,
-**edit** its title and description,
+**edit** its title and description (and **retarget** its target branch),
 **approve / unapprove** it (a reviewer action,
 with the approval count shown inline), **request changes** (the blocking reviewer state —
 it adds you as a reviewer if needed, posts your drafted comment alongside, and clears when
@@ -1270,10 +1271,11 @@ Once connected:
 - **Pull requests** — the **Pull Requests** tab lists a Bitbucket repo's PRs; open one to
   read its **diff**, **comments**, and **build statuses**, and to act on it: **comment**,
   **decline**, **merge** (merge commit, squash, or fast-forward, with an optional
-  delete-source-branch), **edit** the title/description, **approve/unapprove**,
-  **request changes** (a true toggle — click again to revoke; approving also clears it),
-  pick **reviewers** from your workspace members (the PR author can't review their own
-  PR, so they never appear), and flip **draft ↔ ready** in either direction. Its
+  delete-source-branch), **edit** the title/description (and **retarget** the destination
+  branch), **approve/unapprove**, **request changes** (a true toggle — click again to
+  revoke; approving also clears it), pick **reviewers** from your workspace members (the
+  PR author can't review their own PR, so they never appear), and flip **draft ↔ ready**
+  in either direction. Its
   **line-anchored review comments** render too — grouped by file in the conversation
   column and anchored in the Files diff (see *Review comments* under *Pull requests*) —
   with reply-in-thread and edit/delete of your own thread comments (Bitbucket has no
@@ -1521,10 +1523,11 @@ never grants another, and every flag is **off by default**, so read-only stays t
 Beyond \`--allow-write\` (local PRs and issues, above), **Allow remote write**
 (\`--allow-remote-write\`) lets an agent make **real forge writes** in this repo under your
 authenticated identity (GitHub \`gh\`, GitLab \`glab\`, or a stored Bitbucket token):
-**create, merge, update**, and **close/reopen** pull requests, toggle **draft** state,
-**request reviewers**, **edit labels**, set **assignees** (on issues and PRs), **approve**,
-**request changes**, or **withdraw** either, **start**, **reply to**, and **resolve** review
-threads, add or remove **reactions**, **rerun/cancel/dispatch** CI, **create/update releases**,
+**create, merge, update**, and **close/reopen** pull requests, **create, extend, or
+dissolve** a GitHub PR stack, toggle **draft** state, **request reviewers**, **edit labels**,
+set **assignees** (on issues and PRs), **approve**, **request changes**, or **withdraw**
+either, **start**, **reply to**, and **resolve** review threads, add or remove
+**reactions**, **rerun/cancel/dispatch** CI, **create/update releases**,
 **create, comment on, close/reopen**, and set the **milestone** of issues, and — on GitHub —
 **create, comment on, answer, and close/reopen discussions**. One caveat: **creating** a
 pull request pushes its head branch first, so it additionally needs \`--allow-git-write\`

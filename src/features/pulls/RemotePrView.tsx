@@ -20,6 +20,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   type ReactNode,
   useEffect,
+  useEffectEvent,
   useId,
   useMemo,
   useRef,
@@ -134,7 +135,7 @@ import {
   useUnminimizeComment,
   useUnrequestChangesPr,
 } from "@/lib/git/queries";
-import { detectStackOffer } from "@/lib/git/stack-chains";
+import { detectStackOffer, isNativeStack } from "@/lib/git/stack-chains";
 import {
   type ApprovalState,
   type ForgeProvider,
@@ -186,7 +187,6 @@ import {
   threadToMarkdown,
 } from "./ReviewThreads";
 import {
-  isNativeStack,
   StackOffer,
   type StackOfferHandle,
   StackSection,
@@ -511,9 +511,7 @@ export function RemotePrView({
   // somehow left the list between detection and render.
   const offerRows = (stackOffer?.members ?? []).flatMap((n) => {
     const row = openPrs.find((p) => p.number === n);
-    return row
-      ? [{ number: row.number, title: row.title, headRefName: row.headRefName }]
-      : [];
+    return row ? [{ number: row.number, title: row.title }] : [];
   });
   const stackWriteError = stackCreate.error ?? stackAdd.error ?? null;
 
@@ -531,7 +529,14 @@ export function RemotePrView({
     const { stackNumber } = stackOffer;
     stackAdd.mutate(
       { stackNumber, pullRequests: stackOffer.members },
-      { onSuccess: () => toast.success(`Added to stack #${stackNumber}`) },
+      {
+        // The response lists the stack's members AFTER the append, so its length
+        // is the new total — not just what this write added.
+        onSuccess: (outcome) =>
+          toast.success(
+            `Added to stack #${stackNumber} — ${outcome.members.length} pull requests`,
+          ),
+      },
     );
   }
 
@@ -541,6 +546,19 @@ export function RemotePrView({
     stackCreate.reset();
     stackAdd.reset();
   }
+
+  // This component is NOT remounted per PR (RepositoryView renders it without a
+  // key), so a stack write's error — and its pending flag — would otherwise
+  // outlive the PR they belong to and render under the next PR's offer before
+  // any write. The ref makes the mount pass a no-op: there's nothing to clear
+  // yet, and clearing is only ever correct when the PR actually changed.
+  const stackWritePr = useRef(number);
+  const resetStackWrites = useEffectEvent(() => cancelStackOffer());
+  useEffect(() => {
+    if (stackWritePr.current === number) return;
+    stackWritePr.current = number;
+    resetStackWrites();
+  }, [number]);
 
   // The stack number the dissolve writes, parsed once. A native stack's id is a
   // numeric string by contract, so a value that won't parse means the contract
@@ -2516,7 +2534,7 @@ export function RemotePrView({
           edit.setOpen(open);
         }}
         title={`Edit ${prNoun}`}
-        description={`Updates the title and description of #${number} on ${remoteLabel}.`}
+        description={`Updates the title, description, and base branch of #${number} on ${remoteLabel}.`}
         contentClassName="sm:max-w-lg"
         bodyTextareaClassName="max-h-72 min-h-24 resize-y font-mono"
         onGenerate={aiEnabled ? runGenerate : undefined}
