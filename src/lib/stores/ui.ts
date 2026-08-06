@@ -80,7 +80,10 @@ export interface FindingsLimits {
 }
 
 /** One page per category — matches the shared LoadMoreRow PAGE_SIZE. */
-const DEFAULT_FINDINGS_LIMITS: FindingsLimits = { alerts: 100, advisories: 100 };
+const DEFAULT_FINDINGS_LIMITS: FindingsLimits = {
+  alerts: 100,
+  advisories: 100,
+};
 
 export interface SelectedFile {
   path: string;

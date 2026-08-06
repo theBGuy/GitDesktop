@@ -235,7 +235,9 @@ export function RepoSettingsDialog({
    *  each open, so a later open with no request starts at "general" again. */
   initialSection?: SectionId;
 }) {
-  const [section, setSection] = useState<SectionId>(initialSection ?? "general");
+  const [section, setSection] = useState<SectionId>(
+    initialSection ?? "general",
+  );
   const reduceMotion = useReducedMotion();
   // The dialog is provider-aware: each provider gets the sections its API
   // supports, with the same rail + crossfade shell.

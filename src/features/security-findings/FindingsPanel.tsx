@@ -37,6 +37,12 @@ import { type SelectedFinding, useUiStore } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
 import { SEVERITY_RANK, SeverityChip, severityLevel } from "./severity";
 
+/** Ceiling for a category's row limit. MUST stay in lockstep with `clamp_limit`
+ *  in src-tauri/src/github/security_findings.rs, which is the source of truth:
+ *  it clamps every fetch to 500, so growing the limit past this would re-run the
+ *  paged walk for the same 500 rows and leave "Load more" permanently offered. */
+const FINDINGS_LIMIT_CAP = 500;
+
 interface AlertRow {
   /** Unique per rendered row: the alert number, or an index fallback for a
    *  tolerated alert whose number came through as 0 (duplicate React keys and
@@ -52,16 +58,21 @@ interface AlertGroup {
   rows: AlertRow[];
 }
 
-/** Worst-first: the alerts endpoint orders by creation date, so severity order is
- *  applied here. The sort is stable, leaving created-order as the tiebreak within
- *  a level, and grouping preserves it — so both the groups and the rows inside
- *  each group run worst-first. */
+/** Worst-first, for every finding category: both endpoints order by date, so the
+ *  severity ladder is applied here instead. Callers use `toSorted` so the sort
+ *  stays stable and server date order remains the tiebreak within a level; a null
+ *  or unrecognized severity ranks with `unknown`, i.e. last. */
+const bySeverity = (
+  a: { severity: string | null },
+  b: { severity: string | null },
+) =>
+  SEVERITY_RANK[severityLevel(a.severity)] -
+  SEVERITY_RANK[severityLevel(b.severity)];
+
 function buildAlertGroups(alerts: DependabotAlertOut[]): AlertGroup[] {
-  const sorted = alerts.toSorted(
-    (a, b) =>
-      SEVERITY_RANK[severityLevel(a.severity)] -
-      SEVERITY_RANK[severityLevel(b.severity)],
-  );
+  // Grouping preserves the sorted order, so the groups AND the rows inside each
+  // group both run worst-first.
+  const sorted = alerts.toSorted(bySeverity);
   // Keyed by name AND ecosystem: the same package name exists in several
   // ecosystems, and merging them would mislabel the group's ecosystem.
   const groups = new Map<string, AlertGroup>();
@@ -283,6 +294,7 @@ export function FindingsPanel({
   );
   const advisoryRows = allAdvisories
     .filter((a) => matchesAdvisory(a, query))
+    .toSorted(bySeverity)
     .map((advisory, i) => ({
       // Index fallback for a tolerated advisory with no GHSA id (see AlertRow).
       id: advisory.ghsaId ? `advisory-${advisory.ghsaId}` : `advisory-i${i}`,
@@ -474,18 +486,27 @@ export function FindingsPanel({
                 )}
                 {/* Outside the empty branch: filtering to zero matches must not
                     strip the only way to reach rows past the fetched window. */}
-                {alertsOut.truncated && (
-                  <LoadMoreRow
-                    count={allAlerts.length}
-                    loading={alerts.isFetching}
-                    onLoadMore={() =>
-                      setFindingsLimits({
-                        ...limits,
-                        alerts: limits.alerts + PAGE_SIZE,
-                      })
-                    }
-                  />
-                )}
+                {alertsOut.truncated &&
+                  (limits.alerts >= FINDINGS_LIMIT_CAP ? (
+                    <p className="border-t px-3 py-3 text-xs text-muted-foreground">
+                      Showing the first {FINDINGS_LIMIT_CAP.toLocaleString()}{" "}
+                      dependency alerts.
+                    </p>
+                  ) : (
+                    <LoadMoreRow
+                      count={allAlerts.length}
+                      loading={alerts.isFetching}
+                      onLoadMore={() =>
+                        setFindingsLimits({
+                          ...limits,
+                          alerts: Math.min(
+                            limits.alerts + PAGE_SIZE,
+                            FINDINGS_LIMIT_CAP,
+                          ),
+                        })
+                      }
+                    />
+                  ))}
               </>
             )}
 
@@ -568,18 +589,27 @@ export function FindingsPanel({
                     );
                   })
                 )}
-                {advisoriesOut.truncated && (
-                  <LoadMoreRow
-                    count={allAdvisories.length}
-                    loading={advisories.isFetching}
-                    onLoadMore={() =>
-                      setFindingsLimits({
-                        ...limits,
-                        advisories: limits.advisories + PAGE_SIZE,
-                      })
-                    }
-                  />
-                )}
+                {advisoriesOut.truncated &&
+                  (limits.advisories >= FINDINGS_LIMIT_CAP ? (
+                    <p className="border-t px-3 py-3 text-xs text-muted-foreground">
+                      Showing the first {FINDINGS_LIMIT_CAP.toLocaleString()}{" "}
+                      security advisories.
+                    </p>
+                  ) : (
+                    <LoadMoreRow
+                      count={allAdvisories.length}
+                      loading={advisories.isFetching}
+                      onLoadMore={() =>
+                        setFindingsLimits({
+                          ...limits,
+                          advisories: Math.min(
+                            limits.advisories + PAGE_SIZE,
+                            FINDINGS_LIMIT_CAP,
+                          ),
+                        })
+                      }
+                    />
+                  ))}
               </>
             )}
           </div>
