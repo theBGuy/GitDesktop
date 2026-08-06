@@ -95,6 +95,13 @@ pub struct GitDesktopMcp {
     /// ops (`run_git_mutating` takes `&AppState`). Built with `AppState::default()` (no
     /// Tauri runtime needed); `Arc` so it survives the per-request clones.
     state: Arc<crate::state::AppState>,
+    /// The working tree's toplevel for [`Self::repo`], resolved on first use (see
+    /// [`Self::toplevel`]). `repo` is fixed for the process lifetime, which is what
+    /// makes caching it sound; `Arc` so the resolution survives the per-request
+    /// clones instead of re-running for each. `git::ai_ignore::filtered_diff`
+    /// resolves separately and deliberately — it serves non-MCP callers too, and
+    /// only spawns when there are patterns to apply.
+    toplevel: Arc<tokio::sync::OnceCell<String>>,
     // Read by the `#[tool_handler]`-generated `list_tools`/`call_tool`; the
     // dead-code lint misses that (it only sees the derived `Clone` touch it).
     #[allow(dead_code)]
@@ -224,6 +231,7 @@ impl GitDesktopMcp {
             allow_destructive,
             consolidated: Arc::new(AtomicBool::new(false)),
             state: Arc::new(crate::state::AppState::default()),
+            toplevel: Arc::new(tokio::sync::OnceCell::new()),
             // `ToolRouter` implements `Add`, so the domain modules stay independent — a
             // module gaining tools never touches this expression.
             tool_router: Self::read_git_router()
@@ -238,6 +246,21 @@ impl GitDesktopMcp {
             // contributes any, so there's no `+` chain here.
             prompt_router: Self::generate_prompt_router(),
         }
+    }
+
+    /// The bound repo's working-tree TOPLEVEL, resolved once per process.
+    ///
+    /// `--repo` is taken verbatim and may name any directory inside the tree, but
+    /// anything that reads repo-relative names out of git — or joins a fixed
+    /// relative path onto it — has to use the root or it answers about the
+    /// subdirectory instead, quietly. Cached because `repo` never changes after
+    /// construction; only a successful resolution is stored, so a repo that
+    /// becomes readable later is still picked up.
+    pub(super) async fn toplevel(&self) -> crate::error::AppResult<&str> {
+        self.toplevel
+            .get_or_try_init(|| crate::git::runner::worktree_toplevel(&self.repo))
+            .await
+            .map(String::as_str)
     }
 
     /// Gate for the app-data write tools (local PRs AND local issues): an actionable

@@ -1145,9 +1145,7 @@ impl GitDesktopMcp {
         &self,
         settings: &crate::app_store::AiGenSettings,
     ) -> Result<Vec<String>, McpError> {
-        let toplevel = crate::git::runner::worktree_toplevel(&self.repo)
-            .await
-            .map_err(app_err)?;
+        let toplevel = self.toplevel().await.map_err(app_err)?.to_string();
         let repo_ignore = crate::instructions::read_repo_ai_ignore(toplevel)
             .await
             .map_err(app_err)?;
@@ -1163,12 +1161,37 @@ impl GitDesktopMcp {
     /// whatever it is given and answers NotFound with `None`, so a `--repo` bound
     /// to a subdirectory drops the repo's instructions without a word.
     async fn repo_instructions(&self) -> Result<Option<String>, McpError> {
-        let toplevel = crate::git::runner::worktree_toplevel(&self.repo)
-            .await
-            .map_err(app_err)?;
+        let toplevel = self.toplevel().await.map_err(app_err)?.to_string();
         crate::instructions::read_repo_instructions(toplevel)
             .await
             .map_err(app_err)
+    }
+
+    /// Untracked (new) file paths, NUL-separated and raw — these names are matched
+    /// against the user's AI-ignore rules, so any rewriting of them fails OPEN. Without
+    /// `-z` git C-quotes a name holding a quote, backslash, or non-ASCII byte
+    /// (`"cafÃ©.txt"`), and trimming would fold a trailing-space name onto a
+    /// different name's spelling; either way the rule that covers it stops matching.
+    ///
+    /// Listed from the working-tree TOPLEVEL rather than `self.repo` as given:
+    /// `ls-files` prints names relative to its cwd and lists only that subtree, so a
+    /// `--repo` pointing below the root would both hand the engine names an anchored
+    /// rule cannot match — leaking the NAME — and silently drop every untracked file
+    /// outside that subdirectory.
+    async fn untracked_files(&self) -> Result<Vec<String>, crate::error::AppError> {
+        let toplevel = self.toplevel().await?;
+        let out = crate::git::runner::run_git(
+            Some(toplevel),
+            &["ls-files", "--others", "--exclude-standard", "-z"],
+            crate::git::runner::DEFAULT_TIMEOUT,
+        )
+        .await?;
+        Ok(out
+            .stdout_lossy()
+            .split('\0')
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect())
     }
 
     /// Gather + assemble the commit-message recipe (STAGED changes). Errors with
@@ -1530,7 +1553,7 @@ impl GitDesktopMcp {
 
         // `git diff HEAD` omits untracked files; list their paths so a branch made
         // entirely of new files can still be named (mirrors the in-app call site).
-        let untracked_paths = untracked_files(&self.repo).await.map_err(app_err)?;
+        let untracked_paths = self.untracked_files().await.map_err(app_err)?;
         // Untracked names never pass through a diff, so the ignore patterns have to
         // be applied to them here — a name is disclosure too. Their hidden count
         // joins the diff's: downstream both mean "in-progress changes hidden".
@@ -1816,33 +1839,6 @@ async fn committed_base_ref(repo: &str) -> Option<String> {
         return Some(default);
     }
     None
-}
-
-/// Untracked (new) file paths, NUL-separated and raw — these names are matched
-/// against the user's AI-ignore rules, so any rewriting of them fails OPEN. Without
-/// `-z` git C-quotes a name holding a quote, backslash, or non-ASCII byte
-/// (`"caf\303\251.txt"`), and trimming would fold a trailing-space name onto a
-/// different name's spelling; either way the rule that covers it stops matching.
-///
-/// Listed from the working-tree TOPLEVEL rather than `repo` as given: `ls-files`
-/// prints names relative to its cwd and lists only that subtree, so a `--repo`
-/// pointing below the root would both hand the engine names an anchored rule
-/// cannot match — leaking the NAME — and silently drop every untracked file
-/// outside that subdirectory.
-async fn untracked_files(repo: &str) -> Result<Vec<String>, crate::error::AppError> {
-    let toplevel = crate::git::runner::worktree_toplevel(repo).await?;
-    let out = crate::git::runner::run_git(
-        Some(&toplevel),
-        &["ls-files", "--others", "--exclude-standard", "-z"],
-        crate::git::runner::DEFAULT_TIMEOUT,
-    )
-    .await?;
-    Ok(out
-        .stdout_lossy()
-        .split('\0')
-        .filter(|p| !p.is_empty())
-        .map(str::to_string)
-        .collect())
 }
 
 /// What the AI-ignore filter left of an untracked-name list. Mirrors the TS
@@ -2826,7 +2822,14 @@ mod tests {
         std::fs::write(repo.join("sub dir").join("a b.md"), "x\n").unwrap();
         std::fs::write(repo.join("café.txt"), "x\n").unwrap();
 
-        let mut names = untracked_files(&repo_s).await.expect("list untracked");
+        let mcp = crate::mcp_server::GitDesktopMcp::with_options(
+            repo_s.clone(),
+            false,
+            false,
+            false,
+            false,
+        );
+        let mut names = mcp.untracked_files().await.expect("list untracked");
         names.sort();
         assert_eq!(
             names,
@@ -2869,7 +2872,14 @@ mod tests {
             .join("api")
             .to_string_lossy()
             .into_owned();
-        let mut names = untracked_files(&subdir).await.expect("list untracked");
+        let mcp = crate::mcp_server::GitDesktopMcp::with_options(
+            subdir.clone(),
+            false,
+            false,
+            false,
+            false,
+        );
+        let mut names = mcp.untracked_files().await.expect("list untracked");
         names.sort();
         assert_eq!(
             names,
