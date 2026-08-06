@@ -11,6 +11,7 @@ export type RepoTab =
   | "issues"
   | "discussions"
   | "actions"
+  | "findings"
   | "tags"
   | "insights"
   | "code-todos"
@@ -64,6 +65,23 @@ export interface SelectedIssue {
   id: string;
 }
 
+/** Selected security finding: a Dependabot alert (by number) or a repository
+ *  advisory (by GHSA id) — the two categories the Findings tab lists. */
+export type SelectedFinding =
+  | { type: "alert"; number: number }
+  | { type: "advisory"; ghsaId: string };
+
+/** How many rows each Findings category has asked for. In the store (not panel
+ *  state) so the list and the detail pane build identical query keys and share
+ *  one cache entry. */
+export interface FindingsLimits {
+  alerts: number;
+  advisories: number;
+}
+
+/** One page per category — matches the shared LoadMoreRow PAGE_SIZE. */
+const DEFAULT_FINDINGS_LIMITS: FindingsLimits = { alerts: 100, advisories: 100 };
+
 export interface SelectedFile {
   path: string;
   staged: boolean;
@@ -107,6 +125,9 @@ const CROSS_REPO_RESET: Partial<UiState> = {
   selectedDiscussion: null,
   pendingIssueDraft: null,
   selectedRunId: null,
+  selectedFinding: null,
+  findingsLimits: DEFAULT_FINDINGS_LIMITS,
+  repoSettingsRequest: null,
   selectedTag: null,
   selectedTodo: null,
   selectedFile: null,
@@ -194,6 +215,14 @@ interface UiState {
   localPrCreate: { defaultHead?: string; defaultBase?: string } | null;
   /** Selected workflow run (databaseId) on the Actions tab. */
   selectedRunId: number | null;
+  /** Selected finding on the Findings tab. */
+  selectedFinding: SelectedFinding | null;
+  /** Per-category row limits on the Findings tab; "Load more" bumps one. */
+  findingsLimits: FindingsLimits;
+  /** A one-shot request to open Repository Settings at a section, raised by
+   *  another surface (the Findings tab's "Dependabot is off" card). The menu
+   *  that owns the dialog consumes and clears it. */
+  repoSettingsRequest: "security" | null;
   /** Selected tag (by name) on the Tags tab. */
   selectedTag: { tag: string } | null;
   /** Selected TODO on the Code TODOs tab. Carries the scan's authoritative
@@ -286,6 +315,12 @@ interface UiState {
   }) => void;
   closeLocalPrCreate: () => void;
   selectRun: (id: number | null) => void;
+  selectFinding: (finding: SelectedFinding | null) => void;
+  setFindingsLimits: (limits: FindingsLimits) => void;
+  /** Ask whichever surface owns the Repository Settings dialog to open it at
+   *  `section`. Cleared by that surface as it opens (one-shot). */
+  requestRepoSettings: (section: "security") => void;
+  clearRepoSettingsRequest: () => void;
   selectTag: (tag: { tag: string } | null) => void;
   setSelectedTodo: (
     todo: {
@@ -375,6 +410,9 @@ export const useUiStore = create<UiState>()((set, get) => {
     pendingCreate: null,
     localPrCreate: null,
     selectedRunId: null,
+    selectedFinding: null,
+    findingsLimits: DEFAULT_FINDINGS_LIMITS,
+    repoSettingsRequest: null,
     selectedTag: null,
     selectedTodo: null,
     selectedFile: null,
@@ -473,6 +511,10 @@ export const useUiStore = create<UiState>()((set, get) => {
     openLocalPrCreate: (seeds) => set({ localPrCreate: seeds ?? {} }),
     closeLocalPrCreate: () => set({ localPrCreate: null }),
     selectRun: (id) => set({ selectedRunId: id }),
+    selectFinding: (finding) => set({ selectedFinding: finding }),
+    setFindingsLimits: (limits) => set({ findingsLimits: limits }),
+    requestRepoSettings: (section) => set({ repoSettingsRequest: section }),
+    clearRepoSettingsRequest: () => set({ repoSettingsRequest: null }),
     selectTag: (tag) => set({ selectedTag: tag }),
     setSelectedTodo: (todo) => set({ selectedTodo: todo }),
     selectCommit: (hash) => set({ selectedCommitHash: hash }),

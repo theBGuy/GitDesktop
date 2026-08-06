@@ -279,6 +279,11 @@ export const capabilities: Capability[] = [
     group: "CI, tags & releases",
     label: "Insights graphs — commit activity, churn & more, computed locally",
   },
+  {
+    group: "CI, tags & releases",
+    label: "Findings tab — Dependabot alerts & security advisories",
+    highlight: true,
+  },
 
   // — Repository & workspace —
   {

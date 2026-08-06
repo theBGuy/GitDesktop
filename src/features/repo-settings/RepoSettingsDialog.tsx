@@ -101,7 +101,7 @@ function eventsSummary(events: string[]): string {
   return `${labels.slice(0, 3).join(", ")} +${labels.length - 3}`;
 }
 
-type SectionId =
+export type SectionId =
   | "general"
   | "access"
   | "rules"
@@ -226,12 +226,16 @@ export function RepoSettingsDialog({
   repoPath,
   open,
   onOpenChange,
+  initialSection,
 }: {
   repoPath: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Section to land on. An initializer is enough: the dialog mounts fresh on
+   *  each open, so a later open with no request starts at "general" again. */
+  initialSection?: SectionId;
 }) {
-  const [section, setSection] = useState<SectionId>("general");
+  const [section, setSection] = useState<SectionId>(initialSection ?? "general");
   const reduceMotion = useReducedMotion();
   // The dialog is provider-aware: each provider gets the sections its API
   // supports, with the same rail + crossfade shell.

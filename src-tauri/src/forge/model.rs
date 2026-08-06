@@ -32,6 +32,10 @@ pub struct Capabilities {
     pub ci: bool,
     pub webhooks: bool,
     pub approvals: bool,
+    /// Reading the platform's own vulnerability findings (Dependabot alerts +
+    /// repository security advisories). GitHub-only — GitLab's equivalent is a
+    /// paid-tier security dashboard and Bitbucket Cloud has no analogue.
+    pub security_findings: bool,
 }
 
 impl Capabilities {
@@ -53,6 +57,7 @@ impl Capabilities {
                 ci: true,
                 webhooks: true,
                 approvals: true,
+                security_findings: true,
             },
             // GitLab: MRs/issues/labels/milestones/CI/approvals, emoji "awards" as
             // reactions, but no Discussions (GitHub-only).
@@ -68,6 +73,7 @@ impl Capabilities {
                 ci: true,
                 webhooks: true,
                 approvals: true,
+                security_findings: false,
             },
             // Bitbucket Cloud: no labels, milestones, stars, reactions, or
             // discussions; PRs/CI(pipelines)/webhooks/approvals do work. Draft PRs
@@ -86,6 +92,7 @@ impl Capabilities {
                 ci: true,
                 webhooks: true,
                 approvals: true,
+                security_findings: false,
             },
         }
     }
@@ -105,6 +112,7 @@ impl Capabilities {
             ci: false,
             webhooks: false,
             approvals: false,
+            security_findings: false,
         }
     }
 }
@@ -725,6 +733,7 @@ mod tests {
     fn github_supports_everything() {
         let c = Capabilities::for_provider(Provider::GitHub);
         assert!(c.discussions && c.labels && c.milestones && c.draft_prs && c.reactions && c.stars);
+        assert!(c.security_findings);
     }
 
     #[test]
@@ -732,12 +741,15 @@ mod tests {
         let c = Capabilities::for_provider(Provider::GitLab);
         assert!(!c.discussions);
         assert!(c.labels && c.milestones && c.stars && c.reactions && c.approvals);
+        // Dependabot alerts / repo advisories are a GitHub surface.
+        assert!(!c.security_findings);
     }
 
     #[test]
     fn bitbucket_drops_unsupported_features() {
         let c = Capabilities::for_provider(Provider::Bitbucket);
         assert!(!c.labels && !c.milestones && !c.stars && !c.reactions && !c.discussions);
+        assert!(!c.security_findings);
         // Issues are off — the native tracker sunsets 2026-08-20.
         assert!(!c.issues);
         // …but the core flow still works, and draft PRs are supported.
@@ -748,6 +760,7 @@ mod tests {
     fn none_supports_nothing() {
         let c = Capabilities::none();
         assert!(!c.pull_requests && !c.issues && !c.ci && !c.webhooks);
+        assert!(!c.security_findings);
     }
 
     #[test]

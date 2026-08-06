@@ -1245,6 +1245,32 @@ to jump to that run. You can also get an OS **notification** when a run finishes
 (**Settings → Notifications**).`,
   },
   {
+    id: "findings",
+    label: "Findings",
+    body: `# Findings
+
+The **Findings** tab (in the More ▾ menu; palette-only by default — bind a key in
+**Settings → Keyboard**) collects what GitHub's security scanning has turned up for the repo, so you
+can read it without opening the browser. It covers **GitHub** repositories; on a GitLab
+or Bitbucket repo the tab says so instead.
+
+- **Dependabot alerts** — every open alert, grouped by the vulnerable package. Each one
+  shows its **severity**, the **affected version range**, the **first patched version**,
+  and a **CVSS** score when GitHub reports one.
+- **Security advisories** — the advisories published on the repository itself.
+
+Move through the list with **↑ / ↓**; select a row for its detail, then **View on
+GitHub** to open it there.
+
+A category that isn't reporting tells you why rather than looking empty. When Dependabot
+alerts are switched off for the repo, **Open security settings** takes you straight to
+**Repository settings → Security**, where you turn scanning on (see *Repository
+settings*). When your GitHub access can't read a category, you see what GitHub said
+about it; when the check couldn't complete at all, you get a **Retry**.
+
+The tab fetches when you open it — use the refresh button for the current state.`,
+  },
+  {
     id: "bitbucket",
     label: "Bitbucket repositories",
     body: `# Bitbucket repositories

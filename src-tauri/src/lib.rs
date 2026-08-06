@@ -556,6 +556,8 @@ pub fn run() {
             github::collaborators::gh_invitation_cancel,
             github::security::gh_security_get,
             github::security::gh_security_apply,
+            github::security_findings::gh_dependabot_alerts,
+            github::security_findings::gh_repo_advisories,
             github::lifecycle::gh_repo_set_visibility,
             github::lifecycle::gh_repo_transfer,
             github::lifecycle::gh_repo_delete,

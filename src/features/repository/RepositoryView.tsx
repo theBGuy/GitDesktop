@@ -7,6 +7,7 @@ import {
   GitPullRequestIcon,
   ListChecksIcon,
   PlayIcon,
+  ShieldCheckIcon,
   TagIcon,
 } from "@phosphor-icons/react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -55,6 +56,8 @@ import { RunTaskPicker } from "@/features/scripts/RunTaskPicker";
 import { TaskRunConfirm } from "@/features/scripts/TaskRunConfirm";
 import { TaskRunView } from "@/features/scripts/TaskRunView";
 import { TasksPanel } from "@/features/scripts/TasksPanel";
+import { FindingDetailView } from "@/features/security-findings/FindingDetailView";
+import { FindingsPanel } from "@/features/security-findings/FindingsPanel";
 import { TagDetailView } from "@/features/tags/TagDetailView";
 import { TagsPanel } from "@/features/tags/TagsPanel";
 import {
@@ -126,6 +129,7 @@ const SECONDARY_TABS: { tab: RepoTab; label: string; ai?: boolean }[] = [
   { tab: "code-todos", label: "Code TODOs" },
   { tab: "discussions", label: "Discussions" },
   { tab: "actions", label: "Actions" },
+  { tab: "findings", label: "Findings" },
   { tab: "tags", label: "Tags" },
   { tab: "tasks", label: "Tasks" },
   { tab: "insights", label: "Insights" },
@@ -145,6 +149,7 @@ export function RepositoryView() {
   const selectedIssue = useUiStore((s) => s.selectedIssue);
   const selectedDiscussion = useUiStore((s) => s.selectedDiscussion);
   const selectedRunId = useUiStore((s) => s.selectedRunId);
+  const selectedFinding = useUiStore((s) => s.selectedFinding);
   const selectedTag = useUiStore((s) => s.selectedTag);
   const selectedTodo = useUiStore((s) => s.selectedTodo);
   const localPrCreate = useUiStore((s) => s.localPrCreate);
@@ -241,6 +246,7 @@ export function RepositoryView() {
   useHotkeyAction("tab-issues", () => changeTab("issues"));
   useHotkeyAction("tab-discussions", () => changeTab("discussions"));
   useHotkeyAction("tab-actions", () => changeTab("actions"));
+  useHotkeyAction("tab-findings", () => changeTab("findings"));
   useHotkeyAction("tab-tags", () => changeTab("tags"));
   useHotkeyAction("tab-insights", () => changeTab("insights"));
   useHotkeyAction("tab-code-todos", () => changeTab("code-todos"));
@@ -450,6 +456,12 @@ export function RepositoryView() {
           <Activity mode={mode("actions")}>
             <ActionsPanel repoPath={repoPath} active={repoTab === "actions"} />
           </Activity>
+          <Activity mode={mode("findings")}>
+            <FindingsPanel
+              repoPath={repoPath}
+              active={repoTab === "findings"}
+            />
+          </Activity>
           <Activity mode={mode("tags")}>
             <TagsPanel repoPath={repoPath} />
           </Activity>
@@ -572,6 +584,24 @@ export function RepositoryView() {
               <DiffPlaceholder
                 icon={PlayIcon}
                 message="Select a workflow run"
+              />
+            )}
+          </Activity>
+          <Activity mode={mode("findings")}>
+            {selectedFinding ? (
+              <FindingDetailView
+                key={
+                  selectedFinding.type === "alert"
+                    ? `a${selectedFinding.number}`
+                    : `g${selectedFinding.ghsaId}`
+                }
+                repoPath={repoPath}
+                active={repoTab === "findings"}
+              />
+            ) : (
+              <DiffPlaceholder
+                icon={ShieldCheckIcon}
+                message="Select a finding"
               />
             )}
           </Activity>

@@ -15,6 +15,7 @@ pub mod rulesets;
 pub mod runner;
 pub mod secrets;
 pub mod security;
+pub mod security_findings;
 
 use crate::error::{AppError, AppResult};
 

@@ -22,7 +22,7 @@ import {
   WarningCircleIcon,
 } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense, useEffect, useEffectEvent, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -46,6 +46,7 @@ import { RepoAutomationsDialog } from "@/features/automations/RepoAutomationsDia
 import { BranchRulesDialog } from "@/features/branch-rules/BranchRulesDialog";
 import { HooksDialog } from "@/features/hooks/HooksDialog";
 import { RepoJiraDialog } from "@/features/issues/RepoJiraDialog";
+import type { SectionId } from "@/features/repo-settings/RepoSettingsDialog";
 import { copyText } from "@/lib/clipboard";
 import {
   forgeRepoUrl,
@@ -104,6 +105,12 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   const [automationsOpen, setAutomationsOpen] = useState(false);
   const [jiraOpen, setJiraOpen] = useState(false);
   const [repoSettingsOpen, setRepoSettingsOpen] = useState(false);
+  const [repoSettingsSection, setRepoSettingsSection] =
+    useState<SectionId | null>(null);
+  const repoSettingsRequest = useUiStore((s) => s.repoSettingsRequest);
+  const clearRepoSettingsRequest = useUiStore(
+    (s) => s.clearRepoSettingsRequest,
+  );
   const [branchRulesOpen, setBranchRulesOpen] = useState(false);
   const [hooksOpen, setHooksOpen] = useState(false);
   const [submodulesOpen, setSubmodulesOpen] = useState(false);
@@ -166,6 +173,24 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   // The repo's Jira link (if any), so the menu item reads "Change…" vs "Link…"
   // and the dialog opens in edit mode.
   const jiraLink = useJiraLink(repoPath);
+
+  // A request that arrives while the dialog is already open is dropped, not
+  // queued: the section is seeded at mount, so it couldn't be applied, and
+  // deferring it would reopen the dialog the moment the user closed it.
+  const openRepoSettingsAt = useEffectEvent((section: SectionId) => {
+    if (repoSettingsOpen) return;
+    setRepoSettingsSection(section);
+    setRepoSettingsOpen(true);
+  });
+
+  // A one-shot deep link raised by another surface (the Findings tab's "turn on
+  // Dependabot" card). Keyed on the request alone so re-opening the dialog can
+  // never re-fire it.
+  useEffect(() => {
+    if (!repoSettingsRequest) return;
+    openRepoSettingsAt(repoSettingsRequest);
+    clearRepoSettingsRequest();
+  }, [repoSettingsRequest, clearRepoSettingsRequest]);
 
   const onError = (e: unknown) => toastError(e);
 
@@ -451,7 +476,13 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
           <RepoSettingsDialog
             repoPath={repoPath}
             open={repoSettingsOpen}
-            onOpenChange={setRepoSettingsOpen}
+            onOpenChange={(o) => {
+              setRepoSettingsOpen(o);
+              // Drop the deep-linked section on close so a later plain open
+              // starts at "general".
+              if (!o) setRepoSettingsSection(null);
+            }}
+            initialSection={repoSettingsSection ?? undefined}
           />
         </Suspense>
       )}

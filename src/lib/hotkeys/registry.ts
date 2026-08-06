@@ -146,6 +146,13 @@ export const ACTIONS = [
     defaultBinding: null,
   },
   {
+    id: "tab-findings",
+    label: "Findings tab",
+    category: "Navigation",
+    // Palette-only by default: mod+1–9 are already taken by the other tabs.
+    defaultBinding: null,
+  },
+  {
     id: "tab-agent",
     label: "Agent tab",
     category: "Navigation",

@@ -77,6 +77,10 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
 - **GitHub Actions cockpit** — browse runs, drill into jobs and steps, re-run (all
   or failed), cancel, dispatch a workflow, and read failed-step logs — none of
   which GitHub Desktop does.
+- **Security findings, in-app** — a **Findings** tab lists a GitHub repo's open
+  **Dependabot alerts**, grouped by vulnerable package with severity and the first
+  patched version, alongside the repository's **security advisories** — each one a
+  click from its page on GitHub, and one click from turning scanning on when it's off.
 - **Explore repositories** — a full-page browser across **GitHub, GitLab & Bitbucket**:
   before you type it shows **your own repositories** (grouped by owner) and a **Popular**
   star-sorted feed (GitHub & GitLab); typing searches GitHub, all public GitLab projects,
@@ -553,6 +557,16 @@ cancel / manual dispatch, inline failed-step logs, **Debug with AI**, a current-
 CI badge in the header, and run-completion notifications.
 
 ![GitDesktop's GitHub Actions tab: a workflow run with its Lint, Unit tests, and Build jobs listed, the Build job expanded into individual steps and durations, plus Re-run all jobs and View on GitHub controls.](site/src/assets/app-actions.png)
+
+**Findings** — a tab (More ▾) for a GitHub repo's open **Dependabot alerts**,
+grouped by the vulnerable package, each with its severity, affected version range,
+first patched version, and a CVSS score when GitHub has one — plus the
+**security advisories** published
+on the repository itself. Select a row for the detail, then open it on GitHub.
+When a category isn't reporting — alerts switched off, a token that can't read
+them, or a check that didn't complete — the tab says which and why, and
+**Open security settings** goes straight to Repository settings → Security to
+turn scanning on.
 
 **Insights** — a repository-graphs tab (Ctrl/Cmd-9): commit activity, code
 frequency (additions vs. deletions), contributor churn, and a commit punch card —

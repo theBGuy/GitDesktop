@@ -656,6 +656,8 @@ export interface ForgeCapabilities {
   ci: boolean;
   webhooks: boolean;
   approvals: boolean;
+  /** Dependabot alerts + repository security advisories (GitHub-only surfaces). */
+  securityFindings: boolean;
 }
 
 /** Which hosted features GitDesktop has actually *built* for a provider — a different

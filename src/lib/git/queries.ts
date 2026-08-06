@@ -86,7 +86,7 @@ export function useRepoIdentity(repo: string) {
  * query's repo segment matches, so Load-more and Open/Closed switches still skip the
  * skeleton. `repoKeyIndex` is where the repo sits in the key (1 for every key here).
  */
-function keepPreviousDataForRepo(repo: string, repoKeyIndex = 1) {
+export function keepPreviousDataForRepo(repo: string, repoKeyIndex = 1) {
   return <T>(
     previousData: T | undefined,
     previousQuery: { queryKey: QueryKey } | undefined,
@@ -2470,6 +2470,7 @@ const NO_FORGE_STATUS: ForgeStatus = {
     ci: false,
     webhooks: false,
     approvals: false,
+    securityFindings: false,
   },
   implemented: {
     pullRequests: false,
