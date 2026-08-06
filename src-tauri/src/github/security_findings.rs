@@ -408,19 +408,20 @@ fn clamp_limit(limit: Option<u32>) -> usize {
 }
 
 /// Whether the page walk keeps going, and if not whether findings were left behind.
+/// `Continue` carries the cursor, so only an addressable next page can resume it.
 #[derive(Debug, PartialEq, Eq)]
 enum PageOutcome {
     Stop { truncated: bool },
-    Continue,
+    Continue(String),
 }
 
 /// The walk's per-page decision, given the items gathered so far and this page's
 /// size and Link header. Truncation is the safe direction: every stop we can't
 /// prove complete reports `truncated`, never a clean end of list.
-fn page_outcome(total: usize, limit: usize, page_len: usize, next: &NextPage) -> PageOutcome {
+fn page_outcome(total: usize, limit: usize, page_len: usize, next: NextPage) -> PageOutcome {
     if total >= limit {
         return PageOutcome::Stop {
-            truncated: total > limit || *next != NextPage::None,
+            truncated: total > limit || next != NextPage::None,
         };
     }
     match next {
@@ -430,7 +431,7 @@ fn page_outcome(total: usize, limit: usize, page_len: usize, next: &NextPage) ->
         NextPage::Unreadable => PageOutcome::Stop { truncated: true },
         // An empty page that still advertises a next link would spin the walk.
         NextPage::Cursor(_) if page_len == 0 => PageOutcome::Stop { truncated: true },
-        NextPage::Cursor(_) => PageOutcome::Continue,
+        NextPage::Cursor(c) => PageOutcome::Continue(c),
     }
 }
 
@@ -459,33 +460,24 @@ async fn fetch_paged(repo_path: &str, base_path: &str, limit: usize) -> AppResul
         let page_len = page.len();
         let next = parse_link_next(headers);
         items.extend(page);
-        match page_outcome(items.len(), limit, page_len, &next) {
+        match page_outcome(items.len(), limit, page_len, next) {
             PageOutcome::Stop { truncated } => {
                 items.truncate(limit);
                 return Ok(Fetched::Items { items, truncated });
             }
-            // `Continue` is only returned for an addressable cursor; anything else
-            // ends the walk as incomplete rather than as a clean list.
-            PageOutcome::Continue => match next {
-                NextPage::Cursor(c) => cursor = Some(c),
-                _ => {
-                    return Ok(Fetched::Items {
-                        items,
-                        truncated: true,
-                    })
-                }
-            },
+            PageOutcome::Continue(c) => cursor = Some(c),
         }
     }
 }
 
-/// Survivors of a page's deserialization, or the size of a page nothing survived.
+/// Survivors of deserializing the whole fetched window, or its size when nothing
+/// survived — classification spans the walk's items, not one page.
 enum ParsedItems<T> {
     Items(Vec<T>),
     AllUnreadable(usize),
 }
 
-/// Drops individually malformed items, but keeps a page that parsed away entirely
+/// Drops individually malformed items, but keeps a window that parsed away entirely
 /// distinguishable: an empty `Available` list would tell the user the repo is clean
 /// when we simply couldn't read what GitHub sent.
 fn parse_items<T: DeserializeOwned>(items: Vec<Value>) -> ParsedItems<T> {
@@ -1037,16 +1029,16 @@ mod tests {
     fn page_outcome_stops_at_the_limit() {
         // A full window with a further page is truncated; without one it is complete.
         assert_eq!(
-            page_outcome(5, 5, 5, &NextPage::Cursor("C".into())),
+            page_outcome(5, 5, 5, NextPage::Cursor("C".into())),
             PageOutcome::Stop { truncated: true }
         );
         assert_eq!(
-            page_outcome(5, 5, 5, &NextPage::None),
+            page_outcome(5, 5, 5, NextPage::None),
             PageOutcome::Stop { truncated: false }
         );
         // Overshooting the window is truncation on its own.
         assert_eq!(
-            page_outcome(7, 5, 7, &NextPage::None),
+            page_outcome(7, 5, 7, NextPage::None),
             PageOutcome::Stop { truncated: true }
         );
     }
@@ -1056,11 +1048,11 @@ mod tests {
         // An unaddressable next page, and an empty page still advertising a cursor
         // (which would spin the walk), both end it as incomplete.
         assert_eq!(
-            page_outcome(2, 5, 2, &NextPage::Unreadable),
+            page_outcome(2, 5, 2, NextPage::Unreadable),
             PageOutcome::Stop { truncated: true }
         );
         assert_eq!(
-            page_outcome(2, 5, 0, &NextPage::Cursor("C".into())),
+            page_outcome(2, 5, 0, NextPage::Cursor("C".into())),
             PageOutcome::Stop { truncated: true }
         );
     }
@@ -1068,11 +1060,12 @@ mod tests {
     #[test]
     fn page_outcome_continues_under_the_limit_and_ends_clean() {
         assert_eq!(
-            page_outcome(2, 5, 2, &NextPage::Cursor("C".into())),
-            PageOutcome::Continue
+            page_outcome(2, 5, 2, NextPage::Cursor("C".into())),
+            // The cursor rides the outcome, so the walk can't resume on anything else.
+            PageOutcome::Continue("C".into())
         );
         assert_eq!(
-            page_outcome(2, 5, 2, &NextPage::None),
+            page_outcome(2, 5, 2, NextPage::None),
             PageOutcome::Stop { truncated: false }
         );
     }

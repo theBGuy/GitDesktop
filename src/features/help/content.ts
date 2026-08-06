@@ -1264,9 +1264,9 @@ Move through the list with **↑ / ↓**; select a row for its detail, then **Vi
 GitHub** to open it there.
 
 A category that isn't reporting tells you why rather than looking empty. When Dependabot
-alerts are switched off for the repo, **Open security settings** takes you straight to
-**Repository settings → Security**, where you turn scanning on (see *Repository
-settings*). When your GitHub access can't read a category, you see what GitHub said
+alerts are switched off for the repo and you have repo-admin access, **Open security
+settings** takes you straight to **Repository settings → Security**, where you turn
+scanning on (see *Repository settings*). When your GitHub access can't read a category, you see what GitHub said
 about it; when the check couldn't complete at all, you get a **Retry**.
 
 The tab fetches when you open it — use the refresh button for the current state.`,

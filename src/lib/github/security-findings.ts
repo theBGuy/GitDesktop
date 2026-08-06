@@ -18,7 +18,8 @@ export interface DependabotAlertsOut {
   /** The server's own explanation for a non-available envelope; null otherwise. */
   detail: string | null;
   alerts: DependabotAlertOut[];
-  /** The page filled the requested limit, so more may exist server-side. */
+  /** More findings may exist past the fetched window — the limit filled, or the
+   *  walk stopped without proving it reached the end. */
   truncated: boolean;
 }
 
