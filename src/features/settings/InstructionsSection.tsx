@@ -46,11 +46,15 @@ export const InstructionsSection = withForm({
             <code className="rounded bg-muted px-1 py-0.5">vendor/</code> a
             folder wherever it sits. A leading{" "}
             <code className="rounded bg-muted px-1 py-0.5">!</code> puts back
-            something a broader pattern hid, and these patterns are applied after
-            a repository's own file, so a repo can never re-expose what you
-            excluded here. Matching files stay staged and committed as usual, but
-            their diffs are left out of what the AI sees, so noisy folders don't
-            dominate the message.
+            something a broader pattern hid — to spare a file inside an excluded
+            folder, exclude the folder's contents (
+            <code className="rounded bg-muted px-1 py-0.5">vendor/*</code>, not{" "}
+            <code className="rounded bg-muted px-1 py-0.5">vendor/</code>),
+            since git never re-includes below an excluded directory. These
+            patterns are applied after a repository's own file, so a repo can
+            never re-expose what you excluded here. Matching files stay staged
+            and committed as usual, but their diffs are left out of what the AI
+            sees, so noisy folders don't dominate the message.
           </p>
         </div>
         <p className="text-xs text-muted-foreground">

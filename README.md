@@ -641,8 +641,10 @@ display can't strand it off-screen.
   normally), in `.gitignore` syntax: `secrets.env` hides that file at any depth,
   `/secrets.env` only the copy at the repo root, `node_modules` or `vendor/` a
   folder wherever it sits, and `docs/*.log` just that folder's logs. A `!` line
-  puts back something a broader pattern hid, and your global patterns are
-  applied last, so a repo's committed file can never re-expose what you excluded
+  puts back something a broader pattern hid — to spare a file inside an excluded
+  folder, exclude the folder's *contents* (`vendor/*`, not `vendor/`), since git
+  never re-includes below an excluded directory. Your global patterns are applied
+  last, so a repo's committed file can never re-expose what you excluded
   yourself. A model that reads your repository itself isn't limited by them —
   that's what the PR panel's **Agentic review** toggle turns on.
   - **Global** — Settings → Excluded files (one pattern per line).

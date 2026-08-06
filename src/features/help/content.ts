@@ -1694,14 +1694,15 @@ notes**, and **repository descriptions**.
   of the AI's context while still committing them normally — global in Settings, or
   per-repo via \`.gitdesktop/aiignore\`. A model that reads your repository itself isn't
   limited by them — that's what **Agentic review** on a pull request turns on (see
-  *Pull requests*). They're \`.gitignore\` patterns: \`secrets.env\` hides
-  that file at any depth, \`/secrets.env\` only the copy at the repo root, \`node_modules\`
-  or \`vendor/\` a folder wherever it sits, and \`docs/*.log\` just that folder's logs.
-  A \`!\` line puts back something a broader pattern hid, and your global patterns are
-  applied last, so a repo's committed file can never re-expose what you excluded
-  yourself. No
-  need to hand-edit the file: {{secondaryclick}} a changed file → *Exclude from AI* (the
-  file, its folder, or its file type — or a multi-selection) appends to
+  *Pull requests*). They're \`.gitignore\` patterns: \`secrets.env\` hides that file at
+  any depth, \`/secrets.env\` only the copy at the repo root, \`node_modules\` or
+  \`vendor/\` a folder wherever it sits, and \`docs/*.log\` just that folder's logs. A
+  \`!\` line puts back something a broader pattern hid — to spare a file inside an
+  excluded folder, exclude the folder's *contents* (\`vendor/*\`, not \`vendor/\`), since
+  git never re-includes below an excluded directory. Your global patterns are applied
+  last, so a repo's committed file can never re-expose what you excluded yourself.
+  No need to hand-edit the file: {{secondaryclick}} a changed file → *Exclude from AI*
+  (the file, its folder, or its file type — or a multi-selection) appends to
   \`.gitdesktop/aiignore\`, creating it if needed — an anchored line (\`/src/config.ts\`,
   \`/vendor/\`) for exactly the file or folder you picked.
 - **Hide AI** (Settings → General) hides the AI surfaces and pauses your automations —

@@ -55,6 +55,12 @@ fn actionable_lines(patterns: &[String]) -> (Vec<&str>, bool) {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
+        // An embedded newline would smuggle EXTRA pattern lines into the excludes
+        // file past this per-line classification — the smuggled tail could be a
+        // negation while the entry classifies by its first character as positive.
+        if line.contains('\n') || line.contains('\r') {
+            continue;
+        }
         has_positive |= !line.starts_with('!');
         lines.push(line);
     }
@@ -460,7 +466,7 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn drops_blanks_comments_and_negations() {
+    fn keeps_negations_in_order_drops_blanks_and_comments() {
         let patterns = [
             "  ".to_string(),
             "# a comment".to_string(),
@@ -481,6 +487,23 @@ mod tests {
         assert_eq!(lines, ["!a"]);
         assert!(!has_positive);
         assert!(!has_actionable_lines(&inert));
+
+        // An embedded newline would reach the excludes file as TWO lines — the
+        // second an effective negation — while classifying by its first
+        // character as positive. `git_filter_ai_ignored` takes this list
+        // straight from the renderer, so the entry is dropped whole.
+        let smuggled = ["*.env\n!secrets.env".to_string()];
+        let (lines, has_positive) = actionable_lines(&smuggled);
+        assert!(lines.is_empty(), "{lines:?}");
+        assert!(!has_positive);
+        assert!(!has_actionable_lines(&smuggled));
+        // A bare CR is dropped on the same grounds.
+        assert!(actionable_lines(&["a\rb".to_string()]).0.is_empty());
+        // …but a TRAILING newline is just line noise: it trims away and the
+        // pattern still counts.
+        let trailing = ["*.env\n".to_string()];
+        assert_eq!(actionable_lines(&trailing).0, ["*.env"]);
+        assert!(has_actionable_lines(&trailing));
     }
 
     /// The widened term keeps every glob metacharacter literal, collapses each
@@ -513,7 +536,11 @@ mod tests {
     }
 
     /// Every fixture path in the parity repo, repo-relative and sorted.
-    const FIXTURE: [&str; 27] = [
+    const FIXTURE: [&str; 28] = [
+        // A name starting with the negation marker, so an escaped `\!` pattern
+        // has something real to hide. `!` is a legal filename character on every
+        // platform we ship.
+        "!important.txt",
         // A bracket expression's members (`a-d`/`abd`) plus `aXd`, which is not
         // one — so a class that quietly widened would be visible.
         "a-d",
@@ -530,8 +557,9 @@ mod tests {
         "a[b",
         "abd",
         "app.log",
-        // An escaped metacharacter beside the sibling a wildcard would also
-        // sweep, so an over-broad match has a witness.
+        // Negative controls: a `!` and a `^` mid-name, each beside an `X` twin.
+        // Nothing in PARITY may hide these — they are what an over-broad match
+        // (a stray wildcard, a mis-parsed class) would sweep up first.
         "bang!.txt",
         "bangX.txt",
         "build/x.txt",
@@ -559,7 +587,7 @@ mod tests {
     /// The measured truth table (git 2.51.1): for each AI-ignore pattern LIST,
     /// exactly which of `FIXTURE` it hides. The diff commands and
     /// `git_filter_ai_ignored` must both agree with it.
-    const PARITY: [(&[&str], &[&str]); 31] = [
+    const PARITY: [(&[&str], &[&str]); 34] = [
         (
             &["notes.md"],
             &["a/b/notes.md", "docs/notes.md", "notes.md"],
@@ -655,6 +683,10 @@ mod tests {
         // A bracket expression the USER wrote is git's own syntax, read as a range
         // here — so `a-d` is NOT a member, only `abd` is in this fixture.
         (&["a[b-c]d"], &["abd"]),
+        // A backslash escape INSIDE a class: `\-` makes the `-` a member rather
+        // than a range, so the class is {b,-,c} and `a-d` joins `abd`. `aXd` is
+        // the control that must stay visible either way.
+        (&["a[b\\-c]d"], &["a-d", "abd"]),
         // An escaped NON-ASCII character is simply that character to the matcher,
         // multi-byte encoding and all.
         (&["docs/\\日本語.md"], &["docs/日本語.md"]),
@@ -665,6 +697,13 @@ mod tests {
         // nothing at all — including the `a[b` that is a real fixture name.
         (&["a["], &[]),
         (&["a[b"], &[]),
+        // `\!` ESCAPES the marker: this is a POSITIVE pattern naming a file whose
+        // name starts with `!`, and the bare form is a negation that hides
+        // nothing. The pair pins the classification `has_positive` keys on — read
+        // it as a negation and a list of only this line takes the unfiltered fast
+        // path, shipping the whole diff.
+        (&["\\!important.txt"], &["!important.txt"]),
+        (&["!important.txt"], &[]),
     ];
 
     /// A `.gitignore` line the fixture repo carries but the AI-ignore lists never

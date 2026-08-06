@@ -36,10 +36,21 @@ pub async fn read_repo_ai_ignore(repo_path: String) -> AppResult<Vec<String>> {
 
 /// Appends AI-ignore patterns to `<repo>/.gitdesktop/aiignore`, creating the
 /// `.gitdesktop` directory and the file (seeded with a `#` header comment) if
-/// absent. Mirrors `append_to_gitignore`: trim, de-dupe in batch, skip lines
-/// already present. Lines are stored verbatim, gitignore-style — a leading `/`
-/// is preserved and anchors the pattern to the repo root. Returns how many
-/// patterns were appended (0 when all were empty or already present).
+/// absent. Lines are stored verbatim, gitignore-style — a leading `/` is
+/// preserved and anchors the pattern to the repo root. Returns how many patterns
+/// were appended (0 when all were empty or already EFFECTIVE).
+///
+/// Two properties are load-bearing now that `!` un-ignore lines are honored
+/// last-match-wins (see [`crate::git::ai_ignore`]):
+///
+/// Dedup compares only against the lines AFTER the file's last `!`, because a
+/// pattern sitting before a later negation is present but NOT in effect —
+/// counting it as a duplicate would return 0 and let the UI report a file
+/// excluded while it still reaches the model. An unrelated later `!` at worst
+/// re-appends a line the file already had, which changes no verdict.
+///
+/// New lines go at the END, which is what lets a fresh *Exclude from AI* outrank
+/// an earlier hand-written negation of the same path.
 #[tauri::command]
 pub async fn append_repo_ai_ignore(repo_path: String, patterns: Vec<String>) -> AppResult<usize> {
     const HEADER: &str =
@@ -66,13 +77,19 @@ pub async fn append_repo_ai_ignore(repo_path: String, patterns: Vec<String>) -> 
         Err(e) => return Err(AppError::Io(e)),
     };
 
-    // Drop anything already in the file (scoped so the borrow ends before we
-    // mutate `content`).
+    // Drop anything already EFFECTIVE in the file — only the lines after its last
+    // `!`, since an earlier one is overridden by that negation (see the doc
+    // above). Scoped so the borrow ends before we mutate `content`.
     let to_add: Vec<String> = {
-        let existing: HashSet<&str> = content
+        let trimmed: Vec<&str> = content
             .lines()
             .map(crate::fsops::trim_ignore_pattern)
             .collect();
+        let after_last_negation = trimmed
+            .iter()
+            .rposition(|l| l.starts_with('!'))
+            .map_or(0, |i| i + 1);
+        let existing: HashSet<&str> = trimmed[after_last_negation..].iter().copied().collect();
         wanted
             .into_iter()
             .filter(|p| !existing.contains(p.as_str()))
@@ -586,5 +603,49 @@ mod tests {
         assert_eq!(added_dupe, 0);
         let after = std::fs::read_to_string(&path).unwrap();
         assert_eq!(before, after);
+    }
+
+    /// Dedup is "already EFFECTIVE", not "present anywhere": a pattern sitting
+    /// before a later `!` is overridden, so *Exclude from AI* must re-append it
+    /// at the end rather than report success while the file still reaches a model.
+    #[tokio::test]
+    async fn append_ai_ignore_re_adds_a_pattern_a_later_negation_overrides() {
+        let (_tmp, dir) = ai_ignore_test_repo();
+        let repo = dir.to_string_lossy().into_owned();
+        let path = dir.join(".gitdesktop").join("aiignore");
+        std::fs::create_dir_all(dir.join(".gitdesktop")).unwrap();
+
+        // The line is present but DEAD — a hand-written negation follows it.
+        std::fs::write(&path, "/secrets.env\n!secrets.env\n").unwrap();
+        let added = append_repo_ai_ignore(repo.clone(), vec!["/secrets.env".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(
+            added, 1,
+            "the overridden pattern is re-asserted, not skipped"
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.trim_end().ends_with("/secrets.env"),
+            "…and lands LAST, which is what makes it win: {text:?}"
+        );
+
+        // No negation in play → unchanged behavior, still a duplicate.
+        std::fs::write(&path, "/secrets.env\n").unwrap();
+        let added = append_repo_ai_ignore(repo.clone(), vec!["/secrets.env".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(added, 0);
+
+        // An UNRELATED later negation re-appends a line the file already had.
+        // Harmless duplication is the fail-closed direction here.
+        std::fs::write(&path, "/secrets.env\n!other.txt\n").unwrap();
+        let added = append_repo_ai_ignore(repo, vec!["/secrets.env".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(
+            added, 1,
+            "a duplicate is accepted rather than risk a stale skip"
+        );
     }
 }
