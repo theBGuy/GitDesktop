@@ -327,10 +327,10 @@ export function createDiffFile(
     const tmLang =
       lang && customLanguages?.find((c) => c.id === lang && c.tmGrammar);
     if (tmLang) ensureShikiGrammars([tmLang]);
-    // Built-in Shiki grammars load lazily (RenderedDiff kicks that off), so this
-    // synchronous build can only route to Shiki once the grammar is already
+    // Built-in Shiki grammars load lazily (useShikiRouting kicks that off), so
+    // this synchronous build can only route to Shiki once the grammar is already
     // loaded. Until then a built-in Shiki language falls back to highlight.js /
-    // plain; RenderedDiff rebuilds the diff when the grammar finishes loading.
+    // plain; useShikiRouting's grammarState triggers the rebuild that picks it up.
     const useShiki = lang ? isShikiLang(lang) : false;
     const data = {
       oldFile: {
@@ -461,7 +461,7 @@ export function useFileContent(
  * Shiki routing for one diff: lazily loading the built-in grammar it needs,
  * holding the paint until that settles, triggering the rebuild that picks it up,
  * and off-thread worker ASTs for an over-budget Shiki-routed diff. Shared by
- * both {@link createDiffFile} call sites so the two surfaces route identically.
+ * both {@link createDiffFile} call sites so they apply the same routing rules.
  */
 export function useShikiRouting({
   filePath,

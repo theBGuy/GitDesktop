@@ -6,9 +6,8 @@ import { diffLang } from "./diff-lang";
 /**
  * A read-only, syntax-highlighted view of a whole file's text. Highlights the
  * full content in one pass (so multi-line strings/comments keep their context,
- * unlike per-line highlighting) via highlight.js — the same engine the diff pane
- * falls back to for most languages, so a file here matches its diff. Falls back
- * to plain, still-readable text for languages highlight.js doesn't recognize.
+ * unlike per-line highlighting) via highlight.js. Falls back to plain,
+ * still-readable text for languages highlight.js doesn't recognize.
  */
 export function HighlightedCode({
   path,

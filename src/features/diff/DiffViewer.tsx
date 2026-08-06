@@ -128,9 +128,9 @@ export function DiffViewer({ repoPath }: { repoPath: string }) {
 /**
  * The working-tree variant of the diff pane: hunks render as cards with
  * whole-hunk stage/unstage/discard, plus drag-to-select for staging a subset of
- * lines. Untracked, binary, truncated, and generated/minified (one enormous
- * line) diffs fall back to the plain whole-file surface (which is what shows
- * the generated/minified placeholder).
+ * lines. Binary, truncated, and generated/minified (one enormous line) diffs
+ * fall back to the plain whole-file surface (which is what shows the
+ * generated/minified placeholder); untracked text files stage here like any other.
  */
 function WorkingTreeDiff({
   repoPath,
