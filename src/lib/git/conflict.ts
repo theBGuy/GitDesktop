@@ -17,7 +17,7 @@ export interface ConflictSides {
 /** Reads a conflicted file's base/ours/theirs blobs + the marked working file,
  *  plus whether it's AI-ignored. `exclude` is the combined (repo + global)
  *  AI-ignore pattern list, decided by git's own gitignore engine — the same
- *  truth table a test pins the diff-side pathspec translation to. */
+ *  matcher, and the same pinned truth table, as the diff commands. */
 export const conflictSides = (
   repoPath: string,
   path: string,

@@ -412,53 +412,24 @@ pub async fn git_staged_diff(
         "--cached"
     };
 
-    // AI-ignore patterns → pathspec excludes (`git::ai_ignore` owns the
-    // translation). ":(exclude)" needs an inclusive pathspec alongside it,
-    // hence the leading ".".
-    let pathspec =
-        crate::git::ai_ignore::pathspecs_for_repo(&repo_path, &exclude.unwrap_or_default())
-            .await
-            .specs;
+    // `recheck: true` — this diff reads the index and working tree, which a
+    // concurrent edit can change between the name pass and the content pass.
+    let filtered = crate::git::ai_ignore::filtered_diff(
+        &repo_path,
+        &["diff", base, "--no-color"],
+        &["diff", base, "--numstat", "-z"],
+        &exclude.unwrap_or_default(),
+        true,
+    )
+    .await?;
 
-    let mut diff_args: Vec<&str> = vec!["diff", base, "--no-color"];
-    let mut stat_args: Vec<&str> = vec!["diff", base, "--numstat", "-z"];
-    if !pathspec.is_empty() {
-        for args in [&mut diff_args, &mut stat_args] {
-            args.push("--");
-            args.push(".");
-            args.extend(pathspec.iter().map(String::as_str));
-        }
-    }
-
-    let (diff_out, stat_out) = tokio::try_join!(
-        run_git(Some(&repo_path), &diff_args, DEFAULT_TIMEOUT),
-        run_git(Some(&repo_path), &stat_args, DEFAULT_TIMEOUT)
-    )?;
-
-    let files = parse_numstat_z(&stat_out.stdout_lossy());
-
-    // Tell the caller how many changed files the excludes hid, so the AI
-    // prompt can mention that the diff is not the whole story.
-    let excluded_files = if pathspec.is_empty() {
-        0
-    } else {
-        let all = run_git(
-            Some(&repo_path),
-            &["diff", base, "--numstat", "-z"],
-            DEFAULT_TIMEOUT,
-        )
-        .await?;
-        let total = parse_numstat_z(&all.stdout_lossy()).len();
-        total.saturating_sub(files.len()) as u32
-    };
-
-    let (text, truncated) = truncate_at_file_boundary(diff_out.stdout_lossy(), max_bytes);
+    let (text, truncated) = truncate_at_file_boundary(filtered.text, max_bytes);
 
     Ok(StagedDiff {
         text,
         truncated,
-        files,
-        excluded_files,
+        files: filtered.files,
+        excluded_files: filtered.excluded_files,
     })
 }
 
@@ -505,13 +476,32 @@ fn truncate_at_file_boundary(text: String, max: usize) -> (String, bool) {
     (text[..kept_end].trim_end().to_string(), true)
 }
 
+/// One `--numstat -z` row together with EVERY path it names — one for a regular
+/// change, both sides for a rename.
+///
+/// The AI-ignore filter needs the old side too: excluding only one side of a
+/// rename leaves the other side's half of the change (an `A` or `D` row) in the
+/// diff, so a match on either name has to hide the pair.
+pub(crate) struct DiffStatRow {
+    pub entry: DiffStatEntry,
+    pub names: Vec<String>,
+}
+
 /// Parses `git diff --numstat -z` output.
 /// Regular entry: `added\tdeleted\tpath\0`.
 /// Rename entry:  `added\tdeleted\t\0oldpath\0newpath\0`.
 /// Binary files report `-` for both counts.
 pub fn parse_numstat_z(text: &str) -> Vec<DiffStatEntry> {
-    let mut entries = Vec::new();
-    let mut tokens = text.split('\0').peekable();
+    parse_numstat_z_rows(text)
+        .into_iter()
+        .map(|row| row.entry)
+        .collect()
+}
+
+/// [`parse_numstat_z`] keeping both sides of a rename (see [`DiffStatRow`]).
+pub(crate) fn parse_numstat_z_rows(text: &str) -> Vec<DiffStatRow> {
+    let mut rows = Vec::new();
+    let mut tokens = text.split('\0');
     while let Some(token) = tokens.next() {
         if token.is_empty() {
             continue;
@@ -525,24 +515,34 @@ pub fn parse_numstat_z(text: &str) -> Vec<DiffStatEntry> {
         let is_binary = added == "-";
         let added = added.parse().unwrap_or(0);
         let deleted = deleted.parse().unwrap_or(0);
-        let path = if path.is_empty() {
-            // rename: skip old path, take new path
-            tokens.next();
+        let (path, names) = if path.is_empty() {
+            // rename: old path, then new path — the entry reports the new one.
+            let old = tokens.next().unwrap_or("");
             match tokens.next() {
-                Some(new_path) if !new_path.is_empty() => new_path.to_string(),
+                Some(new_path) if !new_path.is_empty() => (
+                    new_path.to_string(),
+                    [old, new_path]
+                        .iter()
+                        .filter(|n| !n.is_empty())
+                        .map(|n| n.to_string())
+                        .collect(),
+                ),
                 _ => continue,
             }
         } else {
-            path.to_string()
+            (path.to_string(), vec![path.to_string()])
         };
-        entries.push(DiffStatEntry {
-            path,
-            added,
-            deleted,
-            is_binary,
+        rows.push(DiffStatRow {
+            entry: DiffStatEntry {
+                path,
+                added,
+                deleted,
+                is_binary,
+            },
+            names,
         });
     }
-    entries
+    rows
 }
 
 #[cfg(test)]

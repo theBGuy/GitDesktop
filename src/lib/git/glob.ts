@@ -10,20 +10,17 @@
  *
  * `[`, `*` and `?` are metacharacters, so a raw path holding one matches the
  * wrong files: `app/[slug]/page.tsx` reads as a character class. Wrapping each
- * as a one-character class (`[` → `[[]`) is the only form BOTH engines honor —
- * pathspec ignores the backslash escapes .gitignore accepts (measured, git
- * 2.51.1). `]` outside a class is already literal; a literal backslash is
- * inexpressible on either engine and is left alone (impossible on Windows).
+ * as a one-character class (`[` → `[[]`) makes it literal to git's matcher
+ * (measured, git 2.51.1). `]` outside a class is already literal; a literal
+ * backslash is inexpressible as a gitignore pattern and is left alone
+ * (impossible on Windows).
  *
  * A trailing space is the one case backslash IS the answer: .gitignore strips
  * unescaped trailing whitespace, so a file named `notes ` yields the pattern
  * `notes`, which hides a DIFFERENT file and leaves the named one visible
  * (measured). The escape is written in the idiomatic .gitignore spelling users
- * read in their own files. It reaches the pathspec engine only through Rust's
- * `pathspecs_for`, which re-encodes it as `[ ]` first: on WINDOWS a backslash in
- * a pathspec is a SEPARATOR rather than an escape, so the raw form matched
- * NOTHING there while Unix honored it (measured, git 2.51.1.windows.1). The
- * class form is what makes both platforms agree.
+ * read in their own files, and `check-ignore` — the one engine every AI-ignore
+ * verdict comes from — reads it natively on every platform.
  *
  * The escape is defeated when the name ALREADY ends in a backslash (`notes\ `):
  * the emitted `notes\\ ` is an even backslash run, so the space reads as

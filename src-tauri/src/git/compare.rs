@@ -92,11 +92,47 @@ pub async fn git_branch_diff_files(
     Ok(parse_numstat_z(&out.stdout_lossy()))
 }
 
+/// Both refs resolved to SHAs in ONE spawn, so every call of the AI-ignore
+/// filter's two-pass flow reads the same trees. Trees are immutable once named,
+/// which is why the branch path pins refs where the staged path re-reads instead.
+///
+/// `^{commit}` peels an annotated tag to its commit, and turns a multi-line rev
+/// expansion (`HEAD^!`, `HEAD^@`) into a git error rather than an argument whose
+/// line count silently misaligns with the two SHAs expected below.
+async fn pinned_range(repo_path: &str, base: &str, compare: &str) -> AppResult<String> {
+    let base_rev = format!("{base}^{{commit}}");
+    let compare_rev = format!("{compare}^{{commit}}");
+    let out = run_git(
+        Some(repo_path),
+        &["rev-parse", &base_rev, &compare_rev],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    let text = out.stdout_lossy();
+    let shas: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let [base_sha, compare_sha] = shas[..] else {
+        return Err(AppError::InvalidArgument(format!(
+            "could not resolve {base} and {compare}"
+        )));
+    };
+    let is_sha = |s: &str| s.chars().all(|c| c.is_ascii_hexdigit());
+    if !is_sha(base_sha) || !is_sha(compare_sha) {
+        return Err(AppError::InvalidArgument(format!(
+            "could not resolve {base} and {compare}"
+        )));
+    }
+    Ok(format!("{base_sha}...{compare_sha}"))
+}
+
 /// The full combined `base...compare` diff text plus its file summary, for
 /// feeding AI PR description generation. `exclude` mirrors `git_staged_diff`:
-/// AI-ignore patterns become pathspec excludes and `excluded_files` reports how
-/// many changed files they hid. Truncation deliberately differs — char boundary
-/// at a 1 MB default, not file boundary at the AI budget.
+/// AI-ignore patterns hide changed files and `excluded_files` reports how many.
+/// Truncation deliberately differs — char boundary at a 1 MB default, not file
+/// boundary at the AI budget.
 #[tauri::command]
 pub async fn git_branch_diff(
     repo_path: String,
@@ -107,54 +143,32 @@ pub async fn git_branch_diff(
 ) -> AppResult<StagedDiff> {
     validate_ref(&base)?;
     validate_ref(&compare)?;
-    let range = format!("{base}...{compare}");
+    let exclude = exclude.unwrap_or_default();
 
-    // AI-ignore patterns → pathspec excludes (`git::ai_ignore` owns the
-    // translation). ":(exclude)" needs an inclusive pathspec alongside it,
-    // hence the leading ".".
-    let pathspec =
-        crate::git::ai_ignore::pathspecs_for_repo(&repo_path, &exclude.unwrap_or_default())
-            .await
-            .specs;
-
-    let mut diff_args: Vec<&str> = vec!["diff", "--no-color", &range];
-    let mut stat_args: Vec<&str> = vec!["diff", "--numstat", "-z", &range];
-    if !pathspec.is_empty() {
-        for args in [&mut diff_args, &mut stat_args] {
-            args.push("--");
-            args.push(".");
-            args.extend(pathspec.iter().map(String::as_str));
-        }
-    }
-
-    let (text_out, files_out) = tokio::try_join!(
-        run_git(Some(&repo_path), &diff_args, DEFAULT_TIMEOUT),
-        run_git(Some(&repo_path), &stat_args, DEFAULT_TIMEOUT)
-    )?;
-    let (text, truncated) =
-        truncate_at_char_boundary(text_out.stdout_lossy(), max_bytes.unwrap_or(1_000_000));
-    let files = parse_numstat_z(&files_out.stdout_lossy());
-
-    // Tell the caller how many changed files the excludes hid, so the AI
-    // prompt can mention that the diff is not the whole story.
-    let excluded_files = if pathspec.is_empty() {
-        0
+    let range = if crate::git::ai_ignore::has_actionable_lines(&exclude) {
+        pinned_range(&repo_path, &base, &compare).await?
     } else {
-        let all = run_git(
-            Some(&repo_path),
-            &["diff", "--numstat", "-z", &range],
-            DEFAULT_TIMEOUT,
-        )
-        .await?;
-        let total = parse_numstat_z(&all.stdout_lossy()).len();
-        total.saturating_sub(files.len()) as u32
+        format!("{base}...{compare}")
     };
+
+    // `recheck: false` — the range is pinned to immutable trees above.
+    let filtered = crate::git::ai_ignore::filtered_diff(
+        &repo_path,
+        &["diff", "--no-color", &range],
+        &["diff", "--numstat", "-z", &range],
+        &exclude,
+        false,
+    )
+    .await?;
+
+    let (text, truncated) =
+        truncate_at_char_boundary(filtered.text, max_bytes.unwrap_or(1_000_000));
 
     Ok(StagedDiff {
         text,
         truncated,
-        files,
-        excluded_files,
+        files: filtered.files,
+        excluded_files: filtered.excluded_files,
     })
 }
 

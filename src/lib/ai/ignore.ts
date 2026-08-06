@@ -78,7 +78,7 @@ export async function filterPathsByAiIgnore(input: {
 /**
  * Drops every AI-ignored file from an already-resolved unified diff and its
  * changed-file list, client-side — the one recipe for both diff sources, since
- * the pathspec-exclude route (`gitBranchDiff`'s `exclude`) only exists where
+ * the server-side route (`gitBranchDiff`'s `exclude`) only exists where
  * GitDesktop runs the diff itself and a forge-supplied PR diff arrives whole.
  *
  * Candidates are the UNION of the diff's own section keys and the file list,
