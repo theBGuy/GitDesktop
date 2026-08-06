@@ -462,6 +462,11 @@ export function useFileContent(
  * holding the paint until that settles, triggering the rebuild that picks it up,
  * and off-thread worker ASTs for an over-budget Shiki-routed diff. Shared by
  * both {@link createDiffFile} call sites so they apply the same routing rules.
+ *
+ * Contract: callers must list BOTH returned `grammarState` and `workerAsts` in
+ * their {@link createDiffFile} memo's deps — createDiffFile reads the loaded
+ * grammar via module state (isShikiLang), not a passed value, so only their
+ * identity change forces the rebuild that picks it up.
  */
 export function useShikiRouting({
   filePath,
@@ -697,9 +702,7 @@ function RenderedDiff({
     customLanguages,
   });
 
-  // grammarState + workerAsts are deliberate rebuild TRIGGERS: createDiffFile
-  // reads the loaded grammar via module state (isShikiLang), not a passed value,
-  // so only their identity change forces the rebuild that picks it up.
+  // grammarState + workerAsts: rebuild-trigger deps — see useShikiRouting's contract.
   // biome-ignore lint/correctness/useExhaustiveDependencies: grammarState is an intentional rebuild trigger, read via module state not directly
   const diffFile = useMemo(
     () =>

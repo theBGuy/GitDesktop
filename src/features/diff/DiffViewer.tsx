@@ -636,9 +636,7 @@ function StagingDiffView({
   // stage/unstage/discard patch (see WorkingTreeDiff). Null while content reads
   // are pending: don't build an intermediate diff the arriving reads would
   // immediately restructure.
-  // grammarState + workerAsts are deliberate rebuild TRIGGERS: createDiffFile
-  // reads the loaded grammar via module state (isShikiLang), not a passed value,
-  // so only their identity change forces the rebuild that picks it up.
+  // grammarState + workerAsts: rebuild-trigger deps — see useShikiRouting's contract.
   // biome-ignore lint/correctness/useExhaustiveDependencies: grammarState is an intentional rebuild trigger, read via module state not directly
   const diffFile = useMemo(
     () =>
