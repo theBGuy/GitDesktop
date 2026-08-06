@@ -463,10 +463,11 @@ export function useFileContent(
  * and off-thread worker ASTs for an over-budget Shiki-routed diff. Shared by
  * both {@link createDiffFile} call sites so they apply the same routing rules.
  *
- * Contract: callers must list BOTH returned `grammarState` and `workerAsts` in
- * their {@link createDiffFile} memo's deps — createDiffFile reads the loaded
- * grammar via module state (isShikiLang), not a passed value, so only their
- * identity change forces the rebuild that picks it up.
+ * Contract: callers must list both returned `grammarState` and `workerAsts` in
+ * their {@link createDiffFile} memo's deps. `workerAsts` is passed into
+ * createDiffFile and is an ordinary dep; `grammarState` is read only via module
+ * state (isShikiLang), so listing it explicitly is what forces the rebuild that
+ * picks the loaded grammar up.
  */
 export function useShikiRouting({
   filePath,
