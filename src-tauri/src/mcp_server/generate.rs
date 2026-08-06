@@ -1170,7 +1170,7 @@ impl GitDesktopMcp {
     /// Untracked (new) file paths, NUL-separated and raw — these names are matched
     /// against the user's AI-ignore rules, so any rewriting of them fails OPEN. Without
     /// `-z` git C-quotes a name holding a quote, backslash, or non-ASCII byte
-    /// (`"cafÃ©.txt"`), and trimming would fold a trailing-space name onto a
+    /// (`"caf\303\251.txt"`), and trimming would fold a trailing-space name onto a
     /// different name's spelling; either way the rule that covers it stops matching.
     ///
     /// Listed from the working-tree TOPLEVEL rather than `self.repo` as given:
