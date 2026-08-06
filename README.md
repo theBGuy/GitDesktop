@@ -640,10 +640,11 @@ display can't strand it off-screen.
 - **AI ignore patterns** (keep files out of AI context; they still commit
   normally), in `.gitignore` syntax: `secrets.env` hides that file at any depth,
   `/secrets.env` only the copy at the repo root, `node_modules` or `vendor/` a
-  folder wherever it sits, and `docs/*.log` just that folder's logs. `!`
-  re-include lines aren't supported. A model that reads your repository itself
-  isn't limited by them — that's what the PR panel's **Agentic review** toggle
-  turns on.
+  folder wherever it sits, and `docs/*.log` just that folder's logs. A `!` line
+  puts back something a broader pattern hid, and your global patterns are
+  applied last, so a repo's committed file can never re-expose what you excluded
+  yourself. A model that reads your repository itself isn't limited by them —
+  that's what the PR panel's **Agentic review** toggle turns on.
   - **Global** — Settings → Excluded files (one pattern per line).
   - **Per-repo** — `.gitdesktop/aiignore` in the repo. A changed file's
     context menu → **Exclude from AI** (file, folder, or file type — or a

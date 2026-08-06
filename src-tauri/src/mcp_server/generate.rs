@@ -1128,8 +1128,13 @@ impl GitDesktopMcp {
 impl GitDesktopMcp {
     /// The user's AI-ignore patterns for the bound repo: the repo's own ignore
     /// file first, then the global setting's patterns — the merge every recipe
-    /// passes to the git layer as pathspec excludes. Takes the caller's already-read
-    /// `settings`, so one recipe call reads the settings store exactly once.
+    /// passes to the git layer. Takes the caller's already-read `settings`, so
+    /// one recipe call reads the settings store exactly once.
+    ///
+    /// Repo-first/global-LAST is a security invariant, not a preference: `!`
+    /// un-ignore lines are honored last-match-wins, and `.gitdesktop/aiignore` is
+    /// committed content anyone with push access can write. Reversed, a committed
+    /// `!` could re-expose a file the user excluded globally.
     async fn ai_ignore_patterns(
         &self,
         settings: &crate::app_store::AiGenSettings,

@@ -17,6 +17,11 @@
 //! valid UTF-8 — fall back to a deliberately wider glob
 //! ([`widened_glob_for_name`]), which over-hides rather than leaks.
 //!
+//! `!` un-ignore lines are honored with git's own semantics, which makes list
+//! ORDER significant (last match wins) and carries git's documented limitation
+//! with it: a file cannot be re-included once one of its parent directories is
+//! excluded. Callers concatenate repo-then-global so the user's own list wins.
+//!
 //! This is a privacy boundary: a pattern that fails to match is a file that
 //! reaches a third-party model.
 
@@ -32,29 +37,28 @@ use crate::git::diff::{parse_numstat_z, parse_numstat_z_rows};
 use crate::git::runner::{run_git, run_git_raw, run_git_raw_input, DEFAULT_TIMEOUT};
 use crate::git::types::DiffStatEntry;
 
-/// The lines of an AI-ignore list the matcher acts on: trimmed, with blanks,
-/// `#` comments and `!` un-ignore lines dropped. Returns them with the number of
-/// `!` lines dropped.
+/// The lines of an AI-ignore list the matcher acts on — trimmed, with blanks and
+/// `#` comments dropped — plus whether any of them is a POSITIVE (non-`!`) line.
 ///
-/// `!` is dropped rather than honored because a diff is filtered by EXCLUSION —
-/// a pathspec has no un-exclude — so an un-ignore git's matcher honored would
-/// hide a file on the name pass and hand it to a model on the content pass. Of
-/// the two uniform behaviors, refusing an un-ignore withholds more.
-fn actionable_lines(patterns: &[String]) -> (Vec<&str>, usize) {
+/// Order is preserved and load-bearing: gitignore is last-match-wins, so a `!`
+/// un-ignore only re-includes what an EARLIER line hid, and the caller's
+/// concatenation order decides precedence.
+///
+/// The flag exists because a list of nothing but `!` lines can never hide
+/// anything — a negation alone causes no ignoring — so callers short-circuit on
+/// it rather than spawning git to be told nothing matched.
+fn actionable_lines(patterns: &[String]) -> (Vec<&str>, bool) {
     let mut lines: Vec<&str> = Vec::new();
-    let mut skipped_negations = 0usize;
+    let mut has_positive = false;
     for raw in patterns {
         let line = crate::fsops::trim_ignore_pattern(raw);
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if line.starts_with('!') {
-            skipped_negations += 1;
-            continue;
-        }
+        has_positive |= !line.starts_with('!');
         lines.push(line);
     }
-    (lines, skipped_negations)
+    (lines, has_positive)
 }
 
 /// The repo's effective `core.ignorecase`. Unset (or unreadable) means `false`,
@@ -123,14 +127,13 @@ async fn neutral_repo() -> AppResult<PathBuf> {
 /// exist in the working tree or the index — which is what lets callers ask about
 /// a remote PR's changed-file list, or about one conflicted path without
 /// depending on how the index happens to hold it. The pattern lines go into a
-/// temp excludes file, so semantics are gitignore's own — but only the lines
-/// [`actionable_lines`] keeps, so a `!` un-ignore is dropped here even though
-/// git would honor it natively (see that function).
+/// temp excludes file IN ORDER, so semantics are gitignore's own, `!` un-ignore
+/// lines and their last-match-wins precedence included.
 ///
 /// `paths` are repo-relative, forward-slashed. Empty `paths`, or an `exclude`
-/// with no actionable line in it, short-circuits to `[]` without spawning git;
-/// so does "nothing matched" (check-ignore's exit code 1, which is not an
-/// error).
+/// carrying no positive line (see [`actionable_lines`]), short-circuits to `[]`
+/// without spawning git; so does "nothing matched" (check-ignore's exit code 1,
+/// which is not an error).
 ///
 /// Matching runs in [`neutral_repo`] rather than the user's repo, so their AI
 /// patterns are the only rules in play — but `repo_path` still decides case
@@ -156,8 +159,8 @@ pub async fn filter_ignored(
     paths: &[String],
     exclude: &[String],
 ) -> AppResult<Vec<String>> {
-    let (lines, _) = actionable_lines(exclude);
-    if paths.is_empty() || lines.is_empty() {
+    let (lines, has_positive) = actionable_lines(exclude);
+    if paths.is_empty() || !has_positive {
         return Ok(Vec::new());
     }
     let icase = repo_ignorecase(repo_path).await;
@@ -264,10 +267,11 @@ pub struct FilteredDiff {
     pub excluded_files: u32,
 }
 
-/// Whether an AI-ignore list holds anything the matcher would act on — the flag
-/// a caller needs to keep its unfiltered command shape when it does not.
+/// Whether an AI-ignore list can hide anything — the flag a caller needs to keep
+/// its unfiltered command shape when it cannot. A list of nothing but `!` lines
+/// is inert (a negation causes no ignoring), so it takes the unfiltered path.
 pub fn has_actionable_lines(patterns: &[String]) -> bool {
-    !actionable_lines(patterns).0.is_empty()
+    actionable_lines(patterns).1
 }
 
 /// Whether a name is inexpressible as a `,literal` exclude term and needs
@@ -464,11 +468,19 @@ mod tests {
             "  *.log  ".to_string(),
             "/".to_string(),
         ];
-        let (lines, skipped) = actionable_lines(&patterns);
-        // A bare `/` survives this filter: git's own matcher decides what it
-        // means, exactly as it does for every other surviving line.
-        assert_eq!(lines, ["*.log", "/"]);
-        assert_eq!(skipped, 1);
+        let (lines, has_positive) = actionable_lines(&patterns);
+        // Negations are KEPT, in place: order is what gives them meaning. A bare
+        // `/` survives too — git's own matcher decides what it means, exactly as
+        // it does for every other surviving line.
+        assert_eq!(lines, ["!docs/notes.md", "*.log", "/"]);
+        assert!(has_positive);
+
+        // Nothing but negations (and droppables) can never hide anything.
+        let inert = ["!a".to_string(), "  ".to_string(), "# c".to_string()];
+        let (lines, has_positive) = actionable_lines(&inert);
+        assert_eq!(lines, ["!a"]);
+        assert!(!has_positive);
+        assert!(!has_actionable_lines(&inert));
     }
 
     /// The widened term keeps every glob metacharacter literal, collapses each
@@ -547,7 +559,7 @@ mod tests {
     /// The measured truth table (git 2.51.1): for each AI-ignore pattern LIST,
     /// exactly which of `FIXTURE` it hides. The diff commands and
     /// `git_filter_ai_ignored` must both agree with it.
-    const PARITY: [(&[&str], &[&str]); 27] = [
+    const PARITY: [(&[&str], &[&str]); 31] = [
         (
             &["notes.md"],
             &["a/b/notes.md", "docs/notes.md", "notes.md"],
@@ -584,19 +596,39 @@ mod tests {
         // A bracket is a character class in gitignore, so this PATTERN never
         // matches the literal name — however concrete the name looks.
         (&["weird[1].txt"], &[]),
-        // `!` un-ignore lines are unsupported and dropped before git sees them: a
-        // lone negation hides nothing, and a negation after a matching pattern
-        // re-includes nothing. Git's matcher would honor the second case, but a
-        // diff filtered by exclusion has no un-exclude to mirror it with.
+        // A LONE `!` line hides nothing: a negation only ever re-includes what an
+        // earlier line hid, so it can never cause ignoring by itself.
         (&["!docs/notes.md"], &[]),
+        // …but after a matching pattern it re-includes, with git's own
+        // last-match-wins precedence.
         (
             &["*.md", "!docs/notes.md"],
+            &["a/b/notes.md", "docs/日本語.md", "notes.md"],
+        ),
+        // Reversed, the negation is DEAD — the later positive line matches last.
+        (
+            &["!docs/notes.md", "*.md"],
             &[
                 "a/b/notes.md",
                 "docs/notes.md",
                 "docs/日本語.md",
                 "notes.md",
             ],
+        ),
+        // Git's documented limitation, pinned so it is never mistaken for a bug:
+        // a file cannot be re-included once a parent DIRECTORY is excluded, so
+        // this hides exactly what a bare `build/` hides.
+        (
+            &["build/", "!build/x.txt"],
+            &["build/x.txt", "docs/build/y.txt"],
+        ),
+        // The repo-then-global concatenation in miniature: whichever list is
+        // appended LAST decides, which is why callers put the user's global
+        // patterns after the repo's committed file.
+        (&["notes.md", "!notes.md"], &[]),
+        (
+            &["!notes.md", "notes.md"],
+            &["a/b/notes.md", "docs/notes.md", "notes.md"],
         ),
         // Blanks and comments are dropped everywhere too.
         (&["  ", "# a comment", "docs/*.log"], &["docs/a.log"]),
@@ -1073,41 +1105,81 @@ mod tests {
         );
     }
 
-    /// A `!` un-ignore line is unsupported: adding one changes NOTHING. Git's own
-    /// matcher would re-include the negated path, and a diff filtered by
-    /// exclusion has no un-exclude to mirror that with.
+    /// A `!` un-ignore line really re-includes the file, all the way through the
+    /// REAL command: the re-included path is back in the diff TEXT, not merely
+    /// back in the file list. Every AI surface reads the same engine, so the one
+    /// `git_filter_ai_ignored` assertion carries the conflict-gate and
+    /// remote-PR paths with it.
     #[tokio::test]
-    async fn negation_lines_change_nothing_on_either_engine() {
+    async fn a_negation_re_includes_the_file_end_to_end() {
         let (_dir, repo) = parity_repo().await;
         let all: Vec<String> = FIXTURE.iter().map(|p| p.to_string()).collect();
-        let plain = vec!["*.md".to_string()];
-        let negated = vec!["*.md".to_string(), "!docs/notes.md".to_string()];
 
-        let (kept, skipped) = actionable_lines(&negated);
-        assert_eq!(skipped, 1);
-        assert_eq!(kept, actionable_lines(&plain).0);
+        let out = git_staged_diff(
+            repo.clone(),
+            None,
+            Some(vec!["*.md".to_string(), "!docs/notes.md".to_string()]),
+            None,
+        )
+        .await
+        .unwrap();
 
-        let (with_negation, _) = hidden_by_command(&repo, &["*.md", "!docs/notes.md"]).await;
-        let (without, _) = hidden_by_command(&repo, &["*.md"]).await;
-        assert_eq!(
-            with_negation, without,
-            "the `!` line did not re-include anything"
+        let listed: BTreeSet<&str> = out.files.iter().map(|f| f.path.as_str()).collect();
+        assert!(
+            listed.contains("docs/notes.md"),
+            "the un-ignored file is back in the file list: {listed:?}"
         );
         assert!(
-            with_negation.contains("docs/notes.md"),
-            "the negated path stays hidden"
+            out.text.contains("+++ b/docs/notes.md"),
+            "…and back in the diff TEXT, which is what reaches the model"
         );
+        for still_hidden in ["notes.md", "a/b/notes.md", "docs/日本語.md"] {
+            assert!(
+                !listed.contains(still_hidden),
+                "{still_hidden} stays hidden"
+            );
+            assert!(
+                !out.text.contains(&format!("+++ b/{still_hidden}")),
+                "{still_hidden} stays out of the diff text"
+            );
+        }
+        assert_eq!(out.excluded_files, 3, "the three unnegated `*.md` files");
 
-        let with = git_filter_ai_ignored(repo.clone(), all.clone(), negated)
+        // The shared engine, so every other AI surface inherits the same verdict.
+        let by_gitignore = git_filter_ai_ignored(
+            repo,
+            all,
+            vec!["*.md".to_string(), "!docs/notes.md".to_string()],
+        )
+        .await
+        .unwrap();
+        assert!(!by_gitignore.contains(&"docs/notes.md".to_string()));
+        assert!(by_gitignore.contains(&"notes.md".to_string()));
+    }
+
+    /// A list of nothing but `!` lines is inert — it cannot hide anything — so it
+    /// takes the unfiltered fast path rather than spawning the two-pass flow.
+    #[tokio::test]
+    async fn only_negations_behaves_as_no_filter() {
+        let (_dir, repo) = parity_repo().await;
+
+        let unfiltered = git_staged_diff(repo.clone(), None, None, None)
             .await
             .unwrap();
-        let without = git_filter_ai_ignored(repo.clone(), all, plain)
-            .await
-            .unwrap();
-        assert_eq!(with, without);
+        let negations_only = git_staged_diff(
+            repo.clone(),
+            None,
+            Some(vec!["!notes.md".to_string(), "!docs/a.log".to_string()]),
+            None,
+        )
+        .await
+        .unwrap();
 
-        // An exclude list of nothing BUT droppable lines matches nothing at all,
-        // and never spawns git.
+        assert_eq!(negations_only.files.len(), unfiltered.files.len());
+        assert_eq!(negations_only.excluded_files, 0);
+        assert_eq!(negations_only.text, unfiltered.text);
+
+        // Same on the path-list engine: no positive line, nothing hidden.
         let only_droppable = git_filter_ai_ignored(
             repo,
             vec!["docs/notes.md".to_string()],

@@ -15,6 +15,11 @@ function ignoreLines(patterns: string): string[] {
  * `.gitdesktop/aiignore` entries first, then the global setting's lines
  * (`aiIgnorePatterns`, raw and newline-joined).
  *
+ * That order is a security invariant, not a preference: `!` un-ignore lines are
+ * honored last-match-wins, and the repo file is committed content anyone with
+ * push access can write. Global LAST means a committed `!` can never re-expose a
+ * file the user excluded globally.
+ *
  * Rejects when the repo file can't be read — except under
  * `tolerateRepoReadError`, which the conflict-resolve surface passes so an
  * unreadable repo file can't abort a resolution the global patterns alone can
