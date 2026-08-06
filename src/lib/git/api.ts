@@ -3049,8 +3049,9 @@ export const readRepoAiIgnore = (repoPath: string) =>
   invoke<string[]>("read_repo_ai_ignore", { repoPath });
 
 /** Appends AI-ignore patterns to `<repo>/.gitdesktop/aiignore` (created if
- *  absent), returning the number of patterns actually appended (already-present
- *  ones are skipped). */
+ *  absent), returning the number actually appended. Skipped only when already
+ *  EFFECTIVE — a pattern sitting before a later `!` un-ignore line is re-added
+ *  at the end, where last-match-wins puts it back in force. */
 export const appendRepoAiIgnore = (repoPath: string, patterns: string[]) =>
   invoke<number>("append_repo_ai_ignore", { repoPath, patterns });
 

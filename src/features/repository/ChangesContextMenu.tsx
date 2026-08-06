@@ -11,7 +11,11 @@ import {
   openWithProgram,
   revealInExplorer,
 } from "@/lib/git/api";
-import { globLiteralPath, literalPathspec } from "@/lib/git/glob";
+import {
+  aiExcludePatternLinesForPath,
+  globLiteralPath,
+  literalPathspec,
+} from "@/lib/git/glob";
 import type { FileEntry } from "@/lib/git/types";
 import { isWindows } from "@/lib/hotkeys/binding";
 import {
@@ -52,8 +56,10 @@ export interface ChangesMenuActions {
   /** `pathspec` reaches `git rm --cached` as given, so a concrete path must
    *  arrive through `literalPathspec` or it removes its glob-siblings too. */
   untrack: (pathspec: string, ignorePattern: string, label: string) => void;
-  /** `pattern` is an AI-ignore line — glob-escape a concrete path. */
-  aiExclude: (pattern: string, label: string) => void;
+  /** AI-ignore LINES for a concrete path — build them with
+   *  `aiExcludePatternLinesForPath`, which glob-escapes and adds the
+   *  `/`-separated twin a `\`-holding path needs to be hidden on Windows. */
+  aiExclude: (patterns: string[], label: string) => void;
   aiExcludeSelected: () => void;
 }
 
@@ -288,7 +294,7 @@ export function ChangesContextMenuItems({
           <ContextMenuItem
             onClick={() =>
               actions.aiExclude(
-                `/${globLiteralPath(entry.path)}`,
+                aiExcludePatternLinesForPath(entry.path),
                 `/${entry.path}`,
               )
             }
@@ -306,7 +312,9 @@ export function ChangesContextMenuItems({
                     key={folder}
                     onClick={() =>
                       actions.aiExclude(
-                        `/${globLiteralPath(folder)}/`,
+                        aiExcludePatternLinesForPath(folder).map(
+                          (line) => `${line}/`,
+                        ),
                         `/${folder}/`,
                       )
                     }
@@ -320,7 +328,7 @@ export function ChangesContextMenuItems({
           {extensionPattern && (
             <ContextMenuItem
               onClick={() =>
-                actions.aiExclude(extensionPattern, `*.${extension}`)
+                actions.aiExclude([extensionPattern], `*.${extension}`)
               }
             >
               Exclude all .{extension} files from AI (add to

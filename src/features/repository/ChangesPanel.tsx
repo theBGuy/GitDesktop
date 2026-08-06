@@ -20,7 +20,11 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { BlameDialog } from "@/features/history/BlameDialog";
 import { FileHistoryDialog } from "@/features/history/FileHistoryDialog";
-import { globLiteralPath, literalPathspec } from "@/lib/git/glob";
+import {
+  aiExcludePatternLinesForPath,
+  globLiteralPath,
+  literalPathspec,
+} from "@/lib/git/glob";
 import {
   useAppendRepoAiIgnore,
   useAppendToGitignore,
@@ -68,10 +72,14 @@ function unstagePaths(entry: FileEntry): string[] {
 }
 
 /**
- * Toast copy for a bulk ignore / AI-exclude of `total` selected entries, where
- * `added` came back from the Rust command as the count actually appended
- * (already-present ones are skipped). Reports the honest end state: nothing new
- * when everything was already covered, a partial when some were skipped.
+ * Toast copy for a bulk ignore / AI-exclude, where `total` is the number of
+ * LINES written and `added` came back from the Rust command as the count
+ * actually appended — skipping lines already present (.gitignore) or already in
+ * EFFECT (.gitdesktop/aiignore, where a later `!` un-ignore revives a line).
+ * Lines, not selected entries: on the AI path a `\`-holding path emits a second
+ * `/`-separated line, so the total can exceed the selection. Reports the honest
+ * end state: nothing new when everything was already covered, a partial when
+ * some were skipped.
  */
 function ignoreToast(added: number, total: number, file: string): string {
   const entries = (n: number) => `entr${n === 1 ? "y" : "ies"}`;
@@ -425,8 +433,8 @@ export function ChangesPanel({ repoPath }: { repoPath: string }) {
       onError,
     });
   }
-  function aiExcludeOne(pattern: string, label: string) {
-    appendAiIgnore.mutate([pattern], {
+  function aiExcludeOne(patterns: string[], label: string) {
+    appendAiIgnore.mutate(patterns, {
       onSuccess: (added) =>
         toast.success(
           added === 0
@@ -522,10 +530,18 @@ export function ChangesPanel({ repoPath }: { repoPath: string }) {
 
   // Bulk AI-exclude: add a `/path` line per selected file — the leading slash
   // anchors each pattern to THIS file rather than every file with that name.
-  // The Rust side de-dupes and skips lines already present.
+  // A path holding `\` contributes a second line, so the count below is LINES,
+  // which is what the toast names. The Rust side skips lines already in EFFECT.
   function aiExcludeSelected() {
     if (selectionCount === 0) return;
-    const patterns = selectedEntries.map((e) => `/${globLiteralPath(e.path)}`);
+    // Deduped: a literal `weird\name.env` and a real `weird/name.env` both emit
+    // the `/`-separated line, and the duplicate would read as a false partial
+    // ("Added 2 of 3") once the Rust side collapses it.
+    const patterns = [
+      ...new Set(
+        selectedEntries.flatMap((e) => aiExcludePatternLinesForPath(e.path)),
+      ),
+    ];
     appendAiIgnore.mutate(patterns, {
       onSuccess: (added) => {
         toast.success(

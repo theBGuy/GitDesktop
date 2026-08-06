@@ -11,26 +11,57 @@
  * `[`, `*` and `?` are metacharacters, so a raw path holding one matches the
  * wrong files: `app/[slug]/page.tsx` reads as a character class. Wrapping each
  * as a one-character class (`[` → `[[]`) makes it literal to git's matcher
- * (measured, git 2.51.1). `]` outside a class is already literal; a literal
- * backslash is inexpressible as a gitignore pattern and is left alone
- * (impossible on Windows).
+ * (measured, git 2.51.1). `]` outside a class is already literal.
  *
- * A trailing space is the one case backslash IS the answer: .gitignore strips
+ * A `\` is DOUBLED, because raw it is a gitignore escape that eats the next
+ * character: `weird\name.env` names `weirdname.env` — a different file hidden
+ * while the one the user picked stays visible (the `src\foo.ts` row of Rust's
+ * PARITY table pins exactly that, and nothing more).
+ *
+ * Doubling fixes the PARSE everywhere — `\\` is a literal backslash to git on
+ * every platform — but not the MATCH, which diverges on the name side: Windows
+ * normalizes a name's `\` to a separator before comparing, so no backslash
+ * spelling reaches such a file there. That is why a second, `/`-separated line
+ * is required and NOT redundant; see [`aiExcludePatternLinesForPath`].
+ *
+ * A trailing space is the other case backslash is the answer: .gitignore strips
  * unescaped trailing whitespace, so a file named `notes ` yields the pattern
  * `notes`, which hides a DIFFERENT file and leaves the named one visible
  * (measured). The escape is written in the idiomatic .gitignore spelling users
  * read in their own files, and `check-ignore` — the one engine every AI-ignore
  * verdict comes from — reads it natively on every platform.
  *
- * The escape is defeated when the name ALREADY ends in a backslash (`notes\ `):
- * the emitted `notes\\ ` is an even backslash run, so the space reads as
- * unescaped and is stripped again. Bounded by the same limitation as above — a
- * literal backslash is inexpressible here — and impossible on Windows.
+ * Order is load-bearing: doubling runs FIRST, so the escape the trailing-space
+ * arm adds is not doubled in turn, and a name already ending in `\` yields an
+ * ODD run (`notes\` + space → `notes\\\ `) that both `trimIgnorePattern` and
+ * Rust's `trim_ignore_pattern` read as a kept space.
  */
 export function globLiteralPath(path: string): string {
   return path
+    .replace(/\\/g, "\\\\")
     .replace(/[[*?]/g, (c) => `[${c}]`)
     .replace(/ +$/, (spaces) => spaces.replaceAll(" ", "\\ "));
+}
+
+/**
+ * The AI-ignore line(s) that hide one concrete path, anchored to the repo root.
+ *
+ * Usually one line. A path containing `\` gets a second, `/`-separated twin,
+ * because the two platforms disagree about what that byte IS during matching:
+ * Windows normalizes the NAME's `\` to a separator, so there only
+ * `weird/name.env` reaches it and no backslash spelling can. Unix keeps it an
+ * ordinary byte, where the escaped form matches exactly and the `/` twin is a
+ * real path pattern that would also hide a genuine `weird/name.env` subtree.
+ * So the pair can over-hide on either platform — the safe direction on a
+ * privacy boundary — and never misses the named file. AI-ignore files are
+ * committed and shared, so one line set has to serve both.
+ */
+export function aiExcludePatternLinesForPath(path: string): string[] {
+  const lines = [`/${globLiteralPath(path)}`];
+  if (path.includes("\\")) {
+    lines.push(`/${globLiteralPath(path.replaceAll("\\", "/"))}`);
+  }
+  return lines;
 }
 
 /**

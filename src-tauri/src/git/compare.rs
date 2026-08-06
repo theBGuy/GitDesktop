@@ -145,7 +145,7 @@ pub async fn git_branch_diff(
     validate_ref(&compare)?;
     let exclude = exclude.unwrap_or_default();
 
-    let range = if crate::git::ai_ignore::has_actionable_lines(&exclude) {
+    let range = if crate::git::ai_ignore::has_positive_pattern(&exclude) {
         pinned_range(&repo_path, &base, &compare).await?
     } else {
         format!("{base}...{compare}")

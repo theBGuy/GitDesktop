@@ -33,7 +33,7 @@ use tempfile::TempPath;
 use tokio::sync::OnceCell;
 
 use crate::error::{AppError, AppResult};
-use crate::git::diff::{parse_numstat_z, parse_numstat_z_rows};
+use crate::git::diff::{parse_numstat_z, parse_numstat_z_rows, DiffStatRow};
 use crate::git::runner::{run_git, run_git_raw, run_git_raw_input, DEFAULT_TIMEOUT};
 use crate::git::types::DiffStatEntry;
 
@@ -260,8 +260,10 @@ const MAX_ATTEMPTS: u32 = 3;
 /// Byte ceiling on the content pass's whole argv. The exclude list grows with
 /// the hidden-file count and Windows caps a command line at 32,767 UTF-16 units,
 /// so a large enough change fails the spawn outright (os error 206). Past this
-/// the diff is withheld whole: over-hiding costs the model context, spawning
-/// without the terms would hand it every ignored file.
+/// the call ERRORS: spawning without the terms would hand the model every
+/// ignored file, and returning an empty diff is indistinguishable from
+/// "everything was ignored" — advice the caller would repeat to the user while
+/// survivors sat unshown.
 const TERM_BUDGET: usize = 16_000;
 
 /// A `git diff` filtered by the user's AI-ignore list. `text` is untruncated —
@@ -276,7 +278,7 @@ pub struct FilteredDiff {
 /// Whether an AI-ignore list can hide anything — the flag a caller needs to keep
 /// its unfiltered command shape when it cannot. A list of nothing but `!` lines
 /// is inert (a negation causes no ignoring), so it takes the unfiltered path.
-pub fn has_actionable_lines(patterns: &[String]) -> bool {
+pub fn has_positive_pattern(patterns: &[String]) -> bool {
     actionable_lines(patterns).1
 }
 
@@ -334,17 +336,23 @@ fn widened_glob_for_name(path: &str) -> String {
 /// diff excluding the concrete names it hid. A rename is hidden whole when either
 /// side matches, and an unreadable name is hidden unconditionally.
 ///
-/// `repo_path` must be the repository ROOT: diff prints root-relative names
-/// while pathspecs resolve against the cwd, so a subdirectory would void every
-/// term. The positive pathspec alongside the excludes must likewise be exactly
-/// `.`: git's `common_prefix_len()` skips exclude items, then advances each
-/// negative pattern by the prefix it computed, so any directory component
-/// silently voids them (measured, git 2.51.1).
+/// Once there is anything to filter, every spawn runs at the working-tree
+/// TOPLEVEL, resolved here rather than trusted from `repo_path`: below the
+/// toplevel the exclude terms would match nothing and the positive `.` would
+/// truncate the diff, so a subdirectory binding has to be resolved before any
+/// pathspec is built. The positive pathspec must likewise be exactly `.`: git's
+/// `common_prefix_len()` skips exclude items, then advances each negative pattern
+/// by the prefix it computed, so any directory component silently voids them
+/// (measured, git 2.51.1).
 ///
 /// `recheck` re-reads the names after the content pass and retries on a mismatch,
 /// for callers whose diff reads mutable state (index, working tree) — a file
 /// appearing between the passes would otherwise enter the diff unchecked.
 /// Callers over immutable trees pin their refs instead and pass `false`.
+///
+/// Errors when the exclude terms would exceed [`TERM_BUDGET`]: an empty result
+/// there would read to every caller as "everything was ignored" while survivors
+/// went unshown, so the failure is explicit rather than silent.
 pub async fn filtered_diff(
     repo_path: &str,
     content_args: &[&str],
@@ -352,7 +360,12 @@ pub async fn filtered_diff(
     exclude: &[String],
     recheck: bool,
 ) -> AppResult<FilteredDiff> {
-    if !has_actionable_lines(exclude) {
+    // No toplevel resolution here: there are no exclude terms for a subdirectory
+    // cwd to void, and `git diff` is cwd-independent anyway (measured, git 2.51.1:
+    // `--cached --numstat` returns the same root-relative rows from a
+    // subdirectory). So these spawns stay byte-identical to the unfiltered
+    // command, and the common case pays nothing.
+    if !has_positive_pattern(exclude) {
         let (content, stat) = tokio::try_join!(
             run_git(Some(repo_path), content_args, DEFAULT_TIMEOUT),
             run_git(Some(repo_path), numstat_args, DEFAULT_TIMEOUT)
@@ -363,6 +376,13 @@ pub async fn filtered_diff(
             excluded_files: 0,
         });
     }
+
+    // Pin every spawn below to the working-tree toplevel. PATHSPEC elements
+    // resolve against the cwd, so below the toplevel the exclude terms match
+    // nothing and the positive `.` truncates the diff — shipping an excluded file
+    // while reporting it hidden.
+    let toplevel = crate::git::runner::worktree_toplevel(repo_path).await?;
+    let repo_path = toplevel.as_str();
 
     for _ in 0..MAX_ATTEMPTS {
         let stat = run_git(Some(repo_path), numstat_args, DEFAULT_TIMEOUT).await?;
@@ -380,7 +400,6 @@ pub async fn filtered_diff(
             .into_iter()
             .collect();
 
-        let total_rows = rows.len() as u32;
         let mut terms: Vec<String> = Vec::new();
         let mut files: Vec<DiffStatEntry> = Vec::new();
         let mut excluded_files = 0u32;
@@ -417,14 +436,13 @@ pub async fn filtered_diff(
         let mut args: Vec<&str> = content_args.to_vec();
         args.extend(["--", "."]);
         args.extend(terms.iter().map(String::as_str));
-        // Over budget the survivors go too: they can only be shipped by a spawn
-        // that would either fail outright or have to drop terms (see TERM_BUDGET).
+        // Over budget this cannot be answered safely OR honestly — see TERM_BUDGET.
         if args.iter().map(|a| a.len()).sum::<usize>() > TERM_BUDGET {
-            return Ok(FilteredDiff {
-                text: String::new(),
-                files: Vec::new(),
-                excluded_files: total_rows,
-            });
+            return Err(AppError::Command(
+                "too many AI-ignored changed files to filter this diff safely \
+                 — narrow the diff or the AI ignore patterns"
+                    .into(),
+            ));
         }
         let content = run_git(Some(repo_path), &args, DEFAULT_TIMEOUT).await?;
 
@@ -447,7 +465,7 @@ pub async fn filtered_diff(
 
 /// Every path a numstat pass named, both rename sides included, in a
 /// comparable order.
-fn sorted_names(rows: &[crate::git::diff::DiffStatRow]) -> Vec<String> {
+fn sorted_names(rows: &[DiffStatRow]) -> Vec<String> {
     let mut names: Vec<String> = rows
         .iter()
         .flat_map(|row| row.names.iter().cloned())
@@ -486,7 +504,7 @@ mod tests {
         let (lines, has_positive) = actionable_lines(&inert);
         assert_eq!(lines, ["!a"]);
         assert!(!has_positive);
-        assert!(!has_actionable_lines(&inert));
+        assert!(!has_positive_pattern(&inert));
 
         // An embedded newline would reach the excludes file as TWO lines — the
         // second an effective negation — while classifying by its first
@@ -496,14 +514,14 @@ mod tests {
         let (lines, has_positive) = actionable_lines(&smuggled);
         assert!(lines.is_empty(), "{lines:?}");
         assert!(!has_positive);
-        assert!(!has_actionable_lines(&smuggled));
+        assert!(!has_positive_pattern(&smuggled));
         // A bare CR is dropped on the same grounds.
         assert!(actionable_lines(&["a\rb".to_string()]).0.is_empty());
         // …but a TRAILING newline is just line noise: it trims away and the
         // pattern still counts.
         let trailing = ["*.env\n".to_string()];
         assert_eq!(actionable_lines(&trailing).0, ["*.env"]);
-        assert!(has_actionable_lines(&trailing));
+        assert!(has_positive_pattern(&trailing));
     }
 
     /// The widened term keeps every glob metacharacter literal, collapses each
@@ -1229,6 +1247,66 @@ mod tests {
         assert!(only_droppable.is_empty());
     }
 
+    /// What a `\` in a NAME needs from a pattern, per platform — the two lines
+    /// `aiExcludePatternLinesForPath` emits for such a path.
+    ///
+    /// The platforms disagree about what that byte IS while matching. Unix keeps
+    /// it an ordinary byte, so the ESCAPED pattern matches it exactly. Windows
+    /// normalizes the name's `\` to a separator before matching, so no backslash
+    /// spelling can reach it and only the `/`-separated twin does. Path STRINGS,
+    /// so no filesystem is involved and the fixture exists on both.
+    ///
+    /// The raw single-backslash pattern is asserted everywhere because it is the
+    /// bug this pins: gitignore reads it as an escape, so it hides a DIFFERENT
+    /// file and leaves the named one visible.
+    #[tokio::test]
+    async fn a_backslash_in_a_name_needs_the_platforms_own_spelling() {
+        let (_dir, repo) = parity_repo().await;
+        let paths = vec!["weird\\name.env".to_string(), "weirdname.env".to_string()];
+        let hits = |pattern: &str| {
+            let repo = repo.clone();
+            let paths = paths.clone();
+            let pattern = pattern.to_string();
+            async move {
+                git_filter_ai_ignored(repo, paths, vec![pattern])
+                    .await
+                    .unwrap()
+            }
+        };
+
+        // The bug: `\n` is an escaped `n`, so this names `weirdname.env`.
+        let raw = hits("/weird\\name.env").await;
+        assert_eq!(
+            raw,
+            vec!["weirdname.env".to_string()],
+            "a raw backslash escapes the next character on every platform"
+        );
+
+        let escaped = hits("/weird\\\\name.env").await;
+        let separated = hits("/weird/name.env").await;
+        if cfg!(windows) {
+            assert_eq!(
+                separated,
+                vec!["weird\\name.env".to_string()],
+                "the name's `\\` normalizes to a separator here"
+            );
+            assert!(
+                !escaped.contains(&"weird\\name.env".to_string()),
+                "…so no backslash spelling reaches it: {escaped:?}"
+            );
+        } else {
+            assert_eq!(
+                escaped,
+                vec!["weird\\name.env".to_string()],
+                "the `\\` is an ordinary byte here, matched exactly by the escape"
+            );
+            assert!(
+                !separated.contains(&"weird\\name.env".to_string()),
+                "…and the `/` twin names a nested path instead: {separated:?}"
+            );
+        }
+    }
+
     /// A renamed file is hidden WHOLE when either side matches. Excluding only
     /// the new name leaves a `D <old name>` row, which names the very file the
     /// user withheld; excluding only the old name leaves the new content.
@@ -1399,6 +1477,90 @@ mod tests {
         );
     }
 
+    /// A `repo_path` BELOW the toplevel still filters correctly, because the
+    /// flow resolves the toplevel itself.
+    ///
+    /// Left at a subdirectory cwd, `--numstat` still prints root-relative names
+    /// — so the verdicts and `excluded_files` look right — while the exclude
+    /// terms resolve against that cwd and match nothing, and the positive `.`
+    /// scopes the diff to the subdirectory. The excluded file's content would
+    /// ship while reported hidden, and everything outside the subdirectory would
+    /// vanish. The MCP server takes `--repo` verbatim, so this cwd is reachable.
+    #[tokio::test]
+    async fn a_subdirectory_repo_path_still_filters_from_the_toplevel() {
+        let (_dir, repo) = seed_repo("subdir").await;
+        let root = Path::new(&repo);
+        std::fs::create_dir_all(root.join("services").join("api")).unwrap();
+        std::fs::write(
+            root.join("services").join("api").join(".env"),
+            "TOKEN=SECRET_MARKER\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("services").join("api").join("app.js"),
+            "// APP_MARKER\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("root.txt"), "ROOT_MARKER\n").unwrap();
+        run_git(Some(&repo), &["add", "-A", "-f"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+
+        let subdir = root
+            .join("services")
+            .join("api")
+            .to_string_lossy()
+            .into_owned();
+        for (label, path) in [("subdirectory", &subdir), ("toplevel", &repo)] {
+            let out = git_staged_diff(path.clone(), None, Some(vec!["*.env".to_string()]), None)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                out.files
+                    .iter()
+                    .map(|f| f.path.as_str())
+                    .collect::<Vec<_>>(),
+                ["root.txt", "services/api/app.js"],
+                "{label}: file list"
+            );
+            assert_eq!(out.excluded_files, 1, "{label}: disclosure");
+            assert!(
+                !out.text.contains("SECRET_MARKER"),
+                "{label}: the excluded file's CONTENT must not ship"
+            );
+            assert!(
+                out.text.contains("ROOT_MARKER"),
+                "{label}: the diff must not be scoped to the subdirectory"
+            );
+            assert!(out.text.contains("APP_MARKER"), "{label}: survivor kept");
+        }
+
+        // …and with NO patterns at all: both paths cover the same tree. The
+        // unfiltered path takes no toplevel resolution at all, so this passes
+        // either way — `git diff` is cwd-independent. It is the uniformity
+        // insurance, guarding the SCOPE property (a future `--relative`, or a
+        // pathspec added to this path, would break it), not the resolution.
+        for (label, path) in [("subdirectory", &subdir), ("toplevel", &repo)] {
+            let out = git_staged_diff(path.clone(), None, None, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                out.files
+                    .iter()
+                    .map(|f| f.path.as_str())
+                    .collect::<Vec<_>>(),
+                ["root.txt", "services/api/.env", "services/api/app.js"],
+                "{label}: unfiltered scope"
+            );
+            assert_eq!(out.excluded_files, 0);
+            assert!(
+                out.text.contains("ROOT_MARKER"),
+                "{label}: the whole tree, not just the subdirectory"
+            );
+        }
+    }
+
     /// Every changed file hidden ⇒ no content pass runs at all. A `git diff`
     /// carrying no pathspec is the FULL diff, so this short-circuit is what stops
     /// an all-ignored change from coming back unfiltered.
@@ -1480,44 +1642,79 @@ mod tests {
         );
     }
 
-    /// Past `TERM_BUDGET` the diff is withheld WHOLE — survivors included —
-    /// because the only alternatives are a spawn that fails outright on Windows
-    /// or one with terms dropped, which ships the very files that matched.
+    /// Past `TERM_BUDGET` the call ERRORS rather than returning an empty diff:
+    /// empty is indistinguishable from "everything was ignored", which every
+    /// generation surface repeats to the user as advice — while survivors sit
+    /// unshown. The just-under case runs alongside it so the cliff cannot move
+    /// silently in either direction.
+    ///
+    /// Sizes are argv bytes: each term is `:(exclude,literal)` (19) plus a
+    /// ~73-char path, so ~94 each on top of ~100 bytes of fixed args.
     #[tokio::test]
-    async fn a_term_list_over_budget_withholds_the_whole_diff() {
+    async fn a_term_list_over_budget_errors_instead_of_leaking_or_lying() {
         let (_dir, repo) = seed_repo("budget").await;
         let blob = seed_blob(&repo).await;
-
-        // 400 long ignored names: ~94 bytes of term each, far past the budget.
         let pad = "a".repeat(60);
-        let mut inner = String::new();
-        for i in 0..400 {
-            inner.push_str(&format!("100644 blob {blob}\tf{i}_{pad}.env\n"));
-        }
-        let vendor = mktree_raw(&repo, inner.as_bytes());
-        let top = format!(
-            "040000 tree {vendor}\tvendor\n\
-             100644 blob {blob}\ta.txt\n\
-             100644 blob {blob}\tkeep.txt\n"
-        );
-        let (base, head) = commit_tree_pair(&repo, top.as_bytes()).await;
 
-        // Fixture precondition: the two survivors really are in the range.
+        // Builds a tree of `count` long ignored names under `vendor/`, plus two
+        // short survivors outside it.
+        let tree_of = |count: usize| {
+            let blob = blob.clone();
+            let pad = pad.clone();
+            let repo = repo.clone();
+            async move {
+                let mut inner = String::new();
+                for i in 0..count {
+                    inner.push_str(&format!("100644 blob {blob}\tf{i}_{pad}.env\n"));
+                }
+                let vendor = mktree_raw(&repo, inner.as_bytes());
+                let top = format!(
+                    "040000 tree {vendor}\tvendor\n\
+                     100644 blob {blob}\ta.txt\n\
+                     100644 blob {blob}\tkeep.txt\n"
+                );
+                commit_tree_pair(&repo, top.as_bytes()).await
+            }
+        };
+
+        // ~400 × 94 ≈ 37,600 bytes of terms — far past the 16,000 budget.
+        let (base, head) = tree_of(400).await;
         let all = git_branch_diff(repo.clone(), base.clone(), head.clone(), None, None)
             .await
             .unwrap();
-        assert_eq!(all.files.len(), 402);
-        assert_eq!(all.excluded_files, 0);
+        assert_eq!(all.files.len(), 402, "fixture precondition");
 
+        let err = git_branch_diff(
+            repo.clone(),
+            base,
+            head,
+            None,
+            Some(vec!["vendor/".to_string()]),
+        )
+        .await
+        .expect_err("over budget must not return a diff at all");
+        assert!(
+            err.to_string()
+                .contains("too many AI-ignored changed files"),
+            "{err}"
+        );
+
+        // ~150 × 94 ≈ 14,100 bytes — just under, so the content pass runs and
+        // the survivors come back filtered in the ordinary way.
+        let (base, head) = tree_of(150).await;
         let filtered = git_branch_diff(repo, base, head, None, Some(vec!["vendor/".to_string()]))
             .await
-            .unwrap();
-        assert!(filtered.text.is_empty(), "{}", filtered.text);
-        assert!(filtered.files.is_empty(), "{:?}", filtered.files);
+            .expect("under budget filters normally");
         assert_eq!(
-            filtered.excluded_files, 402,
-            "the disclosure counts survivors too — they are withheld as well"
+            filtered
+                .files
+                .iter()
+                .map(|f| f.path.as_str())
+                .collect::<Vec<_>>(),
+            ["a.txt", "keep.txt"]
         );
+        assert_eq!(filtered.excluded_files, 150);
+        assert!(!filtered.text.contains("vendor/"), "{}", filtered.text);
     }
 
     /// A multi-line rev expansion is a hard error on the pinned path, rather than

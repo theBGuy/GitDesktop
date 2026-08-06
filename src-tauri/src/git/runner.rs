@@ -166,6 +166,31 @@ pub async fn run_git_input(
     Ok(out)
 }
 
+/// The working tree's toplevel for `repo_path`, which may be any directory
+/// inside it.
+///
+/// Anything that reads repo-relative NAMES out of git, or hands git pathspecs
+/// meant to match them, has to bind to this rather than to the path it was
+/// given: git prints and resolves both relative to the cwd, so a subdirectory
+/// silently re-scopes the answer while still looking well-formed. The MCP server
+/// takes `--repo` verbatim, so that subdirectory is reachable.
+pub(crate) async fn worktree_toplevel(repo_path: &str) -> AppResult<String> {
+    let out = run_git(
+        Some(repo_path),
+        &["rev-parse", "--show-toplevel"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    let stdout = out.stdout_lossy();
+    // Line endings ONLY: a trailing space can be part of the directory name, and
+    // `trim()` would strip it into a path that does not exist.
+    let toplevel = stdout.trim_end_matches(['\r', '\n']).to_string();
+    if toplevel.is_empty() {
+        return Err(AppError::NotARepo(repo_path.to_string()));
+    }
+    Ok(toplevel)
+}
+
 /// Runs a mutating git command under the per-repo lock, retrying once on
 /// index.lock contention caused by external tools (editors, other clients).
 pub async fn run_git_mutating(
