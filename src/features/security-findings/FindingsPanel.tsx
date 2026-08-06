@@ -21,7 +21,13 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { LoadMoreRow, PAGE_SIZE } from "@/features/conversations/LoadMoreRow";
 import { ForgeNotReady } from "@/features/repository/ForgeNotReady";
-import { forgeReady, forgeSupports, useForgeStatus } from "@/lib/git/queries";
+import {
+  forgeFeatureReady,
+  forgeReady,
+  forgeSupports,
+  useForgeStatus,
+  useRepoAdmin,
+} from "@/lib/git/queries";
 import type {
   DependabotAlertOut,
   FindingAvailability,
@@ -263,6 +269,12 @@ export function FindingsPanel({
   const ready = forgeReady(forge.data);
   const supported = forgeSupports(forge.data, "securityFindings");
   const enabled = ready && supported;
+  // Mirrors RepositoryMenu's gate on the "Repository settings…" item: the deep
+  // link opens that same admin-only dialog, so offering it to a non-admin would
+  // land them on a permissions error. Same query key, so no extra fetch.
+  const settingsReady = forgeFeatureReady(forge.data, "repoSettings");
+  const admin = useRepoAdmin(repoPath, settingsReady);
+  const canOpenRepoSettings = settingsReady && Boolean(admin.data?.admin);
 
   const limits = useUiStore((s) => s.findingsLimits);
   const setFindingsLimits = useUiStore((s) => s.setFindingsLimits);
@@ -344,7 +356,9 @@ export function FindingsPanel({
   const refreshing = alerts.isFetching || advisories.isFetching;
   const refreshReason = enabled
     ? "Refresh findings"
-    : "Connect this repo to GitHub to load findings";
+    : !supported && ready
+      ? "Security findings aren't available on this repository's host."
+      : "Connect this repo to GitHub to load findings";
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -411,7 +425,11 @@ export function FindingsPanel({
                 category="dependency alerts"
                 Category="Dependency alerts"
                 onRetry={() => alerts.refetch()}
-                onEnable={() => requestRepoSettings("security")}
+                onEnable={
+                  canOpenRepoSettings
+                    ? () => requestRepoSettings("security")
+                    : undefined
+                }
               />
             ) : (
               <>
@@ -489,7 +507,7 @@ export function FindingsPanel({
                 {alertsOut.truncated &&
                   (limits.alerts >= FINDINGS_LIMIT_CAP ? (
                     <p className="border-t px-3 py-3 text-xs text-muted-foreground">
-                      Showing the first {FINDINGS_LIMIT_CAP.toLocaleString()}{" "}
+                      Showing the first {allAlerts.length.toLocaleString()}{" "}
                       dependency alerts.
                     </p>
                   ) : (
@@ -592,7 +610,7 @@ export function FindingsPanel({
                 {advisoriesOut.truncated &&
                   (limits.advisories >= FINDINGS_LIMIT_CAP ? (
                     <p className="border-t px-3 py-3 text-xs text-muted-foreground">
-                      Showing the first {FINDINGS_LIMIT_CAP.toLocaleString()}{" "}
+                      Showing the first {allAdvisories.length.toLocaleString()}{" "}
                       security advisories.
                     </p>
                   ) : (

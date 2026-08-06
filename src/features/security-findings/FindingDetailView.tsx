@@ -46,15 +46,18 @@ function DetailShell({
         <h2 className="text-sm font-semibold text-balance">{title}</h2>
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <SeverityChip severity={severity} />
-          <Button
-            variant="outline"
-            size="sm"
-            className="ml-auto"
-            onClick={() => openUrl(htmlUrl)}
-          >
-            <ArrowSquareOutIcon data-icon="inline-start" />
-            View on GitHub
-          </Button>
+          {/* A tolerated malformed item can lack html_url — no link, no button. */}
+          {htmlUrl ? (
+            <Button
+              variant="outline"
+              size="sm"
+              className="ml-auto"
+              onClick={() => openUrl(htmlUrl)}
+            >
+              <ArrowSquareOutIcon data-icon="inline-start" />
+              View on GitHub
+            </Button>
+          ) : null}
         </div>
         <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-xs">
           {meta}

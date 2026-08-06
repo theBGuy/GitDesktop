@@ -79,12 +79,13 @@ From the welcome screen (or the repo switcher in the header):
 Once a repo is open you land on the **Changes** tab. The header's tab rail holds the
 three primary views — **Changes**, **History**, and **Pull Requests** — and a
 **More ▾** menu holds the rest: **Compare**, {{ai}}**Agent**, {{/ai}}**Issues**,
-**Discussions**, **Actions**, **Tags**, and **Insights**. The More button shows the
-active secondary tab's name, so the rail always says where you are.
+**Code TODOs**, **Discussions**, **Actions**, **Findings**, **Tags**, **Tasks**,
+and **Insights**. The More button shows the active secondary tab's name, so the
+rail always says where you are.
 
 Switch tabs with the number keys ({{kbd:tab-changes}} through {{kbd:tab-insights}}; see
-*Keyboard & navigation*). Issues, Discussions, Actions, and Tags need \`gh\` and a GitHub
-remote{{ai}}; the **Agent** tab appears only when AI features are enabled{{/ai}}.
+*Keyboard & navigation*). Issues, Discussions, Actions, Findings, and Tags need \`gh\` and a
+GitHub remote{{ai}}; the **Agent** tab appears only when AI features are enabled{{/ai}}.
 
 > Tip: press {{kbd:command-palette}} anytime for the command palette — the fastest way
 > to find a feature when you don't know where it lives — or {{kbd:show-help}} to reopen
@@ -1842,8 +1843,9 @@ bindings (formatted for your platform) — rebind any of them in **Settings → 
 - **Tabs:** {{kbd:tab-changes}} Changes · {{kbd:tab-history}} History ·
   {{kbd:tab-compare}} Compare · {{kbd:tab-pulls}} Pull Requests · {{kbd:tab-actions}}
   Actions · {{kbd:tab-issues}} Issues · {{kbd:tab-discussions}} Discussions ·
-  {{kbd:tab-tags}} Tags · {{kbd:tab-insights}} Insights.{{ai}} The **Agent** tab is
-  palette-only by default (bind a key in Settings).{{/ai}}
+  {{kbd:tab-tags}} Tags · {{kbd:tab-insights}} Insights. The **Code TODOs**, **Findings**,
+  and **Tasks** tabs are palette-only by default{{ai}}, as is **Agent**{{/ai}} (bind a key
+  in **Settings → Keyboard**).
 - {{kbd:show-repositories}} repositories · {{kbd:show-branches}} branches ·
   {{kbd:back-to-repositories}} back to repositories · {{kbd:focus-filter}} focus the
   filter.

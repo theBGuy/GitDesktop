@@ -8,7 +8,7 @@
 //! timeout escapes as `Err`; every completed-but-failed call is classified into
 //! the envelope instead.
 
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::{AppError, AppResult};
@@ -168,7 +168,7 @@ struct RawVulnerability {
 #[derive(Deserialize, Default)]
 struct RawAlert {
     #[serde(default)]
-    number: i64,
+    number: Option<i64>,
     #[serde(default)]
     state: Option<String>,
     #[serde(default)]
@@ -241,7 +241,9 @@ fn alert_out(raw: RawAlert) -> DependabotAlertOut {
     let advisory = raw.security_advisory.unwrap_or_default();
     let vulnerability = raw.security_vulnerability.unwrap_or_default();
     DependabotAlertOut {
-        number: raw.number,
+        // A null/absent number degrades to 0 rather than dropping the alert; the
+        // UI's identity falls back to the list index.
+        number: raw.number.unwrap_or(0),
         state: raw.state.unwrap_or_default(),
         package_name: package.name.unwrap_or_default(),
         ecosystem: package.ecosystem.unwrap_or_default(),
@@ -405,6 +407,33 @@ fn clamp_limit(limit: Option<u32>) -> usize {
     limit.unwrap_or(100).clamp(1, 500) as usize
 }
 
+/// Whether the page walk keeps going, and if not whether findings were left behind.
+#[derive(Debug, PartialEq, Eq)]
+enum PageOutcome {
+    Stop { truncated: bool },
+    Continue,
+}
+
+/// The walk's per-page decision, given the items gathered so far and this page's
+/// size and Link header. Truncation is the safe direction: every stop we can't
+/// prove complete reports `truncated`, never a clean end of list.
+fn page_outcome(total: usize, limit: usize, page_len: usize, next: &NextPage) -> PageOutcome {
+    if total >= limit {
+        return PageOutcome::Stop {
+            truncated: total > limit || *next != NextPage::None,
+        };
+    }
+    match next {
+        NextPage::None => PageOutcome::Stop { truncated: false },
+        // A next page we can't address ends the walk as INCOMPLETE — reporting
+        // it complete would present a parse failure as "no more findings".
+        NextPage::Unreadable => PageOutcome::Stop { truncated: true },
+        // An empty page that still advertises a next link would spin the walk.
+        NextPage::Cursor(_) if page_len == 0 => PageOutcome::Stop { truncated: true },
+        NextPage::Cursor(_) => PageOutcome::Continue,
+    }
+}
+
 /// Walks a cursor-paginated list endpoint up to `limit` items. `base_path` must
 /// already carry a query string — the cursor is appended as `&after=`.
 async fn fetch_paged(repo_path: &str, base_path: &str, limit: usize) -> AppResult<Fetched> {
@@ -430,36 +459,107 @@ async fn fetch_paged(repo_path: &str, base_path: &str, limit: usize) -> AppResul
         let page_len = page.len();
         let next = parse_link_next(headers);
         items.extend(page);
-        if items.len() >= limit {
-            let truncated = items.len() > limit || next != NextPage::None;
-            items.truncate(limit);
-            return Ok(Fetched::Items { items, truncated });
-        }
-        let c = match next {
-            NextPage::None => {
-                return Ok(Fetched::Items {
-                    items,
-                    truncated: false,
-                })
+        match page_outcome(items.len(), limit, page_len, &next) {
+            PageOutcome::Stop { truncated } => {
+                items.truncate(limit);
+                return Ok(Fetched::Items { items, truncated });
             }
-            // A next page we can't address ends the walk as INCOMPLETE — reporting
-            // it complete would present a parse failure as "no more findings".
-            NextPage::Unreadable => {
-                return Ok(Fetched::Items {
-                    items,
-                    truncated: true,
-                })
-            }
-            NextPage::Cursor(c) => c,
-        };
-        // An empty page that still advertises a next link would spin the walk.
-        if page_len == 0 {
-            return Ok(Fetched::Items {
-                items,
-                truncated: true,
-            });
+            // `Continue` is only returned for an addressable cursor; anything else
+            // ends the walk as incomplete rather than as a clean list.
+            PageOutcome::Continue => match next {
+                NextPage::Cursor(c) => cursor = Some(c),
+                _ => {
+                    return Ok(Fetched::Items {
+                        items,
+                        truncated: true,
+                    })
+                }
+            },
         }
-        cursor = Some(c);
+    }
+}
+
+/// Survivors of a page's deserialization, or the size of a page nothing survived.
+enum ParsedItems<T> {
+    Items(Vec<T>),
+    AllUnreadable(usize),
+}
+
+/// Drops individually malformed items, but keeps a page that parsed away entirely
+/// distinguishable: an empty `Available` list would tell the user the repo is clean
+/// when we simply couldn't read what GitHub sent.
+fn parse_items<T: DeserializeOwned>(items: Vec<Value>) -> ParsedItems<T> {
+    let total = items.len();
+    let parsed: Vec<T> = items
+        .into_iter()
+        .filter_map(|v| serde_json::from_value::<T>(v).ok())
+        .collect();
+    if total > 0 && parsed.is_empty() {
+        ParsedItems::AllUnreadable(total)
+    } else {
+        ParsedItems::Items(parsed)
+    }
+}
+
+fn alerts_envelope(fetched: Fetched) -> DependabotAlertsOut {
+    match fetched {
+        Fetched::Unavailable {
+            availability,
+            detail,
+        } => DependabotAlertsOut {
+            availability,
+            detail,
+            alerts: Vec::new(),
+            truncated: false,
+        },
+        Fetched::Items { items, truncated } => match parse_items::<RawAlert>(items) {
+            ParsedItems::Items(raw) => DependabotAlertsOut {
+                availability: FindingAvailability::Available,
+                detail: None,
+                alerts: raw.into_iter().map(alert_out).collect(),
+                truncated,
+            },
+            ParsedItems::AllUnreadable(total) => DependabotAlertsOut {
+                availability: FindingAvailability::Indeterminate,
+                detail: Some(format!(
+                    "GitHub returned {total} {} this build couldn't read",
+                    if total == 1 { "alert" } else { "alerts" }
+                )),
+                alerts: Vec::new(),
+                truncated: false,
+            },
+        },
+    }
+}
+
+fn advisories_envelope(fetched: Fetched) -> RepoAdvisoriesOut {
+    match fetched {
+        Fetched::Unavailable {
+            availability,
+            detail,
+        } => RepoAdvisoriesOut {
+            availability,
+            detail,
+            advisories: Vec::new(),
+            truncated: false,
+        },
+        Fetched::Items { items, truncated } => match parse_items::<RawRepoAdvisory>(items) {
+            ParsedItems::Items(raw) => RepoAdvisoriesOut {
+                availability: FindingAvailability::Available,
+                detail: None,
+                advisories: raw.into_iter().map(advisory_out).collect(),
+                truncated,
+            },
+            ParsedItems::AllUnreadable(total) => RepoAdvisoriesOut {
+                availability: FindingAvailability::Indeterminate,
+                detail: Some(format!(
+                    "GitHub returned {total} {} this build couldn't read",
+                    if total == 1 { "advisory" } else { "advisories" }
+                )),
+                advisories: Vec::new(),
+                truncated: false,
+            },
+        },
     }
 }
 
@@ -473,29 +573,8 @@ pub async fn gh_dependabot_alerts(
     // on a fork with an `upstream` remote, which would list the parent's findings.
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
     let base = format!("repos/{slug}/dependabot/alerts?state=open&per_page=100");
-    Ok(
-        match fetch_paged(&repo_path, &base, clamp_limit(limit)).await? {
-            Fetched::Unavailable {
-                availability,
-                detail,
-            } => DependabotAlertsOut {
-                availability,
-                detail,
-                alerts: Vec::new(),
-                truncated: false,
-            },
-            Fetched::Items { items, truncated } => DependabotAlertsOut {
-                availability: FindingAvailability::Available,
-                detail: None,
-                alerts: items
-                    .into_iter()
-                    .filter_map(|v| serde_json::from_value::<RawAlert>(v).ok())
-                    .map(alert_out)
-                    .collect(),
-                truncated,
-            },
-        },
-    )
+    let fetched = fetch_paged(&repo_path, &base, clamp_limit(limit)).await?;
+    Ok(alerts_envelope(fetched))
 }
 
 /// Security advisories published on the repo itself (its own GHSAs).
@@ -506,29 +585,8 @@ pub async fn gh_repo_advisories(
 ) -> AppResult<RepoAdvisoriesOut> {
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
     let base = format!("repos/{slug}/security-advisories?per_page=100");
-    Ok(
-        match fetch_paged(&repo_path, &base, clamp_limit(limit)).await? {
-            Fetched::Unavailable {
-                availability,
-                detail,
-            } => RepoAdvisoriesOut {
-                availability,
-                detail,
-                advisories: Vec::new(),
-                truncated: false,
-            },
-            Fetched::Items { items, truncated } => RepoAdvisoriesOut {
-                availability: FindingAvailability::Available,
-                detail: None,
-                advisories: items
-                    .into_iter()
-                    .filter_map(|v| serde_json::from_value::<RawRepoAdvisory>(v).ok())
-                    .map(advisory_out)
-                    .collect(),
-                truncated,
-            },
-        },
-    )
+    let fetched = fetch_paged(&repo_path, &base, clamp_limit(limit)).await?;
+    Ok(advisories_envelope(fetched))
 }
 
 #[cfg(test)]
@@ -902,5 +960,120 @@ mod tests {
         assert_eq!(clamp_limit(Some(0)), 1);
         assert_eq!(clamp_limit(Some(42)), 42);
         assert_eq!(clamp_limit(Some(10_000)), 500);
+    }
+
+    fn readable_alert() -> Value {
+        alert_fixture(
+            json!({ "identifier": "4.12.34" }),
+            json!({ "score": 5.3, "vector_string": "CVSS:3.1/AV:N" }),
+        )
+    }
+
+    #[test]
+    fn a_page_that_parses_away_entirely_is_indeterminate() {
+        // Every item unreadable must NOT render as "no open alerts" — that is the
+        // clean-repo lie the envelope exists to prevent.
+        let out = alerts_envelope(Fetched::Items {
+            items: vec![json!("not an object"), json!(42)],
+            truncated: false,
+        });
+        assert_eq!(out.availability, FindingAvailability::Indeterminate);
+        assert_eq!(
+            out.detail.as_deref(),
+            Some("GitHub returned 2 alerts this build couldn't read")
+        );
+        assert!(out.alerts.is_empty());
+
+        let out = advisories_envelope(Fetched::Items {
+            items: vec![json!("not an object")],
+            truncated: false,
+        });
+        assert_eq!(out.availability, FindingAvailability::Indeterminate);
+        assert_eq!(
+            out.detail.as_deref(),
+            Some("GitHub returned 1 advisory this build couldn't read")
+        );
+        assert!(out.advisories.is_empty());
+
+        // A genuinely empty page is still the real, available answer.
+        let out = alerts_envelope(Fetched::Items {
+            items: Vec::new(),
+            truncated: false,
+        });
+        assert_eq!(out.availability, FindingAvailability::Available);
+        assert_eq!(out.detail, None);
+    }
+
+    #[test]
+    fn a_partly_unreadable_page_keeps_the_survivors() {
+        let out = alerts_envelope(Fetched::Items {
+            items: vec![json!("not an object"), readable_alert()],
+            truncated: true,
+        });
+        assert_eq!(out.availability, FindingAvailability::Available);
+        assert_eq!(out.detail, None);
+        assert_eq!(out.alerts.len(), 1);
+        assert_eq!(out.alerts[0].number, 29);
+        assert!(out.truncated);
+    }
+
+    #[test]
+    fn an_alert_with_a_null_number_is_kept() {
+        // `serde(default)` covers a MISSING key, not a null — a required i64 would
+        // drop the whole alert over its identity field.
+        let mut item = readable_alert();
+        item["number"] = Value::Null;
+        let out = alerts_envelope(Fetched::Items {
+            items: vec![item],
+            truncated: false,
+        });
+        assert_eq!(out.availability, FindingAvailability::Available);
+        assert_eq!(out.alerts.len(), 1);
+        assert_eq!(out.alerts[0].number, 0);
+        assert_eq!(out.alerts[0].package_name, "hono");
+    }
+
+    #[test]
+    fn page_outcome_stops_at_the_limit() {
+        // A full window with a further page is truncated; without one it is complete.
+        assert_eq!(
+            page_outcome(5, 5, 5, &NextPage::Cursor("C".into())),
+            PageOutcome::Stop { truncated: true }
+        );
+        assert_eq!(
+            page_outcome(5, 5, 5, &NextPage::None),
+            PageOutcome::Stop { truncated: false }
+        );
+        // Overshooting the window is truncation on its own.
+        assert_eq!(
+            page_outcome(7, 5, 7, &NextPage::None),
+            PageOutcome::Stop { truncated: true }
+        );
+    }
+
+    #[test]
+    fn page_outcome_stops_short_without_claiming_completeness() {
+        // An unaddressable next page, and an empty page still advertising a cursor
+        // (which would spin the walk), both end it as incomplete.
+        assert_eq!(
+            page_outcome(2, 5, 2, &NextPage::Unreadable),
+            PageOutcome::Stop { truncated: true }
+        );
+        assert_eq!(
+            page_outcome(2, 5, 0, &NextPage::Cursor("C".into())),
+            PageOutcome::Stop { truncated: true }
+        );
+    }
+
+    #[test]
+    fn page_outcome_continues_under_the_limit_and_ends_clean() {
+        assert_eq!(
+            page_outcome(2, 5, 2, &NextPage::Cursor("C".into())),
+            PageOutcome::Continue
+        );
+        assert_eq!(
+            page_outcome(2, 5, 2, &NextPage::None),
+            PageOutcome::Stop { truncated: false }
+        );
     }
 }

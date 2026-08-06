@@ -23,10 +23,10 @@ const ATLASSIAN_TOKEN_URL =
 
 /**
  * Shared "this hosted feature isn't available" empty state for the Pull
- * Requests, Issues, Discussions, and Actions tabs. Names the actual blocker and
- * pairs it with the one action that resolves it, so the tab is a path forward
- * instead of a dead end. `feature` is the noun the message reads with ("pull
- * requests", "workflow runs").
+ * Requests, Issues, Discussions, Actions, and Findings tabs. Names the actual
+ * blocker and pairs it with the one action that resolves it, so the tab is a
+ * path forward instead of a dead end. `feature` is the noun the message reads
+ * with ("pull requests", "workflow runs").
  *
  * Provider-aware, with the publish path taking precedence: when this repo has
  * no origin and ≥1 provider can publish it, the panel offers the shared

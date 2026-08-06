@@ -157,6 +157,7 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   // everyone else.
   const settingsReady = forgeFeatureReady(gh.data, "repoSettings");
   const admin = useRepoAdmin(repoPath, settingsReady);
+  const canOpenRepoSettings = settingsReady && Boolean(admin.data?.admin);
   const editor = (settings.data?.externalEditor ?? "").trim();
   const editorName =
     (settings.data?.externalEditorName ?? "").trim() || "editor";
@@ -184,13 +185,16 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   });
 
   // A one-shot deep link raised by another surface (the Findings tab's "turn on
-  // Dependabot" card). Keyed on the request alone so re-opening the dialog can
-  // never re-fire it.
+  // Dependabot" card). Not keyed on the dialog's open state, so re-opening the
+  // dialog can never re-fire it.
   useEffect(() => {
     if (!repoSettingsRequest) return;
-    openRepoSettingsAt(repoSettingsRequest);
+    // Same admin gate as the menu item: the dialog is admin-only, so a request
+    // raised before the gate was known must not open it. Cleared either way —
+    // a refused request is dropped rather than left to fire later.
+    if (canOpenRepoSettings) openRepoSettingsAt(repoSettingsRequest);
     clearRepoSettingsRequest();
-  }, [repoSettingsRequest, clearRepoSettingsRequest]);
+  }, [repoSettingsRequest, clearRepoSettingsRequest, canOpenRepoSettings]);
 
   const onError = (e: unknown) => toastError(e);
 
@@ -240,7 +244,7 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   useHotkeyAction(
     "repository-settings",
     () => setRepoSettingsOpen(true),
-    settingsReady && Boolean(admin.data?.admin),
+    canOpenRepoSettings,
   );
   useHotkeyAction("branch-rules", () => setBranchRulesOpen(true));
   useHotkeyAction("git-hooks", () => setHooksOpen(true));
@@ -389,7 +393,7 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
           <KanbanIcon />
           {jiraLink.data ? "Change Jira project…" : "Link Jira project…"}
         </DropdownMenuItem>
-        {settingsReady && admin.data?.admin && (
+        {canOpenRepoSettings && (
           <DropdownMenuItem onClick={() => setRepoSettingsOpen(true)}>
             <GearSixIcon />
             Repository settings…
