@@ -530,7 +530,9 @@ function GeneralForm({
           </span>
         )}
         <Button
-          disabled={!dirty || !mergeValid || update.isPending}
+          disabled={
+            !dirty || !mergeValid || update.isPending || descGen.generating
+          }
           onClick={() =>
             update.mutate(form, {
               onSuccess: () => toast.success("Repository settings saved"),

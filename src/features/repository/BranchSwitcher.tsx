@@ -31,6 +31,7 @@ import {
 } from "@/lib/branch-rules/match";
 import { useEffectiveBranchRules } from "@/lib/branch-rules/queries";
 import { copyText } from "@/lib/clipboard";
+import { isDirtyTreeRefusal } from "@/lib/error-summary";
 import {
   forgeFeatureReady,
   useBranchDivergence,
@@ -56,6 +57,7 @@ import {
   useStashCount,
   useStashPop,
   useUnlockUserWorktree,
+  useSwitchAutostash,
   useUpdateBranchFrom,
   useUserWorktrees,
 } from "@/lib/git/queries";
@@ -66,7 +68,12 @@ import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useLocalPrs } from "@/lib/pulls/queries";
 import { useSetRepoLens } from "@/lib/repo-lens/queries";
-import { useAiConfigured, useAiEnabled } from "@/lib/settings/queries";
+import {
+  useAiConfigured,
+  useAiEnabled,
+  useSaveSettings,
+  useSettings,
+} from "@/lib/settings/queries";
 import { type SelectedPr, useUiStore } from "@/lib/stores/ui";
 import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
@@ -87,6 +94,10 @@ import { StashesDialog } from "./StashesDialog";
 import { SwitchWithChangesDialog } from "./SwitchWithChangesDialog";
 import { useOpenWorktree } from "./useOpenRepoByPath";
 import { LockWorktreeDialog, RenameWorktreeDialog } from "./WorktreesDialog";
+import {
+  reportAutostashOutcome,
+  useStashReapplyRecovery,
+} from "./useStashReapplyRecovery";
 
 /** Lower-cased, forward-slashed path for cross-source comparison — git emits
  *  "/", the app stores "\" on Windows. */
@@ -165,6 +176,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   const discardAll = useDiscardAll(repoPath);
   const stashAll = useStashAll(repoPath);
   const stashPop = useStashPop(repoPath);
+  const switchAutostash = useSwitchAutostash(repoPath);
   const mergeBranch = useMergeBranch(repoPath);
   const rebaseBranch = useRebaseBranch(repoPath);
   const rebaseOnto = useRebaseOnto(repoPath);
@@ -174,6 +186,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   const setBranchArchived = useSetBranchArchived(repoPath);
   const openWorktree = useOpenWorktree();
   const unlockWorktree = useUnlockUserWorktree(repoPath);
+  const recovery = useStashReapplyRecovery(repoPath);
+  const settings = useSettings();
+  const saveSettings = useSaveSettings();
   const rulesConfig = useEffectiveBranchRules(repoPath);
   const amendingHash = useUiStore((s) => s.amendingHash);
   const openSettings = useUiStore((s) => s.openSettings);
@@ -219,6 +234,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     name: string;
     remote: string | null;
   } | null>(null);
+  // "Reapply after switching" — seeded from the saved preference each time the
+  // dialog opens fresh, and persisted back when the user changes it.
+  const [reapplyOnSwitch, setReapplyOnSwitch] = useState(false);
+  // Why a first switch attempt didn't work, shown when the dialog re-opens.
+  const [switchHint, setSwitchHint] = useState<string | null>(null);
   // A branch checked out in another worktree, awaiting confirm to open it.
   const [worktreeSwitchTarget, setWorktreeSwitchTarget] = useState<{
     name: string;
@@ -578,20 +598,6 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     }
   }
 
-  async function runCheckoutAsync(target: {
-    name: string;
-    remote: string | null;
-  }) {
-    if (target.remote) {
-      await checkoutRemote.mutateAsync({
-        remote: target.remote,
-        name: target.name,
-      });
-    } else {
-      await checkout.mutateAsync(target.name);
-    }
-  }
-
   function switchTo(name: string, remote: string | null = null) {
     if (amending) return; // guarded by the disabled trigger; belt-and-suspenders
     setOpen(false);
@@ -604,6 +610,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     }
     // with work in progress, let the user choose to bring or stash it
     if (hasChanges) {
+      setSwitchHint(null);
+      setReapplyOnSwitch(settings.data?.reapplyStashOnSwitch ?? false);
       setSwitchTarget({ name, remote });
       return;
     }
@@ -614,19 +622,48 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     if (!switchTarget) return;
     const target = switchTarget;
     setSwitchTarget(null);
-    runCheckout(target, { onError });
+    runCheckout(target, {
+      onError: (e) => {
+        // git refused to carry the changes over rather than failing outright —
+        // re-open the choice with stashing pointed out, instead of a dead-end
+        // toast. The checkbox keeps whatever the user already set.
+        if (isDirtyTreeRefusal(e)) {
+          setSwitchHint(
+            "Bringing changes didn't work — git would overwrite them. Stash and switch instead.",
+          );
+          setSwitchTarget(target);
+          return;
+        }
+        onError(e);
+      },
+    });
   }
 
+  // One compound (stash → switch → optionally pop) under a single repo lock,
+  // for both checkbox states — the unchecked path just skips the pop.
   async function stashAndSwitch() {
     if (!switchTarget) return;
     const target = switchTarget;
+    const reapply = reapplyOnSwitch;
     setSwitchTarget(null);
+    if (settings.data && settings.data.reapplyStashOnSwitch !== reapply) {
+      saveSettings.mutate({ ...settings.data, reapplyStashOnSwitch: reapply });
+    }
     try {
-      await stashAll.mutateAsync(undefined);
-      await runCheckoutAsync(target);
-      toast.success(
-        `Stashed changes and switched to ${target.name} — "Pop latest stash" restores them`,
-      );
+      const outcome = await switchAutostash.mutateAsync({
+        name: target.name,
+        remote: target.remote,
+        reapply,
+      });
+      reportAutostashOutcome(outcome, {
+        operation: "Switch",
+        reapplied: `Stashed, switched to ${target.name}, and reapplied your changes.`,
+        stashedOnly: `Stashed changes and switched to ${target.name} — "Pop latest stash" restores them`,
+        plain: `Switched to ${target.name}.`,
+        // Names the branch the switch failed to reach — more useful than the
+        // generic didn't-finish line.
+        stashKept: `Couldn't switch to ${target.name} — your changes are safely stashed; pop them when you're ready.`,
+      });
     } catch (e) {
       onError(e);
     }
@@ -766,23 +803,41 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     );
   }
 
+  // A branch update only touches the working tree when it merges in place, i.e.
+  // when the updated branch IS the current one — the throwaway-worktree path is
+  // always clean. The branch check is belt-and-suspenders on top of the error
+  // classification; a mismatch falls through to the normal error toast.
+  function beginUpdateRecovery(e: unknown, branch: string, base: string) {
+    if (branch !== currentName) return false;
+    return recovery.handleError(e, {
+      operationLabel: "update",
+      detail: base,
+      reappliedMessage: `Updated from ${base} and reapplied your changes.`,
+      plainMessage: `Updated ${branch} from ${base}`,
+      run: { op: "merge", ref: base },
+    });
+  }
+
   // Pull the latest from the default branch into `target` without switching to
   // it (unless it's already current): fast-forwards when possible, otherwise
   // merges via a throwaway worktree so the working tree — and its watchers —
   // stay put. A conflicting merge aborts and reports rather than switching.
   function doUpdateFromDefault(target: string) {
     if (!defaultName || target === defaultName) return;
+    const base = defaultName;
     setOpen(false);
     updateBranchFrom.mutate(
-      { branch: target, base: defaultName },
+      { branch: target, base },
       {
         onSuccess: (status) =>
           toast.success(
             status === "up-to-date"
-              ? `${target} is already up to date with ${defaultName}`
-              : `Updated ${target} from ${defaultName}`,
+              ? `${target} is already up to date with ${base}`
+              : `Updated ${target} from ${base}`,
           ),
-        onError,
+        onError: (e) => {
+          if (!beginUpdateRecovery(e, target, base)) onError(e);
+        },
       },
     );
   }
@@ -801,7 +856,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
               ? `${target} is already up to date with ${base}`
               : `Updated ${target} from ${base}`,
           ),
-        onError,
+        onError: (e) => {
+          if (!beginUpdateRecovery(e, target, base)) onError(e);
+        },
       },
     );
   }
@@ -835,7 +892,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     rebaseBranch.isPending ||
     rebaseOnto.isPending ||
     push.isPending ||
-    updateBranchFrom.isPending;
+    updateBranchFrom.isPending ||
+    switchAutostash.isPending ||
+    recovery.pending;
 
   // Hotkey handlers reuse the menu's own flows, so every gate (clean tree,
   // stash count, picker availability) and confirm dialog applies equally.
@@ -2132,14 +2191,15 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       <SwitchWithChangesDialog
         target={switchTarget}
         currentLabel={currentLabel}
+        hint={switchHint}
+        reapply={reapplyOnSwitch}
+        onReapplyChange={setReapplyOnSwitch}
         onCancel={() => setSwitchTarget(null)}
         onBringChanges={bringAndSwitch}
         onStashAndSwitch={stashAndSwitch}
-        bringPending={checkout.isPending || checkoutRemote.isPending}
-        stashPending={
-          stashAll.isPending || checkout.isPending || checkoutRemote.isPending
-        }
       />
+
+      {recovery.dialog}
 
       <PromoteWorktreeDialog
         key={promoteTarget?.path ?? "no-promote"}

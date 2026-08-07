@@ -225,6 +225,13 @@ export interface AppSettings {
   /** Warn before amending a commit that's already on the remote (force push).
    *  Cleared by the dialog's "Don't show this again". */
   confirmAmendForcePush: boolean;
+  /** Skip the stash-and-reapply prompt and just recover whenever a pull, an
+   *  update from upstream, or a branch update would overwrite uncommitted
+   *  changes. Set by the prompt's "Always stash and reapply". */
+  autoStashOnPull: boolean;
+  /** Pop the stash again on the new branch after "Stash and switch" — the
+   *  remembered state of that dialog's "Reapply after switching" checkbox. */
+  reapplyStashOnSwitch: boolean;
   /** Show the Ctrl/Shift-click multi-select hint above the changes list.
    *  Cleared by the hint's "Don't show again". */
   showSelectionHint: boolean;
@@ -318,6 +325,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   defaultBranch: "main",
   hotkeys: {},
   confirmAmendForcePush: true,
+  autoStashOnPull: false,
+  reapplyStashOnSwitch: false,
   showSelectionHint: true,
   showLineStageHint: true,
   autoCheckUpdates: true,

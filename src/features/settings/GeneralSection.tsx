@@ -108,6 +108,33 @@ export const GeneralSection = withForm({
           )}
         </div>
         <div className="space-y-1.5">
+          <form.AppField name="autoStashOnPull">
+            {(field) => (
+              <field.CheckboxField
+                label="Automatically stash and reapply on pull and branch updates"
+                className="flex cursor-pointer items-center gap-2 text-xs"
+              />
+            )}
+          </form.AppField>
+          <p className="text-xs text-muted-foreground">
+            When a pull or branch update would overwrite uncommitted changes,
+            stash them, run it, then reapply.
+          </p>
+        </div>
+        <div className="space-y-1.5">
+          <form.AppField name="reapplyStashOnSwitch">
+            {(field) => (
+              <field.CheckboxField
+                label="Reapply stashed changes after switching branches"
+                className="flex cursor-pointer items-center gap-2 text-xs"
+              />
+            )}
+          </form.AppField>
+          <p className="text-xs text-muted-foreground">
+            Applies when you choose Stash and switch.
+          </p>
+        </div>
+        <div className="space-y-1.5">
           <form.AppField name="createPrsAsDraft">
             {(field) => (
               <field.CheckboxField

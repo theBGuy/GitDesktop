@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 use tauri::State;
 
 use crate::error::{AppError, AppResult};
-use crate::git::runner::{run_git, run_git_mutating, GitOutput, DEFAULT_TIMEOUT, NETWORK_TIMEOUT};
+use crate::git::runner::{
+    run_git, run_git_mutating, run_git_raw, GitOutput, DEFAULT_TIMEOUT, NETWORK_TIMEOUT,
+};
 use crate::state::AppState;
 
 fn validate_remote_arg(value: &str, what: &str) -> AppResult<()> {
@@ -31,7 +33,7 @@ pub(crate) fn with_credentials(cred: &[String], sub: &[&str]) -> Vec<String> {
 }
 
 /// Whether a git network failure's `stderr` looks like an auth-class failure — the
-/// gate for the ambient-credential fallback in [`run_git_mutating_with_creds`].
+/// gate for the ambient-credential fallback in [`run_git_with_creds_once`].
 /// Case-insensitive substring match on three signatures:
 ///
 /// 1. `"authentication failed"` — the helper-provided token was rejected (401).
@@ -57,13 +59,15 @@ fn is_auth_class_failure(stderr: &str) -> bool {
         || s.contains("repository not found")
 }
 
-/// Run a mutating git network op with one-shot credential `-c` entries prefixed.
+/// Run a git network op with one-shot credential `-c` entries prefixed, taking NO
+/// lock — so it is callable from inside a held `repo_lock` (the autostash
+/// compounds). Returns the raw output: a non-zero exit is not an error here.
 ///
 /// When `cred` is non-empty and the injected run fails with an auth-class git error
-/// ([`is_auth_class_failure`]), retries EXACTLY ONCE with NO injected config (plain
-/// [`run_git_mutating`] on the same sub-args) and returns that result — on a double
-/// failure the RETRY's error is surfaced, because the ambient attempt's error names
-/// the true end state. Empty `cred` ⇒ behavior unchanged.
+/// ([`is_auth_class_failure`]), retries EXACTLY ONCE with NO injected config (the
+/// same sub-args, plain) and returns that result — on a double failure the RETRY's
+/// output is surfaced, because the ambient attempt's error names the true end
+/// state. Empty `cred` ⇒ behavior unchanged.
 ///
 /// The auth gates that produce `cred` only prove a credential EXISTS locally
 /// (`gh auth token` is a local read; glab's `hosts:` entry outlives PAT expiry) —
@@ -73,8 +77,32 @@ fn is_auth_class_failure(stderr: &str) -> bool {
 ///
 /// The retry is safe because HTTPS auth happens at ref negotiation BEFORE any
 /// server-side ref update: a failed-auth push mutated nothing on the remote, so it
-/// can't double-apply. Only Git-kind errors are classified; every other kind
-/// (timeout, IO, …) returns as-is with no retry.
+/// can't double-apply. Only a non-zero git exit is classified; spawn failures and
+/// timeouts return as-is with no retry.
+pub(crate) async fn run_git_with_creds_once(
+    repo_path: &str,
+    cred: &[String],
+    sub: &[&str],
+    timeout: Duration,
+) -> AppResult<GitOutput> {
+    let args = with_credentials(cred, sub);
+    let out = run_git_raw(
+        Some(repo_path),
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
+        timeout,
+    )
+    .await?;
+
+    // Injected credentials present but rejected → one-shot ambient retry.
+    if !cred.is_empty() && out.code != 0 && is_auth_class_failure(&out.stderr) {
+        return run_git_raw(Some(repo_path), sub, timeout).await;
+    }
+    Ok(out)
+}
+
+/// [`run_git_with_creds_once`] under the per-repo lock, surfacing a non-zero exit
+/// as [`AppError::Git`] — the mutating-command contract every network caller
+/// (fetch/pull/push) is written against.
 pub(crate) async fn run_git_mutating_with_creds(
     state: &AppState,
     repo_path: &str,
@@ -82,24 +110,24 @@ pub(crate) async fn run_git_mutating_with_creds(
     sub: &[&str],
     timeout: Duration,
 ) -> AppResult<GitOutput> {
-    let args = with_credentials(cred, sub);
-    let result = run_git_mutating(
-        state,
-        repo_path,
-        &args.iter().map(String::as_str).collect::<Vec<_>>(),
-        timeout,
-    )
-    .await;
+    let lock = state.repo_lock(repo_path).await;
+    let _guard = lock.lock().await;
 
-    // Injected credentials present but rejected → one-shot ambient retry.
-    if !cred.is_empty() {
-        if let Err(AppError::Git { stderr, .. }) = &result {
-            if is_auth_class_failure(stderr) {
-                return run_git_mutating(state, repo_path, sub, timeout).await;
-            }
-        }
+    // index.lock contention from an external tool (editor, other client) is
+    // transient — retry once. Expressed here rather than via `run_git_mutating`
+    // because the injection half must stay lock-free.
+    let mut out = run_git_with_creds_once(repo_path, cred, sub, timeout).await?;
+    if out.code != 0 && out.stderr.contains("index.lock") {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        out = run_git_with_creds_once(repo_path, cred, sub, timeout).await?;
     }
-    result
+    if out.code != 0 {
+        return Err(AppError::Git {
+            code: out.code,
+            stderr: out.stderr,
+        });
+    }
+    Ok(out)
 }
 
 /// How long a resolved remote URL stays trusted before re-shelling to `git`. A few
@@ -647,6 +675,7 @@ mod tests {
     use super::{
         build_push_args, cache_get, cache_invalidate, cache_put, git_remote_remove_core,
         is_auth_class_failure, parse_upstream_tracking, resolve_push_target,
+        run_git_mutating_with_creds,
     };
     use crate::error::AppError;
     use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
@@ -749,6 +778,39 @@ mod tests {
         assert!(!is_auth_class_failure(
             "ssh: Could not resolve hostname github.com"
         ));
+    }
+
+    /// The failure contract every caller (fetch/pull/push) branches on: a non-zero
+    /// sub-command surfaces as `AppError::Git` carrying git's OWN exit code and
+    /// stderr, not a synthesized message.
+    #[tokio::test]
+    async fn mutating_with_creds_surfaces_gits_own_code_and_stderr() {
+        let (_base, base) = temp_base("creds-error");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "a.txt").await;
+
+        let state = AppState::default();
+        let result = run_git_mutating_with_creds(
+            &state,
+            &repo_s,
+            &[],
+            &["merge", "nonexistent-ref-xyz"],
+            DEFAULT_TIMEOUT,
+        )
+        .await;
+        match result {
+            Err(AppError::Git { code, stderr }) => {
+                assert_eq!(code, 1);
+                assert!(
+                    stderr.contains("nonexistent-ref-xyz - not something we can merge"),
+                    "expected git's own stderr, got: {stderr}"
+                );
+            }
+            Err(other) => panic!("expected AppError::Git, got {other:?}"),
+            Ok(_) => panic!("merging a missing ref should fail"),
+        }
     }
 
     // --- Pure arg-building for a named-branch push. ---

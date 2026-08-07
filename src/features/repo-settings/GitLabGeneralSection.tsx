@@ -399,7 +399,7 @@ function GitLabGeneralForm({
 
       <div className="flex items-center justify-end gap-2 border-t pt-3">
         <Button
-          disabled={!dirty || update.isPending}
+          disabled={!dirty || update.isPending || descGen.generating}
           onClick={() =>
             update.mutate(form, {
               onSuccess: () => toast.success("Settings saved"),

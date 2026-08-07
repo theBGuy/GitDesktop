@@ -83,13 +83,20 @@ async fn rebase_stopped_for_edit(repo: &str) -> bool {
 /// conflict-resolution banner.
 #[tauri::command]
 pub async fn git_op_state(repo_path: String) -> AppResult<RepoOpState> {
-    let rebasing = git_path_exists(&repo_path, "rebase-merge").await
-        || git_path_exists(&repo_path, "rebase-apply").await;
-    let edit_paused = rebasing && rebase_stopped_for_edit(&repo_path).await;
+    op_state(&repo_path).await
+}
+
+/// The detection behind [`git_op_state`], shared so compounds that must not
+/// touch a tree with in-progress state gate on the SAME marker files the banner
+/// reports on.
+pub(crate) async fn op_state(repo_path: &str) -> AppResult<RepoOpState> {
+    let rebasing = git_path_exists(repo_path, "rebase-merge").await
+        || git_path_exists(repo_path, "rebase-apply").await;
+    let edit_paused = rebasing && rebase_stopped_for_edit(repo_path).await;
     Ok(RepoOpState {
-        merging: git_path_exists(&repo_path, "MERGE_HEAD").await,
+        merging: git_path_exists(repo_path, "MERGE_HEAD").await,
         rebasing,
-        cherry_picking: git_path_exists(&repo_path, "CHERRY_PICK_HEAD").await,
+        cherry_picking: git_path_exists(repo_path, "CHERRY_PICK_HEAD").await,
         edit_paused,
     })
 }
@@ -616,8 +623,7 @@ pub(crate) async fn git_stash_paths_core(
     .await?;
     if !unmerged.stdout_lossy().trim().is_empty() {
         return Err(AppError::InvalidArgument(
-            "Can't stash while a merge conflict is in progress — resolve the conflicts first."
-                .into(),
+            "Can't stash while a conflict is in progress — resolve the conflicts first.".into(),
         ));
     }
 

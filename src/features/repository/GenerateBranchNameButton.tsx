@@ -2,9 +2,9 @@ import { SparkleIcon } from "@phosphor-icons/react";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import type { FileEntry } from "@/lib/git/types";
-import {
-  type CommittedNameSource,
-  useGenerateBranchName,
+import type {
+  BranchNameGenerator,
+  CommittedNameSource,
 } from "./useGenerateBranchName";
 
 /** What the generated name has to describe — decides whether the working tree
@@ -26,12 +26,12 @@ export type BranchNameTarget =
  * (when they describe the branch being named) — or, failing that, from that
  * branch's committed work (`committedFallback`) — or points the user at AI
  * setup when no provider is connected. Renders nothing when AI is disabled.
- * Owns its own generation stream, so each dialog only says what's being named
- * (`nameTarget`), where the name lands (`onName`), and how to reach AI settings
- * (`onSetupAi`).
+ * The host dialog owns the generation stream (`gen`) so it can block its own
+ * submit while a name is still being generated; the button decides only which
+ * name sources apply (`nameTarget`) and where the name lands (`onName`).
  */
 export function GenerateBranchNameButton({
-  repoPath,
+  gen,
   aiEnabled,
   aiConfigured,
   hasChanges,
@@ -45,7 +45,8 @@ export function GenerateBranchNameButton({
   onName,
   onSetupAi,
 }: {
-  repoPath: string;
+  /** Owned by the host dialog — see {@link BranchNameGenerator}. */
+  gen: BranchNameGenerator;
   aiEnabled: boolean;
   aiConfigured: boolean;
   hasChanges: boolean;
@@ -72,7 +73,6 @@ export function GenerateBranchNameButton({
   /** Close the host dialog and open AI settings. */
   onSetupAi: () => void;
 }) {
-  const branchNameGen = useGenerateBranchName(repoPath);
   if (!aiEnabled) return null;
   // The working tree belongs to the checked-out branch, so it can only name a
   // new branch or that branch itself.
@@ -109,13 +109,13 @@ export function GenerateBranchNameButton({
           <SparkleIcon data-icon="inline-start" />
           Set up AI to name branches
         </Button>
-      ) : branchNameGen.generating ? (
+      ) : gen.generating ? (
         <Button
           type="button"
           variant="ghost"
           size="xs"
           className="text-muted-foreground"
-          onClick={branchNameGen.cancel}
+          onClick={gen.cancel}
         >
           <Spinner data-icon="inline-start" />
           Generating…
@@ -131,7 +131,7 @@ export function GenerateBranchNameButton({
             className="text-muted-foreground"
             disabled={!canGenerate}
             onClick={() =>
-              branchNameGen.generate({
+              gen.generate({
                 entries,
                 recentBranches: recentBranches.slice(0, 20),
                 useWorkingTree,

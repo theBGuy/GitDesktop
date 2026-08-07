@@ -84,8 +84,10 @@ Objective: <one paragraph — what and why>
 Files in scope: <explicit list; the implementer must not touch others>
 Contracts: <types/interfaces/commands it must expose or consume>
 Acceptance criteria: <checkable statements>
-Verification: <SCOPED checks only — tsc + biome lint on the package's files;
-  the whole-project build runs once, orchestrator-side, at integration>
+Verification: <SCOPED checks only — tsc; biome lint on pre-existing files and
+  full `biome ci` on files the package AUTHORS (new files are LF, so the
+  format check is safe — and CI runs it); the whole-project build runs once,
+  orchestrator-side, at integration>
 Docs-sync: <README/site/help/changelog items, or "orchestrator handles">
 Out of scope: <adjacent things it must leave alone>
 ```
@@ -195,8 +197,12 @@ Out of scope: <adjacent things it must leave alone>
   conversation. Everything a package needs must be in its spec.
 - **Worktree runs** (validated 2026-07-02): fresh worktrees check out CRLF
   (`core.autocrlf=true`), so tree-wide `biome check` fails on formatting
-  noise — the reliable worktree gates are `tsc -b`, `biome lint`, and
-  `pnpm build`. Deps need `pnpm install` first. If the main checkout advances
+  noise — for git-materialized files the reliable worktree gates are
+  `tsc -b`, `biome lint`, and `pnpm build`. Files AUTHORED in the session
+  (Write emits LF) additionally need scoped `pnpm exec biome ci <file>`: CI
+  runs the format check that lint skips, and a new file's format defect
+  passes every lint-only gate (cost PR #151 a red CI). Deps need
+  `pnpm install` first. If the main checkout advances
   mid-run, the final patch may not apply clean — re-apply divergent hunks by
   hand against current HEAD. Clean up with `git worktree remove` + `prune`
   (Windows: node_modules may need `cmd /c rd /s /q` afterwards).

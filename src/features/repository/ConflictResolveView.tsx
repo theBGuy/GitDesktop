@@ -153,6 +153,10 @@ export function ConflictResolveView({
   useEffect(() => {
     kickoff();
   }, [path]);
+  // DiffViewer swaps this view out (it's keyed on path) the moment another file
+  // is selected, so without this an in-flight resolution keeps streaming — and
+  // billing — into an orphaned component.
+  useEffect(() => () => cancel(), [cancel]);
 
   function handleCancel() {
     genRef.current++;

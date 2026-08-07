@@ -15,7 +15,10 @@ import { refNameWarning, sanitizeRefName } from "@/lib/git/ref-name";
 import type { FileEntry } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
 import { GenerateBranchNameButton } from "./GenerateBranchNameButton";
-import type { CommittedNameSource } from "./useGenerateBranchName";
+import {
+  type CommittedNameSource,
+  useGenerateBranchName,
+} from "./useGenerateBranchName";
 
 /**
  * Rename-branch dialog. Open when `target` is the branch being renamed (null =
@@ -60,6 +63,14 @@ export function RenameBranchDialog({
   onOpenSettings: (section: "ai") => void;
 }) {
   const renameBranch = useRenameBranch(repoPath);
+  const branchNameGen = useGenerateBranchName(repoPath);
+  // Every close path routes through here: the dialog stays mounted, so an
+  // in-flight suggestion would otherwise land in the field on the NEXT open,
+  // which may be naming a different branch.
+  const closeDialog = () => {
+    branchNameGen.cancel();
+    onClose();
+  };
   // Only the checked-out branch's own working tree describes it.
   const targetIsCurrent = target !== null && target === currentName;
 
@@ -93,7 +104,7 @@ export function RenameBranchDialog({
     <Dialog
       open={target !== null}
       onOpenChange={(o) => {
-        if (!o) onClose();
+        if (!o) closeDialog();
       }}
     >
       <DialogContent>
@@ -104,6 +115,9 @@ export function RenameBranchDialog({
           className="min-w-0 space-y-4"
           onSubmit={(e) => {
             e.preventDefault();
+            // Enter submits even while the submit button is disabled, so an
+            // in-flight name generation has to be checked here too.
+            if (branchNameGen.generating) return;
             renameForm.handleSubmit();
           }}
         >
@@ -127,7 +141,7 @@ export function RenameBranchDialog({
             )}
           </renameForm.AppField>
           <GenerateBranchNameButton
-            repoPath={repoPath}
+            gen={branchNameGen}
             aiEnabled={aiEnabled}
             aiConfigured={aiConfigured}
             hasChanges={hasChanges}
@@ -141,16 +155,18 @@ export function RenameBranchDialog({
             basedElsewhere={null}
             onName={(name) => renameForm.setFieldValue("name", name)}
             onSetupAi={() => {
-              onClose();
+              closeDialog();
               onOpenSettings("ai");
             }}
           />
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={onClose}>
+            <Button type="button" variant="outline" onClick={closeDialog}>
               Cancel
             </Button>
             <renameForm.AppForm>
-              <renameForm.SubmitButton>Rename</renameForm.SubmitButton>
+              <renameForm.SubmitButton disabled={branchNameGen.generating}>
+                Rename
+              </renameForm.SubmitButton>
             </renameForm.AppForm>
           </DialogFooter>
         </form>

@@ -23,7 +23,10 @@ import {
   useSeedBase,
 } from "./BaseBranchCombobox";
 import { GenerateBranchNameButton } from "./GenerateBranchNameButton";
-import type { CommittedNameSource } from "./useGenerateBranchName";
+import {
+  type CommittedNameSource,
+  useGenerateBranchName,
+} from "./useGenerateBranchName";
 
 /**
  * Create-branch dialog: names a new branch (with optional AI generation from
@@ -74,6 +77,13 @@ export function CreateBranchDialog({
   onOpenSettings: (section: "ai") => void;
 }) {
   const createBranch = useCreateBranch(repoPath);
+  const branchNameGen = useGenerateBranchName(repoPath);
+  // Every close path routes through here: the dialog stays mounted, so an
+  // in-flight suggestion would otherwise land in the field on the next open.
+  const closeDialog = () => {
+    branchNameGen.cancel();
+    onOpenChange(false);
+  };
 
   // The base picker owns its own data; the dialog hides the whole field when
   // there's no offerable base to pick (unborn HEAD / fresh repo → submit with no
@@ -139,7 +149,13 @@ export function CreateBranchDialog({
   }, [open]);
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={(o) => {
+        if (o) onOpenChange(true);
+        else closeDialog();
+      }}
+    >
       <DialogContent>
         <form
           // min-w-0: DialogContent is display:grid, so this grid item must be
@@ -149,6 +165,9 @@ export function CreateBranchDialog({
           className="min-w-0 space-y-4"
           onSubmit={(e) => {
             e.preventDefault();
+            // Enter submits even while the submit button is disabled, so an
+            // in-flight name generation has to be checked here too.
+            if (branchNameGen.generating) return;
             createForm.handleSubmit();
           }}
         >
@@ -185,7 +204,7 @@ export function CreateBranchDialog({
             )}
           </createForm.AppField>
           <GenerateBranchNameButton
-            repoPath={repoPath}
+            gen={branchNameGen}
             aiEnabled={aiEnabled}
             aiConfigured={aiConfigured}
             hasChanges={hasChanges}
@@ -200,7 +219,7 @@ export function CreateBranchDialog({
             basedElsewhere={baseIsHead ? null : createBase}
             onName={(name) => createForm.setFieldValue("name", name)}
             onSetupAi={() => {
-              onOpenChange(false);
+              closeDialog();
               onOpenSettings("ai");
             }}
           />
@@ -226,15 +245,13 @@ export function CreateBranchDialog({
             </createForm.AppField>
           )}
           <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => onOpenChange(false)}
-            >
+            <Button type="button" variant="outline" onClick={closeDialog}>
               Cancel
             </Button>
             <createForm.AppForm>
-              <createForm.SubmitButton>Create branch</createForm.SubmitButton>
+              <createForm.SubmitButton disabled={branchNameGen.generating}>
+                Create branch
+              </createForm.SubmitButton>
             </createForm.AppForm>
           </DialogFooter>
         </form>

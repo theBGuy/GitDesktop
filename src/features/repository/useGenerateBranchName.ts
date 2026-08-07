@@ -192,3 +192,7 @@ export function useGenerateBranchName(repoPath: string) {
 
   return { generate, cancel, generating };
 }
+
+/** The generation stream, owned by the host dialog rather than the button, so
+ *  the dialog can block its own submit while a name is still being generated. */
+export type BranchNameGenerator = ReturnType<typeof useGenerateBranchName>;

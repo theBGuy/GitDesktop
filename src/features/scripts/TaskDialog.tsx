@@ -180,9 +180,13 @@ export function TaskDialog({
   }, [open, editing, cancelGenerate, cancelAnalyze]);
 
   const trimmedName = name.trim();
+  // Saving mid-stream would persist a half-written script, so an in-flight
+  // generate/analyze blocks it just like an empty name does.
   const canSave =
     trimmedName !== "" &&
-    (sourceKind === "file" ? path.trim() !== "" : body.trim() !== "");
+    (sourceKind === "file" ? path.trim() !== "" : body.trim() !== "") &&
+    !scriptGen.generating &&
+    !scriptAnalyze.analyzing;
   const canAnalyze =
     sourceKind === "file" ? path.trim() !== "" : body.trim() !== "";
 

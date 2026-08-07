@@ -132,6 +132,11 @@ export const capabilities: Capability[] = [
   {
     group: "Rewrite & recovery",
     label:
+      "Stash and reapply — one click when a pull, update or switch is blocked",
+  },
+  {
+    group: "Rewrite & recovery",
+    label:
       "Recover lost work — git fsck for orphaned stashes, restored non-destructively",
     highlight: true,
   },
