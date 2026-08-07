@@ -79,7 +79,7 @@ const CONFLICT_MARKERS = [
  *
  *  Deliberately disjoint from CONFLICT_MARKERS: a real merge conflict already
  *  has ConflictBanner recovery, and stashing mid-conflict corrupts the resolve
- *  state. None of these strings appears in conflict output. */
+ *  state. No conflict output observed on git 2.51 carries these strings. */
 const DIRTY_TREE_MARKERS = [
   // `pull` (--ff-only and --no-rebase) and plain `merge`, tracked overlap.
   "your local changes to the following files would be overwritten by merge",

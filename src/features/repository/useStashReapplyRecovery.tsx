@@ -29,7 +29,8 @@ export interface AutostashCopy {
   /** Stash kept on purpose (switch with reapply off). */
   stashedOnly?: string;
   /** Replaces the stash-kept line for a failure that left NO in-progress state,
-   *  where the default's "continue or abort in the banner" would be false. */
+   *  when the surface can say something more specific than the generic default
+   *  (e.g. naming the branch a switch failed to reach). */
   stashKept?: string;
 }
 
@@ -88,7 +89,7 @@ export function reportAutostashOutcome(
         outcome.inProgress
           ? `${copy.operation} hit conflicts — continue or abort in the banner. Your changes are safely stashed; pop them after.`
           : (copy.stashKept ??
-            `${copy.operation} didn't finish — your changes are safely stashed; pop them when you're ready.`),
+              `${copy.operation} didn't finish — your changes are safely stashed; pop them when you're ready.`),
         { duration: 8000, action: stderrDetails(outcome.stderr).action },
       );
       return;

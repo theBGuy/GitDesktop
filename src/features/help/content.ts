@@ -577,8 +577,9 @@ When a **Pull** would overwrite uncommitted changes, git refuses it — and GitD
 **Stash and reapply**: your changes are set aside in the stash (untracked files included),
 the pull runs, then they come back on top of it. If reapplying them hits conflicts, the
 conflicted files appear in **Changes** to resolve as usual and the stash is kept as a backup
-until you're done. The same recovery covers **Update from upstream** and updating the branch
-you're on from another branch.
+until you're done; if they can't go back at all (say the pull brought in a file with the
+same name), they stay safely in the stash. The same recovery covers
+**Update from upstream** and updating the branch you're on from another branch.
 
 Tick **Always stash and reapply** in the prompt — or turn on **Automatically stash and
 reapply on pull** under **Settings → General** — and those operations recover on their own,

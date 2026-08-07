@@ -14,9 +14,9 @@ use crate::git::remote::run_git_with_creds_once;
 use crate::git::runner::{run_git, run_git_raw, GitOutput, DEFAULT_TIMEOUT, NETWORK_TIMEOUT};
 use crate::state::AppState;
 
-/// How a stash → op → reapply compound ended. Every failure mode is a distinct
-/// variant because git's own `--autostash` reports none of them: it exits 0 even
-/// when the reapply conflicts.
+/// How a stash → op → reapply compound ended. Every failure mode is reportable —
+/// a variant, refined by its discriminant field — because git's own `--autostash`
+/// reports none of them: it exits 0 even when the reapply conflicts.
 #[derive(Debug, serde::Serialize)]
 #[serde(
     tag = "kind",
@@ -91,8 +91,9 @@ async fn refuse_mid_op(repo: &str) -> AppResult<()> {
 }
 
 /// Whether the repo is left mid-op. Reuses `git_op_state`'s detection so this gate
-/// and the conflict banner can't drift apart; an unreadable state counts as
-/// in-progress, since keeping the stash is the recoverable answer either way.
+/// and the conflict banner can't drift apart. Best-effort: the underlying probes
+/// swallow read failures into "absent", so an unreadable state reads as no-op; the
+/// `Err` arm keeps the stash should `op_state` ever gain a fallible read.
 async fn op_in_progress(repo: &str) -> bool {
     match crate::git::ops::op_state(repo).await {
         Ok(state) => state.merging || state.rebasing || state.cherry_picking,

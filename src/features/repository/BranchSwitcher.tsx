@@ -619,7 +619,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         // toast. The checkbox keeps whatever the user already set.
         if (isDirtyTreeRefusal(e)) {
           setSwitchHint(
-            "Bringing changes didn't work — git would overwrite them. Stash and reapply instead.",
+            "Bringing changes didn't work — git would overwrite them. Stash and switch instead.",
           );
           setSwitchTarget(target);
           return;
@@ -650,8 +650,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         reapplied: `Stashed, switched to ${target.name}, and reapplied your changes.`,
         stashedOnly: `Stashed changes and switched to ${target.name} — "Pop latest stash" restores them`,
         plain: `Switched to ${target.name}.`,
-        // A switch can't leave an operation to continue or abort, so it names
-        // the branch instead of pointing at a banner that won't be there.
+        // Names the branch the switch failed to reach — more useful than the
+        // generic didn't-finish line.
         stashKept: `Couldn't switch to ${target.name} — your changes are safely stashed; pop them when you're ready.`,
       });
     } catch (e) {
