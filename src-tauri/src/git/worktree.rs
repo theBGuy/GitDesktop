@@ -397,6 +397,11 @@ pub async fn git_worktree_remove(
 ) -> AppResult<()> {
     let mut args = vec!["worktree", "remove"];
     if force {
+        // Doubled deliberately: git requires `--force` TWICE to remove a LOCKED
+        // worktree ("use 'remove -f -f'"); the second flag is a no-op for a
+        // merely-dirty one. A single --force half-removes a locked worktree: the
+        // dir-delete fallback below runs but prune can't drop a locked admin entry.
+        args.push("--force");
         args.push("--force");
     }
     args.push(&path);

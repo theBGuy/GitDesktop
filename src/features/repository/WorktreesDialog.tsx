@@ -479,7 +479,7 @@ function RowTags({
 
 // --------------------------------------------------------------- rename worktree
 
-function RenameWorktreeDialog({
+export function RenameWorktreeDialog({
   repoPath,
   worktree,
   onClose,
@@ -568,7 +568,7 @@ function RenameWorktreeDialog({
 
 // ----------------------------------------------------------------- lock worktree
 
-function LockWorktreeDialog({
+export function LockWorktreeDialog({
   repoPath,
   worktree,
   onClose,
