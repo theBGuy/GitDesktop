@@ -17,7 +17,7 @@ import { toastError } from "@/lib/toast";
 /**
  * Confirms removing a worktree's folder while keeping its branch. Escalates to a
  * force remove when git refuses a dirty or locked worktree. Shared by the
- * worktree manager and the branch switcher's "Remove worktree…" action.
+ * worktree manager and the branch switcher's "Delete worktree…" actions.
  */
 export function DeleteWorktreeDialog({
   repoPath,

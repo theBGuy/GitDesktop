@@ -1624,9 +1624,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                   <p className="px-3 py-1 text-[11px] font-medium text-muted-foreground">
                     Worktrees
                   </p>
-                  {/* These rows are never the CURRENT worktree (otherWorktrees
-                      excludes it), so the menu needs no isCurrent gating — only
-                      the main workspace's own restrictions. */}
+                  {/* No isCurrent gating on these menus: otherWorktrees excludes
+                      the active checkout, by the same normalized-path comparison
+                      the whole section keys on. */}
                   {otherWorktrees.map((w) => (
                     <ContextMenu key={w.path}>
                       <ContextMenuTrigger

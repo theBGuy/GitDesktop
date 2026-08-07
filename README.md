@@ -410,8 +410,8 @@ commit that hasn't been pushed yet.
 - **Worktree manager** — create, switch between, promote a worktree's branch into your
   main checkout, and remove linked worktrees, so you can work on several branches in
   parallel folders without stashing — with one-click jumps to the main workspace right
-  from the branch switcher, where each worktree row's context menu also offers the
-  full set of management actions.
+  from the branch switcher, where each worktree row also carries a context menu with
+  the management actions it supports.
 - **Push or publish a branch without switching to it** — from the branch switcher's
   context menu, push a branch that's ahead of the remote it tracks (its own remote,
   not just `origin`) or publish an unpushed one (choosing the remote when there's more

@@ -195,6 +195,7 @@ function PromoteBody({
           ? `Promoted ${worktree.branch} — your main workspace changes were stashed; Pop latest stash brings them back`
           : `Promoted ${worktree.branch} to your main workspace`,
       );
+      setPending(false);
       onClose();
     } catch (e) {
       if (removed) {

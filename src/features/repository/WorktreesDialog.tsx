@@ -1,6 +1,7 @@
 import {
   ArrowLineUpIcon,
   CaretLeftIcon,
+  CopyIcon,
   DotsThreeVerticalIcon,
   FolderOpenIcon,
   GitBranchIcon,
@@ -40,6 +41,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
+import { copyText } from "@/lib/clipboard";
 import {
   useAddUserWorktree,
   useBranches,
@@ -383,6 +385,10 @@ function WorktreeRow({
           <DropdownMenuItem disabled={isCurrent} onClick={onOpen}>
             <FolderOpenIcon />
             {isCurrent ? "Current worktree" : "Open worktree"}
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => copyText(path, "Path copied")}>
+            <CopyIcon />
+            Copy path
           </DropdownMenuItem>
           <DropdownMenuItem
             // git can't move the main worktree, and moving the one you're

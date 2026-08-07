@@ -429,8 +429,7 @@ pub(crate) async fn remove_worktree(
     if force {
         // Doubled deliberately: git requires `--force` TWICE to remove a LOCKED
         // worktree ("use 'remove -f -f'"); the second flag is a no-op for a
-        // merely-dirty one. A single --force half-removes a locked worktree: the
-        // dir-delete fallback below runs but prune can't drop a locked admin entry.
+        // merely-dirty one.
         args.push("--force");
         args.push("--force");
     }
