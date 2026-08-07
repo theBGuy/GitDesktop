@@ -133,11 +133,13 @@ const workingTreeKeys = (repo: string) =>
     ["repo", repo, "file-b64", ":0"],
   ] as const;
 
-/** Everything a commit (or amend) makes stale BEYOND the working tree —
- *  history, branch tips/counters, HEAD-rev blobs, and mid-operation state
- *  (a commit can conclude a merge). Invalidated fire-and-forget so the Commit
- *  button never waits on them; forge-backed keys (pr/issue/CI/…) are
- *  deliberately absent — a local commit cannot change forge state. */
+/** The families a commit (or amend) makes stale BEYOND the working tree —
+ *  history, branch tips/counters, HEAD-rev blobs, and operation state, both
+ *  in-flight (a commit can conclude a merge or an interrupted journaled op)
+ *  and prospective (merge/conflict previews, local-PR merge states).
+ *  Invalidated fire-and-forget so the Commit button never waits on them;
+ *  forge-backed keys (pr/issue/CI/…) are deliberately absent — a local
+ *  commit cannot change forge state. */
 const commitAftermathKeys = (repo: string) =>
   [
     repoKeys.log(repo),
@@ -159,6 +161,8 @@ const commitAftermathKeys = (repo: string) =>
     ["repo", repo, "conflict-file"],
     ["repo", repo, "merge-preview"],
     ["repo", repo, "conflict-preview"],
+    ["repo", repo, "local-pr-merge-states"],
+    ["repo", repo, "oplog-check"],
     ["repo", repo, "insights", "contributors"],
     ["repo", repo, "insights", "commit-activity"],
     ["repo", repo, "insights", "code-frequency"],
