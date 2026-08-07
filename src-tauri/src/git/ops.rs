@@ -7,7 +7,7 @@ use crate::error::{AppError, AppResult};
 use crate::git::diff::parse_numstat_z;
 use crate::git::history::validate_hash;
 use crate::git::runner::{
-    run_git, run_git_mutating, run_git_raw, run_git_raw_input, DEFAULT_TIMEOUT,
+    run_git, run_git_mutating, run_git_raw, run_git_raw_input, DEFAULT_TIMEOUT, NETWORK_TIMEOUT,
 };
 use crate::git::types::{FileDiff, RepoOpState, RewriteStep, StashEntry, TagInfo};
 use crate::state::AppState;
@@ -2171,6 +2171,38 @@ pub async fn git_finish_local_pr_merge(
     worktree_id: String,
     op_id: Option<String>,
 ) -> AppResult<LocalPrMergeOutcome> {
+    finish_local_pr_merge(
+        &state,
+        &repo_path,
+        &base,
+        &strategy,
+        &message,
+        &worktree_path,
+        &worktree_id,
+        op_id,
+    )
+    .await
+}
+
+/// Testable core of [`git_finish_local_pr_merge`] — takes a plain `&AppState` so
+/// real-repo tokio tests can drive it (mirrors [`merge_local_pr`]).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn finish_local_pr_merge(
+    state: &AppState,
+    repo_path: &str,
+    base: &str,
+    strategy: &str,
+    message: &str,
+    worktree_path: &str,
+    worktree_id: &str,
+    op_id: Option<String>,
+) -> AppResult<LocalPrMergeOutcome> {
+    let repo_path = repo_path.to_string();
+    let base = base.to_string();
+    let strategy = strategy.to_string();
+    let message = message.to_string();
+    let worktree_path = worktree_path.to_string();
+    let worktree_id = worktree_id.to_string();
     validate_branch_arg(&base)?;
 
     // When `base` IS the current branch, `finalize_base` ends in a `merge --ff-only`
@@ -2238,6 +2270,14 @@ pub async fn git_finish_local_pr_merge(
             // squash / merge → conclude with a commit in the worktree. If the user
             // committed the resolution by hand there is nothing staged; tolerate
             // git's "nothing to commit" instead of erroring.
+            //
+            // An unfinished MERGE always commits, even with nothing staged: an
+            // all-"ours" resolution stages a diff identical to HEAD, and skipping
+            // would leave `base` at its old tip while the flow reports "merged".
+            // Squash writes no MERGE_HEAD (measured), so an all-ours squash still
+            // nets an empty diff and is skipped — a known degenerate case, left
+            // unchanged here and pinned by a test.
+            let merging = git_path_exists(&worktree_path, "MERGE_HEAD").await;
             let staged = run_git_raw(
                 Some(&worktree_path),
                 &["diff", "--cached", "--quiet"],
@@ -2245,7 +2285,7 @@ pub async fn git_finish_local_pr_merge(
             )
             .await?;
             // exit 0 ⇒ nothing staged ⇒ already committed (or empty) ⇒ skip commit.
-            if staged.code != 0 {
+            if merging || staged.code != 0 {
                 let commit = run_git_raw(
                     Some(&worktree_path),
                     &["commit", "-m", &message],
@@ -2274,8 +2314,8 @@ pub async fn git_finish_local_pr_merge(
         .stdout_lossy()
         .trim()
         .to_string();
-    finalize_base(&state, &repo_path, &base, &new_sha, &current).await?;
-    remove_resolve_worktree(&state, &repo_path, &worktree_path).await;
+    finalize_base(state, &repo_path, &base, &new_sha, &current).await?;
+    remove_resolve_worktree(state, &repo_path, &worktree_path).await;
     crate::oplog::finish(&repo_path, &op_id, None).await;
     Ok(LocalPrMergeOutcome {
         status: "merged".to_string(),
@@ -2316,19 +2356,617 @@ pub async fn git_cleanup_orphaned_resolve_worktrees(
     repo_path: String,
     keep_paths: Vec<String>,
 ) -> AppResult<()> {
+    let root = worktree_root_dir(&repo_path)?;
+    cleanup_orphaned_resolve_worktrees(&state, &repo_path, &keep_paths, &root).await
+}
+
+/// Whether a remote-PR resolve worktree holds NOTHING worth keeping: no merge in
+/// progress, a clean tree, AND no commit that isn't already on some remote. Fails
+/// CLOSED — any unreadable signal answers "keep", because the caller's next step
+/// is `worktree remove --force`.
+async fn pr_resolve_is_worthless(worktree_path: &str) -> bool {
+    // MERGE_HEAD first: a clean tree does NOT imply no merge. Resolving every
+    // conflict as "ours" stages content byte-identical to HEAD, so
+    // `status --porcelain` prints nothing while the merge is still unfinished
+    // (measured, git 2.51.1) — and the finish path concludes exactly that merge.
+    match git_dir_path(worktree_path, "MERGE_HEAD").await {
+        Some(p) if !p.exists() => {}
+        // Present, or unresolvable — either way, keep.
+        _ => return false,
+    }
+    let status = run_git_raw(
+        Some(worktree_path),
+        &["status", "--porcelain"],
+        DEFAULT_TIMEOUT,
+    )
+    .await;
+    match status {
+        Ok(o) if o.code == 0 && o.stdout_lossy().trim().is_empty() => {}
+        _ => return false,
+    }
+    let unpushed = run_git_raw(
+        Some(worktree_path),
+        &["rev-list", "--count", "HEAD", "--not", "--remotes"],
+        DEFAULT_TIMEOUT,
+    )
+    .await;
+    matches!(unpushed, Ok(o) if o.code == 0 && o.stdout_lossy().trim() == "0")
+}
+
+/// Testable core of [`git_cleanup_orphaned_resolve_worktrees`] — takes a plain
+/// `&AppState` and an explicit worktree root (see [`merge_remote_pr`]).
+pub(crate) async fn cleanup_orphaned_resolve_worktrees(
+    state: &AppState,
+    repo_path: &str,
+    keep_paths: &[String],
+    root: &Path,
+) -> AppResult<()> {
+    use crate::git::worktree::normalize_wt_path;
     let listed = run_git(
-        Some(&repo_path),
+        Some(repo_path),
         &["worktree", "list", "--porcelain"],
         DEFAULT_TIMEOUT,
     )
     .await?;
     let all = parse_worktree_paths(&listed.stdout_lossy());
-    for path in orphaned_resolve_worktrees(&all, &keep_paths) {
+    for path in orphaned_resolve_worktrees(&all, keep_paths) {
         // remove_resolve_worktree is itself best-effort (both git calls swallow
         // errors), so one stuck worktree can't stop the rest.
-        remove_resolve_worktree(&state, &repo_path, &path).await;
+        remove_resolve_worktree(state, repo_path, &path).await;
+    }
+
+    // Remote-PR resolves take no keep-set: WORTHLESSNESS is the protection, and it
+    // is strictly safer than a caller-supplied list — a paused conflicted resolve
+    // is dirty, a resolved-but-unpushed one has commits, and a merge in progress
+    // has MERGE_HEAD, so all three survive even if the frontend forgot them.
+    // Accepted race: a worktree is briefly clean, contained and merge-free between
+    // `worktree add` and the merge starting. The frontend re-arms this sweep on
+    // every switch back to a repo, so switching away and back while a
+    // `merge_remote_pr` is mid-flight can land in that window; the cost is a
+    // failed automatic merge the user retries, never resolved work.
+    let root_norm = normalize_wt_path(&root.to_string_lossy());
+    for path in all
+        .iter()
+        .filter(|p| is_pr_resolve_worktree_path(p))
+        .filter(|p| normalize_wt_path(p).starts_with(&format!("{root_norm}/")))
+    {
+        if pr_resolve_is_worthless(path).await {
+            remove_resolve_worktree(state, repo_path, path).await;
+        }
     }
     Ok(())
+}
+
+/// The outcome of a step in the REMOTE-PR conflict-resolution ladder. `status` is
+/// `"pushed"` (the merge landed on the PR head) or `"conflicts"` (the isolated
+/// worktree is kept so the user can resolve there, then finish/abort).
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePrResolveOutcome {
+    pub status: String,
+    pub conflicts: Vec<String>,
+    /// Absolute path to the resolve worktree — set only on `"conflicts"`.
+    pub worktree_path: Option<String>,
+    pub worktree_id: Option<String>,
+    /// The commit now on the PR head — set only on `"pushed"`.
+    pub pushed_sha: Option<String>,
+}
+
+/// A live resolve worktree, as [`git_find_remote_pr_resolve`] rediscovers it. The
+/// id is parsed from the path HERE because this module owns the naming scheme.
+#[derive(Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePrResolveHandle {
+    pub worktree_path: String,
+    pub worktree_id: String,
+}
+
+/// Whether a worktree path is one of our REMOTE-PR resolve worktrees — basename
+/// `gd-pr-resolve-<remote>-<number>-<uuid>`. Matches on the bare `gd-pr-resolve-`
+/// prefix so it covers EVERY remote/number, and deliberately does NOT match
+/// [`is_resolve_worktree_path`]'s `gd-resolve-`, keeping the local-PR orphan sweep
+/// away from a remote resolve holding the user's resolutions.
+fn is_pr_resolve_worktree_path(path: &str) -> bool {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|name| name.starts_with("gd-pr-resolve-"))
+        .unwrap_or(false)
+}
+
+/// The basename prefix identifying one PR's resolve worktree. The REMOTE is part
+/// of it: the same PR number means different branches under different lenses, so
+/// leaving it out would let a fork's origin and upstream resolves collide.
+fn pr_resolve_prefix(remote: &str, number: u64) -> String {
+    format!("gd-pr-resolve-{remote}-{number}-")
+}
+
+/// Guards an IPC-supplied worktree path before `worktree remove --force` is aimed
+/// at it: it must be one of ours AND live under this repo's app-data worktree
+/// root. The root comparison appends a separator (as `is_session_worktree` does) —
+/// a bare prefix match would accept a SIBLING directory `<root>evil/…`.
+fn ensure_pr_resolve_worktree(root: &Path, worktree_path: &str) -> AppResult<()> {
+    use crate::git::worktree::normalize_wt_path;
+    let root_norm = normalize_wt_path(&root.to_string_lossy());
+    if is_pr_resolve_worktree_path(worktree_path)
+        && normalize_wt_path(worktree_path).starts_with(&format!("{root_norm}/"))
+    {
+        return Ok(());
+    }
+    Err(AppError::InvalidArgument(format!(
+        "not a pull-request resolve worktree: {worktree_path}"
+    )))
+}
+
+/// The git remote a PR lens addresses, validated for this flow. Reuses the lens →
+/// remote mapping the forge reads share, then requires the remote to actually
+/// exist (a missing `upstream` on a non-fork clone must fail before any mutation)
+/// and to be filename-safe, since the name lands in a worktree DIRECTORY name.
+async fn resolve_pr_remote(repo_path: &str, lens: Option<&str>) -> AppResult<&'static str> {
+    let remote = crate::github::lens_remote(lens)?;
+    // Unreachable while `lens_remote`'s set stays closed ("origin"/"upstream") —
+    // kept because the name is embedded in a worktree DIRECTORY name, and that
+    // closed set is exactly what the naming scheme currently rests on.
+    if remote.is_empty()
+        || !remote
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return Err(AppError::InvalidArgument(format!(
+            "unusable remote name: {remote}"
+        )));
+    }
+    let names = crate::git::remote::git_remotes(repo_path.to_string()).await?;
+    if !names.iter().any(|n| n == remote) {
+        return Err(AppError::InvalidArgument(format!(
+            "remote does not exist: {remote}"
+        )));
+    }
+    Ok(remote)
+}
+
+/// Pushes `sha` onto `remote`'s `head` branch, fully qualified and NEVER forced
+/// (no `--force`, no lease): the merge carries `<remote>/<head>` as a parent, so
+/// the server sees a fast-forward — a refusal means the head moved, which has to
+/// surface rather than be overridden.
+async fn push_pr_head(
+    state: &AppState,
+    repo_path: &str,
+    remote: &str,
+    sha: &str,
+    head: &str,
+) -> AppResult<()> {
+    let cred = crate::forge::credential_config_for_remote(repo_path, remote).await?;
+    let refspec = format!("{sha}:refs/heads/{head}");
+    crate::git::remote::run_git_mutating_with_creds(
+        state,
+        repo_path,
+        &cred,
+        &["push", remote, &refspec],
+        NETWORK_TIMEOUT,
+    )
+    .await?;
+    Ok(())
+}
+
+/// The message text of an error, preferring git's own stderr.
+fn error_detail(err: &AppError) -> String {
+    match err {
+        AppError::Git { stderr, .. } => stderr.trim().to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Merges `<remote>/<base>` into a remote pull request's head, resolving in a
+/// hidden DETACHED worktree so the user's branch and working tree are never
+/// touched. Clean ⇒ the merge is pushed straight to `refs/heads/<head>` on that
+/// remote and the worktree is torn down (`status: "pushed"`). Conflict ⇒ the
+/// worktree is kept and returned so the frontend drives resolution there, then
+/// calls [`git_finish_remote_pr_resolve`] / [`git_abort_remote_pr_resolve`].
+///
+/// `lens` picks the remote exactly as the forge reads do — under a fork's upstream
+/// lens the PR's branches live on `upstream`, and fetching/pushing `origin` would
+/// silently target the user's fork instead.
+///
+/// Fork PRs are NOT handled here (pushing needs write access to the head repo);
+/// the frontend gates on `PrDetails::cross_repository`.
+#[tauri::command]
+pub async fn git_merge_remote_pr(
+    state: State<'_, AppState>,
+    repo_path: String,
+    number: u64,
+    base: String,
+    head: String,
+    message: Option<String>,
+    lens: Option<String>,
+) -> AppResult<RemotePrResolveOutcome> {
+    let root = worktree_root_dir(&repo_path)?;
+    merge_remote_pr(
+        &state,
+        &repo_path,
+        number,
+        &base,
+        &head,
+        message.as_deref(),
+        lens.as_deref(),
+        &root,
+    )
+    .await
+}
+
+/// Testable core of [`git_merge_remote_pr`] — takes a plain `&AppState` and an
+/// explicit worktree-root dir so real-repo tokio tests can drive it against a
+/// temp dir (mirrors [`merge_local_pr`]).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn merge_remote_pr(
+    state: &AppState,
+    repo_path: &str,
+    number: u64,
+    base: &str,
+    head: &str,
+    message: Option<&str>,
+    lens: Option<&str>,
+    root: &Path,
+) -> AppResult<RemotePrResolveOutcome> {
+    // Both names are interpolated into fetch/push refspecs, so they take the
+    // STRICT validator (its `*?[:\ ` blocklist is the refspec-injection defense),
+    // and they take it before anything mutates.
+    crate::git::branches::validate_ref_name(base)?;
+    crate::git::branches::validate_ref_name(head)?;
+    let remote = resolve_pr_remote(repo_path, lens).await?;
+
+    // Resume before starting: an existing worktree for this (remote, PR) holds
+    // work the user may already have done, so hand it back instead of minting a
+    // second one that would strand the first. Its conflict list may be EMPTY —
+    // that's a fully-resolved-but-unpushed resolve, and the frontend's takeover
+    // renders exactly that state.
+    if let Some(existing) = find_remote_pr_resolve(repo_path, number, lens, root).await? {
+        let conflicts = unmerged_paths(&existing.worktree_path).await;
+        return Ok(RemotePrResolveOutcome {
+            status: "conflicts".to_string(),
+            conflicts,
+            worktree_path: Some(existing.worktree_path),
+            worktree_id: Some(existing.worktree_id),
+            pushed_sha: None,
+        });
+    }
+
+    let cred = crate::forge::credential_config_for_remote(repo_path, remote).await?;
+    let base_spec = format!("+refs/heads/{base}:refs/remotes/{remote}/{base}");
+    let head_spec = format!("+refs/heads/{head}:refs/remotes/{remote}/{head}");
+    if let Err(err) = crate::git::remote::run_git_mutating_with_creds(
+        state,
+        repo_path,
+        &cred,
+        &["fetch", "--no-tags", remote, &base_spec, &head_spec],
+        NETWORK_TIMEOUT,
+    )
+    .await
+    {
+        return Err(AppError::Command(format!(
+            "Could not fetch the pull request branches from {remote}.\n{}",
+            error_detail(&err)
+        )));
+    }
+
+    let head_ref = format!("refs/remotes/{remote}/{head}");
+    let base_ref = format!("refs/remotes/{remote}/{base}");
+    let head_tip = run_git(Some(repo_path), &["rev-parse", &head_ref], DEFAULT_TIMEOUT)
+        .await?
+        .stdout_lossy()
+        .trim()
+        .to_string();
+    let base_tip = run_git(Some(repo_path), &["rev-parse", &base_ref], DEFAULT_TIMEOUT)
+        .await?
+        .stdout_lossy()
+        .trim()
+        .to_string();
+
+    // The head already contains base ⇒ there is nothing to merge. Report that
+    // honestly rather than claiming a push that never happened (the frontend only
+    // starts this when the forge says conflicting, so it's a staleness race).
+    let merge_base = run_git_raw(
+        Some(repo_path),
+        &["merge-base", &base_tip, &head_tip],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .ok()
+    .filter(|o| o.code == 0)
+    .map(|o| o.stdout_lossy().trim().to_string());
+    if merge_base.as_deref() == Some(base_tip.as_str()) {
+        return Err(AppError::Command(format!(
+            "The pull request head already contains {base} — nothing to resolve."
+        )));
+    }
+
+    // The isolated DETACHED worktree at the PR head's tip. No journal entry: the
+    // worktree IS the durable resume handle (`find` rediscovers it), and the
+    // oplog's interrupted-check keys on the MAIN repo's branch, which this flow
+    // never touches — a paused resolve would read as interrupted forever.
+    let worktree_id = uuid::Uuid::new_v4().to_string();
+    let worktree_path = root.join(format!(
+        "{}{worktree_id}",
+        pr_resolve_prefix(remote, number)
+    ));
+    let worktree_path = worktree_path.to_string_lossy().into_owned();
+    std::fs::create_dir_all(root).map_err(AppError::Io)?;
+    run_git_mutating(
+        state,
+        repo_path,
+        &["worktree", "add", "--detach", &worktree_path, &head_tip],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+
+    let message = match message.map(str::trim) {
+        Some(m) if !m.is_empty() => m.to_string(),
+        _ => format!("Merge {base} into {head}"),
+    };
+    // Lock-free with cwd = the worktree: the main repo isn't involved, and the
+    // mutating runners are not re-entrant under the per-repo lock.
+    let merged = run_git_raw(
+        Some(&worktree_path),
+        &["merge", "--no-ff", "-m", &message, &base_tip],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .and_then(check_code);
+
+    match merged {
+        Ok(()) => {
+            let new_sha = run_git(Some(&worktree_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
+                .await?
+                .stdout_lossy()
+                .trim()
+                .to_string();
+            if let Err(err) = push_pr_head(state, repo_path, remote, &new_sha, head).await {
+                // Nothing here is the user's work — the merge was automatic, so
+                // tearing the worktree down costs only a cheap retry.
+                remove_resolve_worktree(state, repo_path, &worktree_path).await;
+                return Err(AppError::Command(format!(
+                    "Could not push the merge to the pull request branch. The pull request head may have moved — try again.\n{}",
+                    error_detail(&err)
+                )));
+            }
+            remove_resolve_worktree(state, repo_path, &worktree_path).await;
+            Ok(RemotePrResolveOutcome {
+                status: "pushed".to_string(),
+                conflicts: Vec::new(),
+                worktree_path: None,
+                worktree_id: None,
+                pushed_sha: Some(new_sha),
+            })
+        }
+        Err(err) => {
+            // Unmerged paths in the WORKTREE are the conflict signal.
+            let conflicts = unmerged_paths(&worktree_path).await;
+            if !conflicts.is_empty() {
+                // Keep the worktree; the frontend drives resolution there, then
+                // finish/abort close it out.
+                Ok(RemotePrResolveOutcome {
+                    status: "conflicts".to_string(),
+                    conflicts,
+                    worktree_path: Some(worktree_path),
+                    worktree_id: Some(worktree_id),
+                    pushed_sha: None,
+                })
+            } else {
+                remove_resolve_worktree(state, repo_path, &worktree_path).await;
+                Err(AppError::Command(format!(
+                    "merge failed; nothing was pushed.\n{}",
+                    error_detail(&err)
+                )))
+            }
+        }
+    }
+}
+
+/// Completes a remote-PR resolve that [`git_merge_remote_pr`] left conflicted,
+/// once the user has resolved (and staged) every conflict IN THE RESOLVE
+/// WORKTREE. Refuses while any unmerged path remains. On success the resolved
+/// merge is pushed to the lens remote's PR head and the worktree is removed; a
+/// REJECTED push keeps the worktree, because it holds the user's resolutions.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // one flat arg per field, IPC-shaped
+pub async fn git_finish_remote_pr_resolve(
+    state: State<'_, AppState>,
+    repo_path: String,
+    head: String,
+    worktree_path: String,
+    worktree_id: String,
+    message: Option<String>,
+    lens: Option<String>,
+) -> AppResult<RemotePrResolveOutcome> {
+    let root = worktree_root_dir(&repo_path)?;
+    finish_remote_pr_resolve(
+        &state,
+        &repo_path,
+        &head,
+        &worktree_path,
+        &worktree_id,
+        message.as_deref(),
+        lens.as_deref(),
+        &root,
+    )
+    .await
+}
+
+/// Testable core of [`git_finish_remote_pr_resolve`] (see [`merge_remote_pr`]).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn finish_remote_pr_resolve(
+    state: &AppState,
+    repo_path: &str,
+    head: &str,
+    worktree_path: &str,
+    worktree_id: &str,
+    message: Option<&str>,
+    lens: Option<&str>,
+    root: &Path,
+) -> AppResult<RemotePrResolveOutcome> {
+    crate::git::branches::validate_ref_name(head)?;
+    let remote = resolve_pr_remote(repo_path, lens).await?;
+    ensure_pr_resolve_worktree(root, worktree_path)?;
+    // Path and id arrive as separate IPC args; requiring them to describe the same
+    // worktree keeps a stale pair from finishing the wrong resolve.
+    if !worktree_path.ends_with(worktree_id) {
+        return Err(AppError::InvalidArgument(
+            "the resolve worktree path and id do not match".to_string(),
+        ));
+    }
+
+    let remaining = unmerged_paths(worktree_path).await;
+    if !remaining.is_empty() {
+        return Err(AppError::Command("Resolve every conflict first.".to_string()));
+    }
+
+    // Conclude the merge with a commit in the worktree. An unfinished merge is
+    // ALWAYS committed, even with nothing staged: resolving every conflict as
+    // "ours" leaves a staged diff identical to HEAD, and the commit's value is
+    // recording the second parent (git commits such a merge fine — measured). The
+    // skip arm is only for the genuine already-committed-by-hand case: no merge
+    // pending AND nothing staged.
+    let merging = git_path_exists(worktree_path, "MERGE_HEAD").await;
+    let staged = run_git_raw(
+        Some(worktree_path),
+        &["diff", "--cached", "--quiet"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    if merging || staged.code != 0 {
+        // No `-m` ⇒ git's prepared MERGE_MSG; `--no-edit` (plus a no-op editor)
+        // keeps it non-interactive either way.
+        let args: Vec<&str> = match message.map(str::trim) {
+            Some(m) if !m.is_empty() => vec!["commit", "-m", m],
+            _ => vec!["-c", "core.editor=true", "commit", "--no-edit"],
+        };
+        let commit = run_git_raw(Some(worktree_path), &args, DEFAULT_TIMEOUT).await?;
+        if commit.code != 0 {
+            let lower = commit.stderr.to_lowercase();
+            let already =
+                lower.contains("nothing to commit") || lower.contains("no changes added");
+            if !already {
+                return Err(AppError::Git {
+                    code: commit.code,
+                    stderr: commit.stderr,
+                });
+            }
+        }
+    }
+
+    let new_sha = run_git(Some(worktree_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
+        .await?
+        .stdout_lossy()
+        .trim()
+        .to_string();
+    // Still sitting on the fetched head ⇒ the merge was never concluded, so there
+    // is nothing to push (pushing it would be a no-op reported as success).
+    let head_tip = run_git(
+        Some(repo_path),
+        &["rev-parse", &format!("refs/remotes/{remote}/{head}")],
+        DEFAULT_TIMEOUT,
+    )
+    .await?
+    .stdout_lossy()
+    .trim()
+    .to_string();
+    if new_sha == head_tip {
+        return Err(AppError::Command(
+            "Nothing to push — the merge was not completed.".to_string(),
+        ));
+    }
+
+    if let Err(err) = push_pr_head(state, repo_path, remote, &new_sha, head).await {
+        // KEEP the worktree: it holds the user's conflict resolutions, and `find`
+        // rediscovers it so a retry resumes rather than starting over.
+        return Err(AppError::Command(format!(
+            "The pull request head moved while you were resolving — abort and start again, or retry.\n{}",
+            error_detail(&err)
+        )));
+    }
+    remove_resolve_worktree(state, repo_path, worktree_path).await;
+    Ok(RemotePrResolveOutcome {
+        status: "pushed".to_string(),
+        conflicts: Vec::new(),
+        worktree_path: None,
+        worktree_id: None,
+        pushed_sha: Some(new_sha),
+    })
+}
+
+/// Abandons a remote-PR resolve: removes the resolve worktree (`--force`) and
+/// prunes. Nothing was pushed and no local branch was touched, so there is nothing
+/// else to roll back — teardown only, which is why it needs no lens. Best-effort.
+#[tauri::command]
+pub async fn git_abort_remote_pr_resolve(
+    state: State<'_, AppState>,
+    repo_path: String,
+    worktree_path: String,
+) -> AppResult<()> {
+    let root = worktree_root_dir(&repo_path)?;
+    abort_remote_pr_resolve(&state, &repo_path, &worktree_path, &root).await
+}
+
+/// Testable core of [`git_abort_remote_pr_resolve`] (see [`merge_remote_pr`]).
+pub(crate) async fn abort_remote_pr_resolve(
+    state: &AppState,
+    repo_path: &str,
+    worktree_path: &str,
+    root: &Path,
+) -> AppResult<()> {
+    ensure_pr_resolve_worktree(root, worktree_path)?;
+    remove_resolve_worktree(state, repo_path, worktree_path).await;
+    Ok(())
+}
+
+/// The live resolve worktree for PR `number` under `lens`'s remote, if one exists
+/// — so a reopened PR view can offer to resume instead of starting over, and so
+/// [`merge_remote_pr`] never mints a duplicate. Read-only.
+#[tauri::command]
+pub async fn git_find_remote_pr_resolve(
+    repo_path: String,
+    number: u64,
+    lens: Option<String>,
+) -> AppResult<Option<RemotePrResolveHandle>> {
+    let root = worktree_root_dir(&repo_path)?;
+    find_remote_pr_resolve(&repo_path, number, lens.as_deref(), &root).await
+}
+
+/// Testable core of [`git_find_remote_pr_resolve`] (see [`merge_remote_pr`]).
+pub(crate) async fn find_remote_pr_resolve(
+    repo_path: &str,
+    number: u64,
+    lens: Option<&str>,
+    root: &Path,
+) -> AppResult<Option<RemotePrResolveHandle>> {
+    use crate::git::worktree::normalize_wt_path;
+    let remote = crate::github::lens_remote(lens)?;
+    let listed = run_git(
+        Some(repo_path),
+        &["worktree", "list", "--porcelain"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    let root_norm = normalize_wt_path(&root.to_string_lossy());
+    let prefix = pr_resolve_prefix(remote, number);
+    Ok(parse_worktree_paths(&listed.stdout_lossy())
+        .into_iter()
+        .find_map(|p| {
+            if !normalize_wt_path(&p).starts_with(&format!("{root_norm}/")) {
+                return None;
+            }
+            // The id is the segment AFTER the prefix — this module names these
+            // directories, so it is also the one that reads the name back.
+            let id = std::path::Path::new(&p)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .and_then(|name| name.strip_prefix(&prefix))?
+                .to_string();
+            Some(RemotePrResolveHandle {
+                worktree_path: p,
+                worktree_id: id,
+            })
+        }))
 }
 
 /// Maps a raw git output into a `Result`, turning a non-zero exit into
@@ -3914,6 +4552,706 @@ detached
         assert!(
             !std::path::Path::new(&wt_path).exists(),
             "worktree removed after abort"
+        );
+    }
+
+    /// A repo wired to a BARE origin, the way the remote-PR ladder expects one.
+    /// Returns both temp dirs (each must outlive the test), the repo path, and the
+    /// bare path. Forward slashes: a Windows backslash path is a poor remote URL.
+    async fn setup_repo_with_origin(
+        marker: &str,
+    ) -> (tempfile::TempDir, tempfile::TempDir, String, String) {
+        let (dir, repo) = setup_repo(marker).await;
+        let (bare_dir, bare) = add_bare_remote(&repo, marker, "origin").await;
+        (dir, bare_dir, repo, bare)
+    }
+
+    /// A second bare repo wired to `repo` under `remote` — what a fork clone's
+    /// `upstream` looks like.
+    async fn add_bare_remote(
+        repo: &str,
+        marker: &str,
+        remote: &str,
+    ) -> (tempfile::TempDir, String) {
+        let bare_dir = tempfile::Builder::new()
+            .prefix(&format!("gd-{remote}-{marker}-"))
+            .tempdir()
+            .expect("create temp dir");
+        let bare = bare_dir.path().to_string_lossy().replace('\\', "/");
+        git(&bare, &["init", "--bare"]).await;
+        git(repo, &["remote", "add", remote, &bare]).await;
+        (bare_dir, bare)
+    }
+
+    /// Pushes a base/head pair to `remote` that conflicts on the same line of
+    /// `a.txt`, leaving the main tree on `base`. Returns the base branch name.
+    async fn push_conflicting_pair(repo: &str, dir: &std::path::Path, remote: &str) -> String {
+        let base = git(repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        git(repo, &["switch", "-c", "feature"]).await;
+        commit_file(repo, dir, "a.txt", "feature-side\n", "feat edit").await;
+        git(repo, &["switch", &base]).await;
+        commit_file(repo, dir, "a.txt", "base-side\n", "base edit").await;
+        git(repo, &["push", remote, &base, "feature"]).await;
+        base
+    }
+
+    /// The whole conflict ladder: the merge lands in an isolated worktree, the
+    /// PR head on the remote is untouched while conflicts stand, and finishing
+    /// pushes the resolved merge onto it.
+    #[tokio::test]
+    async fn remote_pr_conflict_then_finish_pushes_the_resolution() {
+        let (dir, _origin, repo, bare) = setup_repo_with_origin("rpr-conflict").await;
+        let base = push_conflicting_pair(&repo, dir.path(), "origin").await;
+        let head_before = rev(&bare, "refs/heads/feature").await;
+
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let state = AppState::default();
+        let outcome = merge_remote_pr(&state, &repo, 42, &base, "feature", None, None, &root)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.status, "conflicts");
+        assert!(
+            outcome.conflicts.iter().any(|p| p == "a.txt"),
+            "a.txt conflicts: {:?}",
+            outcome.conflicts
+        );
+        assert!(outcome.pushed_sha.is_none(), "nothing pushed yet");
+        let wt = outcome.worktree_path.clone().expect("worktree path set");
+        let wt_id = outcome.worktree_id.clone().expect("worktree id set");
+        assert!(Path::new(&wt).exists(), "worktree kept");
+        assert_eq!(
+            rev(&bare, "refs/heads/feature").await,
+            head_before,
+            "the PR head on the remote is untouched while conflicts stand"
+        );
+
+        // Resolve + stage inside the worktree, as the frontend's editor does.
+        std::fs::write(Path::new(&wt).join("a.txt"), "resolved\n").unwrap();
+        git(&wt, &["add", "a.txt"]).await;
+
+        let done = finish_remote_pr_resolve(
+            &state, &repo, "feature", &wt, &wt_id, None, None, &root,
+        )
+        .await
+        .unwrap();
+        assert_eq!(done.status, "pushed");
+        let pushed = done.pushed_sha.clone().expect("pushed sha");
+        assert_eq!(
+            rev(&bare, "refs/heads/feature").await,
+            pushed,
+            "the PR head is the pushed merge"
+        );
+        assert!(!Path::new(&wt).exists(), "worktree removed after finish");
+    }
+
+    /// A clean divergence needs no user input: the merge is pushed straight
+    /// through and the worktree never survives the call.
+    #[tokio::test]
+    async fn remote_pr_clean_divergence_pushes_immediately() {
+        let (dir, _origin, repo, bare) = setup_repo_with_origin("rpr-clean").await;
+        let base = git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        // Different files ⇒ the merge is clean, but the branches still diverge.
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "feat.txt", "feature\n", "feat commit").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "b.txt", "base\n", "base commit").await;
+        git(&repo, &["push", "origin", &base, "feature"]).await;
+        let head_before = rev(&bare, "refs/heads/feature").await;
+
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let state = AppState::default();
+        let outcome = merge_remote_pr(&state, &repo, 7, &base, "feature", None, None, &root)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.status, "pushed");
+        assert!(outcome.conflicts.is_empty());
+        assert!(outcome.worktree_path.is_none());
+        let pushed = outcome.pushed_sha.clone().expect("pushed sha");
+        assert_ne!(pushed, head_before, "the PR head advanced");
+        assert_eq!(rev(&bare, "refs/heads/feature").await, pushed);
+
+        let wts = git(&repo, &["worktree", "list", "--porcelain"]).await;
+        assert!(!wts.contains("gd-pr-resolve-"), "worktree removed: {wts}");
+    }
+
+    /// Under the upstream lens the PR's branches live on `upstream`. Fetching or
+    /// pushing `origin` here would silently target the user's FORK — the whole
+    /// point of the lens — so both ends must land on upstream and origin must not
+    /// even gain the branch.
+    #[tokio::test]
+    async fn remote_pr_ladder_follows_the_upstream_lens() {
+        let (dir, _origin_dir, repo, origin) = setup_repo_with_origin("rpr-lens").await;
+        let (_up_dir, upstream) = add_bare_remote(&repo, "rpr-lens", "upstream").await;
+        let base = git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "feat.txt", "feature\n", "feat commit").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "b.txt", "base\n", "base commit").await;
+        // The PR lives on UPSTREAM; origin (the fork) never gets `feature`.
+        git(&repo, &["push", "upstream", &base, "feature"]).await;
+        git(&repo, &["push", "origin", &base]).await;
+        let upstream_before = rev(&upstream, "refs/heads/feature").await;
+
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let state = AppState::default();
+        let outcome = merge_remote_pr(
+            &state,
+            &repo,
+            31,
+            &base,
+            "feature",
+            None,
+            Some("upstream"),
+            &root,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.status, "pushed");
+        let pushed = outcome.pushed_sha.clone().expect("pushed sha");
+        assert_ne!(pushed, upstream_before);
+        assert_eq!(
+            rev(&upstream, "refs/heads/feature").await,
+            pushed,
+            "the merge landed on upstream"
+        );
+        let origin_refs = git(&origin, &["for-each-ref", "--format=%(refname)", "refs/heads"]).await;
+        assert!(
+            !origin_refs.contains("refs/heads/feature"),
+            "the fork never received the PR branch: {origin_refs}"
+        );
+    }
+
+    /// A second start for the same (remote, PR) hands back the SAME worktree —
+    /// minting another would strand the first with the user's resolutions in it.
+    /// Once everything is resolved the takeover reports an EMPTY conflict list.
+    #[tokio::test]
+    async fn remote_pr_second_start_resumes_the_existing_worktree() {
+        use crate::git::worktree::normalize_wt_path;
+        let (dir, _origin, repo, _bare) = setup_repo_with_origin("rpr-dedupe").await;
+        let base = push_conflicting_pair(&repo, dir.path(), "origin").await;
+
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let state = AppState::default();
+        let first = merge_remote_pr(&state, &repo, 77, &base, "feature", None, None, &root)
+            .await
+            .unwrap();
+        let wt = first.worktree_path.clone().expect("worktree path set");
+        // The REMOTE is part of the name, so the same number under two lenses
+        // cannot collide.
+        let name = Path::new(&wt).file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("gd-pr-resolve-origin-77-"), "got: {name}");
+
+        let second = merge_remote_pr(&state, &repo, 77, &base, "feature", None, None, &root)
+            .await
+            .unwrap();
+        assert_eq!(second.status, "conflicts");
+        assert_eq!(
+            second.worktree_path.as_deref().map(normalize_wt_path),
+            Some(normalize_wt_path(&wt))
+        );
+        assert_eq!(second.worktree_id, first.worktree_id);
+        assert!(second.conflicts.iter().any(|p| p == "a.txt"));
+
+        let porcelain = git(&repo, &["worktree", "list", "--porcelain"]).await;
+        let mine = parse_worktree_paths(&porcelain)
+            .into_iter()
+            .filter(|p| is_pr_resolve_worktree_path(p))
+            .count();
+        assert_eq!(mine, 1, "exactly one resolve worktree: {porcelain}");
+
+        // Fully resolved but not yet finished: the takeover reports no conflicts,
+        // which is what drives the frontend's "Finish to push" state.
+        std::fs::write(Path::new(&wt).join("a.txt"), "resolved\n").unwrap();
+        git(&wt, &["add", "a.txt"]).await;
+        let third = merge_remote_pr(&state, &repo, 77, &base, "feature", None, None, &root)
+            .await
+            .unwrap();
+        assert_eq!(third.status, "conflicts");
+        assert!(third.conflicts.is_empty(), "got: {:?}", third.conflicts);
+    }
+
+    /// Abort tears the worktree down and pushes nothing; `find` locates the live
+    /// worktree by (remote, number) beforehand and reports none afterwards. The
+    /// local-PR orphan sweep must NOT claim it (its `gd-resolve-` prefix
+    /// deliberately misses `gd-pr-resolve-`).
+    #[tokio::test]
+    async fn remote_pr_abort_removes_worktree_and_find_tracks_it() {
+        use crate::git::worktree::normalize_wt_path;
+        let (dir, _origin, repo, bare) = setup_repo_with_origin("rpr-abort").await;
+        let base = push_conflicting_pair(&repo, dir.path(), "origin").await;
+        let head_before = rev(&bare, "refs/heads/feature").await;
+
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let state = AppState::default();
+        let outcome = merge_remote_pr(&state, &repo, 99, &base, "feature", None, None, &root)
+            .await
+            .unwrap();
+        let wt = outcome.worktree_path.clone().expect("worktree path set");
+        let wt_id = outcome.worktree_id.clone().expect("worktree id set");
+
+        // git's porcelain prints forward slashes where the created path carries
+        // Windows separators, so identity is by NORMALIZED path (as everywhere
+        // else worktree paths are compared).
+        let found = find_remote_pr_resolve(&repo, 99, None, &root)
+            .await
+            .unwrap()
+            .expect("the live resolve is found");
+        assert_eq!(
+            normalize_wt_path(&found.worktree_path),
+            normalize_wt_path(&wt)
+        );
+        assert_eq!(found.worktree_id, wt_id, "the id is parsed off the path");
+        // Neither a different PR number nor a different lens may claim it.
+        assert!(find_remote_pr_resolve(&repo, 98, None, &root)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(find_remote_pr_resolve(&repo, 99, Some("upstream"), &root)
+            .await
+            .unwrap()
+            .is_none());
+
+        // Negative control on the REAL porcelain: an empty keep-set sweeps every
+        // orphan the local-PR flow owns — and this worktree is not one of them.
+        let porcelain = git(&repo, &["worktree", "list", "--porcelain"]).await;
+        let all = parse_worktree_paths(&porcelain);
+        assert!(all.iter().any(|p| p.contains("gd-pr-resolve-")), "{porcelain}");
+        assert!(
+            orphaned_resolve_worktrees(&all, &[]).is_empty(),
+            "the local-PR sweep must not touch a remote-PR resolve: {all:?}"
+        );
+
+        abort_remote_pr_resolve(&state, &repo, &wt, &root)
+            .await
+            .unwrap();
+        assert!(!Path::new(&wt).exists(), "worktree removed after abort");
+        assert!(find_remote_pr_resolve(&repo, 99, None, &root)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            rev(&bare, "refs/heads/feature").await,
+            head_before,
+            "abort pushes nothing"
+        );
+    }
+
+    /// LIVE REPRO (dogfood blocker): resolving every conflict as "ours" stages a
+    /// diff byte-identical to HEAD, so a staged-diff-only check skips the commit,
+    /// HEAD never leaves the fetched tip, and finish dead-ends on "Nothing to
+    /// push". While MERGE_HEAD exists the merge must be committed — its value is
+    /// the second parent, not a tree change.
+    #[tokio::test]
+    async fn remote_pr_finish_commits_an_all_ours_resolution() {
+        let (dir, _origin, repo, bare) = setup_repo_with_origin("rpr-ours").await;
+        let base = push_conflicting_pair(&repo, dir.path(), "origin").await;
+        let head_before = rev(&bare, "refs/heads/feature").await;
+        let tree_before = git(&bare, &["rev-parse", &format!("{head_before}^{{tree}}")])
+            .await
+            .trim()
+            .to_string();
+
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let state = AppState::default();
+        let outcome = merge_remote_pr(&state, &repo, 55, &base, "feature", None, None, &root)
+            .await
+            .unwrap();
+        assert_eq!(outcome.status, "conflicts");
+        let wt = outcome.worktree_path.clone().expect("worktree path set");
+        let wt_id = outcome.worktree_id.clone().expect("worktree id set");
+
+        // Keep the PR head's side of every conflict — the staged diff is now EMPTY
+        // even though the merge is unfinished. This is the exact live repro.
+        git(&wt, &["checkout", "--ours", "a.txt"]).await;
+        git(&wt, &["add", "a.txt"]).await;
+        let porcelain = git(&wt, &["status", "--porcelain"]).await;
+        assert!(
+            porcelain.trim().is_empty(),
+            "the all-ours resolution stages nothing: {porcelain:?}"
+        );
+
+        let done = finish_remote_pr_resolve(
+            &state, &repo, "feature", &wt, &wt_id, None, None, &root,
+        )
+        .await
+        .unwrap();
+        assert_eq!(done.status, "pushed");
+        let pushed = done.pushed_sha.clone().expect("pushed sha");
+        assert_ne!(pushed, head_before, "the PR head advanced");
+        assert_eq!(rev(&bare, "refs/heads/feature").await, pushed);
+
+        // A real MERGE commit: two parents, and the head's own tree preserved.
+        let parents = git(&bare, &["rev-list", "--parents", "-n1", &pushed]).await;
+        assert_eq!(
+            parents.split_whitespace().count(),
+            3,
+            "commit + 2 parents, got: {parents:?}"
+        );
+        assert_eq!(
+            git(&bare, &["rev-parse", &format!("{pushed}^{{tree}}")])
+                .await
+                .trim(),
+            tree_before,
+            "an all-ours merge keeps the head's tree"
+        );
+        assert!(!Path::new(&wt).exists(), "worktree removed after finish");
+    }
+
+    /// The LOCAL sibling of the same class, and the worse one: skipping the commit
+    /// there left `base` at its old tip while the flow reported "merged" — a
+    /// silent false merge. `base` must actually advance to a 2-parent commit.
+    #[tokio::test]
+    async fn local_pr_finish_commits_an_all_ours_resolution() {
+        let (dir, repo) = setup_repo("lpr-ours").await;
+        let base = git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "feature-side\n", "feat edit").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "a.txt", "base-side\n", "base edit").await;
+        // Move the main tree OFF base so finalize_base takes the update-ref path.
+        git(&repo, &["switch", "-c", "work"]).await;
+        let base_before = rev(&repo, &base).await;
+        let tree_before = git(&repo, &["rev-parse", &format!("{base_before}^{{tree}}")])
+            .await
+            .trim()
+            .to_string();
+
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let state = AppState::default();
+        let outcome = merge_local_pr(&state, &repo, &base, "feature", "merge it", "merge", &root)
+            .await
+            .unwrap();
+        assert_eq!(outcome.status, "conflicts");
+        let wt = outcome.worktree_path.clone().expect("worktree path set");
+
+        git(&wt, &["checkout", "--ours", "a.txt"]).await;
+        git(&wt, &["add", "a.txt"]).await;
+        let porcelain = git(&wt, &["status", "--porcelain"]).await;
+        assert!(
+            porcelain.trim().is_empty(),
+            "the all-ours resolution stages nothing: {porcelain:?}"
+        );
+
+        let done = finish_local_pr_merge(
+            &state,
+            &repo,
+            &base,
+            "merge",
+            "merge it",
+            &wt,
+            &outcome.worktree_id.clone().unwrap_or_default(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(done.status, "merged");
+
+        let base_after = rev(&repo, &base).await;
+        assert_ne!(base_after, base_before, "base actually advanced");
+        let parents = git(&repo, &["rev-list", "--parents", "-n1", &base_after]).await;
+        assert_eq!(
+            parents.split_whitespace().count(),
+            3,
+            "commit + 2 parents, got: {parents:?}"
+        );
+        assert_eq!(
+            git(&repo, &["rev-parse", &format!("{base_after}^{{tree}}")])
+                .await
+                .trim(),
+            tree_before,
+            "an all-ours merge keeps base's tree"
+        );
+    }
+
+    /// KNOWN degenerate case, pinned deliberately (NOT changed this round):
+    /// `merge --squash` writes no MERGE_HEAD (measured, git 2.51.1), so an
+    /// all-"ours" squash genuinely stages nothing, the commit is skipped, and
+    /// `base` stays put while the flow still reports "merged". Recorded here so it
+    /// cannot change silently.
+    #[tokio::test]
+    async fn local_pr_finish_squash_all_ours_is_a_known_no_op() {
+        let (dir, repo) = setup_repo("lpr-squash-ours").await;
+        let base = git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "feature-side\n", "feat edit").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "a.txt", "base-side\n", "base edit").await;
+        git(&repo, &["switch", "-c", "work"]).await;
+        let base_before = rev(&repo, &base).await;
+
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let state = AppState::default();
+        let outcome = merge_local_pr(&state, &repo, &base, "feature", "squash it", "squash", &root)
+            .await
+            .unwrap();
+        assert_eq!(outcome.status, "conflicts");
+        let wt = outcome.worktree_path.clone().expect("worktree path set");
+
+        // Squash leaves no MERGE_HEAD — the signal the merge arm relies on.
+        let merge_head = git(&wt, &["rev-parse", "--git-path", "MERGE_HEAD"])
+            .await
+            .trim()
+            .to_string();
+        assert!(
+            !Path::new(&merge_head).exists(),
+            "squash writes no MERGE_HEAD: {merge_head}"
+        );
+
+        git(&wt, &["checkout", "--ours", "a.txt"]).await;
+        git(&wt, &["add", "a.txt"]).await;
+
+        let done = finish_local_pr_merge(
+            &state,
+            &repo,
+            &base,
+            "squash",
+            "squash it",
+            &wt,
+            &outcome.worktree_id.clone().unwrap_or_default(),
+            None,
+        )
+        .await
+        .unwrap();
+        // The behavior as it stands today: reported merged, base unmoved.
+        assert_eq!(done.status, "merged");
+        assert_eq!(
+            rev(&repo, &base).await,
+            base_before,
+            "KNOWN: an all-ours squash advances nothing"
+        );
+    }
+
+    /// The PR head moving while the user resolves must FAIL honestly (the push is
+    /// never forced) and KEEP the worktree — it holds resolutions that would
+    /// otherwise be lost.
+    #[tokio::test]
+    async fn remote_pr_finish_fails_and_keeps_worktree_when_head_moved() {
+        let (dir, _origin, repo, bare) = setup_repo_with_origin("rpr-moved").await;
+        let base = push_conflicting_pair(&repo, dir.path(), "origin").await;
+
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let state = AppState::default();
+        let outcome = merge_remote_pr(&state, &repo, 12, &base, "feature", None, None, &root)
+            .await
+            .unwrap();
+        assert_eq!(outcome.status, "conflicts");
+        let wt = outcome.worktree_path.clone().expect("worktree path set");
+        let wt_id = outcome.worktree_id.clone().expect("worktree id set");
+
+        // Someone pushes to the PR branch while the user is resolving.
+        git(&repo, &["switch", "feature"]).await;
+        commit_file(&repo, dir.path(), "c.txt", "moved\n", "head moved").await;
+        git(&repo, &["push", "origin", "feature"]).await;
+        let moved = rev(&bare, "refs/heads/feature").await;
+
+        std::fs::write(Path::new(&wt).join("a.txt"), "resolved\n").unwrap();
+        git(&wt, &["add", "a.txt"]).await;
+
+        let err = finish_remote_pr_resolve(
+            &state, &repo, "feature", &wt, &wt_id, None, None, &root,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("moved while you were resolving"),
+            "got: {err}"
+        );
+        assert!(
+            Path::new(&wt).exists(),
+            "the worktree keeps the user's resolutions"
+        );
+        assert_eq!(
+            rev(&bare, "refs/heads/feature").await,
+            moved,
+            "the head that moved is never overwritten"
+        );
+    }
+
+    /// The reclamation arm removes a remote-PR resolve worktree ONLY when it is
+    /// provably worthless. A paused conflict (dirty), a resolved-but-unpushed
+    /// merge (a local-only commit), and an all-"ours" resolution (which reads
+    /// CLEAN and contained — only MERGE_HEAD betrays it) all survive an EMPTY
+    /// keep-set; that is what makes the keep-set unnecessary for this arm.
+    #[tokio::test]
+    async fn cleanup_keeps_in_progress_resolves_and_reclaims_only_worthless_ones() {
+        let (dir, _origin, repo, _bare) = setup_repo_with_origin("rpr-sweep").await;
+        let base = push_conflicting_pair(&repo, dir.path(), "origin").await;
+
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let state = AppState::default();
+
+        // (1) A paused conflicted resolve — dirty.
+        let dirty = merge_remote_pr(&state, &repo, 1, &base, "feature", None, None, &root)
+            .await
+            .unwrap()
+            .worktree_path
+            .expect("worktree path set");
+        // (2) Resolved and committed but never pushed — clean tree, local-only commit.
+        let unpushed = merge_remote_pr(&state, &repo, 2, &base, "feature", None, None, &root)
+            .await
+            .unwrap()
+            .worktree_path
+            .expect("worktree path set");
+        std::fs::write(Path::new(&unpushed).join("a.txt"), "resolved\n").unwrap();
+        git(&unpushed, &["add", "a.txt"]).await;
+        git(&unpushed, &["-c", "core.editor=true", "commit", "--no-edit"]).await;
+        // (3) Every conflict resolved as "ours" and staged, not yet committed. The
+        // staged content is byte-identical to HEAD and HEAD is still the fetched
+        // tip, so this reads clean AND fully contained — MERGE_HEAD is the only
+        // remaining evidence of the user's work.
+        let ours = merge_remote_pr(&state, &repo, 3, &base, "feature", None, None, &root)
+            .await
+            .unwrap()
+            .worktree_path
+            .expect("worktree path set");
+        git(&ours, &["checkout", "--ours", "a.txt"]).await;
+        git(&ours, &["add", "a.txt"]).await;
+        // Pin the premise this gate exists for, rather than assuming it.
+        let porcelain = git(&ours, &["status", "--porcelain"]).await;
+        assert!(
+            porcelain.trim().is_empty(),
+            "an all-ours resolution reads CLEAN, got: {porcelain:?}"
+        );
+        let contained = git(
+            &ours,
+            &["rev-list", "--count", "HEAD", "--not", "--remotes"],
+        )
+        .await;
+        assert_eq!(contained.trim(), "0", "and fully contained by the remote");
+
+        // (4) Worthless: detached exactly at a commit the remote already has, with
+        // no merge in flight.
+        let head_tip = rev(&repo, "refs/remotes/origin/feature").await;
+        let clean = root
+            .join("gd-pr-resolve-origin-4-clean")
+            .to_string_lossy()
+            .into_owned();
+        git(&repo, &["worktree", "add", "--detach", &clean, &head_tip]).await;
+
+        cleanup_orphaned_resolve_worktrees(&state, &repo, &[], &root)
+            .await
+            .unwrap();
+
+        assert!(
+            Path::new(&dirty).exists(),
+            "a paused conflicted resolve is kept"
+        );
+        assert!(
+            Path::new(&unpushed).exists(),
+            "a resolved-but-unpushed resolve is kept"
+        );
+        assert!(
+            Path::new(&ours).exists(),
+            "an unfinished merge is kept even though the tree reads clean"
+        );
+        assert!(
+            !Path::new(&clean).exists(),
+            "a clean, fully-contained worktree with no merge in flight is reclaimed"
+        );
+    }
+
+    /// Refspec metacharacters are rejected BEFORE anything is fetched, created, or
+    /// pushed — these names are interpolated into fetch/push refspecs, where `*`
+    /// globs and `:` separates. A lens whose remote does not exist is refused just
+    /// as early, rather than silently falling back to origin.
+    #[tokio::test]
+    async fn remote_pr_rejects_bad_refs_and_missing_remotes_before_any_mutation() {
+        let (dir, repo) = setup_repo("rpr-validate").await;
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let state = AppState::default();
+
+        for (base, head) in [("ma*in", "feature"), ("main", "fea:ture"), ("main", "*")] {
+            let err = merge_remote_pr(&state, &repo, 5, base, head, None, None, &root)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, AppError::InvalidArgument(_)),
+                "{base}/{head} got: {err:?}"
+            );
+        }
+
+        // This clone has no remotes at all, so every lens must fail by NAME.
+        let err = merge_remote_pr(&state, &repo, 5, "main", "feature", None, None, &root)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("origin"), "got: {err}");
+        let err = merge_remote_pr(&state, &repo, 5, "main", "feature", None, Some("upstream"), &root)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("upstream"), "got: {err}");
+        // An unknown lens never reaches git at all.
+        let err = merge_remote_pr(&state, &repo, 5, "main", "feature", None, Some("fork"), &root)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, AppError::InvalidArgument(_)),
+            "got: {err:?}"
+        );
+
+        // Nothing was created on disk.
+        assert!(!root.exists(), "no worktree root created");
+        let wts = git(&repo, &["worktree", "list", "--porcelain"]).await;
+        assert!(!wts.contains("gd-pr-resolve-"), "{wts}");
+        assert!(dir.path().join("a.txt").exists(), "the tree is untouched");
+    }
+
+    #[test]
+    fn pr_resolve_worktree_paths_are_guarded_by_prefix_and_root() {
+        // The two prefixes must not overlap in either direction.
+        assert!(is_pr_resolve_worktree_path(
+            "C:/data/wt/h/gd-pr-resolve-origin-12-abc"
+        ));
+        assert!(!is_pr_resolve_worktree_path("C:/data/wt/h/gd-resolve-abc"));
+        assert!(!is_resolve_worktree_path(
+            "C:/data/wt/h/gd-pr-resolve-origin-12-abc"
+        ));
+        // Mid-path only ⇒ not a match (the basename is the signal).
+        assert!(!is_pr_resolve_worktree_path("C:/repos/gd-pr-resolve-ish/feature"));
+        // The remote namespaces the directory, so two lenses never collide.
+        assert_ne!(pr_resolve_prefix("origin", 12), pr_resolve_prefix("upstream", 12));
+
+        let root = Path::new("C:/data/wt/h");
+        assert!(
+            ensure_pr_resolve_worktree(root, "c:\\data\\wt\\h\\gd-pr-resolve-origin-12-abc").is_ok()
+        );
+        // Ours by name but OUTSIDE the app-data root, and inside the root but not
+        // ours — both refused before `worktree remove --force` is aimed at them.
+        assert!(ensure_pr_resolve_worktree(root, "C:/users/me/gd-pr-resolve-origin-12-abc").is_err());
+        assert!(ensure_pr_resolve_worktree(root, "C:/data/wt/h/my-work").is_err());
+        // A SIBLING directory sharing the root's prefix must not slip through a
+        // bare `starts_with` — this check ends in `worktree remove --force`.
+        assert!(
+            ensure_pr_resolve_worktree(root, "C:/data/wt/hevil/gd-pr-resolve-origin-12-abc")
+                .is_err()
         );
     }
 

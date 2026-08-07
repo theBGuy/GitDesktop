@@ -3,6 +3,7 @@ import {
   ClockIcon,
   GitPullRequestIcon,
   StackSimpleIcon,
+  WarningIcon,
   XCircleIcon,
 } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
@@ -25,6 +26,7 @@ import {
   usePrefetchPr,
   usePrList,
   usePrListCi,
+  usePrListMergeability,
 } from "@/lib/git/queries";
 import { providerLabel } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
@@ -78,6 +80,20 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     lens,
   );
   const ciMap = prListCi.data;
+  // Row conflict chips. The extra gates are load-bearing on top of `ghReady`: this call
+  // takes seconds on large GitHub repos and every active forge query joins the commit
+  // mutation's awaited invalidation set, so it must be idle off this tab — and closed
+  // and merged rows have no live mergeability, so they'd render zero chips anyway.
+  const repoTab = useUiStore((s) => s.repoTab);
+  const prListMergeability = usePrListMergeability(
+    repoPath,
+    ghReady && repoTab === "pulls" && stateFilter === "open",
+    stateFilter,
+    limit,
+    prList.data,
+    lens,
+  );
+  const mergeMap = prListMergeability.data;
   const onStateFilter = (s: PrStateFilter) => {
     setStateFilter(s);
     setLimit(PAGE_SIZE);
@@ -370,6 +386,20 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
               {/* Ahead of the branch names so the row's truncation can't eat it.
                   Text carries the meaning; the label is self-contained so the
                   glyph reads on its own. */}
+              {mergeMap?.get(pr.number) === "conflicting" && (
+                <>
+                  {" · "}
+                  <span
+                    role="img"
+                    title="Has conflicts with the base branch"
+                    aria-label="Has conflicts with the base branch"
+                    className="inline-flex items-center gap-1 align-middle text-warning"
+                  >
+                    <WarningIcon className="size-3 shrink-0" />
+                    Conflicts
+                  </span>
+                </>
+              )}
               {pr.stack && (
                 <>
                   {" · "}

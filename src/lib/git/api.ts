@@ -90,6 +90,8 @@ import type {
   PrCiStatus,
   PrDetails,
   PrInfo,
+  PrMergeability,
+  PrMergeabilityState,
   PrPollInfo,
   PrRef,
   PrTask,
@@ -974,6 +976,88 @@ export const gitAbortLocalPrMerge = (
     opId,
   });
 
+/** Outcome of merging a remote PR's base INTO its head branch: `pushed` merged clean
+ *  and the head branch was updated on the forge (never force); `conflicts` paused in
+ *  an isolated worktree for the user to resolve (its fields feed finish/abort). */
+export interface RemotePrResolveOutcome {
+  status: "pushed" | "conflicts";
+  /** May be EMPTY on a `conflicts` outcome that re-attached to an existing worktree
+   *  whose conflicts are all resolved already — Finish is the next step, not a fault. */
+  conflicts: string[];
+  /** The detached worktree holding the paused merge; null when it pushed clean. */
+  worktreePath: string | null;
+  /** The worktree's id, passed to finish; null when it pushed clean. */
+  worktreeId: string | null;
+  /** The head branch's new tip after a successful push (informational). */
+  pushedSha: string | null;
+}
+
+/** An existing resolve worktree, as returned by {@link gitFindRemotePrResolve}. The id
+ *  is backend-owned — never derived from the path. */
+export interface RemotePrResolveHandle {
+  worktreePath: string;
+  worktreeId: string;
+}
+
+/** Merges the lens remote's `<base>` into the PR's head branch in a hidden detached
+ *  worktree — the user's branch and working tree are untouched. Idempotent: an existing
+ *  resolve worktree for this PR+lens comes back as `conflicts` instead of a duplicate. */
+export const gitMergeRemotePr = (
+  repoPath: string,
+  number: number,
+  base: string,
+  head: string,
+  message: string | null,
+  lens: RemoteLens,
+) =>
+  invoke<RemotePrResolveOutcome>("git_merge_remote_pr", {
+    repoPath,
+    number,
+    base,
+    head,
+    message,
+    lens,
+  });
+
+/** Commits a paused remote-PR resolution and pushes the head branch. Errors while any
+ *  conflict is unresolved, and errors KEEPING the worktree if the remote head moved. */
+export const gitFinishRemotePrResolve = (
+  repoPath: string,
+  head: string,
+  worktreePath: string,
+  worktreeId: string,
+  message: string | null,
+  lens: RemoteLens,
+) =>
+  invoke<RemotePrResolveOutcome>("git_finish_remote_pr_resolve", {
+    repoPath,
+    head,
+    worktreePath,
+    worktreeId,
+    message,
+    lens,
+  });
+
+/** Discards a paused remote-PR resolution by deleting its worktree — nothing was
+ *  pushed and the user's branch was never touched, so nothing else to undo. */
+export const gitAbortRemotePrResolve = (
+  repoPath: string,
+  worktreePath: string,
+) => invoke<void>("git_abort_remote_pr_resolve", { repoPath, worktreePath });
+
+/** The existing resolve worktree for this PR under this lens, or null — lets the view
+ *  offer to resume a resolution left behind by an earlier session. */
+export const gitFindRemotePrResolve = (
+  repoPath: string,
+  number: number,
+  lens: RemoteLens,
+) =>
+  invoke<RemotePrResolveHandle | null>("git_find_remote_pr_resolve", {
+    repoPath,
+    number,
+    lens,
+  });
+
 /** In-memory prediction of whether merging `head` into `base` will conflict, for
  *  the pre-merge preview line. Reuses the existing `MergePreview` shape. */
 export const gitConflictPreview = (
@@ -1368,6 +1452,25 @@ export const forgePrListCi = (
   sampleUrl: string,
 ) => invoke<PrCiStatus[]>("forge_pr_list_ci", { repoPath, prs, sampleUrl });
 
+/** Mergeability for a PR-list page, keyed by number — the sibling of
+ *  {@link forgePrListCi}. Unlike the CI rollup the backend re-queries the page itself,
+ *  so it takes the list's own filter args; `prs` only short-circuits an empty page.
+ *  Only rows the provider can answer for appear in the record. */
+export const forgePrListMergeability = (
+  repoPath: string,
+  state: PrStateFilter,
+  limit: number | undefined,
+  prs: { number: number; headSha: string }[],
+  lens: RemoteLens,
+) =>
+  invoke<Record<number, PrMergeabilityState>>("forge_pr_list_mergeability", {
+    repoPath,
+    state,
+    limit,
+    prs,
+    lens,
+  });
+
 export const ghPrView = (repoPath: string, number: number) =>
   invoke<PrDetails>("gh_pr_view", { repoPath, number });
 
@@ -1396,6 +1499,16 @@ export const forgePrView = (
   number: number,
   lens: RemoteLens,
 ) => invoke<PrDetails>("forge_pr_view", { repoPath, number, lens });
+
+/** A single PR's mergeability against its base. GitHub computes this asynchronously
+ *  and this read PRIMES that computation, so a "checking" result means poll again;
+ *  non-open PRs (and Bitbucket) answer "unavailable". */
+export const forgePrMergeability = (
+  repoPath: string,
+  number: number,
+  lens: RemoteLens,
+) =>
+  invoke<PrMergeability>("forge_pr_mergeability", { repoPath, number, lens });
 
 export const forgePrDiff = (
   repoPath: string,

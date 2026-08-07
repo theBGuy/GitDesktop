@@ -21,8 +21,8 @@ use crate::github::actions::{RunDetail, RunJob, WorkflowRun};
 use crate::github::issue::{IssueDetails, IssueInfo, IssueReactions, Milestone, Reaction};
 use crate::github::pr::{
     ApprovalState, CommitCommentOut, DraftCommentIn, ExternalReviewItem, PrAuthor, PrCheckOut,
-    PrCiStatus, PrCommitOut, PrDetails, PrFileOut, PrInfo, PrListLabel, PrPollInfo, PrRef,
-    PrStackInfo, PrStackMember, PrThreadOut, PrTimelineEventOut, RepoLabel, ReviewSubmitOut,
+    PrCiStatus, PrCommitOut, PrDetails, PrFileOut, PrInfo, PrListLabel, PrMergeability, PrPollInfo,
+    PrRef, PrStackInfo, PrStackMember, PrThreadOut, PrTimelineEventOut, RepoLabel, ReviewSubmitOut,
     ReviewThreadOut, STACKS_TIMEOUT,
 };
 use crate::github::release::{ReleaseAsset, ReleaseDetails, ReleaseInfo};
@@ -781,6 +781,20 @@ struct GlabMrChanges {
     /// per-job `job_id` back through `forge_ci_job_logs` for the inline log peek.
     #[serde(default)]
     head_pipeline: Option<GlabHeadPipeline>,
+    /// Mergeability, carried server-side on the `/changes` payload — so the detail
+    /// view costs no extra HTTP. Null-tolerant like every GitLab scalar.
+    #[serde(default, deserialize_with = "null_to_default")]
+    has_conflicts: Option<bool>,
+    #[serde(default, deserialize_with = "null_to_default")]
+    detailed_merge_status: String,
+    #[serde(default, deserialize_with = "null_to_default")]
+    merge_error: Option<String>,
+    /// The head/target projects. Differing ids mean a fork MR; `None` on either
+    /// side leaves `cross_repository` false rather than guessing.
+    #[serde(default, deserialize_with = "null_to_default")]
+    source_project_id: Option<u64>,
+    #[serde(default, deserialize_with = "null_to_default")]
+    target_project_id: Option<u64>,
 }
 
 /// The `head_pipeline` object embedded in an MR payload — only `id` (the jobs
@@ -1296,6 +1310,18 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         // Inference failing open has no disclosure consequence here: a GitLab merge
         // never cascades, so an unknown chain can't hide a multi-MR merge.
         stack_unknown: false,
+        mergeability: map_gl_mergeability(
+            &mr.state,
+            mr.has_conflicts,
+            &mr.detailed_merge_status,
+            mr.merge_error.as_deref(),
+        ),
+        // A fork MR lives in a different project; either id missing leaves this
+        // false rather than guessing a fork the resolve flow would then refuse.
+        cross_repository: match (mr.source_project_id, mr.target_project_id) {
+            (Some(src), Some(tgt)) => src != tgt,
+            _ => false,
+        },
     })
 }
 
@@ -2652,6 +2678,124 @@ pub async fn mr_merge_state(repo_path: &str, number: u64) -> AppResult<GitLabMrM
         pipeline_status,
         pipeline_url,
     })
+}
+
+/// The MR fields a mergeability read needs, from the slim `merge_requests/{iid}`
+/// GET or a list row. Every scalar is null-tolerant — GitLab nulls them while a
+/// merge status is still being computed.
+#[derive(Deserialize)]
+struct GlabMrMergeability {
+    #[serde(default, deserialize_with = "null_to_default")]
+    iid: u64,
+    #[serde(default, deserialize_with = "null_to_default")]
+    state: String,
+    #[serde(default, deserialize_with = "null_to_default")]
+    has_conflicts: Option<bool>,
+    #[serde(default, deserialize_with = "null_to_default")]
+    detailed_merge_status: String,
+    #[serde(default, deserialize_with = "null_to_default")]
+    merge_error: Option<String>,
+}
+
+/// Map an MR's state + conflict flags onto the neutral shape. EITHER conflict
+/// signal is enough: `has_conflicts` outranks `detailed_merge_status` (which
+/// reports the first blocking reason — CI, approvals — and can hide a conflict),
+/// but GitLab nulls `has_conflicts` while recomputing, and then only the
+/// `"conflict"` detailed status carries the truth.
+fn map_gl_mergeability(
+    state: &str,
+    has_conflicts: Option<bool>,
+    detailed_merge_status: &str,
+    merge_error: Option<&str>,
+) -> PrMergeability {
+    let detail = merge_error
+        .filter(|e| !e.is_empty())
+        .map(str::to_string)
+        .or_else(|| (!detailed_merge_status.is_empty()).then(|| detailed_merge_status.to_string()));
+    if state != "opened" || detailed_merge_status == "not_open" {
+        return PrMergeability {
+            state: "unavailable".to_string(),
+            detail,
+        };
+    }
+    let state = if has_conflicts == Some(true) || detailed_merge_status == "conflict" {
+        "conflicting"
+    } else if matches!(
+        detailed_merge_status,
+        "checking" | "unchecked" | "preparing" | "broken_status" | ""
+    ) {
+        // Empty included: GitLab has not answered yet, so never claim mergeable.
+        // `broken_status` is GitLab's "cannot merge source into target, potential
+        // conflict" — an honest "couldn't determine" (which the UI can retry)
+        // beats leaning it toward a false all-clear.
+        "checking"
+    } else {
+        "mergeable"
+    };
+    PrMergeability {
+        state: state.to_string(),
+        detail,
+    }
+}
+
+/// One MR's mergeability, from the slim MR GET. `with_merge_status_recheck` forces
+/// GitLab to recompute a stale cached status (harmless when already computed).
+pub async fn mr_mergeability(repo_path: &str, number: u64) -> AppResult<PrMergeability> {
+    let enc = encode_project(&project_path(repo_path).await?);
+    let out = run_glab(
+        Some(repo_path),
+        &[
+            "api",
+            &format!("projects/{enc}/merge_requests/{number}?with_merge_status_recheck=true"),
+        ],
+        GLAB_NETWORK_TIMEOUT,
+    )
+    .await?;
+    let mr: GlabMrMergeability = serde_json::from_str(&out.stdout_lossy())
+        .map_err(|e| AppError::Glab(format!("could not parse GitLab merge status: {e}")))?;
+    Ok(map_gl_mergeability(
+        &mr.state,
+        mr.has_conflicts,
+        &mr.detailed_merge_status,
+        mr.merge_error.as_deref(),
+    ))
+}
+
+/// Mergeability for a whole MR-list page, keyed by iid. The list read carries the
+/// same conflict fields as the single GET, so one call covers the page.
+pub async fn mr_list_mergeability(
+    repo_path: &str,
+    state: &str,
+) -> AppResult<HashMap<u64, String>> {
+    let states: &[&str] = match state {
+        "open" => &["opened"],
+        // Closed and merged are separate server states (mirrors `list_prs`); both
+        // map to "unavailable", but the page is still answered honestly per row.
+        "closed" => &["closed", "merged"],
+        other => {
+            return Err(AppError::InvalidArgument(format!(
+                "unknown PR state filter: {other}"
+            )));
+        }
+    };
+    let enc = encode_project(&project_path(repo_path).await?);
+    let mut out_map: HashMap<u64, String> = HashMap::new();
+    for s in states {
+        let endpoint = format!("projects/{enc}/merge_requests?state={s}&per_page=100");
+        let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
+        let rows: Vec<GlabMrMergeability> = serde_json::from_str(&out.stdout_lossy())
+            .map_err(|e| AppError::Glab(format!("could not parse GitLab merge requests: {e}")))?;
+        for r in rows {
+            let m = map_gl_mergeability(
+                &r.state,
+                r.has_conflicts,
+                &r.detailed_merge_status,
+                r.merge_error.as_deref(),
+            );
+            out_map.insert(r.iid, m.state);
+        }
+    }
+    Ok(out_map)
 }
 
 /// Arm auto-merge (merge-when-pipeline-succeeds) — the merge endpoint with the MWPS
@@ -8540,6 +8684,142 @@ mod tests {
         assert_eq!(s.detailed_merge_status, "");
         assert_eq!(s.pipeline_status, "");
         assert_eq!(s.pipeline_url, "");
+    }
+
+    /// `has_conflicts` OUTRANKS `detailed_merge_status`: the detailed status
+    /// reports the first blocking reason (CI, approvals), so a conflicting MR can
+    /// present as `ci_still_running` — which is exactly how a conflicting PR came
+    /// to look clean.
+    #[test]
+    fn maps_gitlab_mergeability_conflicts_over_detailed_status() {
+        let m = map_gl_mergeability("opened", Some(true), "ci_still_running", None);
+        assert_eq!(m.state, "conflicting");
+        assert_eq!(m.detail.as_deref(), Some("ci_still_running"));
+
+        let m = map_gl_mergeability("opened", Some(false), "mergeable", None);
+        assert_eq!(m.state, "mergeable");
+
+        // GitLab NULLS has_conflicts while recomputing — the detailed status is
+        // then the only carrier of the conflict, and must still be believed.
+        assert_eq!(
+            map_gl_mergeability("opened", None, "conflict", None).state,
+            "conflicting"
+        );
+        assert_eq!(
+            map_gl_mergeability("opened", Some(false), "conflict", None).state,
+            "conflicting"
+        );
+
+        // Blocked-but-not-conflicting is still mergeable as far as CONFLICTS go —
+        // this signal answers "would it merge cleanly", not "may it merge".
+        assert_eq!(
+            map_gl_mergeability("opened", Some(false), "not_approved", None).state,
+            "mergeable"
+        );
+
+        // The still-computing set, empty string included (GitLab hasn't answered).
+        // `broken_status` joins it deliberately: GitLab documents it as "cannot
+        // merge the source into the target, potential conflict", so it must not
+        // lean mergeable.
+        for s in ["checking", "unchecked", "preparing", "broken_status", ""] {
+            assert_eq!(
+                map_gl_mergeability("opened", None, s, None).state,
+                "checking",
+                "detailed_merge_status={s:?}"
+            );
+        }
+
+        // Not open (either spelling) ⇒ no live mergeability.
+        assert_eq!(
+            map_gl_mergeability("merged", Some(true), "mergeable", None).state,
+            "unavailable"
+        );
+        assert_eq!(
+            map_gl_mergeability("opened", Some(true), "not_open", None).state,
+            "unavailable"
+        );
+
+        // merge_error wins the detail slot; an empty one falls back to the status.
+        assert_eq!(
+            map_gl_mergeability("opened", Some(true), "broken_status", Some("Merge conflict"))
+                .detail
+                .as_deref(),
+            Some("Merge conflict")
+        );
+        assert_eq!(
+            map_gl_mergeability("opened", Some(true), "broken_status", Some(""))
+                .detail
+                .as_deref(),
+            Some("broken_status")
+        );
+        assert_eq!(map_gl_mergeability("opened", None, "", None).detail, None);
+    }
+
+    /// GitLab sends `null` for these scalars while a status is being computed; a
+    /// present `null` must not fail the whole parse (the negative control).
+    #[test]
+    fn mr_mergeability_tolerates_nulls() {
+        let json = r#"{
+            "iid": 6,
+            "state": "opened",
+            "has_conflicts": null,
+            "detailed_merge_status": null,
+            "merge_error": null
+        }"#;
+        let mr: GlabMrMergeability = serde_json::from_str(json).unwrap();
+        assert_eq!(mr.iid, 6);
+        assert_eq!(mr.has_conflicts, None);
+        assert_eq!(mr.detailed_merge_status, "");
+        assert_eq!(mr.merge_error, None);
+        let m = map_gl_mergeability(
+            &mr.state,
+            mr.has_conflicts,
+            &mr.detailed_merge_status,
+            mr.merge_error.as_deref(),
+        );
+        assert_eq!(m.state, "checking");
+        assert_eq!(m.detail, None);
+    }
+
+    /// The `/changes` payload the MR view already fetches carries the conflict and
+    /// project-id fields, so the detail view costs no extra HTTP.
+    #[test]
+    fn mr_changes_carries_mergeability_and_fork_ids() {
+        let json = r#"{
+            "iid": 6, "web_url": "u", "title": "t", "target_branch": "main",
+            "source_branch": "feat", "state": "opened",
+            "has_conflicts": true, "detailed_merge_status": "broken_status",
+            "source_project_id": 2, "target_project_id": 1
+        }"#;
+        let mr: GlabMrChanges = serde_json::from_str(json).unwrap();
+        assert_eq!(mr.has_conflicts, Some(true));
+        assert_eq!(
+            map_gl_mergeability(
+                &mr.state,
+                mr.has_conflicts,
+                &mr.detailed_merge_status,
+                mr.merge_error.as_deref()
+            )
+            .state,
+            "conflicting"
+        );
+        assert_ne!(mr.source_project_id, mr.target_project_id);
+
+        // Same project ⇒ not a fork; a missing id must NOT read as a fork.
+        let same: GlabMrChanges = serde_json::from_str(
+            r#"{"iid":6,"web_url":"u","title":"t","target_branch":"main",
+                "source_branch":"feat","state":"opened",
+                "source_project_id":1,"target_project_id":1}"#,
+        )
+        .unwrap();
+        assert_eq!(same.source_project_id, same.target_project_id);
+        let absent: GlabMrChanges = serde_json::from_str(
+            r#"{"iid":6,"web_url":"u","title":"t","target_branch":"main",
+                "source_branch":"feat","state":"opened"}"#,
+        )
+        .unwrap();
+        assert_eq!(absent.source_project_id, None);
+        assert_eq!(absent.target_project_id, None);
     }
 
     #[test]

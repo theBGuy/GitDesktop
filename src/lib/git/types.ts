@@ -1679,6 +1679,22 @@ export interface RepoLabel {
   description?: string | null;
 }
 
+/** How a pull request merges into its base, as the FORGE reports it. "checking" =
+ *  the forge hasn't finished computing (GitHub computes asynchronously and the read
+ *  itself primes it, so the caller re-polls); "unavailable" = no server truth to be
+ *  had (a non-open PR, or Bitbucket). */
+export type PrMergeabilityState =
+  | "conflicting"
+  | "mergeable"
+  | "checking"
+  | "unavailable";
+
+export interface PrMergeability {
+  state: PrMergeabilityState;
+  /** The provider's own wording behind the state, when it supplies one. */
+  detail: string | null;
+}
+
 export interface PrDetails {
   /** GraphQL node id, used by the label mutations. */
   id: string;
@@ -1735,6 +1751,13 @@ export interface PrDetails {
    *  merge path that can cascade. GitHub-only this wave (only GitHub cascades);
    *  the GitLab and Bitbucket arms always report false. */
   stackUnknown: boolean;
+  /** How this PR merges into its base. Optional: rows cached by a session that
+   *  predates the field deserialize without it — treat absent as unknown. */
+  mergeability?: PrMergeability;
+  /** The head branch lives in ANOTHER repository (a fork PR), so the local
+   *  resolve flow has nowhere it may push. Optional for the same cache reason;
+   *  absent is treated as not-a-fork (the push itself refuses non-fast-forward). */
+  crossRepository?: boolean;
 }
 
 /** A reviewer who has submitted a verdict, as supplied by the backend (GitLab

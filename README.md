@@ -43,8 +43,10 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
 
 - **The whole PR lifecycle, in-app** — review, comment, label, **assign**, **request
   reviewers**, approve, edit, and merge (merge/squash/rebase) GitHub PRs without the
-  browser. Set **labels and assignees** right when you **open** a PR/MR (GitHub &
-  GitLab), and **link related issues** when you open *or* edit a PR — chips
+  browser. A PR that **won't merge cleanly** says so under its header, and **Resolve
+  conflicts** merges the base into its head in an **isolated worktree** and pushes the
+  result back to the PR. Set **labels and assignees** right when you **open** a PR/MR
+  (GitHub & GitLab), and **link related issues** when you open *or* edit a PR — chips
   **auto-detected** from your branch name and commits (a `fix/123-…` branch seeds
   `#123`), or picked by hand, each toggleable between **Closes** (auto-closes the issue
   on merge) and **Relates to** (GitHub & GitLab; also on **local PRs**, where the refs
@@ -98,7 +100,8 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
     comments), edit labels & assignees, **approve / unapprove**,
     request changes, and **merge** (merge/squash) — including **auto-merge** when the
     pipeline succeeds (cancelable in place) — plus **create** (push-and-open, drafts,
-    duplicate-MR detection)
+    duplicate-MR detection); GitLab's own merge status drives the **conflict** strip,
+    the list's **Conflicts** chip, and in-app conflict resolution
   - **Issues** — create, comment, close/reopen, edit labels & assignees, set
     **milestone**, **due date** (past-due cue), **confidential**, and **linked related
     issues**; lock/unlock, move to another project, or delete
@@ -120,7 +123,9 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
     squash / fast-forward, optionally deleting the source branch), edit, and **create**
     (drafts, reviewers pickable at create time); **approve / unapprove**, **request
     changes** (a true toggle that revokes on every plan), pick reviewers from your
-    workspace, and flip **draft ↔ ready** either way
+    workspace, and flip **draft ↔ ready** either way; Bitbucket publishes no
+    mergeability field, so conflicts are **predicted locally** from your fetched
+    branches — and resolved in-app the same way
   - **Tasks checklist** — add, edit, resolve/unresolve, and delete, with a progress
     bar and an "N open tasks" header chip (read-only on a closed/merged PR)
   - **Pipelines** — rerun, trigger, and stop; on a repo with custom
@@ -382,6 +387,8 @@ branch**, labeled with the default's name — plus a PR badge.
 - **Advanced merge tooling** ⭐ — predicts the result in memory before you commit
   (fast-forward / clean / which files will conflict), with `--no-ff` and a clearly
   cautioned auto-resolve strategy (`-X ours/theirs`) — which GitHub Desktop doesn't offer.
+  (This is the *local* prediction; a remote PR's conflict state comes from the forge
+  itself, and falls back to this prediction only where the forge publishes none.)
 - **Change base** ⭐ — rebase a branch onto a different base when it was branched off the
   wrong one, replaying only its own commits (the wrong base's are left behind), with a
   preview of exactly which commits will move.
@@ -455,7 +462,8 @@ Codex agent, and never writes until you accept.
   switch prompt remembers a **Reapply after switching** choice of its own.
 
 **Pull requests** — full read + write for GitHub PRs, plus **local PRs** (the full PR
-workflow against any two branches with no remote at all).
+workflow against any two branches with no remote at all) — including whether a PR still
+merges cleanly, and resolving it in-app when it doesn't.
 
 - **AI review + security audit** on any PR, with an activity indicator, a cancel, and a
   concurrency-capped queue — and while one mode streams you can **queue the other to run
@@ -502,6 +510,16 @@ workflow against any two branches with no remote at all).
   current step inline and a live step checklist when expanded, while finished **GitHub
   Actions** and **GitLab pipeline** jobs peek their log inline and **Bitbucket** and
   other external checks link out (name/state/URL, no fetchable logs).
+- **Conflicts with the base** — an in-flow strip under a PR's header when it won't merge
+  cleanly (**GitHub** and **GitLab** report it themselves; **Bitbucket** gets a local
+  prediction), plus a **Conflicts** chip on open GitHub/GitLab rows in the list. **Resolve
+  conflicts** merges the base into the PR's head in a **hidden isolated worktree** — your
+  branch and working tree untouched — hands you the conflicted files in the in-app
+  conflict editor, and **Finish & push** updates the PR's head branch, **never
+  force-pushed** (a head that moved meanwhile refuses the push and keeps your work).
+  **Discard** drops the worktree and nothing else; an unfinished resolution is offered
+  back as **Continue resolving**. Fork PRs are excluded — their head lives in another
+  repository.
 - **Stacked PRs** — a stack **position badge** (*2/3*) on stacked rows in the PR list, and a
   **Stack** section on the PR view listing every member bottom → top, keyboard-navigable
   (with palette commands for the next and previous PR in the stack). GitHub's **native

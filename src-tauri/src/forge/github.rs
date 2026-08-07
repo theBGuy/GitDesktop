@@ -105,6 +105,23 @@ pub async fn view_pr(
     crate::github::pr::gh_pr_view(repo_path.to_string(), number, lens).await
 }
 
+pub async fn pr_mergeability(
+    repo_path: &str,
+    number: u64,
+    lens: Option<&str>,
+) -> AppResult<crate::github::pr::PrMergeability> {
+    crate::github::pr::gh_pr_mergeability(repo_path, number, lens).await
+}
+
+pub async fn list_mergeability(
+    repo_path: &str,
+    state: &str,
+    limit: Option<u32>,
+    lens: Option<&str>,
+) -> AppResult<std::collections::HashMap<u64, String>> {
+    crate::github::pr::gh_pr_list_mergeability(repo_path, state, limit, lens).await
+}
+
 pub async fn pr_timeline(
     repo_path: &str,
     number: u64,

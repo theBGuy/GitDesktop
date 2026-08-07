@@ -79,7 +79,11 @@ import {
 import { useEffectiveBranchRules } from "@/lib/branch-rules/queries";
 import { copyText } from "@/lib/clipboard";
 import { presentError } from "@/lib/error-summary";
-import type { MergeStrategy, MinimizeReason } from "@/lib/git/api";
+import type {
+  MergeStrategy,
+  MinimizeReason,
+  RemotePrResolveHandle,
+} from "@/lib/git/api";
 import { displayLogin } from "@/lib/git/bot-login";
 import { splitUnifiedDiff } from "@/lib/git/diff-split";
 import { useForgeGhHost } from "@/lib/git/host";
@@ -87,27 +91,32 @@ import {
   forgeFeatureReady,
   PIPELINE_IN_FLIGHT,
   prDiffOptions,
+  useAbortRemotePrResolve,
   useApplySuggestion,
   useApprovePr,
   useCheckoutPr,
   useClosePr,
   useCommentPr,
+  useConflictPreview,
   useDefaultBranch,
   useDeletePrComment,
   useDeleteReviewComment,
   useEditPr,
   useEditPrComment,
   useEditReviewComment,
+  useFindRemotePrResolve,
   useForgeStatus,
   useGlArmAutoMerge,
   useGlCancelAutoMerge,
   useGlMrMergeState,
   useMergePr,
+  useMergeRemotePr,
   useMinimizeComment,
   usePrApprovals,
   usePrDetails,
   usePrDiff,
   usePrList,
+  usePrMergeability,
   usePrReactions,
   usePrReviewThreads,
   usePrTimeline,
@@ -140,6 +149,7 @@ import {
   type PrDetails,
   type PrThreadOut,
   providerLabel,
+  type RemoteLens,
   type ReviewThreadOut,
 } from "@/lib/git/types";
 import { formatBinding } from "@/lib/hotkeys/binding";
@@ -152,6 +162,7 @@ import {
 import { useRepoLens } from "@/lib/repo-lens/queries";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
+import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
@@ -159,6 +170,10 @@ import { ChecksRollup } from "./ChecksRollup";
 import { LinkedIssuesField } from "./LinkedIssuesField";
 import { PendingReviewBar } from "./PendingReviewBar";
 import { PrCommitDetail } from "./PrCommitDetail";
+import {
+  type PrMergeabilityArm,
+  PrMergeabilityBanner,
+} from "./PrMergeabilityBanner";
 import { PrReviewPanel } from "./PrReviewPanel";
 import { PrTasksChip, PrTasksSection } from "./PrTasksSection";
 import {
@@ -173,6 +188,10 @@ import {
   MrTimeTracking,
   PrFilesPane,
 } from "./RemotePrViewParts";
+import {
+  DISCARD_RESOLVE_CONFIRM,
+  ResolveRemotePrView,
+} from "./ResolveRemotePrView";
 import { ReviewComposer } from "./ReviewComposer";
 import { ReviewersPopover, userRefHint } from "./ReviewersPopover";
 import {
@@ -202,6 +221,23 @@ import {
 import { usePrCapabilities } from "./usePrCapabilities";
 
 type Section = "conversation" | "commits" | "files" | "review";
+
+/** The git remote a lens resolves to, mirroring the backend's own mapping
+ *  (github/mod.rs:73 `lens_remote`). Exhaustive on purpose: a widened `RemoteLens`
+ *  must fail the build here rather than silently fall back to `origin` and quietly
+ *  predict conflicts against the wrong repository. */
+function lensRemoteName(lens: RemoteLens): string {
+  switch (lens) {
+    case "origin":
+      return "origin";
+    case "upstream":
+      return "upstream";
+    default: {
+      const exhaustive: never = lens;
+      return exhaustive;
+    }
+  }
+}
 
 const MERGE_LABEL: Record<MergeStrategy, string> = {
   merge: "Create a merge commit",
@@ -313,6 +349,48 @@ export function RemotePrView({
   );
   const armAutoMerge = useGlArmAutoMerge(repoPath);
   const cancelAutoMerge = useGlCancelAutoMerge(repoPath);
+  const isOpenPr = details.data?.state === "OPEN";
+  // Mergeability against the base — the conflict banner's server truth. Same repoTab
+  // gate as the auto-merge poll above and for the same reason: it polls, and an
+  // <Activity>-hidden subtree still fetches. Non-open PRs have no answer to give.
+  const mergeability = usePrMergeability(
+    repoPath,
+    number,
+    lens,
+    repoTab === "pulls" && isOpenPr,
+  );
+  const lensRemote = lensRemoteName(lens);
+  const serverState = mergeability.data?.state;
+  // The local prediction does double duty: it stands in where the forge has no answer
+  // (Bitbucket, offline), and it NAMES the conflicting files when the forge says
+  // "conflicting" but won't say where. Never for a fork head — its branch may not
+  // exist under our remote.
+  const conflictPreview = useConflictPreview(
+    repoPath,
+    `${lensRemote}/${details.data?.baseRefName ?? ""}`,
+    `${lensRemote}/${details.data?.headRefName ?? ""}`,
+    repoTab === "pulls" &&
+      isOpenPr &&
+      !details.data?.crossRepository &&
+      (serverState === "unavailable" || serverState === "conflicting"),
+  );
+  // An unfinished resolve worktree for this PR (e.g. left by an earlier session).
+  // Offered via the banner, never auto-entered — taking the view over unasked would
+  // hide the pull request the user came to read.
+  const findResolve = useFindRemotePrResolve(
+    repoPath,
+    number,
+    lens,
+    repoTab === "pulls" && isOpenPr,
+  );
+  const mergeRemotePr = useMergeRemotePr(repoPath, lens);
+  const abortRemotePrResolve = useAbortRemotePrResolve(repoPath);
+  // The AI-resolution store the takeover follows — the banner's "Resolve with AI"
+  // seeds its walk here so the surface opens already working through the files.
+  const startAll = useConflictResolve((s) => s.startAll);
+  // The conflict resolution this view is driving — started here or resumed from the
+  // rediscovered worktree. Non-null takes the whole view over.
+  const [resolve, setResolve] = useState<RemotePrResolveHandle | null>(null);
   const editComment = useEditPrComment(repoPath, lens);
   const deleteComment = useDeletePrComment(repoPath, lens);
   const editReviewComment = useEditReviewComment(repoPath, lens);
@@ -613,6 +691,85 @@ export function RemotePrView({
     "pr-stack-dissolve",
     () => void dissolveStack(),
     isSelectedPr && canDissolveStack && !stackDissolve.isPending,
+  );
+
+  // Server truth first; the local preview only fills the gap where the forge has none.
+  // An older cached row without `crossRepository` counts as not-a-fork — the backend's
+  // push refuses anything but a fast-forward either way.
+  const serverConflicting = serverState === "conflicting";
+  const predictedConflict = conflictPreview.data?.status === "conflict";
+  // Only a positive prediction names files; a clean/unknown/pending one names none, and
+  // the banner then shows its sentence alone rather than an empty placeholder.
+  const predictedFiles = predictedConflict
+    ? (conflictPreview.data?.conflicts ?? [])
+    : [];
+  const resolveWorktree = resolve ?? findResolve.data ?? null;
+  const canResolveConflicts =
+    !!isOpenPr &&
+    !details.data?.crossRepository &&
+    (serverConflicting || predictedConflict);
+
+  /** Enter the isolated-worktree resolution: a merge that pauses there on conflicts,
+   *  and just pushes when there are none. `withAi` hands the conflicts the backend
+   *  just reported straight to the AI walk, so the takeover opens already working. */
+  function runResolve(withAi: boolean) {
+    if (resolve) return;
+    const info = details.data;
+    if (!info) return;
+    // Always route through the backend, even when `findResolve` reports a worktree: it
+    // re-attaches to one for this PR+lens from live porcelain rather than a cached read
+    // (and does so before any fetch, so continuing stays fast). A cached handle can be
+    // stale — a just-discarded one would mount the takeover on a deleted path.
+    mergeRemotePr.mutate(
+      { number, base: info.baseRefName, head: info.headRefName },
+      {
+        onSuccess: (outcome) => {
+          if (outcome.status === "pushed") {
+            toast.success(
+              `No conflicts after all — merged ${info.baseRefName} and pushed`,
+            );
+            return;
+          }
+          if (outcome.worktreePath && outcome.worktreeId) {
+            setResolve({
+              worktreePath: outcome.worktreePath,
+              worktreeId: outcome.worktreeId,
+            });
+            // The takeover follows this same store's `activePath`, so starting the walk
+            // here makes it open each file as the AI works through it.
+            if (withAi && outcome.conflicts.length > 0)
+              startAll(outcome.conflicts);
+            return;
+          }
+          // "conflicts" with no worktree to open is a broken outcome — say so rather
+          // than leaving the user on an unchanged view wondering what happened.
+          toast.error("Could not open the conflict resolution worktree");
+        },
+        onError,
+      },
+    );
+  }
+
+  async function discardResolve() {
+    const target = resolve ?? findResolve.data;
+    if (!target) return;
+    if (!(await useConfirm.getState().ask(DISCARD_RESOLVE_CONFIRM))) return;
+    abortRemotePrResolve.mutate(
+      { worktreePath: target.worktreePath },
+      {
+        onSuccess: () => {
+          setResolve(null);
+          toast.success("Resolution discarded");
+        },
+        onError,
+      },
+    );
+  }
+
+  useHotkeyAction(
+    "pr-resolve-conflicts",
+    () => runResolve(false),
+    isSelectedPr && canResolveConflicts && !resolve && !mergeRemotePr.isPending,
   );
 
   const [composeBody, setComposeBody] = useState("");
@@ -1021,6 +1178,8 @@ export function RemotePrView({
     setLastNumber(number);
     setSelectedPath(null);
     setSelectedCommitOid(null);
+    // A different PR must never inherit this one's conflict-resolution takeover.
+    setResolve(null);
   }
   // Default to the first changed file until the user picks one.
   const effectivePath =
@@ -1329,6 +1488,61 @@ export function RemotePrView({
     });
   }
 
+  // The banner's arm: server truth, then the local prediction where the forge has
+  // none, then the resume offer — the resolve worktree is only worth its own line
+  // when there's nothing more urgent to say about the merge.
+  const bannerArm: PrMergeabilityArm = !isOpen
+    ? null
+    : serverConflicting
+      ? "conflicting"
+      : predictedConflict
+        ? "predicted"
+        : findResolve.data
+          ? "resume"
+          : mergeability.data?.state !== "checking"
+            ? null
+            : mergeability.polling
+              ? "checking"
+              : "unknown";
+
+  // A conflict resolution in flight takes over the whole PR view: the merge lives in
+  // an isolated worktree, and ResolveRemotePrView drives its file list, editor and
+  // Finish/Discard in place of the PR's normal sections and footer.
+  if (resolve) {
+    return (
+      <div className="flex h-full flex-col">
+        <header className="space-y-2 border-b px-4 py-3">
+          <div className="flex items-start gap-2">
+            <h2 className="text-sm font-medium">
+              {pr.title}{" "}
+              <span className="font-normal text-muted-foreground">
+                #{pr.number}
+              </span>
+            </h2>
+            <span className="flex-1" />
+            <Badge variant="secondary" className="capitalize">
+              {pr.state.toLowerCase()}
+            </Badge>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            <span className="font-mono">{pr.headRefName}</span>
+            <span>→</span>
+            <span className="font-mono">{pr.baseRefName}</span>
+          </div>
+        </header>
+        <ResolveRemotePrView
+          repoPath={repoPath}
+          head={pr.headRefName}
+          base={pr.baseRefName}
+          worktreePath={resolve.worktreePath}
+          worktreeId={resolve.worktreeId}
+          lens={lens}
+          onDone={() => setResolve(null)}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-full flex-col">
       <header className="space-y-2 border-b px-4 py-3">
@@ -1606,6 +1820,21 @@ export function RemotePrView({
           ))}
         </div>
       </header>
+
+      <PrMergeabilityBanner
+        arm={bannerArm}
+        base={pr.baseRefName}
+        provider={provider}
+        forkBlocked={!!pr.crossRepository}
+        hasResolveWorktree={resolveWorktree !== null}
+        busy={mergeRemotePr.isPending || abortRemotePrResolve.isPending}
+        conflictFiles={predictedFiles}
+        onResolve={() => runResolve(false)}
+        onResolveWithAi={() => runResolve(true)}
+        onDiscard={() => void discardResolve()}
+        onRetry={mergeability.retry}
+        retryBusy={mergeability.isFetching}
+      />
 
       {aiEnabled && canComment && section === "review" && (
         <PrReviewPanel

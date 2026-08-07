@@ -685,7 +685,9 @@ excludes the PR author, whom GitHub won't let you request), flip a PR between
 Reviewers who've already reviewed show as read-only chips carrying their verdict — a check
 for **approved**, an X for **requested changes**, a speech bubble for **commented** (icon
 shape plus the word, never color alone) — so a finished review (including Copilot's) stays
-visible after the reviewer leaves the pending-request list.
+visible after the reviewer leaves the pending-request list. A pull request that no longer
+merges cleanly says so under its header, and **Resolve conflicts** settles it without
+leaving the app — see *Conflicts with the base branch* below.
 
 The list toolbar's **funnel** filters the list by **author or label** — type in its search
 box to narrow both groups at once, toggle any number of options (each shows its match
@@ -722,6 +724,41 @@ Comments, replies, edits, and descriptions use a Markdown editor with **Write / 
 tabs and a formatting toolbar (bold, italic, headings, quote, code, links, and bulleted
 / numbered / task lists, with {{key:mod+b}} / {{key:mod+i}} / {{key:mod+k}}). The same
 editor is everywhere you write Markdown — issues, discussions, and release notes.
+
+## Conflicts with the base branch
+
+When a pull request no longer merges cleanly into its base, a quiet strip under its
+header says so, naming the base branch. Whenever GitDesktop can work out **which files
+clash**, it lists them right under that sentence — up to five paths, then *and N more*
+(hover it for the rest). **GitHub** and **GitLab** answer that question themselves; while
+a forge is still working it out the strip reads **Checking mergeability…**, and if the
+answer never arrives, **Retry** asks again. On **GitHub** a conflicting pull request also
+runs no checks until the conflicts are resolved, and the strip says so — an empty checks
+list there means *never ran*, not *passed*. In the list, **GitHub** and **GitLab** rows
+carry a **Conflicts** chip (icon plus the word) on open pull requests, so you can spot a
+blocked one without opening it.
+
+**Resolve conflicts** settles it right here. GitDesktop merges the base branch into the
+pull request's **head** branch in an **isolated worktree** — your own branch and working
+tree are untouched, the same way a local PR's merge works (see *Local PRs* below) — and
+takes the view over with the conflicted files and the in-app conflict editor (see
+*Syncing & conflicts*).{{ai}} **Resolve with AI** is offered on the strip itself — it
+opens the resolution and starts walking the conflicts with AI straight away — and again
+inside, where it reads **Resolve all with AI** while more than one file is left. Both
+need AI turned on with a review model configured, and every proposal is yours to review
+before it lands.{{/ai}} Once every conflict is resolved, **Finish & push** commits the
+merge and pushes it to the pull request's **head branch**, so the pull request itself
+picks the resolution up. That push is **never forced**: if the head moved while you were
+working, it's refused and your resolution is kept rather than overwritten. **Discard**
+deletes the hidden worktree and touches nothing else. Leave a resolution unfinished and
+it's offered back the next time you open that pull request, as **Continue resolving**.
+
+Pull requests **from a fork** are read-only here: their head branch lives in another
+repository, so there's nowhere for GitDesktop to push, and hovering either button tells
+you that.
+
+**Resolve pull request conflicts** is in the command palette ({{kbd:command-palette}})
+too — no default shortcut, so give it one in **Settings → Keyboard**.
 
 ## Review comments
 
@@ -869,7 +906,10 @@ Conversation is the same **date-sorted activity feed** as GitHub's: pushed commi
 add/removed, close/reopen/merge, and approval events (approved / changes-requested /
 approval-withdrawn), all interleaved with reviews and comments — GitLab doesn't report
 force-push or draft events, so those don't appear. Its **CI checks** roll up from the MR's
-pipeline jobs, and a failing job **peeks its log inline** just like GitHub Actions.
+pipeline jobs, and a failing job **peeks its log inline** just like GitHub Actions. GitLab
+reports **whether the MR conflicts with its target branch** from its own merge status, so
+the conflict strip, the list's **Conflicts** chip, and **Resolve conflicts** all work here
+exactly as they do on GitHub (see *Conflicts with the base branch* above).
 **Creating a merge request**
 works from the app too ({{kbd:create-pr}}, the New menu, or the Compare tab) — it pushes your
 branch and opens the MR, with the same draft checkbox and AI description as GitHub, and the
@@ -936,7 +976,10 @@ verdicts (approved / changes-requested), interleaved with reviews and comments. 
 has no labels or review-request events, so those don't appear. Its **CI checks** roll up
 from the PR head commit's build statuses — name, state, and a **link out** to each status;
 Bitbucket exposes no fetchable job logs, so these don't peek inline the way GitHub Actions
-and GitLab pipeline jobs do.
+and GitLab pipeline jobs do. Bitbucket publishes no mergeability field either, so a
+conflict here is **predicted locally** — GitDesktop merges your fetched copies of the two
+branches in memory and labels the strip as a local prediction — and **Resolve conflicts**
+then works just as it does elsewhere (see *Conflicts with the base branch* above).
 
 ## Local PRs
 

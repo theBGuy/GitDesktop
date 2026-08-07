@@ -70,7 +70,7 @@ pub(crate) async fn gh_lens_slug(repo_path: &str, lens: Option<&str>) -> AppResu
 /// the network-free half of [`gh_lens_slug`], split out so it can be unit-tested.
 /// `None`/`Some("origin")` → `"origin"`, `Some("upstream")` → `"upstream"`;
 /// anything else is an `InvalidArgument` before any git spawn.
-fn lens_remote(lens: Option<&str>) -> AppResult<&'static str> {
+pub(crate) fn lens_remote(lens: Option<&str>) -> AppResult<&'static str> {
     match lens {
         None | Some("origin") => Ok("origin"),
         Some("upstream") => Ok("upstream"),

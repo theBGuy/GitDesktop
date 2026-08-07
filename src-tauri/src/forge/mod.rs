@@ -971,6 +971,50 @@ pub async fn forge_pr_view(
     }
 }
 
+/// Whether ONE merge/pull request can currently merge, behind the abstraction —
+/// SERVER truth, never inferred here. Fetched separately from `forge_pr_view` so
+/// the frontend can re-poll it while the provider is still computing (GitHub
+/// answers `UNKNOWN` until something asks). Bitbucket has no such field and
+/// answers `"unavailable"` without an HTTP call.
+#[tauri::command]
+pub async fn forge_pr_mergeability(
+    repo_path: String,
+    number: u64,
+    lens: Option<String>,
+) -> AppResult<crate::github::pr::PrMergeability> {
+    match detect_non_github(&repo_path).await {
+        Some((Provider::GitLab, _)) => gitlab::mr_mergeability(&repo_path, number).await,
+        Some((Provider::Bitbucket, _)) => Ok(crate::github::pr::PrMergeability::unavailable()),
+        _ => github::pr_mergeability(&repo_path, number, lens.as_deref()).await,
+    }
+}
+
+/// Mergeability for a PR-list page, keyed by number — the sibling of
+/// `forge_pr_list_ci`, and separate from `forge_pr_list` for the same reason:
+/// asking the list read for it measured 3–5s of extra latency on large repos.
+/// `prs` is the page in hand; an empty page short-circuits before any call.
+///
+/// So does any non-open filter, on every arm: a closed/merged row has no live
+/// mergeability, and the only rendered state is "conflicting" — so the Closed tab
+/// would pay GitHub's 3–5s (and GitLab's two calls) for guaranteed-zero chips.
+#[tauri::command]
+pub async fn forge_pr_list_mergeability(
+    repo_path: String,
+    state: String,
+    limit: Option<u32>,
+    prs: Vec<crate::github::pr::PrCiRefIn>,
+    lens: Option<String>,
+) -> AppResult<std::collections::HashMap<u64, String>> {
+    if prs.is_empty() || state != "open" {
+        return Ok(std::collections::HashMap::new());
+    }
+    match detect_non_github(&repo_path).await {
+        Some((Provider::GitLab, _)) => gitlab::mr_list_mergeability(&repo_path, &state).await,
+        Some((Provider::Bitbucket, _)) => Ok(std::collections::HashMap::new()),
+        _ => github::list_mergeability(&repo_path, &state, limit, lens.as_deref()).await,
+    }
+}
+
 /// The PR/MR activity timeline — state changes, label edits, approvals — behind the
 /// abstraction. Each provider maps its own event source onto the neutral
 /// `PrTimelineEventOut` union: GitHub `timelineItems`, GitLab resource/state/label

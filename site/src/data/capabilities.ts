@@ -159,6 +159,11 @@ export const capabilities: Capability[] = [
   },
   {
     group: "Pull requests & review",
+    label:
+      "See when a pull request won't merge cleanly — and resolve the conflicts in-app, in an isolated worktree",
+  },
+  {
+    group: "Pull requests & review",
     label: "Set labels & assignees when you open a PR/MR (GitHub & GitLab)",
   },
   {

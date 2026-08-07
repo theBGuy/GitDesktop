@@ -729,6 +729,12 @@ export const ACTIONS = [
     category: "Pull requests",
     defaultBinding: null,
   },
+  {
+    id: "pr-resolve-conflicts",
+    label: "Resolve pull request conflicts",
+    category: "Pull requests",
+    defaultBinding: null,
+  },
 ] as const satisfies readonly ActionDef[];
 
 export type ActionId = (typeof ACTIONS)[number]["id"];

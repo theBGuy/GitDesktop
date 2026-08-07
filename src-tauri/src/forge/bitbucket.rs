@@ -35,8 +35,8 @@ use crate::forge::Forge;
 use crate::github::actions::{RunDetail, RunJob, WorkflowRun};
 use crate::github::pr::{
     ApprovalState, CommitCommentOut, DraftCommentIn, PrAuthor, PrCiRefIn, PrCiStatus, PrCommitOut,
-    PrDetails, PrFileOut, PrInfo, PrListLabel, PrPollInfo, PrRef, PrThreadOut, PrTimelineEventOut,
-    ReviewSubmitOut, ReviewThreadOut,
+    PrDetails, PrFileOut, PrInfo, PrListLabel, PrMergeability, PrPollInfo, PrRef, PrThreadOut,
+    PrTimelineEventOut, ReviewSubmitOut, ReviewThreadOut,
 };
 
 /// Whether this process has SUCCESSFULLY seeded git's credential store this session
@@ -506,7 +506,7 @@ fn map_bb_pr_state(state: &str) -> String {
     }
 }
 
-/// A PR branch ref (`{branch:{name}, commit:{hash}}`).
+/// A PR branch ref (`{branch:{name}, commit:{hash}, repository:{full_name}}`).
 #[derive(Deserialize, Default)]
 struct BbPrEndpoint {
     #[serde(default)]
@@ -515,6 +515,17 @@ struct BbPrEndpoint {
     /// (Bitbucket has no batch pipeline endpoint). Short hash is fine for `.../statuses`.
     #[serde(default)]
     commit: Option<BbCommitRef>,
+    /// The repo this endpoint lives in — differing `full_name`s across source and
+    /// destination mark a fork PR.
+    #[serde(default)]
+    repository: Option<BbRepoRef>,
+}
+
+/// The repository stub embedded in a PR endpoint.
+#[derive(Deserialize, Default)]
+struct BbRepoRef {
+    #[serde(default, deserialize_with = "null_to_default")]
+    full_name: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -584,6 +595,14 @@ fn user_avatar(u: &BbUser) -> String {
         .as_ref()
         .and_then(|l| l.avatar.as_ref())
         .map(|a| a.href.clone())
+        .unwrap_or_default()
+}
+
+/// The endpoint's repository `full_name` (`workspace/slug`), or empty when absent.
+fn endpoint_repo(ep: &Option<BbPrEndpoint>) -> String {
+    ep.as_ref()
+        .and_then(|e| e.repository.as_ref())
+        .map(|r| r.full_name.clone())
         .unwrap_or_default()
 }
 
@@ -1231,6 +1250,15 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         stack: None,
         stack_members: Vec::new(),
         stack_unknown: false,
+        // Bitbucket Cloud's PR payload carries no mergeability field, and its only
+        // pre-check needs a write scope — so "unknown", never a guess.
+        mergeability: PrMergeability::unavailable(),
+        // A fork PR's source repo differs from its destination; either name absent
+        // (an unfielded payload) leaves this false rather than guessing.
+        cross_repository: {
+            let (src, dst) = (endpoint_repo(&pr.source), endpoint_repo(&pr.destination));
+            !src.is_empty() && !dst.is_empty() && src != dst
+        },
     })
 }
 
@@ -5239,6 +5267,46 @@ pub async fn starred(_owner: &str, _name: &str) -> AppResult<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Bitbucket Cloud's PR payload has no mergeability field and its only
+    /// pre-check needs a write scope, so the honest answer is "unavailable" —
+    /// mirroring how `merge_commit_allowed` stays `None` here.
+    #[test]
+    fn bitbucket_mergeability_is_unavailable() {
+        let m = PrMergeability::unavailable();
+        assert_eq!(m.state, "unavailable");
+        assert_eq!(m.detail, None);
+    }
+
+    /// A fork PR's source repo differs from its destination; an unfielded payload
+    /// (either name absent) must read as same-repo, never as a fork.
+    #[test]
+    fn cross_repository_compares_endpoint_repo_names() {
+        let fork: BbPr = serde_json::from_str(
+            r#"{"id":7,"state":"OPEN",
+                "source":{"branch":{"name":"feat"},"repository":{"full_name":"me/app"}},
+                "destination":{"branch":{"name":"main"},"repository":{"full_name":"acme/app"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(endpoint_repo(&fork.source), "me/app");
+        assert_ne!(endpoint_repo(&fork.source), endpoint_repo(&fork.destination));
+
+        let same: BbPr = serde_json::from_str(
+            r#"{"id":7,"state":"OPEN",
+                "source":{"branch":{"name":"feat"},"repository":{"full_name":"acme/app"}},
+                "destination":{"branch":{"name":"main"},"repository":{"full_name":"acme/app"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(endpoint_repo(&same.source), endpoint_repo(&same.destination));
+
+        let absent: BbPr = serde_json::from_str(
+            r#"{"id":7,"state":"OPEN","source":{"branch":{"name":"feat"}},
+                "destination":{"branch":{"name":"main"},"repository":{"full_name":null}}}"#,
+        )
+        .unwrap();
+        assert_eq!(endpoint_repo(&absent.source), "");
+        assert_eq!(endpoint_repo(&absent.destination), "");
+    }
 
     #[test]
     fn bbql_escape_escapes_quote_and_backslash() {

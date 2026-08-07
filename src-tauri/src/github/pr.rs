@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::error::{AppError, AppResult};
+use crate::forge::gitlab::null_to_default;
 use crate::git::runner::{run_git_raw, DEFAULT_TIMEOUT, NETWORK_TIMEOUT};
 use crate::github::issue::{map_reaction_groups, repo_owner_name, IssueReactions};
 use crate::github::runner::{run_gh, run_gh_input, run_gh_raw, GH_NETWORK_TIMEOUT, GH_TIMEOUT};
@@ -2459,6 +2460,158 @@ struct RawPr {
     assignees: Vec<RawLogin>,
     #[serde(default)]
     review_requests: Vec<RawReviewRequest>,
+    /// GraphQL `MergeableState` — exactly one of MERGEABLE / CONFLICTING / UNKNOWN
+    /// (UNKNOWN = GitHub is still computing; the read itself primes it). Both
+    /// mergeability scalars ride the SHARED view projection, so a `null` must
+    /// degrade to "" rather than fail the parse and blank the whole detail view.
+    #[serde(default, deserialize_with = "null_to_default")]
+    mergeable: String,
+    #[serde(default, deserialize_with = "null_to_default")]
+    merge_state_status: String,
+    #[serde(default, deserialize_with = "null_to_default")]
+    is_cross_repository: bool,
+}
+
+/// Whether a merge/pull request can currently merge, provider-neutral. `state` is
+/// one of `"conflicting" | "mergeable" | "checking" | "unavailable"`; `detail` is
+/// the provider's own why-string, kept raw so the UI can show it verbatim without
+/// this layer inventing a reason.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrMergeability {
+    pub state: String,
+    /// GitHub `mergeStateStatus`, GitLab `detailed_merge_status`/`merge_error`.
+    /// `None` on Bitbucket and whenever the provider supplied nothing.
+    pub detail: Option<String>,
+}
+
+impl PrMergeability {
+    /// The honest "this provider can't tell us" value — Bitbucket Cloud's PR shape
+    /// carries no mergeability field at all.
+    pub fn unavailable() -> Self {
+        PrMergeability {
+            state: "unavailable".to_string(),
+            detail: None,
+        }
+    }
+}
+
+/// Map a GitHub PR's `state` + `mergeable` + `mergeStateStatus` onto the neutral
+/// shape. A non-OPEN PR has no live mergeability, and anything outside
+/// MERGEABLE/CONFLICTING (i.e. UNKNOWN) means GitHub is still computing — never a
+/// false "mergeable".
+fn map_gh_mergeability(state: &str, mergeable: &str, merge_state_status: &str) -> PrMergeability {
+    let detail = (!merge_state_status.is_empty()).then(|| merge_state_status.to_string());
+    if !state.eq_ignore_ascii_case("OPEN") {
+        return PrMergeability {
+            state: "unavailable".to_string(),
+            detail,
+        };
+    }
+    let state = match mergeable {
+        "CONFLICTING" => "conflicting",
+        "MERGEABLE" => "mergeable",
+        _ => "checking",
+    };
+    PrMergeability {
+        state: state.to_string(),
+        detail,
+    }
+}
+
+/// One row of a narrow mergeability projection, shared by the single-PR and the
+/// list read (each ignores the fields its own `--json` didn't ask for). Every
+/// scalar tolerates an explicit `null`, like [`RawPr`]'s.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhMergeabilityRow {
+    #[serde(default, deserialize_with = "null_to_default")]
+    number: u64,
+    #[serde(default, deserialize_with = "null_to_default")]
+    mergeable: String,
+    #[serde(default, deserialize_with = "null_to_default")]
+    merge_state_status: String,
+    #[serde(default, deserialize_with = "null_to_default")]
+    state: String,
+}
+
+/// The narrow mergeability read for ONE PR — deliberately its own `gh pr view`
+/// projection rather than the heavy `PR_VIEW_FIELDS` one, because the frontend
+/// re-polls this while GitHub reports UNKNOWN.
+pub async fn gh_pr_mergeability(
+    repo_path: &str,
+    number: u64,
+    lens: Option<&str>,
+) -> AppResult<PrMergeability> {
+    let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
+    let out = run_gh(
+        Some(repo_path),
+        &[
+            "pr",
+            "view",
+            &number.to_string(),
+            "--repo",
+            &slug,
+            "--json",
+            "mergeable,mergeStateStatus,state",
+        ],
+        GH_TIMEOUT,
+    )
+    .await?;
+    let row: GhMergeabilityRow = serde_json::from_str(&out.stdout_lossy())
+        .map_err(|e| AppError::Gh(format!("could not parse gh pr view: {e}")))?;
+    Ok(map_gh_mergeability(
+        &row.state,
+        &row.mergeable,
+        &row.merge_state_status,
+    ))
+}
+
+/// Mergeability for a whole PR-list page, keyed by number. Its own `gh pr list`
+/// call by design: adding `mergeable` to [`PR_LIST_FIELDS`] measured 3–5s of extra
+/// latency on large repos, so the list never waits on it.
+pub async fn gh_pr_list_mergeability(
+    repo_path: &str,
+    state: &str,
+    limit: Option<u32>,
+    lens: Option<&str>,
+) -> AppResult<std::collections::HashMap<u64, String>> {
+    const FIELDS: &str = "number,mergeable,state";
+    let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
+    // Same state semantics as `gh_pr_list`: the Closed tab uses the search
+    // qualifier so merged PRs are included.
+    let mut args: Vec<&str> = match state {
+        "open" => vec![
+            "pr", "list", "--repo", &slug, "--state", "open", "--json", FIELDS,
+        ],
+        "closed" => vec![
+            "pr", "list", "--repo", &slug, "--search", "is:closed", "--json", FIELDS,
+        ],
+        _ => {
+            return Err(AppError::InvalidArgument(format!(
+                "unknown PR state filter: {state}"
+            )));
+        }
+    };
+    // gh's accepted range is 1..=1000 (`--limit 0` errors), mirroring `gh_pr_list`.
+    let limit_str;
+    if let Some(n) = limit {
+        limit_str = n.clamp(1, 1000).to_string();
+        args.push("--limit");
+        args.push(&limit_str);
+    }
+    let out = run_gh(Some(repo_path), &args, GH_TIMEOUT).await?;
+    let rows: Vec<GhMergeabilityRow> = serde_json::from_str(&out.stdout_lossy())
+        .map_err(|e| AppError::Gh(format!("could not parse gh pr list: {e}")))?;
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            (
+                r.number,
+                map_gh_mergeability(&r.state, &r.mergeable, "").state,
+            )
+        })
+        .collect())
 }
 
 #[derive(Serialize)]
@@ -2679,6 +2832,12 @@ pub struct PrDetails {
     /// failing open has no such consequence (each MR merges on its own, nothing
     /// cascades), and Bitbucket has no stacks, so both report `false`.
     pub stack_unknown: bool,
+    /// Whether the PR can merge right now, per the SERVER — never inferred locally.
+    /// Bitbucket reports `"unavailable"` (its PR shape has no such field).
+    pub mergeability: PrMergeability,
+    /// Whether the head branch lives in a different repository (a fork PR). The
+    /// resolve-conflicts flow pushes to origin, so it is gated on this being false.
+    pub cross_repository: bool,
 }
 
 /// A merge/pull request's approval summary — who has approved and whether the
@@ -2708,7 +2867,7 @@ pub struct ApprovalState {
     pub viewer_requested_changes: bool,
 }
 
-const PR_VIEW_FIELDS: &str = "id,number,title,body,author,state,isDraft,baseRefName,headRefName,additions,deletions,url,commits,files,reviews,comments,statusCheckRollup,labels,assignees,reviewRequests";
+const PR_VIEW_FIELDS: &str = "id,number,title,body,author,state,isDraft,baseRefName,headRefName,additions,deletions,url,commits,files,reviews,comments,statusCheckRollup,labels,assignees,reviewRequests,mergeable,mergeStateStatus,isCrossRepository";
 
 const REPO_MERGE_SETTINGS_QUERY: &str = "query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed } }";
 
@@ -2964,6 +3123,10 @@ pub async fn gh_pr_view(
         .await
         .unwrap_or_default();
 
+    // Free: `mergeable`/`mergeStateStatus` ride the same `gh pr view` call. The
+    // narrow `gh_pr_mergeability` read exists for the frontend's re-poll.
+    let mergeability = map_gh_mergeability(&raw.state, &raw.mergeable, &raw.merge_state_status);
+
     Ok(PrDetails {
         id: raw.id,
         number: raw.number,
@@ -3060,6 +3223,8 @@ pub async fn gh_pr_view(
         stack,
         stack_members,
         stack_unknown,
+        mergeability,
+        cross_repository: raw.is_cross_repository,
     })
 }
 
@@ -5070,11 +5235,12 @@ mod tests {
         real_time_or_empty, reconstruct_pr_diff, reject_upstream_create_metadata,
         rest_comment_to_out, rest_commit_to_out, rest_pull_to_pr_info, rest_review_to_out,
         rollup_state_to_ci, scrape_pr_ref, split_commit_message, stack_members_from,
-        stack_memberships_from, stack_write_args, stack_write_outcome_from, PR_LIST_FIELDS,
-        upstream_pulls_endpoint, GhPrFile, GhPrRestComment, GhPrRestCommit,
-        GhPrRestCommitGitAuthor, GhPrRestCommitInner, GhPrRestPull, GhPrRestReview, GhStackEntry,
-        MergeAsyncOutcome, MergeAsyncStatus, PrDetails, PrInfo, PrMergeOutcome, PrStackInfo,
-        PrStackMember, PrTimelineEventOut, RawLogin,
+        map_gh_mergeability, stack_memberships_from, stack_write_args, stack_write_outcome_from,
+        PR_LIST_FIELDS, PR_VIEW_FIELDS, upstream_pulls_endpoint, GhPrFile, GhPrRestComment,
+        GhPrRestCommit, GhPrRestCommitGitAuthor, GhPrRestCommitInner, GhPrRestPull, GhPrRestReview,
+        GhStackEntry, MergeAsyncOutcome, MergeAsyncStatus, PrDetails, PrInfo, PrMergeOutcome,
+        GhMergeabilityRow, PrMergeability, PrStackInfo, PrStackMember, PrTimelineEventOut,
+        RawLogin, RawPr,
     };
     use crate::error::AppError;
 
@@ -5159,6 +5325,8 @@ mod tests {
             stack,
             stack_members,
             stack_unknown,
+            mergeability: PrMergeability::unavailable(),
+            cross_repository: false,
         }
     }
 
@@ -5632,6 +5800,136 @@ mod tests {
             fields.iter().all(|f| f.trim() == *f && !f.is_empty()),
             "got: {PR_LIST_FIELDS}"
         );
+    }
+
+    /// The detail view's mergeability rides the SAME `gh pr view` call, so the
+    /// projection must ask for it; the LIST projection must keep NOT asking —
+    /// `mergeable` measured 3–5s of extra latency there, which is why the list
+    /// mergeability is a separate command.
+    #[test]
+    fn view_fields_request_mergeability_and_the_list_still_does_not() {
+        let view: Vec<&str> = PR_VIEW_FIELDS.split(',').collect();
+        for f in ["mergeable", "mergeStateStatus", "isCrossRepository"] {
+            assert!(view.contains(&f), "{f} missing from: {PR_VIEW_FIELDS}");
+        }
+        let list: Vec<&str> = PR_LIST_FIELDS.split(',').collect();
+        assert!(
+            !list.contains(&"mergeable") && !list.contains(&"mergeStateStatus"),
+            "got: {PR_LIST_FIELDS}"
+        );
+    }
+
+    #[test]
+    fn maps_github_mergeability_states() {
+        // The three live `MergeableState` values on an OPEN PR.
+        let m = map_gh_mergeability("OPEN", "CONFLICTING", "DIRTY");
+        assert_eq!(m.state, "conflicting");
+        assert_eq!(m.detail.as_deref(), Some("DIRTY"));
+
+        let m = map_gh_mergeability("OPEN", "MERGEABLE", "CLEAN");
+        assert_eq!(m.state, "mergeable");
+        assert_eq!(m.detail.as_deref(), Some("CLEAN"));
+
+        // UNKNOWN = GitHub is still computing — never a false "mergeable".
+        let m = map_gh_mergeability("OPEN", "UNKNOWN", "UNKNOWN");
+        assert_eq!(m.state, "checking");
+
+        // An unrecognized value is treated the same way, never as mergeable.
+        assert_eq!(map_gh_mergeability("OPEN", "", "").state, "checking");
+        assert_eq!(map_gh_mergeability("OPEN", "", "").detail, None);
+
+        // A closed/merged PR has no live mergeability, whatever `mergeable` says.
+        assert_eq!(map_gh_mergeability("MERGED", "MERGEABLE", "").state, "unavailable");
+        assert_eq!(map_gh_mergeability("CLOSED", "CONFLICTING", "DIRTY").state, "unavailable");
+    }
+
+    /// `isCrossRepository` gates the resolve flow (it pushes to origin), so the
+    /// view read must carry it through rather than defaulting to same-repo.
+    #[test]
+    fn raw_pr_reads_cross_repository_and_mergeability() {
+        let raw: RawPr = serde_json::from_str(
+            r#"{"number":7,"state":"OPEN","mergeable":"CONFLICTING",
+                "mergeStateStatus":"DIRTY","isCrossRepository":true}"#,
+        )
+        .unwrap();
+        assert!(raw.is_cross_repository);
+        let m = map_gh_mergeability(&raw.state, &raw.mergeable, &raw.merge_state_status);
+        assert_eq!(m.state, "conflicting");
+
+        // Absent (an Enterprise host that omits them) → same-repo, still checking.
+        let raw: RawPr = serde_json::from_str(r#"{"number":7,"state":"OPEN"}"#).unwrap();
+        assert!(!raw.is_cross_repository);
+        assert_eq!(
+            map_gh_mergeability(&raw.state, &raw.mergeable, &raw.merge_state_status).state,
+            "checking"
+        );
+
+        // An explicit null must degrade, not fail: these ride the SHARED view
+        // projection, so a parse error here would blank the entire detail view.
+        let raw: RawPr = serde_json::from_str(
+            r#"{"number":7,"state":"OPEN","mergeable":null,
+                "mergeStateStatus":null,"isCrossRepository":null}"#,
+        )
+        .unwrap();
+        assert_eq!(raw.mergeable, "");
+        assert_eq!(raw.merge_state_status, "");
+        assert!(!raw.is_cross_repository);
+        assert_eq!(
+            map_gh_mergeability(&raw.state, &raw.mergeable, &raw.merge_state_status).state,
+            "checking"
+        );
+    }
+
+    /// The narrow poll projections take the same null tolerance as the shared
+    /// view read — a `null` here would fail the whole poll, not one field.
+    #[test]
+    fn narrow_mergeability_rows_tolerate_nulls() {
+        let row: GhMergeabilityRow = serde_json::from_str(
+            r#"{"number":null,"mergeable":null,"mergeStateStatus":null,"state":null}"#,
+        )
+        .unwrap();
+        assert_eq!(row.number, 0);
+        assert_eq!(row.mergeable, "");
+        assert_eq!(row.merge_state_status, "");
+        assert_eq!(row.state, "");
+        // An unknown state is never "mergeable".
+        assert_eq!(
+            map_gh_mergeability(&row.state, &row.mergeable, &row.merge_state_status).state,
+            "unavailable"
+        );
+
+        // The live list shape still round-trips through the shared row.
+        let row: GhMergeabilityRow =
+            serde_json::from_str(r#"{"mergeable":"CONFLICTING","number":158,"state":"OPEN"}"#)
+                .unwrap();
+        assert_eq!(row.number, 158);
+        assert_eq!(
+            map_gh_mergeability(&row.state, &row.mergeable, "").state,
+            "conflicting"
+        );
+    }
+
+    /// The frontend reads these keys verbatim — a rename slip here reads as
+    /// `undefined` in TS, which is exactly how a conflicting PR looked clean.
+    #[test]
+    fn mergeability_fields_serialize_camel_case() {
+        let mut details = details_with_stack(None, Vec::new(), false);
+        details.mergeability = PrMergeability {
+            state: "conflicting".to_string(),
+            detail: Some("DIRTY".to_string()),
+        };
+        details.cross_repository = true;
+        let v = serde_json::to_value(&details).unwrap();
+        assert_eq!(v["mergeability"]["state"], "conflicting");
+        assert_eq!(v["mergeability"]["detail"], "DIRTY");
+        assert_eq!(v["crossRepository"], true);
+        assert!(v.get("cross_repository").is_none());
+
+        // Absent detail is an explicit null, never a missing key.
+        let details = details_with_stack(None, Vec::new(), false);
+        let v = serde_json::to_value(&details).unwrap();
+        assert_eq!(v["mergeability"]["state"], "unavailable");
+        assert!(v["mergeability"]["detail"].is_null());
     }
 
     #[test]
