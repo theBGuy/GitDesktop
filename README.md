@@ -448,10 +448,10 @@ Codex agent, and never writes until you accept.
   changes, or you switch branches with work in progress, one click stashes them
   (untracked files included), runs the operation, and reapplies them on the
   other side. A reapply that hits conflicts drops the files into the changes
-  list; one git refuses outright leaves them safely stashed — the stash is kept
-  as a backup either way. **Automatically stash and reapply on pull** (Settings → General)
-  makes it the default for pulls and branch updates, and the switch prompt
-  remembers a **Reapply after switching** choice of its own.
+  list; one that git refuses outright leaves them safely stashed — the stash is
+  kept as a backup either way. **Automatically stash and reapply on pull and
+  branch updates** (Settings → General) makes it the default for both, and the
+  switch prompt remembers a **Reapply after switching** choice of its own.
 
 **Pull requests** — full read + write for GitHub PRs, plus **local PRs** (the full PR
 workflow against any two branches with no remote at all).

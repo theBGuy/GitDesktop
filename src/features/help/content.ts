@@ -582,8 +582,9 @@ same name), they stay safely in the stash. The same recovery covers
 **Update from upstream** and updating the branch you're on from another branch.
 
 Tick **Always stash and reapply** in the prompt — or turn on **Automatically stash and
-reapply on pull** under **Settings → General** — and those operations recover on their own,
-with no prompt. Either way it only ever kicks in when git actually refuses the operation.
+reapply on pull and branch updates** under **Settings → General** — and those operations
+recover on their own, with no prompt. Either way it only ever kicks in when git actually
+refuses the operation.
 
 ## Update a fork from upstream
 

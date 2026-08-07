@@ -367,7 +367,9 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
             className="border-l-0 focus-visible:relative focus-visible:z-10"
             onClick={() => doPull("ffOnly")}
           >
-            {pull.isPending ? (
+            {/* Covers the recovery compounds too: with the preference on they
+                run with no dialog open to show progress. */}
+            {pull.isPending || recovery.pending ? (
               <Spinner data-icon="inline-start" />
             ) : (
               <ArrowDownIcon data-icon="inline-start" />

@@ -2089,8 +2089,6 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         onCancel={() => setSwitchTarget(null)}
         onBringChanges={bringAndSwitch}
         onStashAndSwitch={stashAndSwitch}
-        bringPending={checkout.isPending || checkoutRemote.isPending}
-        stashPending={switchAutostash.isPending}
       />
 
       {recovery.dialog}

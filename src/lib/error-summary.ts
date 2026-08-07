@@ -79,7 +79,11 @@ const CONFLICT_MARKERS = [
  *
  *  Deliberately disjoint from CONFLICT_MARKERS: a real merge conflict already
  *  has ConflictBanner recovery, and stashing mid-conflict corrupts the resolve
- *  state. No conflict output observed on git 2.51 carries these strings. */
+ *  state. No conflict output observed on git 2.51 carries these strings.
+ *
+ *  Paired with the Rust canary `refusal_stderr_still_matches_the_frontend_markers`
+ *  (autostash.rs), which re-runs each refusal and asserts these literals still
+ *  match — keep the two lists in step. */
 const DIRTY_TREE_MARKERS = [
   // `pull` (--ff-only and --no-rebase) and plain `merge`, tracked overlap.
   "your local changes to the following files would be overwritten by merge",

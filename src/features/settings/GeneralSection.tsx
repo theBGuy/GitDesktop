@@ -111,7 +111,7 @@ export const GeneralSection = withForm({
           <form.AppField name="autoStashOnPull">
             {(field) => (
               <field.CheckboxField
-                label="Automatically stash and reapply on pull"
+                label="Automatically stash and reapply on pull and branch updates"
                 className="flex cursor-pointer items-center gap-2 text-xs"
               />
             )}

@@ -4,8 +4,7 @@ import { isDirtyTreeRefusal, presentError } from "@/lib/error-summary";
 import type { AutostashOutcome, PullMode } from "@/lib/git/api";
 import { useMergeAutostash, usePullAutostash } from "@/lib/git/queries";
 import { useSaveSettings, useSettings } from "@/lib/settings/queries";
-import { useErrorDialog } from "@/lib/stores/error-dialog";
-import { toastError } from "@/lib/toast";
+import { errorToastAction, toastError } from "@/lib/toast";
 import {
   StashReapplyDialog,
   type StashReapplyTarget,
@@ -34,25 +33,15 @@ export interface AutostashCopy {
   stashKept?: string;
 }
 
-/** The Details/Copy affordance `toastError` gives a thrown error, for stderr
- *  that arrives as an outcome payload instead — every failure variant keeps the
- *  raw git output one click away. */
+/** The affordance `toastError` gives a thrown error, for stderr that arrives as
+ *  an outcome payload instead — every failure variant keeps the raw git output
+ *  one click away. */
 function stderrDetails(stderr: string) {
   const presentation = presentError(stderr);
-  const action = presentation.long
-    ? {
-        label: "Details",
-        onClick: () => useErrorDialog.getState().open(presentation),
-      }
-    : {
-        label: "Copy",
-        onClick: () => {
-          navigator.clipboard.writeText(presentation.fullText).catch(() => {
-            // clipboard denied — nothing useful to do
-          });
-        },
-      };
-  return { summary: presentation.summary, action };
+  return {
+    summary: presentation.summary,
+    action: errorToastAction(presentation),
+  };
 }
 
 /**

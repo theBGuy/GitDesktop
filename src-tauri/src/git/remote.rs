@@ -675,6 +675,7 @@ mod tests {
     use super::{
         build_push_args, cache_get, cache_invalidate, cache_put, git_remote_remove_core,
         is_auth_class_failure, parse_upstream_tracking, resolve_push_target,
+        run_git_mutating_with_creds,
     };
     use crate::error::AppError;
     use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
@@ -777,6 +778,39 @@ mod tests {
         assert!(!is_auth_class_failure(
             "ssh: Could not resolve hostname github.com"
         ));
+    }
+
+    /// The failure contract every caller (fetch/pull/push) branches on: a non-zero
+    /// sub-command surfaces as `AppError::Git` carrying git's OWN exit code and
+    /// stderr, not a synthesized message.
+    #[tokio::test]
+    async fn mutating_with_creds_surfaces_gits_own_code_and_stderr() {
+        let (_base, base) = temp_base("creds-error");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "a.txt").await;
+
+        let state = AppState::default();
+        let result = run_git_mutating_with_creds(
+            &state,
+            &repo_s,
+            &[],
+            &["merge", "nonexistent-ref-xyz"],
+            DEFAULT_TIMEOUT,
+        )
+        .await;
+        match result {
+            Err(AppError::Git { code, stderr }) => {
+                assert_eq!(code, 1);
+                assert!(
+                    stderr.contains("nonexistent-ref-xyz - not something we can merge"),
+                    "expected git's own stderr, got: {stderr}"
+                );
+            }
+            Err(other) => panic!("expected AppError::Git, got {other:?}"),
+            Ok(_) => panic!("merging a missing ref should fail"),
+        }
     }
 
     // --- Pure arg-building for a named-branch push. ---

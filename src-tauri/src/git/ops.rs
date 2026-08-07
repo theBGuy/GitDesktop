@@ -623,8 +623,7 @@ pub(crate) async fn git_stash_paths_core(
     .await?;
     if !unmerged.stdout_lossy().trim().is_empty() {
         return Err(AppError::InvalidArgument(
-            "Can't stash while a merge conflict is in progress — resolve the conflicts first."
-                .into(),
+            "Can't stash while a conflict is in progress — resolve the conflicts first.".into(),
         ));
     }
 

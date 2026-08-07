@@ -77,8 +77,7 @@ async fn has_unmerged(repo: &str) -> AppResult<bool> {
 async fn refuse_mid_op(repo: &str) -> AppResult<()> {
     if has_unmerged(repo).await? {
         return Err(AppError::InvalidArgument(
-            "Can't stash while a merge conflict is in progress — resolve the conflicts first."
-                .into(),
+            "Can't stash while a conflict is in progress — resolve the conflicts first.".into(),
         ));
     }
     if op_in_progress(repo).await {
@@ -747,6 +746,79 @@ mod tests {
     }
 
     // ---- contract ---------------------------------------------------------
+
+    /// The whole feature triggers off git's English refusal wording, matched in
+    /// `src/lib/error-summary.ts`. These literals are duplicated here ON PURPOSE:
+    /// a git release that rewords one would otherwise kill the recovery flow
+    /// silently, and this is the only thing that would notice.
+    #[tokio::test]
+    async fn refusal_stderr_still_matches_the_frontend_markers() {
+        const MERGE_TRACKED: &str =
+            "your local changes to the following files would be overwritten by merge";
+        const MERGE_UNTRACKED: &str =
+            "the following untracked working tree files would be overwritten by merge";
+        const CHECKOUT_TRACKED: &str =
+            "your local changes to the following files would be overwritten by checkout";
+        const CHECKOUT_UNTRACKED: &str =
+            "the following untracked working tree files would be overwritten by checkout";
+        const REBASE_UNSTAGED: &str = "cannot pull with rebase: you have unstaged changes";
+        const REBASE_STAGED: &str =
+            "cannot pull with rebase: your index contains uncommitted changes";
+
+        async fn refusal(repo: &str, args: &[&str]) -> String {
+            let out = run_git_raw(Some(repo), args, DEFAULT_TIMEOUT)
+                .await
+                .unwrap();
+            assert_ne!(out.code, 0, "expected git to refuse {args:?}");
+            out.stderr.to_lowercase()
+        }
+        fn assert_marker(stderr: &str, marker: &str) {
+            assert!(
+                stderr.contains(marker),
+                "git no longer emits {marker:?} — the frontend classifier is now blind to this \
+                 refusal. Actual stderr:\n{stderr}"
+            );
+        }
+
+        // Tracked overlap: `feat` rewrote a.txt and so did the working tree.
+        let (dir, repo) = setup_with_feat("markers-tracked").await;
+        write(dir.path(), "a.txt", "dirty\n");
+        assert_marker(
+            &refusal(&repo, &["merge", "--no-edit", "feat"]).await,
+            MERGE_TRACKED,
+        );
+        assert_marker(&refusal(&repo, &["switch", "feat"]).await, CHECKOUT_TRACKED);
+
+        // Untracked overlap: `feat` adds a file the working tree already has.
+        let (dir, repo) = setup_repo("markers-untracked").await;
+        git(&repo, &["switch", "-c", "feat"]).await;
+        write(dir.path(), "u.txt", "theirs\n");
+        commit_all(&repo, "add untracked-to-be").await;
+        git(&repo, &["switch", "main"]).await;
+        write(dir.path(), "u.txt", "mine\n");
+        assert_marker(
+            &refusal(&repo, &["merge", "--no-edit", "feat"]).await,
+            MERGE_UNTRACKED,
+        );
+        assert_marker(
+            &refusal(&repo, &["switch", "feat"]).await,
+            CHECKOUT_UNTRACKED,
+        );
+
+        // `pull --rebase` refuses up front, with a different line per dirty kind.
+        let (dir, work, clone) = setup_clone("markers-rebase").await;
+        write(&dir.path().join("work"), "a.txt", "upstream\n");
+        commit_all(&work, "upstream").await;
+        git(&work, &["push"]).await;
+
+        write(&dir.path().join("clone"), "b.txt", "dirty\n");
+        assert_marker(
+            &refusal(&clone, &["pull", "--rebase"]).await,
+            REBASE_UNSTAGED,
+        );
+        git(&clone, &["add", "b.txt"]).await;
+        assert_marker(&refusal(&clone, &["pull", "--rebase"]).await, REBASE_STAGED);
+    }
 
     #[test]
     fn outcome_serializes_to_the_pinned_wire_shape() {
