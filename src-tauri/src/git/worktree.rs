@@ -404,8 +404,8 @@ async fn worktree_is_registered(repo_path: &str, path: &str) -> bool {
 }
 
 /// Removes a session worktree and (when given) deletes its branch. `force` is
-/// needed to drop a worktree with uncommitted changes — i.e. a discarded
-/// session whose output was never committed.
+/// needed to drop a worktree with uncommitted changes (a discarded session
+/// whose output was never committed) or a locked one.
 #[tauri::command]
 pub async fn git_worktree_remove(
     state: State<'_, AppState>,
@@ -1030,6 +1030,32 @@ prunable gitdir file points to non-existent location
         assert!(
             registry(&repo_s).await.contains("/clean-wt"),
             "the worktree stays registered"
+        );
+    }
+
+    /// The main worktree is never deleted behind git's back: git refuses in
+    /// both force modes, the entry stays registered, and the checkout
+    /// survives.
+    #[tokio::test]
+    async fn main_worktree_remove_surfaces_error_and_keeps_checkout() {
+        let (_base, repo_s) = setup_repo("main-wt").await;
+        let state = AppState::default();
+        for force in [false, true] {
+            let err = remove_worktree(&state, &repo_s, &repo_s, None, force)
+                .await
+                .expect_err("git refuses to remove the main working tree");
+            assert!(
+                err.to_string().to_lowercase().contains("main working tree"),
+                "git must name the reason: {err}"
+            );
+        }
+        assert!(
+            std::path::Path::new(&repo_s).join("a.txt").exists(),
+            "the main checkout survives"
+        );
+        assert!(
+            registry(&repo_s).await.contains("/repo"),
+            "main stays registered"
         );
     }
 }

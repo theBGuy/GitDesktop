@@ -1044,7 +1044,13 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     const div = divByName.get(branch.name);
     const canUpdate = Boolean(defaultName) && branch.name !== defaultName;
     const deletionBlocked = isDeletionBlocked(rulesConfig, branch.name);
-    const inWorktree = worktreeByBranch.has(branch.name);
+    // The worktree (other than the active checkout) this branch occupies, when
+    // any — the Delete worktree… item gates on it (git refuses to remove the
+    // main working tree).
+    const rowWorktree = (userWorktrees.data ?? []).find(
+      (w) => w.path === worktreeByBranch.get(branch.name),
+    );
+    const inWorktree = rowWorktree !== undefined;
     // Outbound sync gating. `pushable` = tracked on a KNOWN remote and ahead →
     // offer a plain push to that remote (disabled with "(diverged)" when also
     // behind); the backend resolves to the branch's own upstream remote.
@@ -1373,17 +1379,16 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           <ContextMenuSeparator />
           {inWorktree && (
             <ContextMenuItem
+              disabled={rowWorktree?.isMain}
               onClick={() => {
-                const wtPath = worktreeByBranch.get(branch.name);
-                const wt = (userWorktrees.data ?? []).find(
-                  (w) => w.path === wtPath,
-                );
-                if (!wt) return;
+                if (!rowWorktree) return;
                 setOpen(false);
-                setRemoveWorktreeTarget(wt);
+                setRemoveWorktreeTarget(rowWorktree);
               }}
             >
-              Delete worktree…
+              {rowWorktree?.isMain
+                ? "Delete worktree… (main workspace)"
+                : "Delete worktree…"}
             </ContextMenuItem>
           )}
           <ContextMenuItem
@@ -1682,14 +1687,19 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                         </ContextMenuItem>
                         <ContextMenuSeparator />
                         <ContextMenuItem
-                          // git worktree move refuses the main worktree.
-                          disabled={w.isMain}
+                          // git worktree move refuses the main worktree and a
+                          // locked one.
+                          disabled={w.isMain || w.isLocked}
                           onClick={() => {
                             setOpen(false);
                             setRenameWorktreeTarget(w);
                           }}
                         >
-                          {w.isMain ? "Rename… (main workspace)" : "Rename…"}
+                          {w.isMain
+                            ? "Rename… (main workspace)"
+                            : w.isLocked
+                              ? "Rename… (locked)"
+                              : "Rename…"}
                         </ContextMenuItem>
                         {!w.isMain &&
                           (w.isLocked ? (

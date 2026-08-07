@@ -36,7 +36,12 @@ async function removeWorktreeFreeingBranch(repoPath: string, path: string) {
   try {
     await removeWorktree(repoPath, path, null, false);
   } catch (e) {
-    const msg = String((e as { message?: string })?.message ?? e);
+    // Path stripped before matching — a folder NAMED e.g. "docs-in-use" must
+    // not read as a transient hold.
+    const msg = String((e as { message?: string })?.message ?? e).replaceAll(
+      path,
+      "",
+    );
     if (/close any program|in use|being used|invalid argument/i.test(msg)) {
       await new Promise((resolve) => setTimeout(resolve, 300));
       await removeWorktree(repoPath, path, null, false);

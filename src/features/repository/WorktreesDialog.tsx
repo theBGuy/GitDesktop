@@ -391,14 +391,14 @@ function WorktreeRow({
             Copy path
           </DropdownMenuItem>
           <DropdownMenuItem
-            // git can't move the main worktree, and moving the one you're
-            // standing in risks a cwd lock + a stale active path — rename it
-            // after switching away.
-            disabled={isMain || isCurrent}
+            // git can't move the main worktree or a locked one, and moving the
+            // one you're standing in risks a cwd lock + a stale active path —
+            // rename it after switching away.
+            disabled={isMain || isCurrent || isLocked}
             onClick={onRename}
           >
             <PencilSimpleIcon />
-            Rename…
+            {isLocked ? "Rename… (locked)" : "Rename…"}
           </DropdownMenuItem>
           {!isMain &&
             (isLocked ? (

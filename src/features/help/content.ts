@@ -526,11 +526,13 @@ test, or review several branches at once without stashing or switching.
 - **Open** a worktree to make it the active repository — git commands then run in that
   folder and the window title follows. Open the main worktree to switch back.
 - **Rename** a worktree to move its folder to a new name in place; its branch is unchanged.
-- **Lock** a worktree (with an optional reason) so git won't prune or remove it without a
-  forced confirmation — useful for one on a removable or network drive; **Unlock** to undo.
+- **Lock** a worktree (with an optional reason) so it won't be pruned, renamed, or
+  removed: renaming needs an unlock first, and deleting asks for a forced confirmation.
+  Useful for one on a removable or network drive; **Unlock** to undo.
 - **Delete** a worktree to remove its folder; its branch is kept. A worktree with
   uncommitted changes, or a locked one, asks before force-removing. The main worktree,
   and whichever one you're currently in, can't be renamed or deleted — switch away first.
+  A locked worktree can't be renamed until you unlock it.
 - **Promote to main workspace** brings a worktree's branch into your main checkout: it
   removes the worktree (a branch can't be checked out in two at once) and checks that branch
   out in the main workspace. The worktree must be clean first; any uncommitted work in the
@@ -543,16 +545,17 @@ A branch can only be checked out in one worktree at a time, so the list excludes
 already in use. The **branch switcher** knows this too: a branch that's checked out in
 another worktree is badged, and choosing it offers to open that worktree instead of failing
 with a checkout error. You can also **Delete worktree…** straight from that badged branch's
-context menu — the branch stays, and its **Delete…** item un-disables once the worktree
+context menu (disabled when the badge points at the main workspace, which can't be
+removed) — the branch stays, and its **Delete…** item un-disables once the worktree
 is gone. When you're in a linked worktree the switcher reminds you that a branch checkout
 lands *there* (not the main workspace) and offers a one-click **Open main workspace**, and its
 **Worktrees** section jumps you straight to any other worktree — no detour through a
 checked-out branch. Each of those rows carries the worktree management actions on its
-context menu — **Open worktree**, **Copy path**, **Rename**, **Lock**/**Unlock**,
-**Promote to main workspace**, **Delete worktree** — with the ones a row doesn't support
-(the main workspace, a detached checkout) hidden or disabled with the reason in the
-label. **Open main workspace** and **Promote this worktree to main workspace** are in
-the command palette too.
+context menu — **Open worktree**, **Copy path**, **Rename…**, **Lock…**/**Unlock**,
+**Promote to main workspace…**, **Delete worktree…** — with the ones a row doesn't support
+(the main workspace, a detached checkout, a locked worktree) hidden or disabled with the
+reason in the label. **Open main workspace** and
+**Promote this worktree to main workspace** are in the command palette too.
 
 A repository's local pull requests, issues, review history, and per-repo settings are shared
 across all its worktrees, so you see the same ones whichever folder you're working in.{{ai}}

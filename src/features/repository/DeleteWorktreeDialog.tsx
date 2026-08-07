@@ -44,8 +44,11 @@ export function DeleteWorktreeDialog({
         onError: (e) => {
           const msg = String((e as { message?: string })?.message ?? e);
           // git refuses a non-force remove of a dirty/locked worktree; surface
-          // the escalation rather than failing silently.
-          if (!force && /force|modified|untracked|locked/i.test(msg)) {
+          // the escalation rather than failing silently. The path is stripped
+          // first so a folder NAMED e.g. "locked-tools" can't turn every
+          // refusal into a force offer.
+          const reason = msg.replaceAll(worktree.path, "");
+          if (!force && /force|modified|untracked|locked/i.test(reason)) {
             setForceNeeded(true);
           } else {
             toastError(e);
