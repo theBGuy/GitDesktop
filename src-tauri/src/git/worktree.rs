@@ -370,17 +370,36 @@ pub async fn git_worktree_repair(
     Ok(())
 }
 
-/// True when the worktree at `path` holds uncommitted or untracked work worth
-/// protecting — the gate for finishing a non-forced removal git refused. Ignored
-/// files (`node_modules`) don't count under `--porcelain`. git failing to inspect
-/// the worktree at all (admin files already torn down mid-remove) → false, nothing
-/// left to protect; a spawn failure/timeout → true, so an unknown state is never
-/// deleted blindly.
-async fn worktree_has_uncommitted_changes(path: &str) -> bool {
-    match run_git_raw(Some(path), &["status", "--porcelain"], DEFAULT_TIMEOUT).await {
-        Ok(out) if out.code == 0 => !out.stdout_lossy().trim().is_empty(),
-        Ok(_) => false,
-        Err(_) => true,
+/// The comparison form of a worktree path: `normalize_wt_path` over the RESOLVED
+/// path, since git records worktrees canonically — a symlinked parent (macOS
+/// `/var` → `/private/var`) or a Windows verbatim prefix would otherwise read as a
+/// different worktree. Unresolvable paths (already deleted) fall back to the raw
+/// form; both sides get the same treatment, so quirks cancel out.
+fn canonical_wt_path(p: &str) -> String {
+    let resolved = std::fs::canonicalize(p)
+        .map(|c| c.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| p.to_string());
+    normalize_wt_path(resolved.strip_prefix(r"\\?\").unwrap_or(&resolved))
+}
+
+/// Whether git still lists `path` as one of the repo's worktrees. An unreadable
+/// registry answers `true`: the caller uses this to decide whether deleting the
+/// folder is safe, and uncertainty must never authorize a delete.
+async fn worktree_is_registered(repo_path: &str, path: &str) -> bool {
+    let out = run_git_raw(
+        Some(repo_path),
+        &["worktree", "list", "--porcelain"],
+        DEFAULT_TIMEOUT,
+    )
+    .await;
+    match out {
+        Ok(out) if out.code == 0 => {
+            let target = canonical_wt_path(path);
+            parse_worktree_porcelain(&out.stdout_lossy())
+                .iter()
+                .any(|w| canonical_wt_path(&w.path) == target)
+        }
+        _ => true,
     }
 }
 
@@ -395,6 +414,17 @@ pub async fn git_worktree_remove(
     branch: Option<String>,
     force: bool,
 ) -> AppResult<()> {
+    remove_worktree(&state, &repo_path, &path, branch, force).await
+}
+
+/// The body of `git_worktree_remove`, callable without a Tauri `State`.
+pub(crate) async fn remove_worktree(
+    state: &AppState,
+    repo_path: &str,
+    path: &str,
+    branch: Option<String>,
+    force: bool,
+) -> AppResult<()> {
     let mut args = vec!["worktree", "remove"];
     if force {
         // Doubled deliberately: git requires `--force` TWICE to remove a LOCKED
@@ -404,26 +434,27 @@ pub async fn git_worktree_remove(
         args.push("--force");
         args.push("--force");
     }
-    args.push(&path);
+    args.push(path);
     // `git worktree remove` deletes the directory itself, but its recursive delete
     // mishandles Windows reparse points: a worktree with pnpm-installed deps
     // (`node_modules/*` junctioned into `.pnpm/`) fails with `failed to delete
     // '<path>': Invalid argument`, half-removed. Finish it ourselves —
     // `std::fs::remove_dir_all` deletes reparse points as links (hardened since Rust
     // 1.63) — then `prune` to reconcile git's dangling admin entry.
-    if let Err(git_err) = run_git_mutating(&state, &repo_path, &args, DEFAULT_TIMEOUT).await {
-        // A NON-forced refusal has two causes: git is protecting real uncommitted work
-        // (Keep passes force=false precisely for that), or its recursive delete choked
-        // on a reparse point after the clean check passed. Only finish the delete when
-        // there's nothing to protect; otherwise surface git's error.
-        if !force && worktree_has_uncommitted_changes(&path).await {
+    if let Err(git_err) = run_git_mutating(state, repo_path, &args, DEFAULT_TIMEOUT).await {
+        // git drops `.git/worktrees/<id>` BEFORE deleting the directory, so a still-
+        // registered path means git refused as policy (dirty, locked, main worktree) —
+        // surface that error, which the frontend reads to offer the forced retry.
+        // Finishing the delete is only sound once the entry is gone; an unreadable
+        // registry counts as registered, so a folder is never deleted on a guess.
+        if worktree_is_registered(repo_path, path).await {
             return Err(git_err);
         }
-        match std::fs::remove_dir_all(&path) {
+        match std::fs::remove_dir_all(path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             // Removed despite an error partway (a child vanished under us) — good enough.
-            Err(_) if !std::path::Path::new(&path).exists() => {}
+            Err(_) if !std::path::Path::new(path).exists() => {}
             // Still there — usually a file locked by another process (an editor, terminal, or
             // file watcher holding a handle in `node_modules`/`target`). Surface THAT cause
             // rather than git's stale "Invalid argument", so the message is actionable.
@@ -433,21 +464,14 @@ pub async fn git_worktree_remove(
                 )));
             }
         }
-        // Best-effort reconcile: current git drops `.git/worktrees/<id>` BEFORE deleting
-        // the directory (the step that failed), so the admin entry is already gone — a
-        // prune hiccup must never turn a successful removal into a reported failure.
-        let _ = run_git_mutating(&state, &repo_path, &["worktree", "prune"], DEFAULT_TIMEOUT).await;
+        // Best-effort reconcile: a prune hiccup must never turn a successful removal
+        // into a reported failure.
+        let _ = run_git_mutating(state, repo_path, &["worktree", "prune"], DEFAULT_TIMEOUT).await;
     }
     // The branch can only be deleted once it's no longer checked out (i.e. after
     // the worktree is gone). Best-effort: a failure here shouldn't fail removal.
     if let Some(branch) = branch.as_deref().filter(|b| !b.is_empty()) {
-        let _ = run_git_mutating(
-            &state,
-            &repo_path,
-            &["branch", "-D", branch],
-            DEFAULT_TIMEOUT,
-        )
-        .await;
+        let _ = run_git_mutating(state, repo_path, &["branch", "-D", branch], DEFAULT_TIMEOUT).await;
     }
     Ok(())
 }
@@ -901,51 +925,112 @@ prunable gitdir file points to non-existent location
         );
     }
 
-    /// The non-forced-removal safety gate: a clean checkout (ignored `node_modules`
-    /// don't count) → false; real uncommitted/untracked work → true; a path git can't
-    /// read as a repo → false.
-    #[tokio::test]
-    async fn worktree_has_uncommitted_changes_gates_on_real_work() {
-        let _base = tempfile::Builder::new()
-            .prefix("gd-wt-dirty-")
+    /// A temp repo with one commit, for the `remove_worktree` tests. The returned
+    /// `TempDir` owns the whole tree (worktrees included, so they're cleaned up
+    /// too) and must stay alive for the test's duration.
+    async fn setup_repo(marker: &str) -> (tempfile::TempDir, String) {
+        let base = tempfile::Builder::new()
+            .prefix(&format!("gd-wt-{marker}-"))
             .tempdir()
             .expect("create temp dir");
-        let base = _base.path().to_path_buf();
-        let repo = base.join("repo");
+        let repo = base.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let repo_s = repo.to_string_lossy().into_owned();
-
         run(&repo_s, &["init", "-q"]).await;
         run(&repo_s, &["config", "user.email", "t@t.local"]).await;
         run(&repo_s, &["config", "user.name", "T"]).await;
-        std::fs::write(repo.join(".gitignore"), "node_modules/\n").unwrap();
         std::fs::write(repo.join("a.txt"), "hello\n").unwrap();
         run(&repo_s, &["add", "-A"]).await;
         run(&repo_s, &["commit", "-qm", "seed"]).await;
+        (base, repo_s)
+    }
 
-        // Clean checkout — nothing to protect.
-        assert!(!worktree_has_uncommitted_changes(&repo_s).await);
+    /// The worktree registry as git reports it, forward-slashed + lower-cased so a
+    /// `/dir-name` substring check is separator- and case-agnostic.
+    async fn registry(repo: &str) -> String {
+        normalize_wt_path(&run(repo, &["worktree", "list", "--porcelain"]).await)
+    }
 
-        // Gitignored deps (the exact case that leaks on Windows) are NOT work.
-        std::fs::create_dir_all(repo.join("node_modules/pkg")).unwrap();
-        std::fs::write(repo.join("node_modules/pkg/index.js"), "x\n").unwrap();
+    /// A forced removal of a LOCKED worktree must fully remove it — git needs
+    /// `--force` twice for a locked one, and a half-removal leaves an admin entry
+    /// that prune can't drop. The branch is not part of the removal here.
+    #[tokio::test]
+    async fn locked_worktree_force_remove_clears_registration() {
+        let (base, repo_s) = setup_repo("force-locked").await;
+        let wt = base.path().join("locked-wt");
+        let wt_s = wt.to_string_lossy().into_owned();
+        run(&repo_s, &["worktree", "add", "-b", "feat-lock", &wt_s, "HEAD"]).await;
+        run(&repo_s, &["worktree", "lock", &wt_s]).await;
+
+        let state = AppState::default();
+        remove_worktree(&state, &repo_s, &wt_s, None, true)
+            .await
+            .expect("forced removal of a locked worktree succeeds");
+
+        assert!(!wt.exists(), "the checkout is gone from disk");
         assert!(
-            !worktree_has_uncommitted_changes(&repo_s).await,
-            "gitignored node_modules must not read as uncommitted work"
+            !registry(&repo_s).await.contains("/locked-wt"),
+            "no admin entry is left behind"
         );
+        assert!(
+            !run(&repo_s, &["branch", "--list", "feat-lock"])
+                .await
+                .trim()
+                .is_empty(),
+            "the branch survives a removal that wasn't asked to delete it"
+        );
+    }
 
-        // An untracked, non-ignored file IS work to protect.
-        std::fs::write(repo.join("scratch.txt"), "wip\n").unwrap();
-        assert!(worktree_has_uncommitted_changes(&repo_s).await);
-        std::fs::remove_file(repo.join("scratch.txt")).unwrap();
+    /// A non-forced removal git refuses over uncommitted work must surface git's
+    /// error with the checkout intact — the frontend keys on that message to offer
+    /// the forced retry.
+    #[tokio::test]
+    async fn dirty_worktree_nonforced_remove_surfaces_error() {
+        let (base, repo_s) = setup_repo("dirty").await;
+        let wt = base.path().join("dirty-wt");
+        let wt_s = wt.to_string_lossy().into_owned();
+        run(&repo_s, &["worktree", "add", "-b", "feat-dirty", &wt_s, "HEAD"]).await;
+        std::fs::write(wt.join("scratch.txt"), "wip\n").unwrap();
 
-        // A modified tracked file IS work to protect.
-        std::fs::write(repo.join("a.txt"), "changed\n").unwrap();
-        assert!(worktree_has_uncommitted_changes(&repo_s).await);
+        let state = AppState::default();
+        let err = remove_worktree(&state, &repo_s, &wt_s, None, false)
+            .await
+            .expect_err("git refuses to drop uncommitted work");
 
-        // A directory git can't read as a repo → nothing to protect.
-        let non_repo = base.join("not-a-repo");
-        std::fs::create_dir_all(&non_repo).unwrap();
-        assert!(!worktree_has_uncommitted_changes(&non_repo.to_string_lossy()).await);
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("force") || msg.contains("modified") || msg.contains("untracked"),
+            "error must match the frontend's escalation vocabulary: {msg}"
+        );
+        assert!(wt.exists(), "the dirty checkout is left on disk");
+        assert!(
+            registry(&repo_s).await.contains("/dirty-wt"),
+            "the worktree stays registered"
+        );
+    }
+
+    /// The other half of the same guard: a CLEAN but locked worktree. Nothing is
+    /// dirty, yet git still refuses — the removal must report that instead of
+    /// deleting the folder behind git's back and leaving an unprunable entry.
+    #[tokio::test]
+    async fn locked_clean_worktree_nonforced_remove_refuses() {
+        let (base, repo_s) = setup_repo("locked-clean").await;
+        let wt = base.path().join("clean-wt");
+        let wt_s = wt.to_string_lossy().into_owned();
+        run(&repo_s, &["worktree", "add", "-b", "feat-clean", &wt_s, "HEAD"]).await;
+        run(&repo_s, &["worktree", "lock", &wt_s]).await;
+
+        let state = AppState::default();
+        let err = remove_worktree(&state, &repo_s, &wt_s, None, false)
+            .await
+            .expect_err("git refuses to drop a locked worktree without --force");
+
+        let msg = err.to_string().to_lowercase();
+        assert!(msg.contains("locked"), "the lock must be named: {msg}");
+        assert!(wt.exists(), "the locked checkout is left on disk");
+        assert!(
+            registry(&repo_s).await.contains("/clean-wt"),
+            "the worktree stays registered"
+        );
     }
 }
