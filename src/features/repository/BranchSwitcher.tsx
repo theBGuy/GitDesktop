@@ -56,8 +56,8 @@ import {
   useStashAll,
   useStashCount,
   useStashPop,
-  useUnlockUserWorktree,
   useSwitchAutostash,
+  useUnlockUserWorktree,
   useUpdateBranchFrom,
   useUserWorktrees,
 } from "@/lib/git/queries";
@@ -93,11 +93,11 @@ import { RenameBranchDialog } from "./RenameBranchDialog";
 import { StashesDialog } from "./StashesDialog";
 import { SwitchWithChangesDialog } from "./SwitchWithChangesDialog";
 import { useOpenWorktree } from "./useOpenRepoByPath";
-import { LockWorktreeDialog, RenameWorktreeDialog } from "./WorktreesDialog";
 import {
   reportAutostashOutcome,
   useStashReapplyRecovery,
 } from "./useStashReapplyRecovery";
+import { LockWorktreeDialog, RenameWorktreeDialog } from "./WorktreesDialog";
 
 /** Lower-cased, forward-slashed path for cross-source comparison — git emits
  *  "/", the app stores "\" on Windows. */
