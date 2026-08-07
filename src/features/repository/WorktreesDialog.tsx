@@ -606,9 +606,9 @@ export function LockWorktreeDialog({
         <DialogHeader>
           <DialogTitle>Lock worktree</DialogTitle>
           <DialogDescription>
-            Locking stops git from pruning or removing this worktree without a
-            forced confirmation — useful for one on a removable or network
-            drive. Add an optional note for why.
+            Locking stops this worktree from being pruned or renamed, and
+            deleting it asks for a forced confirmation — useful for one on a
+            removable or network drive. Add an optional note for why.
           </DialogDescription>
         </DialogHeader>
 

@@ -49,8 +49,10 @@ pub struct UserWorktree {
 
 /// Normalizes a worktree path for cross-source comparison: git prints forward
 /// slashes while the app stores native separators (back-slashes on Windows), and
-/// Windows paths are case-insensitive. Lower-casing is harmless on Unix here — the
-/// only paths compared are app-generated session dirs vs. git's own output.
+/// Windows paths are case-insensitive. Lower-casing is harmless on Unix here —
+/// session-dir comparisons are app-generated vs. git's own output, and the
+/// registration check (`canonical_wt_path`) can only over-report "registered",
+/// which refuses a fallback delete: the safe direction.
 pub(crate) fn normalize_wt_path(p: &str) -> String {
     p.replace('\\', "/").to_lowercase()
 }
@@ -1056,6 +1058,32 @@ prunable gitdir file points to non-existent location
         assert!(
             registry(&repo_s).await.contains("/repo"),
             "main stays registered"
+        );
+    }
+
+    /// The fallback still finishes a removal git half-did: git de-registers
+    /// `.git/worktrees/<id>` BEFORE deleting the directory, so a leftover
+    /// folder with no admin entry must be deleted, not reported.
+    #[tokio::test]
+    async fn deregistered_worktree_remove_deletes_leftover_folder() {
+        let (base, repo_s) = setup_repo("deregistered").await;
+        let wt = base.path().join("orphan-wt");
+        let wt_s = wt.to_string_lossy().into_owned();
+        run(&repo_s, &["worktree", "add", "-b", "feat-orphan", &wt_s, "HEAD"]).await;
+        // Reproduce git's ordering: admin entry gone, checkout still on disk.
+        std::fs::remove_dir_all(
+            std::path::Path::new(&repo_s).join(".git").join("worktrees"),
+        )
+        .expect("drop the worktree admin dir");
+
+        let state = AppState::default();
+        remove_worktree(&state, &repo_s, &wt_s, None, false)
+            .await
+            .expect("a de-registered leftover folder is finished off, not reported");
+        assert!(!wt.exists(), "the leftover checkout is deleted");
+        assert!(
+            !registry(&repo_s).await.contains("/orphan-wt"),
+            "nothing is left in the registry"
         );
     }
 }
