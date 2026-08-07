@@ -42,7 +42,7 @@ portable-pty = "0.9"
 # Tier-3 "GitDesktop AS an MCP server" — the read-only stdio server reached via the
 # `gitdesktop mcp` subcommand (see main.rs + docs/mcp-server-tier3.md). Linked into
 # the main binary so a shipped app can act as an MCP server with nothing extra to bundle.
-rmcp = { version = "1", features = ["server", "macros", "transport-io"] }
+rmcp = { version = "2", features = ["server", "macros", "transport-io"] }
 # Local-PR MCP write core (local_prs.rs): resolve the same app-data dir the store
 # plugin writes (dirs, matching Tauri's BaseDirectory::AppData = dirs::data_dir()),
 # mint record ids (uuid v4, matching the frontend's crypto.randomUUID()), and stamp
