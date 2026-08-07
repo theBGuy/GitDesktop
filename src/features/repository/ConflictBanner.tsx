@@ -97,7 +97,10 @@ export function ConflictBanner({
           ? "Rebase paused — amend this commit's changes in Changes, then Continue"
           : opVerb
             ? `${opVerb} · ${conflictText}`
-            : conflictText}
+            : // No operation to continue or abort (a conflicted stash pop leaves
+              // unmerged paths and nothing else), so the banner has to say where
+              // the resolution happens.
+              `${conflictText} — resolve ${conflictedCount === 1 ? "it" : "them"} in the changes list.`}
       </span>
       <div className="flex items-center gap-1.5">
         {canResolveWithAi && (

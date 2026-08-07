@@ -43,6 +43,7 @@ import { useLocalConversation } from "@/features/conversations/useLocalConversat
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { CommitDetailView } from "@/features/history/CommitDetailView";
 import { JiraRefRow } from "@/features/issues/JiraRefRow";
+import { useStashReapplyRecovery } from "@/features/repository/useStashReapplyRecovery";
 import { isMergeMethodAllowed } from "@/lib/branch-rules/match";
 import { useEffectiveBranchRules } from "@/lib/branch-rules/queries";
 import { copyText } from "@/lib/clipboard";
@@ -99,6 +100,7 @@ export function LocalPrView({
   const update = useUpdateLocalPr(repoPath);
   const merge = useMergeLocalPr(repoPath);
   const updateBranchFrom = useUpdateBranchFrom(repoPath);
+  const recovery = useStashReapplyRecovery(repoPath);
   const status = useRepoStatus(repoPath);
   const selectedPr = useUiStore((s) => s.selectedPr);
   const pendingPrSection = useUiStore((s) => s.pendingPrSection);
@@ -939,7 +941,7 @@ export function LocalPrView({
               <Button
                 variant="outline"
                 size="sm"
-                disabled={updateBranchFrom.isPending}
+                disabled={updateBranchFrom.isPending || recovery.pending}
                 title={`Merge ${pr.base} into ${pr.head} to catch it up`}
                 onClick={() =>
                   updateBranchFrom.mutate(
@@ -947,7 +949,24 @@ export function LocalPrView({
                     {
                       onSuccess: () =>
                         toast.success(`Updated ${pr.head} from ${pr.base}`),
-                      onError: toastError,
+                      // Only an in-place update (head IS the current branch) can
+                      // be refused over uncommitted changes — the throwaway
+                      // worktree path is always clean. Anything else toasts.
+                      onError: (e) => {
+                        if (
+                          status.data?.branch?.name === pr.head &&
+                          recovery.handleError(e, {
+                            operationLabel: "update",
+                            detail: pr.base,
+                            reappliedMessage: `Updated from ${pr.base} and reapplied your changes.`,
+                            plainMessage: `Updated ${pr.head} from ${pr.base}`,
+                            run: { op: "merge", ref: pr.base },
+                          })
+                        ) {
+                          return;
+                        }
+                        toastError(e);
+                      },
                     },
                   )
                 }
@@ -1100,6 +1119,8 @@ export function LocalPrView({
           setDeletingCommentId(null);
         }}
       />
+
+      {recovery.dialog}
     </div>
   );
 }

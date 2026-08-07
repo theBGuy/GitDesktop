@@ -48,6 +48,7 @@ import { useSettings } from "@/lib/settings/queries";
 import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { PublishRepoControl, usePublishProviders } from "./PublishRepoControl";
+import { useStashReapplyRecovery } from "./useStashReapplyRecovery";
 
 export function SyncControls({ repoPath }: { repoPath: string }) {
   const status = useRepoStatus(repoPath);
@@ -57,6 +58,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   const pull = usePull(repoPath);
   const push = usePush(repoPath);
   const updateUpstream = useUpdateFromUpstream(repoPath);
+  const recovery = useStashReapplyRecovery(repoPath);
   const markFetched = useFetchStatusStore((s) => s.markFetched);
   const lastFetchedAt = useLastFetchedAt(repoPath);
   // Effective bindings drive the discoverability hints on the sync buttons:
@@ -98,7 +100,8 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     fetchRemote.isPending ||
     pull.isPending ||
     push.isPending ||
-    updateUpstream.isPending;
+    updateUpstream.isPending ||
+    recovery.pending;
   const onError = (e: unknown) => toastError(e);
 
   // One entry point for every fetch — manual (button/hotkey) and automatic —
@@ -208,13 +211,35 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   const fetchKeyshortcuts =
     fetchBinding === null ? undefined : bindingToAriaKeyshortcuts(fetchBinding);
 
+  // The plain-success toast for a pull: ff-only stays silent (the counts on the
+  // buttons already tell the story), the reconciling modes name what they did.
+  function pullSuccessMessage(mode: PullMode): string | undefined {
+    if (mode === "rebase") return "Pulled with rebase";
+    if (mode === "merge") return "Pulled with merge";
+    return undefined;
+  }
+
+  // A pull refused because it would overwrite uncommitted changes isn't a dead
+  // end: offer (or, with the preference on, just run) stash → pull → reapply.
+  // Every other error keeps its normal toast. Triggered by the refusal itself,
+  // never pre-flighted.
   function doPull(mode: PullMode) {
+    const plain = pullSuccessMessage(mode);
     pull.mutate(mode, {
       onSuccess: () => {
-        if (mode === "rebase") toast.success("Pulled with rebase");
-        else if (mode === "merge") toast.success("Pulled with merge");
+        if (plain) toast.success(plain);
       },
-      onError,
+      onError: (e) => {
+        const taken = recovery.handleError(e, {
+          operationLabel: "pull",
+          reappliedMessage: "Pulled and reapplied your changes.",
+          // ff-only has no ordinary success toast, but a recovery the user ran
+          // deliberately still has to confirm itself.
+          plainMessage: plain ?? "Pulled.",
+          run: { op: "pull", mode },
+        });
+        if (!taken) onError(e);
+      },
     });
   }
 
@@ -230,6 +255,16 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           toast.success(`Already up to date with ${ref}.`);
         } else if (outcome.kind === "fast-forwarded") {
           toast.success(`Fast-forwarded to ${ref}.`);
+        } else if (outcome.kind === "dirty-blocked") {
+          // The merge was refused, not attempted-and-broken: recover from the
+          // already-resolved ref, so confirming costs no second fetch.
+          recovery.begin({
+            operationLabel: "update",
+            detail: ref,
+            reappliedMessage: `Updated from ${ref} and reapplied your changes.`,
+            plainMessage: `Merged ${ref} into your branch.`,
+            run: { op: "merge", ref: outcome.ref },
+          });
         } else {
           toast.success(`Merged ${ref} into your branch.`);
         }
@@ -454,6 +489,8 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {recovery.dialog}
     </div>
   );
 }

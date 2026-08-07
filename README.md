@@ -444,6 +444,14 @@ model to merge a file, review the proposal as a diff, and accept it (per file or
 all at once). Multi-provider, runs on local Ollama or a keyless Claude Code /
 Codex agent, and never writes until you accept.
 
+- **Stash and reapply** — when a pull, a branch update, or a branch switch is
+  blocked by uncommitted changes, one click stashes them (untracked files
+  included), runs the operation, and reapplies them on the other side. A reapply
+  that hits conflicts drops the files into the changes list and keeps the stash
+  as a backup. **Automatically stash and reapply on pull** (Settings → General)
+  makes it the default for pulls and branch updates, and the switch prompt
+  remembers a **Reapply after switching** choice of its own.
+
 **Pull requests** — full read + write for GitHub PRs, plus **local PRs** (the full PR
 workflow against any two branches with no remote at all).
 

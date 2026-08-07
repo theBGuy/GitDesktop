@@ -7,6 +7,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef } from "react";
+import { isDirtyTreeRefusal } from "@/lib/error-summary";
 import { isAppError } from "@/lib/tauri/invoke";
 import { COLD_START_NO_GH, COLD_START_NO_GIT } from "@/lib/test-mode";
 import * as api from "./api";
@@ -3295,12 +3296,39 @@ export function usePull(repo: string) {
   );
 }
 
+/** Stash → run → reapply variants of pull, merge, and switch. Whole-repo
+ *  invalidation like their plain counterparts: each moves HEAD and rewrites the
+ *  working tree, and the stash list changes too. */
+export function usePullAutostash(repo: string) {
+  return useRepoMutation(repo, (mode: api.PullMode = "ffOnly") =>
+    api.gitPullAutostash(repo, mode),
+  );
+}
+
+export function useMergeAutostash(repo: string) {
+  return useRepoMutation(repo, (branch: string) =>
+    api.gitMergeAutostash(repo, branch),
+  );
+}
+
+export function useSwitchAutostash(repo: string) {
+  return useRepoMutation(
+    repo,
+    (args: { name: string; remote: string | null; reapply: boolean }) =>
+      api.gitSwitchAutostash(repo, args.name, args.remote, args.reapply),
+  );
+}
+
 /** Outcome of an "Update from upstream" run, for an honest toast. `branch` is
  *  the upstream default branch name (no `upstream/` prefix). */
 export type UpstreamUpdateOutcome =
   | { kind: "up-to-date"; branch: string }
   | { kind: "fast-forwarded"; branch: string }
-  | { kind: "merged"; branch: string };
+  | { kind: "merged"; branch: string }
+  /** The final merge refused to overwrite uncommitted changes. Returned rather
+   *  than thrown so the caller can offer stash-and-reapply: `ref` is the
+   *  already-resolved `upstream/<branch>`, so the retry needs no re-fetch. */
+  | { kind: "dirty-blocked"; branch: string; ref: string };
 
 /**
  * Sync the current branch with a fork's `upstream` remote: fetch upstream
@@ -3332,7 +3360,15 @@ export function useUpdateFromUpstream(repo: string) {
     const fastForward = preview.status === "fast-forward";
     // Plain merge: ff-when-possible, merge commit otherwise. A conflict makes
     // gitMerge reject — the error propagates and the conflict UI takes over.
-    await api.gitMerge(repo, ref, false, false, "none");
+    // Only this final step can hit the dirty-tree refusal (fetch/resolve/preview
+    // never touch the working tree), so it alone is caught and reported as an
+    // outcome; every other failure still throws.
+    try {
+      await api.gitMerge(repo, ref, false, false, "none");
+    } catch (e) {
+      if (isDirtyTreeRefusal(e)) return { kind: "dirty-blocked", branch, ref };
+      throw e;
+    }
     return { kind: fastForward ? "fast-forwarded" : "merged", branch };
   });
 }

@@ -436,7 +436,10 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   branch. (Creating from a base other than the branch you're on uses your in-progress
   changes only, since the new branch won't carry that committed work.)
 {{/ai}}- Switching with **uncommitted changes** prompts you to bring them along or stash
-  and switch.
+  and switch. Tick **Reapply after switching** on that prompt to have the stashed changes
+  put back for you once the switch lands; leave it unticked and they stay in the stash until
+  you pop them. If reapplying them hits conflicts, the files appear in **Changes** to resolve
+  and the stash is kept as a backup. Your choice is remembered for next time.
 - {{Secondaryclick}} a branch to **merge**, **squash and merge**, **rebase**, or **update it
   from the default branch** ({{kbd:update-from-default}}) — the last *without* checking it
   out.
@@ -567,6 +570,19 @@ right on the **Push** and **Pull** buttons.
   commits.
 - **Push** ({{kbd:push}}) sends your commits. For a branch with no upstream yet, you'll
   see **Publish branch** instead.
+
+## Stash and reapply
+
+When a **Pull** would overwrite uncommitted changes, git refuses it — and GitDesktop offers
+**Stash and reapply**: your changes are set aside in the stash (untracked files included),
+the pull runs, then they come back on top of it. If reapplying them hits conflicts, the
+conflicted files appear in **Changes** to resolve as usual and the stash is kept as a backup
+until you're done. The same recovery covers **Update from upstream** and updating the branch
+you're on from another branch.
+
+Tick **Always stash and reapply** in the prompt — or turn on **Automatically stash and
+reapply on pull** under **Settings → General** — and those operations recover on their own,
+with no prompt. Either way it only ever kicks in when git actually refuses the operation.
 
 ## Update a fork from upstream
 

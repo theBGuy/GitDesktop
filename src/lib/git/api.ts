@@ -717,6 +717,52 @@ export type PullMode = "ffOnly" | "rebase" | "merge";
 export const gitPull = (repoPath: string, mode: PullMode = "ffOnly") =>
   invoke<void>("git_pull", { repoPath, mode });
 
+/**
+ * What a stash → run → reapply compound did. Each command below stashes
+ * (including untracked files), runs its operation, then pops — reporting which
+ * of those steps landed rather than collapsing to a bare success/failure, so
+ * the UI can say where the user's changes ended up.
+ *
+ * `stderr` on the failure variants is the underlying git output; the stash is
+ * retained in every variant that names it, and is the user's safety net.
+ */
+export type AutostashOutcome =
+  /** Tree was clean at stash time; the operation ran plainly. */
+  | { kind: "nothingStashed" }
+  /** Switch with `reapply: false` — stash kept deliberately, no pop attempted. */
+  | { kind: "stashedOnly" }
+  /** stash → run → pop, all clean. */
+  | { kind: "reapplied" }
+  /** The operation succeeded but the pop failed; the stash is kept.
+   *  `conflicted` = the pop left unmerged paths to resolve, rather than
+   *  refusing outright. */
+  | { kind: "reapplyConflicted"; stderr: string; conflicted: boolean }
+  /** The operation failed cleanly and the changes were restored. */
+  | { kind: "opFailedRestored"; stderr: string }
+  /** The operation failed and the stash is kept. `inProgress` = it left
+   *  in-progress state, so ConflictBanner offers Continue/Abort; false = the
+   *  restore-pop failed instead, and there is no banner. */
+  | { kind: "opFailedStashKept"; stderr: string; inProgress: boolean };
+
+export const gitPullAutostash = (repoPath: string, mode: PullMode = "ffOnly") =>
+  invoke<AutostashOutcome>("git_pull_autostash", { repoPath, mode });
+
+export const gitMergeAutostash = (repoPath: string, branch: string) =>
+  invoke<AutostashOutcome>("git_merge_autostash", { repoPath, branch });
+
+export const gitSwitchAutostash = (
+  repoPath: string,
+  name: string,
+  remote: string | null,
+  reapply: boolean,
+) =>
+  invoke<AutostashOutcome>("git_switch_autostash", {
+    repoPath,
+    name,
+    remote,
+    reapply,
+  });
+
 export const gitPush = (
   repoPath: string,
   setUpstream: boolean,

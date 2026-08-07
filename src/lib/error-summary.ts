@@ -72,6 +72,44 @@ const CONFLICT_MARKERS = [
   "needs merge",
 ];
 
+/** Markers for git's refuse-to-clobber-your-working-tree family — the errors a
+ *  stash → run → reapply recovery can turn into a one-click fix. Measured
+ *  verbatim on git 2.51.1.windows.1 (lower-cased here, matched
+ *  case-insensitively; git prefixes them with `error:`).
+ *
+ *  Deliberately disjoint from CONFLICT_MARKERS: a real merge conflict already
+ *  has ConflictBanner recovery, and stashing mid-conflict corrupts the resolve
+ *  state. None of these strings appears in conflict output. */
+const DIRTY_TREE_MARKERS = [
+  // `pull` (--ff-only and --no-rebase) and plain `merge`, tracked overlap.
+  "your local changes to the following files would be overwritten by merge",
+  // Same flows, untracked overlap — the app stashes --include-untracked, so
+  // this is recoverable for us even though git's own --autostash skips it.
+  "the following untracked working tree files would be overwritten by merge",
+  // `switch` / `checkout` (both emit "by checkout"), tracked and untracked.
+  "your local changes to the following files would be overwritten by checkout",
+  "the following untracked working tree files would be overwritten by checkout",
+  // `pull --rebase` refuses up front, with a distinct line per dirty kind.
+  "cannot pull with rebase: you have unstaged changes",
+  "cannot pull with rebase: your index contains uncommitted changes",
+];
+
+/**
+ * Whether a thrown value is git refusing an operation because it would
+ * overwrite uncommitted work — the pull / merge / switch dirty-tree family that
+ * stash-and-reapply recovers from. Anything else (including real merge
+ * conflicts) returns false and keeps its normal error presentation.
+ */
+export function isDirtyTreeRefusal(e: unknown): boolean {
+  const text = isAppError(e)
+    ? `${e.message ?? ""}\n${e.stderr ?? ""}`
+    : e instanceof Error
+      ? e.message
+      : String(e);
+  const lower = text.toLowerCase();
+  return DIRTY_TREE_MARKERS.some((m) => lower.includes(m));
+}
+
 /** The paused operation named in the text, capitalized for the summary. */
 function conflictOp(text: string): string {
   const lower = text.toLowerCase();
