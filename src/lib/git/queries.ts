@@ -118,12 +118,12 @@ export const repoKeys = {
 };
 
 /**
- * The keys a staging-class mutation touches: repo status, every working-tree file diff,
+ * The keys a working-tree write invalidates: repo status, every working-tree file diff,
  * and only the MUTABLE file-at-rev slices — `"worktree"` and the index `":0"`, which
- * staging rewrites — all prefix-matched. Hot mutations (stage/unstage/discard/apply)
- * pass this to {@link useRepoMutation} so they don't mark the heavy
- * history/branches/Insights/SBOM queries stale. Committed-rev reads (HEAD, commit SHAs)
- * are immutable here and deliberately left alone.
+ * staging rewrites — all prefix-matched. Staging-class mutations (stage/unstage/discard/
+ * apply) pass this ALONE so they don't mark the heavy history/branches/Insights/SBOM
+ * queries stale; {@link useCommit} passes it as its AWAITED set and defers what HEAD
+ * moves to {@link commitAftermathKeys}. Committed-rev reads are immutable under staging.
  */
 const workingTreeKeys = (repo: string) =>
   [
@@ -2797,8 +2797,8 @@ export function useForkRepoByName() {
  * A mutation that invalidates repo queries on completion. Defaults to the whole repo
  * subtree (correct but broad); pass `opts.invalidate` to narrow it for hot mutations
  * (each key is prefix-matched). Reserve the whole-subtree default for ops that touch
- * history or branch topology (checkout/pull/reset/merge). `opts.invalidateAfter`
- * refreshes further families without ever holding the mutation pending.
+ * history or branch topology (checkout/pull/reset/merge); a hot history op (commit)
+ * splits instead — narrow awaited `invalidate` plus deferred `opts.invalidateAfter`.
  */
 function useRepoMutation<TArgs, TData>(
   repo: string,
@@ -2807,9 +2807,10 @@ function useRepoMutation<TArgs, TData>(
     /** Query keys to invalidate on completion (prefix-matched). Defaults to the
      *  whole repo subtree. */
     invalidate?: readonly (readonly unknown[])[];
-    /** Keys invalidated fire-and-forget on top of `invalidate` — NEVER awaited,
-     *  even under refetchBeforeSuccess, so callers can refresh heavy/slow
-     *  families without holding the mutation's isPending. */
+    /** Keys invalidated fire-and-forget on top of `invalidate` — NEVER awaited, so
+     *  callers can refresh heavy/slow families without holding the mutation's
+     *  isPending. Sequenced after the awaited set only under `refetchBeforeSuccess`;
+     *  otherwise both fire together in `onSettled`. */
     invalidateAfter?: readonly (readonly unknown[])[];
     /** Invalidate (and AWAIT) in onSuccess instead of fire-and-forget in
      *  onSettled, so the refetch lands BEFORE the caller's own onSuccess —
