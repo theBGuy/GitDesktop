@@ -84,9 +84,11 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // takes seconds on large GitHub repos and every active forge query joins the commit
   // mutation's awaited invalidation set, so it must be idle off this tab — and closed
   // and merged rows have no live mergeability, so they'd render zero chips anyway.
-  // `!isPlaceholderData` keeps the chips honest across a lens/tab switch: the list holds
-  // the PREVIOUS page's rows while this re-queries by the new filters, and PR numbers
-  // repeat across repos, so a chip could land on the wrong row. Absent beats wrong.
+  // `!isPlaceholderData` covers the first half of a lens/tab switch: while the LIST is
+  // still serving the previous page's rows, this stays idle rather than describing a
+  // page that isn't on screen. (The second half — this query's own placeholder serving
+  // the previous lens's map — is handled inside the hook, which compares repo AND lens.)
+  // PR numbers repeat across repos, so a misplaced chip is a wrong claim; absent is not.
   const repoTab = useUiStore((s) => s.repoTab);
   const prListMergeability = usePrListMergeability(
     repoPath,

@@ -2778,6 +2778,8 @@ pub async fn mr_list_mergeability(
     // mergeability to report.
     debug_assert_eq!(state, "open", "only the open filter reaches the providers");
     let enc = encode_project(&project_path(repo_path).await?);
+    // per_page=100 matches `list_prs`' own deliberate open-state cap, so every row
+    // the list can render is answerable here — a limit param would add nothing.
     let endpoint = format!(
         "projects/{enc}/merge_requests?state=opened&per_page=100&with_merge_status_recheck=true"
     );

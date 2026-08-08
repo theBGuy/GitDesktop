@@ -361,11 +361,12 @@ export function RemotePrView({
   );
   const lensRemote = lensRemoteName(lens);
   const serverState = mergeability.data?.state;
-  // The local prediction does double duty: it stands in where the forge has no answer
-  // (Bitbucket, offline), and it NAMES the conflicting files when the forge says
-  // "conflicting" but won't say where. Never for a fork head — its branch may not
-  // exist under our remote. Hoisted because a DISABLED query keeps serving its last
-  // value, so every reader of the prediction has to gate on this too.
+  // The local prediction does double duty: it stands in where the forge ANSWERS but has
+  // no truth to give (Bitbucket), and it NAMES the conflicting files when the forge says
+  // "conflicting" but won't say where. A FAILED read is not covered — it leaves
+  // `serverState` undefined, which disables this too. Never for a fork head either: its
+  // branch may not exist under our remote. Hoisted because a DISABLED query keeps
+  // serving its last value, so every reader of the prediction has to gate on this too.
   const previewEnabled =
     repoTab === "pulls" &&
     isOpenPr &&

@@ -17,8 +17,9 @@ const FORK_BLOCKED_REASON =
 /** How many conflicting paths get their own row before the rest collapse to a count. */
 const MAX_FILE_ROWS = 5;
 
-/** Which line the banner shows. `predicted` is the local fallback when the forge has
- *  no answer (Bitbucket, offline); `unknown` is a `checking` poll that gave up. */
+/** Which line the banner shows. `predicted` is the local fallback when the forge answers
+ *  but has no mergeability to give (Bitbucket) — not when the read itself failed;
+ *  `unknown` is a `checking` poll that gave up. */
 export type PrMergeabilityArm =
   | "conflicting"
   | "predicted"

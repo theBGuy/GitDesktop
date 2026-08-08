@@ -930,13 +930,22 @@ export function usePrListMergeability(
     queryFn: async () => {
       const rows = await api.forgePrListMergeability(repo, state, limit, lens);
       return new Map<number, PrMergeabilityState>(
-        Object.entries(rows).map(([number, state]) => [Number(number), state]),
+        Object.entries(rows).map(([number, mergeState]) => [
+          Number(number),
+          mergeState,
+        ]),
       );
     },
     enabled: enabled && !!prs && prs.length > 0,
     staleTime: 30_000,
-    // Keep the current chips while a "Load more" grows the list, matching usePrList.
-    placeholderData: keepPreviousDataForRepo(repo),
+    // Keeps the current chips while a "Load more" grows the list, but only within the
+    // SAME repo AND lens: the shared `keepPreviousDataForRepo` compares the repo segment
+    // alone, which would paint origin's map onto upstream's rows (numbers collide across
+    // repos) for however long the new lens's read takes.
+    placeholderData: (prev, prevQuery) =>
+      prevQuery?.queryKey?.[1] === repo && prevQuery?.queryKey?.[3] === lens
+        ? prev
+        : undefined,
   });
 }
 
