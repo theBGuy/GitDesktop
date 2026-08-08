@@ -970,11 +970,21 @@ export function FindingsPanel({
                               </Badge>
                             ) : null}
                             {/* Rows in a group share a type and often a date, so
-                                the alert number is what tells them apart. */}
-                            <span className="ml-auto shrink-0 tabular-nums">
-                              #{a.number}
-                            </span>
-                            <span className="shrink-0">
+                                the alert number is what tells them apart — but a
+                                tolerated alert numbered 0 has none to show. */}
+                            {a.number === 0 ? null : (
+                              <span className="ml-auto shrink-0 tabular-nums">
+                                #{a.number}
+                              </span>
+                            )}
+                            {/* The number span normally carries `ml-auto`;
+                                without it the date takes over pushing right. */}
+                            <span
+                              className={cn(
+                                "shrink-0",
+                                a.number === 0 && "ml-auto",
+                              )}
+                            >
                               <RelativeTime date={a.createdAt} />
                             </span>
                           </p>
