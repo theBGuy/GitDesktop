@@ -136,12 +136,21 @@ pub async fn git_op_continue(
     repo_path: String,
     op: String,
 ) -> AppResult<()> {
-    validate_op(&op)?;
-    let args: Vec<&str> = match op.as_str() {
-        "merge" => vec!["commit", "--no-edit"],
+    op_continue(&state, &repo_path, &op).await
+}
+
+/// Testable core of [`git_op_continue`] — takes a plain `&AppState` so real-repo
+/// tokio tests can drive it.
+pub(crate) async fn op_continue(state: &AppState, repo_path: &str, op: &str) -> AppResult<()> {
+    validate_op(op)?;
+    let args: Vec<&str> = match op {
+        // `--cleanup=strip` is load-bearing: with no editor run, cleanup defaults
+        // to `whitespace`, leaving MERGE_MSG's `# Conflicts:` block in the
+        // recorded message (measured, git 2.51.1).
+        "merge" => vec!["commit", "--no-edit", "--cleanup=strip"],
         other => vec!["-c", "core.editor=true", other, "--continue"],
     };
-    run_git_mutating(&state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
+    run_git_mutating(state, repo_path, &args, DEFAULT_TIMEOUT).await?;
     Ok(())
 }
 
@@ -2835,10 +2844,19 @@ pub(crate) async fn finish_remote_pr_resolve(
     .await?;
     if merging || staged.code != 0 {
         // No `-m` ⇒ git's prepared MERGE_MSG; `--no-edit` (plus a no-op editor)
-        // keeps it non-interactive either way.
+        // keeps it non-interactive either way. `--cleanup=strip` is load-bearing:
+        // with no editor run, cleanup defaults to `whitespace`, which leaves
+        // MERGE_MSG's `# Conflicts:` block in the recorded message — and that
+        // shows on the forge (measured, git 2.51.1).
         let args: Vec<&str> = match message.map(str::trim) {
             Some(m) if !m.is_empty() => vec!["commit", "-m", m],
-            _ => vec!["-c", "core.editor=true", "commit", "--no-edit"],
+            _ => vec![
+                "-c",
+                "core.editor=true",
+                "commit",
+                "--no-edit",
+                "--cleanup=strip",
+            ],
         };
         let commit = run_git_raw(Some(worktree_path), &args, DEFAULT_TIMEOUT).await?;
         if commit.code != 0 {
@@ -4853,6 +4871,51 @@ detached
         );
     }
 
+    /// The same comment-block wart in the MAIN-repo "continue a merge" command:
+    /// `commit --no-edit` runs no editor, so git's cleanup defaults to
+    /// `whitespace` and MERGE_MSG's `# Conflicts:` lines land in the user's own
+    /// merge commit.
+    #[tokio::test]
+    async fn op_continue_merge_records_a_comment_free_message() {
+        let (dir, repo) = setup_repo("op-continue-merge").await;
+        let base = git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "feature-side\n", "feat edit").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "a.txt", "base-side\n", "base edit").await;
+
+        // Conflict, then resolve + stage exactly as the conflict editor does.
+        let merged = run_git_raw(Some(&repo), &["merge", "feature"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_ne!(merged.code, 0, "the merge must conflict for this to be real");
+        std::fs::write(dir.path().join("a.txt"), "resolved\n").unwrap();
+        git(&repo, &["add", "a.txt"]).await;
+
+        let state = AppState::default();
+        op_continue(&state, &repo, "merge").await.unwrap();
+
+        let msg = git(&repo, &["log", "-1", "--format=%B"]).await;
+        assert!(
+            !msg.lines().any(|l| l.starts_with('#')),
+            "the merge commit must not record git's comment block, got: {msg:?}"
+        );
+        assert!(
+            msg.contains("Merge"),
+            "the subject line survives cleanup, got: {msg:?}"
+        );
+        // It really is a merge commit (the continue concluded the merge).
+        let parents = git(&repo, &["rev-list", "--parents", "-n1", "HEAD"]).await;
+        assert_eq!(
+            parents.split_whitespace().count(),
+            3,
+            "commit + 2 parents, got: {parents:?}"
+        );
+    }
+
     /// LIVE REPRO (dogfood blocker): resolving every conflict as "ours" stages a
     /// diff byte-identical to HEAD, so a staged-diff-only check skips the commit,
     /// HEAD never leaves the fetched tip, and finish dead-ends on "Nothing to
@@ -4911,6 +4974,19 @@ detached
                 .trim(),
             tree_before,
             "an all-ours merge keeps the head's tree"
+        );
+
+        // The recorded message must carry NO comment block: with no editor run,
+        // git's cleanup defaults to `whitespace` and would leave MERGE_MSG's
+        // `# Conflicts:` lines in the message, publicly visible on the forge.
+        let msg = git(&bare, &["log", "-1", "--format=%B", &pushed]).await;
+        assert!(
+            !msg.lines().any(|l| l.starts_with('#')),
+            "the pushed message must not contain git's comment block, got: {msg:?}"
+        );
+        assert!(
+            msg.contains("Merge"),
+            "the subject line survives cleanup, got: {msg:?}"
         );
         assert!(!Path::new(&wt).exists(), "worktree removed after finish");
     }
