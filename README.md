@@ -84,9 +84,9 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
   first patched version), its **code scanning** and **secret scanning** alerts, and the
   repository's **security advisories**. Select a row for its detail — for a Dependabot
   alert that adds CVSS base metrics, CWEs, labeled references, and whether the
-  dependency is direct or transitive — then open it on GitHub. A category that isn't
-  switched on says so, with a jump to the settings that enable it if you're a repo
-  admin.
+  dependency is direct or transitive — then open it on GitHub. A scanning category that
+  isn't switched on says so, with a jump to the settings that enable it if you're a
+  repo admin.
 - **Explore repositories** — a full-page browser across **GitHub, GitLab & Bitbucket**:
   before you type it shows **your own repositories** (grouped by owner) and a **Popular**
   star-sorted feed (GitHub & GitLab); typing searches GitHub, all public GitLab projects,
@@ -599,8 +599,10 @@ the detail, then open it on GitHub; a Dependabot alert's detail adds a base-metr
 table per CVSS version the advisory carries (3.x and 4.0), its CWEs, labeled reference
 links, and whether the package is a direct or transitive dependency. When a category
 isn't reporting — scanning switched off, a token that can't read it, or a check that
-didn't complete — the tab says which and why, and (with repo-admin access) **Open
-security settings** goes straight to Repository settings → Security to turn scanning on.
+didn't complete — the tab says which and why; for the three scanning categories, **Open
+security settings** (with repo-admin access) goes straight to Repository settings →
+Security to turn scanning on. Repository advisories have no such switch — they're only
+published on public repositories.
 
 **Insights** — a repository-graphs tab (Ctrl/Cmd-9): commit activity, code
 frequency (additions vs. deletions), contributor churn, and a commit punch card —

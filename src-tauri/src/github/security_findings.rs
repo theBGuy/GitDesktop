@@ -24,6 +24,9 @@ pub enum FindingAvailability {
     Available,
     /// The feature is switched off for this repo.
     NotEnabled,
+    /// No analysis has ever run: the first scan may still be in flight, or scanning
+    /// was never configured. Distinct from `NotEnabled`, which the server asserts.
+    NoResultsYet,
     /// The token can't read this surface (no admin / not authorized).
     Forbidden,
     /// The call failed in a way we can't attribute; the list is unknown, not empty.
@@ -163,7 +166,7 @@ pub struct SecretScanningAlertOut {
     /// active | inactive | unknown, raw.
     pub validity: Option<String>,
     pub publicly_leaked: Option<bool>,
-    pub resolution: Option<String>,
+    // No `resolution`: the fetch pins `state=open`, so it is always null here.
     pub html_url: String,
     pub created_at: String,
     pub updated_at: String,
@@ -441,8 +444,6 @@ struct RawSecretScanningAlert {
     validity: Option<String>,
     #[serde(default)]
     publicly_leaked: Option<bool>,
-    #[serde(default)]
-    resolution: Option<String>,
     #[serde(default)]
     html_url: Option<String>,
     #[serde(default)]
@@ -769,7 +770,6 @@ fn secret_scanning_alert_out(raw: RawSecretScanningAlert) -> SecretScanningAlert
         secret_type_display_name: raw.secret_type_display_name.unwrap_or_default(),
         validity: raw.validity,
         publicly_leaked: raw.publicly_leaked,
-        resolution: raw.resolution,
         html_url: raw.html_url.unwrap_or_default(),
         created_at: raw.created_at.unwrap_or_default(),
         updated_at: raw.updated_at.unwrap_or_default(),
@@ -860,13 +860,12 @@ fn classify_failure(stdout_body: &str, stderr: &str) -> (FindingAvailability, Op
         return (FindingAvailability::Indeterminate, detail);
     };
     let lower = message.to_lowercase();
-    // Each arm words "off for this repo" differently: Dependabot says "disabled",
-    // code scanning says "not enabled", and a scanned-but-never-analyzed repo
-    // answers "no analysis found" — none of them mean the repo is clean.
-    if lower.contains("disabled")
-        || lower.contains("not enabled")
-        || lower.contains("no analysis found")
-    {
+    // "no analysis found" is weaker than the other two: a repo mid-first-scan and a
+    // repo that never configured scanning both answer it, so it can't claim the
+    // feature is off the way an explicit "disabled"/"not enabled" body does.
+    if lower.contains("no analysis found") {
+        (FindingAvailability::NoResultsYet, detail)
+    } else if lower.contains("disabled") || lower.contains("not enabled") {
         (FindingAvailability::NotEnabled, detail)
     } else if lower.contains("not authorized")
         || lower.contains("forbidden")
@@ -1458,6 +1457,7 @@ mod tests {
         for (variant, expected) in [
             (FindingAvailability::Available, "available"),
             (FindingAvailability::NotEnabled, "notEnabled"),
+            (FindingAvailability::NoResultsYet, "noResultsYet"),
             (FindingAvailability::Forbidden, "forbidden"),
             (FindingAvailability::Indeterminate, "indeterminate"),
         ] {
@@ -1712,10 +1712,16 @@ mod tests {
             detail.as_deref(),
             Some("Code scanning is not enabled for this repository. Please enable code scanning in the repository settings.")
         );
-        // A public repo that has never run an analysis (404) is likewise "off", not clean.
+    }
+
+    #[test]
+    fn classify_failure_reads_no_analysis_as_no_results_yet() {
+        // Measured on a public repo whose scanning has never produced an analysis
+        // (404). A repo mid-first-scan answers the same, so this is NOT proof the
+        // feature is off — the two states need different copy.
         let (availability, detail) =
             classify_failure(r#"{"message":"no analysis found"}"#, "gh: HTTP 404");
-        assert_eq!(availability, FindingAvailability::NotEnabled);
+        assert_eq!(availability, FindingAvailability::NoResultsYet);
         assert_eq!(detail.as_deref(), Some("no analysis found"));
     }
 
@@ -2208,7 +2214,6 @@ mod tests {
             "validity": "active",
             "publicly_leaked": true,
             "multi_repo": false,
-            "resolution": Value::Null,
             "html_url": "https://github.com/theBGuy/GitDesktop/security/secret-scanning/2",
             "created_at": "2026-08-04T18:18:30Z",
             "updated_at": "2026-08-05T18:18:30Z"
@@ -2226,7 +2231,6 @@ mod tests {
         assert_eq!(out.secret_type_display_name, "Adafruit IO Key");
         assert_eq!(out.validity.as_deref(), Some("active"));
         assert_eq!(out.publicly_leaked, Some(true));
-        assert_eq!(out.resolution, None);
         assert_eq!(
             out.html_url,
             "https://github.com/theBGuy/GitDesktop/security/secret-scanning/2"
@@ -2310,7 +2314,6 @@ mod tests {
                     "secretTypeDisplayName": "Adafruit IO Key",
                     "validity": "active",
                     "publiclyLeaked": true,
-                    "resolution": Value::Null,
                     "htmlUrl": "https://github.com/theBGuy/GitDesktop/security/secret-scanning/2",
                     "createdAt": "2026-08-04T18:18:30Z",
                     "updatedAt": "2026-08-05T18:18:30Z"

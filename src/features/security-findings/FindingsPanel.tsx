@@ -1,6 +1,7 @@
 import {
   ArrowClockwiseIcon,
   GearSixIcon,
+  InfoIcon,
   LockKeyIcon,
   QuestionIcon,
   ShieldCheckIcon,
@@ -158,7 +159,9 @@ function buildCodeScanningGroups(
     else {
       groups.set(alert.ruleId, {
         key: alert.ruleId,
-        label: alert.ruleName ?? alert.ruleId,
+        // `||`, not `??`: the tolerant Raw parse degrades a missing field to an
+        // empty string, so an empty name must fall through the same as a null.
+        label: alert.ruleName || alert.ruleId || "Unidentified rule",
         rows: [row],
       });
     }
@@ -176,6 +179,13 @@ const bySecretUrgency = (
     VALIDITY_RANK[validityLevel(b.validity)] ||
   b.createdAt.localeCompare(a.createdAt);
 
+/** A secret type's display name, falling back through the tolerated-empty fields
+ *  the Raw parse can leave behind. Shared by the group header and the row title
+ *  so the two can never disagree — and grouping on it keeps two differently-typed
+ *  secrets apart when both lost their display name. */
+const secretTypeLabel = (a: SecretScanningAlertOut) =>
+  a.secretTypeDisplayName || a.secretType || "Unknown secret type";
+
 function buildSecretGroups(alerts: SecretScanningAlertOut[]): SecretGroup[] {
   const sorted = alerts.toSorted(bySecretUrgency);
   const groups = new Map<string, SecretGroup>();
@@ -184,15 +194,10 @@ function buildSecretGroups(alerts: SecretScanningAlertOut[]): SecretGroup[] {
       id: alert.number === 0 ? `secret-i${i}` : `secret-${alert.number}`,
       alert,
     };
-    const bucket = groups.get(alert.secretTypeDisplayName);
+    const label = secretTypeLabel(alert);
+    const bucket = groups.get(label);
     if (bucket) bucket.rows.push(row);
-    else {
-      groups.set(alert.secretTypeDisplayName, {
-        key: alert.secretTypeDisplayName,
-        label: alert.secretTypeDisplayName,
-        rows: [row],
-      });
-    }
+    else groups.set(label, { key: label, label, rows: [row] });
   });
   return [...groups.values()];
 }
@@ -247,7 +252,13 @@ function SectionHeader({ title }: { title: string }) {
  *  identifies the finding — survives. `dir="rtl"` moves the ellipsis to the
  *  leading edge; the `<bdi>` keeps the path itself reading left-to-right. */
 function PathLabel({ path, line }: { path: string; line: number | null }) {
-  const text = line === null ? path : `${path}:${line}`;
+  // A tolerated alert can arrive with no path at all; a line number hung off the
+  // placeholder would read as a location, so it's dropped with the path.
+  const text = path
+    ? line === null
+      ? path
+      : `${path}:${line}`
+    : "No file path";
   return (
     <span dir="rtl" className="ml-auto min-w-0 truncate font-mono" title={text}>
       <bdi>{text}</bdi>
@@ -294,12 +305,12 @@ function ReasonCard({
 }
 
 /**
- * The card for any envelope that isn't `"available"`. `notEnabledMessage` is the
- * category's own benefit-phrased sentence for the not-enabled state; `onEnable`
- * is passed on top of it only where the app can open the toggle. A category
- * without either still reports the state the server named rather than falling
- * through to "couldn't check". `Category` is the sentence-initial form of
- * `category`.
+ * The card for any envelope that isn't `"available"`. `notEnabledMessage` and
+ * `noResultsYetMessage` are the category's own copy for those two states;
+ * `onEnable` is passed on top of either only where the app can open the toggle.
+ * A category without them still reports the state the server named rather than
+ * falling through to "couldn't check". `Category` is the sentence-initial form
+ * of `category`.
  */
 function UnavailableCard({
   availability,
@@ -307,6 +318,7 @@ function UnavailableCard({
   category,
   Category,
   notEnabledMessage,
+  noResultsYetMessage,
   onRetry,
   onEnable,
 }: {
@@ -315,12 +327,20 @@ function UnavailableCard({
   category: string;
   Category: string;
   notEnabledMessage?: string;
+  noResultsYetMessage?: string;
   onRetry: () => void;
   onEnable?: () => void;
 }) {
+  const enableAction = onEnable ? (
+    <Button variant="outline" size="sm" onClick={onEnable}>
+      <GearSixIcon data-icon="inline-start" />
+      Open security settings
+    </Button>
+  ) : undefined;
+
   if (availability === "notEnabled") {
-    // The benefit sentence is how a non-admin learns what to ask for, so it
-    // shows with or without the action. It already names the cause, so the
+    // The category's own sentence is how a non-admin learns what to ask for, so
+    // it shows with or without the action. It already names the cause, so the
     // server's detail would only restate it — detail is for the generic path.
     return (
       <ReasonCard
@@ -329,14 +349,23 @@ function UnavailableCard({
           notEnabledMessage ?? `${Category} aren't enabled for this repository.`
         }
         detail={notEnabledMessage ? null : detail}
-        action={
-          onEnable ? (
-            <Button variant="outline" size="sm" onClick={onEnable}>
-              <GearSixIcon data-icon="inline-start" />
-              Open security settings
-            </Button>
-          ) : undefined
+        action={enableAction}
+      />
+    );
+  }
+  if (availability === "noResultsYet") {
+    // Deliberately not phrased as "turn it on": this state can't distinguish an
+    // unconfigured feature from one whose first analysis is still running, so it
+    // names both. The settings action stays — setup is the likely need.
+    return (
+      <ReasonCard
+        icon={InfoIcon}
+        message={
+          noResultsYetMessage ??
+          `No ${category} have been reported for this repository yet.`
         }
+        detail={noResultsYetMessage ? null : detail}
+        action={enableAction}
       />
     );
   }
@@ -349,19 +378,26 @@ function UnavailableCard({
       />
     );
   }
-  return (
-    <ReasonCard
-      icon={QuestionIcon}
-      message={`Couldn't check ${category}.`}
-      detail={detail}
-      action={
-        <Button variant="outline" size="sm" onClick={onRetry}>
-          <ArrowClockwiseIcon data-icon="inline-start" />
-          Retry
-        </Button>
-      }
-    />
-  );
+  if (availability === "indeterminate") {
+    return (
+      <ReasonCard
+        icon={QuestionIcon}
+        message={`Couldn't check ${category}.`}
+        detail={detail}
+        action={
+          <Button variant="outline" size="sm" onClick={onRetry}>
+            <ArrowClockwiseIcon data-icon="inline-start" />
+            Retry
+          </Button>
+        }
+      />
+    );
+  }
+  // Every state is branched above, so this is unreachable — and the assignment
+  // is the point: a new FindingAvailability variant fails to compile here
+  // instead of silently rendering the "couldn't check" card.
+  const _exhaustive: never = availability;
+  return _exhaustive;
 }
 
 function LoadFailed({
@@ -635,9 +671,9 @@ export function FindingsPanel({
                       <div className="flex items-baseline gap-2 px-3 py-1 text-[11px] text-muted-foreground">
                         <span
                           className="truncate font-mono text-foreground"
-                          title={group.packageName}
+                          title={group.packageName || "Unknown package"}
                         >
-                          {group.packageName}
+                          {group.packageName || "Unknown package"}
                         </span>
                         <span className="shrink-0">{group.ecosystem}</span>
                         <span className="ml-auto shrink-0 tabular-nums">
@@ -723,7 +759,8 @@ export function FindingsPanel({
                 detail={codeScanningOut.detail}
                 category="code scanning alerts"
                 Category="Code scanning alerts"
-                notEnabledMessage="Code scanning isn't producing results for this repository yet. Turn it on to see alerts here."
+                notEnabledMessage="Code scanning is off for this repository. Turn it on to see alerts here."
+                noResultsYetMessage="Code scanning hasn't reported results for this repository yet — it may still need setting up, or its first analysis may still be running."
                 onRetry={() => codeScanning.refetch()}
                 onEnable={
                   canOpenRepoSettings
@@ -763,14 +800,16 @@ export function FindingsPanel({
                         >
                           {group.label}
                         </span>
-                        {group.label === group.key ? null : (
+                        {/* The raw id, alongside a named rule. Suppressed when
+                            the id is itself empty — the label already covers it. */}
+                        {group.key && group.label !== group.key ? (
                           <span
                             className="min-w-0 shrink truncate font-mono"
                             title={group.key}
                           >
                             {group.key}
                           </span>
-                        )}
+                        ) : null}
                         <span className="ml-auto shrink-0 tabular-nums">
                           {group.rows.length}
                         </span>
@@ -935,9 +974,9 @@ export function FindingsPanel({
                           {/* Full-width type line, matching the alert rows. */}
                           <p
                             className="mt-1 truncate text-xs font-medium"
-                            title={a.secretTypeDisplayName}
+                            title={secretTypeLabel(a)}
                           >
-                            {a.secretTypeDisplayName}
+                            {secretTypeLabel(a)}
                           </p>
                         </button>
                       ))}
@@ -1027,10 +1066,18 @@ export function FindingsPanel({
                       >
                         <p className="flex items-center gap-2 text-[11px] text-muted-foreground">
                           <SeverityChip severity={adv.severity} />
-                          <span className="ml-auto min-w-0 truncate font-mono">
-                            {adv.ghsaId}
+                          {adv.ghsaId ? (
+                            <span className="ml-auto min-w-0 truncate font-mono">
+                              {adv.ghsaId}
+                            </span>
+                          ) : null}
+                          {/* The GHSA span normally carries `ml-auto`; without
+                              it the state takes over pushing the row right. */}
+                          <span
+                            className={cn("shrink-0", !adv.ghsaId && "ml-auto")}
+                          >
+                            {adv.state}
                           </span>
-                          <span className="shrink-0">{adv.state}</span>
                           {when ? (
                             <span className="shrink-0">
                               <RelativeTime date={when} />

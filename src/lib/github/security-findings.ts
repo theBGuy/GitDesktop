@@ -10,6 +10,10 @@ import { invoke } from "@/lib/tauri/invoke";
 export type FindingAvailability =
   | "available"
   | "notEnabled"
+  /** The server answered, but nothing has been reported yet — the feature may be
+   *  unconfigured or its first run may still be going. Distinct from
+   *  `notEnabled`, which the wire proves; this state can't tell the two apart. */
+  | "noResultsYet"
   | "forbidden"
   | "indeterminate";
 
@@ -120,7 +124,6 @@ export interface SecretScanningAlertOut {
    *  providers it has a checker for, so null means "never checked". */
   validity: string | null;
   publiclyLeaked: boolean | null;
-  resolution: string | null;
   htmlUrl: string;
   createdAt: string;
   updatedAt: string;

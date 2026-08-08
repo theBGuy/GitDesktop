@@ -1345,9 +1345,12 @@ only reads as clean once GitHub has confirmed it's switched on. When **Dependabo
 alerts**, **code scanning**, or **secret scanning** is switched off for the repo and you
 have repo-admin access, **Open security settings** takes you straight to **Repository
 settings → Security**, where you turn that scanning on (see *Repository settings*).
-Advisories have no such switch — they're only published on public repositories, so
-their card says just that. When your GitHub access can't read a category, you see what
-GitHub said about it; when the check couldn't complete at all, you get a **Retry**.
+**Code scanning** hedges on purpose: GitHub reports nothing whether it was never set up
+or its first analysis is still running, so its card says results haven't arrived yet
+instead of guessing, and keeps the settings link for either case. Advisories have no
+such switch — they're only published on public repositories, so their card says just
+that. When your GitHub access can't read a category, you see what GitHub said about it;
+when the check couldn't complete at all, you get a **Retry**.
 
 The tab fetches when you open it — use the refresh button for the current state.`,
   },

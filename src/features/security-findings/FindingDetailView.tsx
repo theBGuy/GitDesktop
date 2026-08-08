@@ -164,7 +164,9 @@ function ReferencesSection({ references }: { references: ReferenceOut[] }) {
 function AlertDetail({ alert }: { alert: DependabotAlertOut }) {
   return (
     <DetailShell
-      title={alert.summary}
+      // Falls back to the identity field, never invented prose: a doubly-degraded
+      // item with no GHSA id either keeps a blank heading rather than a lie.
+      title={alert.summary || alert.ghsaId}
       chip={<SeverityChip severity={alert.severity} />}
       htmlUrl={alert.htmlUrl}
       meta={
@@ -194,7 +196,9 @@ function AlertDetail({ alert }: { alert: DependabotAlertOut }) {
               <span className="font-mono">{alert.cveId}</span>
             </Row>
           ) : null}
-          {alert.cvssScore !== null ? (
+          {/* Only when there's no CVSS section to carry the score — otherwise
+              this row and the first section state the same number twice. */}
+          {alert.cvssScore !== null && alert.cvss.length === 0 ? (
             <Row label="CVSS">
               <span className="tabular-nums">{alert.cvssScore}</span>
             </Row>
@@ -244,10 +248,17 @@ function capitalizeFirst(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
+/** `path:line`, or a placeholder when the path came through empty — a line
+ *  number hung off nothing reads as a location. Must stay in step with
+ *  `PathLabel` in FindingsPanel, which renders the same value in the list. */
+function locationText(path: string, line: number | null): string {
+  return path ? (line === null ? path : `${path}:${line}`) : "No file path";
+}
+
 function CodeScanningDetail({ alert }: { alert: CodeScanningAlertOut }) {
   return (
     <DetailShell
-      title={alert.ruleName ?? alert.ruleId}
+      title={alert.ruleName || alert.ruleId || "Unidentified rule"}
       chip={
         <CodeScanningChip
           securitySeverity={alert.securitySeverity}
@@ -257,9 +268,13 @@ function CodeScanningDetail({ alert }: { alert: CodeScanningAlertOut }) {
       htmlUrl={alert.htmlUrl}
       meta={
         <>
-          <Row label="Rule">
-            <span className="font-mono">{alert.ruleId}</span>
-          </Row>
+          {/* Omitted outright when the id is empty — the title already carries
+              the fallback, matching how a missing date drops its row. */}
+          {alert.ruleId ? (
+            <Row label="Rule">
+              <span className="font-mono">{alert.ruleId}</span>
+            </Row>
+          ) : null}
           {/* The SARIF level, spelled out — the chip shows it only when the rule
               carries no security severity to outrank it. */}
           {alert.severity ? (
@@ -276,9 +291,7 @@ function CodeScanningDetail({ alert }: { alert: CodeScanningAlertOut }) {
           </Row>
           <Row label="Location">
             <span className="font-mono">
-              {alert.startLine === null
-                ? alert.path
-                : `${alert.path}:${alert.startLine}`}
+              {locationText(alert.path, alert.startLine)}
             </span>
           </Row>
           {alert.ref ? (
@@ -286,7 +299,8 @@ function CodeScanningDetail({ alert }: { alert: CodeScanningAlertOut }) {
               <span className="font-mono">{alert.ref}</span>
             </Row>
           ) : null}
-          <Row label="State">{alert.state}</Row>
+          {/* No State row: the fetch pins state=open, so it could only ever
+              read "open". */}
           <Row label="Opened">
             <RelativeTime date={alert.createdAt} />
           </Row>
@@ -306,17 +320,19 @@ function CodeScanningDetail({ alert }: { alert: CodeScanningAlertOut }) {
 function SecretScanningDetail({ alert }: { alert: SecretScanningAlertOut }) {
   return (
     <DetailShell
-      title={alert.secretTypeDisplayName}
+      title={
+        alert.secretTypeDisplayName || alert.secretType || "Unknown secret type"
+      }
       chip={<ValidityChip validity={alert.validity} />}
       htmlUrl={alert.htmlUrl}
       meta={
         <>
-          <Row label="Type">{alert.secretTypeDisplayName}</Row>
+          <Row label="Type">
+            {alert.secretTypeDisplayName || alert.secretType || "Unknown"}
+          </Row>
           <Row label="Validity">{validityLabel(alert.validity)}</Row>
-          <Row label="State">{alert.state}</Row>
-          {alert.resolution ? (
-            <Row label="Resolution">{alert.resolution}</Row>
-          ) : null}
+          {/* No State row: the fetch pins state=open, so it could only ever
+              read "open". */}
           {/* Only for a confirmed public leak — a null means GitHub didn't say,
               and "No" would read as a clearance it never gave. */}
           {alert.publiclyLeaked === true ? (
@@ -340,7 +356,7 @@ function SecretScanningDetail({ alert }: { alert: SecretScanningAlertOut }) {
 function AdvisoryDetail({ advisory }: { advisory: RepoAdvisoryOut }) {
   return (
     <DetailShell
-      title={advisory.summary}
+      title={advisory.summary || advisory.ghsaId}
       chip={<SeverityChip severity={advisory.severity} />}
       htmlUrl={advisory.htmlUrl}
       meta={
