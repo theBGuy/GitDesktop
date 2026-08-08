@@ -646,11 +646,17 @@ fn reference_label(url: &str) -> String {
     }
 }
 
-/// Drops entries with no URL: a reference is only ever rendered as a link.
+/// Drops anything that isn't an http(s) link. An advisory's references are
+/// community-contributed, and this row renders as an openable link — no other
+/// scheme has a meaning here worth handing to the opener.
 fn references_out(raw: Option<Vec<RawReference>>) -> Vec<ReferenceOut> {
     raw.unwrap_or_default()
         .into_iter()
-        .filter_map(|r| r.url.filter(|u| !u.is_empty()))
+        .filter_map(|r| r.url)
+        .filter(|u| {
+            let lower = u.to_ascii_lowercase();
+            lower.starts_with("http://") || lower.starts_with("https://")
+        })
         .map(|url| ReferenceOut {
             label: reference_label(&url),
             url,
@@ -2041,7 +2047,8 @@ mod tests {
 
     #[test]
     fn advisory_detail_lists_drop_unusable_entries() {
-        // A reference with no URL can't be a link and a CWE with no id can't be named.
+        // Only http(s) survives: a reference is rendered as an openable link, and the
+        // list is community-contributed, so a mail address or a local path is not one.
         let references = references_out(Some(vec![
             RawReference {
                 url: Some("https://nvd.nist.gov/vuln/detail/CVE-1".into()),
@@ -2049,6 +2056,15 @@ mod tests {
             RawReference { url: None },
             RawReference {
                 url: Some(String::new()),
+            },
+            RawReference {
+                url: Some("mailto:security@example.com".into()),
+            },
+            RawReference {
+                url: Some("file:///C:/Windows/System32/drivers/etc/hosts".into()),
+            },
+            RawReference {
+                url: Some("not a url".into()),
             },
         ]));
         assert_eq!(references.len(), 1);

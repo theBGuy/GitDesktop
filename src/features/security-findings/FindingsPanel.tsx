@@ -337,6 +337,12 @@ function UnavailableCard({
       Open security settings
     </Button>
   ) : undefined;
+  const retryAction = (
+    <Button variant="outline" size="sm" onClick={onRetry}>
+      <ArrowClockwiseIcon data-icon="inline-start" />
+      Retry
+    </Button>
+  );
 
   if (availability === "notEnabled") {
     // The category's own sentence is how a non-admin learns what to ask for, so
@@ -355,17 +361,23 @@ function UnavailableCard({
   }
   if (availability === "noResultsYet") {
     // Deliberately not phrased as "turn it on": this state can't distinguish an
-    // unconfigured feature from one whose first analysis is still running, so it
-    // names both. The settings action stays — setup is the likely need.
+    // unconfigured feature from one whose first analysis is still running, so
+    // both the copy and the actions cover each — settings for setup, Retry for
+    // a run that may since have finished. Retry is the non-admin's only path.
     return (
       <ReasonCard
         icon={InfoIcon}
         message={
           noResultsYetMessage ??
-          `No ${category} have been reported for this repository yet.`
+          `No ${category} have been reported for this repository yet — the feature may not be set up, or its first run may still be going.`
         }
         detail={noResultsYetMessage ? null : detail}
-        action={enableAction}
+        action={
+          <div className="flex flex-wrap items-center gap-2">
+            {enableAction}
+            {retryAction}
+          </div>
+        }
       />
     );
   }
@@ -384,12 +396,7 @@ function UnavailableCard({
         icon={QuestionIcon}
         message={`Couldn't check ${category}.`}
         detail={detail}
-        action={
-          <Button variant="outline" size="sm" onClick={onRetry}>
-            <ArrowClockwiseIcon data-icon="inline-start" />
-            Retry
-          </Button>
-        }
+        action={retryAction}
       />
     );
   }
