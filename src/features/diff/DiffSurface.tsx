@@ -43,6 +43,7 @@ import { DiffErrorBoundary } from "./DiffErrorBoundary";
 import { DiffLanguagePicker } from "./DiffLanguagePicker";
 import { DiffPlaceholder } from "./DiffPlaceholder";
 import { diffLang } from "./diff-lang";
+import { installHljsGapIsolation } from "./gap-isolation";
 import { djb2 } from "./highlight-worker-shared";
 import { ImageDiff, ImagePanes, type ImageRevs, imageMime } from "./ImageDiff";
 import {
@@ -291,6 +292,11 @@ export const HIGHLIGHT_MAX_LINES = 2000;
 // by the char budgets above. SYNTAX_LINE_CAP is shared with the Shiki +
 // precomputed highlighters.
 highlighter.setMaxLineToIgnoreSyntax(SYNTAX_LINE_CAP);
+// Same singleton, gap isolation: a hunk-reconstructed buffer is tokenized per
+// contiguous non-blank run, so an unclosed construct at a hunk boundary can't
+// bleed to EOF. An explicit call, not a side-effect import, so it can't be
+// tree-shaken.
+installHljsGapIsolation();
 
 /**
  * Build a parsed `DiffFile` from unified-diff text, with syntax highlighting

@@ -13,6 +13,7 @@ import { createJavaScriptRegexEngine } from "@shikijs/engine-javascript";
 import jsonGrammar from "@shikijs/langs/json";
 import type { LanguageRegistration } from "@shikijs/types";
 import type { CustomLanguage } from "@/lib/settings/api";
+import { gapIsolatedAst } from "./gap-isolation";
 import { gdDark, gdLight } from "./shiki-theme";
 
 /**
@@ -273,7 +274,9 @@ export function shikiDiffHighlighter(
     getAST: (raw, _fileName, lang) => {
       if (!lang || !loaded.has(lang)) return EMPTY_AST;
       try {
-        return buildHast(raw, lang, isDarkOverride);
+        return gapIsolatedAst(raw, (segment) =>
+          buildHast(segment, lang, isDarkOverride),
+        );
       } catch {
         return EMPTY_AST;
       }
