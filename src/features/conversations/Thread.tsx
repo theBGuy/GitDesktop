@@ -97,6 +97,7 @@ export function Thread({
   onToggleReaction,
   renderBody,
   copyMarkdown,
+  writeDisabledReason,
 }: {
   thread: PrThreadOut;
   onQuote?: () => void;
@@ -117,6 +118,10 @@ export function Thread({
   onHide?: (classifier: MinimizeReason) => void;
   /** Unhide a previously hidden comment. */
   onUnhide?: () => void;
+  /** Set when the viewer may not write to the repo: the hide/unhide items stay
+   *  visible but disabled, with this text appended to their label (a disabled
+   *  item drops pointer events, so a tooltip would never show). */
+  writeDisabledReason?: string;
   /** Current reactions on this comment (only used when onToggleReaction set). */
   reactions?: Reaction[];
   /** Present to enable the reaction bar; toggles the viewer's reaction. */
@@ -126,6 +131,7 @@ export function Thread({
   const [draft, setDraft] = useState("");
   const [expanded, setExpanded] = useState(false);
   const minimized = thread.isMinimized;
+  const writeSuffix = writeDisabledReason ? ` — ${writeDisabledReason}` : "";
   return (
     <div className="group space-y-1">
       <p className="flex items-center gap-2 text-xs">
@@ -197,11 +203,24 @@ export function Thread({
                   </DropdownMenuItem>
                 )}
                 {onUnhide && minimized && (
-                  <DropdownMenuItem onClick={onUnhide}>Unhide</DropdownMenuItem>
+                  <DropdownMenuItem
+                    disabled={!!writeDisabledReason}
+                    onClick={onUnhide}
+                  >
+                    Unhide{writeSuffix}
+                  </DropdownMenuItem>
                 )}
                 {onHide && !minimized && (
                   <DropdownMenuSub>
-                    <DropdownMenuSubTrigger>Hide…</DropdownMenuSubTrigger>
+                    {/* The vendored sub-trigger carries no disabled styling of
+                        its own (unlike menu items), so the dim rides a
+                        call-site class. */}
+                    <DropdownMenuSubTrigger
+                      disabled={!!writeDisabledReason}
+                      className="data-disabled:opacity-50"
+                    >
+                      Hide…{writeSuffix}
+                    </DropdownMenuSubTrigger>
                     <DropdownMenuSubContent>
                       {HIDE_REASONS.map(([label, classifier]) => (
                         <DropdownMenuItem

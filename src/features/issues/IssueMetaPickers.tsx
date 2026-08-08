@@ -69,6 +69,7 @@ export function AssigneesPopover({
   onChange,
   commitOnClose = false,
   lens,
+  disabledReason,
 }: {
   repoPath: string;
   enabled: boolean;
@@ -77,6 +78,9 @@ export function AssigneesPopover({
   commitOnClose?: boolean;
   /** The origin|upstream lens the parent surface resolved. */
   lens: RemoteLens;
+  /** Set when the viewer may not write to the repo: the trigger stays visible
+   *  but disabled and this text explains why. Absent = editable as before. */
+  disabledReason?: string;
 }) {
   const users = useAssignableUsers(repoPath, enabled, lens);
   const ghHost = useForgeGhHost(repoPath);
@@ -129,14 +133,24 @@ export function AssigneesPopover({
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       <Popover.Root open={open} onOpenChange={handleOpenChange}>
-        <Popover.Trigger
-          render={
-            <Button variant="ghost" size="xs" aria-label="Edit assignees" />
+        {/* A natively disabled button swallows `title`, so the reason rides a
+            wrapping span. */}
+        <span
+          title={disabledReason}
+          className={
+            disabledReason ? "inline-flex cursor-not-allowed" : "inline-flex"
           }
         >
-          <UserPlusIcon data-icon="inline-start" />
-          Assignees
-        </Popover.Trigger>
+          <Popover.Trigger
+            disabled={!!disabledReason}
+            render={
+              <Button variant="ghost" size="xs" aria-label="Edit assignees" />
+            }
+          >
+            <UserPlusIcon data-icon="inline-start" />
+            Assignees
+          </Popover.Trigger>
+        </span>
         <Popover.Portal>
           <Popover.Positioner
             align="start"
@@ -191,6 +205,7 @@ export function MilestoneMenu({
   valueLabel,
   onChange,
   lens,
+  disabledReason,
 }: {
   repoPath: string;
   enabled: boolean;
@@ -199,6 +214,9 @@ export function MilestoneMenu({
   onChange: (milestone: number | null, title: string | null) => void;
   /** The origin|upstream lens the parent surface resolved. */
   lens: RemoteLens;
+  /** Set when the viewer may not write to the repo: the trigger stays visible
+   *  but disabled and this text explains why. Absent = editable as before. */
+  disabledReason?: string;
 }) {
   const milestones = useMilestones(repoPath, enabled, lens);
   const list = milestones.data ?? [];
@@ -211,15 +229,25 @@ export function MilestoneMenu({
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       <DropdownMenu>
-        <DropdownMenuTrigger
-          render={
-            <Button variant="ghost" size="xs" aria-label="Set milestone" />
+        {/* A natively disabled button swallows `title`, so the reason rides a
+            wrapping span. */}
+        <span
+          title={disabledReason}
+          className={
+            disabledReason ? "inline-flex cursor-not-allowed" : "inline-flex"
           }
         >
-          <FlagIcon data-icon="inline-start" />
-          {display}
-          <CaretDownIcon data-icon="inline-end" />
-        </DropdownMenuTrigger>
+          <DropdownMenuTrigger
+            disabled={!!disabledReason}
+            render={
+              <Button variant="ghost" size="xs" aria-label="Set milestone" />
+            }
+          >
+            <FlagIcon data-icon="inline-start" />
+            {display}
+            <CaretDownIcon data-icon="inline-end" />
+          </DropdownMenuTrigger>
+        </span>
         <DropdownMenuContent align="start" className="min-w-52">
           <DropdownMenuItem
             onClick={() => onChange(null, null)}

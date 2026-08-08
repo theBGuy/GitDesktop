@@ -3847,14 +3847,47 @@ pub async fn repo_admin(repo_path: &str) -> AppResult<bool> {
     Ok(repo_admin_matches(&page.values, &slug))
 }
 
-/// A repo's slug only, for the admin probe's slug match.
+/// Whether the signed-in viewer can push to this repo — the write twin of
+/// [`repo_admin`], asking the same endpoint for `role=contributor` (Bitbucket's
+/// write tier). The listing answering without the repo is an affirmative "no
+/// write"; a credential/HTTP failure errors instead, so the caller can tell the
+/// two apart.
+pub async fn repo_write_access(repo_path: &str) -> AppResult<crate::forge::ForgeRepoWriteAccess> {
+    let (ws, slug) = workspace_slug(repo_path).await?;
+    if slug.contains('"') {
+        return Err(AppError::Bitbucket(format!(
+            "unexpected characters in repository slug: {slug}"
+        )));
+    }
+    let creds = http::load_credentials().await?;
+    // Lowercase the BBQL value — the server-side `slug="…"` filter is
+    // case-sensitive, so a mixed-case clone URL would match 0 rows.
+    let query = format!(r#"slug="{}""#, slug.to_ascii_lowercase());
+    let path = format!(
+        "repositories/{}?role=contributor&q={}&pagelen=100",
+        encode_query_value(&ws),
+        encode_query_value(&query),
+    );
+    let page: BbPage<BbRepoSlug> = http::bb_get_json(&creds, &path, "repositories").await?;
+    let listed = repo_admin_matches(&page.values, &slug);
+    Ok(crate::forge::ForgeRepoWriteAccess {
+        can_push: Some(listed),
+        // Bitbucket has no triage tier — issue/PR metadata rides on write.
+        can_triage: Some(listed),
+        role: listed.then(|| "contributor".to_string()),
+        repo: Some(format!("{ws}/{slug}")),
+        unknown_reason: None,
+    })
+}
+
+/// A repo's slug only, for the role-scoped probes' slug match.
 #[derive(Deserialize)]
 struct BbRepoSlug {
     #[serde(default)]
     slug: String,
 }
 
-/// Whether the admin-scoped repo list contains this slug (case-insensitive). Pure
+/// Whether a role-scoped repo list contains this slug (case-insensitive). Pure
 /// (testable): the `q=slug="…"` filter is server-side, but we confirm the match
 /// defensively rather than trusting a non-empty list.
 fn repo_admin_matches(repos: &[BbRepoSlug], slug: &str) -> bool {

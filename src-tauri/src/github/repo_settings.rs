@@ -8,7 +8,7 @@ use serde_json::json;
 
 use crate::error::{AppError, AppResult};
 use crate::github::runner::{
-    run_gh, run_gh_input, run_gh_raw, GH_NETWORK_TIMEOUT, GH_TIMEOUT,
+    run_gh, run_gh_input, run_gh_raw, GhOutput, GH_NETWORK_TIMEOUT, GH_TIMEOUT,
 };
 
 /// Whether the signed-in user is an admin on this repo — gates the repo-settings /
@@ -30,6 +30,119 @@ pub async fn gh_repo_admin(repo_path: String) -> AppResult<bool> {
         return Ok(false);
     }
     Ok(out.stdout_lossy().trim() == "true")
+}
+
+/// The viewer's permission bits on `GET repos/{slug}`. Every flag is optional:
+/// GitHub omits the whole block for an unauthenticated read and has added tiers
+/// (triage/maintain) over time, so an absent flag must read as "didn't say"
+/// rather than "false".
+#[derive(Deserialize)]
+struct GhRepoPermissions {
+    #[serde(default)]
+    admin: Option<bool>,
+    #[serde(default)]
+    maintain: Option<bool>,
+    #[serde(default)]
+    push: Option<bool>,
+    #[serde(default)]
+    triage: Option<bool>,
+    #[serde(default)]
+    pull: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct GhRepoPermissionsJson {
+    #[serde(default)]
+    permissions: Option<GhRepoPermissions>,
+}
+
+/// The highest role the permission bits name, `None` when none is set. Ordered
+/// most- to least-privileged: GitHub sets every tier at or below the viewer's.
+fn role_from_permissions(p: &GhRepoPermissions) -> Option<String> {
+    [
+        (p.admin, "admin"),
+        (p.maintain, "maintain"),
+        (p.push, "write"),
+        (p.triage, "triage"),
+        (p.pull, "read"),
+    ]
+    .into_iter()
+    .find(|(flag, _)| *flag == Some(true))
+    .map(|(_, role)| role.to_string())
+}
+
+/// `(can_push, can_triage, role)`, the shape both the probe and its tests read.
+type WriteAccessBits = (Option<bool>, Option<bool>, Option<String>);
+
+/// The permission bits from a `GET repos/{slug}` body. Pure. `Err` carries the
+/// unknown-reason: unparseable JSON or a missing `permissions` block means the
+/// probe couldn't answer, which must never collapse into "cannot push".
+///
+/// Triage falls back to the push bit — a response predating the triage tier still
+/// says a pusher can manage metadata; both absent stays unknown.
+fn write_access_from_repo_json(repo_json: &str) -> Result<WriteAccessBits, String> {
+    let parsed: GhRepoPermissionsJson = serde_json::from_str(repo_json)
+        .map_err(|e| format!("could not read the repository's permissions: {e}"))?;
+    let perms = parsed
+        .permissions
+        .ok_or_else(|| "the repository response carried no permissions".to_string())?;
+    Ok((
+        perms.push,
+        perms.triage.or(perms.push),
+        role_from_permissions(&perms),
+    ))
+}
+
+/// A one-line reason for a failed `gh` call — its first non-empty stderr line,
+/// or the exit status when gh said nothing. It reaches the UI, so keep it short.
+fn gh_failure_reason(out: &GhOutput) -> String {
+    out.stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("gh exited with status {}", out.code))
+}
+
+/// Whether the signed-in viewer can push to this repo — the viewer-permission
+/// probe behind `forge_repo_write_access`'s GitHub arm.
+///
+/// Resolved through the LENS, not origin: a fork PR targets the parent repo, and
+/// the parent's permission is what gates that PR's controls. Every failure mode
+/// (gh error, unparseable body, no `permissions` block) answers `can_push: None`
+/// with a reason — `Some(false)` is reserved for GitHub affirmatively saying the
+/// viewer can't push, so a broken probe never hides a control the user can use.
+pub async fn gh_repo_write_access(
+    repo_path: String,
+    lens: Option<String>,
+) -> AppResult<crate::forge::ForgeRepoWriteAccess> {
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
+    let out = run_gh_raw(
+        Some(&repo_path),
+        &["api", &format!("repos/{slug}")],
+        GH_TIMEOUT,
+    )
+    .await?;
+    let unknown = |reason: String| crate::forge::ForgeRepoWriteAccess {
+        can_push: None,
+        can_triage: None,
+        role: None,
+        repo: Some(slug.clone()),
+        unknown_reason: Some(reason),
+    };
+    if out.code != 0 {
+        return Ok(unknown(gh_failure_reason(&out)));
+    }
+    match write_access_from_repo_json(&out.stdout_lossy()) {
+        Ok((can_push, can_triage, role)) => Ok(crate::forge::ForgeRepoWriteAccess {
+            can_push,
+            can_triage,
+            role,
+            repo: Some(slug),
+            unknown_reason: None,
+        }),
+        Err(reason) => Ok(unknown(reason)),
+    }
 }
 
 /// The `parent` block `gh repo view --json parent` returns for a fork — the
@@ -733,4 +846,71 @@ pub async fn gh_repo_settings_update(
         settings.topics = t.names;
     }
     Ok(settings)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_access_from_repo_json;
+
+    #[test]
+    fn write_access_reads_the_permissions_block() {
+        // GitHub sets every tier at or below the viewer's, so the role is the
+        // highest set flag.
+        assert_eq!(
+            write_access_from_repo_json(
+                r#"{"permissions":{"admin":false,"maintain":true,"push":true,"triage":true,"pull":true}}"#
+            ),
+            Ok((Some(true), Some(true), Some("maintain".into()))),
+        );
+        assert_eq!(
+            write_access_from_repo_json(
+                r#"{"permissions":{"admin":true,"maintain":true,"push":true,"triage":true,"pull":true}}"#
+            ),
+            Ok((Some(true), Some(true), Some("admin".into()))),
+        );
+        // A read-only viewer: an AFFIRMATIVE denial, distinct from unknown.
+        assert_eq!(
+            write_access_from_repo_json(
+                r#"{"permissions":{"admin":false,"maintain":false,"push":false,"triage":false,"pull":true}}"#
+            ),
+            Ok((Some(false), Some(false), Some("read".into()))),
+        );
+        // A triager can't push but DOES manage metadata — the axis that keeps
+        // labels/assignees enabled for a real collaborator.
+        assert_eq!(
+            write_access_from_repo_json(
+                r#"{"permissions":{"admin":false,"maintain":false,"push":false,"triage":true,"pull":true}}"#
+            ),
+            Ok((Some(false), Some(true), Some("triage".into()))),
+        );
+        // Tiers the response omits don't invent a role, and no flag set at all
+        // leaves the role unlabeled while `push` still answers. A response with
+        // no `triage` key borrows the push bit.
+        assert_eq!(
+            write_access_from_repo_json(r#"{"permissions":{"push":true,"pull":true}}"#),
+            Ok((Some(true), Some(true), Some("write".into()))),
+        );
+        assert_eq!(
+            write_access_from_repo_json(
+                r#"{"permissions":{"admin":false,"push":false,"pull":false}}"#
+            ),
+            Ok((Some(false), Some(false), None)),
+        );
+    }
+
+    #[test]
+    fn write_access_reports_unknown_rather_than_denying() {
+        // No `permissions` block (unauthenticated read) — the probe can't answer.
+        let no_block = write_access_from_repo_json(r#"{"full_name":"o/r"}"#).unwrap_err();
+        assert!(no_block.contains("permissions"), "{no_block}");
+        // `permissions` present but without `push` or `triage`: the role can still
+        // be read, yet both axes stay unknown rather than defaulting to false.
+        assert_eq!(
+            write_access_from_repo_json(r#"{"permissions":{"pull":true}}"#),
+            Ok((None, None, Some("read".into()))),
+        );
+        // A null block and unparseable output are both unknown, never `false`.
+        assert!(write_access_from_repo_json(r#"{"permissions":null}"#).is_err());
+        assert!(write_access_from_repo_json("gh: not found (HTTP 404)").is_err());
+    }
 }

@@ -853,6 +853,20 @@ export interface ForgeRepoAdmin {
   owner: boolean;
 }
 
+/** Viewer write-permission on the repo behind the lens. null everywhere = the
+ *  probe couldn't answer — consumers must FAIL OPEN (leave controls enabled). */
+export interface ForgeRepoWriteAccess {
+  canPush: boolean | null;
+  /** Triage tier and above, which grants labels / assignees / milestones / pin /
+   *  lock WITHOUT push (GitHub triage; GitLab Reporter) — a separate axis, not
+   *  implied by `canPush`. */
+  canTriage: boolean | null;
+  role: string | null;
+  /** The probed repo identity ("owner/repo") for UI copy. */
+  repo: string | null;
+  unknownReason: string | null;
+}
+
 /** GitLab project settings — its own shape rather than a lossy mapping onto
  *  {@link RepoSettings}: features are ACCESS LEVELS (enabled / private /
  *  disabled), the merge style is one enum, squash is a four-way option. */

@@ -40,9 +40,11 @@ import {
   usePushTag,
   useReleaseDetails,
   useReleaseList,
+  useRepoWriteAccess,
   useSyncUpdaterNotes,
   useTagList,
   useUploadReleaseAsset,
+  writeAccessReason,
 } from "@/lib/git/queries";
 import { providerLabel } from "@/lib/git/types";
 import { useUiStore } from "@/lib/stores/ui";
@@ -78,6 +80,16 @@ export function TagDetailView({
   const canWrite = provider !== "gitlab" && provider !== "bitbucket";
   const canManage = canWrite || forgeFeatureReady(gh.data, "releaseEdit");
   const canCreate = canWrite || forgeFeatureReady(gh.data, "releaseCreate");
+  // Publishing a release is a repo write: an explicitly read-only viewer keeps
+  // the buttons (disabled, with the reason). Releases are repo-wide — no lens.
+  const writeAccess = useRepoWriteAccess(repoPath, undefined, !!provider);
+  const writeReason = writeAccessReason(writeAccess.data);
+  const writeBlocked = writeAccess.data?.canPush === false;
+  // A natively-disabled Button swallows `title`, so every hint below rides a
+  // wrapping span (house idiom).
+  const blockedSpanClass = writeBlocked
+    ? "inline-flex cursor-not-allowed"
+    : "inline-flex";
   const remoteLabel = providerLabel(provider);
   // Ask the provider for a release only when connected; otherwise it's just a tag.
   const release = useReleaseDetails(repoPath, ghReady ? tag : null);
@@ -168,59 +180,67 @@ export function TagDetailView({
             {canManage && (
               <>
                 {rel.isDraft && (
+                  <span title={writeReason} className={blockedSpanClass}>
+                    <Button
+                      variant="outline"
+                      size="xs"
+                      disabled={editRelease.isPending || writeBlocked}
+                      onClick={() =>
+                        editRelease.mutate(
+                          {
+                            tag,
+                            title: "",
+                            notes: "",
+                            prerelease: rel.isPrerelease,
+                            draft: false,
+                            // Omit --latest so GitHub applies its default (a newly
+                            // published stable release becomes Latest, like the web UI).
+                            // A draft's isLatest is structurally false — sending it here
+                            // was the bug that stripped Latest on publish.
+                            latest: undefined,
+                          },
+                          {
+                            onSuccess: () => toast.success("Published"),
+                            onError,
+                          },
+                        )
+                      }
+                    >
+                      Publish
+                    </Button>
+                  </span>
+                )}
+                <span title={writeReason} className={blockedSpanClass}>
                   <Button
                     variant="outline"
                     size="xs"
-                    disabled={editRelease.isPending}
-                    onClick={() =>
-                      editRelease.mutate(
-                        {
-                          tag,
-                          title: "",
-                          notes: "",
-                          prerelease: rel.isPrerelease,
-                          draft: false,
-                          // Omit --latest so GitHub applies its default (a newly
-                          // published stable release becomes Latest, like the web UI).
-                          // A draft's isLatest is structurally false — sending it here
-                          // was the bug that stripped Latest on publish.
-                          latest: undefined,
-                        },
-                        {
-                          onSuccess: () => toast.success("Published"),
-                          onError,
-                        },
-                      )
-                    }
+                    disabled={writeBlocked}
+                    onClick={() => {
+                      setEditTitle(rel.name);
+                      setEditNotes(rel.body);
+                      setEditPrerelease(rel.isPrerelease);
+                      setEditLatest(isLatest);
+                      setEditSyncUpdater(true);
+                      setSyncArmed(false);
+                      setEditOpen(true);
+                    }}
                   >
-                    Publish
+                    Edit
                   </Button>
-                )}
-                <Button
-                  variant="outline"
-                  size="xs"
-                  onClick={() => {
-                    setEditTitle(rel.name);
-                    setEditNotes(rel.body);
-                    setEditPrerelease(rel.isPrerelease);
-                    setEditLatest(isLatest);
-                    setEditSyncUpdater(true);
-                    setSyncArmed(false);
-                    setEditOpen(true);
-                  }}
-                >
-                  Edit
-                </Button>
-                <Button
-                  variant="outline"
-                  size="xs"
-                  onClick={() => {
-                    setCleanupTag(false);
-                    setDeleteOpen(true);
-                  }}
-                >
-                  Delete
-                </Button>
+                </span>
+                <span title={writeReason} className={blockedSpanClass}>
+                  <Button
+                    variant="outline"
+                    size="xs"
+                    disabled={writeBlocked}
+                    onClick={() => {
+                      setCleanupTag(false);
+                      setDeleteOpen(true);
+                    }}
+                  >
+                    Delete
+                  </Button>
+                </span>
               </>
             )}
             {rel.url && (
@@ -266,19 +286,21 @@ export function TagDetailView({
                 <span className="flex-1" />
                 {/* GitHub attaches a binary; GitLab uploads + links the file. */}
                 {canManage && (
-                  <Button
-                    variant="ghost"
-                    size="xs"
-                    disabled={uploadAsset.isPending}
-                    onClick={onUpload}
-                  >
-                    {uploadAsset.isPending ? (
-                      <Spinner data-icon="inline-start" />
-                    ) : (
-                      <UploadSimpleIcon data-icon="inline-start" />
-                    )}
-                    Upload
-                  </Button>
+                  <span title={writeReason} className={blockedSpanClass}>
+                    <Button
+                      variant="ghost"
+                      size="xs"
+                      disabled={uploadAsset.isPending || writeBlocked}
+                      onClick={onUpload}
+                    >
+                      {uploadAsset.isPending ? (
+                        <Spinner data-icon="inline-start" />
+                      ) : (
+                        <UploadSimpleIcon data-icon="inline-start" />
+                      )}
+                      Upload
+                    </Button>
+                  </span>
                 )}
               </div>
               {rel.assets.length === 0 ? (
@@ -310,23 +332,27 @@ export function TagDetailView({
                         >
                           <DownloadSimpleIcon />
                         </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon-xs"
-                          aria-label={`Delete ${a.name}`}
-                          className="text-muted-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
-                          onClick={() =>
-                            deleteAsset.mutate(
-                              { tag, assetName: a.name },
-                              {
-                                onSuccess: () => toast.success("Asset deleted"),
-                                onError,
-                              },
-                            )
-                          }
-                        >
-                          <TrashIcon />
-                        </Button>
+                        <span title={writeReason} className={blockedSpanClass}>
+                          <Button
+                            variant="ghost"
+                            size="icon-xs"
+                            aria-label={`Delete ${a.name}`}
+                            disabled={writeBlocked}
+                            className="text-muted-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                            onClick={() =>
+                              deleteAsset.mutate(
+                                { tag, assetName: a.name },
+                                {
+                                  onSuccess: () =>
+                                    toast.success("Asset deleted"),
+                                  onError,
+                                },
+                              )
+                            }
+                          >
+                            <TrashIcon />
+                          </Button>
+                        </span>
                       </>
                     ) : (
                       // GitLab asset links carry no size/download count — open the
@@ -345,24 +371,30 @@ export function TagDetailView({
                           </Button>
                         )}
                         {canManage && (
-                          <Button
-                            variant="ghost"
-                            size="icon-xs"
-                            aria-label={`Delete ${a.name}`}
-                            className="text-muted-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
-                            onClick={() =>
-                              deleteAsset.mutate(
-                                { tag, assetName: a.name },
-                                {
-                                  onSuccess: () =>
-                                    toast.success("Asset deleted"),
-                                  onError,
-                                },
-                              )
-                            }
+                          <span
+                            title={writeReason}
+                            className={blockedSpanClass}
                           >
-                            <TrashIcon />
-                          </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon-xs"
+                              aria-label={`Delete ${a.name}`}
+                              disabled={writeBlocked}
+                              className="text-muted-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                              onClick={() =>
+                                deleteAsset.mutate(
+                                  { tag, assetName: a.name },
+                                  {
+                                    onSuccess: () =>
+                                      toast.success("Asset deleted"),
+                                    onError,
+                                  },
+                                )
+                              }
+                            >
+                              <TrashIcon />
+                            </Button>
+                          </span>
                         )}
                       </>
                     )}
@@ -614,13 +646,16 @@ export function TagDetailView({
           <h2 className="font-mono text-sm font-medium">{tag}</h2>
           <span className="flex-1" />
           {ghReady && canCreate && (
-            <Button
-              variant="outline"
-              size="xs"
-              onClick={() => setCreateReleaseOpen(true)}
-            >
-              Create release
-            </Button>
+            <span title={writeReason} className={blockedSpanClass}>
+              <Button
+                variant="outline"
+                size="xs"
+                disabled={writeBlocked}
+                onClick={() => setCreateReleaseOpen(true)}
+              >
+                Create release
+              </Button>
+            </span>
           )}
         </div>
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">

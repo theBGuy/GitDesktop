@@ -23,6 +23,7 @@ export function LabelsPopover({
   labelableId,
   labels,
   lens,
+  disabledReason,
 }: {
   repoPath: string;
   enabled: boolean;
@@ -34,6 +35,9 @@ export function LabelsPopover({
   labels: RepoLabel[];
   /** The origin|upstream lens the parent PR/issue surface resolved. */
   lens: RemoteLens;
+  /** Set when the viewer may not write to the repo: the trigger stays visible
+   *  but disabled and this text explains why. Absent = editable as before. */
+  disabledReason?: string;
 }) {
   const repoLabels = useRepoLabels(repoPath, enabled, lens);
   const editLabels = useEditPrLabels(repoPath, lens);
@@ -87,18 +91,29 @@ export function LabelsPopover({
 
   return (
     <div className="flex flex-wrap items-center gap-1.5">
-      {/* Trigger first, so it never shifts as chips come and go. */}
+      {/* Trigger first, so it never shifts as chips come and go. A natively
+          disabled button swallows `title`, so the reason rides a wrapping span. */}
       <Popover.Root open={open} onOpenChange={handleOpenChange}>
-        <Popover.Trigger
-          render={<Button variant="ghost" size="xs" aria-label="Edit labels" />}
+        <span
+          title={disabledReason}
+          className={
+            disabledReason ? "inline-flex cursor-not-allowed" : "inline-flex"
+          }
         >
-          {editLabels.isPending ? (
-            <Spinner data-icon="inline-start" />
-          ) : (
-            <TagIcon data-icon="inline-start" />
-          )}
-          Labels
-        </Popover.Trigger>
+          <Popover.Trigger
+            disabled={!!disabledReason}
+            render={
+              <Button variant="ghost" size="xs" aria-label="Edit labels" />
+            }
+          >
+            {editLabels.isPending ? (
+              <Spinner data-icon="inline-start" />
+            ) : (
+              <TagIcon data-icon="inline-start" />
+            )}
+            Labels
+          </Popover.Trigger>
+        </span>
         <Popover.Portal>
           <Popover.Positioner
             align="start"

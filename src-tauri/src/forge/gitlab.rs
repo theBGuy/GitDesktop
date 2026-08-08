@@ -6057,10 +6057,47 @@ struct GlabProjectPermissions {
     permissions: Option<GlabPermissions>,
 }
 
-/// Whether the signed-in viewer can manage this project's settings
-/// (Maintainer+) and whether they hold the Owner-only lifecycle powers.
-pub async fn repo_admin(repo_path: &str) -> AppResult<(bool, bool)> {
-    let enc = encode_project(&project_path(repo_path).await?);
+/// The viewer's effective access level, plus why the membership fallback
+/// couldn't answer when it failed. An unanswered fallback makes `level` a FLOOR
+/// (the fallback only ever raises it), never a denial.
+struct EffectiveAccess {
+    level: u8,
+    ambiguous: Option<String>,
+}
+
+/// The viewer's access level from the effective-membership endpoint:
+/// `Ok(Some(level))` when it answered, `Ok(None)` on a 404 (GitLab saying the
+/// viewer is genuinely not a member), `Err(reason)` when it couldn't answer.
+async fn membership_access_level(repo_path: &str, enc: &str) -> Result<Option<u8>, String> {
+    let user = current_user(repo_path)
+        .await
+        .map_err(|e| format!("could not identify the signed-in GitLab user: {e}"))?;
+    let endpoint = format!("projects/{enc}/members/all/{}", user.id);
+    let out = run_glab_raw(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT)
+        .await
+        .map_err(|e| format!("could not read GitLab project membership: {e}"))?;
+    if out.code != 0 {
+        let stdout = out.stdout_lossy();
+        if glab_output_is_404(&out.stderr, &stdout) {
+            return Ok(None);
+        }
+        let msg = out.stderr.trim();
+        return Err(if msg.is_empty() {
+            format!("glab exited with code {} reading project membership", out.code)
+        } else {
+            msg.to_string()
+        });
+    }
+    serde_json::from_str::<GlabAccessLevel>(&out.stdout_lossy())
+        .map(|m| Some(m.access_level))
+        .map_err(|e| format!("could not parse GitLab project membership: {e}"))
+}
+
+/// The viewer's effective access level on the project (0 when they have none) —
+/// the shared resolution behind the admin and write-access probes. `enc` is the
+/// already-encoded project id, so a caller that needs the raw path doesn't
+/// resolve it twice.
+async fn effective_access_level(repo_path: &str, enc: &str) -> AppResult<EffectiveAccess> {
     let out = run_glab(
         Some(repo_path),
         &["api", &format!("projects/{enc}")],
@@ -6081,19 +6118,63 @@ pub async fn repo_admin(repo_path: &str) -> AppResult<(bool, bool)> {
     // access inherited from an ancestor group or an invited group reads as
     // null/null. Before concluding the viewer can't manage, ask the
     // effective-membership endpoint (a 404 there = genuinely not a member).
+    let mut ambiguous = None;
     if level < 40 {
-        if let Ok(user) = current_user(repo_path).await {
-            let endpoint = format!("projects/{enc}/members/all/{}", user.id);
-            if let Ok(out) =
-                run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await
-            {
-                if let Ok(m) = serde_json::from_str::<GlabAccessLevel>(&out.stdout_lossy()) {
-                    level = level.max(m.access_level);
-                }
-            }
+        match membership_access_level(repo_path, enc).await {
+            Ok(Some(inherited)) => level = level.max(inherited),
+            Ok(None) => {}
+            Err(reason) => ambiguous = Some(reason),
         }
     }
+    Ok(EffectiveAccess { level, ambiguous })
+}
+
+/// Whether the signed-in viewer can manage this project's settings
+/// (Maintainer+) and whether they hold the Owner-only lifecycle powers. An
+/// unanswered membership fallback reads as "not a member" here, as it always has.
+pub async fn repo_admin(repo_path: &str) -> AppResult<(bool, bool)> {
+    let enc = encode_project(&project_path(repo_path).await?);
+    let level = effective_access_level(repo_path, &enc).await?.level;
     Ok((level >= 40, level >= 50))
+}
+
+/// A GitLab access level → `(can push, can triage, role label)`. Pure. Developer
+/// (30) is the first level that can push and Reporter (20) the first that manages
+/// issue/MR metadata; levels the app doesn't name (0 = none, 5 = minimal access,
+/// any future tier) carry no label.
+fn write_access_from_level(level: u8) -> (bool, bool, Option<String>) {
+    let role = match level {
+        50 => Some("owner"),
+        40 => Some("maintainer"),
+        30 => Some("developer"),
+        20 => Some("reporter"),
+        10 => Some("guest"),
+        _ => None,
+    };
+    (level >= 30, level >= 20, role.map(str::to_string))
+}
+
+/// Whether the signed-in viewer can push to this project — the write twin of
+/// [`repo_admin`]. A resolved level is an affirmative answer even at 0 (the
+/// endpoints replied), and a failed project read propagates as an error rather
+/// than a guessed `false`.
+///
+/// An unanswered membership fallback leaves the level a FLOOR, so a threshold it
+/// already clears stays affirmative while the ones it doesn't become unknown.
+/// The tier label survives only alongside a granted push, and even then the
+/// floor can understate it — nothing gates on the label.
+pub async fn repo_write_access(repo_path: &str) -> AppResult<crate::forge::ForgeRepoWriteAccess> {
+    let path = project_path(repo_path).await?;
+    let access = effective_access_level(repo_path, &encode_project(&path)).await?;
+    let (can_push, can_triage, role) = write_access_from_level(access.level);
+    let resolved = access.ambiguous.is_none();
+    Ok(crate::forge::ForgeRepoWriteAccess {
+        can_push: (can_push || resolved).then_some(can_push),
+        can_triage: (can_triage || resolved).then_some(can_triage),
+        role: if can_push || resolved { role } else { None },
+        repo: Some(path),
+        unknown_reason: if can_push { None } else { access.ambiguous },
+    })
 }
 
 /// The GitLab project settings the app manages, as the frontend consumes them.
@@ -9807,5 +9888,33 @@ mod tests {
         // Cross-side lookups miss (new_path on the old side, etc.).
         assert!(gl_file_diff(&changes, "new_name.rs", "old").is_none());
         assert!(gl_file_diff(&changes, "absent.rs", "new").is_none());
+    }
+
+    #[test]
+    fn write_access_from_level_maps_push_triage_and_role() {
+        let role = |level| write_access_from_level(level).2;
+        assert_eq!(write_access_from_level(50), (true, true, Some("owner".into())));
+        assert_eq!(
+            write_access_from_level(40),
+            (true, true, Some("maintainer".into()))
+        );
+        assert_eq!(
+            write_access_from_level(30),
+            (true, true, Some("developer".into()))
+        );
+        // Reporter can't push but DOES manage issue/MR metadata.
+        assert_eq!(
+            write_access_from_level(20),
+            (false, true, Some("reporter".into()))
+        );
+        assert_eq!(
+            write_access_from_level(10),
+            (false, false, Some("guest".into()))
+        );
+        // No membership resolved at all is an affirmative "no" on both axes.
+        assert_eq!(write_access_from_level(0), (false, false, None));
+        // Levels the app doesn't name (5 = minimal access) stay unlabeled.
+        assert_eq!(role(5), None);
+        assert_eq!(role(35), None);
     }
 }

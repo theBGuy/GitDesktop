@@ -71,6 +71,7 @@ export function IssueSidebar({
   canLinkIssues,
   remoteLabel,
   lens,
+  pickerDisabledReason,
 }: {
   repoPath: string;
   number: number;
@@ -88,6 +89,10 @@ export function IssueSidebar({
   remoteLabel: string;
   /** The origin|upstream lens the parent issue view resolved. */
   lens: RemoteLens;
+  /** Set when the viewer lacks the tier these pickers need (TRIAGE, not push):
+   *  they stay visible but disabled, with this text explaining why. Absent =
+   *  editable as before. */
+  pickerDisabledReason?: string;
 }) {
   const setAssignees = useSetIssueAssignees(repoPath, lens);
   const setMilestone = useSetIssueMilestone(repoPath, lens);
@@ -127,6 +132,7 @@ export function IssueSidebar({
             labelableId={issue.id}
             labels={issue.labels}
             lens={lens}
+            disabledReason={pickerDisabledReason}
           />
         )}
         {canEditAssignees && (
@@ -136,6 +142,7 @@ export function IssueSidebar({
             value={issue.assignees}
             commitOnClose
             lens={lens}
+            disabledReason={pickerDisabledReason}
             onChange={(next) =>
               setAssignees.mutate({ number, assignees: next }, { onError })
             }
@@ -148,6 +155,7 @@ export function IssueSidebar({
             value={issue.milestone?.number ?? null}
             valueLabel={issue.milestone?.title}
             lens={lens}
+            disabledReason={pickerDisabledReason}
             onChange={(m, title) =>
               setMilestone.mutate({ number, milestone: m, title }, { onError })
             }
@@ -231,6 +239,7 @@ export function IssueSidebar({
         value={issue.assignees}
         commitOnClose
         lens={lens}
+        disabledReason={pickerDisabledReason}
         onChange={(next) =>
           setAssignees.mutate({ number, assignees: next }, { onError })
         }
@@ -243,6 +252,7 @@ export function IssueSidebar({
         labelableId={issue.id}
         labels={issue.labels}
         lens={lens}
+        disabledReason={pickerDisabledReason}
       />
       <MilestoneMenu
         repoPath={repoPath}
@@ -250,6 +260,7 @@ export function IssueSidebar({
         value={issue.milestone?.number ?? null}
         valueLabel={issue.milestone?.title}
         lens={lens}
+        disabledReason={pickerDisabledReason}
         onChange={(m, title) =>
           setMilestone.mutate({ number, milestone: m, title }, { onError })
         }

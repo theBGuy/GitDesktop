@@ -30,6 +30,7 @@ import type {
   ForgeCapabilities,
   ForgeImplemented,
   ForgeProvider,
+  ForgeRepoWriteAccess,
   ForgeSearchList,
   ForgeStatus,
   ForgeUserRef,
@@ -4649,6 +4650,49 @@ export function useRepoAdmin(repo: string, enabled: boolean) {
     staleTime: 5 * 60_000,
     retry: false,
   });
+}
+
+/** The viewer's push permission on the repo behind `lens` — the PERMISSION axis
+ *  the per-action forge flags don't answer. `retry: false` keeps a failed probe
+ *  from a retry storm; consumers fail open on anything but `canPush === false`. */
+export function useRepoWriteAccess(
+  repo: string,
+  lens: RemoteLens | undefined,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: ["repo", repo, "write-access", lens ?? "origin"] as const,
+    queryFn: () => api.forgeRepoWriteAccess(repo, lens),
+    enabled,
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+}
+
+/** The compact reasons appended to a disabled MENU ITEM's label: a disabled item
+ *  drops pointer events, so a `title` never surfaces there and the explanation
+ *  has to live in the label. Headline buttons use the reason helpers below. */
+export const WRITE_ACCESS_ITEM_REASON = "requires write access";
+export const TRIAGE_ACCESS_ITEM_REASON = "requires triage access";
+
+/** The disabled-reason string for PUSH-gated controls, or undefined while the
+ *  probe hasn't positively denied access (pending / errored / unknown all read
+ *  as "allowed" so a probe outage never strips controls). */
+export function writeAccessReason(
+  access: ForgeRepoWriteAccess | undefined,
+): string | undefined {
+  if (access?.canPush !== false) return undefined;
+  return `Requires write access to ${access.repo ?? "this repository"}`;
+}
+
+/** The disabled-reason for TRIAGE-gated controls (labels, assignees,
+ *  milestones, pin, lock) — a lower tier than push, so it must be read off its
+ *  own axis or a triager loses controls they hold. Same fail-open rule. */
+export function triageAccessReason(
+  access: ForgeRepoWriteAccess | undefined,
+): string | undefined {
+  if (access?.canTriage !== false) return undefined;
+  return `Requires triage access to ${access.repo ?? "this repository"}`;
 }
 
 /** The active gh token's OAuth scopes — for "this needs gh auth refresh -s X"

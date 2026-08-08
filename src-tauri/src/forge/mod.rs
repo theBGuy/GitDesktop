@@ -2655,6 +2655,43 @@ pub async fn forge_repo_admin(repo_path: String) -> AppResult<ForgeRepoAdmin> {
     }
 }
 
+/// The viewer's push permission on a repo, as the frontend consumes it.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForgeRepoWriteAccess {
+    /// Some(true/false) only when the provider AFFIRMATIVELY answered;
+    /// None = unknown (failed/ambiguous probe) — the frontend fails OPEN on None.
+    pub can_push: Option<bool>,
+    /// Whether the viewer can manage issue/PR metadata (labels, assignees,
+    /// milestones, pin, lock) — GitHub's triage tier and above; a tier BELOW push.
+    pub can_triage: Option<bool>,
+    pub role: Option<String>,
+    /// The probed repo identity ("owner/repo" / project path / "ws/slug") for UI copy.
+    pub repo: Option<String>,
+    pub unknown_reason: Option<String>,
+}
+
+/// Whether the signed-in viewer can PUSH to this repo — the viewer-PERMISSION
+/// probe, distinct from the provider-capability flags (what this app implements
+/// for a forge) and from the admin probe (who may manage settings). A `None`
+/// `can_push` means the probe couldn't answer: callers keep write controls
+/// ENABLED rather than hiding them on a guess.
+///
+/// `lens` is honored on the GitHub arm ONLY — a fork PR targets the PARENT repo,
+/// so the parent's permission is what gates its controls. The GitLab and
+/// Bitbucket surfaces in this app are origin-pinned (see `forge_pr_list`).
+#[tauri::command]
+pub async fn forge_repo_write_access(
+    repo_path: String,
+    lens: Option<String>,
+) -> AppResult<ForgeRepoWriteAccess> {
+    match detect_non_github(&repo_path).await {
+        Some((Provider::GitLab, _)) => gitlab::repo_write_access(&repo_path).await,
+        Some((Provider::Bitbucket, _)) => bitbucket::repo_write_access(&repo_path).await,
+        _ => crate::github::repo_settings::gh_repo_write_access(repo_path, lens).await,
+    }
+}
+
 /// The GitLab project-settings read. GitLab-only — its settings model (feature
 /// access levels, one merge-method enum, a squash option) doesn't map onto
 /// GitHub's `RepoSettings`, so each provider keeps its own shaped surface
@@ -3824,5 +3861,48 @@ mod tests {
         assert!(capped.len() <= README_CAP);
         assert_eq!(capped.len(), pad_len);
         assert!(capped.chars().all(|c| c == 'a'));
+    }
+
+    /// The frontend keys off these exact names, and an unknown probe must travel
+    /// as a JSON `null` (not an omitted field) so it reads as "fails open".
+    #[test]
+    fn write_access_serializes_camel_case_wire_keys() {
+        let known = serde_json::to_value(ForgeRepoWriteAccess {
+            can_push: Some(false),
+            can_triage: Some(true),
+            role: Some("triage".into()),
+            repo: Some("o/r".into()),
+            unknown_reason: None,
+        })
+        .unwrap();
+        assert_eq!(
+            known,
+            serde_json::json!({
+                "canPush": false,
+                "canTriage": true,
+                "role": "triage",
+                "repo": "o/r",
+                "unknownReason": null,
+            })
+        );
+
+        let unknown = serde_json::to_value(ForgeRepoWriteAccess {
+            can_push: None,
+            can_triage: None,
+            role: None,
+            repo: Some("o/r".into()),
+            unknown_reason: Some("HTTP 404".into()),
+        })
+        .unwrap();
+        assert_eq!(
+            unknown,
+            serde_json::json!({
+                "canPush": null,
+                "canTriage": null,
+                "role": null,
+                "repo": "o/r",
+                "unknownReason": "HTTP 404",
+            })
+        );
     }
 }

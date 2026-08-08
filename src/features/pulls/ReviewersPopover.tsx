@@ -46,6 +46,7 @@ export function ReviewersPopover({
   value,
   onChange,
   lens,
+  disabledReason,
 }: {
   repoPath: string;
   number: number | null;
@@ -54,6 +55,9 @@ export function ReviewersPopover({
   onChange: (next: ForgeUserRef[]) => void;
   /** The origin|upstream lens the parent surface resolved (create dialog: "origin"). */
   lens: RemoteLens;
+  /** Set when the viewer may not write to the repo: the trigger stays visible
+   *  but disabled and this text explains why. Absent = editable as before. */
+  disabledReason?: string;
 }) {
   const candidates = useReviewerCandidates(repoPath, number, enabled, lens);
   // GitHub reviewer ids are logins (avatars served at `<host>/<login>.png`), so the
@@ -101,14 +105,24 @@ export function ReviewersPopover({
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       <Popover.Root open={open} onOpenChange={handleOpenChange}>
-        <Popover.Trigger
-          render={
-            <Button variant="ghost" size="xs" aria-label="Edit reviewers" />
+        {/* A natively disabled button swallows `title`, so the reason rides a
+            wrapping span. */}
+        <span
+          title={disabledReason}
+          className={
+            disabledReason ? "inline-flex cursor-not-allowed" : "inline-flex"
           }
         >
-          <UserCheckIcon data-icon="inline-start" />
-          Reviewers
-        </Popover.Trigger>
+          <Popover.Trigger
+            disabled={!!disabledReason}
+            render={
+              <Button variant="ghost" size="xs" aria-label="Edit reviewers" />
+            }
+          >
+            <UserCheckIcon data-icon="inline-start" />
+            Reviewers
+          </Popover.Trigger>
+        </span>
         <Popover.Portal>
           <Popover.Positioner
             align="start"

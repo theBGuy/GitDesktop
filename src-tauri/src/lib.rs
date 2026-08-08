@@ -366,6 +366,7 @@ pub fn run() {
             forge::forge_issue_transfer,
             forge::forge_issue_delete,
             forge::forge_repo_admin,
+            forge::forge_repo_write_access,
             forge::forge_gl_repo_settings,
             forge::forge_gl_repo_settings_update,
             forge::forge_gl_members,

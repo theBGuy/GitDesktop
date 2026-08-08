@@ -18,6 +18,8 @@ import {
   forgeFeatureReady,
   useForgeStatus,
   useRepoStatus,
+  useRepoWriteAccess,
+  writeAccessReason,
 } from "@/lib/git/queries";
 import { useWorkflowRuns } from "@/lib/github/actions";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
@@ -48,6 +50,17 @@ export function ActionsPanel({
   const isPipelines = provider === "gitlab" || provider === "bitbucket";
   const canWrite = provider !== "gitlab" && provider !== "bitbucket";
   const canDispatch = canWrite || forgeFeatureReady(forge.data, "ciDispatch");
+  // Starting a run is a repo write: an explicitly read-only viewer keeps the
+  // control (with the reason) rather than losing it. CI is repo-wide, so the
+  // probe takes no lens; an Activity-hidden tab still renders, so it also gates
+  // on `active` to keep a background tab from fetching.
+  const writeAccess = useRepoWriteAccess(
+    repoPath,
+    undefined,
+    active && !!provider,
+  );
+  const writeReason = writeAccessReason(writeAccess.data);
+  const writeBlocked = writeAccess.data?.canPush === false;
   const runNoun = isPipelines ? "pipeline" : "workflow";
   const status = useRepoStatus(repoPath);
   const currentBranch = status.data?.branch.name ?? null;
@@ -104,22 +117,32 @@ export function ActionsPanel({
         </Button>
         <div className="ml-auto flex items-center gap-1">
           {canDispatch && (
-            <Button
-              variant="ghost"
-              size="xs"
-              disabled={!ghReady}
+            // A natively-disabled Button swallows `title`, so the hint rides the
+            // wrapping span (house idiom) — it covers the enabled case too.
+            <span
               title={
-                ghReady
+                writeReason ??
+                (ghReady
                   ? `Run a ${runNoun}`
                   : isGitLab
                     ? "Sign in with the GitLab CLI (glab) to run pipelines"
-                    : "Sign in with GitHub CLI to run workflows"
+                    : "Sign in with GitHub CLI to run workflows")
               }
-              onClick={() => setRunOpen(true)}
+              className={cn(
+                "inline-flex",
+                writeBlocked && "cursor-not-allowed",
+              )}
             >
-              <PlayIcon data-icon="inline-start" />
-              Run {runNoun}…
-            </Button>
+              <Button
+                variant="ghost"
+                size="xs"
+                disabled={!ghReady || writeBlocked}
+                onClick={() => setRunOpen(true)}
+              >
+                <PlayIcon data-icon="inline-start" />
+                Run {runNoun}…
+              </Button>
+            </span>
           )}
           <Button
             variant="outline"
@@ -204,14 +227,23 @@ export function ActionsPanel({
               </EmptyHeader>
               {canDispatch && (
                 <EmptyContent>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setRunOpen(true)}
+                  <span
+                    title={writeReason}
+                    className={cn(
+                      "inline-flex",
+                      writeBlocked && "cursor-not-allowed",
+                    )}
                   >
-                    <PlayIcon data-icon="inline-start" />
-                    Run {runNoun}…
-                  </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={writeBlocked}
+                      onClick={() => setRunOpen(true)}
+                    >
+                      <PlayIcon data-icon="inline-start" />
+                      Run {runNoun}…
+                    </Button>
+                  </span>
                 </EmptyContent>
               )}
             </Empty>

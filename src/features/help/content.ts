@@ -655,6 +655,12 @@ instead of a dead end.) When a token is within a week of expiring, a quiet **dis
 notice** at the top of this tab (and the Issues tab) reminds you to reconnect before it
 lapses.
 
+What you can *do* here follows your access on the repository: when you lack the access an
+action needs — push access to **merge**, a lighter tier (GitHub's triage, GitLab's
+Reporter) for **labels**, **assignees**, and **reviewers** — the control stays where it
+is, disabled, and says what it requires
+instead of failing when you press it.
+
 ## Fork · Upstream lens
 
 When the repo is a **GitHub fork** — an \`origin\` you pushed to plus an \`upstream\`
