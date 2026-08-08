@@ -1,6 +1,7 @@
 import {
   CircleIcon,
   InfoIcon,
+  QuestionIcon,
   WarningCircleIcon,
   WarningIcon,
 } from "@phosphor-icons/react";
@@ -78,6 +79,141 @@ export function SeverityChip({ severity }: { severity: string | null }) {
     <Badge variant="outline" className={cn("gap-1", SEVERITY_TONE[level])}>
       <Icon weight={level === "critical" ? "fill" : "regular"} />
       {SEVERITY_LABEL[level]}
+    </Badge>
+  );
+}
+
+// ── Code scanning ────────────────────────────────────────────────────────────
+
+/** A code scanning alert's SARIF level. A ladder of its own: an `error` is the
+ *  analysis tool's confidence, not an advisory severity, so it is never relabeled
+ *  "Critical" or "High" — only *ranked* alongside them. */
+export type SarifLevel = "error" | "warning" | "note" | "unknown";
+
+const SARIF_LABEL: Record<SarifLevel, string> = {
+  error: "Error",
+  warning: "Warning",
+  note: "Note",
+  unknown: "Unspecified",
+};
+
+/** The severity rung a SARIF level shares for ordering and visual weight. Sort
+ *  and tone only — `SARIF_LABEL` is what names the level to the user. */
+const SARIF_AS_SEVERITY: Record<SarifLevel, SeverityLevel> = {
+  error: "high",
+  warning: "medium",
+  note: "low",
+  unknown: "unknown",
+};
+
+export function sarifLevel(level: string | null): SarifLevel {
+  switch (level?.toLowerCase()) {
+    case "error":
+      return "error";
+    case "warning":
+      return "warning";
+    case "note":
+      return "note";
+    default:
+      return "unknown";
+  }
+}
+
+/** Fields of a code scanning alert that decide its chip and its rank. */
+interface CodeScanningLevels {
+  securitySeverity: string | null;
+  severity: string | null;
+}
+
+/** Worst-first rank for a code scanning alert: its security severity when the
+ *  rule carries one, else its SARIF level on the shared ladder. Presence of
+ *  `securitySeverity` is the switch, matching `CodeScanningChip`. */
+export function codeScanningRank(a: CodeScanningLevels): number {
+  return SEVERITY_RANK[
+    a.securitySeverity
+      ? severityLevel(a.securitySeverity)
+      : SARIF_AS_SEVERITY[sarifLevel(a.severity)]
+  ];
+}
+
+/**
+ * The chip for a code scanning alert. A rule with a security severity gets the
+ * ordinary severity chip; anything else is labeled with its SARIF level in that
+ * ladder's own words, so nothing is promoted to a severity GitHub never assigned.
+ */
+export function CodeScanningChip({
+  securitySeverity,
+  severity,
+}: CodeScanningLevels) {
+  if (securitySeverity) return <SeverityChip severity={securitySeverity} />;
+  const level = sarifLevel(severity);
+  const rung = SARIF_AS_SEVERITY[level];
+  const Icon = SEVERITY_ICON[rung];
+  return (
+    <Badge variant="outline" className={cn("gap-1", SEVERITY_TONE[rung])}>
+      <Icon />
+      {SARIF_LABEL[level]}
+    </Badge>
+  );
+}
+
+// ── Secret scanning ──────────────────────────────────────────────────────────
+
+/** Whether a leaked secret still works. GitHub only checks providers it has a
+ *  validator for, so "unknown" is the honest reading of a missing validity —
+ *  never "inactive". */
+export type ValidityLevel = "active" | "inactive" | "unknown";
+
+const VALIDITY_LABEL: Record<ValidityLevel, string> = {
+  active: "Active",
+  inactive: "Inactive",
+  unknown: "Unknown",
+};
+
+/** A still-working credential is the emergency, so it takes the destructive
+ *  tone; the label carries the meaning on its own for the color-blind path. */
+const VALIDITY_TONE: Record<ValidityLevel, string> = {
+  active: "text-destructive",
+  inactive: "text-muted-foreground",
+  unknown: "text-foreground",
+};
+
+/** Active secrets float to the top of the list. */
+export const VALIDITY_RANK: Record<ValidityLevel, number> = {
+  active: 0,
+  unknown: 1,
+  inactive: 2,
+};
+
+const VALIDITY_ICON: Record<ValidityLevel, typeof WarningIcon> = {
+  active: WarningIcon,
+  inactive: CircleIcon,
+  unknown: QuestionIcon,
+};
+
+export function validityLevel(validity: string | null): ValidityLevel {
+  switch (validity?.toLowerCase()) {
+    case "active":
+      return "active";
+    case "inactive":
+      return "inactive";
+    default:
+      return "unknown";
+  }
+}
+
+/** The user-facing name for a validity, normalized exactly as the chip does. */
+export const validityLabel = (validity: string | null): string =>
+  VALIDITY_LABEL[validityLevel(validity)];
+
+/** A secret's validity chip — **Active** / **Inactive** / **Unknown**. */
+export function ValidityChip({ validity }: { validity: string | null }) {
+  const level = validityLevel(validity);
+  const Icon = VALIDITY_ICON[level];
+  return (
+    <Badge variant="outline" className={cn("gap-1", VALIDITY_TONE[level])}>
+      <Icon weight={level === "active" ? "fill" : "regular"} />
+      {VALIDITY_LABEL[level]}
     </Badge>
   );
 }

@@ -1,5 +1,6 @@
-//! Read side of GitHub's security surface: the repo's open Dependabot alerts and
-//! its published security advisories, for the Findings tab.
+//! Read side of GitHub's security surface for the Findings tab: the repo's open
+//! Dependabot, code scanning and secret scanning alerts, plus its published
+//! security advisories.
 //!
 //! Every list rides an availability envelope. A repo with the feature off, a token
 //! without access, and an unrecognized failure are all distinct from "genuinely
@@ -57,9 +58,112 @@ pub struct DependabotAlertOut {
     pub ghsa_id: String,
     pub cve_id: Option<String>,
     pub cvss_score: Option<f64>,
+    /// GitHub's dependency relationship ("direct" | "transitive"), verbatim so an
+    /// unrecognized value renders instead of being dropped.
+    pub relationship: Option<String>,
+    /// v3 before v4 when the advisory carries both; empty when it scores neither.
+    pub cvss: Vec<CvssOut>,
+    pub references: Vec<ReferenceOut>,
+    pub cwes: Vec<CweOut>,
     pub vulnerable_version_range: Option<String>,
     /// `None` when no fix has shipped yet.
     pub first_patched_version: Option<String>,
+    pub html_url: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CvssOut {
+    /// Read off the vector's own prefix ("3.1", "4.0"); empty when the vector
+    /// carries no recognizable one, since the slot alone can't name the revision.
+    pub version: String,
+    pub score: Option<f64>,
+    pub vector_string: String,
+    /// Decoded base metrics in canonical order; empty when the vector is foreign,
+    /// which is the view's cue to fall back to the raw string.
+    pub metrics: Vec<CvssMetricOut>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CvssMetricOut {
+    pub label: String,
+    pub value: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReferenceOut {
+    pub url: String,
+    /// Derived here: the wire carries a bare URL with no title.
+    pub label: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CweOut {
+    pub cwe_id: String,
+    pub name: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeScanningAlertsOut {
+    pub availability: FindingAvailability,
+    pub detail: Option<String>,
+    pub alerts: Vec<CodeScanningAlertOut>,
+    pub truncated: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeScanningAlertOut {
+    pub number: i64,
+    pub state: String,
+    pub rule_id: String,
+    pub rule_name: Option<String>,
+    pub rule_description: Option<String>,
+    /// The SARIF level ("note" | "warning" | "error"), raw — it is a different
+    /// scale from `security_severity` and collapsing the two mislabels findings.
+    pub severity: Option<String>,
+    /// `rule.security_severity_level` ("low" … "critical"), raw.
+    pub security_severity: Option<String>,
+    pub tool_name: String,
+    pub tool_version: Option<String>,
+    pub path: String,
+    pub start_line: Option<i64>,
+    pub message: String,
+    /// The ref the alert was last seen on. `ref` is a Rust keyword, so the wire
+    /// key is pinned by hand.
+    #[serde(rename = "ref")]
+    pub git_ref: Option<String>,
+    pub html_url: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretScanningAlertsOut {
+    pub availability: FindingAvailability,
+    pub detail: Option<String>,
+    pub alerts: Vec<SecretScanningAlertOut>,
+    pub truncated: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretScanningAlertOut {
+    pub number: i64,
+    pub state: String,
+    pub secret_type: String,
+    pub secret_type_display_name: String,
+    /// active | inactive | unknown, raw.
+    pub validity: Option<String>,
+    pub publicly_leaked: Option<bool>,
+    pub resolution: Option<String>,
     pub html_url: String,
     pub created_at: String,
     pub updated_at: String,
@@ -116,12 +220,36 @@ struct RawPackage {
     ecosystem: Option<String>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, Clone)]
 struct RawCvss {
     #[serde(default)]
     score: Option<f64>,
     #[serde(default)]
     vector_string: Option<String>,
+}
+
+/// The per-revision scores. `cvss_v3` restates the legacy `cvss` field, which is
+/// the fallback for repos whose payload predates this object.
+#[derive(Deserialize, Default)]
+struct RawCvssSeverities {
+    #[serde(default)]
+    cvss_v3: Option<RawCvss>,
+    #[serde(default)]
+    cvss_v4: Option<RawCvss>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawReference {
+    #[serde(default)]
+    url: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawCwe {
+    #[serde(default)]
+    cwe_id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -132,6 +260,8 @@ struct RawDependency {
     manifest_path: Option<String>,
     #[serde(default)]
     scope: Option<String>,
+    #[serde(default)]
+    relationship: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -146,6 +276,12 @@ struct RawAlertAdvisory {
     cve_id: Option<String>,
     #[serde(default)]
     cvss: Option<RawCvss>,
+    #[serde(default)]
+    cvss_severities: Option<RawCvssSeverities>,
+    #[serde(default)]
+    references: Option<Vec<RawReference>>,
+    #[serde(default)]
+    cwes: Option<Vec<RawCwe>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -225,6 +361,96 @@ struct RawRepoAdvisory {
     vulnerabilities: Option<Vec<RawAdvisoryVulnerability>>,
 }
 
+#[derive(Deserialize, Default)]
+struct RawCodeScanningRule {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    severity: Option<String>,
+    #[serde(default)]
+    security_severity_level: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawCodeScanningTool {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawInstanceMessage {
+    #[serde(default)]
+    text: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawInstanceLocation {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    start_line: Option<i64>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawCodeScanningInstance {
+    #[serde(default, rename = "ref")]
+    git_ref: Option<String>,
+    #[serde(default)]
+    message: Option<RawInstanceMessage>,
+    #[serde(default)]
+    location: Option<RawInstanceLocation>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawCodeScanningAlert {
+    #[serde(default)]
+    number: Option<i64>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    rule: Option<RawCodeScanningRule>,
+    #[serde(default)]
+    tool: Option<RawCodeScanningTool>,
+    #[serde(default)]
+    most_recent_instance: Option<RawCodeScanningInstance>,
+    #[serde(default)]
+    html_url: Option<String>,
+    #[serde(default)]
+    created_at: Option<String>,
+    #[serde(default)]
+    updated_at: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawSecretScanningAlert {
+    #[serde(default)]
+    number: Option<i64>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    secret_type: Option<String>,
+    #[serde(default)]
+    secret_type_display_name: Option<String>,
+    #[serde(default)]
+    validity: Option<String>,
+    #[serde(default)]
+    publicly_leaked: Option<bool>,
+    #[serde(default)]
+    resolution: Option<String>,
+    #[serde(default)]
+    html_url: Option<String>,
+    #[serde(default)]
+    created_at: Option<String>,
+    #[serde(default)]
+    updated_at: Option<String>,
+}
+
 /// GitHub reports an absent CVSS as a score with a null vector (often `0.0`), so a
 /// null vector reads as "no score" rather than a real zero.
 fn cvss_score(cvss: Option<RawCvss>) -> Option<f64> {
@@ -233,6 +459,216 @@ fn cvss_score(cvss: Option<RawCvss>) -> Option<f64> {
         Some(v) if !v.is_empty() => cvss.score,
         _ => None,
     }
+}
+
+/// One base metric: its key, its full label, and the letters it defines. Values
+/// outside the list pass through raw — inventing a label would misstate the score.
+type MetricSpec = (
+    &'static str,
+    &'static str,
+    &'static [(&'static str, &'static str)],
+);
+
+const NONE_LOW_HIGH: &[(&str, &str)] = &[("N", "None"), ("L", "Low"), ("H", "High")];
+const ATTACK_VECTOR: &[(&str, &str)] = &[
+    ("N", "Network"),
+    ("A", "Adjacent"),
+    ("L", "Local"),
+    ("P", "Physical"),
+];
+const LOW_HIGH: &[(&str, &str)] = &[("L", "Low"), ("H", "High")];
+
+/// CVSS v3 base metrics in the order GitHub's own table shows them.
+const CVSS_V3_BASE: &[MetricSpec] = &[
+    ("AV", "Attack vector", ATTACK_VECTOR),
+    ("AC", "Attack complexity", LOW_HIGH),
+    ("PR", "Privileges required", NONE_LOW_HIGH),
+    (
+        "UI",
+        "User interaction",
+        &[("N", "None"), ("R", "Required")],
+    ),
+    ("S", "Scope", &[("U", "Unchanged"), ("C", "Changed")]),
+    ("C", "Confidentiality", NONE_LOW_HIGH),
+    ("I", "Integrity", NONE_LOW_HIGH),
+    ("A", "Availability", NONE_LOW_HIGH),
+];
+
+/// CVSS v4 base metrics. v4 renames the impact metrics and adds attack
+/// requirements, so a v3 table applied to a v4 vector would mislabel it.
+const CVSS_V4_BASE: &[MetricSpec] = &[
+    ("AV", "Attack vector", ATTACK_VECTOR),
+    ("AC", "Attack complexity", LOW_HIGH),
+    (
+        "AT",
+        "Attack requirements",
+        &[("N", "None"), ("P", "Present")],
+    ),
+    ("PR", "Privileges required", NONE_LOW_HIGH),
+    (
+        "UI",
+        "User interaction",
+        &[("N", "None"), ("P", "Passive"), ("A", "Active")],
+    ),
+    ("VC", "Vulnerable system confidentiality", NONE_LOW_HIGH),
+    ("VI", "Vulnerable system integrity", NONE_LOW_HIGH),
+    ("VA", "Vulnerable system availability", NONE_LOW_HIGH),
+    ("SC", "Subsequent system confidentiality", NONE_LOW_HIGH),
+    ("SI", "Subsequent system integrity", NONE_LOW_HIGH),
+    ("SA", "Subsequent system availability", NONE_LOW_HIGH),
+];
+
+/// The revision a vector declares, e.g. `CVSS:3.1/…` → `3.1`. Empty for anything
+/// else, since only the vector distinguishes 3.0 from 3.1.
+fn cvss_version(vector: &str) -> String {
+    vector
+        .split('/')
+        .next()
+        .and_then(|prefix| prefix.strip_prefix("CVSS:"))
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Decodes a vector's BASE metrics only — temporal, threat and environmental
+/// tokens carry no key in the tables above and are skipped, as is a foreign
+/// prefix, which yields no metrics at all rather than v3-labelled nonsense.
+fn cvss_metrics(vector: &str) -> Vec<CvssMetricOut> {
+    let mut parts = vector.split('/');
+    let table = match parts.next() {
+        Some("CVSS:3.0" | "CVSS:3.1") => CVSS_V3_BASE,
+        Some("CVSS:4.0") => CVSS_V4_BASE,
+        _ => return Vec::new(),
+    };
+    let tokens: Vec<(&str, &str)> = parts.filter_map(|p| p.split_once(':')).collect();
+    let mut metrics = Vec::new();
+    for &(key, label, values) in table {
+        let Some(raw) = tokens
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|&(_, v)| v)
+            .filter(|v| !v.is_empty())
+        else {
+            continue;
+        };
+        let value = values
+            .iter()
+            .find(|(letter, _)| *letter == raw)
+            .map_or(raw, |&(_, name)| name);
+        metrics.push(CvssMetricOut {
+            label: label.to_string(),
+            value: value.to_string(),
+        });
+    }
+    metrics
+}
+
+/// One scored revision, or nothing: a null/empty vector means GitHub has no score
+/// here, and its companion `score` (often `0.0`) is not a real zero.
+fn cvss_out(cvss: RawCvss) -> Option<CvssOut> {
+    let vector = cvss.vector_string.filter(|v| !v.is_empty())?;
+    Some(CvssOut {
+        version: cvss_version(&vector),
+        score: cvss.score,
+        metrics: cvss_metrics(&vector),
+        vector_string: vector,
+    })
+}
+
+/// The advisory's scores, v3 first. The legacy `cvss` field stands in for a v3
+/// entry the newer `cvss_severities` object doesn't carry.
+fn cvss_list(severities: Option<RawCvssSeverities>, legacy: Option<RawCvss>) -> Vec<CvssOut> {
+    let severities = severities.unwrap_or_default();
+    let v3_slot_is_legacy = severities.cvss_v3.is_none();
+    let mut list: Vec<CvssOut> = [severities.cvss_v3.or(legacy), severities.cvss_v4]
+        .into_iter()
+        .flatten()
+        .filter_map(cvss_out)
+        .collect();
+    // The legacy field names no revision, so on a v4-only advisory it can restate
+    // the v4 vector and list the same score twice. `cvss_severities` is the
+    // authoritative source when the two collide.
+    if list.len() == 2 && list[0].version == list[1].version {
+        list.remove(if v3_slot_is_legacy { 0 } else { 1 });
+    }
+    list
+}
+
+/// Splits a URL into its lowercased host (no `www.`, userinfo or port) and its
+/// path. `None` when there is no scheme-delimited authority to read.
+fn split_url(url: &str) -> Option<(String, &str)> {
+    let after_scheme = url.split_once("://")?.1;
+    let hierarchical = after_scheme
+        .split_at(after_scheme.find(['?', '#']).unwrap_or(after_scheme.len()))
+        .0;
+    let (authority, path) =
+        hierarchical.split_at(hierarchical.find('/').unwrap_or(hierarchical.len()));
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    // Case-fold before stripping `www.`: hosts are case-insensitive, so an
+    // upper-case prefix has to fall away too.
+    let lower = host
+        .split_once(':')
+        .map_or(host, |(h, _)| h)
+        .to_ascii_lowercase();
+    let host = lower.strip_prefix("www.").unwrap_or(&lower);
+    (!host.is_empty()).then(|| (host.to_string(), path))
+}
+
+/// A short label for a bare reference URL — GitHub sends no title, and an
+/// unlabelled link is unreadable in the detail pane.
+fn reference_label(url: &str) -> String {
+    let Some((host, path)) = split_url(url) else {
+        return url.to_string();
+    };
+    if host == "nvd.nist.gov" {
+        return "NVD".to_string();
+    }
+    if host != "github.com" {
+        return host;
+    }
+    let is_ghsa = path.split('/').any(|seg| {
+        seg.as_bytes()
+            .get(..5)
+            .is_some_and(|p| p.eq_ignore_ascii_case(b"GHSA-"))
+    });
+    if path.contains("/commit/") {
+        "Commit".to_string()
+    } else if path.contains("/releases/tag/") {
+        "Release".to_string()
+    } else if path.contains("/advisories/") || is_ghsa {
+        "Advisory".to_string()
+    } else if path.contains("/pull/") {
+        "Pull request".to_string()
+    } else if path.contains("/issues/") {
+        "Issue".to_string()
+    } else {
+        host
+    }
+}
+
+/// Drops entries with no URL: a reference is only ever rendered as a link.
+fn references_out(raw: Option<Vec<RawReference>>) -> Vec<ReferenceOut> {
+    raw.unwrap_or_default()
+        .into_iter()
+        .filter_map(|r| r.url.filter(|u| !u.is_empty()))
+        .map(|url| ReferenceOut {
+            label: reference_label(&url),
+            url,
+        })
+        .collect()
+}
+
+/// Drops entries with no CWE id — the id is the row's identity and its link target.
+fn cwes_out(raw: Option<Vec<RawCwe>>) -> Vec<CweOut> {
+    raw.unwrap_or_default()
+        .into_iter()
+        .filter_map(|c| {
+            let cwe_id = c.cwe_id.filter(|id| !id.is_empty())?;
+            Some(CweOut {
+                cwe_id,
+                name: c.name.unwrap_or_default(),
+            })
+        })
+        .collect()
 }
 
 fn alert_out(raw: RawAlert) -> DependabotAlertOut {
@@ -254,7 +690,11 @@ fn alert_out(raw: RawAlert) -> DependabotAlertOut {
         description: advisory.description.unwrap_or_default(),
         ghsa_id: advisory.ghsa_id.unwrap_or_default(),
         cve_id: advisory.cve_id,
-        cvss_score: cvss_score(advisory.cvss),
+        cvss_score: cvss_score(advisory.cvss.clone()),
+        relationship: dependency.relationship,
+        cvss: cvss_list(advisory.cvss_severities, advisory.cvss),
+        references: references_out(advisory.references),
+        cwes: cwes_out(advisory.cwes),
         vulnerable_version_range: vulnerability.vulnerable_version_range,
         first_patched_version: vulnerability
             .first_patched_version
@@ -293,6 +733,46 @@ fn advisory_out(raw: RawRepoAdvisory) -> RepoAdvisoryOut {
                 }
             })
             .collect(),
+    }
+}
+
+fn code_scanning_alert_out(raw: RawCodeScanningAlert) -> CodeScanningAlertOut {
+    let rule = raw.rule.unwrap_or_default();
+    let tool = raw.tool.unwrap_or_default();
+    let instance = raw.most_recent_instance.unwrap_or_default();
+    let location = instance.location.unwrap_or_default();
+    CodeScanningAlertOut {
+        number: raw.number.unwrap_or(0),
+        state: raw.state.unwrap_or_default(),
+        rule_id: rule.id.unwrap_or_default(),
+        rule_name: rule.name,
+        rule_description: rule.description,
+        severity: rule.severity,
+        security_severity: rule.security_severity_level,
+        tool_name: tool.name.unwrap_or_default(),
+        tool_version: tool.version,
+        path: location.path.unwrap_or_default(),
+        start_line: location.start_line,
+        message: instance.message.and_then(|m| m.text).unwrap_or_default(),
+        git_ref: instance.git_ref,
+        html_url: raw.html_url.unwrap_or_default(),
+        created_at: raw.created_at.unwrap_or_default(),
+        updated_at: raw.updated_at.unwrap_or_default(),
+    }
+}
+
+fn secret_scanning_alert_out(raw: RawSecretScanningAlert) -> SecretScanningAlertOut {
+    SecretScanningAlertOut {
+        number: raw.number.unwrap_or(0),
+        state: raw.state.unwrap_or_default(),
+        secret_type: raw.secret_type.unwrap_or_default(),
+        secret_type_display_name: raw.secret_type_display_name.unwrap_or_default(),
+        validity: raw.validity,
+        publicly_leaked: raw.publicly_leaked,
+        resolution: raw.resolution,
+        html_url: raw.html_url.unwrap_or_default(),
+        created_at: raw.created_at.unwrap_or_default(),
+        updated_at: raw.updated_at.unwrap_or_default(),
     }
 }
 
@@ -380,9 +860,22 @@ fn classify_failure(stdout_body: &str, stderr: &str) -> (FindingAvailability, Op
         return (FindingAvailability::Indeterminate, detail);
     };
     let lower = message.to_lowercase();
-    if lower.contains("disabled") {
+    // Each arm words "off for this repo" differently: Dependabot says "disabled",
+    // code scanning says "not enabled", and a scanned-but-never-analyzed repo
+    // answers "no analysis found" — none of them mean the repo is clean.
+    if lower.contains("disabled")
+        || lower.contains("not enabled")
+        || lower.contains("no analysis found")
+    {
         (FindingAvailability::NotEnabled, detail)
-    } else if lower.contains("not authorized") || lower.contains("forbidden") {
+    } else if lower.contains("not authorized")
+        || lower.contains("forbidden")
+        || lower.contains("not accessible")
+        || lower.contains("must have admin")
+    {
+        // The scanning endpoints refuse an under-scoped token in their own words
+        // ("Resource not accessible by…", "You must have admin permissions to…");
+        // as Indeterminate they would offer a Retry that can never succeed.
         (FindingAvailability::Forbidden, detail)
     } else {
         (FindingAvailability::Indeterminate, detail)
@@ -398,7 +891,22 @@ enum Fetched {
     Unavailable {
         availability: FindingAvailability,
         detail: Option<String>,
+        /// The response's status code when the status line was readable; arm-level
+        /// rules need it to tell a bare 404 from a same-worded failure.
+        status: Option<u16>,
     },
+}
+
+/// The status code off gh's echoed status line (`HTTP/2.0 404 Not Found`).
+fn parse_status(headers: &str) -> Option<u16> {
+    headers
+        .lines()
+        .next()?
+        .strip_prefix("HTTP/")?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
 }
 
 /// The page-walk ceiling. gh's `--paginate` is unbounded, so the walk follows the
@@ -453,6 +961,7 @@ async fn fetch_paged(repo_path: &str, base_path: &str, limit: usize) -> AppResul
             return Ok(Fetched::Unavailable {
                 availability,
                 detail,
+                status: parse_status(headers),
             });
         }
         let page: Vec<Value> = serde_json::from_str(body.trim())
@@ -498,6 +1007,7 @@ fn alerts_envelope(fetched: Fetched) -> DependabotAlertsOut {
         Fetched::Unavailable {
             availability,
             detail,
+            ..
         } => DependabotAlertsOut {
             availability,
             detail,
@@ -524,13 +1034,31 @@ fn alerts_envelope(fetched: Fetched) -> DependabotAlertsOut {
     }
 }
 
+/// Repository advisories exist only on public repos; a private one answers the
+/// endpoint with a bare `404 Not Found`, which the generic classifier can only
+/// read as an error. Scoped to this arm — elsewhere a 404 stays indeterminate.
+fn advisories_availability(
+    availability: FindingAvailability,
+    detail: Option<&str>,
+    status: Option<u16>,
+) -> FindingAvailability {
+    if availability == FindingAvailability::Indeterminate
+        && status == Some(404)
+        && detail == Some("Not Found")
+    {
+        return FindingAvailability::NotEnabled;
+    }
+    availability
+}
+
 fn advisories_envelope(fetched: Fetched) -> RepoAdvisoriesOut {
     match fetched {
         Fetched::Unavailable {
             availability,
             detail,
+            status,
         } => RepoAdvisoriesOut {
-            availability,
+            availability: advisories_availability(availability, detail.as_deref(), status),
             detail,
             advisories: Vec::new(),
             truncated: false,
@@ -549,6 +1077,70 @@ fn advisories_envelope(fetched: Fetched) -> RepoAdvisoriesOut {
                     if total == 1 { "advisory" } else { "advisories" }
                 )),
                 advisories: Vec::new(),
+                truncated: false,
+            },
+        },
+    }
+}
+
+fn code_scanning_envelope(fetched: Fetched) -> CodeScanningAlertsOut {
+    match fetched {
+        Fetched::Unavailable {
+            availability,
+            detail,
+            ..
+        } => CodeScanningAlertsOut {
+            availability,
+            detail,
+            alerts: Vec::new(),
+            truncated: false,
+        },
+        Fetched::Items { items, truncated } => match parse_items::<RawCodeScanningAlert>(items) {
+            ParsedItems::Items(raw) => CodeScanningAlertsOut {
+                availability: FindingAvailability::Available,
+                detail: None,
+                alerts: raw.into_iter().map(code_scanning_alert_out).collect(),
+                truncated,
+            },
+            ParsedItems::AllUnreadable(total) => CodeScanningAlertsOut {
+                availability: FindingAvailability::Indeterminate,
+                detail: Some(format!(
+                    "GitHub returned {total} {} this build couldn't read",
+                    if total == 1 { "alert" } else { "alerts" }
+                )),
+                alerts: Vec::new(),
+                truncated: false,
+            },
+        },
+    }
+}
+
+fn secret_scanning_envelope(fetched: Fetched) -> SecretScanningAlertsOut {
+    match fetched {
+        Fetched::Unavailable {
+            availability,
+            detail,
+            ..
+        } => SecretScanningAlertsOut {
+            availability,
+            detail,
+            alerts: Vec::new(),
+            truncated: false,
+        },
+        Fetched::Items { items, truncated } => match parse_items::<RawSecretScanningAlert>(items) {
+            ParsedItems::Items(raw) => SecretScanningAlertsOut {
+                availability: FindingAvailability::Available,
+                detail: None,
+                alerts: raw.into_iter().map(secret_scanning_alert_out).collect(),
+                truncated,
+            },
+            ParsedItems::AllUnreadable(total) => SecretScanningAlertsOut {
+                availability: FindingAvailability::Indeterminate,
+                detail: Some(format!(
+                    "GitHub returned {total} {} this build couldn't read",
+                    if total == 1 { "alert" } else { "alerts" }
+                )),
+                alerts: Vec::new(),
                 truncated: false,
             },
         },
@@ -579,6 +1171,34 @@ pub async fn gh_repo_advisories(
     let base = format!("repos/{slug}/security-advisories?per_page=100");
     let fetched = fetch_paged(&repo_path, &base, clamp_limit(limit)).await?;
     Ok(advisories_envelope(fetched))
+}
+
+/// The repo's OPEN code scanning alerts.
+#[tauri::command]
+pub async fn gh_code_scanning_alerts(
+    repo_path: String,
+    limit: Option<u32>,
+) -> AppResult<CodeScanningAlertsOut> {
+    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    let base = format!("repos/{slug}/code-scanning/alerts?state=open&per_page=100");
+    let fetched = fetch_paged(&repo_path, &base, clamp_limit(limit)).await?;
+    Ok(code_scanning_envelope(fetched))
+}
+
+/// The repo's OPEN secret scanning alerts.
+#[tauri::command]
+pub async fn gh_secret_scanning_alerts(
+    repo_path: String,
+    limit: Option<u32>,
+) -> AppResult<SecretScanningAlertsOut> {
+    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    // `hide_secret` keeps the literal leaked credential out of the response, so it
+    // never reaches this process's memory or gh's logging — the app only ever needs
+    // the alert's metadata.
+    let base =
+        format!("repos/{slug}/secret-scanning/alerts?state=open&per_page=100&hide_secret=true");
+    let fetched = fetch_paged(&repo_path, &base, clamp_limit(limit)).await?;
+    Ok(secret_scanning_envelope(fetched))
 }
 
 #[cfg(test)]
@@ -879,6 +1499,15 @@ mod tests {
                     "ghsaId": "GHSA-8j4g-w8fx-2239",
                     "cveId": "CVE-2026-69207",
                     "cvssScore": 5.3,
+                    "relationship": "transitive",
+                    "cvss": [{
+                        "version": "3.1",
+                        "score": 5.3,
+                        "vectorString": "CVSS:3.1/AV:N",
+                        "metrics": [{ "label": "Attack vector", "value": "Network" }]
+                    }],
+                    "references": [],
+                    "cwes": [],
                     "vulnerableVersionRange": "< 4.12.34",
                     "firstPatchedVersion": "4.12.34",
                     "htmlUrl": "https://github.com/theBGuy/GitDesktop/security/dependabot/29",
@@ -1067,6 +1696,654 @@ mod tests {
         assert_eq!(
             page_outcome(2, 5, 2, NextPage::None),
             PageOutcome::Stop { truncated: false }
+        );
+    }
+
+    #[test]
+    fn classify_failure_reads_code_scanning_off_as_not_enabled() {
+        // Measured against a private repo with code scanning off (403). "not enabled"
+        // is code scanning's own wording — nothing in it says "disabled".
+        let (availability, detail) = classify_failure(
+            r#"{"message":"Code scanning is not enabled for this repository. Please enable code scanning in the repository settings."}"#,
+            "gh: Code scanning is not enabled for this repository. (HTTP 403)",
+        );
+        assert_eq!(availability, FindingAvailability::NotEnabled);
+        assert_eq!(
+            detail.as_deref(),
+            Some("Code scanning is not enabled for this repository. Please enable code scanning in the repository settings.")
+        );
+        // A public repo that has never run an analysis (404) is likewise "off", not clean.
+        let (availability, detail) =
+            classify_failure(r#"{"message":"no analysis found"}"#, "gh: HTTP 404");
+        assert_eq!(availability, FindingAvailability::NotEnabled);
+        assert_eq!(detail.as_deref(), Some("no analysis found"));
+    }
+
+    #[test]
+    fn classify_failure_reads_secret_scanning_off_as_not_enabled() {
+        let (availability, detail) = classify_failure(
+            r#"{"message":"Secret scanning is disabled on this repository.","status":"404"}"#,
+            "gh: Secret scanning is disabled on this repository. (HTTP 404)",
+        );
+        assert_eq!(availability, FindingAvailability::NotEnabled);
+        assert_eq!(
+            detail.as_deref(),
+            Some("Secret scanning is disabled on this repository.")
+        );
+    }
+
+    #[test]
+    fn classify_failure_reads_a_scanning_refusal_as_forbidden() {
+        // GitHub's documented refusal wordings for these endpoints (not live-measured
+        // — no under-scoped token was available to probe with). As Indeterminate they
+        // would offer the user a Retry that can never succeed.
+        for message in [
+            "Resource not accessible by personal access token",
+            "You must have admin permissions to the repository to use this endpoint.",
+        ] {
+            let body = json!({ "message": message }).to_string();
+            let (availability, detail) = classify_failure(&body, "gh: HTTP 403");
+            assert_eq!(availability, FindingAvailability::Forbidden, "{message}");
+            assert_eq!(detail.as_deref(), Some(message));
+        }
+    }
+
+    #[test]
+    fn parse_status_reads_the_status_line() {
+        assert_eq!(
+            parse_status("HTTP/2.0 404 Not Found\r\nServer: github.com\r\n"),
+            Some(404)
+        );
+        assert_eq!(parse_status("HTTP/1.1 200 OK\r\n"), Some(200));
+        // No status line (gh printed only a body) leaves the code unknown.
+        assert_eq!(parse_status(""), None);
+        assert_eq!(parse_status("Server: github.com\r\n"), None);
+    }
+
+    #[test]
+    fn advisories_read_a_bare_not_found_as_not_enabled() {
+        // Advisories exist only on public repos; a private one 404s with "Not Found",
+        // which as Indeterminate would read to the user as a failure.
+        let out = advisories_envelope(Fetched::Unavailable {
+            availability: FindingAvailability::Indeterminate,
+            detail: Some("Not Found".into()),
+            status: Some(404),
+        });
+        assert_eq!(out.availability, FindingAvailability::NotEnabled);
+        assert_eq!(out.detail.as_deref(), Some("Not Found"));
+        // The override is scoped to this arm: elsewhere a bare 404 stays unknown.
+        let out = alerts_envelope(Fetched::Unavailable {
+            availability: FindingAvailability::Indeterminate,
+            detail: Some("Not Found".into()),
+            status: Some(404),
+        });
+        assert_eq!(out.availability, FindingAvailability::Indeterminate);
+        // A different message, or an unreadable status, is not the private-repo case.
+        for (detail, status) in [
+            (Some("Bad credentials".to_string()), Some(404)),
+            (Some("Not Found".to_string()), Some(502)),
+            (Some("Not Found".to_string()), None),
+        ] {
+            let out = advisories_envelope(Fetched::Unavailable {
+                availability: FindingAvailability::Indeterminate,
+                detail,
+                status,
+            });
+            assert_eq!(out.availability, FindingAvailability::Indeterminate);
+        }
+        // A classified failure is never re-read by the override.
+        let out = advisories_envelope(Fetched::Unavailable {
+            availability: FindingAvailability::Forbidden,
+            detail: Some("Not Found".into()),
+            status: Some(404),
+        });
+        assert_eq!(out.availability, FindingAvailability::Forbidden);
+    }
+
+    fn metric_pairs(metrics: &[CvssMetricOut]) -> Vec<(&str, &str)> {
+        metrics
+            .iter()
+            .map(|m| (m.label.as_str(), m.value.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn cvss_v3_vector_decodes_to_the_base_table() {
+        let metrics = cvss_metrics("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:H");
+        assert_eq!(
+            metric_pairs(&metrics),
+            vec![
+                ("Attack vector", "Network"),
+                ("Attack complexity", "High"),
+                ("Privileges required", "None"),
+                ("User interaction", "None"),
+                ("Scope", "Unchanged"),
+                ("Confidentiality", "None"),
+                ("Integrity", "None"),
+                ("Availability", "High"),
+            ]
+        );
+        // 3.0 shares the table.
+        assert_eq!(cvss_metrics("CVSS:3.0/AV:L/AC:L").len(), 2);
+    }
+
+    #[test]
+    fn cvss_v4_vector_decodes_to_its_own_base_table() {
+        let metrics =
+            cvss_metrics("CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N");
+        assert_eq!(
+            metric_pairs(&metrics),
+            vec![
+                ("Attack vector", "Network"),
+                ("Attack complexity", "Low"),
+                ("Attack requirements", "Present"),
+                ("Privileges required", "None"),
+                ("User interaction", "None"),
+                ("Vulnerable system confidentiality", "None"),
+                ("Vulnerable system integrity", "None"),
+                ("Vulnerable system availability", "High"),
+                ("Subsequent system confidentiality", "None"),
+                ("Subsequent system integrity", "None"),
+                ("Subsequent system availability", "None"),
+            ]
+        );
+    }
+
+    #[test]
+    fn cvss_metric_table_is_chosen_by_the_prefix() {
+        // v4-only keys inside a v3 vector are skipped rather than mislabelled, and
+        // v3-only keys inside a v4 vector likewise — "UI:P" means Passive only in v4.
+        let v3 = cvss_metrics("CVSS:3.1/AV:N/AT:P/VC:H/S:C/UI:R");
+        assert_eq!(
+            metric_pairs(&v3),
+            vec![
+                ("Attack vector", "Network"),
+                ("User interaction", "Required"),
+                ("Scope", "Changed"),
+            ]
+        );
+        let v4 = cvss_metrics("CVSS:4.0/AV:N/S:C/C:H/UI:P");
+        assert_eq!(
+            metric_pairs(&v4),
+            vec![
+                ("Attack vector", "Network"),
+                ("User interaction", "Passive")
+            ]
+        );
+    }
+
+    #[test]
+    fn cvss_metrics_tolerate_unknown_tokens() {
+        // Temporal/threat/environmental tokens carry no base key and drop out; an
+        // unrecognized VALUE falls back to the raw letter rather than an invented label.
+        let metrics = cvss_metrics("CVSS:3.1/AV:X/AC:L/E:P/RL:O/RC:C/MAV:N/CR:H/ZZ:Q/PR:");
+        assert_eq!(
+            metric_pairs(&metrics),
+            vec![("Attack vector", "X"), ("Attack complexity", "Low")]
+        );
+    }
+
+    #[test]
+    fn a_foreign_vector_yields_no_metrics() {
+        // The view falls back to the raw vector string; guessing a table would print
+        // v3 labels over a v2 (or future) vector's letters.
+        for vector in [
+            "",
+            "not a vector",
+            "AV:N/AC:L/Au:N/C:P/I:P/A:P",
+            "CVSS:2.0/AV:N/AC:L",
+            "CVSS:5.0/AV:N",
+        ] {
+            assert!(cvss_metrics(vector).is_empty(), "{vector}");
+        }
+    }
+
+    #[test]
+    fn cvss_entries_come_from_the_vector_not_the_score() {
+        // Both revisions, v3 first, each versioned off its own prefix.
+        let list = cvss_list(
+            Some(RawCvssSeverities {
+                cvss_v3: Some(RawCvss {
+                    score: Some(7.5),
+                    vector_string: Some("CVSS:3.1/AV:N/AC:L".into()),
+                }),
+                cvss_v4: Some(RawCvss {
+                    score: Some(8.7),
+                    vector_string: Some("CVSS:4.0/AV:N/AC:L".into()),
+                }),
+            }),
+            None,
+        );
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].version, "3.1");
+        assert_eq!(list[0].score, Some(7.5));
+        assert_eq!(list[0].vector_string, "CVSS:3.1/AV:N/AC:L");
+        assert_eq!(list[1].version, "4.0");
+        assert_eq!(list[1].score, Some(8.7));
+        // A null vector means "no score here" — the 0.0 alongside it is not a real zero.
+        let list = cvss_list(
+            Some(RawCvssSeverities {
+                cvss_v3: Some(RawCvss {
+                    score: Some(0.0),
+                    vector_string: None,
+                }),
+                cvss_v4: None,
+            }),
+            None,
+        );
+        assert!(list.is_empty());
+        // The legacy `cvss` field stands in for a missing v3 entry.
+        let list = cvss_list(
+            None,
+            Some(RawCvss {
+                score: Some(5.3),
+                vector_string: Some("CVSS:3.0/AV:N".into()),
+            }),
+        );
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].version, "3.0");
+        // A vector with no CVSS prefix keeps its raw string but claims no revision.
+        let list = cvss_list(
+            None,
+            Some(RawCvss {
+                score: Some(6.8),
+                vector_string: Some("AV:N/AC:L/Au:N".into()),
+            }),
+        );
+        assert_eq!(list[0].version, "");
+        assert!(list[0].metrics.is_empty());
+        assert_eq!(list[0].vector_string, "AV:N/AC:L/Au:N");
+    }
+
+    #[test]
+    fn a_legacy_vector_never_duplicates_a_scored_revision() {
+        // The legacy `cvss` field names no revision: on a v4-only advisory it can
+        // restate the v4 vector, which must not render as two identical scores.
+        let list = cvss_list(
+            Some(RawCvssSeverities {
+                cvss_v3: None,
+                cvss_v4: Some(RawCvss {
+                    score: Some(6.9),
+                    vector_string: Some("CVSS:4.0/AV:N/AC:L".into()),
+                }),
+            }),
+            Some(RawCvss {
+                score: Some(9.9),
+                vector_string: Some("CVSS:4.0/AV:N/AC:L".into()),
+            }),
+        );
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].version, "4.0");
+        // The surviving entry is the cvss_severities one, not the legacy restatement.
+        assert_eq!(list[0].score, Some(6.9));
+        // Genuinely different revisions still both survive.
+        let list = cvss_list(
+            Some(RawCvssSeverities {
+                cvss_v3: None,
+                cvss_v4: Some(RawCvss {
+                    score: Some(6.9),
+                    vector_string: Some("CVSS:4.0/AV:N/AC:L".into()),
+                }),
+            }),
+            Some(RawCvss {
+                score: Some(5.3),
+                vector_string: Some("CVSS:3.1/AV:N/AC:L".into()),
+            }),
+        );
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].version, "3.1");
+        assert_eq!(list[1].version, "4.0");
+    }
+
+    #[test]
+    fn reference_labels_name_the_link_target() {
+        for (url, expected) in [
+            ("https://nvd.nist.gov/vuln/detail/CVE-2026-69207", "NVD"),
+            ("https://github.com/honojs/hono/commit/abc123", "Commit"),
+            (
+                "https://github.com/honojs/hono/releases/tag/v4.12.34",
+                "Release",
+            ),
+            (
+                "https://github.com/honojs/hono/security/advisories/GHSA-8j4g-w8fx-2239",
+                "Advisory",
+            ),
+            // A GHSA id anywhere in the path is an advisory even off the advisories route.
+            (
+                "https://github.com/advisories/GHSA-8j4g-w8fx-2239",
+                "Advisory",
+            ),
+            ("https://github.com/honojs/hono/pull/4212", "Pull request"),
+            ("https://github.com/honojs/hono/issues/4211", "Issue"),
+            // No recognized route: the bare host, never an empty label.
+            ("https://github.com/honojs/hono", "github.com"),
+            ("https://www.cve.org/CVERecord?id=CVE-2026-69207", "cve.org"),
+            (
+                "https://lists.debian.org:8443/msg00001.html",
+                "lists.debian.org",
+            ),
+            ("http://EXAMPLE.COM/x", "example.com"),
+            ("https://WWW.Example.com/x", "example.com"),
+            // Nothing parseable to name it by: the URL labels itself.
+            ("not a url", "not a url"),
+            ("mailto:security@example.com", "mailto:security@example.com"),
+            ("https:///no-host/path", "https:///no-host/path"),
+        ] {
+            assert_eq!(reference_label(url), expected, "{url}");
+        }
+    }
+
+    #[test]
+    fn advisory_detail_lists_drop_unusable_entries() {
+        // A reference with no URL can't be a link and a CWE with no id can't be named.
+        let references = references_out(Some(vec![
+            RawReference {
+                url: Some("https://nvd.nist.gov/vuln/detail/CVE-1".into()),
+            },
+            RawReference { url: None },
+            RawReference {
+                url: Some(String::new()),
+            },
+        ]));
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].label, "NVD");
+        let cwes = cwes_out(Some(vec![
+            RawCwe {
+                cwe_id: Some("CWE-1333".into()),
+                name: Some("Inefficient Regular Expression Complexity".into()),
+            },
+            RawCwe {
+                cwe_id: None,
+                name: Some("orphan".into()),
+            },
+        ]));
+        assert_eq!(cwes.len(), 1);
+        assert_eq!(cwes[0].cwe_id, "CWE-1333");
+        assert_eq!(cwes[0].name, "Inefficient Regular Expression Complexity");
+        assert!(references_out(None).is_empty());
+        assert!(cwes_out(None).is_empty());
+    }
+
+    fn detailed_alert_fixture() -> Value {
+        let mut alert = alert_fixture(
+            json!({ "identifier": "4.12.34" }),
+            json!({ "score": 5.3, "vector_string": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:H" }),
+        );
+        alert["security_advisory"]["cvss_severities"] = json!({
+            "cvss_v3": {
+                "score": 5.3,
+                "vector_string": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:H"
+            },
+            "cvss_v4": {
+                "score": 6.9,
+                "vector_string": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N"
+            }
+        });
+        alert["security_advisory"]["references"] = json!([
+            { "url": "https://github.com/honojs/hono/security/advisories/GHSA-8j4g-w8fx-2239" },
+            { "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-69207" }
+        ]);
+        alert["security_advisory"]["cwes"] = json!([
+            { "cwe_id": "CWE-1333", "name": "Inefficient Regular Expression Complexity" }
+        ]);
+        alert
+    }
+
+    #[test]
+    fn alert_maps_the_detail_fields() {
+        let raw: RawAlert =
+            serde_json::from_value(detailed_alert_fixture()).expect("alert fixture deserializes");
+        let out = alert_out(raw);
+        assert_eq!(out.relationship.as_deref(), Some("transitive"));
+        // The legacy cvss field still feeds cvssScore; the new list is separate.
+        assert_eq!(out.cvss_score, Some(5.3));
+        assert_eq!(out.cvss.len(), 2);
+        assert_eq!(out.cvss[0].version, "3.1");
+        assert_eq!(out.cvss[0].metrics.len(), 8);
+        assert_eq!(out.cvss[1].version, "4.0");
+        assert_eq!(out.cvss[1].score, Some(6.9));
+        assert_eq!(out.cvss[1].metrics.len(), 11);
+        assert_eq!(out.references.len(), 2);
+        assert_eq!(out.references[0].label, "Advisory");
+        assert_eq!(out.references[1].label, "NVD");
+        assert_eq!(out.cwes.len(), 1);
+        assert_eq!(out.cwes[0].cwe_id, "CWE-1333");
+    }
+
+    #[test]
+    fn alert_detail_fields_tolerate_a_stripped_item() {
+        let raw: RawAlert =
+            serde_json::from_value(json!({ "number": 7 })).expect("sparse alert deserializes");
+        let out = alert_out(raw);
+        assert_eq!(out.relationship, None);
+        assert!(out.cvss.is_empty());
+        assert!(out.references.is_empty());
+        assert!(out.cwes.is_empty());
+    }
+
+    fn code_scanning_fixture() -> Value {
+        json!({
+            "number": 4,
+            "state": "open",
+            "rule": {
+                "id": "js/zipslip",
+                "name": "js/zipslip",
+                "description": "Arbitrary file write during zip extraction",
+                "severity": "error",
+                "security_severity_level": "high",
+                "tags": ["security"]
+            },
+            "tool": { "name": "CodeQL", "guid": Value::Null, "version": "2.4.0" },
+            "most_recent_instance": {
+                "ref": "refs/heads/main",
+                "state": "open",
+                "commit_sha": "39406e42cb832f683daa691dd652a8dc36ee8930",
+                "message": { "text": "This path depends on a user-provided value." },
+                "location": {
+                    "path": "lib/ab12-gen.js",
+                    "start_line": 917,
+                    "end_line": 917,
+                    "start_column": 7,
+                    "end_column": 18
+                },
+                "classifications": ["library"]
+            },
+            "html_url": "https://github.com/theBGuy/GitDesktop/security/code-scanning/4",
+            "created_at": "2026-08-04T12:29:18Z",
+            "updated_at": "2026-08-05T12:29:18Z"
+        })
+    }
+
+    #[test]
+    fn code_scanning_alert_maps_every_field() {
+        let raw: RawCodeScanningAlert =
+            serde_json::from_value(code_scanning_fixture()).expect("fixture deserializes");
+        let out = code_scanning_alert_out(raw);
+        assert_eq!(out.number, 4);
+        assert_eq!(out.state, "open");
+        assert_eq!(out.rule_id, "js/zipslip");
+        assert_eq!(out.rule_name.as_deref(), Some("js/zipslip"));
+        assert_eq!(
+            out.rule_description.as_deref(),
+            Some("Arbitrary file write during zip extraction")
+        );
+        // The SARIF level and the security severity are separate scales.
+        assert_eq!(out.severity.as_deref(), Some("error"));
+        assert_eq!(out.security_severity.as_deref(), Some("high"));
+        assert_eq!(out.tool_name, "CodeQL");
+        assert_eq!(out.tool_version.as_deref(), Some("2.4.0"));
+        assert_eq!(out.path, "lib/ab12-gen.js");
+        assert_eq!(out.start_line, Some(917));
+        assert_eq!(out.message, "This path depends on a user-provided value.");
+        assert_eq!(out.git_ref.as_deref(), Some("refs/heads/main"));
+        assert_eq!(
+            out.html_url,
+            "https://github.com/theBGuy/GitDesktop/security/code-scanning/4"
+        );
+        assert_eq!(out.created_at, "2026-08-04T12:29:18Z");
+        assert_eq!(out.updated_at, "2026-08-05T12:29:18Z");
+    }
+
+    #[test]
+    fn code_scanning_alert_tolerates_a_stripped_item() {
+        let raw: RawCodeScanningAlert =
+            serde_json::from_value(json!({ "number": 9 })).expect("sparse alert deserializes");
+        let out = code_scanning_alert_out(raw);
+        assert_eq!(out.number, 9);
+        assert_eq!(out.rule_id, "");
+        assert_eq!(out.message, "");
+        assert_eq!(out.path, "");
+        assert_eq!(out.start_line, None);
+        assert_eq!(out.git_ref, None);
+        assert_eq!(out.security_severity, None);
+    }
+
+    fn secret_scanning_fixture() -> Value {
+        json!({
+            "number": 2,
+            "state": "open",
+            "secret_type": "adafruit_io_key",
+            "secret_type_display_name": "Adafruit IO Key",
+            "secret": "aio_XXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+            "validity": "active",
+            "publicly_leaked": true,
+            "multi_repo": false,
+            "resolution": Value::Null,
+            "html_url": "https://github.com/theBGuy/GitDesktop/security/secret-scanning/2",
+            "created_at": "2026-08-04T18:18:30Z",
+            "updated_at": "2026-08-05T18:18:30Z"
+        })
+    }
+
+    #[test]
+    fn secret_scanning_alert_maps_every_field() {
+        let raw: RawSecretScanningAlert =
+            serde_json::from_value(secret_scanning_fixture()).expect("fixture deserializes");
+        let out = secret_scanning_alert_out(raw);
+        assert_eq!(out.number, 2);
+        assert_eq!(out.state, "open");
+        assert_eq!(out.secret_type, "adafruit_io_key");
+        assert_eq!(out.secret_type_display_name, "Adafruit IO Key");
+        assert_eq!(out.validity.as_deref(), Some("active"));
+        assert_eq!(out.publicly_leaked, Some(true));
+        assert_eq!(out.resolution, None);
+        assert_eq!(
+            out.html_url,
+            "https://github.com/theBGuy/GitDesktop/security/secret-scanning/2"
+        );
+        assert_eq!(out.created_at, "2026-08-04T18:18:30Z");
+        assert_eq!(out.updated_at, "2026-08-05T18:18:30Z");
+    }
+
+    #[test]
+    fn secret_scanning_alert_tolerates_a_stripped_item() {
+        let raw: RawSecretScanningAlert =
+            serde_json::from_value(json!({ "number": 3 })).expect("sparse alert deserializes");
+        let out = secret_scanning_alert_out(raw);
+        assert_eq!(out.number, 3);
+        assert_eq!(out.secret_type, "");
+        assert_eq!(out.secret_type_display_name, "");
+        assert_eq!(out.validity, None);
+        assert_eq!(out.publicly_leaked, None);
+    }
+
+    #[test]
+    fn code_scanning_envelope_wire_shape_is_pinned() {
+        let raw: RawCodeScanningAlert = serde_json::from_value(code_scanning_fixture()).unwrap();
+        let envelope = CodeScanningAlertsOut {
+            availability: FindingAvailability::Available,
+            detail: None,
+            alerts: vec![code_scanning_alert_out(raw)],
+            truncated: true,
+        };
+        assert_eq!(
+            serde_json::to_value(&envelope).unwrap(),
+            json!({
+                "availability": "available",
+                "detail": Value::Null,
+                "truncated": true,
+                "alerts": [{
+                    "number": 4,
+                    "state": "open",
+                    "ruleId": "js/zipslip",
+                    "ruleName": "js/zipslip",
+                    "ruleDescription": "Arbitrary file write during zip extraction",
+                    "severity": "error",
+                    "securitySeverity": "high",
+                    "toolName": "CodeQL",
+                    "toolVersion": "2.4.0",
+                    "path": "lib/ab12-gen.js",
+                    "startLine": 917,
+                    "message": "This path depends on a user-provided value.",
+                    // A Rust keyword on the wire: the key must stay literally "ref".
+                    "ref": "refs/heads/main",
+                    "htmlUrl": "https://github.com/theBGuy/GitDesktop/security/code-scanning/4",
+                    "createdAt": "2026-08-04T12:29:18Z",
+                    "updatedAt": "2026-08-05T12:29:18Z"
+                }]
+            })
+        );
+    }
+
+    #[test]
+    fn secret_scanning_envelope_wire_shape_is_pinned() {
+        let raw: RawSecretScanningAlert =
+            serde_json::from_value(secret_scanning_fixture()).unwrap();
+        let envelope = SecretScanningAlertsOut {
+            availability: FindingAvailability::NotEnabled,
+            detail: Some("Secret scanning is disabled on this repository.".into()),
+            alerts: vec![secret_scanning_alert_out(raw)],
+            truncated: false,
+        };
+        // The exact shape also pins what does NOT cross: the fixture's `secret` value
+        // stays server-side — this app never carries a leaked credential to the UI.
+        assert_eq!(
+            serde_json::to_value(&envelope).unwrap(),
+            json!({
+                "availability": "notEnabled",
+                "detail": "Secret scanning is disabled on this repository.",
+                "truncated": false,
+                "alerts": [{
+                    "number": 2,
+                    "state": "open",
+                    "secretType": "adafruit_io_key",
+                    "secretTypeDisplayName": "Adafruit IO Key",
+                    "validity": "active",
+                    "publiclyLeaked": true,
+                    "resolution": Value::Null,
+                    "htmlUrl": "https://github.com/theBGuy/GitDesktop/security/secret-scanning/2",
+                    "createdAt": "2026-08-04T18:18:30Z",
+                    "updatedAt": "2026-08-05T18:18:30Z"
+                }]
+            })
+        );
+    }
+
+    #[test]
+    fn new_arms_keep_the_availability_envelope() {
+        // A readable-but-empty window is the real answer; an unavailable one carries
+        // the reason instead of an empty list the user would read as "clean".
+        let out = code_scanning_envelope(Fetched::Items {
+            items: Vec::new(),
+            truncated: false,
+        });
+        assert_eq!(out.availability, FindingAvailability::Available);
+        assert!(out.alerts.is_empty());
+        let out = secret_scanning_envelope(Fetched::Unavailable {
+            availability: FindingAvailability::NotEnabled,
+            detail: Some("Secret scanning is disabled on this repository.".into()),
+            status: Some(404),
+        });
+        assert_eq!(out.availability, FindingAvailability::NotEnabled);
+        assert!(!out.truncated);
+        let out = secret_scanning_envelope(Fetched::Items {
+            items: vec![json!("not an object")],
+            truncated: false,
+        });
+        assert_eq!(out.availability, FindingAvailability::Indeterminate);
+        assert_eq!(
+            out.detail.as_deref(),
+            Some("GitHub returned 1 alert this build couldn't read")
         );
     }
 }

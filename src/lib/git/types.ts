@@ -656,7 +656,8 @@ export interface ForgeCapabilities {
   ci: boolean;
   webhooks: boolean;
   approvals: boolean;
-  /** Dependabot alerts + repository security advisories (GitHub-only surfaces). */
+  /** Dependabot, code scanning and secret scanning alerts + repository security
+   *  advisories (GitHub-only surfaces). */
   securityFindings: boolean;
 }
 

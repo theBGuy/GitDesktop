@@ -567,6 +567,8 @@ pub fn run() {
             github::security::gh_security_apply,
             github::security_findings::gh_dependabot_alerts,
             github::security_findings::gh_repo_advisories,
+            github::security_findings::gh_code_scanning_alerts,
+            github::security_findings::gh_secret_scanning_alerts,
             github::lifecycle::gh_repo_set_visibility,
             github::lifecycle::gh_repo_transfer,
             github::lifecycle::gh_repo_delete,

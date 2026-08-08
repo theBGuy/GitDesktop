@@ -65,10 +65,13 @@ export interface SelectedIssue {
   id: string;
 }
 
-/** Selected security finding: a Dependabot alert (by number) or a repository
- *  advisory (by GHSA id) — the two categories the Findings tab lists. */
+/** Selected security finding, one variant per category the Findings tab lists.
+ *  Alert / code-scanning / secret-scanning numbers are per-category sequences, so
+ *  the `type` tag is what keeps two same-numbered findings distinct. */
 export type SelectedFinding =
   | { type: "alert"; number: number }
+  | { type: "codeScanning"; number: number }
+  | { type: "secretScanning"; number: number }
   | { type: "advisory"; ghsaId: string };
 
 /** How many rows each Findings category has asked for. In the store (not panel
@@ -76,12 +79,16 @@ export type SelectedFinding =
  *  one cache entry. */
 export interface FindingsLimits {
   alerts: number;
+  codeScanning: number;
+  secretScanning: number;
   advisories: number;
 }
 
 /** One page per category — matches the shared LoadMoreRow PAGE_SIZE. */
 const DEFAULT_FINDINGS_LIMITS: FindingsLimits = {
   alerts: 100,
+  codeScanning: 100,
+  secretScanning: 100,
   advisories: 100,
 };
 

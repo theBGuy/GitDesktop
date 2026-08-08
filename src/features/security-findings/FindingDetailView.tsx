@@ -2,21 +2,33 @@ import { ArrowSquareOutIcon } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { ReactNode } from "react";
 import { RelativeTime } from "@/components/relative-time";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Markdown } from "@/components/ui/markdown";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { forgeReady, forgeSupports, useForgeStatus } from "@/lib/git/queries";
 import type {
+  CodeScanningAlertOut,
+  CvssOut,
   DependabotAlertOut,
+  ReferenceOut,
   RepoAdvisoryOut,
+  SecretScanningAlertOut,
 } from "@/lib/github/security-findings";
 import {
+  useCodeScanningAlerts,
   useDependabotAlerts,
   useRepoAdvisories,
+  useSecretScanningAlerts,
 } from "@/lib/github/security-findings";
 import { useUiStore } from "@/lib/stores/ui";
-import { SeverityChip } from "./severity";
+import {
+  CodeScanningChip,
+  SeverityChip,
+  ValidityChip,
+  validityLabel,
+} from "./severity";
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -29,13 +41,15 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
 
 function DetailShell({
   title,
-  severity,
+  chip,
   htmlUrl,
   meta,
   children,
 }: {
   title: string;
-  severity: string | null;
+  /** The category's own status chip — severity, SARIF level, or validity; each
+   *  category names its state in its own ladder's words. */
+  chip: ReactNode;
   htmlUrl: string;
   meta: ReactNode;
   children: ReactNode;
@@ -45,7 +59,7 @@ function DetailShell({
       <div className="border-b p-4">
         <h2 className="text-sm font-semibold text-balance">{title}</h2>
         <div className="mt-2 flex flex-wrap items-center gap-2">
-          <SeverityChip severity={severity} />
+          {chip}
           {/* A tolerated malformed item can lack html_url — no link, no button. */}
           {htmlUrl ? (
             <Button
@@ -72,11 +86,86 @@ function DetailShell({
   );
 }
 
+/** GitHub reports `direct` / `transitive`; anything else is shown as it arrived,
+ *  so a value we don't know yet is never dropped or mislabeled. */
+function relationshipLabel(relationship: string): string {
+  switch (relationship.toLowerCase()) {
+    case "direct":
+      return "Direct";
+    case "transitive":
+      return "Transitive";
+    default:
+      return relationship;
+  }
+}
+
+/** One CVSS version's score and decoded metrics. An advisory can carry v3 and v4
+ *  at once, so each gets its own section rather than one collapsed "CVSS" row. */
+function CvssSection({ cvss }: { cvss: CvssOut }) {
+  return (
+    <section className="mb-4">
+      <h3 className="mb-1.5 flex items-baseline gap-2 text-xs font-semibold">
+        {/* The version is empty when the vector named none — heading it
+            "CVSS" alone beats a dangling revision number. */}
+        <span>{cvss.version ? `CVSS ${cvss.version}` : "CVSS"}</span>
+        {cvss.score !== null ? (
+          <span className="font-normal text-muted-foreground tabular-nums">
+            {cvss.score}
+          </span>
+        ) : null}
+      </h3>
+      {cvss.metrics.length > 0 ? (
+        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
+          {cvss.metrics.map((m) => (
+            <Row key={m.label} label={m.label}>
+              {m.value}
+            </Row>
+          ))}
+        </dl>
+      ) : (
+        // An unparseable vector still says something — show it raw rather than
+        // silently rendering an empty section.
+        <p className="font-mono text-[11px] wrap-break-word text-muted-foreground">
+          {cvss.vectorString}
+        </p>
+      )}
+    </section>
+  );
+}
+
+function ReferencesSection({ references }: { references: ReferenceOut[] }) {
+  return (
+    <section className="mt-4">
+      <h3 className="mb-1.5 text-xs font-semibold">References</h3>
+      <ul>
+        {references.map((r, i) => (
+          <li key={`${r.url}-${i}`}>
+            <button
+              type="button"
+              onClick={() => openUrl(r.url)}
+              className="flex w-full cursor-pointer items-center gap-2 rounded px-1 py-1 text-left text-xs hover:bg-muted/40"
+            >
+              <span className="shrink-0">{r.label}</span>
+              <span
+                className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground"
+                title={r.url}
+              >
+                {r.url}
+              </span>
+              <ArrowSquareOutIcon className="size-3 shrink-0 text-muted-foreground" />
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 function AlertDetail({ alert }: { alert: DependabotAlertOut }) {
   return (
     <DetailShell
       title={alert.summary}
-      severity={alert.severity}
+      chip={<SeverityChip severity={alert.severity} />}
       htmlUrl={alert.htmlUrl}
       meta={
         <>
@@ -87,6 +176,13 @@ function AlertDetail({ alert }: { alert: DependabotAlertOut }) {
               {alert.scope ? ` · ${alert.scope}` : ""}
             </span>
           </Row>
+          {/* Next to the package: whether this is your dependency or something
+              underneath it decides who can act on it. Omitted when unstated. */}
+          {alert.relationship ? (
+            <Row label="Dependency">
+              {relationshipLabel(alert.relationship)}
+            </Row>
+          ) : null}
           <Row label="Manifest">
             <span className="font-mono">{alert.manifestPath}</span>
           </Row>
@@ -109,13 +205,134 @@ function AlertDetail({ alert }: { alert: DependabotAlertOut }) {
           <Row label="Patched">
             {alert.firstPatchedVersion ?? "No patched version yet"}
           </Row>
+          {alert.cwes.length > 0 ? (
+            <Row label="CWE">
+              <span className="flex flex-wrap gap-1">
+                {alert.cwes.map((c) => (
+                  <Badge
+                    key={c.cweId}
+                    variant="outline"
+                    className="h-auto max-w-full py-0.5 text-left font-normal whitespace-normal"
+                  >
+                    <span className="font-mono">{c.cweId}</span> {c.name}
+                  </Badge>
+                ))}
+              </span>
+            </Row>
+          ) : null}
           <Row label="Opened">
             <RelativeTime date={alert.createdAt} />
           </Row>
         </>
       }
     >
+      {/* Index-keyed: the version can come through empty, so it isn't unique. */}
+      {alert.cvss.map((c, i) => (
+        <CvssSection key={`${c.version}-${i}`} cvss={c} />
+      ))}
       <Markdown>{alert.description}</Markdown>
+      {alert.references.length > 0 ? (
+        <ReferencesSection references={alert.references} />
+      ) : null}
+    </DetailShell>
+  );
+}
+
+/** Sentence-case a raw wire value, leaving the rest of it as it arrived so an
+ *  unrecognized level still reads instead of collapsing to "Unspecified". */
+function capitalizeFirst(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function CodeScanningDetail({ alert }: { alert: CodeScanningAlertOut }) {
+  return (
+    <DetailShell
+      title={alert.ruleName ?? alert.ruleId}
+      chip={
+        <CodeScanningChip
+          securitySeverity={alert.securitySeverity}
+          severity={alert.severity}
+        />
+      }
+      htmlUrl={alert.htmlUrl}
+      meta={
+        <>
+          <Row label="Rule">
+            <span className="font-mono">{alert.ruleId}</span>
+          </Row>
+          {/* The SARIF level, spelled out — the chip shows it only when the rule
+              carries no security severity to outrank it. */}
+          {alert.severity ? (
+            <Row label="Level">{capitalizeFirst(alert.severity)}</Row>
+          ) : null}
+          <Row label="Tool">
+            {alert.toolName}
+            {alert.toolVersion ? (
+              <span className="text-muted-foreground">
+                {" "}
+                {alert.toolVersion}
+              </span>
+            ) : null}
+          </Row>
+          <Row label="Location">
+            <span className="font-mono">
+              {alert.startLine === null
+                ? alert.path
+                : `${alert.path}:${alert.startLine}`}
+            </span>
+          </Row>
+          {alert.ref ? (
+            <Row label="Ref">
+              <span className="font-mono">{alert.ref}</span>
+            </Row>
+          ) : null}
+          <Row label="State">{alert.state}</Row>
+          <Row label="Opened">
+            <RelativeTime date={alert.createdAt} />
+          </Row>
+        </>
+      }
+    >
+      <p className="text-xs wrap-break-word">{alert.message}</p>
+      {alert.ruleDescription ? (
+        <p className="mt-3 text-xs wrap-break-word text-muted-foreground">
+          {alert.ruleDescription}
+        </p>
+      ) : null}
+    </DetailShell>
+  );
+}
+
+function SecretScanningDetail({ alert }: { alert: SecretScanningAlertOut }) {
+  return (
+    <DetailShell
+      title={alert.secretTypeDisplayName}
+      chip={<ValidityChip validity={alert.validity} />}
+      htmlUrl={alert.htmlUrl}
+      meta={
+        <>
+          <Row label="Type">{alert.secretTypeDisplayName}</Row>
+          <Row label="Validity">{validityLabel(alert.validity)}</Row>
+          <Row label="State">{alert.state}</Row>
+          {alert.resolution ? (
+            <Row label="Resolution">{alert.resolution}</Row>
+          ) : null}
+          {/* Only for a confirmed public leak — a null means GitHub didn't say,
+              and "No" would read as a clearance it never gave. */}
+          {alert.publiclyLeaked === true ? (
+            <Row label="Publicly leaked">Yes</Row>
+          ) : null}
+          <Row label="Opened">
+            <RelativeTime date={alert.createdAt} />
+          </Row>
+        </>
+      }
+    >
+      {/* The locations of a secret are a separate paginated endpoint we don't
+          fetch, so this says so instead of implying the alert has no detail. */}
+      <p className="text-xs text-muted-foreground">
+        Open this alert on GitHub to see where the secret appears and manage it.
+      </p>
     </DetailShell>
   );
 }
@@ -124,7 +341,7 @@ function AdvisoryDetail({ advisory }: { advisory: RepoAdvisoryOut }) {
   return (
     <DetailShell
       title={advisory.summary}
-      severity={advisory.severity}
+      chip={<SeverityChip severity={advisory.severity} />}
       htmlUrl={advisory.htmlUrl}
       meta={
         <>
@@ -201,6 +418,18 @@ export function FindingDetailView({
   // Same hooks + same store limits as the panel, so these are cache hits rather
   // than a second fetch.
   const alerts = useDependabotAlerts(repoPath, enabled, active, limits.alerts);
+  const codeScanning = useCodeScanningAlerts(
+    repoPath,
+    enabled,
+    active,
+    limits.codeScanning,
+  );
+  const secrets = useSecretScanningAlerts(
+    repoPath,
+    enabled,
+    active,
+    limits.secretScanning,
+  );
   const advisories = useRepoAdvisories(
     repoPath,
     enabled,
@@ -208,7 +437,16 @@ export function FindingDetailView({
     limits.advisories,
   );
 
-  const query = selectedFinding?.type === "advisory" ? advisories : alerts;
+  // Only the selected finding's own category decides the pending/error state —
+  // a sibling category failing must not blank a finding that loaded fine.
+  const query =
+    selectedFinding?.type === "advisory"
+      ? advisories
+      : selectedFinding?.type === "codeScanning"
+        ? codeScanning
+        : selectedFinding?.type === "secretScanning"
+          ? secrets
+          : alerts;
 
   // Gated on `enabled`: a disabled query stays `isPending` forever, so an
   // ungated skeleton would spin here if the repo lost the capability mid-session.
@@ -235,6 +473,16 @@ export function FindingDetailView({
       (a) => a.number === selectedFinding.number,
     );
     if (alert) return <AlertDetail alert={alert} />;
+  } else if (selectedFinding?.type === "codeScanning") {
+    const alert = codeScanning.data?.alerts.find(
+      (a) => a.number === selectedFinding.number,
+    );
+    if (alert) return <CodeScanningDetail alert={alert} />;
+  } else if (selectedFinding?.type === "secretScanning") {
+    const alert = secrets.data?.alerts.find(
+      (a) => a.number === selectedFinding.number,
+    );
+    if (alert) return <SecretScanningDetail alert={alert} />;
   } else if (selectedFinding?.type === "advisory") {
     const advisory = advisories.data?.advisories.find(
       (a) => a.ghsaId === selectedFinding.ghsaId,

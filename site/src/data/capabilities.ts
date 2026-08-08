@@ -291,7 +291,8 @@ export const capabilities: Capability[] = [
   },
   {
     group: "CI, tags & releases",
-    label: "Findings tab — Dependabot alerts & security advisories",
+    label:
+      "Findings tab — Dependabot, code & secret scanning alerts, advisories",
     highlight: true,
   },
 

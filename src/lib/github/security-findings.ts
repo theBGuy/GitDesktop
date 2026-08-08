@@ -41,6 +41,89 @@ export interface DependabotAlertOut {
   htmlUrl: string;
   createdAt: string;
   updatedAt: string;
+  /** `"direct"` / `"transitive"` when GitHub states it; null when it doesn't —
+   *  the two read very differently to someone deciding whether to act. */
+  relationship: string | null;
+  /** Every CVSS version the advisory carries (v3 and v4 coexist). */
+  cvss: CvssOut[];
+  references: ReferenceOut[];
+  cwes: CweOut[];
+}
+
+export interface CvssOut {
+  version: string;
+  score: number | null;
+  vectorString: string;
+  /** The vector decoded into human labels; empty when the vector couldn't be
+   *  parsed, in which case the raw `vectorString` is all there is to show. */
+  metrics: CvssMetricOut[];
+}
+
+export interface CvssMetricOut {
+  label: string;
+  value: string;
+}
+
+export interface ReferenceOut {
+  url: string;
+  label: string;
+}
+
+export interface CweOut {
+  cweId: string;
+  name: string;
+}
+
+export interface CodeScanningAlertsOut {
+  availability: FindingAvailability;
+  detail: string | null;
+  alerts: CodeScanningAlertOut[];
+  truncated: boolean;
+}
+
+export interface CodeScanningAlertOut {
+  number: number;
+  state: string;
+  ruleId: string;
+  ruleName: string | null;
+  ruleDescription: string | null;
+  /** The SARIF level — `note` / `warning` / `error`. A different ladder from the
+   *  advisory severities, so it is labeled in its own words, never mapped onto
+   *  Critical/High. */
+  severity: string | null;
+  /** The security severity (critical/high/medium/low) when the rule carries one. */
+  securitySeverity: string | null;
+  toolName: string;
+  toolVersion: string | null;
+  path: string;
+  startLine: number | null;
+  message: string;
+  ref: string | null;
+  htmlUrl: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SecretScanningAlertsOut {
+  availability: FindingAvailability;
+  detail: string | null;
+  alerts: SecretScanningAlertOut[];
+  truncated: boolean;
+}
+
+export interface SecretScanningAlertOut {
+  number: number;
+  state: string;
+  secretType: string;
+  secretTypeDisplayName: string;
+  /** `active` / `inactive` / `unknown` — GitHub only validates secrets for
+   *  providers it has a checker for, so null means "never checked". */
+  validity: string | null;
+  publiclyLeaked: boolean | null;
+  resolution: string | null;
+  htmlUrl: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface RepoAdvisoriesOut {
@@ -75,15 +158,25 @@ export interface AdvisoryVulnerabilityOut {
 
 // ── API wrappers ─────────────────────────────────────────────────────────────
 //
-// GitHub-only: Dependabot alerts and repository security advisories have no
-// GitLab/Bitbucket analogue, so these stay `gh_*` and the panel gates on the
-// `securityFindings` capability rather than dispatching per provider.
+// GitHub-only: every findings category here (Dependabot, code scanning, secret
+// scanning, repository advisories) has no GitLab/Bitbucket analogue, so these
+// stay `gh_*` and the panel gates on the `securityFindings` capability rather
+// than dispatching per provider.
 
 export const ghDependabotAlerts = (repoPath: string, limit: number) =>
   invoke<DependabotAlertsOut>("gh_dependabot_alerts", { repoPath, limit });
 
 export const ghRepoAdvisories = (repoPath: string, limit: number) =>
   invoke<RepoAdvisoriesOut>("gh_repo_advisories", { repoPath, limit });
+
+export const ghCodeScanningAlerts = (repoPath: string, limit: number) =>
+  invoke<CodeScanningAlertsOut>("gh_code_scanning_alerts", { repoPath, limit });
+
+export const ghSecretScanningAlerts = (repoPath: string, limit: number) =>
+  invoke<SecretScanningAlertsOut>("gh_secret_scanning_alerts", {
+    repoPath,
+    limit,
+  });
 
 // ── Queries ──────────────────────────────────────────────────────────────────
 //
@@ -117,6 +210,36 @@ export function useRepoAdvisories(
   return useQuery({
     queryKey: ["repo", repo, "findings", "advisories", limit] as const,
     queryFn: () => ghRepoAdvisories(repo, limit),
+    enabled: enabled && active,
+    staleTime: 5 * 60_000,
+    placeholderData: keepPreviousDataForRepo(repo),
+  });
+}
+
+export function useCodeScanningAlerts(
+  repo: string,
+  enabled: boolean,
+  active: boolean,
+  limit: number,
+) {
+  return useQuery({
+    queryKey: ["repo", repo, "findings", "codeScanning", limit] as const,
+    queryFn: () => ghCodeScanningAlerts(repo, limit),
+    enabled: enabled && active,
+    staleTime: 5 * 60_000,
+    placeholderData: keepPreviousDataForRepo(repo),
+  });
+}
+
+export function useSecretScanningAlerts(
+  repo: string,
+  enabled: boolean,
+  active: boolean,
+  limit: number,
+) {
+  return useQuery({
+    queryKey: ["repo", repo, "findings", "secretScanning", limit] as const,
+    queryFn: () => ghSecretScanningAlerts(repo, limit),
     enabled: enabled && active,
     staleTime: 5 * 60_000,
     placeholderData: keepPreviousDataForRepo(repo),

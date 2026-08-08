@@ -1326,16 +1326,28 @@ or Bitbucket repo the tab says so instead.
 - **Dependabot alerts** — every open alert, grouped by the vulnerable package. Each one
   shows its **severity**, the **affected version range**, the **first patched version**,
   and a **CVSS** score when GitHub reports one.
+- **Code scanning alerts** — the open alerts the repo's code scanning tools have
+  raised, grouped by the **rule** that fired.
+- **Secret scanning alerts** — the open alerts for credentials found committed to the
+  repository, grouped by the kind of secret, each with a **validity** chip —
+  **Active**, **Inactive**, or **Unknown** — for the leaked credential.
 - **Security advisories** — the advisories published on the repository itself.
 
 Move through the list with **↑ / ↓**; select a row for its detail, then **View on
-GitHub** to open it there.
+GitHub** to open it there. A Dependabot alert's detail goes further: whether the
+vulnerable package is a **direct** or **transitive** dependency, a **base-metric
+table** for each CVSS version the advisory carries (**3.x** and **4.0** can both be
+there), the **CWEs** GitHub classified it under, and its **references** as labeled
+links.
 
-A category that isn't reporting tells you why rather than looking empty. When Dependabot
-alerts are switched off for the repo and you have repo-admin access, **Open security
-settings** takes you straight to **Repository settings → Security**, where you turn
-scanning on (see *Repository settings*). When your GitHub access can't read a category, you see what GitHub said
-about it; when the check couldn't complete at all, you get a **Retry**.
+A category that isn't reporting tells you why rather than looking empty — a category
+only reads as clean once GitHub has confirmed it's switched on. When **Dependabot
+alerts**, **code scanning**, or **secret scanning** is switched off for the repo and you
+have repo-admin access, **Open security settings** takes you straight to **Repository
+settings → Security**, where you turn that scanning on (see *Repository settings*).
+Advisories have no such switch — they're only published on public repositories, so
+their card says just that. When your GitHub access can't read a category, you see what
+GitHub said about it; when the check couldn't complete at all, you get a **Retry**.
 
 The tab fetches when you open it — use the refresh button for the current state.`,
   },

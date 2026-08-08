@@ -80,9 +80,13 @@ themselves up to date (see [Updates](#updates)). Prefer to build from source? Se
   or failed), cancel, dispatch a workflow, and read failed-step logs — none of
   which GitHub Desktop does.
 - **Security findings, in-app** — a **Findings** tab lists a GitHub repo's open
-  **Dependabot alerts**, grouped by vulnerable package with severity and the first
-  patched version, alongside the repository's **security advisories** — each one a
-  click from its page on GitHub, and one click from turning scanning on when it's off.
+  **Dependabot alerts** (grouped by vulnerable package, each row with its severity and
+  first patched version), its **code scanning** and **secret scanning** alerts, and the
+  repository's **security advisories**. Select a row for its detail — for a Dependabot
+  alert that adds CVSS base metrics, CWEs, labeled references, and whether the
+  dependency is direct or transitive — then open it on GitHub. A category that isn't
+  switched on says so, with a jump to the settings that enable it if you're a repo
+  admin.
 - **Explore repositories** — a full-page browser across **GitHub, GitLab & Bitbucket**:
   before you type it shows **your own repositories** (grouped by owner) and a **Popular**
   star-sorted feed (GitHub & GitLab); typing searches GitHub, all public GitLab projects,
@@ -588,13 +592,15 @@ CI badge in the header, and run-completion notifications.
 
 **Findings** — a tab (More ▾) for a GitHub repo's open **Dependabot alerts**,
 grouped by the vulnerable package, each with its severity, affected version range,
-first patched version, and a CVSS score when GitHub has one — plus the
-**security advisories** published
-on the repository itself. Select a row for the detail, then open it on GitHub.
-When a category isn't reporting — alerts switched off, a token that can't read
-them, or a check that didn't complete — the tab says which and why, and
-**Open security settings** goes straight to Repository settings → Security to
-turn scanning on.
+first patched version, and a CVSS score when GitHub has one — plus **code scanning**
+alerts, **secret scanning** alerts with a **validity** chip for the leaked credential,
+and the **security advisories** published on the repository itself. Select a row for
+the detail, then open it on GitHub; a Dependabot alert's detail adds a base-metric
+table per CVSS version the advisory carries (3.x and 4.0), its CWEs, labeled reference
+links, and whether the package is a direct or transitive dependency. When a category
+isn't reporting — scanning switched off, a token that can't read it, or a check that
+didn't complete — the tab says which and why, and (with repo-admin access) **Open
+security settings** goes straight to Repository settings → Security to turn scanning on.
 
 **Insights** — a repository-graphs tab (Ctrl/Cmd-9): commit activity, code
 frequency (additions vs. deletions), contributor churn, and a commit punch card —

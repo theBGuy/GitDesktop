@@ -32,9 +32,10 @@ pub struct Capabilities {
     pub ci: bool,
     pub webhooks: bool,
     pub approvals: bool,
-    /// Reading the platform's own vulnerability findings (Dependabot alerts +
-    /// repository security advisories). GitHub-only — GitLab's equivalent is a
-    /// paid-tier security dashboard and Bitbucket Cloud has no analogue.
+    /// Reading the platform's own vulnerability findings (Dependabot, code
+    /// scanning and secret scanning alerts + repository security advisories).
+    /// GitHub-only — GitLab's equivalent is a paid-tier security dashboard and
+    /// Bitbucket Cloud has no analogue.
     pub security_findings: bool,
 }
 

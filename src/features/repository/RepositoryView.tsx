@@ -593,7 +593,11 @@ export function RepositoryView() {
                 key={
                   selectedFinding.type === "alert"
                     ? `a${selectedFinding.number}`
-                    : `g${selectedFinding.ghsaId}`
+                    : selectedFinding.type === "codeScanning"
+                      ? `c${selectedFinding.number}`
+                      : selectedFinding.type === "secretScanning"
+                        ? `s${selectedFinding.number}`
+                        : `g${selectedFinding.ghsaId}`
                 }
                 repoPath={repoPath}
                 active={repoTab === "findings"}
