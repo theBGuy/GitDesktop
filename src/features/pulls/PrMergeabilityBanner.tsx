@@ -127,7 +127,11 @@ export function PrMergeabilityBanner({
             <>
               {"Merging into "}
               <span className="font-mono">{base}</span>
-              {" is predicted to conflict (checked locally)."}
+              {/* Names the staleness: the prediction runs on remote-tracking refs
+                  and never fetches, so it can only be as fresh as the last fetch. */}
+              {
+                " is predicted to conflict (checked locally from your last fetch)."
+              }
             </>
           ) : arm === "checking" ? (
             "Checking mergeability…"

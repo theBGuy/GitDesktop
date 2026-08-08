@@ -2503,9 +2503,12 @@ impl PrMergeability {
 fn map_gh_mergeability(state: &str, mergeable: &str, merge_state_status: &str) -> PrMergeability {
     let detail = (!merge_state_status.is_empty()).then(|| merge_state_status.to_string());
     if !state.eq_ignore_ascii_case("OPEN") {
+        // No detail: "unavailable" means there is no server truth to be had, so a
+        // leftover `mergeStateStatus` would describe a state that no longer applies
+        // (GitHub keeps reporting the last one on a merged PR).
         return PrMergeability {
             state: "unavailable".to_string(),
-            detail,
+            detail: None,
         };
     }
     let state = match mergeable {
@@ -2577,22 +2580,14 @@ pub async fn gh_pr_list_mergeability(
     lens: Option<&str>,
 ) -> AppResult<std::collections::HashMap<u64, String>> {
     const FIELDS: &str = "number,mergeable,state";
+    // Only "open" reaches any provider — `forge_pr_list_mergeability` short-circuits
+    // every other filter to an empty map, because a closed/merged row has no live
+    // mergeability to report.
+    debug_assert_eq!(state, "open", "only the open filter reaches the providers");
     let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
-    // Same state semantics as `gh_pr_list`: the Closed tab uses the search
-    // qualifier so merged PRs are included.
-    let mut args: Vec<&str> = match state {
-        "open" => vec![
-            "pr", "list", "--repo", &slug, "--state", "open", "--json", FIELDS,
-        ],
-        "closed" => vec![
-            "pr", "list", "--repo", &slug, "--search", "is:closed", "--json", FIELDS,
-        ],
-        _ => {
-            return Err(AppError::InvalidArgument(format!(
-                "unknown PR state filter: {state}"
-            )));
-        }
-    };
+    let mut args: Vec<&str> = vec![
+        "pr", "list", "--repo", &slug, "--state", "open", "--json", FIELDS,
+    ];
     // gh's accepted range is 1..=1000 (`--limit 0` errors), mirroring `gh_pr_list`.
     let limit_str;
     if let Some(n) = limit {
@@ -5838,9 +5833,16 @@ mod tests {
         assert_eq!(map_gh_mergeability("OPEN", "", "").state, "checking");
         assert_eq!(map_gh_mergeability("OPEN", "", "").detail, None);
 
-        // A closed/merged PR has no live mergeability, whatever `mergeable` says.
-        assert_eq!(map_gh_mergeability("MERGED", "MERGEABLE", "").state, "unavailable");
-        assert_eq!(map_gh_mergeability("CLOSED", "CONFLICTING", "DIRTY").state, "unavailable");
+        // A closed/merged PR has no live mergeability, whatever `mergeable` says —
+        // and it carries NO detail: GitHub keeps reporting the last
+        // `mergeStateStatus` on a merged PR, which would describe a state that no
+        // longer applies ("unavailable" means no server truth to be had).
+        let m = map_gh_mergeability("MERGED", "MERGEABLE", "CLEAN");
+        assert_eq!(m.state, "unavailable");
+        assert!(m.detail.is_none(), "got: {:?}", m.detail);
+        let m = map_gh_mergeability("CLOSED", "CONFLICTING", "DIRTY");
+        assert_eq!(m.state, "unavailable");
+        assert!(m.detail.is_none(), "got: {:?}", m.detail);
     }
 
     /// `isCrossRepository` gates the resolve flow (it pushes to origin), so the

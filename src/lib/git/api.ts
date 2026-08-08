@@ -1453,21 +1453,19 @@ export const forgePrListCi = (
 ) => invoke<PrCiStatus[]>("forge_pr_list_ci", { repoPath, prs, sampleUrl });
 
 /** Mergeability for a PR-list page, keyed by number — the sibling of
- *  {@link forgePrListCi}. Unlike the CI rollup the backend re-queries the page itself,
- *  so it takes the list's own filter args; `prs` only short-circuits an empty page.
- *  Only rows the provider can answer for appear in the record. */
+ *  {@link forgePrListCi}. Unlike the CI rollup it takes no row list: the backend
+ *  re-queries the page from these same filter args, so only the filters cross the
+ *  wire. Only rows the provider can answer for appear in the record. */
 export const forgePrListMergeability = (
   repoPath: string,
   state: PrStateFilter,
   limit: number | undefined,
-  prs: { number: number; headSha: string }[],
   lens: RemoteLens,
 ) =>
   invoke<Record<number, PrMergeabilityState>>("forge_pr_list_mergeability", {
     repoPath,
     state,
     limit,
-    prs,
     lens,
   });
 

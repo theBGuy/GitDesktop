@@ -6,14 +6,6 @@ import {
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
 import { ConflictFileView } from "@/features/repository/ConflictFileView";
 import { ConflictResolveView } from "@/features/repository/ConflictResolveView";
@@ -27,11 +19,21 @@ import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import type { LocalPr } from "@/lib/pulls/local";
 import { useUpdateLocalPr } from "@/lib/pulls/queries";
 import { useAiEnabled, useReviewConfigured } from "@/lib/settings/queries";
+import { useConfirm } from "@/lib/stores/confirm";
 import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 
 const baseName = (path: string) => path.split("/").pop() || path;
+
+/** Local-PR wording: this throws away a paused MERGE into the user's own branch, not a
+ *  remote-PR resolution — deliberately NOT shared with the remote surface's copy. */
+const DISCARD_MERGE_CONFIRM = {
+  title: "Discard this merge?",
+  body: "The conflict resolution is thrown away; your branch and working tree are untouched.",
+  confirmLabel: "Discard merge",
+  confirmVariant: "destructive",
+} as const;
 
 /**
  * The isolated-worktree conflict-resolution surface for a paused local-PR merge.
@@ -67,7 +69,6 @@ export function ResolveConflictsView({
   const activePath = useConflictResolve((s) => s.activePath);
 
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
-  const [confirmAbort, setConfirmAbort] = useState(false);
 
   const entries = status.data?.entries ?? [];
   const conflicted: FileEntry[] = entries.filter(
@@ -95,7 +96,9 @@ export function ResolveConflictsView({
   if (!pending) return null;
 
   const remaining = conflictedPaths.length;
-  const done = !status.isPending && remaining === 0;
+  // Gated on a SUCCESSFUL read: an errored status query (a worktree that vanished
+  // underneath us) leaves no entries, which would otherwise read as "all resolved".
+  const done = status.isSuccess && remaining === 0;
   const canResolveWithAi = aiEnabled && reviewConfigured && remaining > 0;
   const busy = finish.isPending || abort.isPending;
 
@@ -135,23 +138,20 @@ export function ResolveConflictsView({
     );
   }
 
-  function onAbort() {
+  async function onAbort() {
     if (!pending) return;
+    if (!(await useConfirm.getState().ask(DISCARD_MERGE_CONFIRM))) return;
     abort.mutate(
       { worktreePath: pending.worktreePath, opId: pending.opId },
       {
         onSuccess: () => {
-          setConfirmAbort(false);
           update.mutate({
             id: pr.id,
             mutate: (cur) => ({ ...cur, pendingMerge: undefined }),
           });
           toast.success("Merge discarded");
         },
-        onError: (e) => {
-          setConfirmAbort(false);
-          toastError(e);
-        },
+        onError: toastError,
       },
     );
   }
@@ -191,19 +191,25 @@ export function ResolveConflictsView({
             variant="outline"
             size="xs"
             disabled={busy}
-            onClick={() => setConfirmAbort(true)}
+            onClick={() => void onAbort()}
           >
             Abort
           </Button>
-          <Button
-            size="xs"
-            disabled={busy || remaining > 0}
+          {/* Wrap so the disabled reason still shows on hover — a native-disabled
+              button swallows its `title` (vendored Button's pointer-events-none). */}
+          <span
+            className="inline-flex"
             title={remaining > 0 ? "Resolve every conflict first" : undefined}
-            onClick={onFinish}
           >
-            {finish.isPending && <Spinner data-icon="inline-start" />}
-            Finish merge
-          </Button>
+            <Button
+              size="xs"
+              disabled={busy || remaining > 0}
+              onClick={onFinish}
+            >
+              {finish.isPending && <Spinner data-icon="inline-start" />}
+              Finish merge
+            </Button>
+          </span>
         </div>
       </div>
 
@@ -272,31 +278,6 @@ export function ResolveConflictsView({
           ) : null}
         </div>
       </div>
-
-      <Dialog open={confirmAbort} onOpenChange={setConfirmAbort}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Discard this merge?</DialogTitle>
-            <DialogDescription>
-              The conflict resolution is thrown away; your branch and working
-              tree are untouched.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setConfirmAbort(false)}>
-              Keep going
-            </Button>
-            <Button
-              variant="destructive"
-              disabled={abort.isPending}
-              onClick={onAbort}
-            >
-              {abort.isPending && <Spinner data-icon="inline-start" />}
-              Discard merge
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

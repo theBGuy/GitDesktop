@@ -377,7 +377,7 @@ pub async fn git_worktree_repair(
 /// `/var` → `/private/var`) or a Windows verbatim prefix would otherwise read as a
 /// different worktree. Unresolvable paths (already deleted) fall back to the raw
 /// form; both sides get the same treatment, so quirks cancel out.
-fn canonical_wt_path(p: &str) -> String {
+pub(crate) fn canonical_wt_path(p: &str) -> String {
     let resolved = std::fs::canonicalize(p)
         .map(|c| c.to_string_lossy().into_owned())
         .unwrap_or_else(|_| p.to_string());

@@ -2713,9 +2713,11 @@ fn map_gl_mergeability(
         .map(str::to_string)
         .or_else(|| (!detailed_merge_status.is_empty()).then(|| detailed_merge_status.to_string()));
     if state != "opened" || detailed_merge_status == "not_open" {
+        // No detail: "unavailable" means there is no server truth to be had, so a
+        // leftover status string would describe a computation that no longer applies.
         return PrMergeability {
             state: "unavailable".to_string(),
-            detail,
+            detail: None,
         };
     }
     let state = if has_conflicts == Some(true) || detailed_merge_status == "conflict" {
@@ -2738,16 +2740,16 @@ fn map_gl_mergeability(
     }
 }
 
-/// One MR's mergeability, from the slim MR GET. `with_merge_status_recheck` forces
-/// GitLab to recompute a stale cached status (harmless when already computed).
+/// One MR's mergeability, from the slim MR GET. Deliberately NO recheck parameter:
+/// GitLab documents `with_merge_status_recheck` on the LIST endpoints only and
+/// ignores it here. Reading the MR is itself what primes GitLab's asynchronous
+/// mergeability check, so a stale status resolves on a later read — which is what
+/// the `"checking"` state and the caller's re-poll are for.
 pub async fn mr_mergeability(repo_path: &str, number: u64) -> AppResult<PrMergeability> {
     let enc = encode_project(&project_path(repo_path).await?);
     let out = run_glab(
         Some(repo_path),
-        &[
-            "api",
-            &format!("projects/{enc}/merge_requests/{number}?with_merge_status_recheck=true"),
-        ],
+        &["api", &format!("projects/{enc}/merge_requests/{number}")],
         GLAB_NETWORK_TIMEOUT,
     )
     .await?;
@@ -2763,37 +2765,34 @@ pub async fn mr_mergeability(repo_path: &str, number: u64) -> AppResult<PrMergea
 
 /// Mergeability for a whole MR-list page, keyed by iid. The list read carries the
 /// same conflict fields as the single GET, so one call covers the page.
+///
+/// `with_merge_status_recheck` is valid HERE (the list endpoints document it, the
+/// show endpoint does not): it requests — without guaranteeing — an asynchronous
+/// recalculation, so rows sitting on a stale `unchecked` start recomputing.
 pub async fn mr_list_mergeability(
     repo_path: &str,
     state: &str,
 ) -> AppResult<HashMap<u64, String>> {
-    let states: &[&str] = match state {
-        "open" => &["opened"],
-        // Closed and merged are separate server states (mirrors `list_prs`); both
-        // map to "unavailable", but the page is still answered honestly per row.
-        "closed" => &["closed", "merged"],
-        other => {
-            return Err(AppError::InvalidArgument(format!(
-                "unknown PR state filter: {other}"
-            )));
-        }
-    };
+    // Only "open" reaches any provider — `forge_pr_list_mergeability` short-circuits
+    // every other filter to an empty map, because a closed/merged row has no live
+    // mergeability to report.
+    debug_assert_eq!(state, "open", "only the open filter reaches the providers");
     let enc = encode_project(&project_path(repo_path).await?);
+    let endpoint = format!(
+        "projects/{enc}/merge_requests?state=opened&per_page=100&with_merge_status_recheck=true"
+    );
+    let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
+    let rows: Vec<GlabMrMergeability> = serde_json::from_str(&out.stdout_lossy())
+        .map_err(|e| AppError::Glab(format!("could not parse GitLab merge requests: {e}")))?;
     let mut out_map: HashMap<u64, String> = HashMap::new();
-    for s in states {
-        let endpoint = format!("projects/{enc}/merge_requests?state={s}&per_page=100");
-        let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
-        let rows: Vec<GlabMrMergeability> = serde_json::from_str(&out.stdout_lossy())
-            .map_err(|e| AppError::Glab(format!("could not parse GitLab merge requests: {e}")))?;
-        for r in rows {
-            let m = map_gl_mergeability(
-                &r.state,
-                r.has_conflicts,
-                &r.detailed_merge_status,
-                r.merge_error.as_deref(),
-            );
-            out_map.insert(r.iid, m.state);
-        }
+    for r in rows {
+        let m = map_gl_mergeability(
+            &r.state,
+            r.has_conflicts,
+            &r.detailed_merge_status,
+            r.merge_error.as_deref(),
+        );
+        out_map.insert(r.iid, m.state);
     }
     Ok(out_map)
 }
@@ -8729,15 +8728,14 @@ mod tests {
             );
         }
 
-        // Not open (either spelling) ⇒ no live mergeability.
-        assert_eq!(
-            map_gl_mergeability("merged", Some(true), "mergeable", None).state,
-            "unavailable"
-        );
-        assert_eq!(
-            map_gl_mergeability("opened", Some(true), "not_open", None).state,
-            "unavailable"
-        );
+        // Not open (either spelling) ⇒ no live mergeability, and NO detail: a
+        // leftover status would describe a computation that no longer applies.
+        let m = map_gl_mergeability("merged", Some(true), "mergeable", None);
+        assert_eq!(m.state, "unavailable");
+        assert!(m.detail.is_none(), "got: {:?}", m.detail);
+        let m = map_gl_mergeability("opened", Some(true), "not_open", Some("Merge conflict"));
+        assert_eq!(m.state, "unavailable");
+        assert!(m.detail.is_none(), "got: {:?}", m.detail);
 
         // merge_error wins the detail slot; an empty one falls back to the status.
         assert_eq!(

@@ -906,7 +906,9 @@ export function usePrListCi(
 
 /** Hydrates PR-list rows with each PR's mergeability, keyed by number — the rows' conflict
  *  chip. Runs separately from `usePrList`, and its numbers digest in the key is
- *  load-bearing, for exactly the reasons documented on `usePrListCi` above. */
+ *  load-bearing, for exactly the reasons documented on `usePrListCi` above. `prs` never
+ *  reaches the backend (it re-queries the page from the filters): it is here only to
+ *  form that digest and to keep the read off an empty page. */
 export function usePrListMergeability(
   repo: string,
   enabled: boolean,
@@ -926,15 +928,7 @@ export function usePrListMergeability(
       prs?.map((p) => p.number).join(",") ?? "",
     ] as const,
     queryFn: async () => {
-      // `enabled` requires a non-empty `prs`, so the cast below is safe.
-      const list = prs as PrInfo[];
-      const rows = await api.forgePrListMergeability(
-        repo,
-        state,
-        limit,
-        list.map((p) => ({ number: p.number, headSha: p.headSha })),
-        lens,
-      );
+      const rows = await api.forgePrListMergeability(repo, state, limit, lens);
       return new Map<number, PrMergeabilityState>(
         Object.entries(rows).map(([number, state]) => [Number(number), state]),
       );
@@ -1010,12 +1004,16 @@ export function usePrMergeability(
   // mirror is the render-visible half.
   const polls = useRef(0);
   const ladderFor = useRef("");
+  const seen = useRef({ ok: 0, failed: 0 });
   const [pollsUsed, setPollsUsed] = useState(0);
   const query = useQuery({
     queryKey: ["repo", repo, "pr", lens, number ?? 0, "mergeability"] as const,
     queryFn: () => api.forgePrMergeability(repo, number ?? 0, lens),
     enabled: enabled && number !== null,
     staleTime: 15_000,
+    // `polls.current` is the ONE ladder counter, fed below by completions of either
+    // kind. The cache's own cumulative counts are deliberately not used here: they
+    // outlive the mount, so a PR that once hit the ceiling could never poll again.
     refetchInterval: (q) =>
       q.state.data?.state === "checking" &&
       polls.current < MERGEABILITY_POLL_LIMIT
@@ -1027,17 +1025,25 @@ export function usePrMergeability(
   const identity = [repo, number, lens].join("|");
   const checking = query.data?.state === "checking";
   const updatedAt = query.dataUpdatedAt;
-  // One ladder step per read that came back still "checking", restarting whenever the
-  // PR or lens changes — each is its own question, and a switch must not inherit a
-  // ceiling the previous one hit.
+  const failedAt = query.errorUpdatedAt;
+  // One ladder step per COMPLETED read that left the question open — a success still
+  // saying "checking", OR a failure. Counting failures is what actually bounds a flaky
+  // or rate-limited forge: the last good answer stays "checking" in the cache, so a
+  // success-only ladder would poll every 2.5s forever and never reach the gave-up arm.
+  // Compared against the last timestamps seen so an unrelated re-render can't spend a
+  // rung, and reset whenever the PR or lens changes — each is its own question.
   useEffect(() => {
     if (ladderFor.current !== identity) {
       ladderFor.current = identity;
       polls.current = 0;
+      seen.current = { ok: 0, failed: 0 };
     }
-    if (checking && updatedAt > 0) polls.current += 1;
+    const advanced =
+      updatedAt > seen.current.ok || failedAt > seen.current.failed;
+    seen.current = { ok: updatedAt, failed: failedAt };
+    if (advanced && checking) polls.current += 1;
     setPollsUsed(polls.current);
-  }, [identity, checking, updatedAt]);
+  }, [identity, checking, updatedAt, failedAt]);
 
   const refetch = query.refetch;
   const retry = useCallback(() => {

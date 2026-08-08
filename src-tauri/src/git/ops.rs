@@ -2410,7 +2410,6 @@ pub(crate) async fn cleanup_orphaned_resolve_worktrees(
     keep_paths: &[String],
     root: &Path,
 ) -> AppResult<()> {
-    use crate::git::worktree::normalize_wt_path;
     let listed = run_git(
         Some(repo_path),
         &["worktree", "list", "--porcelain"],
@@ -2433,11 +2432,10 @@ pub(crate) async fn cleanup_orphaned_resolve_worktrees(
     // every switch back to a repo, so switching away and back while a
     // `merge_remote_pr` is mid-flight can land in that window; the cost is a
     // failed automatic merge the user retries, never resolved work.
-    let root_norm = normalize_wt_path(&root.to_string_lossy());
     for path in all
         .iter()
         .filter(|p| is_pr_resolve_worktree_path(p))
-        .filter(|p| normalize_wt_path(p).starts_with(&format!("{root_norm}/")))
+        .filter(|p| path_is_under(root, p))
     {
         if pr_resolve_is_worthless(path).await {
             remove_resolve_worktree(state, repo_path, path).await;
@@ -2490,16 +2488,30 @@ fn pr_resolve_prefix(remote: &str, number: u64) -> String {
     format!("gd-pr-resolve-{remote}-{number}-")
 }
 
+/// Whether `path` lives under `root`. The two sides routinely arrive as DIFFERENT
+/// SPELLINGS of the same location — git's porcelain prints macOS's canonical
+/// `/private/var/…` where the caller holds the `/var/…` symlink, and a Windows
+/// runner's 8.3 short name (`RUNNER~1`) where the caller holds the long one — so
+/// each side is canonicalized (`canonical_wt_path`, the #152 helper) before
+/// comparing. The normalize-only spelling is a second chance for a path that no
+/// longer exists: `canonicalize` fails there, and one side falling back while the
+/// other resolves would make two spellings of the same path look different.
+/// Either comparison is a containment check against the SAME root, so accepting
+/// either never widens what passes. The separator is appended (as
+/// `is_session_worktree` does) — a bare prefix match would accept a SIBLING
+/// directory `<root>evil/…`.
+fn path_is_under(root: &Path, path: &str) -> bool {
+    use crate::git::worktree::{canonical_wt_path, normalize_wt_path};
+    let root_str = root.to_string_lossy();
+    let canon = canonical_wt_path(path).starts_with(&format!("{}/", canonical_wt_path(&root_str)));
+    let norm = normalize_wt_path(path).starts_with(&format!("{}/", normalize_wt_path(&root_str)));
+    canon || norm
+}
+
 /// Guards an IPC-supplied worktree path before `worktree remove --force` is aimed
-/// at it: it must be one of ours AND live under this repo's app-data worktree
-/// root. The root comparison appends a separator (as `is_session_worktree` does) —
-/// a bare prefix match would accept a SIBLING directory `<root>evil/…`.
+/// at it: it must be one of ours AND live under this repo's app-data worktree root.
 fn ensure_pr_resolve_worktree(root: &Path, worktree_path: &str) -> AppResult<()> {
-    use crate::git::worktree::normalize_wt_path;
-    let root_norm = normalize_wt_path(&root.to_string_lossy());
-    if is_pr_resolve_worktree_path(worktree_path)
-        && normalize_wt_path(worktree_path).starts_with(&format!("{root_norm}/"))
-    {
+    if is_pr_resolve_worktree_path(worktree_path) && path_is_under(root, worktree_path) {
         return Ok(());
     }
     Err(AppError::InvalidArgument(format!(
@@ -2823,6 +2835,18 @@ pub(crate) async fn finish_remote_pr_resolve(
             "the resolve worktree path and id do not match".to_string(),
         ));
     }
+    // The worktree must belong to THIS lens: the remote is baked into its name, and
+    // finishing an origin resolve under the upstream lens would push the merge to
+    // the wrong repository.
+    let owned_by_lens = std::path::Path::new(worktree_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .is_some_and(|name| name.starts_with(&format!("gd-pr-resolve-{remote}-")));
+    if !owned_by_lens {
+        return Err(AppError::InvalidArgument(format!(
+            "this resolve worktree does not belong to the {remote} remote"
+        )));
+    }
 
     let remaining = unmerged_paths(worktree_path).await;
     if !remaining.is_empty() {
@@ -2957,7 +2981,6 @@ pub(crate) async fn find_remote_pr_resolve(
     lens: Option<&str>,
     root: &Path,
 ) -> AppResult<Option<RemotePrResolveHandle>> {
-    use crate::git::worktree::normalize_wt_path;
     let remote = crate::github::lens_remote(lens)?;
     let listed = run_git(
         Some(repo_path),
@@ -2965,12 +2988,13 @@ pub(crate) async fn find_remote_pr_resolve(
         DEFAULT_TIMEOUT,
     )
     .await?;
-    let root_norm = normalize_wt_path(&root.to_string_lossy());
     let prefix = pr_resolve_prefix(remote, number);
     Ok(parse_worktree_paths(&listed.stdout_lossy())
         .into_iter()
         .find_map(|p| {
-            if !normalize_wt_path(&p).starts_with(&format!("{root_norm}/")) {
+            // Porcelain paths and `root` can be different spellings of the same
+            // location (see `path_is_under`).
+            if !path_is_under(root, &p) {
                 return None;
             }
             // The id is the segment AFTER the prefix — this module names these
@@ -4759,7 +4783,7 @@ detached
     /// Once everything is resolved the takeover reports an EMPTY conflict list.
     #[tokio::test]
     async fn remote_pr_second_start_resumes_the_existing_worktree() {
-        use crate::git::worktree::normalize_wt_path;
+        use crate::git::worktree::canonical_wt_path;
         let (dir, _origin, repo, _bare) = setup_repo_with_origin("rpr-dedupe").await;
         let base = push_conflicting_pair(&repo, dir.path(), "origin").await;
 
@@ -4779,9 +4803,13 @@ detached
             .await
             .unwrap();
         assert_eq!(second.status, "conflicts");
+        // Compare CANONICALIZED: the resumed path came back through git's
+        // porcelain, which prints macOS's `/private/var/…` for the `/var/…` temp
+        // dir this test created (and long names for a Windows runner's 8.3 short
+        // names) — raw string equality would fail there and pass here.
         assert_eq!(
-            second.worktree_path.as_deref().map(normalize_wt_path),
-            Some(normalize_wt_path(&wt))
+            second.worktree_path.as_deref().map(canonical_wt_path),
+            Some(canonical_wt_path(&wt))
         );
         assert_eq!(second.worktree_id, first.worktree_id);
         assert!(second.conflicts.iter().any(|p| p == "a.txt"));
@@ -4810,7 +4838,7 @@ detached
     /// deliberately misses `gd-pr-resolve-`).
     #[tokio::test]
     async fn remote_pr_abort_removes_worktree_and_find_tracks_it() {
-        use crate::git::worktree::normalize_wt_path;
+        use crate::git::worktree::canonical_wt_path;
         let (dir, _origin, repo, bare) = setup_repo_with_origin("rpr-abort").await;
         let base = push_conflicting_pair(&repo, dir.path(), "origin").await;
         let head_before = rev(&bare, "refs/heads/feature").await;
@@ -4824,16 +4852,17 @@ detached
         let wt = outcome.worktree_path.clone().expect("worktree path set");
         let wt_id = outcome.worktree_id.clone().expect("worktree id set");
 
-        // git's porcelain prints forward slashes where the created path carries
-        // Windows separators, so identity is by NORMALIZED path (as everywhere
-        // else worktree paths are compared).
+        // Identity is by CANONICALIZED path: git's porcelain prints its own
+        // spelling of the same location (forward slashes here, macOS's
+        // `/private/var/…` for a `/var/…` temp dir, long names for a Windows
+        // runner's 8.3 short names), so raw string equality is not identity.
         let found = find_remote_pr_resolve(&repo, 99, None, &root)
             .await
             .unwrap()
             .expect("the live resolve is found");
         assert_eq!(
-            normalize_wt_path(&found.worktree_path),
-            normalize_wt_path(&wt)
+            canonical_wt_path(&found.worktree_path),
+            canonical_wt_path(&wt)
         );
         assert_eq!(found.worktree_id, wt_id, "the id is parsed off the path");
         // Neither a different PR number nor a different lens may claim it.
@@ -4916,6 +4945,54 @@ detached
         );
     }
 
+    /// The squash sibling: a conflicted `merge --squash` writes SQUASH_MSG (not
+    /// MERGE_HEAD), and SQUASH_MSG carries the same `# Conflicts:` block — so the
+    /// continue must strip it too. The result is a SINGLE-parent commit, which is
+    /// what makes this a different path from the merge arm rather than a rerun.
+    #[tokio::test]
+    async fn op_continue_squash_records_a_comment_free_single_parent_commit() {
+        let (dir, repo) = setup_repo("op-continue-squash").await;
+        let base = git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "feature-side\n", "feat edit").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "a.txt", "base-side\n", "base edit").await;
+        let before = rev(&repo, "HEAD").await;
+
+        let squashed = run_git_raw(Some(&repo), &["merge", "--squash", "feature"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_ne!(squashed.code, 0, "the squash must conflict for this to be real");
+        // Squash leaves no MERGE_HEAD — only SQUASH_MSG carries the comment block.
+        let merge_head = git(&repo, &["rev-parse", "--git-path", "MERGE_HEAD"])
+            .await
+            .trim()
+            .to_string();
+        assert!(!Path::new(&merge_head).exists(), "squash writes no MERGE_HEAD");
+        std::fs::write(dir.path().join("a.txt"), "resolved\n").unwrap();
+        git(&repo, &["add", "a.txt"]).await;
+
+        let state = AppState::default();
+        op_continue(&state, &repo, "merge").await.unwrap();
+
+        let msg = git(&repo, &["log", "-1", "--format=%B"]).await;
+        assert!(
+            !msg.lines().any(|l| l.starts_with('#')),
+            "the squash commit must not record git's comment block, got: {msg:?}"
+        );
+        // A squash records ONE parent — the feature side is not a parent.
+        let parents = git(&repo, &["rev-list", "--parents", "-n1", "HEAD"]).await;
+        assert_eq!(
+            parents.split_whitespace().count(),
+            2,
+            "commit + 1 parent, got: {parents:?}"
+        );
+        assert_ne!(rev(&repo, "HEAD").await, before, "the squash committed");
+    }
+
     /// LIVE REPRO (dogfood blocker): resolving every conflict as "ours" stages a
     /// diff byte-identical to HEAD, so a staged-diff-only check skips the commit,
     /// HEAD never leaves the fetched tip, and finish dead-ends on "Nothing to
@@ -4950,6 +5027,33 @@ detached
             porcelain.trim().is_empty(),
             "the all-ours resolution stages nothing: {porcelain:?}"
         );
+
+        // Wrong lens: this worktree is named for `origin`, so finishing it under
+        // the upstream lens would push the merge to the WRONG repository. Refused
+        // before anything is committed or pushed.
+        git(&repo, &["remote", "add", "upstream", &bare]).await;
+        let err = finish_remote_pr_resolve(
+            &state,
+            &repo,
+            "feature",
+            &wt,
+            &wt_id,
+            None,
+            Some("upstream"),
+            &root,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("does not belong to the upstream"),
+            "got: {err}"
+        );
+        assert_eq!(
+            rev(&bare, "refs/heads/feature").await,
+            head_before,
+            "the refused finish pushed nothing"
+        );
+        git(&repo, &["remote", "remove", "upstream"]).await;
 
         let done = finish_remote_pr_resolve(
             &state, &repo, "feature", &wt, &wt_id, None, None, &root,
@@ -5302,29 +5406,88 @@ detached
 
     #[test]
     fn pr_resolve_worktree_paths_are_guarded_by_prefix_and_root() {
-        // The two prefixes must not overlap in either direction.
+        // Forward slashes only: `Path::file_name` treats `\` as a separator on
+        // WINDOWS ONLY, so a backslash fixture is a whole-string basename on
+        // Linux/macOS and would test something different there.
         assert!(is_pr_resolve_worktree_path(
-            "C:/data/wt/h/gd-pr-resolve-origin-12-abc"
+            "/data/wt/h/gd-pr-resolve-origin-12-abc"
         ));
-        assert!(!is_pr_resolve_worktree_path("C:/data/wt/h/gd-resolve-abc"));
+        assert!(!is_pr_resolve_worktree_path("/data/wt/h/gd-resolve-abc"));
         assert!(!is_resolve_worktree_path(
-            "C:/data/wt/h/gd-pr-resolve-origin-12-abc"
+            "/data/wt/h/gd-pr-resolve-origin-12-abc"
         ));
         // Mid-path only ⇒ not a match (the basename is the signal).
-        assert!(!is_pr_resolve_worktree_path("C:/repos/gd-pr-resolve-ish/feature"));
+        assert!(!is_pr_resolve_worktree_path("/repos/gd-pr-resolve-ish/feature"));
         // The remote namespaces the directory, so two lenses never collide.
         assert_ne!(pr_resolve_prefix("origin", 12), pr_resolve_prefix("upstream", 12));
 
+        let root = Path::new("/data/wt/h");
+        assert!(ensure_pr_resolve_worktree(root, "/data/wt/h/gd-pr-resolve-origin-12-abc").is_ok());
+        // Ours by name but OUTSIDE the app-data root, and inside the root but not
+        // ours — both refused before `worktree remove --force` is aimed at them.
+        assert!(ensure_pr_resolve_worktree(root, "/users/me/gd-pr-resolve-origin-12-abc").is_err());
+        assert!(ensure_pr_resolve_worktree(root, "/data/wt/h/my-work").is_err());
+        // A SIBLING directory sharing the root's prefix must not slip through a
+        // bare `starts_with` — this check ends in `worktree remove --force`.
+        assert!(
+            ensure_pr_resolve_worktree(root, "/data/wt/hevil/gd-pr-resolve-origin-12-abc").is_err()
+        );
+    }
+
+    /// The divergent-spelling class the 3-OS matrix caught: one side reaches a
+    /// directory through a link, the other through its real path. macOS's
+    /// `/var → /private/var` temp dirs are that shape; a junction reproduces it on
+    /// Windows, the only platform this can run on locally. Canonicalizing BOTH
+    /// sides is what makes the two spellings compare equal — and containment must
+    /// still REFUSE a sibling through either spelling.
+    #[cfg(windows)]
+    #[test]
+    fn path_is_under_matches_across_a_linked_spelling() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let real = tmp.path().join("real");
+        let leaf = "gd-pr-resolve-origin-1-abc";
+        std::fs::create_dir_all(real.join(leaf)).unwrap();
+        let link = tmp.path().join("link");
+        // Directory junctions need no elevation (unlike symlinks).
+        let made = std::process::Command::new("cmd")
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                &link.to_string_lossy(),
+                &real.to_string_lossy(),
+            ])
+            .output()
+            .expect("run mklink");
+        assert!(
+            made.status.success(),
+            "mklink /J failed: {}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+
+        let child_real = real.join(leaf).to_string_lossy().into_owned();
+        let child_link = link.join(leaf).to_string_lossy().into_owned();
+        // Root spelled one way, child the other — both directions.
+        assert!(path_is_under(&link, &child_real), "linked root vs real child");
+        assert!(path_is_under(&real, &child_link), "real root vs linked child");
+        // A sibling sharing the root's prefix is still refused through either.
+        let sibling = tmp.path().join("realevil").join(leaf);
+        std::fs::create_dir_all(&sibling).unwrap();
+        let sibling = sibling.to_string_lossy().into_owned();
+        assert!(!path_is_under(&real, &sibling));
+        assert!(!path_is_under(&link, &sibling));
+    }
+
+    /// Windows-only: drive letters, case-insensitivity and backslash separators
+    /// are meaningful there and nowhere else (`Path::file_name` only splits on
+    /// `\` on Windows), so this spelling row cannot run cross-platform.
+    #[cfg(windows)]
+    #[test]
+    fn pr_resolve_worktree_guard_accepts_windows_spellings() {
         let root = Path::new("C:/data/wt/h");
         assert!(
             ensure_pr_resolve_worktree(root, "c:\\data\\wt\\h\\gd-pr-resolve-origin-12-abc").is_ok()
         );
-        // Ours by name but OUTSIDE the app-data root, and inside the root but not
-        // ours — both refused before `worktree remove --force` is aimed at them.
-        assert!(ensure_pr_resolve_worktree(root, "C:/users/me/gd-pr-resolve-origin-12-abc").is_err());
-        assert!(ensure_pr_resolve_worktree(root, "C:/data/wt/h/my-work").is_err());
-        // A SIBLING directory sharing the root's prefix must not slip through a
-        // bare `starts_with` — this check ends in `worktree remove --force`.
         assert!(
             ensure_pr_resolve_worktree(root, "C:/data/wt/hevil/gd-pr-resolve-origin-12-abc")
                 .is_err()

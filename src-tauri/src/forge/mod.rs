@@ -992,20 +992,18 @@ pub async fn forge_pr_mergeability(
 /// Mergeability for a PR-list page, keyed by number — the sibling of
 /// `forge_pr_list_ci`, and separate from `forge_pr_list` for the same reason:
 /// asking the list read for it measured 3–5s of extra latency on large repos.
-/// `prs` is the page in hand; an empty page short-circuits before any call.
-///
-/// So does any non-open filter, on every arm: a closed/merged row has no live
-/// mergeability, and the only rendered state is "conflicting" — so the Closed tab
-/// would pay GitHub's 3–5s (and GitLab's two calls) for guaranteed-zero chips.
+/// Any non-open filter short-circuits to an empty map before any call, on every
+/// arm: a closed/merged row has no live mergeability, and the only rendered state
+/// is "conflicting" — so the Closed tab would pay GitHub's 3–5s for
+/// guaranteed-zero chips. That gate is why the provider arms only ever see "open".
 #[tauri::command]
 pub async fn forge_pr_list_mergeability(
     repo_path: String,
     state: String,
     limit: Option<u32>,
-    prs: Vec<crate::github::pr::PrCiRefIn>,
     lens: Option<String>,
 ) -> AppResult<std::collections::HashMap<u64, String>> {
-    if prs.is_empty() || state != "open" {
+    if state != "open" {
         return Ok(std::collections::HashMap::new());
     }
     match detect_non_github(&repo_path).await {

@@ -766,10 +766,15 @@ export function RemotePrView({
     );
   }
 
+  // Also fires on the resume arm — a leftover worktree is resumable even once the
+  // server has flipped back to mergeable, and the banner offers it there.
   useHotkeyAction(
     "pr-resolve-conflicts",
     () => runResolve(false),
-    isSelectedPr && canResolveConflicts && !resolve && !mergeRemotePr.isPending,
+    isSelectedPr &&
+      (canResolveConflicts || resolveWorktree !== null) &&
+      !resolve &&
+      !mergeRemotePr.isPending,
   );
 
   const [composeBody, setComposeBody] = useState("");
