@@ -43,8 +43,8 @@ import { DiffErrorBoundary } from "./DiffErrorBoundary";
 import { DiffLanguagePicker } from "./DiffLanguagePicker";
 import { DiffPlaceholder } from "./DiffPlaceholder";
 import { diffLang } from "./diff-lang";
-import { installHljsGapIsolation } from "./gap-isolation";
 import { djb2 } from "./highlight-worker-shared";
+import { installHljsGapIsolation } from "./hljs-gap-isolation";
 import { ImageDiff, ImagePanes, type ImageRevs, imageMime } from "./ImageDiff";
 import {
   ensureBuiltinShikiLang,
