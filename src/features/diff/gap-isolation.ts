@@ -1,3 +1,6 @@
+// Import from core, never the react entry: both re-export the same singleton,
+// but this module is reachable from the highlight worker (highlight-worker ->
+// shiki-highlighter -> here), where react would pull React into the chunk.
 import { type DiffAST, highlighter } from "@git-diff-view/core";
 
 /**
@@ -11,18 +14,18 @@ import { type DiffAST, highlighter } from "@git-diff-view/core";
  */
 
 /** Buffers below this many lines are never treated as holey. */
-export const HOLEY_MIN_LINES = 50;
+const HOLEY_MIN_LINES = 50;
 /** Blank-line ratio at which a buffer is treated as hunk-reconstructed.
- *  Measured holey buffers run ~99% blank; real source files rarely exceed ~40%. */
-export const HOLEY_MIN_BLANK_RATIO = 0.5;
+ *  Measured holey buffers run ~99% blank; no file in this repo reaches 50%
+ *  (highest among the 519 code files of >=50 lines: 15%). */
+const HOLEY_MIN_BLANK_RATIO = 0.5;
 
 /**
- * Whether `raw` looks hunk-reconstructed. Blank means exactly `""` —
+ * Whether pre-split `lines` look hunk-reconstructed. Blank means exactly `""` —
  * placeholder lines carry no whitespace, so whitespace-only lines stay real
  * content (and a CRLF file's content lines end `"\r"`, keeping them non-blank).
  */
-export function isHoleyBuffer(raw: string): boolean {
-  const lines = raw.split("\n");
+function isHoley(lines: readonly string[]): boolean {
   if (lines.length < HOLEY_MIN_LINES) return false;
   let blank = 0;
   for (const line of lines) if (line === "") blank++;
@@ -37,16 +40,13 @@ function astTextLength(node: DiffAST | DiffAST["children"][number]): number {
     : 0;
 }
 
-/**
- * Tokenize `raw` segment by segment when it looks hunk-reconstructed; a
- * sub-threshold buffer takes the unchanged single `tokenize(raw)` path.
- */
-export function gapIsolatedAst(
+/** Tokenize each run of non-blank lines separately and merge the ASTs. `lines`
+ *  must be `raw.split("\n")`. */
+function mergeSegments(
   raw: string,
+  lines: readonly string[],
   tokenize: (segment: string) => DiffAST,
 ): DiffAST {
-  if (!isHoleyBuffer(raw)) return tokenize(raw);
-  const lines = raw.split("\n");
   // N split elements are joined by exactly N-1 "\n" separators: one separator
   // PRECEDES every element but the first. A run of non-blank elements keeps its
   // internal separators inside the segment text handed to `tokenize`.
@@ -70,7 +70,9 @@ export function gapIsolatedAst(
     const start = i;
     while (i < lines.length && lines[i] !== "") i++;
     const segmentAst = tokenize(lines.slice(start, i).join("\n"));
-    children.push(...(segmentAst.children ?? []));
+    // Appended one at a time: a long contiguous run can exceed the engine's
+    // argument limit when spread into push().
+    for (const child of segmentAst.children ?? []) children.push(child);
   }
   emitSeps();
   const merged: DiffAST = { type: "root", children };
@@ -78,6 +80,18 @@ export function gapIsolatedAst(
   // fallback for one segment) would drop text, so fall back to the whole-buffer
   // pass — the wrapper is then never worse than not wrapping.
   return astTextLength(merged) === raw.length ? merged : tokenize(raw);
+}
+
+/**
+ * Tokenize `raw` segment by segment when it looks hunk-reconstructed; a
+ * sub-threshold buffer takes the unchanged single `tokenize(raw)` path.
+ */
+export function gapIsolatedAst(
+  raw: string,
+  tokenize: (segment: string) => DiffAST,
+): DiffAST {
+  const lines = raw.split("\n");
+  return isHoley(lines) ? mergeSegments(raw, lines, tokenize) : tokenize(raw);
 }
 
 // A registry symbol, not a module-local one: on HMR this module re-evaluates
@@ -96,36 +110,45 @@ function markInstalled<T extends object>(fn: T): T {
  * a non-writable, non-configurable property, so the wrap lands one level down
  * on the lowlight engine — covering both of getAST's tokenize exits, a
  * registered language via `highlight` and an unregistered one via
- * `highlightAuto`. Idempotent, and must be called explicitly at module scope (a
- * bare side-effect import can be dropped).
+ * `highlightAuto`. Fails open: if the engine ever refuses the patch, diffs
+ * render without gap isolation rather than the module throwing at import.
+ * Idempotent, and must be called explicitly at module scope (a bare
+ * side-effect import can be dropped).
  */
 export function installHljsGapIsolation(): void {
-  const engine = highlighter.getHighlighterEngine();
-  if (GAP_ISOLATED in engine.highlight) return;
-  const originalHighlight = engine.highlight;
-  const originalAuto = engine.highlightAuto;
+  try {
+    const engine = highlighter.getHighlighterEngine();
+    if (GAP_ISOLATED in engine.highlight) return;
+    const originalHighlight = engine.highlight;
+    const originalAuto = engine.highlightAuto;
 
-  const isolatedHighlight: typeof engine.highlight = (
-    language,
-    value,
-    options,
-  ) =>
-    gapIsolatedAst(value, (segment) =>
-      originalHighlight.call(engine, language, segment, options),
-    );
+    const isolatedHighlight: typeof engine.highlight = (
+      language,
+      value,
+      options,
+    ) =>
+      gapIsolatedAst(value, (segment) =>
+        originalHighlight.call(engine, language, segment, options),
+      );
 
-  // Language detection stays whole-buffer, and every segment is tokenized as
-  // that one language: detecting per segment could resolve a different language
-  // for each, coloring one buffer inconsistently.
-  const isolatedAuto: typeof engine.highlightAuto = (value, options) => {
-    const whole = originalAuto.call(engine, value, options);
-    const detected = whole.data?.language;
-    if (!detected || !isHoleyBuffer(value)) return whole;
-    return gapIsolatedAst(value, (segment) =>
-      originalHighlight.call(engine, detected, segment, options),
-    );
-  };
+    // Language detection stays whole-buffer, and every segment is tokenized as
+    // that one language: detecting per segment could resolve a different
+    // language for each, coloring one buffer inconsistently.
+    const isolatedAuto: typeof engine.highlightAuto = (value, options) => {
+      const whole = originalAuto.call(engine, value, options);
+      const detected = whole.data?.language;
+      if (!detected) return whole;
+      const lines = value.split("\n");
+      if (!isHoley(lines)) return whole;
+      const merged = mergeSegments(value, lines, (segment) =>
+        originalHighlight.call(engine, detected, segment, options),
+      );
+      return { ...merged, data: whole.data };
+    };
 
-  engine.highlight = markInstalled(isolatedHighlight);
-  engine.highlightAuto = markInstalled(isolatedAuto);
+    engine.highlight = markInstalled(isolatedHighlight);
+    engine.highlightAuto = markInstalled(isolatedAuto);
+  } catch {
+    // fail open: diffs render without gap isolation
+  }
 }
