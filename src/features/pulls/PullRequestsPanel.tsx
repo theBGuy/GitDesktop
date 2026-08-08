@@ -82,13 +82,14 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   const ciMap = prListCi.data;
   // Row conflict chips. The extra gates are load-bearing on top of `ghReady`: this call
   // takes seconds on large GitHub repos and every active forge query joins the commit
-  // mutation's awaited invalidation set, so it must be idle off this tab — and closed
-  // and merged rows have no live mergeability, so they'd render zero chips anyway.
+  // mutation's awaited invalidation set, so it must be idle off this tab and off the
+  // Closed tab, where no row has live mergeability to report.
   // `!isPlaceholderData` covers the first half of a lens/tab switch: while the LIST is
   // still serving the previous page's rows, this stays idle rather than describing a
-  // page that isn't on screen. (The second half — this query's own placeholder serving
-  // the previous lens's map — is handled inside the hook, which compares repo AND lens.)
-  // PR numbers repeat across repos, so a misplaced chip is a wrong claim; absent is not.
+  // page that isn't on screen. None of these gates stop a chip on their own, though —
+  // a DISABLED query still renders placeholder data, so keeping the previous tab's or
+  // lens's map off these rows is the hook's placeholder comparator's job.
+  // PR numbers repeat across states and repos, so a misplaced chip is a wrong claim.
   const repoTab = useUiStore((s) => s.repoTab);
   const prListMergeability = usePrListMergeability(
     repoPath,

@@ -938,12 +938,16 @@ export function usePrListMergeability(
     },
     enabled: enabled && !!prs && prs.length > 0,
     staleTime: 30_000,
-    // Keeps the current chips while a "Load more" grows the list, but only within the
-    // SAME repo AND lens: the shared `keepPreviousDataForRepo` compares the repo segment
-    // alone, which would paint origin's map onto upstream's rows (numbers collide across
-    // repos) for however long the new lens's read takes.
+    // Keeps the current chips while a "Load more" grows the list (that moves only the
+    // limit/digest segments, idx 5/6), but ONLY within the same repo, lens AND state.
+    // A placeholder is served even while this query is DISABLED — query-core applies it
+    // on any keyed query with no data yet — so matching on repo alone (what the shared
+    // `keepPreviousDataForRepo` does) would paint the open tab's map onto closed rows,
+    // and origin's onto upstream's, since numbers collide across both axes.
     placeholderData: (prev, prevQuery) =>
-      prevQuery?.queryKey?.[1] === repo && prevQuery?.queryKey?.[3] === lens
+      prevQuery?.queryKey?.[1] === repo &&
+      prevQuery?.queryKey?.[3] === lens &&
+      prevQuery?.queryKey?.[4] === state
         ? prev
         : undefined,
   });
