@@ -1953,13 +1953,15 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
 - **General** — hide AI features (which also pauses your automations until you show them
   again — your rules are kept), keep running in the **system tray** on close (so
   background work continues; launching the app again while it's running —
-  tray-hidden or not — focuses the existing window), **automatically stash and reapply
-  on pull and branch updates** (an operation git would refuse over uncommitted changes
-  recovers on its own, no prompt), **reapply stashed changes after switching branches**
-  (*Stash and switch* puts your changes back once the switch lands), **create pull
-  requests as drafts** by default (off by default — pre-checks the Create-PR dialog's
-  draft box, still overridable per PR; pairs with *Review draft PRs when created* so a
-  draft's automated first review waits until it's marked ready), and privacy options.
+  tray-hidden or not — focuses the existing window), **automatically fetch from your
+  remotes** (a background fetch on an interval you pick — it never pulls, merges, or
+  changes your files), **automatically stash and reapply on pull and branch updates**
+  (an operation git would refuse over uncommitted changes recovers on its own, no
+  prompt), **reapply stashed changes after switching branches** (*Stash and switch*
+  puts your changes back once the switch lands), **create pull requests as drafts** by
+  default (off by default — pre-checks the Create-PR dialog's draft box, still
+  overridable per PR; pairs with *Review draft PRs when created* so a draft's automated
+  first review waits until it's marked ready), and privacy options.
 - **Appearance** — pick a theme: **System** (follows your OS's light/dark setting),
   **Light**, **Dark**, or **Slate** (a softer, blue-gray dark). Applies as you pick it,
   and *Cycle theme* in the command palette steps through them.
