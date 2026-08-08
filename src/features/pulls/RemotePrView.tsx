@@ -364,15 +364,18 @@ export function RemotePrView({
   // The local prediction does double duty: it stands in where the forge has no answer
   // (Bitbucket, offline), and it NAMES the conflicting files when the forge says
   // "conflicting" but won't say where. Never for a fork head — its branch may not
-  // exist under our remote.
+  // exist under our remote. Hoisted because a DISABLED query keeps serving its last
+  // value, so every reader of the prediction has to gate on this too.
+  const previewEnabled =
+    repoTab === "pulls" &&
+    isOpenPr &&
+    !details.data?.crossRepository &&
+    (serverState === "unavailable" || serverState === "conflicting");
   const conflictPreview = useConflictPreview(
     repoPath,
     `${lensRemote}/${details.data?.baseRefName ?? ""}`,
     `${lensRemote}/${details.data?.headRefName ?? ""}`,
-    repoTab === "pulls" &&
-      isOpenPr &&
-      !details.data?.crossRepository &&
-      (serverState === "unavailable" || serverState === "conflicting"),
+    previewEnabled,
   );
   // An unfinished resolve worktree for this PR (e.g. left by an earlier session).
   // Offered via the banner, never auto-entered — taking the view over unasked would
@@ -697,7 +700,11 @@ export function RemotePrView({
   // An older cached row without `crossRepository` counts as not-a-fork — the backend's
   // push refuses anything but a fast-forward either way.
   const serverConflicting = serverState === "conflicting";
-  const predictedConflict = conflictPreview.data?.status === "conflict";
+  // `previewEnabled` multiplies in because react-query keeps serving a disabled query's
+  // last value: once a resolve pushes and the server flips off "conflicting", the stale
+  // prediction would otherwise keep the banner offering Resolve on a clean PR.
+  const predictedConflict =
+    previewEnabled && conflictPreview.data?.status === "conflict";
   // Only a positive prediction names files; a clean/unknown/pending one names none, and
   // the banner then shows its sentence alone rather than an empty placeholder.
   const predictedFiles = predictedConflict

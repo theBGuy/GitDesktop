@@ -2206,20 +2206,14 @@ pub(crate) async fn finish_local_pr_merge(
     worktree_id: &str,
     op_id: Option<String>,
 ) -> AppResult<LocalPrMergeOutcome> {
-    let repo_path = repo_path.to_string();
-    let base = base.to_string();
-    let strategy = strategy.to_string();
-    let message = message.to_string();
-    let worktree_path = worktree_path.to_string();
-    let worktree_id = worktree_id.to_string();
-    validate_branch_arg(&base)?;
+    validate_branch_arg(base)?;
 
     // When `base` IS the current branch, `finalize_base` ends in a `merge --ff-only`
     // into the main tree — re-guard clean HERE, since the user may have dirtied it
     // during resolution (after `git_merge_local_pr`'s upfront check). Otherwise base
     // moves by `update-ref` and the main tree is never touched.
     let current = run_git(
-        Some(&repo_path),
+        Some(repo_path),
         &["rev-parse", "--abbrev-ref", "HEAD"],
         DEFAULT_TIMEOUT,
     )
@@ -2228,30 +2222,30 @@ pub(crate) async fn finish_local_pr_merge(
     .trim()
     .to_string();
     if base == current {
-        ensure_clean_tree(&repo_path).await?;
+        ensure_clean_tree(repo_path).await?;
     }
 
     // Guard: every conflict in the worktree must be resolved first.
-    let remaining = unmerged_paths(&worktree_path).await;
+    let remaining = unmerged_paths(worktree_path).await;
     if !remaining.is_empty() {
         return Err(AppError::Command("Resolve every conflict first".to_string()));
     }
 
-    match strategy.as_str() {
+    match strategy {
         "rebase" => {
             // Continue the cherry-pick in the worktree with a non-interactive
             // editor so git never blocks (mirrors git_op_continue / git_rebase).
             let out = run_git_raw(
-                Some(&worktree_path),
+                Some(worktree_path),
                 &["-c", "core.editor=true", "cherry-pick", "--continue"],
                 DEFAULT_TIMEOUT,
             )
             .await?;
             // A later commit in the range may re-conflict; if so, stay in the
             // worktree and re-report conflicts (do NOT finalize or remove).
-            let conflicts = unmerged_paths(&worktree_path).await;
+            let conflicts = unmerged_paths(worktree_path).await;
             if !conflicts.is_empty() {
-                let tip = run_git(Some(&worktree_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
+                let tip = run_git(Some(worktree_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
                     .await
                     .ok()
                     .map(|o| o.stdout_lossy().trim().to_string())
@@ -2260,8 +2254,8 @@ pub(crate) async fn finish_local_pr_merge(
                     status: "conflicts".to_string(),
                     conflicts,
                     base_tip: tip,
-                    worktree_id: Some(worktree_id),
-                    worktree_path: Some(worktree_path),
+                    worktree_id: Some(worktree_id.to_string()),
+                    worktree_path: Some(worktree_path.to_string()),
                     op_id,
                 });
             }
@@ -2286,9 +2280,9 @@ pub(crate) async fn finish_local_pr_merge(
             // Squash writes no MERGE_HEAD (measured), so an all-ours squash still
             // nets an empty diff and is skipped — a known degenerate case, left
             // unchanged here and pinned by a test.
-            let merging = git_path_exists(&worktree_path, "MERGE_HEAD").await;
+            let merging = git_path_exists(worktree_path, "MERGE_HEAD").await;
             let staged = run_git_raw(
-                Some(&worktree_path),
+                Some(worktree_path),
                 &["diff", "--cached", "--quiet"],
                 DEFAULT_TIMEOUT,
             )
@@ -2296,8 +2290,8 @@ pub(crate) async fn finish_local_pr_merge(
             // exit 0 ⇒ nothing staged ⇒ already committed (or empty) ⇒ skip commit.
             if merging || staged.code != 0 {
                 let commit = run_git_raw(
-                    Some(&worktree_path),
-                    &["commit", "-m", &message],
+                    Some(worktree_path),
+                    &["commit", "-m", message],
                     DEFAULT_TIMEOUT,
                 )
                 .await?;
@@ -2318,14 +2312,14 @@ pub(crate) async fn finish_local_pr_merge(
 
     // Completed with no remaining conflicts: advance base, tear down, close oplog.
     // `current` was resolved up top (and re-guarded clean when base == current).
-    let new_sha = run_git(Some(&worktree_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
+    let new_sha = run_git(Some(worktree_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
         .await?
         .stdout_lossy()
         .trim()
         .to_string();
-    finalize_base(state, &repo_path, &base, &new_sha, &current).await?;
-    remove_resolve_worktree(state, &repo_path, &worktree_path).await;
-    crate::oplog::finish(&repo_path, &op_id, None).await;
+    finalize_base(state, repo_path, base, &new_sha, &current).await?;
+    remove_resolve_worktree(state, repo_path, worktree_path).await;
+    crate::oplog::finish(repo_path, &op_id, None).await;
     Ok(LocalPrMergeOutcome {
         status: "merged".to_string(),
         conflicts: Vec::new(),
@@ -2828,24 +2822,30 @@ pub(crate) async fn finish_remote_pr_resolve(
     crate::git::branches::validate_ref_name(head)?;
     let remote = resolve_pr_remote(repo_path, lens).await?;
     ensure_pr_resolve_worktree(root, worktree_path)?;
-    // Path and id arrive as separate IPC args; requiring them to describe the same
-    // worktree keeps a stale pair from finishing the wrong resolve.
-    if !worktree_path.ends_with(worktree_id) {
-        return Err(AppError::InvalidArgument(
-            "the resolve worktree path and id do not match".to_string(),
-        ));
-    }
-    // The worktree must belong to THIS lens: the remote is baked into its name, and
-    // finishing an origin resolve under the upstream lens would push the merge to
-    // the wrong repository.
-    let owned_by_lens = std::path::Path::new(worktree_path)
+    // Parse the identity this module itself encodes into the directory name —
+    // `gd-pr-resolve-<remote>-<number>-<uuid>` — rather than suffix-matching the
+    // id: an empty id makes `ends_with` vacuously true, and a partial one matches
+    // any worktree whose name happens to end that way. The remote segment is what
+    // stops one lens from finishing (and pushing) another lens's resolve.
+    let basename = std::path::Path::new(worktree_path)
         .file_name()
         .and_then(|s| s.to_str())
-        .is_some_and(|name| name.starts_with(&format!("gd-pr-resolve-{remote}-")));
-    if !owned_by_lens {
+        .unwrap_or_default();
+    let Some(rest) = basename.strip_prefix(&format!("gd-pr-resolve-{remote}-")) else {
         return Err(AppError::InvalidArgument(format!(
             "this resolve worktree does not belong to the {remote} remote"
         )));
+    };
+    // `<number>-<uuid>`: the number is digits, so the FIRST `-` ends it and
+    // everything after is the id (a uuid, which contains `-` itself).
+    let parsed_id = rest
+        .split_once('-')
+        .filter(|(number, _)| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
+        .map(|(_, id)| id);
+    if worktree_id.is_empty() || parsed_id != Some(worktree_id) {
+        return Err(AppError::InvalidArgument(
+            "the resolve worktree path and id do not match".to_string(),
+        ));
     }
 
     let remaining = unmerged_paths(worktree_path).await;
@@ -5054,6 +5054,26 @@ detached
             "the refused finish pushed nothing"
         );
         git(&repo, &["remote", "remove", "upstream"]).await;
+
+        // An EMPTY id must be refused, not accepted: every path "ends with" the
+        // empty string, so a suffix match would wave it through. A partial id is
+        // refused for the same reason — the id must be the whole uuid segment.
+        for bad_id in ["", &wt_id[wt_id.len() - 4..]] {
+            let err = finish_remote_pr_resolve(
+                &state, &repo, "feature", &wt, bad_id, None, None, &root,
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("path and id do not match"),
+                "id {bad_id:?} got: {err}"
+            );
+        }
+        assert_eq!(
+            rev(&bare, "refs/heads/feature").await,
+            head_before,
+            "no refused finish pushed anything"
+        );
 
         let done = finish_remote_pr_resolve(
             &state, &repo, "feature", &wt, &wt_id, None, None, &root,

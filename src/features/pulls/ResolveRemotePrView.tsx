@@ -126,9 +126,12 @@ export function ResolveRemotePrView({
             onDone();
             return;
           }
-          // The backend keeps the worktree whenever it can't finish, so stay put
-          // and let the live worktree status drive this surface.
-          toast("More conflicts to resolve");
+          // Unreachable by contract: finish either pushes or errors — it never hands
+          // back conflicts (that shape belongs to the local sibling's rebase path).
+          // Surfaced rather than swallowed, so a contract drift can't pass silently.
+          toastError(
+            new Error("The resolve finished with an unexpected result."),
+          );
         },
         onError: toastError,
       },
@@ -177,6 +180,7 @@ export function ResolveRemotePrView({
             <Button
               size="xs"
               variant="ghost"
+              disabled={busy}
               onClick={() => startAll(conflictedPaths)}
             >
               <SparkleIcon data-icon="inline-start" />
