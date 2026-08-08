@@ -385,8 +385,9 @@ branch**, labeled with the default's name — plus a PR badge.
 - **Local branch-protection rules** — naming, merge methods, require-PR, force-push;
   shareable via a committed file or importable from GitHub.
 - **Advanced merge tooling** ⭐ — predicts the result in memory before you commit
-  (fast-forward / clean / which files will conflict), with `--no-ff` and a clearly
-  cautioned auto-resolve strategy (`-X ours/theirs`) — which GitHub Desktop doesn't offer.
+  (fast-forward / already up to date / clean / which files will conflict), with
+  `--no-ff` and a clearly cautioned auto-resolve strategy (`-X ours/theirs`) — which
+  GitHub Desktop doesn't offer.
   (This is the *local* prediction; a remote PR's conflict state comes from the forge
   itself, and falls back to this prediction only where the forge publishes none.)
 - **Change base** ⭐ — rebase a branch onto a different base when it was branched off the
@@ -414,11 +415,11 @@ commit that hasn't been pushed yet.
   restart, it surfaces a calm recovery notice naming what was interrupted and the exact
   branch + commit it started from (browsable any time via the *Operation history*
   command).
-- **Worktree manager** — create, switch between, promote a worktree's branch into your
-  main checkout, and remove linked worktrees, so you can work on several branches in
-  parallel folders without stashing — with one-click jumps to the main workspace right
-  from the branch switcher, where each worktree row also carries a context menu with
-  the management actions it supports.
+- **Worktree manager** — create, switch between, rename, lock, promote a worktree's
+  branch into your main checkout, and remove linked worktrees, so you can work on
+  several branches in parallel folders without stashing — with one-click jumps to the
+  main workspace right from the branch switcher, where each worktree row also carries
+  a context menu with the management actions it supports.
 - **Push or publish a branch without switching to it** — from the branch switcher's
   context menu, push a branch that's ahead of the remote it tracks (its own remote,
   not just `origin`) or publish an unpushed one (choosing the remote when there's more

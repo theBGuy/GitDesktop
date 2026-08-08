@@ -121,7 +121,7 @@ export const capabilities: Capability[] = [
   {
     group: "Rewrite & recovery",
     label:
-      "Merge preview — fast-forward / clean / which files conflict, before you merge",
+      "Merge preview — fast-forward / already up to date / clean / which files conflict, before you merge",
     highlight: true,
   },
   {
