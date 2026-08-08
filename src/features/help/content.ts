@@ -469,8 +469,9 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   yet — click one to check it out (creating a local tracking branch), or {{secondaryclick}} to
   **Delete on _origin_…**, a server-side delete that removes the branch from the remote for
   everyone (protected names are blocked, and it can't be undone from the app).
-- The **Merge** dialog previews the result before you commit to it — *fast-forward*, *clean
-  merge*, or *which files will conflict* — worked out in memory without touching your files.
+- The **Merge** dialog previews the result before you commit to it — *fast-forward*, *already
+  up to date*, *clean merge*, or *which files will conflict* — worked out in memory without
+  touching your files.
   Two options sit alongside: **Always create a merge commit** (no fast-forward), and an **On
   conflict** strategy — *Stop and let me resolve* (default), or *Prefer current* / *Prefer
   incoming* to auto-resolve conflicting changes in one branch's favor (the other side's
@@ -1955,7 +1956,10 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   tray-hidden or not — focuses the existing window), **create pull requests as drafts**
   by default (off by default — pre-checks the Create-PR dialog's draft box, still
   overridable per PR; pairs with *Review draft PRs when created* so a draft's automated
-  first review waits until it's marked ready), and privacy options.
+  first review waits until it's marked ready), **automatically stash and reapply on pull
+  and branch updates** (an operation git would refuse over uncommitted changes recovers
+  on its own, no prompt), **reapply stashed changes after switching branches** (*Stash
+  and switch* puts your changes back once the switch lands), and privacy options.
 {{ai}}- **AI** — providers, models, keys, instructions, agent-session isolation
   (worktree / container), and the container image.
 - **Slash commands** — manage built-in and custom agent commands.
