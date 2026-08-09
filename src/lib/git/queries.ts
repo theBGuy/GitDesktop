@@ -89,8 +89,8 @@ export function useRepoIdentity(repo: string) {
  * query's repo segment matches, so Load-more and Open/Closed switches still skip the
  * skeleton. `repoKeyIndex` is where the repo sits in the key (1 for every key here).
  * A key that also varies on an identity axis beyond repo (lens, state) needs
- * `keepPreviousDataForKeyAxes` instead — matching repo alone would serve another axis's
- * data (the PR and issue list hooks below do this).
+ * `keepPreviousDataForKeyAxes` instead (the PR and issue list hooks below do):
+ * matching repo alone would serve another axis's data.
  */
 export function keepPreviousDataForRepo(repo: string, repoKeyIndex = 1) {
   return <T>(
@@ -974,7 +974,8 @@ export function usePrListCi(
 
 /** Hydrates PR-list rows with each PR's mergeability, keyed by number — the rows' conflict
  *  chip. Runs separately from `usePrList`, and its numbers digest in the key is
- *  load-bearing, for exactly the reasons documented on `usePrListCi` above. `prs` never
+ *  load-bearing for the same reason as `usePrListCi`'s: it keeps a map built from one
+ *  page's rows from caching under another page's key. `prs` never
  *  reaches the backend (it re-queries the page from the filters): it is here only to
  *  form that digest and to keep the read off an empty page. */
 export function usePrListMergeability(

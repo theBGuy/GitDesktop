@@ -85,9 +85,9 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // takes seconds on large GitHub repos and every active forge query joins the commit
   // mutation's awaited invalidation set, so it must be idle off this tab and off the
   // Closed tab, where no row has live mergeability to report.
-  // `!isPlaceholderData` covers the first half of a tab switch: while the LIST is
-  // still serving the previous tab's rows, this stays idle rather than describing a
-  // page that isn't on screen. None of these gates stop a chip on their own, though —
+  // `!isPlaceholderData` covers the first half of a tab switch or Load more: while
+  // the LIST is still serving placeholder rows, this stays idle rather than describing
+  // a page that isn't on screen. None of these gates stop a chip on their own, though —
   // a DISABLED query still renders placeholder data, so keeping the previous tab's or
   // lens's map off these rows is the hook's placeholder comparator's job.
   // PR numbers repeat across states and repos, so a misplaced chip is a wrong claim.
