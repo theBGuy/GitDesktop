@@ -891,9 +891,14 @@ export function usePrList(
     queryFn: () => api.forgePrList(repo, state, limit, lens),
     enabled,
     staleTime: 30_000,
-    // Growing the limit ("Load more") keeps the current rows visible instead of
-    // flashing skeletons while the larger page loads.
-    placeholderData: keepPreviousDataForRepo(repo),
+    // State and limit stay free so a tab switch or "Load more" keeps the current rows
+    // instead of flashing skeletons, but lens must match: a fork numbers PRs
+    // independently of its parent, so another lens's rows misdescribe the list and a
+    // click on one navigates by number to a different PR.
+    placeholderData: (prev, prevQuery) =>
+      prevQuery?.queryKey?.[1] === repo && prevQuery?.queryKey?.[3] === lens
+        ? prev
+        : undefined,
   });
 }
 
@@ -936,8 +941,15 @@ export function usePrListCi(
     },
     enabled: enabled && !!prs && prs.length > 0,
     staleTime: 30_000,
-    // Keep the current icons while a "Load more" grows the list, matching usePrList.
-    placeholderData: keepPreviousDataForRepo(repo),
+    // Keeps the current icons while a "Load more" grows the list (that moves only the
+    // limit/digest segments), but ONLY within the same repo, lens AND state — the map is
+    // number-keyed too, so `usePrListMergeability`'s rationale below applies verbatim.
+    placeholderData: (prev, prevQuery) =>
+      prevQuery?.queryKey?.[1] === repo &&
+      prevQuery?.queryKey?.[3] === lens &&
+      prevQuery?.queryKey?.[4] === state
+        ? prev
+        : undefined,
   });
 }
 
