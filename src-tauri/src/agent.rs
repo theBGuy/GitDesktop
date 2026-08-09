@@ -201,7 +201,9 @@ impl EventSink for Channel<ReviewEvent> {
 // to the lists but overwrites the scalars; upstream's adds GI_TYPELIB_PATH.
 
 /// `PATH`-style lists the bundle prepends itself to; `$APPDIR` entries are
-/// dropped and the variable is unset when nothing survives.
+/// dropped and the variable is unset when nothing survives — except `PATH`,
+/// which is replaced with a minimal host PATH.
+/// Twin of the `export` allowlist in `.github/scripts/appimage-guard.sh`.
 const APPDIR_PATHLIST_VARS: &[&str] = &[
     "LD_LIBRARY_PATH",
     "PATH",
@@ -215,6 +217,7 @@ const APPDIR_PATHLIST_VARS: &[&str] = &[
 /// `$APPDIR`. Deliberately left alone: `GDK_BACKEND` and `GTK_THEME` (set by the
 /// hook but not `$APPDIR`-derived, and a child may legitimately want them), and
 /// `LD_PRELOAD` (the AppImage never sets it, so any value is the user's).
+/// Twin of the `export` allowlist in `.github/scripts/appimage-guard.sh`.
 const APPDIR_SCALAR_VARS: &[&str] = &[
     "GSETTINGS_SCHEMA_DIR",
     "GTK_EXE_PREFIX",
@@ -223,6 +226,9 @@ const APPDIR_SCALAR_VARS: &[&str] = &[
     "GDK_PIXBUF_MODULE_FILE",
     "GIO_EXTRA_MODULES",
 ];
+
+/// Where a child's `PATH` lands when every entry it inherited was bundle-derived.
+const FALLBACK_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 
 /// Whether `entry` is `appdir` itself or a path beneath it. Matches on a path
 /// boundary so a sibling mount (`/tmp/.mount_gdX`) isn't stripped by a prefix.
@@ -273,11 +279,11 @@ fn compute_child_env_overrides(
         if !dropped {
             continue;
         }
-        // A child always needs a PATH, so an all-bundle PATH is emptied rather
-        // than unset (AppRun prepends to the host PATH, so host entries remain
-        // in practice).
+        // A child always needs a PATH, and an EMPTY element means "the current
+        // directory" to POSIX exec — so an all-bundle PATH falls back to a
+        // minimal host PATH rather than being unset or left empty.
         let kept = if *name == "PATH" {
-            Some(kept.unwrap_or_default())
+            Some(kept.unwrap_or_else(|| FALLBACK_PATH.to_string()))
         } else {
             kept
         };
@@ -293,7 +299,7 @@ fn compute_child_env_overrides(
 
 /// The process-wide override plan, computed once from the live environment.
 /// Empty (so every applier is a no-op) unless we're running from an AppImage.
-pub(crate) fn child_env_overrides() -> &'static [(&'static str, Option<String>)] {
+fn child_env_overrides() -> &'static [(&'static str, Option<String>)] {
     // AppImage is Linux-only, and `APPDIR` alone gates it: an extracted run
     // (`--appimage-extract`, the no-FUSE path) sets `APPDIR` but never `APPIMAGE`.
     if !cfg!(all(unix, not(target_os = "macos"))) {
@@ -1812,9 +1818,9 @@ fn kill_process_tree(child: &mut tokio::process::Child) {
     {
         // Negative PID targets the process group (pgid == pid for a group
         // leader), so `kill -KILL` reaches every descendant.
-        let _ = std::process::Command::new("kill")
-            .args(["-KILL", &format!("-{pid}")])
-            .spawn();
+        let mut cmd = std::process::Command::new("kill");
+        sanitize_child_env(&mut cmd);
+        let _ = cmd.args(["-KILL", &format!("-{pid}")]).spawn();
     }
 
     // Belt-and-braces: the tree-kill can race the child exiting, and this is
@@ -2629,7 +2635,7 @@ mod child_env_tests {
     }
 
     /// Expected result when nothing `$APPDIR`-derived was there to drop.
-    fn untouched(list: &str) -> (Option<String>, bool) {
+    fn no_strip(list: &str) -> (Option<String>, bool) {
         (Some(list.to_string()), false)
     }
 
@@ -2637,7 +2643,7 @@ mod child_env_tests {
     fn a_list_without_bundle_entries_is_untouched() {
         assert_eq!(
             strip_appdir_pathlist("/usr/bin:/bin", APPDIR),
-            untouched("/usr/bin:/bin")
+            no_strip("/usr/bin:/bin")
         );
     }
 
@@ -2684,17 +2690,17 @@ mod child_env_tests {
         // and nothing was dropped, so no override is warranted either.
         assert_eq!(
             strip_appdir_pathlist("/tmp/.mount_gdAbcX/lib:/usr/lib", APPDIR),
-            untouched("/tmp/.mount_gdAbcX/lib:/usr/lib")
+            no_strip("/tmp/.mount_gdAbcX/lib:/usr/lib")
         );
     }
 
     #[test]
-    fn a_host_only_list_keeps_its_empty_segments_and_emits_no_override() {
-        // Empty segments are dropped only as a side effect of a real strip; with
-        // nothing bundle-derived to remove, the child inherits the value verbatim.
+    fn a_host_only_list_collapses_empty_segments_but_emits_no_override() {
+        // The helper always collapses empty segments; the child keeps its original
+        // value only because a host-only list produces no override at all.
         assert_eq!(
             strip_appdir_pathlist("/usr/local/bin::/usr/bin", APPDIR),
-            untouched("/usr/local/bin:/usr/bin")
+            no_strip("/usr/local/bin:/usr/bin")
         );
         assert!(compute_child_env_overrides(
             APPDIR,
@@ -2704,7 +2710,7 @@ mod child_env_tests {
     }
 
     #[test]
-    fn degenerate_segments_are_dropped_and_an_empty_value_unsets() {
+    fn empty_segments_collapse_and_a_list_with_no_survivors_unsets() {
         assert_eq!(
             strip_appdir_pathlist(":/tmp/.mount_gdAbc/bin::/usr/bin:", APPDIR),
             stripped_to("/usr/bin")
@@ -2712,7 +2718,7 @@ mod child_env_tests {
         assert_eq!(strip_appdir_pathlist("", APPDIR), (None, false));
         assert_eq!(strip_appdir_pathlist("::", APPDIR), (None, false));
         // An empty appdir strips nothing (the plan never asks for one).
-        assert_eq!(strip_appdir_pathlist("/usr/bin", ""), untouched("/usr/bin"));
+        assert_eq!(strip_appdir_pathlist("/usr/bin", ""), no_strip("/usr/bin"));
     }
 
     #[test]
@@ -2795,9 +2801,29 @@ mod child_env_tests {
             APPDIR,
             lookup(&[("PATH", "/tmp/.mount_gdAbc/usr/bin:/tmp/.mount_gdAbc/bin")]),
         );
-        assert_eq!(plan, vec![("PATH", Some(String::new()))]);
+        assert_eq!(
+            plan,
+            vec![("PATH", Some("/usr/local/bin:/usr/bin:/bin".to_string()))]
+        );
         // An already-empty PATH is left alone rather than re-set to itself.
         assert!(compute_child_env_overrides(APPDIR, lookup(&[("PATH", "")])).is_empty());
+    }
+
+    #[test]
+    fn portable_pty_env_remove_drops_an_inherited_var() {
+        // The PTY applier only subtracts, so `CommandBuilder` must snapshot the
+        // parent environment into its own map — an `env_remove` that only cleared
+        // caller overrides would leave the bundle paths in place for the terminal.
+        let mut cmd = portable_pty::CommandBuilder::new("x");
+        assert!(
+            cmd.get_env("PATH").is_some(),
+            "portable-pty must snapshot the parent environment"
+        );
+        cmd.env_remove("PATH");
+        assert!(
+            cmd.get_env("PATH").is_none(),
+            "portable-pty must drop inherited vars, not just caller overrides"
+        );
     }
 }
 

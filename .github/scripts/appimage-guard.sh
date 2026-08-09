@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Fails the build when the AppImage bundles libwayland-client: a bundled copy
-# shadows the host's and breaks EGL on Mesa 25+ systems. Run from the repo
-# root — the bundle path is relative to it.
+# Fails the build when the AppImage bundles libwayland-client (a bundled copy
+# shadows the host's and breaks EGL on Mesa 25+ systems), or when a startup hook
+# exports a $APPDIR-derived variable the app doesn't strip from spawned children.
+# Run from the repo root — the bundle path is relative to it.
 set -euo pipefail
 
 appimage=$(find src-tauri/target/release/bundle/appimage -maxdepth 1 -name '*.AppImage' -print -quit 2>/dev/null || true)
@@ -21,3 +22,34 @@ if [ -n "$found" ]; then
   exit 1
 fi
 echo "OK: $(basename "$appimage") does not bundle libwayland-client"
+
+# Every variable a startup hook points into the bundle must also be stripped from
+# the environment of the tools we spawn. Twin of `APPDIR_PATHLIST_VARS` +
+# `APPDIR_SCALAR_VARS` in src-tauri/src/agent.rs — extend both together.
+# Hook SCRIPTS only: AppRun.wrapped is a binary that sets LD_LIBRARY_PATH
+# programmatically, so there is no export text there to parse.
+allowed=" LD_LIBRARY_PATH PATH XDG_DATA_DIRS GTK_PATH"
+allowed="$allowed GST_PLUGIN_SYSTEM_PATH GST_PLUGIN_SYSTEM_PATH_1_0"
+allowed="$allowed GSETTINGS_SCHEMA_DIR GTK_EXE_PREFIX GTK_DATA_PREFIX"
+allowed="$allowed GTK_IM_MODULE_FILE GDK_PIXBUF_MODULE_FILE GIO_EXTRA_MODULES"
+allowed="$allowed APPDIR " # the hook's own re-export
+hooks=0
+unknown=""
+for hook in "$workdir"/squashfs-root/apprun-hooks/*.sh; do
+  [ -e "$hook" ] || continue
+  hooks=$((hooks + 1))
+  exported=$(grep -E '^[[:space:]]*export[[:space:]]+[A-Za-z_][A-Za-z0-9_]*=.*\$\{?APPDIR' "$hook" \
+    | sed -E 's/^[[:space:]]*export[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)=.*/\1/' || true)
+  for name in $exported; do
+    case "$allowed" in
+      *" $name "*) ;;
+      *) unknown="$unknown $name" ;;
+    esac
+  done
+done
+if [ -n "$unknown" ]; then
+  echo "FAIL: hook exports \$APPDIR-derived var(s) the app does not strip:$unknown"
+  echo "      add them to APPDIR_PATHLIST_VARS / APPDIR_SCALAR_VARS in src-tauri/src/agent.rs"
+  exit 1
+fi
+echo "OK: every \$APPDIR-derived export in $hooks startup hook(s) is stripped from child processes"
