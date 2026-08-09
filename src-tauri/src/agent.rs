@@ -191,6 +191,167 @@ impl EventSink for Channel<ReviewEvent> {
     }
 }
 
+// --- child environment -----------------------------------------------------
+//
+// Inside the Linux AppImage, AppRun and its GTK hook point loader/toolkit vars
+// into the bundle, so any spawned HOST binary loads the bundle's Ubuntu 22.04
+// libraries and dies. Subtract per child only: never clear (SSH_AUTH_SOCK
+// inherits), never touch our own env (WebKit helpers, the dlopen'd tray). The
+// list/scalar split tracks Tauri's linuxdeploy-plugin-gtk fork, which appends
+// to the lists but overwrites the scalars; upstream's adds GI_TYPELIB_PATH.
+
+/// `PATH`-style lists the bundle prepends itself to; `$APPDIR` entries are
+/// dropped and the variable is unset when nothing survives.
+const APPDIR_PATHLIST_VARS: &[&str] = &[
+    "LD_LIBRARY_PATH",
+    "PATH",
+    "XDG_DATA_DIRS",
+    "GTK_PATH",
+    "GST_PLUGIN_SYSTEM_PATH",
+    "GST_PLUGIN_SYSTEM_PATH_1_0",
+];
+
+/// Single-path variables the bundle owns outright — unset when they point into
+/// `$APPDIR`. Deliberately left alone: `GDK_BACKEND` and `GTK_THEME` (set by the
+/// hook but not `$APPDIR`-derived, and a child may legitimately want them), and
+/// `LD_PRELOAD` (the AppImage never sets it, so any value is the user's).
+const APPDIR_SCALAR_VARS: &[&str] = &[
+    "GSETTINGS_SCHEMA_DIR",
+    "GTK_EXE_PREFIX",
+    "GTK_DATA_PREFIX",
+    "GTK_IM_MODULE_FILE",
+    "GDK_PIXBUF_MODULE_FILE",
+    "GIO_EXTRA_MODULES",
+];
+
+/// Whether `entry` is `appdir` itself or a path beneath it. Matches on a path
+/// boundary so a sibling mount (`/tmp/.mount_gdX`) isn't stripped by a prefix.
+fn is_under_appdir(entry: &str, appdir: &str) -> bool {
+    if appdir.is_empty() {
+        return false;
+    }
+    entry == appdir
+        || (entry.len() > appdir.len()
+            && entry.starts_with(appdir)
+            && entry.as_bytes()[appdir.len()] == b'/')
+}
+
+/// Drops `$APPDIR` entries (and empty ones) from a `:`-separated list. Returns
+/// the survivors — `None` meaning "unset the variable" — plus whether any
+/// `$APPDIR` entry was actually dropped, which is what makes an override
+/// warranted: a host-only list must be left exactly as the child inherited it.
+fn strip_appdir_pathlist(value: &str, appdir: &str) -> (Option<String>, bool) {
+    let appdir = appdir.trim_end_matches('/');
+    let mut dropped = false;
+    let kept: Vec<&str> = value
+        .split(':')
+        .filter(|entry| {
+            if is_under_appdir(entry, appdir) {
+                dropped = true;
+                return false;
+            }
+            !entry.is_empty()
+        })
+        .collect();
+    ((!kept.is_empty()).then(|| kept.join(":")), dropped)
+}
+
+/// Builds the override plan from an `appdir` and an environment lookup; `Some`
+/// sets the variable on the child, `None` removes it. Pure so the rules are
+/// testable off-Linux.
+fn compute_child_env_overrides(
+    appdir: &str,
+    var: impl Fn(&str) -> Option<String>,
+) -> Vec<(&'static str, Option<String>)> {
+    if appdir.is_empty() {
+        return Vec::new();
+    }
+    let mut plan = Vec::new();
+    for name in APPDIR_PATHLIST_VARS {
+        let Some(value) = var(name) else { continue };
+        let (kept, dropped) = strip_appdir_pathlist(&value, appdir);
+        if !dropped {
+            continue;
+        }
+        // A child always needs a PATH, so an all-bundle PATH is emptied rather
+        // than unset (AppRun prepends to the host PATH, so host entries remain
+        // in practice).
+        let kept = if *name == "PATH" {
+            Some(kept.unwrap_or_default())
+        } else {
+            kept
+        };
+        plan.push((*name, kept));
+    }
+    for name in APPDIR_SCALAR_VARS {
+        if var(name).is_some_and(|value| is_under_appdir(&value, appdir.trim_end_matches('/'))) {
+            plan.push((*name, None));
+        }
+    }
+    plan
+}
+
+/// The process-wide override plan, computed once from the live environment.
+/// Empty (so every applier is a no-op) unless we're running from an AppImage.
+pub(crate) fn child_env_overrides() -> &'static [(&'static str, Option<String>)] {
+    // AppImage is Linux-only, and `APPDIR` alone gates it: an extracted run
+    // (`--appimage-extract`, the no-FUSE path) sets `APPDIR` but never `APPIMAGE`.
+    if !cfg!(all(unix, not(target_os = "macos"))) {
+        return &[];
+    }
+    static PLAN: std::sync::OnceLock<Vec<(&'static str, Option<String>)>> =
+        std::sync::OnceLock::new();
+    PLAN.get_or_init(|| {
+        let appdir = std::env::var("APPDIR").unwrap_or_default();
+        compute_child_env_overrides(&appdir, |key| std::env::var(key).ok())
+    })
+}
+
+/// Env sink for [`sanitize_child_env`], implemented for every command builder the
+/// app spawns through (std, tokio, portable-pty).
+pub(crate) trait ChildEnv {
+    fn set_var(&mut self, key: &str, value: &str);
+    fn unset_var(&mut self, key: &str);
+}
+
+impl ChildEnv for Command {
+    fn set_var(&mut self, key: &str, value: &str) {
+        self.env(key, value);
+    }
+    fn unset_var(&mut self, key: &str) {
+        self.env_remove(key);
+    }
+}
+
+impl ChildEnv for std::process::Command {
+    fn set_var(&mut self, key: &str, value: &str) {
+        self.env(key, value);
+    }
+    fn unset_var(&mut self, key: &str) {
+        self.env_remove(key);
+    }
+}
+
+impl ChildEnv for portable_pty::CommandBuilder {
+    fn set_var(&mut self, key: &str, value: &str) {
+        self.env(key, value);
+    }
+    fn unset_var(&mut self, key: &str) {
+        self.env_remove(key);
+    }
+}
+
+/// Removes the AppImage bundle's paths from a child's environment. Call it FIRST,
+/// before a site's own `.env()` calls, so explicitly-set variables always win.
+pub(crate) fn sanitize_child_env<C: ChildEnv>(cmd: &mut C) {
+    for (name, value) in child_env_overrides() {
+        match value {
+            Some(v) => cmd.set_var(name, v),
+            None => cmd.unset_var(name),
+        }
+    }
+}
+
 // --- binary resolution -----------------------------------------------------
 //
 // A GUI app does not reliably inherit the user's shell PATH, and npm-installed
@@ -421,6 +582,7 @@ async fn resolve_via_login_shell(names: &[&str]) -> Option<PathBuf> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     for name in names {
         let mut cmd = Command::new(&shell);
+        sanitize_child_env(&mut cmd);
         // -l sources the profile; -i sources the rc files, where zsh/bash users
         // commonly set PATH (nvm, `brew shellenv`, …). stdin is closed so the
         // shell runs the one command and exits rather than waiting for input.
@@ -486,6 +648,7 @@ pub(crate) async fn run_capture(
     timeout: Duration,
 ) -> AppResult<(i32, String)> {
     let mut cmd = Command::new(program);
+    sanitize_child_env(&mut cmd);
     cmd.args(args)
         .env("NO_COLOR", "1")
         .env("CLICOLOR", "0")
@@ -1690,6 +1853,7 @@ async fn stream_agent(
     on_event: &dyn EventSink,
 ) -> AppResult<()> {
     let mut cmd = Command::new(binary);
+    sanitize_child_env(&mut cmd);
     cmd.args(args)
         .current_dir(cwd)
         .env("NO_COLOR", "1")
@@ -2441,6 +2605,200 @@ pub async fn agent_session(
         &on_event,
     )
     .await
+}
+
+#[cfg(test)]
+mod child_env_tests {
+    use super::*;
+
+    const APPDIR: &str = "/tmp/.mount_gdAbc";
+
+    /// Look up a var from a fixture table, so these run identically on every OS.
+    fn lookup(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        move |key| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| (*v).to_string())
+        }
+    }
+
+    /// Expected `strip_appdir_pathlist` result when `list` survived a real strip.
+    fn stripped_to(list: &str) -> (Option<String>, bool) {
+        (Some(list.to_string()), true)
+    }
+
+    /// Expected result when nothing `$APPDIR`-derived was there to drop.
+    fn untouched(list: &str) -> (Option<String>, bool) {
+        (Some(list.to_string()), false)
+    }
+
+    #[test]
+    fn a_list_without_bundle_entries_is_untouched() {
+        assert_eq!(
+            strip_appdir_pathlist("/usr/bin:/bin", APPDIR),
+            untouched("/usr/bin:/bin")
+        );
+    }
+
+    #[test]
+    fn an_all_bundle_list_strips_to_nothing() {
+        assert_eq!(
+            strip_appdir_pathlist(
+                "/tmp/.mount_gdAbc/usr/lib:/tmp/.mount_gdAbc:/tmp/.mount_gdAbc/usr/lib/x86_64-linux-gnu",
+                APPDIR
+            ),
+            (None, true)
+        );
+    }
+
+    #[test]
+    fn bundle_entries_are_dropped_in_place_and_host_order_survives() {
+        assert_eq!(
+            strip_appdir_pathlist(
+                "/tmp/.mount_gdAbc/usr/bin:/usr/local/bin:/tmp/.mount_gdAbc/usr/lib:/usr/bin",
+                APPDIR
+            ),
+            stripped_to("/usr/local/bin:/usr/bin")
+        );
+    }
+
+    #[test]
+    fn a_trailing_slash_on_appdir_is_equivalent() {
+        let value = "/tmp/.mount_gdAbc/usr/lib:/usr/lib";
+        assert_eq!(
+            strip_appdir_pathlist(value, "/tmp/.mount_gdAbc/"),
+            strip_appdir_pathlist(value, APPDIR),
+            "a trailing slash must not change the outcome"
+        );
+        // The bare directory itself matches with or without the trailing slash.
+        assert_eq!(
+            strip_appdir_pathlist("/tmp/.mount_gdAbc", "/tmp/.mount_gdAbc//"),
+            (None, true)
+        );
+    }
+
+    #[test]
+    fn a_prefix_that_is_not_a_path_boundary_survives() {
+        // A sibling mount whose name merely starts with ours must not be stripped —
+        // and nothing was dropped, so no override is warranted either.
+        assert_eq!(
+            strip_appdir_pathlist("/tmp/.mount_gdAbcX/lib:/usr/lib", APPDIR),
+            untouched("/tmp/.mount_gdAbcX/lib:/usr/lib")
+        );
+    }
+
+    #[test]
+    fn a_host_only_list_keeps_its_empty_segments_and_emits_no_override() {
+        // Empty segments are dropped only as a side effect of a real strip; with
+        // nothing bundle-derived to remove, the child inherits the value verbatim.
+        assert_eq!(
+            strip_appdir_pathlist("/usr/local/bin::/usr/bin", APPDIR),
+            untouched("/usr/local/bin:/usr/bin")
+        );
+        assert!(compute_child_env_overrides(
+            APPDIR,
+            lookup(&[("PATH", "/usr/local/bin::/usr/bin")])
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn degenerate_segments_are_dropped_and_an_empty_value_unsets() {
+        assert_eq!(
+            strip_appdir_pathlist(":/tmp/.mount_gdAbc/bin::/usr/bin:", APPDIR),
+            stripped_to("/usr/bin")
+        );
+        assert_eq!(strip_appdir_pathlist("", APPDIR), (None, false));
+        assert_eq!(strip_appdir_pathlist("::", APPDIR), (None, false));
+        // An empty appdir strips nothing (the plan never asks for one).
+        assert_eq!(strip_appdir_pathlist("/usr/bin", ""), untouched("/usr/bin"));
+    }
+
+    #[test]
+    fn vars_outside_the_two_tables_never_enter_the_plan() {
+        // GDK_BACKEND/GTK_THEME aren't `$APPDIR`-derived and LD_PRELOAD is the
+        // user's, so even bundle-looking values must come through untouched.
+        let plan = compute_child_env_overrides(
+            APPDIR,
+            lookup(&[
+                ("GDK_BACKEND", "/tmp/.mount_gdAbc/wayland"),
+                ("GTK_THEME", "/tmp/.mount_gdAbc/Adwaita"),
+                ("LD_PRELOAD", "/tmp/.mount_gdAbc/usr/lib/libfoo.so"),
+            ]),
+        );
+        assert!(plan.is_empty(), "unexpected overrides: {plan:?}");
+    }
+
+    #[test]
+    fn a_scalar_equal_to_appdir_is_unset_and_respects_the_path_boundary() {
+        let expected = vec![("GTK_DATA_PREFIX", None)];
+        assert_eq!(
+            compute_child_env_overrides(
+                APPDIR,
+                lookup(&[("GTK_DATA_PREFIX", "/tmp/.mount_gdAbc")])
+            ),
+            expected
+        );
+        // Same directory, appdir spelled with a trailing slash.
+        assert_eq!(
+            compute_child_env_overrides(
+                "/tmp/.mount_gdAbc/",
+                lookup(&[("GTK_DATA_PREFIX", "/tmp/.mount_gdAbc")])
+            ),
+            expected
+        );
+        // A sibling directory sharing the prefix belongs to the host — leave it.
+        assert!(compute_child_env_overrides(
+            APPDIR,
+            lookup(&[("GTK_DATA_PREFIX", "/tmp/.mount_gdAbcX")])
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn no_appdir_means_no_overrides_at_all() {
+        assert!(
+            compute_child_env_overrides("", lookup(&[("PATH", "/tmp/.mount_gdAbc/usr/bin")]))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_plan_rewrites_lists_removes_bundle_scalars_and_skips_clean_vars() {
+        let plan = compute_child_env_overrides(
+            APPDIR,
+            lookup(&[
+                ("LD_LIBRARY_PATH", "/tmp/.mount_gdAbc/usr/lib"),
+                ("PATH", "/tmp/.mount_gdAbc/usr/bin:/usr/bin"),
+                ("XDG_DATA_DIRS", "/usr/share"),
+                (
+                    "GDK_PIXBUF_MODULE_FILE",
+                    "/tmp/.mount_gdAbc/usr/lib/loaders.cache",
+                ),
+                ("GTK_IM_MODULE_FILE", "/etc/gtk/immodules.cache"),
+            ]),
+        );
+        assert_eq!(
+            plan,
+            vec![
+                ("LD_LIBRARY_PATH", None),
+                ("PATH", Some("/usr/bin".to_string())),
+                ("GDK_PIXBUF_MODULE_FILE", None),
+            ]
+        );
+    }
+
+    #[test]
+    fn path_is_never_unset_even_when_every_entry_is_bundle_derived() {
+        let plan = compute_child_env_overrides(
+            APPDIR,
+            lookup(&[("PATH", "/tmp/.mount_gdAbc/usr/bin:/tmp/.mount_gdAbc/bin")]),
+        );
+        assert_eq!(plan, vec![("PATH", Some(String::new()))]);
+        // An already-empty PATH is left alone rather than re-set to itself.
+        assert!(compute_child_env_overrides(APPDIR, lookup(&[("PATH", "")])).is_empty());
+    }
 }
 
 #[cfg(test)]

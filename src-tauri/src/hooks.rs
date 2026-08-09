@@ -203,6 +203,7 @@ pub async fn git_run_hook_manager(
         }
     };
     let mut cmd = tokio::process::Command::new(&manager);
+    crate::agent::sanitize_child_env(&mut cmd);
     cmd.args(args)
         .current_dir(&repo_path)
         .stdin(std::process::Stdio::null());

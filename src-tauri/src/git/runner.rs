@@ -72,6 +72,8 @@ pub async fn run_git_raw_input(
 ) -> AppResult<GitOutput> {
     let git = git_bin().await?;
     let mut cmd = Command::new(&git);
+    // Also covers the credential helpers git spawns in turn.
+    crate::agent::sanitize_child_env(&mut cmd);
     cmd.args(["-c", "core.quotePath=false", "-c", "color.ui=false"]);
     cmd.args(args);
     if let Some(repo) = repo_path {

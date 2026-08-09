@@ -364,6 +364,7 @@ pub async fn agent_container_prepare(
 /// and a tail of the build log on failure. Callers own their temp context dir.
 async fn run_build(bin: &Path, build_args: &[String]) -> AppResult<()> {
     let mut cmd = Command::new(bin);
+    crate::agent::sanitize_child_env(&mut cmd);
     cmd.args(build_args)
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
@@ -1056,11 +1057,9 @@ fn launch_container_shell(bin: &str, args: &[String], tip: &str) -> AppResult<()
     }
     let cmd = format!("echo '{tip}'; {line}; echo; echo '(container exited)'; exec bash");
     for term in ["x-terminal-emulator", "gnome-terminal", "konsole", "xterm"] {
-        if Command::new(term)
-            .args(["-e", "bash", "-c", &cmd])
-            .spawn()
-            .is_ok()
-        {
+        let mut term_cmd = Command::new(term);
+        crate::agent::sanitize_child_env(&mut term_cmd);
+        if term_cmd.args(["-e", "bash", "-c", &cmd]).spawn().is_ok() {
             return Ok(());
         }
     }

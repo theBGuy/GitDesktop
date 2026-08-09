@@ -419,6 +419,7 @@ async fn launch_custom_command(command: &str, path: &str) -> AppResult<()> {
     }
 
     let mut cmd = Command::new(&resolved);
+    crate::agent::sanitize_child_env(&mut cmd);
     cmd.args(rest);
     // Always root at the repository directory: harmless when `{path}` is used
     // explicitly, and the only cwd signal for launchers that inherit it
@@ -559,12 +560,16 @@ fn launch_terminal_unix(kind: &str, program: &str, path: &str) -> AppResult<()> 
             None
         };
         if let Some(bin) = chosen {
-            if Command::new(&bin).current_dir(path).spawn().is_ok() {
+            let mut cmd = Command::new(&bin);
+            crate::agent::sanitize_child_env(&mut cmd);
+            if cmd.current_dir(path).spawn().is_ok() {
                 return Ok(());
             }
         }
         for term in ["x-terminal-emulator", "gnome-terminal", "konsole", "xterm"] {
-            if Command::new(term).current_dir(path).spawn().is_ok() {
+            let mut cmd = Command::new(term);
+            crate::agent::sanitize_child_env(&mut cmd);
+            if cmd.current_dir(path).spawn().is_ok() {
                 return Ok(());
             }
         }
@@ -1054,6 +1059,7 @@ pub async fn open_with_program(program: String, path: String) -> AppResult<()> {
         c
     } else {
         let mut c = std::process::Command::new(&program);
+        crate::agent::sanitize_child_env(&mut c);
         c.arg(&path);
         c
     };

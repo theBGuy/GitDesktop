@@ -66,6 +66,7 @@ pub async fn run_glab_raw(
 ) -> AppResult<GlabOutput> {
     let glab = glab_bin().await?;
     let mut cmd = Command::new(&glab);
+    crate::agent::sanitize_child_env(&mut cmd);
     cmd.args(args);
     if let Some(repo) = repo_path {
         cmd.current_dir(repo);
@@ -266,6 +267,7 @@ pub async fn run_glab_ex(
 ) -> AppResult<GlabOutput> {
     let glab = glab_bin().await?;
     let mut cmd = Command::new(&glab);
+    crate::agent::sanitize_child_env(&mut cmd);
     cmd.args(args);
     if let Some(repo) = repo_path {
         cmd.current_dir(repo);

@@ -464,8 +464,10 @@ pub async fn pty_open(
         tree_kill,
     } = build_command(&opts, &id).await?;
     // portable-pty's CommandBuilder already inherits the parent environment, so we
-    // only advertise a capable terminal here (re-copying every var is redundant and
-    // can introduce odd-cased duplicate Windows vars).
+    // only subtract (the AppImage bundle's paths, which would poison host tools run
+    // in the terminal) and advertise a capable terminal — re-copying every var is
+    // redundant and can introduce odd-cased duplicate Windows vars.
+    crate::agent::sanitize_child_env(&mut cmd);
     cmd.env("TERM", "xterm-256color");
 
     let pty_system = native_pty_system();

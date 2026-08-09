@@ -669,6 +669,7 @@ async fn run_client_cli(bin: &str, args: &[&str]) -> AppResult<(String, String, 
     })?;
 
     let mut cmd = Command::new(&program);
+    crate::agent::sanitize_child_env(&mut cmd);
     cmd.args(args)
         .env("NO_COLOR", "1")
         .env("CLICOLOR", "0")

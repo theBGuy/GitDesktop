@@ -940,6 +940,7 @@ async fn run_reconnect_child(
     on_event: &Channel<ReconnectEvent>,
 ) -> AppResult<()> {
     let mut cmd = Command::new(binary);
+    crate::agent::sanitize_child_env(&mut cmd);
     cmd.args(args.iter().map(String::as_str));
     // Non-interactive + quiet. Deliberately no GH_PROMPT_DISABLED — stdin-null
     // suffices and that env var's effect on the web flow is unvalidated.
