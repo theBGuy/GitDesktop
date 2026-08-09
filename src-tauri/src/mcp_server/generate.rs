@@ -2880,7 +2880,8 @@ mod tests {
     /// A name that lost bytes to the lossy decode (invalid UTF-8 on disk — reachable on
     /// Linux/macOS, not creatable on Windows, so it's fed in as a String here) can match
     /// no rule the user could write, and is hidden on that basis alone: no pattern is
-    /// configured here, and it is still dropped and counted.
+    /// configured here, and it is still dropped and counted — and the note the recipe
+    /// renders from that output cites only the unreadable cause.
     #[tokio::test]
     async fn untracked_names_that_lost_bytes_are_hidden() {
         let base_dir = tempfile::Builder::new()
@@ -2901,6 +2902,34 @@ mod tests {
         // Counted apart from the pattern hits, so no message can blame the (empty)
         // pattern list for it.
         assert_eq!(filtered.unreadable, 1);
+
+        // Both counts come from the real filter here, so the note form is pinned
+        // end-to-end, not just from hand-fed counters (the twin above does the same
+        // for the pattern cause).
+        let recipe = assemble_branch_recipe(BranchPieces {
+            diff_text: String::new(),
+            diff_truncated: false,
+            files: vec![],
+            untracked_paths: filtered.paths,
+            excluded_files: filtered.excluded,
+            unreadable: filtered.unreadable,
+            recent_branches: vec![],
+            commit_subjects: vec![],
+            repo_instructions: None,
+            global_instructions: String::new(),
+        });
+        assert!(
+            recipe
+                .prompt
+                .contains("[1 new file(s) left out because their names aren't readable text]"),
+            "prompt:\n{}",
+            recipe.prompt
+        );
+        assert!(
+            !recipe.prompt.contains("hidden by the user's AI ignore rules"),
+            "no pattern hid anything here:\n{}",
+            recipe.prompt
+        );
     }
 
     /// `-z` keeps the listed names byte-exact: a name with a space stays whole, and a
@@ -3226,8 +3255,7 @@ mod tests {
     /// undisclosed. Exact counts hold because no settings store is read under
     /// `cfg(test)` (app_store's `resolve_store_dir`), so the repo's own ignore file is
     /// the whole pattern set.
-    // Holding the guard across the awaits IS the point: it serializes the
-    // settings-store tests against each other.
+    // Held across awaits deliberately — the guard IS the serialization (see SETTINGS_STORE_LOCK).
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn branch_recipe_counts_ignored_untracked_names() {
@@ -3255,8 +3283,7 @@ mod tests {
     /// with a pattern a user could really hold (`*` hides everything, so the recipe
     /// must refuse and say why). The twin above owes its exactness to the arm that
     /// keeps the developer's real store out of every test.
-    // Holding the guard across the awaits IS the point: it serializes the
-    // settings-store tests against each other.
+    // Held across awaits deliberately — the guard IS the serialization (see SETTINGS_STORE_LOCK).
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn branch_recipe_reads_the_resolved_settings_store() {
