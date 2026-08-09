@@ -20,8 +20,8 @@ import { toastError } from "@/lib/toast";
  * Opens a repository by path: validates it, records it in recents, and switches
  * the app to it. A path that's no longer a git repo offers a toast to **Locate…**
  * the folder's new home (moved on disk) or **Remove** the stale row.
- * Every open-by-path route lands here: the shared recents list, macOS
- * File → Open Recent, and the folder picker in {@link usePickAndOpenRepo}.
+ * Callers: the shared recents list, macOS File → Open Recent, and the folder
+ * picker in {@link usePickAndOpenRepo}.
  */
 export function useOpenRepoByPath() {
   const openRepo = useUiStore((s) => s.openRepo);

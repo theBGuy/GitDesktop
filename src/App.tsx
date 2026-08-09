@@ -58,6 +58,15 @@ function App() {
   const [createOpen, setCreateOpen] = useState(false);
   const dialogOpen = cloneOpen || createOpen;
 
+  // The dialogs live above the view switch, so navigation no longer unmounts
+  // them (e.g. the clone dialog's "Open Settings → Accounts") — close them
+  // when the screen changes, or the new screen mounts behind the modal.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `view` is an intentional close trigger, not read directly
+  useEffect(() => {
+    setCloneOpen(false);
+    setCreateOpen(false);
+  }, [view]);
+
   // Show a one-time passive notice on first launch, letting users opt out.
   const noticeShown = useRef(false);
   // The notice lingers ~10s; read the LATEST settings at click/dismiss time (not
