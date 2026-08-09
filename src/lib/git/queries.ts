@@ -88,9 +88,9 @@ export function useRepoIdentity(repo: string) {
  * number-keyed maps, briefly-wrong data). Keeps previous data only when the previous
  * query's repo segment matches, so Load-more and Open/Closed switches still skip the
  * skeleton. `repoKeyIndex` is where the repo sits in the key (1 for every key here).
- * A key that also varies on an identity axis beyond repo (lens, state) needs an inline
- * comparator instead — matching repo alone would serve another axis's data (the PR and
- * issue list hooks below do this).
+ * A key that also varies on an identity axis beyond repo (lens, state) needs
+ * `keepPreviousDataForKeyAxes` instead — matching repo alone would serve another axis's
+ * data (the PR and issue list hooks below do this).
  */
 export function keepPreviousDataForRepo(repo: string, repoKeyIndex = 1) {
   return <T>(
@@ -98,6 +98,27 @@ export function keepPreviousDataForRepo(repo: string, repoKeyIndex = 1) {
     previousQuery: { queryKey: QueryKey } | undefined,
   ): T | undefined =>
     previousQuery?.queryKey?.[repoKeyIndex] === repo ? previousData : undefined;
+}
+
+/**
+ * `keepPreviousData` scoped to a repo PLUS extra key segments: previous data is reused
+ * only when every listed `[index, value]` axis matches as well. The indices are
+ * positional, so each call site's axes list must stay in sync with its key literal —
+ * this helper dedupes that coupling, it does not remove it.
+ */
+export function keepPreviousDataForKeyAxes(
+  repo: string,
+  axes: ReadonlyArray<readonly [index: number, value: unknown]>,
+  repoKeyIndex = 1,
+) {
+  return <T>(
+    previousData: T | undefined,
+    previousQuery: { queryKey: QueryKey } | undefined,
+  ): T | undefined => {
+    const key = previousQuery?.queryKey;
+    if (!key || key[repoKeyIndex] !== repo) return undefined;
+    return axes.every(([i, v]) => key[i] === v) ? previousData : undefined;
+  };
 }
 
 export const repoKeys = {
@@ -898,19 +919,17 @@ export function usePrList(
     // instead of flashing skeletons, but lens must match: a fork numbers PRs
     // independently of its parent, so another lens's rows misdescribe the list and a
     // click on one navigates by number to a different PR.
-    placeholderData: (prev, prevQuery) =>
-      prevQuery?.queryKey?.[1] === repo && prevQuery?.queryKey?.[3] === lens
-        ? prev
-        : undefined,
+    placeholderData: keepPreviousDataForKeyAxes(repo, [[3, lens]]),
   });
 }
 
 /** Hydrates PR-list rows with each PR's CI rollup, keyed by number. Runs SEPARATELY from
  *  `usePrList` — a full rollup expansion inside the list query 504s on large GitHub
- *  repos. The numbers digest in the key is load-bearing: the list keeps the previous
- *  tab's rows as placeholder data, so on a tab switch this can fire against the PREVIOUS
- *  tab's rows, and keyed by state+limit alone that result would cache under the new
- *  tab's key. */
+ *  repos. CALLER CONTRACT: idle this hook while the list serves placeholder rows
+ *  (`enabled: … && !list.isPlaceholderData`) — the comparator below leaves `state` free,
+ *  so an ungated intermediate fetch would build a map from the outgoing rows and cache it
+ *  under the incoming key. The numbers digest in the key is the remaining defense: it
+ *  keeps such a result from ever caching under another page's key. */
 export function usePrListCi(
   repo: string,
   enabled: boolean,
@@ -947,12 +966,9 @@ export function usePrListCi(
     staleTime: 30_000,
     // Repo and lens must match: a fork numbers PRs independently of its parent, so a
     // cross-lens map paints wrong icons. State stays free — the panel idles this query
-    // while the list serves another tab's rows (mirroring the mergeability gate), and
+    // while the list serves placeholder rows (mirroring the mergeability gate), and
     // open/closed sets are disjoint, so a cross-tab serve can't show another PR's status.
-    placeholderData: (prev, prevQuery) =>
-      prevQuery?.queryKey?.[1] === repo && prevQuery?.queryKey?.[3] === lens
-        ? prev
-        : undefined,
+    placeholderData: keepPreviousDataForKeyAxes(repo, [[3, lens]]),
   });
 }
 
@@ -996,12 +1012,10 @@ export function usePrListMergeability(
     // on any keyed query with no data yet — so matching on repo alone (what the shared
     // `keepPreviousDataForRepo` does) would paint the open tab's map onto closed rows,
     // and origin's onto upstream's, since numbers collide across both axes.
-    placeholderData: (prev, prevQuery) =>
-      prevQuery?.queryKey?.[1] === repo &&
-      prevQuery?.queryKey?.[3] === lens &&
-      prevQuery?.queryKey?.[4] === state
-        ? prev
-        : undefined,
+    placeholderData: keepPreviousDataForKeyAxes(repo, [
+      [3, lens],
+      [4, state],
+    ]),
   });
 }
 
@@ -1608,10 +1622,7 @@ export function useIssueList(
     // instead of flashing skeletons, but lens must match: a fork numbers issues
     // independently of its parent, so another lens's rows misdescribe the list and a
     // click on one navigates by number to a different issue.
-    placeholderData: (prev, prevQuery) =>
-      prevQuery?.queryKey?.[1] === repo && prevQuery?.queryKey?.[3] === lens
-        ? prev
-        : undefined,
+    placeholderData: keepPreviousDataForKeyAxes(repo, [[3, lens]]),
   });
 }
 

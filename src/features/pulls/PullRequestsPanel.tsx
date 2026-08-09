@@ -67,10 +67,11 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // resets to the first page.
   const [limit, setLimit] = useState(PAGE_SIZE);
   const prList = usePrList(repoPath, ghReady, stateFilter, limit, lens);
-  // Row CI icons hydrate separately from the list, so the list paints immediately. Idle
-  // while the list serves another tab's placeholder rows: otherwise the intermediate key
-  // caches a map fetched against rows that are about to be replaced, and that cached map
-  // becomes the placeholder source for the next key.
+  // Row CI icons hydrate separately from the list, so the list paints immediately; the
+  // backend routes GitHub/GitLab/Bitbucket, so `ghReady` is the readiness gate. Idle
+  // while the list serves placeholder rows (tab switch or Load more): otherwise the
+  // intermediate key caches a map fetched against rows that are about to be replaced,
+  // and that cached map becomes the placeholder source for the next key.
   const prListCi = usePrListCi(
     repoPath,
     ghReady && !prList.isPlaceholderData,
