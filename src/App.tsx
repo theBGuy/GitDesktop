@@ -137,7 +137,10 @@ function App() {
   useHotkeysListener();
   // The macOS menu bar routes into the same action dispatch; inert elsewhere.
   useMacAppMenu();
-  useHotkeyAction("open-settings", openSettings);
+  // Settings… is exposed in the macOS menu bar, which stays clickable on the
+  // git-missing screen — without the gate it would flip the view to a Settings
+  // screen that never renders, surfacing only after Retry.
+  useHotkeyAction("open-settings", openSettings, gitInstalled.isSuccess);
   // App owns the three repo actions outright: they must work on every screen
   // (Settings/Help/Explore mount neither the welcome list nor the repo
   // switcher), and duplicate registrations would shadow by mount order.

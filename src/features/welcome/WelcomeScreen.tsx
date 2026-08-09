@@ -7,13 +7,12 @@ import {
   GitForkIcon,
   QuestionIcon,
 } from "@phosphor-icons/react";
-import { useState } from "react";
 import { BrandMark } from "@/components/BrandMark";
 import { Button } from "@/components/ui/button";
 import { usePickAndOpenRepo } from "@/features/repository/useOpenRepoByPath";
 import { useUpdateCheck } from "@/features/updates/useUpdateCheck";
 import { formatBinding } from "@/lib/hotkeys/binding";
-import { useEffectiveBindings } from "@/lib/hotkeys/hotkeys";
+import { dispatchAction, useEffectiveBindings } from "@/lib/hotkeys/hotkeys";
 import type { ActionId } from "@/lib/hotkeys/registry";
 import {
   useAiEnabled,
@@ -21,8 +20,6 @@ import {
   useSettings,
 } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
-import { CloneRepoDialog } from "./CloneRepoDialog";
-import { CreateRepoDialog } from "./CreateRepoDialog";
 import { RecentRepoList } from "./RecentRepoList";
 
 export function WelcomeScreen() {
@@ -35,8 +32,6 @@ export function WelcomeScreen() {
   const aiEnabled = useAiEnabled();
   const bindings = useEffectiveBindings();
   const updateAvailable = Boolean(useUpdateCheck().data);
-  const [cloneOpen, setCloneOpen] = useState(false);
-  const [createOpen, setCreateOpen] = useState(false);
 
   function dismissNudge() {
     if (settings.data) {
@@ -69,14 +64,14 @@ export function WelcomeScreen() {
       label: "Clone repository",
       icon: GitForkIcon,
       variant: "outline",
-      onClick: () => setCloneOpen(true),
+      onClick: () => dispatchAction("clone-repository"),
     },
     {
       id: "new-repository",
       label: "Create repository",
       icon: FolderPlusIcon,
       variant: "outline",
-      onClick: () => setCreateOpen(true),
+      onClick: () => dispatchAction("new-repository"),
     },
     {
       id: "open-explore",
@@ -192,9 +187,6 @@ export function WelcomeScreen() {
           </div>
         </div>
       </main>
-
-      <CloneRepoDialog open={cloneOpen} onOpenChange={setCloneOpen} />
-      <CreateRepoDialog open={createOpen} onOpenChange={setCreateOpen} />
     </div>
   );
 }

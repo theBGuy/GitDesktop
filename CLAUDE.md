@@ -123,10 +123,10 @@ pnpm changelog:preview  # preview pending changelog.d/ fragments
   load the `vercel-react-best-practices` skill and apply it as you write (it doesn't
   auto-load — pull it in yourself). Vercel's 70-rule playbook: waterfalls, bundle size,
   data fetching, re-renders, memoization.
-- **macOS Edit menu** — we rely on Tauri's `Menu::default()` (it ships the Edit submenu
-  that powers undo/redo/cut/copy/paste in inputs on macOS). If you add a custom app menu,
-  derive it from `Menu::default()` or include the Edit `PredefinedMenuItem`s, or macOS
-  text editing breaks.
+- **macOS Edit menu** — the app builds its own menu bar in
+  `src-tauri/src/app_menu.rs::build_menu`. Whatever you change there, keep all seven Edit
+  `PredefinedMenuItem`s (undo, redo, separator, cut, copy, paste, select-all) or derive
+  from `Menu::default()`, or macOS text editing breaks in every input.
 - The site deploys to Cloudflare Pages at `gitdesktop.app` (`base: "/"`).
 
 ## Delegated implementation (orchestrator ⇄ subagents)
