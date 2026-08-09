@@ -109,8 +109,13 @@ export interface BranchNamePromptInput {
   files: { path: string; added: number; deleted: number; isBinary: boolean }[];
   /** Untracked (new) file paths — no diff content, but the names guide naming. */
   untrackedPaths: string[];
-  /** Changed files hidden from this context by the user's ignore patterns. */
+  /** Every changed file hidden from this context — pattern matches AND unreadable
+   *  names. The disclosure upper bound. */
   excludedFiles: number;
+  /** The subset of `excludedFiles` hidden because their names aren't readable text
+   *  (untracked names only). Split out so the prompt's note never blames the user's
+   *  ignore rules for a file no pattern could have matched. */
+  unreadableFiles: number;
   /** Subjects of the commits already on this branch, newest first — the branch's
    *  committed work. Empty when there are none (or when it isn't resolvable). */
   commitSubjects: string[];

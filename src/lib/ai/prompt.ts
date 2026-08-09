@@ -103,8 +103,16 @@ export function buildBranchNamePrompt(input: BranchNamePromptInput): {
   const budgeted = budgetDiff(stripBinarySections(input.diffText));
 
   let filesSection = `## Files changed\n${fileSummary || "(none)"}`;
-  if (input.excludedFiles > 0) {
-    filesSection += `\n[${input.excludedFiles} additional changed file(s) hidden by the user's AI ignore rules]`;
+  // The two causes stay separate: an unreadable name is hidden with no pattern
+  // configured at all, so folding it in blames rules the user may not have.
+  // KEEP IN SYNC: `assemble_branch_recipe` renders these three forms byte-identically.
+  const patternHidden = input.excludedFiles - input.unreadableFiles;
+  if (patternHidden > 0 && input.unreadableFiles > 0) {
+    filesSection += `\n[${patternHidden} additional changed file(s) hidden by the user's AI ignore rules; ${input.unreadableFiles} more new file(s) left out because their names aren't readable text]`;
+  } else if (patternHidden > 0) {
+    filesSection += `\n[${patternHidden} additional changed file(s) hidden by the user's AI ignore rules]`;
+  } else if (input.unreadableFiles > 0) {
+    filesSection += `\n[${input.unreadableFiles} new file(s) left out because their names aren't readable text]`;
   }
   const promptParts = [filesSection];
   if (input.recentBranches.length > 0) {

@@ -90,6 +90,7 @@ export function useGenerateBranchName(repoPath: string) {
             files: diff.files,
             untrackedPaths: untracked.paths,
             excludedFiles: diff.excludedFiles + untracked.excluded,
+            unreadableFiles: untracked.unreadable,
             commitSubjects: opts.workingTreeSubjects,
             recentBranches: opts.recentBranches,
             repoInstructions,
@@ -128,6 +129,7 @@ export function useGenerateBranchName(repoPath: string) {
               committed.excludedFiles +
               (diff?.excludedFiles ?? 0) +
               untracked.excluded,
+            unreadableFiles: untracked.unreadable,
             commitSubjects: fallback.subjects,
             recentBranches: opts.recentBranches,
             repoInstructions,

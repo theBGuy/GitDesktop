@@ -428,7 +428,7 @@ mod tests {
     fn a_remote_without_a_url_keeps_its_name_and_gets_no_url() {
         let (names, urls) = parse_remote_v("nourl\t");
         assert_eq!(names, vec!["nourl"]);
-        assert!(urls.get("nourl").is_none());
+        assert!(!urls.contains_key("nourl"));
     }
 
     /// A remote carrying several push URLs emits exactly one `(fetch)` row (the FIRST
