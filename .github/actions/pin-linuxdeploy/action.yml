@@ -19,6 +19,8 @@ runs:
         LINUXDEPLOY_SHA256: c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d
       run: |
         set -euo pipefail
+        # The gate is arch-agnostic (runner.os); this pin is not.
+        [ "$(uname -m)" = x86_64 ] || { echo "pin-linuxdeploy is x86_64-only"; exit 1; }
         cache_dir="$HOME/.cache/tauri"
         target="$cache_dir/linuxdeploy-x86_64.AppImage"
         mkdir -p "$cache_dir"

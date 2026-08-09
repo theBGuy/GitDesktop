@@ -46,7 +46,7 @@ timeout -k 5 30 xvfb-run -a ./squashfs-root/AppRun >/tmp/run.log 2>&1 &
 run_pid=$!
 
 sleep 20
-pgrep -f WebKitWebProcess >/dev/null || fail "web process not running at 20s"
+pgrep -f WebKitWebProcess >/dev/null || fail "no WebKitWebProcess at 20s (the app may also have exited early — see the log tail)"
 
 wait "$run_pid"
 code=$?
