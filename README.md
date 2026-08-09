@@ -15,8 +15,9 @@
 GitDesktop is a free, open-source (Apache-2.0) Git client for Windows, macOS,
 and Linux, built with Tauri 2 and React 19 by theBGuy. It keeps GitHub
 Desktop's approachable model and goes further: staging, diffs, branches, and
-history for any remote, plus the whole pull-request loop (code review, CI,
-issues) on GitHub, GitLab, and Bitbucket. That includes things GitHub Desktop
+history for any remote, plus the whole pull-request loop (code review and
+CI) on GitHub, GitLab, and Bitbucket, with issues in-app on GitHub and
+GitLab or via Jira on Bitbucket. That includes things GitHub Desktop
 doesn't do at all, like offline "local" pull requests and a GitHub Actions
 cockpit.
 
@@ -49,7 +50,8 @@ instead, see [Development](#development).
   two branches, promotable to real ones in one click.
 - **Three forges, first-class**: GitHub, [GitLab](#gitlab), and
   [Bitbucket Cloud](#bitbucket-cloud), each with PRs/MRs, CI, and project
-  settings in the same panels, plus [Jira](#jira-cloud-issues) for issues.
+  settings in the same panels; [issues in-app](#issues-and-to-dos) on GitHub
+  and GitLab, or via [Jira](#jira-cloud-issues) on Bitbucket.
 - **A [GitHub Actions cockpit](#github-actions)**: runs, jobs, steps,
   re-run / cancel / dispatch, failed-step logs, and AI debugging.
 - **[Coding agents](#coding-agent-sessions) with guardrails**: hand tasks to
@@ -432,8 +434,8 @@ react or upvote, with Write/Preview markdown throughout.
 ### GitHub Actions
 
 A dedicated tab with live run status, run detail, re-run (all or failed),
-cancel, manual dispatch, and inline failed-step logs, none of which GitHub
-Desktop does, plus a current-branch CI badge in the header and
+cancel, manual dispatch, and inline failed-step logs (none of which GitHub
+Desktop does), plus a current-branch CI badge in the header and
 run-completion notifications.
 
 - **Debug failed CI with AI**: turn a failed job's logs into a streamed
@@ -595,15 +597,15 @@ priority, labels, and original/remaining estimates.
 
 ### Accounts and sign-in
 
-Reconnect **GitHub** (`gh`'s device-code flow) and **GitLab** (`glab
---web`) right from the not-signed-in panels, Settings → Accounts, or the
-palette; no dropping to a terminal (though it stays a fallback). GitDesktop
-tells an **expired-or-revoked session** apart from never-signed-in and
-network blips, badges the affected account with one-click **Reconnect**, and
-**warns before a token lapses**: GitLab and GitHub PAT expiry, plus an
-optional Bitbucket **expiry date** you supply. For GitLab it nudges the
-**browser (OAuth)** option, whose sessions renew themselves instead of
-expiring.
+Reconnect **GitHub** (`gh`'s device-code flow) and **GitLab**
+(`glab --web`) right from the not-signed-in panels, Settings → Accounts, or
+the palette; no dropping to a terminal (though it stays a fallback).
+GitDesktop tells an **expired-or-revoked session** apart from
+never-signed-in and network blips, badges the affected account with
+one-click **Reconnect**, and **warns before a token lapses**: GitLab and
+GitHub PAT expiry, plus an optional Bitbucket **expiry date** you supply.
+For GitLab it nudges the **browser (OAuth)** option, whose sessions renew
+themselves instead of expiring.
 
 ### Coding agent sessions
 
@@ -866,10 +868,15 @@ from OS code signing.
 - **GitHub CLI (`gh`)**, installed and authenticated (`gh auth login`), for
   the pull-request and Actions features; they stay hidden when it isn't
   available.
-- An **AI provider** for the AI features: an API key (Anthropic / OpenAI /
-  OpenRouter / **Ollama Cloud**), a local **Ollama** server, or a signed-in
-  agent CLI (**Claude Code / Codex / GitHub Copilot / opencode**). All
-  optional.
+- **GitLab CLI (`glab`)**, installed and authenticated (`glab auth login`),
+  for the GitLab features; optional.
+- An **Atlassian API token** for the Bitbucket Cloud and Jira features
+  (Bitbucket adds it in Settings → Accounts; a Jira link is set up per
+  repo and can reuse it); optional.
+- An **AI provider** for the AI features (all optional): an API key
+  (Anthropic / OpenAI / OpenRouter / **Ollama Cloud**), a local **Ollama**
+  server, or a signed-in agent CLI (**Claude Code / Codex / GitHub Copilot /
+  opencode**).
 
 ## Development
 
