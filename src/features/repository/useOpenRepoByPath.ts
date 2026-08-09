@@ -20,7 +20,8 @@ import { toastError } from "@/lib/toast";
  * Opens a repository by path: validates it, records it in recents, and switches
  * the app to it. A path that's no longer a git repo offers a toast to **Locate…**
  * the folder's new home (moved on disk) or **Remove** the stale row.
- * Shared by the welcome list and the in-app repo switcher.
+ * Every open-by-path route lands here: the shared recents list, macOS
+ * File → Open Recent, and the folder picker in {@link usePickAndOpenRepo}.
  */
 export function useOpenRepoByPath() {
   const openRepo = useUiStore((s) => s.openRepo);
@@ -148,8 +149,9 @@ export function useOpenWorktree() {
 
 /**
  * Prompts for a local folder, then opens it as a repository (validate, record
- * in recents, switch to it). Shared by the welcome screen and the in-app repo
- * switcher so "Open repository…" behaves identically everywhere.
+ * in recents, switch to it). App is the sole caller — it registers this as the
+ * `add-local-repository` action, and every surface offering "Open repository…"
+ * dispatches that action rather than calling here.
  */
 export function usePickAndOpenRepo() {
   const openByPath = useOpenRepoByPath();

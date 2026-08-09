@@ -56,6 +56,7 @@ function App() {
   const pickAndOpen = usePickAndOpenRepo();
   const [cloneOpen, setCloneOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
+  const dialogOpen = cloneOpen || createOpen;
 
   // Show a one-time passive notice on first launch, letting users opt out.
   const noticeShown = useRef(false);
@@ -140,22 +141,32 @@ function App() {
   // Settings… is exposed in the macOS menu bar, which stays clickable on the
   // git-missing screen — without the gate it would flip the view to a Settings
   // screen that never renders, surfacing only after Retry.
-  useHotkeyAction("open-settings", openSettings, gitInstalled.isSuccess);
+  useHotkeyAction(
+    "open-settings",
+    openSettings,
+    gitInstalled.isSuccess && !dialogOpen,
+  );
   // App owns the three repo actions outright: they must work on every screen
   // (Settings/Help/Explore mount neither the welcome list nor the repo
   // switcher), and duplicate registrations would shadow by mount order.
   // Disabled until git resolves — the dialogs render below the early returns,
-  // so a click before then would stash a stale `open` that pops later.
-  useHotkeyAction("add-local-repository", pickAndOpen, gitInstalled.isSuccess);
+  // so a click before then would stash a stale `open` that pops later. An open
+  // clone/create dialog suppresses all four: the native menu bar sits outside
+  // the webview's modal overlay, so a menu click there would stack a second.
+  useHotkeyAction(
+    "add-local-repository",
+    pickAndOpen,
+    gitInstalled.isSuccess && !dialogOpen,
+  );
   useHotkeyAction(
     "clone-repository",
     () => setCloneOpen(true),
-    gitInstalled.isSuccess,
+    gitInstalled.isSuccess && !dialogOpen,
   );
   useHotkeyAction(
     "new-repository",
     () => setCreateOpen(true),
-    gitInstalled.isSuccess,
+    gitInstalled.isSuccess && !dialogOpen,
   );
   // Palette-only deep link; hidden alongside the panel when AI features are off.
   useHotkeyAction(
