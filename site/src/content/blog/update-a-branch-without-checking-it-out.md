@@ -21,8 +21,7 @@ refire, generated files churn, and if `.gitignore` changed in the meantime
 you come back to a wall of untracked files. Two context switches to move
 one pointer.
 
-Git can move a branch you're not standing on. It has been able to
-all along.
+Git can move a branch you're not standing on. It has been able to all along.
 
 ## The colon in the refspec
 
@@ -66,6 +65,7 @@ the source's name:
 
 ```sh
 $ git fetch origin main:hotfix-base
+From …/origin
  * [new branch]      main       -> hotfix-base
 ```
 
@@ -99,10 +99,10 @@ a fetch from `.` exactly as it does to one from `origin`.
 
 ## The branch you're standing on is off limits
 
-The exception is the branch that's checked out:
+The exception is the branch that's checked out. Switch to `main` and
+try to update it the same way:
 
 ```sh
-$ git switch main
 $ git fetch origin main:main
 fatal: refusing to fetch into branch 'refs/heads/main' checked out at '…/repo'
 ```
@@ -118,7 +118,7 @@ is no longer `HEAD`. There's a flag that overrides the refusal, and it
 makes a tidy demonstration of why you shouldn't:
 
 ```sh
-$ git fetch --update-head-ok origin main:main
+$ git fetch --update-head-ok origin main:main   # demo only — clean tree required
 From …/origin
    c21574c..0538f6b  main       -> main
    c21574c..0538f6b  main       -> origin/main
@@ -132,20 +132,21 @@ Changes to be committed:
 ```
 
 That is a staged deletion you never made. The fetched commit added
-`docs.md`; your index still describes the tree from before it; `git
-status` reports the difference as your doing. Commit from here and you
-revert the change you just pulled. To put the three back in agreement,
-run `git reset --hard`, which rebuilds the index and working tree to
-match the moved branch — safe only because the working tree was clean
-to begin with. Then `git switch -` back to `feature`.
+`docs.md`; your index still describes the tree from before it;
+`git status` reports the difference as your doing. Commit from here and
+you revert the change you just pulled. Provided the working tree is
+clean, `git reset --hard` puts the three back in agreement by rebuilding
+the index and working tree to match the moved branch; with uncommitted
+work present it would destroy that work too. Then `git switch -` back
+to `feature`.
 
 The flag exists for `git pull`, which passes it on every fetch it runs.
 A stock pull doesn't need it: its fetch half only writes `origin/*`, and
 the merge or rebase half is what moves your branch. But a pull carrying
-a refspec, `git pull origin main:main` say, does fetch straight into the
-checked-out branch. What makes that safe is the merge or rebase that
-follows at once; that reconciliation is the step `--update-head-ok`
-alone skips.
+a refspec (`git pull origin main:main`, for instance) does fetch
+straight into the checked-out branch. What makes that safe is the merge
+or rebase that follows at once; that reconciliation is the step
+`--update-head-ok` alone skips.
 
 The same refusal covers a branch checked out *anywhere*. If `main` lives
 in a linked worktree, fetching into it fails from the primary checkout
@@ -220,8 +221,7 @@ remote, and your local commit is off the branch — not destroyed,
 `main@{1}` still names it, but off the branch, silently. If the stray
 commit should keep a real name rather than a reflog entry, park it
 before the force: `git branch rescue main`, then the forced fetch, and
-afterward `rescue` points at your commit while `main` matches
-the remote.
+afterward `rescue` points at your commit while `main` matches the remote.
 
 If instead you meant to keep both sides on `main`, you want a merge or
 a rebase, and those need a working tree. Any working tree satisfies
@@ -248,8 +248,8 @@ a0ffdc9 Merge remote-tracking branch 'origin/main'
 687bfb7 fix: local-only patch
 ```
 
-Your own checkout never blinked, and a `git -C ../tmp rebase
-origin/main` would have served the rebase preference the same way. Two
+Your own checkout never blinked. For the rebase preference,
+`git -C ../tmp rebase origin/main` would have served the same way. Two
 things about where this leaves you: `main` now carries a commit the
 remote lacks, so the next plain `main:main` fetch is a rejection until
 you push; and whether a merge like this one will conflict is
@@ -258,18 +258,17 @@ from the same seat.
 
 ## Or don't do any of this
 
-The feature this post has been circling ships in
-[GitDesktop](/features/), the Git client I work on. After a fetch, every
-branch row shows how far it sits ahead or behind its upstream, and a
-branch with commits to pull offers **Update from origin/…** in its
-context menu: no switching, your checkout stays put. Under that item, in
-order: an
-ancestry check to classify the case; `git fetch . origin/main:main` when
-it's a fast-forward; for a diverged branch, the throwaway-worktree merge
-from above — created, merged, removed, a conflicted merge aborted so the
-branch is left exactly as it was. Aimed at the branch you're standing
-on, it does the one reasonable thing left and merges in place, conflicts
-and all, the way a plain pull would.
+The feature this post has been circling ships in [GitDesktop](/features/),
+the Git client I work on. After a fetch, every branch row shows how far
+it sits ahead or behind its upstream, and a branch with commits to pull
+offers **Update from origin/…** in its context menu: no switching, your
+checkout stays put. Under that item, in order: an ancestry check to
+classify the case, then `git fetch . origin/main:main` when it's a
+fast-forward, and for a diverged branch the throwaway-worktree merge
+from above — created, merged, removed, a conflicted merge aborted so
+the branch is left exactly as it was. Aimed at the branch you're
+standing on, it does the one reasonable thing left and merges in place,
+conflicts and all, the way a plain pull would.
 
 A branch is a name for a commit, and a name can move without you
 standing on it. You check out a branch to work on it; updating it never
