@@ -135,9 +135,9 @@ PR badge.
   you commit (fast-forward, already up to date, clean, or exactly which
   files will conflict), with `--no-ff` and a clearly cautioned auto-resolve
   strategy (`-X ours/theirs`); GitHub Desktop offers none of this. This is
-  the *local* prediction; a remote PR's
-  conflict state comes from the forge itself, and falls back to this
-  prediction only where the forge publishes none.
+  the *local* prediction; a remote PR's conflict state comes from the forge
+  itself, and falls back to this prediction only where the forge publishes
+  none.
 - **Change base** ⭐: rebase a branch onto a different base when it was
   branched off the wrong one, replaying only its own commits (the wrong
   base's are left behind), with a preview of exactly which commits will
@@ -330,14 +330,14 @@ PR (comments and all) in one click.
   reviews, and metadata), at your fork or the **parent** repository. The
   choice is remembered per repo (defaulting to your fork) and also sits in
   the palette as the **Switch to fork / upstream view** commands.
-  Opening a PR targets a repository explicitly,
-  offering your fork or the upstream repo on a fork. When you're done with a
-  fork, the settings **Danger zone** can **remove the upstream remote** (a
-  local detach; reversible) or **leave the fork network** entirely: on
-  **GitLab** this happens right in the app (Owner-only; open MRs to the
-  parent close), and on **GitHub** and **Bitbucket** it links out to the
-  provider's detach page. A **Re-check fork status** button refreshes the
-  fork badge in place afterward.
+  Opening a PR targets a repository explicitly, offering your fork or the
+  upstream repo on a fork. When you're done with a fork, the settings
+  **Danger zone** can **remove the upstream remote** (a local detach;
+  reversible) or **leave the fork network** entirely: on **GitLab** this
+  happens right in the app (Owner-only; open MRs to the parent close),
+  and on **GitHub** and **Bitbucket** it links out to the provider's
+  detach page. A **Re-check fork status** button refreshes the fork badge
+  in place afterward.
 - **Record management**: a local PR's context menu in the list (or the
   command palette) can **Archive / Unarchive** or **Delete** it. Delete
   confirms; the branches are untouched.
@@ -649,10 +649,10 @@ touches your checkout.
   rendered right in the app (never bounced to an external editor). **Switch
   between the two mid-session** as the idea narrows; the conversation
   carries over. Hand a report **straight to Plan**, or **save** it as a
-  local Markdown file (yours to review and commit, in
-  `.gitdesktop/research/`). It searches and reads but never writes, and
-  runs on **any agent** (Claude, Codex, Copilot, or opencode), each using
-  its own native web search and fetch.
+  local Markdown file (yours to review and commit, in `.gitdesktop/research/`).
+  It searches and reads but never writes, and runs on **any agent** (Claude,
+  Codex, Copilot, or opencode), each using its own native web search and
+  fetch.
 - **Plan before you build**: a read-only **Plan** mode drafts an agent-ready
   issue from a task (or an existing issue): a repo-aware agent explores your
   code and writes the problem, approach, affected files, acceptance
