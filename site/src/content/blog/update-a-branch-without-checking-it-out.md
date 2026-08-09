@@ -7,19 +7,19 @@ pillar: git-safety
 tags: ["git", "branches", "workflow"]
 ---
 
-Your pull request just merged. You're already on the next branch, and now
-your local `main` is stale: the merge landed on the remote, not in your
-clone. Sooner or later you'll cut a branch from `main`, rebase onto it, or
-just read it, and you'd rather all of that see today's history instead of
-last week's.
+Your pull request just merged. You're already on the next branch, and
+now your local `main` is stale: the merge landed on the remote, not in
+your clone. Sooner or later you'll cut a branch from `main`, rebase onto
+it, or just read it, and you'd rather all of that see today's history
+instead of last week's.
 
 The move everyone knows is to go visit: `git switch main`, `git pull`,
 `git switch -`. It works. It also checks out `main` for the privilege of
 running one fast-forward, and [a checkout stopped being free
 years ago](/blog/the-whole-loop-one-window/): dev servers restart, watchers
 refire, generated files churn, and if `.gitignore` changed in the meantime
-you come back to a wall of untracked files. Two context switches to move
-one pointer.
+you come back to a wall of untracked files. Two context switches
+to move one pointer.
 
 Git can move a branch you're not standing on. It has been able to all along.
 
@@ -144,9 +144,10 @@ The flag exists for `git pull`, which passes it on every fetch it runs.
 A stock pull doesn't need it: its fetch half only writes `origin/*`, and
 the merge or rebase half is what moves your branch. But a pull carrying
 a refspec (`git pull origin main:main`, for instance) does fetch
-straight into the checked-out branch. What makes that safe is the merge
-or rebase that follows at once; that reconciliation is the step
-`--update-head-ok` alone skips.
+straight into the checked-out branch. What makes that safe is that pull
+reconciles the index and working tree immediately afterward (its output
+even says "fast-forwarding your working tree"); that reconciliation is
+the step `--update-head-ok` alone skips.
 
 The same refusal covers a branch checked out *anywhere*. If `main` lives
 in a linked worktree, fetching into it fails from the primary checkout
