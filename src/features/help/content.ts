@@ -65,7 +65,8 @@ A few things worth knowing up front:
 {{/ai}}
 ## Open your first repository
 
-From the welcome screen (or the repo switcher in the header):
+Use the welcome screen's buttons, the repo switcher in the header, or the command
+palette — wherever you are in the app, these actions and their shortcuts are available:
 
 - **Open repository** ({{kbd:add-local-repository}}) — point at a folder that's already
   a Git repo.

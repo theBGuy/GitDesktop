@@ -13,7 +13,6 @@ import { useRepoAlias } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { RemoveRepoDialog, RepoAliasDialog } from "./RepoDialogs";
 import { RepoList } from "./RepoList";
-import { usePickAndOpenRepo } from "./useOpenRepoByPath";
 
 /** A repository action row in the switcher footer (open / clone / create). */
 function ActionRow({
@@ -41,7 +40,6 @@ export function RepoSwitcher() {
   const repoName = useUiStore((s) => s.repoName);
   const repoPath = useUiStore((s) => s.repoPath);
   const alias = useRepoAlias(repoPath);
-  const pickAndOpen = usePickAndOpenRepo();
   const [open, setOpen] = useState(false);
   // Dialogs live outside the popover: closing it unmounts its contents.
   const [aliasTarget, setAliasTarget] = useState<RecentRepo | null>(null);
@@ -111,7 +109,7 @@ export function RepoSwitcher() {
                   icon={FolderOpenIcon}
                   onClick={() => {
                     setOpen(false);
-                    pickAndOpen();
+                    dispatchAction("add-local-repository");
                   }}
                 >
                   Open repository…

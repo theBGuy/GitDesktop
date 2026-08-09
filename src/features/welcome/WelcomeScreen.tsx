@@ -9,7 +9,6 @@ import {
 } from "@phosphor-icons/react";
 import { BrandMark } from "@/components/BrandMark";
 import { Button } from "@/components/ui/button";
-import { usePickAndOpenRepo } from "@/features/repository/useOpenRepoByPath";
 import { useUpdateCheck } from "@/features/updates/useUpdateCheck";
 import { formatBinding } from "@/lib/hotkeys/binding";
 import { dispatchAction, useEffectiveBindings } from "@/lib/hotkeys/hotkeys";
@@ -26,7 +25,6 @@ export function WelcomeScreen() {
   const openSettings = useUiStore((s) => s.openSettings);
   const openHelp = useUiStore((s) => s.openHelp);
   const openExplore = useUiStore((s) => s.openExplore);
-  const pickAndOpen = usePickAndOpenRepo();
   const settings = useSettings();
   const saveSettings = useSaveSettings();
   const aiEnabled = useAiEnabled();
@@ -57,7 +55,7 @@ export function WelcomeScreen() {
       label: "Open repository",
       icon: FolderOpenIcon,
       variant: "default",
-      onClick: pickAndOpen,
+      onClick: () => dispatchAction("add-local-repository"),
     },
     {
       id: "clone-repository",
