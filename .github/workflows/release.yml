@@ -134,7 +134,7 @@ jobs:
 
       # Runs after the asset upload, but the release stays a draft until every
       # leg is green, so a red guard still blocks publishing.
-      - name: Guard against a bundled libwayland-client
+      - name: Guard the AppImage bundle and its startup env
         if: runner.os == 'Linux'
         shell: bash
         run: bash .github/scripts/appimage-guard.sh

@@ -74,7 +74,7 @@ jobs:
       - name: Build unsigned AppImage
         run: pnpm tauri build --bundles appimage --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
-      - name: Guard against a bundled libwayland-client
+      - name: Guard the AppImage bundle and its startup env
         shell: bash
         run: bash .github/scripts/appimage-guard.sh
 
