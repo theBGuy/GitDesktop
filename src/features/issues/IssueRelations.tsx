@@ -99,7 +99,7 @@ export function RelatedRow({
           className={cn(
             "text-muted-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100",
             // Full opacity only for the in-flight spinner — a permission-blocked
-            // remove keeps the vendored disabled dim and hover-reveal.
+            // remove keeps the vendored disabled dim.
             pending && "disabled:opacity-100",
           )}
           onClick={onRemove}
