@@ -133,12 +133,12 @@ Changes to be committed:
 
 That is a staged deletion you never made. The fetched commit added
 `docs.md`; your index still describes the tree from before it;
-`git status` reports the difference as your doing. Commit from here and
-you revert the change you just pulled. Provided the working tree is
-clean, `git reset --hard` puts the three back in agreement by rebuilding
-the index and working tree to match the moved branch; with uncommitted
-work present it would destroy that work too. Then `git switch -` back
-to `feature`.
+`git status` reports the difference as your doing. Commit from here
+and you revert the change you just pulled. Provided the working tree
+is clean, `git reset --hard` puts the three back in agreement by
+rebuilding the index and working tree to match the moved branch; with
+uncommitted work present it would destroy that work too. Then
+`git switch -` back to `feature`.
 
 The flag exists for `git pull`, which passes it on every fetch it runs.
 A stock pull doesn't need it: its fetch half only writes `origin/*`, and
