@@ -73,9 +73,11 @@ tauri-plugin-updater = "2"
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"
 # Broadcasting WM_SETTINGCHANGE so a freshly-added PATH entry (the "add gitdesktop
-# to PATH" launcher) reaches new terminals without a logout. See path_launcher.rs.
+# to PATH" launcher) reaches new terminals without a logout (path_launcher.rs), and
+# job objects so a timed-out git takes its whole process tree with it (runner.rs).
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
+  "Win32_System_JobObjects",
   "Win32_UI_WindowsAndMessaging",
 ] }
 

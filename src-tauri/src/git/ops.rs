@@ -8,6 +8,7 @@ use crate::git::diff::parse_numstat_z;
 use crate::git::history::validate_hash;
 use crate::git::runner::{
     run_git, run_git_mutating, run_git_raw, run_git_raw_input, DEFAULT_TIMEOUT, NETWORK_TIMEOUT,
+    WORKTREE_OP_TIMEOUT,
 };
 use crate::git::types::{FileDiff, RepoOpState, RewriteStep, StashEntry, TagInfo};
 use crate::state::AppState;
@@ -1801,7 +1802,7 @@ async fn remove_resolve_worktree(state: &AppState, repo_path: &str, worktree_pat
         state,
         repo_path,
         &["worktree", "remove", "--force", worktree_path],
-        DEFAULT_TIMEOUT,
+        WORKTREE_OP_TIMEOUT,
     )
     .await;
     let _ = run_git_mutating(state, repo_path, &["worktree", "prune"], DEFAULT_TIMEOUT).await;
@@ -2050,7 +2051,7 @@ pub(crate) async fn merge_local_pr(
         state,
         repo_path,
         &["worktree", "add", "--detach", &worktree_path, &base_tip],
-        DEFAULT_TIMEOUT,
+        WORKTREE_OP_TIMEOUT,
     )
     .await;
     if let Err(err) = add {
@@ -2710,7 +2711,7 @@ pub(crate) async fn merge_remote_pr(
         state,
         repo_path,
         &["worktree", "add", "--detach", &worktree_path, &head_tip],
-        DEFAULT_TIMEOUT,
+        WORKTREE_OP_TIMEOUT,
     )
     .await?;
 

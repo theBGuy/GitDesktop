@@ -63,12 +63,19 @@ export function ResolveConflictsView({
   const reviewConfigured = useReviewConfigured();
   // Same AI-resolution store the Changes tab drives: `activePath` decides whether
   // the selected file shows the AI streaming view or the manual editor, and
-  // `startAll` kicks off a "resolve all" walk. It selects files via the main UI
-  // store (harmless here — we track our own selection below and follow its walk).
+  // `startAll` kicks off a "resolve all" walk. It selects files via the main UI store,
+  // which is a real cross-surface bleed here — those paths live in a HIDDEN worktree.
+  // Stopping the walk on unmount is the honest minimum; scoping the store per surface
+  // is deliberately deferred.
   const startAll = useConflictResolve((s) => s.startAll);
   const activePath = useConflictResolve((s) => s.activePath);
+  const stopResolveWalk = useConflictResolve((s) => s.stop);
 
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
+
+  // Leaving the takeover must disarm the walk: a leftover `activePath` pointing into
+  // the hidden worktree would otherwise hijack the Changes tab's selection.
+  useEffect(() => () => stopResolveWalk(), [stopResolveWalk]);
 
   const entries = status.data?.entries ?? [];
   const conflicted: FileEntry[] = entries.filter(

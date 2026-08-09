@@ -4,7 +4,7 @@ import { isDirtyTreeRefusal, presentError } from "@/lib/error-summary";
 import type { AutostashOutcome, PullMode } from "@/lib/git/api";
 import { useMergeAutostash, usePullAutostash } from "@/lib/git/queries";
 import { useSaveSettings, useSettings } from "@/lib/settings/queries";
-import { errorToastAction, toastError } from "@/lib/toast";
+import { errorToastAction, toastError, toastErrorWithNote } from "@/lib/toast";
 import {
   StashReapplyDialog,
   type StashReapplyTarget,
@@ -36,12 +36,8 @@ export interface AutostashCopy {
 /** The affordance `toastError` gives a thrown error, for stderr that arrives as
  *  an outcome payload instead — every failure variant keeps the raw git output
  *  one click away. */
-function stderrDetails(stderr: string) {
-  const presentation = presentError(stderr);
-  return {
-    summary: presentation.summary,
-    action: errorToastAction(presentation),
-  };
+function stderrAction(stderr: string) {
+  return errorToastAction(presentError(stderr));
 }
 
 /**
@@ -70,7 +66,7 @@ export function reportAutostashOutcome(
         outcome.conflicted
           ? `${copy.operation} finished — reapplying your changes hit conflicts. Fix them in the changes list; your stash is kept as a backup.`
           : `${copy.operation} finished — your changes couldn't be reapplied automatically. They're kept in the stash.`,
-        { duration: 8000, action: stderrDetails(outcome.stderr).action },
+        { duration: 8000, action: stderrAction(outcome.stderr) },
       );
       return;
     case "opFailedStashKept":
@@ -79,18 +75,15 @@ export function reportAutostashOutcome(
           ? `${copy.operation} hit conflicts — continue or abort in the banner. Your changes are safely stashed; pop them after.`
           : (copy.stashKept ??
               `${copy.operation} didn't finish — your changes are safely stashed; pop them when you're ready.`),
-        { duration: 8000, action: stderrDetails(outcome.stderr).action },
+        { duration: 8000, action: stderrAction(outcome.stderr) },
       );
       return;
-    case "opFailedRestored": {
-      const { summary, action } = stderrDetails(outcome.stderr);
-      toast.error(summary, {
-        description: "Your changes are back where they were.",
-        duration: 8000,
-        action,
-      });
+    case "opFailedRestored":
+      toastErrorWithNote(
+        outcome.stderr,
+        "Your changes are back where they were.",
+      );
       return;
-    }
   }
 }
 

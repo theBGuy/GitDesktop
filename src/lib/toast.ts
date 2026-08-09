@@ -26,8 +26,19 @@ export function errorToastAction(presentation: ErrorPresentation) {
 
 /** Error toast — calm one-line summary, full text one click away. */
 export function toastError(e: unknown) {
+  toastErrorWithNote(e, undefined);
+}
+
+/**
+ * `toastError` plus a line naming the state the failure left behind. The note is
+ * a required parameter on purpose: `toastError` is passed bare as a react-query
+ * `onError`, which supplies the mutation's variables as the second argument — an
+ * optional one would let the whole variables value land here and render.
+ */
+export function toastErrorWithNote(e: unknown, note: string | undefined) {
   const presentation = presentError(e);
   toast.error(presentation.summary, {
+    description: note,
     duration: 8000,
     action: errorToastAction(presentation),
   });

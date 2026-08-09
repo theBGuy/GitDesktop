@@ -2,7 +2,9 @@ use serde::Serialize;
 
 use crate::error::{AppError, AppResult};
 use crate::git::diff::{parse_numstat_z, truncate_at_char_boundary};
-use crate::git::runner::{run_git, run_git_raw, DEFAULT_TIMEOUT, NETWORK_TIMEOUT};
+use crate::git::runner::{
+    run_git, run_git_raw, DEFAULT_TIMEOUT, NETWORK_TIMEOUT, WORKTREE_OP_TIMEOUT,
+};
 use crate::git::types::{CommitSummary, DiffStatEntry, FileDiff, StagedDiff};
 
 /// Commits that distinguish two branches, from the current branch's point of
@@ -421,7 +423,7 @@ pub async fn git_remove_worktree(repo_path: String, worktree_path: String) -> Ap
     let _ = run_git_raw(
         Some(&repo_path),
         &["worktree", "remove", "--force", &worktree_path],
-        DEFAULT_TIMEOUT,
+        WORKTREE_OP_TIMEOUT,
     )
     .await;
     let _ = run_git_raw(Some(&repo_path), &["worktree", "prune"], DEFAULT_TIMEOUT).await;

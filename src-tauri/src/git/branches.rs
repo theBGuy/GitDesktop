@@ -3,6 +3,7 @@ use tauri::State;
 use crate::error::{AppError, AppResult};
 use crate::git::runner::{
     run_git, run_git_mutating, run_git_raw, DEFAULT_TIMEOUT, NETWORK_TIMEOUT,
+    WORKTREE_OP_TIMEOUT,
 };
 use crate::git::types::{Branch, BranchDivergence, RemoteBranch};
 use crate::state::AppState;
@@ -736,10 +737,12 @@ pub async fn git_update_branch_from(
     run_git(
         Some(&repo_path),
         &["worktree", "add", "--quiet", &tmp_str, &branch],
-        DEFAULT_TIMEOUT,
+        WORKTREE_OP_TIMEOUT,
     )
     .await?;
 
+    // The merge keeps the default budget: it rewrites only the differing files, not
+    // the whole tree, and both arms below tear the temp worktree down regardless.
     let merged = run_git(
         Some(&tmp_str),
         &["merge", "--no-edit", &base],
@@ -762,7 +765,7 @@ pub async fn git_update_branch_from(
     let _ = run_git_raw(
         Some(&repo_path),
         &["worktree", "remove", "--force", &tmp_str],
-        DEFAULT_TIMEOUT,
+        WORKTREE_OP_TIMEOUT,
     )
     .await;
     let _ = run_git_raw(Some(&repo_path), &["worktree", "prune"], DEFAULT_TIMEOUT).await;

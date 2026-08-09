@@ -8,7 +8,9 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
 use crate::error::{AppError, AppResult};
-use crate::git::runner::{run_git, run_git_mutating, run_git_raw, DEFAULT_TIMEOUT};
+use crate::git::runner::{
+    run_git, run_git_mutating, run_git_raw, DEFAULT_TIMEOUT, WORKTREE_OP_TIMEOUT,
+};
 use crate::state::AppState;
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -113,7 +115,7 @@ pub async fn git_worktree_create(
         &state,
         &repo_path,
         &["worktree", "add", "-b", &branch, &path_str, base],
-        DEFAULT_TIMEOUT,
+        WORKTREE_OP_TIMEOUT,
     )
     .await?;
     // The fresh worktree's HEAD is exactly the base commit (no turns yet); record
@@ -244,7 +246,7 @@ pub async fn git_worktree_add_user(
     } else {
         args.extend_from_slice(&[path, branch]);
     }
-    run_git_mutating(&state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
+    run_git_mutating(&state, &repo_path, &args, WORKTREE_OP_TIMEOUT).await?;
     Ok(())
 }
 
@@ -384,9 +386,17 @@ pub(crate) fn canonical_wt_path(p: &str) -> String {
     normalize_wt_path(resolved.strip_prefix(r"\\?\").unwrap_or(&resolved))
 }
 
-/// Whether git still lists `path` as one of the repo's worktrees. An unreadable
+/// Whether git still lists `path` as a LIVE worktree of the repo. An unreadable
 /// registry answers `true`: the caller uses this to decide whether deleting the
 /// folder is safe, and uncertainty must never authorize a delete.
+///
+/// A `prunable` entry answers `false` even though it is listed: git has already
+/// torn the worktree down past the point of policy refusal, so the caller's
+/// delete-then-prune fallback is the right recovery. For the variant that leaves the
+/// checkout on disk with its gitdir link gone, that fallback is the ONLY recovery,
+/// because git refuses `worktree remove` on it in both force modes ("validation
+/// failed, cannot remove working tree: '<path>/.git' does not exist"). With the
+/// directory fully gone git's own remove succeeds and this never has to arbitrate.
 async fn worktree_is_registered(repo_path: &str, path: &str) -> bool {
     let out = run_git_raw(
         Some(repo_path),
@@ -399,7 +409,7 @@ async fn worktree_is_registered(repo_path: &str, path: &str) -> bool {
             let target = canonical_wt_path(path);
             parse_worktree_porcelain(&out.stdout_lossy())
                 .iter()
-                .any(|w| canonical_wt_path(&w.path) == target)
+                .any(|w| canonical_wt_path(&w.path) == target && !w.prunable)
         }
         _ => true,
     }
@@ -442,16 +452,23 @@ pub(crate) async fn remove_worktree(
     // '<path>': Invalid argument`, half-removed. Finish it ourselves —
     // `std::fs::remove_dir_all` deletes reparse points as links (hardened since Rust
     // 1.63) — then `prune` to reconcile git's dangling admin entry.
-    if let Err(git_err) = run_git_mutating(state, repo_path, &args, DEFAULT_TIMEOUT).await {
-        // git drops `.git/worktrees/<id>` BEFORE deleting the directory, so a still-
-        // registered path means git refused as policy (dirty, locked, main worktree) —
-        // surface that error, which the frontend reads to offer the forced retry.
-        // Finishing the delete is only sound once the entry is gone; an unreadable
-        // registry counts as registered, so a folder is never deleted on a guess.
+    if let Err(git_err) = run_git_mutating(state, repo_path, &args, WORKTREE_OP_TIMEOUT).await {
+        // Two measured orderings: git's own FAILED delete still unregisters, so a live
+        // registration means a policy refusal (dirty, locked, main) — surface it, since
+        // the frontend reads that error to offer the forced retry. A KILLED delete
+        // instead leaves the entry over a half-deleted directory, which
+        // `worktree_is_registered` reports as unregistered so this fallback can finish
+        // it. An unreadable registry counts as registered: never delete on a guess.
         if worktree_is_registered(repo_path, path).await {
             return Err(git_err);
         }
-        match std::fs::remove_dir_all(path) {
+        // Deleting a whole checkout runs for minutes on a large tree; keep it off the
+        // async worker thread.
+        let target = path.to_string();
+        let removed = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(target))
+            .await
+            .map_err(|e| AppError::Command(format!("Worktree removal task failed: {e}")))?;
+        match removed {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             // Removed despite an error partway (a child vanished under us) — good enough.
@@ -576,7 +593,7 @@ pub async fn git_worktree_resume(
         &state,
         &repo_path,
         &["worktree", "add", &path, &branch],
-        DEFAULT_TIMEOUT,
+        WORKTREE_OP_TIMEOUT,
     )
     .await?;
     Ok(())
@@ -1084,6 +1101,59 @@ prunable gitdir file points to non-existent location
         assert!(
             !registry(&repo_s).await.contains("/orphan-wt"),
             "nothing is left in the registry"
+        );
+    }
+
+    /// A removal killed mid-delete (a timeout on a huge tree) leaves the state git
+    /// reports as `prunable gitdir file points to non-existent location`: entry
+    /// still registered, checkout still on disk, its inner `.git` link already
+    /// gone. git then refuses `worktree remove` in both force modes, so the retry
+    /// has to fall through to our own delete + prune.
+    #[tokio::test]
+    async fn prunable_half_removed_worktree_is_removed_on_retry() {
+        let (base, repo_s) = setup_repo("prunable-half").await;
+        let wt = base.path().join("half-wt");
+        let wt_s = wt.to_string_lossy().into_owned();
+        run(&repo_s, &["worktree", "add", "-b", "feat-half", &wt_s, "HEAD"]).await;
+        std::fs::remove_file(wt.join(".git")).expect("break the gitdir link");
+        assert!(
+            registry(&repo_s).await.contains("prunable"),
+            "the fixture must reproduce the prunable state"
+        );
+
+        let state = AppState::default();
+        remove_worktree(&state, &repo_s, &wt_s, None, false)
+            .await
+            .expect("the retry finishes an interrupted removal");
+        assert!(!wt.exists(), "the half-deleted checkout is gone");
+        assert!(
+            !registry(&repo_s).await.contains("/half-wt"),
+            "the stale admin entry is pruned"
+        );
+    }
+
+    /// The same interruption one step later — directory already gone, entry still
+    /// registered and prunable. Removal must reconcile it rather than report the
+    /// worktree as missing.
+    #[tokio::test]
+    async fn prunable_registered_entry_with_dir_gone_is_reconciled() {
+        let (base, repo_s) = setup_repo("prunable-gone").await;
+        let wt = base.path().join("gone-wt");
+        let wt_s = wt.to_string_lossy().into_owned();
+        run(&repo_s, &["worktree", "add", "-b", "feat-gone", &wt_s, "HEAD"]).await;
+        std::fs::remove_dir_all(&wt).expect("drop the whole checkout");
+        assert!(
+            registry(&repo_s).await.contains("prunable"),
+            "the fixture must reproduce the prunable state"
+        );
+
+        let state = AppState::default();
+        remove_worktree(&state, &repo_s, &wt_s, None, false)
+            .await
+            .expect("a vanished checkout is reconciled, not reported");
+        assert!(
+            !registry(&repo_s).await.contains("/gone-wt"),
+            "the stale admin entry is gone"
         );
     }
 }
