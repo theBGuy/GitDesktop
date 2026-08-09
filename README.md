@@ -866,13 +866,13 @@ from OS code signing.
 
 - **git** on `PATH` (required).
 - **GitHub CLI (`gh`)**, installed and authenticated (`gh auth login`), for
-  the pull-request and Actions features; they stay hidden when it isn't
-  available.
+  the pull-request and Actions features; optional (they stay hidden when it
+  isn't available).
 - **GitLab CLI (`glab`)**, installed and authenticated (`glab auth login`),
   for the GitLab features; optional.
 - An **Atlassian API token** for the Bitbucket Cloud and Jira features
-  (Bitbucket adds it in Settings → Accounts; a Jira link is set up per
-  repo and can reuse it); optional.
+  (you add it under Settings → Accounts for Bitbucket; a Jira link is set
+  up per repo and can reuse it); optional.
 - An **AI provider** for the AI features (all optional): an API key
   (Anthropic / OpenAI / OpenRouter / **Ollama Cloud**), a local **Ollama**
   server, or a signed-in agent CLI (**Claude Code / Codex / GitHub Copilot /
