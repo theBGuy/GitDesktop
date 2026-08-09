@@ -350,6 +350,9 @@ scaffolding), publish to GitHub, and fork.
   its new home from the "no longer a git repository" notice; after you confirm the folder,
   the entry keeps its alias and badges, and its local PRs, issues, review history, and
   automations follow along.
+- **macOS menu bar** — **File** carries **New / Open / Clone Repository…** and an
+  **Open Recent** list of your last ten repos; **Settings…** sits in the GitDesktop
+  menu. Items work from any screen.
 - **GitHub repo settings** (admin) — description & topics (with AI suggestions), merge
   options and default commit messages, template & forking, **collaborators &
   invitations**, **branch rulesets** (create/edit, reversible enable/disable), **code

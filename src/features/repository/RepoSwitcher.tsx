@@ -51,12 +51,7 @@ export function RepoSwitcher() {
   const [cloneOpen, setCloneOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
 
-  // Open/clone/create are reachable here too, so you don't have to leave the
-  // repository view to get to another repo.
   useHotkeyAction("show-repositories", () => setOpen(true));
-  useHotkeyAction("add-local-repository", pickAndOpen);
-  useHotkeyAction("clone-repository", () => setCloneOpen(true));
-  useHotkeyAction("new-repository", () => setCreateOpen(true));
 
   const repoLabel = alias ?? repoName ?? "Repository";
 

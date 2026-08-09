@@ -13,7 +13,7 @@ import { Button } from "@/components/ui/button";
 import { usePickAndOpenRepo } from "@/features/repository/useOpenRepoByPath";
 import { useUpdateCheck } from "@/features/updates/useUpdateCheck";
 import { formatBinding } from "@/lib/hotkeys/binding";
-import { useEffectiveBindings, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
+import { useEffectiveBindings } from "@/lib/hotkeys/hotkeys";
 import type { ActionId } from "@/lib/hotkeys/registry";
 import {
   useAiEnabled,
@@ -47,10 +47,6 @@ export function WelcomeScreen() {
     dismissNudge();
     openHelp();
   }
-
-  useHotkeyAction("add-local-repository", pickAndOpen);
-  useHotkeyAction("clone-repository", () => setCloneOpen(true));
-  useHotkeyAction("new-repository", () => setCreateOpen(true));
 
   // The primary entry points, surfaced as a launcher: label on the left, the
   // live keyboard shortcut on the right (honours user remaps via bindings).

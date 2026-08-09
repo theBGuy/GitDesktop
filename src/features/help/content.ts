@@ -74,6 +74,10 @@ From the welcome screen (or the repo switcher in the header):
 - **Create repository** ({{kbd:new-repository}}) — start a new repo with an optional
   README, \`.gitignore\`, and license.
 
+On macOS, the menu bar mirrors these: **File → New / Open / Clone Repository…** plus
+an **Open Recent** list of your last ten repos, with **Settings…** in the
+**GitDesktop** menu. Menu items work from any screen.
+
 ## Finding your way around
 
 Once a repo is open you land on the **Changes** tab. The header's tab rail holds the

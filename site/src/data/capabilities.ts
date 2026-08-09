@@ -356,6 +356,10 @@ export const capabilities: Capability[] = [
   { group: "Repository & workspace", label: "Environment & CLI health check" },
   {
     group: "Repository & workspace",
+    label: "Native macOS menu bar — File menu with Open Recent",
+  },
+  {
+    group: "Repository & workspace",
     label: "Remembers window size & position",
   },
   {

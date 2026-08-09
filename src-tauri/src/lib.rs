@@ -1,5 +1,6 @@
 mod agent;
 mod agent_sandbox;
+mod app_menu;
 mod app_store;
 mod automation_claims;
 mod dependabot;
@@ -79,6 +80,11 @@ pub fn run() {
                     .plugin(tauri_plugin_updater::Builder::new().build())?;
                 tray::setup_tray(app.handle())?;
                 tray::init_window_title(app.handle());
+                // macOS-only: the menu bar is always present there, so it needs a
+                // real File menu. Other platforms reach the same actions through
+                // the in-window repo dropdown.
+                #[cfg(target_os = "macos")]
+                app_menu::setup_app_menu(app.handle())?;
                 // On Windows, keep the managed MCP launcher copy fresh after an
                 // update — but only if it already exists (lazy: never-used ⇒
                 // never copied). Fire-and-forget so startup never blocks on the
@@ -694,6 +700,7 @@ pub fn run() {
             agent::agent_review_cancel,
             agent::agent_session,
             tray::set_close_to_tray,
+            app_menu::set_recent_repos_menu,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
