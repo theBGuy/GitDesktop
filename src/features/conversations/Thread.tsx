@@ -97,7 +97,7 @@ export function Thread({
   onToggleReaction,
   renderBody,
   copyMarkdown,
-  writeDisabledReason,
+  disabledReason,
 }: {
   thread: PrThreadOut;
   onQuote?: () => void;
@@ -118,10 +118,11 @@ export function Thread({
   onHide?: (classifier: MinimizeReason) => void;
   /** Unhide a previously hidden comment. */
   onUnhide?: () => void;
-  /** Set when the viewer may not write to the repo: the hide/unhide items stay
-   *  visible but disabled, with this text appended to their label (a disabled
-   *  item drops pointer events, so a tooltip would never show). */
-  writeDisabledReason?: string;
+  /** Set when the viewer may not hide comments — a TRIAGE-tier action, so
+   *  callers feed this from the triage axis rather than push. The hide/unhide
+   *  items stay visible but disabled, with this text appended to their label (a
+   *  disabled item drops pointer events, so a tooltip would never show). */
+  disabledReason?: string;
   /** Current reactions on this comment (only used when onToggleReaction set). */
   reactions?: Reaction[];
   /** Present to enable the reaction bar; toggles the viewer's reaction. */
@@ -131,7 +132,7 @@ export function Thread({
   const [draft, setDraft] = useState("");
   const [expanded, setExpanded] = useState(false);
   const minimized = thread.isMinimized;
-  const writeSuffix = writeDisabledReason ? ` — ${writeDisabledReason}` : "";
+  const disabledSuffix = disabledReason ? ` — ${disabledReason}` : "";
   return (
     <div className="group space-y-1">
       <p className="flex items-center gap-2 text-xs">
@@ -204,10 +205,10 @@ export function Thread({
                 )}
                 {onUnhide && minimized && (
                   <DropdownMenuItem
-                    disabled={!!writeDisabledReason}
+                    disabled={!!disabledReason}
                     onClick={onUnhide}
                   >
-                    Unhide{writeSuffix}
+                    Unhide{disabledSuffix}
                   </DropdownMenuItem>
                 )}
                 {onHide && !minimized && (
@@ -216,10 +217,10 @@ export function Thread({
                         its own (unlike menu items), so the dim rides a
                         call-site class. */}
                     <DropdownMenuSubTrigger
-                      disabled={!!writeDisabledReason}
+                      disabled={!!disabledReason}
                       className="data-disabled:opacity-50"
                     >
-                      Hide…{writeSuffix}
+                      Hide…{disabledSuffix}
                     </DropdownMenuSubTrigger>
                     <DropdownMenuSubContent>
                       {HIDE_REASONS.map(([label, classifier]) => (

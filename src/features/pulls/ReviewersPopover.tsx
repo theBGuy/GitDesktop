@@ -55,8 +55,9 @@ export function ReviewersPopover({
   onChange: (next: ForgeUserRef[]) => void;
   /** The origin|upstream lens the parent surface resolved (create dialog: "origin"). */
   lens: RemoteLens;
-  /** Set when the viewer may not write to the repo: the trigger stays visible
-   *  but disabled and this text explains why. Absent = editable as before. */
+  /** Set when the viewer lacks the access this picker's action needs — callers
+   *  pass the reason for the matching axis. The trigger stays visible but
+   *  disabled and this text explains why. Absent = editable as before. */
   disabledReason?: string;
 }) {
   const candidates = useReviewerCandidates(repoPath, number, enabled, lens);

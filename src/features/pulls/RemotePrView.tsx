@@ -91,6 +91,7 @@ import {
   forgeFeatureReady,
   PIPELINE_IN_FLIGHT,
   prDiffOptions,
+  TRIAGE_ACCESS_ITEM_REASON,
   triageAccessReason,
   useAbortRemotePrResolve,
   useApplySuggestion,
@@ -137,7 +138,6 @@ import {
   useUnapprovePr,
   useUnminimizeComment,
   useUnrequestChangesPr,
-  WRITE_ACCESS_ITEM_REASON,
   writeAccessReason,
 } from "@/lib/git/queries";
 import {
@@ -295,12 +295,12 @@ export function RemotePrView({
     !!forge.data?.provider,
   );
   const writeReason = writeAccessReason(writeAccess.data);
-  // Labels, assignees and reviewers are granted at TRIAGE tier, below push —
-  // gating them on the write axis would strip controls a triager holds.
+  // Labels, assignees, reviewers and hiding comments are granted at TRIAGE tier,
+  // below push — gating them on the write axis would strip a triager's controls.
   const triageReason = triageAccessReason(writeAccess.data);
   // Menu items can't show a tooltip once disabled — they carry the compact
   // reason in their label instead.
-  const itemReason = writeReason ? WRITE_ACCESS_ITEM_REASON : undefined;
+  const triageItemReason = triageReason ? TRIAGE_ACCESS_ITEM_REASON : undefined;
   // Per-action write-capability flags from forge status + provider (gating
   // convention: usePrCapabilities).
   const {
@@ -1781,7 +1781,12 @@ export function RemotePrView({
         {/* GitLab-only time-tracking summary; a popover with estimate/add-spent
             while the MR is open, static once closed. */}
         {canTrackTime && (
-          <MrTimeTracking repoPath={repoPath} number={number} open={isOpen} />
+          <MrTimeTracking
+            repoPath={repoPath}
+            number={number}
+            open={isOpen}
+            disabledReason={triageReason}
+          />
         )}
         {/* Bitbucket-only PR-tasks chip — quiet until there are unresolved tasks;
             jumps to the Tasks section. Same usePrTasks query as the section. */}
@@ -2197,7 +2202,7 @@ export function RemotePrView({
                               ? () => unhideComment(c.id)
                               : undefined
                           }
-                          writeDisabledReason={itemReason}
+                          disabledReason={triageItemReason}
                           reactions={
                             canReact
                               ? reactions.data?.comments[c.id]

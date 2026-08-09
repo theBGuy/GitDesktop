@@ -78,8 +78,9 @@ export function AssigneesPopover({
   commitOnClose?: boolean;
   /** The origin|upstream lens the parent surface resolved. */
   lens: RemoteLens;
-  /** Set when the viewer may not write to the repo: the trigger stays visible
-   *  but disabled and this text explains why. Absent = editable as before. */
+  /** Set when the viewer lacks the access this picker's action needs — callers
+   *  pass the reason for the matching axis. The trigger stays visible but
+   *  disabled and this text explains why. Absent = editable as before. */
   disabledReason?: string;
 }) {
   const users = useAssignableUsers(repoPath, enabled, lens);
@@ -214,8 +215,9 @@ export function MilestoneMenu({
   onChange: (milestone: number | null, title: string | null) => void;
   /** The origin|upstream lens the parent surface resolved. */
   lens: RemoteLens;
-  /** Set when the viewer may not write to the repo: the trigger stays visible
-   *  but disabled and this text explains why. Absent = editable as before. */
+  /** Set when the viewer lacks the access this picker's action needs — callers
+   *  pass the reason for the matching axis. The trigger stays visible but
+   *  disabled and this text explains why. Absent = editable as before. */
   disabledReason?: string;
 }) {
   const milestones = useMilestones(repoPath, enabled, lens);
@@ -288,6 +290,7 @@ export function IssueTypeMenu({
   value,
   onChange,
   lens,
+  disabledReason,
 }: {
   repoPath: string;
   enabled: boolean;
@@ -295,6 +298,10 @@ export function IssueTypeMenu({
   onChange: (type: IssueType | null) => void;
   /** The origin|upstream lens the parent surface resolved. */
   lens: RemoteLens;
+  /** Set when the viewer lacks the access this picker's action needs — callers
+   *  pass the reason for the matching axis. The trigger stays visible but
+   *  disabled and this text explains why. Absent = editable as before. */
+  disabledReason?: string;
 }) {
   const types = useIssueTypes(repoPath, enabled, lens);
   const list = types.data ?? [];
@@ -304,19 +311,29 @@ export function IssueTypeMenu({
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       <DropdownMenu>
-        <DropdownMenuTrigger
-          render={
-            <Button variant="ghost" size="xs" aria-label="Set issue type" />
+        {/* A natively disabled button swallows `title`, so the reason rides a
+            wrapping span. */}
+        <span
+          title={disabledReason}
+          className={
+            disabledReason ? "inline-flex cursor-not-allowed" : "inline-flex"
           }
         >
-          {value ? (
-            <TypeDot color={value.color} data-icon="inline-start" />
-          ) : (
-            <ShapesIcon data-icon="inline-start" />
-          )}
-          {value?.name ?? "Type"}
-          <CaretDownIcon data-icon="inline-end" />
-        </DropdownMenuTrigger>
+          <DropdownMenuTrigger
+            disabled={!!disabledReason}
+            render={
+              <Button variant="ghost" size="xs" aria-label="Set issue type" />
+            }
+          >
+            {value ? (
+              <TypeDot color={value.color} data-icon="inline-start" />
+            ) : (
+              <ShapesIcon data-icon="inline-start" />
+            )}
+            {value?.name ?? "Type"}
+            <CaretDownIcon data-icon="inline-end" />
+          </DropdownMenuTrigger>
+        </span>
         <DropdownMenuContent align="start" className="min-w-52">
           <DropdownMenuItem
             onClick={() => onChange(null)}

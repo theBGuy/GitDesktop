@@ -6154,26 +6154,35 @@ fn write_access_from_level(level: u8) -> (bool, bool, Option<String>) {
     (level >= 30, level >= 20, role.map(str::to_string))
 }
 
-/// Whether the signed-in viewer can push to this project — the write twin of
-/// [`repo_admin`]. A resolved level is an affirmative answer even at 0 (the
-/// endpoints replied), and a failed project read propagates as an error rather
-/// than a guessed `false`.
+/// The write-access answer a resolved level implies. Pure; `repo` is left `None`
+/// because the caller resolves that identity asynchronously.
 ///
 /// An unanswered membership fallback leaves the level a FLOOR, so a threshold it
 /// already clears stays affirmative while the ones it doesn't become unknown.
 /// The tier label survives only alongside a granted push, and even then the
 /// floor can understate it — nothing gates on the label.
-pub async fn repo_write_access(repo_path: &str) -> AppResult<crate::forge::ForgeRepoWriteAccess> {
-    let path = project_path(repo_path).await?;
-    let access = effective_access_level(repo_path, &encode_project(&path)).await?;
-    let (can_push, can_triage, role) = write_access_from_level(access.level);
-    let resolved = access.ambiguous.is_none();
-    Ok(crate::forge::ForgeRepoWriteAccess {
+fn write_access_fields(level: u8, ambiguous: Option<String>) -> crate::forge::ForgeRepoWriteAccess {
+    let (can_push, can_triage, role) = write_access_from_level(level);
+    let resolved = ambiguous.is_none();
+    crate::forge::ForgeRepoWriteAccess {
         can_push: (can_push || resolved).then_some(can_push),
         can_triage: (can_triage || resolved).then_some(can_triage),
         role: if can_push || resolved { role } else { None },
+        repo: None,
+        unknown_reason: if can_push { None } else { ambiguous },
+    }
+}
+
+/// Whether the signed-in viewer can push to this project — the write twin of
+/// [`repo_admin`]. A resolved level is an affirmative answer even at 0 (the
+/// endpoints replied), and a failed project read propagates as an error rather
+/// than a guessed `false`.
+pub async fn repo_write_access(repo_path: &str) -> AppResult<crate::forge::ForgeRepoWriteAccess> {
+    let path = project_path(repo_path).await?;
+    let access = effective_access_level(repo_path, &encode_project(&path)).await?;
+    Ok(crate::forge::ForgeRepoWriteAccess {
         repo: Some(path),
-        unknown_reason: if can_push { None } else { access.ambiguous },
+        ..write_access_fields(access.level, access.ambiguous)
     })
 }
 
@@ -9916,5 +9925,37 @@ mod tests {
         // Levels the app doesn't name (5 = minimal access) stay unlabeled.
         assert_eq!(role(5), None);
         assert_eq!(role(35), None);
+    }
+
+    #[test]
+    fn write_access_fields_treat_an_unanswered_fallback_as_a_floor() {
+        let fields = |level, ambiguous: Option<&str>| {
+            let a = write_access_fields(level, ambiguous.map(str::to_string));
+            (a.can_push, a.can_triage, a.role, a.repo, a.unknown_reason)
+        };
+        // Developer already clears both bars, so an unanswered fallback is moot.
+        assert_eq!(
+            fields(30, Some("502 Bad Gateway")),
+            (Some(true), Some(true), Some("developer".into()), None, None)
+        );
+        // Reporter clears triage but not push: only the unmet axis — and the
+        // label, which the floor can understate — goes unknown, with the reason.
+        assert_eq!(
+            fields(20, Some("502 Bad Gateway")),
+            (
+                None,
+                Some(true),
+                None,
+                None,
+                Some("502 Bad Gateway".into())
+            )
+        );
+        // Nothing resolved and no answer from the fallback: both axes unknown.
+        assert_eq!(
+            fields(0, Some("502 Bad Gateway")),
+            (None, None, None, None, Some("502 Bad Gateway".into()))
+        );
+        // An answered fallback (404 = not a member) is an affirmative "no".
+        assert_eq!(fields(0, None), (Some(false), Some(false), None, None, None));
     }
 }

@@ -63,8 +63,9 @@ export function RelatedRow({
   onOpen: (n: number) => void;
   onRemove: () => void;
   pending?: boolean;
-  /** Set when the viewer may not write to the repo: the remove button stays
-   *  visible but disabled, with this text as its hint. */
+  /** Set when the viewer lacks the access this row's remove needs — callers pass
+   *  the reason for the matching axis (sub-issues are write, dependency and
+   *  related-issue links are triage). The button stays visible but disabled. */
   removeDisabledReason?: string;
 }) {
   return (
@@ -112,12 +113,16 @@ function RelationList({
   onOpen,
   onRemove,
   isRemoving,
+  removeDisabledReason,
 }: {
   label: string;
   items: RelatedIssue[];
   onOpen: (n: number) => void;
   onRemove: (target: number) => void;
   isRemoving: (target: number) => boolean;
+  /** Set when the viewer may not edit dependencies: each row's remove stays
+   *  visible but disabled, with this text as its hint. */
+  removeDisabledReason?: string;
 }) {
   return (
     <div className="space-y-1">
@@ -129,6 +134,7 @@ function RelationList({
           onOpen={onOpen}
           onRemove={() => onRemove(it.number)}
           pending={isRemoving(it.number)}
+          removeDisabledReason={removeDisabledReason}
         />
       ))}
     </div>
@@ -375,11 +381,15 @@ export function IssueRelationships({
   repoPath,
   number,
   lens,
+  disabledReason,
 }: {
   repoPath: string;
   number: number;
   /** The origin|upstream lens the parent issue view resolved. */
   lens: RemoteLens;
+  /** Set when the viewer lacks the access dependency edits need: Add and the
+   *  per-row removes disable, with this text as their hint. The lists stay live. */
+  disabledReason?: string;
 }) {
   const dependencies = useIssueDependencies(repoPath, number, lens);
   const setDep = useSetIssueDependency(repoPath, lens);
@@ -412,19 +422,32 @@ export function IssueRelationships({
         <span className="flex-1" />
         {addRelation === null && (
           <DropdownMenu>
-            <DropdownMenuTrigger
-              render={
-                <Button
-                  variant="ghost"
-                  size="xs"
-                  aria-label="Add a relationship"
-                />
+            {/* A natively disabled button swallows `title`, so the reason rides
+                a wrapping span. Every item in this menu is a write, so the gate
+                sits on the trigger rather than on each item. */}
+            <span
+              title={disabledReason}
+              className={
+                disabledReason
+                  ? "inline-flex cursor-not-allowed"
+                  : "inline-flex"
               }
             >
-              <PlusIcon data-icon="inline-start" />
-              Add
-              <CaretDownIcon data-icon="inline-end" />
-            </DropdownMenuTrigger>
+              <DropdownMenuTrigger
+                disabled={!!disabledReason}
+                render={
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    aria-label="Add a relationship"
+                  />
+                }
+              >
+                <PlusIcon data-icon="inline-start" />
+                Add
+                <CaretDownIcon data-icon="inline-end" />
+              </DropdownMenuTrigger>
+            </span>
             <DropdownMenuContent align="end" className="min-w-44">
               <DropdownMenuItem onClick={() => setAddRelation("blocked_by")}>
                 Blocked by…
@@ -454,6 +477,7 @@ export function IssueRelationships({
             setDep.variables.relation === "blocked_by" &&
             setDep.variables.target === t
           }
+          removeDisabledReason={disabledReason}
         />
       )}
       {blocking.length > 0 && (
@@ -473,6 +497,7 @@ export function IssueRelationships({
             setDep.variables.relation === "blocking" &&
             setDep.variables.target === t
           }
+          removeDisabledReason={disabledReason}
         />
       )}
       {depsLoaded &&

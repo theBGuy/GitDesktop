@@ -78,6 +78,7 @@ export function IssueDevelopment({
   issueTitle,
   issueUrl,
   lens,
+  disabledReason,
 }: {
   repoPath: string;
   number: number;
@@ -86,6 +87,11 @@ export function IssueDevelopment({
   issueUrl: string;
   /** The origin|upstream lens the parent issue view resolved. */
   lens: RemoteLens;
+  /** Set when the viewer may not push: creating a linked branch is a remote
+   *  branch write, so that item disables and appends this text to its label (a
+   *  disabled menu item drops pointer events, so a tooltip never shows).
+   *  Callers pass the compact write-axis reason; the link-out stays live. */
+  disabledReason?: string;
 }) {
   const dev = useIssueDevelopment(repoPath, number, lens);
   const createBranch = useCreateLinkedBranch(repoPath, lens);
@@ -139,12 +145,14 @@ export function IssueDevelopment({
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="min-w-56">
             <DropdownMenuItem
+              disabled={!!disabledReason}
               onClick={() => {
                 setBranchName(defaultBranchName(number, issueTitle));
                 setBranchOpen(true);
               }}
             >
               Create a branch…
+              {disabledReason ? ` — ${disabledReason}` : ""}
             </DropdownMenuItem>
             <DropdownMenuItem onClick={() => openUrl(issueUrl)}>
               <ArrowSquareOutIcon />

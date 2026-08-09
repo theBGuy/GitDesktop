@@ -127,19 +127,22 @@ export function RemoteIssueView({
   const lens = useRepoLens(repoPath);
   // The viewer's permission on the lens repo — a PERMISSION axis the per-action
   // flags below don't cover, so it never hides a control: it only disables one,
-  // and only on an explicit denial. Triage is its own tier: labels, assignees,
-  // milestones, pin and lock come with it WITHOUT push, so they read
-  // `canTriage` and gating them on push would strip a triager's controls.
+  // and only on an explicit denial. Triage is its own, LOWER tier: labels,
+  // assignees, milestones, hide-comments and the other issue-metadata rows come
+  // with it without push, so those read `canTriage`; pin, transfer, delete and
+  // branch creation are write-tier. Each blocked flag derives from its reason so
+  // the two can never disagree.
   const writeAccess = useRepoWriteAccess(repoPath, lens, !!provider);
   const writeReason = writeAccessReason(writeAccess.data);
-  const writeBlocked = writeAccess.data?.canPush === false;
   const triageReason = triageAccessReason(writeAccess.data);
-  const triageBlocked = writeAccess.data?.canTriage === false;
+  const writeBlocked = !!writeReason;
+  const triageBlocked = !!triageReason;
   // A disabled menu item drops pointer events, so its explanation goes in the
   // label; each suffix is empty whenever its axis allows the action.
-  const itemReason = writeBlocked ? WRITE_ACCESS_ITEM_REASON : undefined;
-  const itemSuffix = itemReason ? ` — ${itemReason}` : "";
-  const triageSuffix = triageBlocked ? ` — ${TRIAGE_ACCESS_ITEM_REASON}` : "";
+  const triageItemReason = triageReason ? TRIAGE_ACCESS_ITEM_REASON : undefined;
+  const writeItemReason = writeReason ? WRITE_ACCESS_ITEM_REASON : undefined;
+  const itemSuffix = writeItemReason ? ` — ${writeItemReason}` : "";
+  const triageSuffix = triageItemReason ? ` — ${triageItemReason}` : "";
   // GitLab WRITES land per-action. Each shared control is
   // `canWrite || forgeFeatureReady(...)` so GitHub keeps its controls while a
   // forge-status query is pending/failed (canWrite default-true) AND a ready GitLab
@@ -161,6 +164,10 @@ export function RemoteIssueView({
   // pin stays GitHub-only via `canWrite`. GitLab locks without a reason and
   // "moves" instead of transferring — labels/submenus branch on the provider.
   const isGitLab = provider === "gitlab";
+  // Locking is write-tier on GitHub but only Reporter (triage) on GitLab, so
+  // the lock arms take their axis from the provider.
+  const lockBlocked = isGitLab ? triageBlocked : writeBlocked;
+  const lockSuffix = isGitLab ? triageSuffix : itemSuffix;
   const canLock = canWrite || forgeFeatureReady(forge.data, "issueLock");
   const canTransfer =
     canWrite || forgeFeatureReady(forge.data, "issueTransfer");
@@ -449,7 +456,7 @@ export function RemoteIssueView({
               <DropdownMenuContent align="end" className="min-w-52">
                 {canWrite && (
                   <DropdownMenuItem
-                    disabled={triageBlocked}
+                    disabled={writeBlocked}
                     onClick={() =>
                       pinIssue.mutate(
                         { number, pinned: !issue.isPinned },
@@ -464,13 +471,13 @@ export function RemoteIssueView({
                     }
                   >
                     {issue.isPinned ? "Unpin issue" : "Pin issue"}
-                    {triageSuffix}
+                    {itemSuffix}
                   </DropdownMenuItem>
                 )}
                 {canLock &&
                   (issue.locked ? (
                     <DropdownMenuItem
-                      disabled={triageBlocked}
+                      disabled={lockBlocked}
                       onClick={() =>
                         unlockIssue.mutate(number, {
                           onSuccess: () =>
@@ -479,12 +486,12 @@ export function RemoteIssueView({
                         })
                       }
                     >
-                      Unlock conversation{triageSuffix}
+                      Unlock conversation{lockSuffix}
                     </DropdownMenuItem>
                   ) : isGitLab ? (
                     // GitLab locks without a reason — a plain item, no submenu.
                     <DropdownMenuItem
-                      disabled={triageBlocked}
+                      disabled={lockBlocked}
                       onClick={() =>
                         lockIssue.mutate(
                           { number, reason: null },
@@ -496,7 +503,7 @@ export function RemoteIssueView({
                         )
                       }
                     >
-                      Lock conversation{triageSuffix}
+                      Lock conversation{lockSuffix}
                     </DropdownMenuItem>
                   ) : (
                     <DropdownMenuSub>
@@ -504,10 +511,10 @@ export function RemoteIssueView({
                           of its own (unlike menu items), so the dim rides a
                           call-site class. */}
                       <DropdownMenuSubTrigger
-                        disabled={triageBlocked}
+                        disabled={writeBlocked}
                         className="data-disabled:opacity-50"
                       >
-                        Lock conversation…{triageSuffix}
+                        Lock conversation…{itemSuffix}
                       </DropdownMenuSubTrigger>
                       <DropdownMenuSubContent>
                         {LOCK_REASONS.map(([label, reason]) => (
@@ -698,7 +705,7 @@ export function RemoteIssueView({
                       ? () => unhideComment(c.id)
                       : undefined
                   }
-                  writeDisabledReason={itemReason}
+                  disabledReason={triageItemReason}
                   reactions={
                     canReact ? reactions.data?.comments[c.id] : undefined
                   }
@@ -847,6 +854,7 @@ export function RemoteIssueView({
           remoteLabel={remoteLabel}
           lens={lens}
           pickerDisabledReason={triageReason}
+          writeItemReason={writeItemReason}
         />
       </div>
 

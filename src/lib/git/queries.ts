@@ -4686,8 +4686,10 @@ export function writeAccessReason(
 }
 
 /** The disabled-reason for TRIAGE-gated controls (labels, assignees,
- *  milestones, pin, lock) — a lower tier than push, so it must be read off its
- *  own axis or a triager loses controls they hold. Same fail-open rule. */
+ *  milestones, review requests, hiding comments) — a lower tier than push, so it
+ *  must be read off its own axis or a triager loses controls they hold. Pin is
+ *  write-tier; locking is write-tier on GitHub but Reporter (triage) on GitLab.
+ *  Same fail-open rule. */
 export function triageAccessReason(
   access: ForgeRepoWriteAccess | undefined,
 ): string | undefined {

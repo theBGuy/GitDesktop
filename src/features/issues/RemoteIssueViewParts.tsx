@@ -72,6 +72,7 @@ export function IssueSidebar({
   remoteLabel,
   lens,
   pickerDisabledReason,
+  writeItemReason,
 }: {
   repoPath: string;
   number: number;
@@ -93,6 +94,9 @@ export function IssueSidebar({
    *  they stay visible but disabled, with this text explaining why. Absent =
    *  editable as before. */
   pickerDisabledReason?: string;
+  /** The compact WRITE-axis reason for the rail's one push-tier affordance
+   *  (Development → create a linked branch), which triage doesn't cover. */
+  writeItemReason?: string;
 }) {
   const setAssignees = useSetIssueAssignees(repoPath, lens);
   const setMilestone = useSetIssueMilestone(repoPath, lens);
@@ -175,6 +179,7 @@ export function IssueSidebar({
             value={issue.dueDate}
             open={issue.state === "OPEN"}
             pending={setDueDate.isPending}
+            disabledReason={pickerDisabledReason}
             onChange={(dueDate) =>
               setDueDate.mutate({ number, dueDate }, { onError })
             }
@@ -184,6 +189,7 @@ export function IssueSidebar({
           <ConfidentialRow
             value={issue.confidential}
             pending={setConfidential.isPending}
+            disabledReason={pickerDisabledReason}
             onChange={(confidential) =>
               setConfidential.mutate({ number, confidential }, { onError })
             }
@@ -194,6 +200,7 @@ export function IssueSidebar({
             repoPath={repoPath}
             number={number}
             editable={issue.state === "OPEN"}
+            disabledReason={pickerDisabledReason}
           />
         )}
         {canLinkIssues && (
@@ -202,6 +209,7 @@ export function IssueSidebar({
             number={number}
             editable={issue.state === "OPEN"}
             lens={lens}
+            disabledReason={pickerDisabledReason}
           />
         )}
         <div className="space-y-1.5">
@@ -226,6 +234,7 @@ export function IssueSidebar({
         enabled
         value={issue.issueType}
         lens={lens}
+        disabledReason={pickerDisabledReason}
         onChange={(type) =>
           setType.mutate(
             { number, typeName: type?.name ?? null, type },
@@ -276,7 +285,12 @@ export function IssueSidebar({
           Manage on GitHub
         </button>
       </div>
-      <IssueRelationships repoPath={repoPath} number={number} lens={lens} />
+      <IssueRelationships
+        repoPath={repoPath}
+        number={number}
+        lens={lens}
+        disabledReason={pickerDisabledReason}
+      />
       <IssueDevelopment
         repoPath={repoPath}
         number={number}
@@ -284,6 +298,7 @@ export function IssueSidebar({
         issueTitle={issue.title}
         issueUrl={issue.url}
         lens={lens}
+        disabledReason={writeItemReason}
       />
       <div className="space-y-1.5">
         <p className="text-xs font-medium text-muted-foreground">
@@ -327,6 +342,7 @@ export function DueDateRow({
   open,
   pending,
   onChange,
+  disabledReason,
 }: {
   /** "YYYY-MM-DD" or null. */
   value: string | null;
@@ -334,8 +350,12 @@ export function DueDateRow({
   open: boolean;
   pending: boolean;
   onChange: (date: string | null) => void;
+  /** Set when the viewer lacks the tier this row needs: the input and Clear stay
+   *  visible but disabled, with this text as their hint. */
+  disabledReason?: string;
 }) {
   const pastDue = open && value !== null && isPastDue(value);
+  const blocked = !!disabledReason;
   return (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between gap-2">
@@ -346,34 +366,47 @@ export function DueDateRow({
           Due date
         </Label>
         {value !== null && (
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            className="text-muted-foreground"
-            disabled={pending}
-            onClick={() => onChange(null)}
+          // The hint sits on the controls, not the row: a disabled input or
+          // button swallows `title`, while the Label stays live either way.
+          <span
+            title={disabledReason}
+            className={blocked ? "inline-flex cursor-not-allowed" : undefined}
           >
-            Clear
-          </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="xs"
+              className="text-muted-foreground"
+              disabled={pending || blocked}
+              onClick={() => onChange(null)}
+            >
+              Clear
+            </Button>
+          </span>
         )}
       </div>
       {/* Uncontrolled while focused (key remounts on external change) so the
           segment editing never fights a controlled re-render; blur commits. */}
-      <Input
-        key={value ?? ""}
-        id="issue-due-date"
-        type="date"
-        defaultValue={value ?? ""}
-        className="h-7"
-        onBlur={(e) => {
-          const next = e.target.value;
-          if (next && next !== value) onChange(next);
-        }}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") e.currentTarget.blur();
-        }}
-      />
+      <span
+        title={disabledReason}
+        className={blocked ? "block cursor-not-allowed" : "block"}
+      >
+        <Input
+          key={value ?? ""}
+          id="issue-due-date"
+          type="date"
+          defaultValue={value ?? ""}
+          className="h-7"
+          disabled={blocked}
+          onBlur={(e) => {
+            const next = e.target.value;
+            if (next && next !== value) onChange(next);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") e.currentTarget.blur();
+          }}
+        />
+      </span>
       {pastDue && <p className="text-[11px] text-destructive">Past due</p>}
     </div>
   );
@@ -384,10 +417,14 @@ function ConfidentialRow({
   value,
   pending,
   onChange,
+  disabledReason,
 }: {
   value: boolean;
   pending: boolean;
   onChange: (confidential: boolean) => void;
+  /** Set when the viewer lacks the tier this row needs: the switch stays visible
+   *  but disabled, with this text as its hint. */
+  disabledReason?: string;
 }) {
   return (
     <div className="space-y-1.5">
@@ -398,12 +435,20 @@ function ConfidentialRow({
         >
           Confidential
         </Label>
-        <Switch
-          id="issue-confidential"
-          checked={value}
-          disabled={pending}
-          onCheckedChange={onChange}
-        />
+        {/* A disabled switch swallows `title`, so the hint rides its wrapper. */}
+        <span
+          title={disabledReason}
+          className={
+            disabledReason ? "inline-flex cursor-not-allowed" : undefined
+          }
+        >
+          <Switch
+            id="issue-confidential"
+            checked={value}
+            disabled={pending || !!disabledReason}
+            onCheckedChange={onChange}
+          />
+        </span>
       </div>
       {value && (
         <p className="text-[11px] text-muted-foreground">
@@ -429,6 +474,7 @@ export function TimeTrackingControls({
   onSetEstimate,
   onAddSpent,
   idPrefix,
+  disabledReason,
 }: {
   stats: GitLabTimeStats | undefined;
   editable: boolean;
@@ -439,6 +485,10 @@ export function TimeTrackingControls({
   onAddSpent: (duration: string | null) => void;
   /** Disambiguates the input ids when two instances mount (issue rail + MR). */
   idPrefix: string;
+  /** Set when the viewer lacks the tier the edits need: the inputs and their
+   *  Clear/Reset buttons disable, with this text as the group's hint. The
+   *  summary above them is a read and stays live. */
+  disabledReason?: string;
 }) {
   const estimate = stats?.timeEstimate ?? 0;
   const spent = stats?.totalTimeSpent ?? 0;
@@ -489,7 +539,15 @@ export function TimeTrackingControls({
         <p className="text-[11px] text-muted-foreground">No time tracked.</p>
       )}
       {editable && (
-        <div className="space-y-1.5 pt-0.5">
+        // Group-level hint: the disabled inputs and buttons inside swallow
+        // `title`, so the wrapper is the hover target.
+        <div
+          className={cn(
+            "space-y-1.5 pt-0.5",
+            disabledReason && "cursor-not-allowed",
+          )}
+          title={disabledReason}
+        >
           <div className="flex items-center gap-1.5">
             <Input
               id={`${idPrefix}-time-estimate`}
@@ -498,7 +556,7 @@ export function TimeTrackingControls({
               className="h-7"
               placeholder="Estimate (e.g. 3h)"
               aria-label="Set time estimate"
-              disabled={pending}
+              disabled={pending || !!disabledReason}
               onBlur={(e) => {
                 const next = e.target.value.trim();
                 if (next && next !== humanEstimate) onSetEstimate(next);
@@ -513,7 +571,7 @@ export function TimeTrackingControls({
                 variant="ghost"
                 size="xs"
                 className="shrink-0 text-muted-foreground"
-                disabled={pending}
+                disabled={pending || !!disabledReason}
                 onClick={() => onSetEstimate(null)}
               >
                 Clear
@@ -526,7 +584,7 @@ export function TimeTrackingControls({
               className="h-7"
               placeholder="Add spent (e.g. 45m, -15m)"
               aria-label="Add spent time"
-              disabled={pending}
+              disabled={pending || !!disabledReason}
               onKeyDown={(e) => {
                 if (e.key !== "Enter") return;
                 const el = e.currentTarget;
@@ -543,7 +601,7 @@ export function TimeTrackingControls({
                 variant="ghost"
                 size="xs"
                 className="shrink-0 text-muted-foreground"
-                disabled={pending}
+                disabled={pending || !!disabledReason}
                 onClick={() => onAddSpent(null)}
               >
                 Reset
@@ -571,10 +629,14 @@ function IssueTimeTrackingSection({
   repoPath,
   number,
   editable,
+  disabledReason,
 }: {
   repoPath: string;
   number: number;
   editable: boolean;
+  /** Set when the viewer lacks the tier the editing controls need — the summary
+   *  is a read and stays live. */
+  disabledReason?: string;
 }) {
   const stats = useGlIssueTimeStats(repoPath, number);
   const setEstimate = useSetIssueTimeEstimate(repoPath);
@@ -591,6 +653,7 @@ function IssueTimeTrackingSection({
           stats={stats.data}
           editable={editable}
           pending={setEstimate.isPending || addSpent.isPending}
+          disabledReason={disabledReason}
           idPrefix="issue"
           onSetEstimate={(duration) =>
             setEstimate.mutate({ number, duration }, { onError })
@@ -612,12 +675,16 @@ function IssueLinksSection({
   number,
   editable,
   lens,
+  disabledReason,
 }: {
   repoPath: string;
   number: number;
   editable: boolean;
   /** The parent issue's lens (GitLab-only section, so always "origin"). */
   lens: RemoteLens;
+  /** Set when the viewer lacks the tier link edits need: Add and the per-row
+   *  removes disable, with this text as their hint. The list stays live. */
+  disabledReason?: string;
 }) {
   const links = useGlIssueLinks(repoPath, number);
   const linkIssue = useLinkIssue(repoPath);
@@ -641,16 +708,26 @@ function IssueLinksSection({
         </span>
         <span className="flex-1" />
         {editable && !adding && (
-          <Button
-            variant="ghost"
-            size="xs"
-            aria-label="Link a related issue"
-            onClick={() => setAdding(true)}
+          // A natively disabled button swallows `title`, so the reason rides a
+          // wrapping span.
+          <span
+            title={disabledReason}
+            className={
+              disabledReason ? "inline-flex cursor-not-allowed" : "inline-flex"
+            }
           >
-            <PlusIcon data-icon="inline-start" />
-            Add
-            <CaretDownIcon data-icon="inline-end" />
-          </Button>
+            <Button
+              variant="ghost"
+              size="xs"
+              aria-label="Link a related issue"
+              disabled={!!disabledReason}
+              onClick={() => setAdding(true)}
+            >
+              <PlusIcon data-icon="inline-start" />
+              Add
+              <CaretDownIcon data-icon="inline-end" />
+            </Button>
+          </span>
         )}
       </div>
 
@@ -659,6 +736,7 @@ function IssueLinksSection({
           key={l.linkId}
           issue={toRelated(l)}
           onOpen={open}
+          removeDisabledReason={disabledReason}
           onRemove={() =>
             unlinkIssue.mutate({ number, linkId: l.linkId }, { onError })
           }

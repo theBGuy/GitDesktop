@@ -850,7 +850,24 @@ pub async fn gh_repo_settings_update(
 
 #[cfg(test)]
 mod tests {
-    use super::write_access_from_repo_json;
+    use super::{gh_failure_reason, write_access_from_repo_json, GhOutput};
+
+    #[test]
+    fn gh_failure_reason_names_the_failure_even_when_gh_is_silent() {
+        let noisy = GhOutput {
+            stdout: Vec::new(),
+            stderr: "\n  \ngh: Not Found (HTTP 404)\nsecond line\n".into(),
+            code: 1,
+        };
+        assert_eq!(gh_failure_reason(&noisy), "gh: Not Found (HTTP 404)");
+        // Empty stderr still names the failure rather than reading as silence.
+        let silent = GhOutput {
+            stdout: Vec::new(),
+            stderr: String::new(),
+            code: 4,
+        };
+        assert_eq!(gh_failure_reason(&silent), "gh exited with status 4");
+    }
 
     #[test]
     fn write_access_reads_the_permissions_block() {

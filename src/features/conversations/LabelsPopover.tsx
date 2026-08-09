@@ -35,8 +35,9 @@ export function LabelsPopover({
   labels: RepoLabel[];
   /** The origin|upstream lens the parent PR/issue surface resolved. */
   lens: RemoteLens;
-  /** Set when the viewer may not write to the repo: the trigger stays visible
-   *  but disabled and this text explains why. Absent = editable as before. */
+  /** Set when the viewer lacks the access this picker's action needs — callers
+   *  pass the reason for the matching axis. The trigger stays visible but
+   *  disabled and this text explains why. Absent = editable as before. */
   disabledReason?: string;
 }) {
   const repoLabels = useRepoLabels(repoPath, enabled, lens);

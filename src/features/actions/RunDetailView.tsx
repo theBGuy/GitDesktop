@@ -69,6 +69,7 @@ function JobRow({
   onDebug,
   onPlay,
   playing = false,
+  playDisabledReason,
 }: {
   repoPath: string;
   job: RunJob;
@@ -81,6 +82,9 @@ function JobRow({
   onPlay?: () => void;
   /** Whether the play mutation is in flight for THIS job. */
   playing?: boolean;
+  /** Set when the viewer may not push: the play button stays visible but
+   *  disabled, with this text as its hint. */
+  playDisabledReason?: string;
 }) {
   // Failed and in-progress jobs are the interesting ones — open them by default.
   const [open, setOpen] = useState(
@@ -134,21 +138,32 @@ function JobRow({
           )}
         </button>
         {onPlay && (
-          <Button
-            variant="ghost"
-            size="xs"
-            className="mr-2 shrink-0 text-muted-foreground"
-            disabled={playing}
-            aria-label={`Run job ${job.name}`}
-            onClick={onPlay}
+          // A natively disabled button swallows `title`, so the reason rides a
+          // wrapping span.
+          <span
+            title={playDisabledReason}
+            className={
+              playDisabledReason
+                ? "inline-flex cursor-not-allowed"
+                : "inline-flex"
+            }
           >
-            {playing ? (
-              <Spinner data-icon="inline-start" />
-            ) : (
-              <PlayIcon data-icon="inline-start" />
-            )}
-            Run job
-          </Button>
+            <Button
+              variant="ghost"
+              size="xs"
+              className="mr-2 shrink-0 text-muted-foreground"
+              disabled={playing || !!playDisabledReason}
+              aria-label={`Run job ${job.name}`}
+              onClick={onPlay}
+            >
+              {playing ? (
+                <Spinner data-icon="inline-start" />
+              ) : (
+                <PlayIcon data-icon="inline-start" />
+              )}
+              Run job
+            </Button>
+          </span>
         )}
         {onDebug && (
           <Button
@@ -308,7 +323,11 @@ export function RunDetailView({
   const canPlay = forgeFeatureReady(forge.data, "ciJobPlay");
   // Re-run and cancel are repo writes: an explicitly read-only viewer keeps the
   // buttons (disabled, with the reason). CI is repo-wide — no lens.
-  const writeAccess = useRepoWriteAccess(repoPath, undefined, tabActive && !!provider);
+  const writeAccess = useRepoWriteAccess(
+    repoPath,
+    undefined,
+    tabActive && !!provider,
+  );
   const writeReason = writeAccessReason(writeAccess.data);
   const writeBlocked = writeAccess.data?.canPush === false;
   // Shared by every disabled-with-reason wrapper below (a natively-disabled
@@ -351,9 +370,11 @@ export function RunDetailView({
           toast.success(
             provider === "gitlab"
               ? "Retrying pipeline"
-              : failedOnly
-                ? "Re-running failed jobs"
-                : "Re-running workflow",
+              : provider === "bitbucket"
+                ? "Triggering a new pipeline"
+                : failedOnly
+                  ? "Re-running failed jobs"
+                  : "Re-running workflow",
           ),
         onError: toastError,
       },
@@ -563,6 +584,7 @@ export function RunDetailView({
                       : undefined
                   }
                   playing={playJob.isPending && playJob.variables === job.id}
+                  playDisabledReason={writeReason}
                 />
               ))}
             </div>

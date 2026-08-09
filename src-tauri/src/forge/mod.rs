@@ -2663,8 +2663,12 @@ pub struct ForgeRepoWriteAccess {
     /// None = unknown (failed/ambiguous probe) — the frontend fails OPEN on None.
     pub can_push: Option<bool>,
     /// Whether the viewer can manage issue/PR metadata (labels, assignees,
-    /// milestones, pin, lock) — GitHub's triage tier and above; a tier BELOW push.
+    /// milestones, review requests, hide-comments) — GitHub's triage tier and
+    /// above; a tier BELOW push.
     pub can_triage: Option<bool>,
+    /// The provider's tier label ("admin"/"maintain"/"write"/"triage"/"read" on
+    /// GitHub, "owner"/"maintainer"/"developer"/… on GitLab). Diagnostic only —
+    /// the two boolean axes do the gating; nothing on the frontend reads this.
     pub role: Option<String>,
     /// The probed repo identity ("owner/repo" / project path / "ws/slug") for UI copy.
     pub repo: Option<String>,

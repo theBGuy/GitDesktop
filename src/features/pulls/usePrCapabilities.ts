@@ -21,13 +21,13 @@ import type {
  *   duplicate a GitHub control that lives elsewhere.
  *
  * Axes, never conflated: every `can*` flag above is AVAILABILITY (is this action
- * wired for this provider?) and decides what RENDERS. `writeBlocked` and
- * `triageBlocked` are PERMISSION and decide only what is ENABLED — consumers
- * disable-with-reason and never hide on permission. Triage is its own tier
- * (labels, assignees, milestones, pin, lock are granted there without push), so
- * a triage control keys on the triage axis — this flag or `triageAccessReason` —
- * never the write axis. Absent or
- * unanswered probe data leaves both false (fail open).
+ * wired for this provider?) and decides what RENDERS. `writeBlocked` is
+ * PERMISSION and decides only what is ENABLED — consumers disable-with-reason
+ * and never hide on permission. Triage is a SEPARATE, lower tier granting
+ * labels, assignees, milestones, review requests and hiding comments without
+ * push, so a triage control keys on `triageAccessReason`, never on
+ * `writeBlocked`. Absent or unanswered probe data leaves `writeBlocked` false
+ * (fail open).
  */
 export function usePrCapabilities(
   forgeData: ForgeStatus | undefined,
@@ -101,12 +101,10 @@ export function usePrCapabilities(
   // Only an explicit denial blocks: null/undefined (probe pending, failed, or
   // unable to answer) must behave exactly as before.
   const writeBlocked = writeAccess?.canPush === false;
-  const triageBlocked = writeAccess?.canTriage === false;
 
   return {
     canWrite,
     writeBlocked,
-    triageBlocked,
     canComment,
     canChangeState,
     canEdit,

@@ -432,11 +432,16 @@ export function MrTimeTracking({
   repoPath,
   number,
   open,
+  disabledReason,
 }: {
   repoPath: string;
   number: number;
   /** Whether the MR is open — only then are the editing controls offered. */
   open: boolean;
+  /** Set when the viewer lacks the access these edits need: the estimate and
+   *  spent controls disable, with this text as their hint. The summary is a
+   *  read and stays live. */
+  disabledReason?: string;
 }) {
   const stats = useGlMrTimeStats(repoPath, number);
   const setEstimate = useSetMrTimeEstimate(repoPath);
@@ -501,6 +506,7 @@ export function MrTimeTracking({
             stats={data}
             editable
             pending={setEstimate.isPending || addSpent.isPending}
+            disabledReason={disabledReason}
             idPrefix="mr"
             onSetEstimate={(duration) =>
               setEstimate.mutate({ number, duration }, { onError })
