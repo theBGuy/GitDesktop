@@ -668,7 +668,8 @@ struct BranchPieces {
     /// Every hidden changed file — pattern matches AND unreadable names.
     excluded_files: u32,
     /// The subset of `excluded_files` hidden because their names aren't readable
-    /// text. Rendered as its own cause: no pattern could have matched them.
+    /// text. Rendered as its own cause: no rule the user could write matches a
+    /// lossily-decoded name (a bare `*` still can — the U+FFFD guard is separate).
     unreadable: u32,
     recent_branches: Vec<String>,
     /// Subjects of the commits this branch adds over its base, newest first —
@@ -1690,8 +1691,9 @@ impl GitDesktopMcp {
             files: diff.files,
             untracked_paths,
             excluded_files: diff.excluded_files,
-            // Same subset on both paths: the committed fold above carries the working
-            // tree's hidden count (unreadable names included) onward.
+            // Same subset on both paths: the working-tree fold put filtered.excluded
+            // (unreadable included) into diff.excluded_files, and the committed fold
+            // carries that total onward.
             unreadable: filtered.unreadable,
             recent_branches: branches,
             commit_subjects,
