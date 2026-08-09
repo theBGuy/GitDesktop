@@ -2,9 +2,10 @@
 # Runtime smoke test for the Linux AppImage, run inside a modern-Mesa container
 # (fedora:44) against $APPIMAGE. The full gtk3 closure is required: linuxdeploy
 # excludes those libs from the bundle, so without them the app dies on a missing
-# host lib (e.g. libfribidi) long before EGL is reached. Both pass criteria are
-# required — an early crash exits well before the timeout, while an EGL failure
-# aborts only the web process and leaves the shell alive until the timeout.
+# host lib (e.g. libfribidi) long before EGL is reached. Three criteria, each
+# catching what the others miss: alive at the timeout (early crash), a live
+# WebKitWebProcess at 20s and no EGL-failure line (an EGL abort kills only the
+# web process, leaving the shell alive and sometimes silent).
 set -u
 
 : "${APPIMAGE:?APPIMAGE must point at the AppImage to test}"
@@ -28,11 +29,11 @@ cd /tmp || exit 1
   exit 1
 }
 
-export XDG_RUNTIME_DIR=/tmp/xdg && mkdir -p /tmp/xdg && chmod 700 /tmp/xdg
-export HOME=/tmp/home && mkdir -p /tmp/home
-
-timeout -k 5 30 xvfb-run -a ./squashfs-root/AppRun >/tmp/run.log 2>&1
-code=$?
+export XDG_RUNTIME_DIR=/tmp/xdg
+mkdir -p /tmp/xdg
+chmod 700 /tmp/xdg
+export HOME=/tmp/home
+mkdir -p /tmp/home
 
 fail() {
   echo "SMOKE FAILED: $1"
@@ -41,13 +42,22 @@ fail() {
   exit 1
 }
 
+timeout -k 5 30 xvfb-run -a ./squashfs-root/AppRun >/tmp/run.log 2>&1 &
+run_pid=$!
+
+sleep 20
+pgrep -f WebKitWebProcess >/dev/null || fail "web process not running at 20s"
+
+wait "$run_pid"
+code=$?
+
 # 124 = timeout fired; 137 = the -k KILL backstop fired on a TERM-blocking app.
 # Both mean the app was still alive at 30s.
 if [ "$code" -ne 124 ] && [ "$code" -ne 137 ]; then
   fail "app exited with code $code before the 30s timeout (expected 124 or 137)"
 fi
-if grep -q "Could not create default EGL display" /tmp/run.log; then
+if grep -Eqi 'Could not create default EGL display|EGL_BAD_PARAMETER|Failed to create EGL display' /tmp/run.log; then
   fail "EGL initialization error in the log"
 fi
 
-echo "SMOKE OK: app stayed alive for 30s with no EGL error"
+echo "SMOKE OK: alive at the 30s timeout, web process running at 20s, no EGL failure"

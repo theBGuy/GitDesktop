@@ -95,7 +95,7 @@ jobs:
             file
 
       - name: Pin newer linuxdeploy for AppImage bundling
-        if: matrix.platform == 'ubuntu-22.04'
+        if: runner.os == 'Linux'
         uses: ./.github/actions/pin-linuxdeploy
 
       - name: Install frontend dependencies
@@ -132,28 +132,9 @@ jobs:
           # uploadUpdaterJson defaults to true → generates & attaches latest.json.
           updaterJsonPreferNsis: true
 
-      # A bundled libwayland-client.so.0 shadows the host's and breaks EGL on
-      # Mesa 25+ systems. This runs after the asset upload, but the release
-      # stays a draft until every leg is green, so a red guard blocks publishing.
+      # Runs after the asset upload, but the release stays a draft until every
+      # leg is green, so a red guard still blocks publishing.
       - name: Guard against a bundled libwayland-client
-        if: matrix.platform == 'ubuntu-22.04'
+        if: runner.os == 'Linux'
         shell: bash
-        run: |
-          set -euo pipefail
-          appimage=$(find src-tauri/target/release/bundle/appimage -maxdepth 1 -name '*.AppImage' -print -quit)
-          if [ -z "$appimage" ]; then
-            echo "No AppImage found under src-tauri/target/release/bundle/appimage"
-            exit 1
-          fi
-          workdir=$(mktemp -d)
-          cp "$appimage" "$workdir/app.AppImage"
-          chmod +x "$workdir/app.AppImage"
-          # --appimage-extract avoids FUSE, which GitHub runners don't provide.
-          (cd "$workdir" && ./app.AppImage --appimage-extract >/dev/null)
-          # Match any soname: a bundled copy breaks EGL wherever it is placed.
-          found=$(find "$workdir/squashfs-root" -name 'libwayland-client.so*' -print -quit)
-          if [ -n "$found" ]; then
-            echo "FAIL: $(basename "$appimage") bundles $found"
-            exit 1
-          fi
-          echo "OK: $(basename "$appimage") does not bundle libwayland-client"
+        run: bash .github/scripts/appimage-guard.sh

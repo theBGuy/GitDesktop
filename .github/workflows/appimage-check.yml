@@ -12,7 +12,11 @@ on:
       - ".github/workflows/appimage-check.yml"
       - ".github/workflows/release.yml"
       - ".github/actions/pin-linuxdeploy/**"
+      - ".github/scripts/appimage-guard.sh"
       - ".github/scripts/appimage-smoke.sh"
+      # A Tauri CLI or bundle-config change can silently no-op the pin.
+      - "src-tauri/tauri.conf.json"
+      - "package.json"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -23,8 +27,8 @@ permissions:
 
 jobs:
   appimage:
-    # Mirrors release.yml's Linux leg environment — if that runner ever
-    # migrates, this one moves with it or the check stops proving anything.
+    # Paired with release.yml's Linux leg by convention only — nothing enforces
+    # it, so a runner bump there must be mirrored here or this proves nothing.
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:
@@ -70,38 +74,18 @@ jobs:
       - name: Build unsigned AppImage
         run: pnpm tauri build --bundles appimage --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
-      # A bundled libwayland-client.so.0 shadows the host's and breaks EGL on
-      # Mesa 25+ systems. Kept identical to release.yml's guard step.
       - name: Guard against a bundled libwayland-client
         shell: bash
-        run: |
-          set -euo pipefail
-          appimage=$(find src-tauri/target/release/bundle/appimage -maxdepth 1 -name '*.AppImage' -print -quit)
-          if [ -z "$appimage" ]; then
-            echo "No AppImage found under src-tauri/target/release/bundle/appimage"
-            exit 1
-          fi
-          workdir=$(mktemp -d)
-          cp "$appimage" "$workdir/app.AppImage"
-          chmod +x "$workdir/app.AppImage"
-          # --appimage-extract avoids FUSE, which GitHub runners don't provide.
-          (cd "$workdir" && ./app.AppImage --appimage-extract >/dev/null)
-          # Match any soname: a bundled copy breaks EGL wherever it is placed.
-          found=$(find "$workdir/squashfs-root" -name 'libwayland-client.so*' -print -quit)
-          if [ -n "$found" ]; then
-            echo "FAIL: $(basename "$appimage") bundles $found"
-            exit 1
-          fi
-          echo "OK: $(basename "$appimage") does not bundle libwayland-client"
+        run: bash .github/scripts/appimage-guard.sh
 
       - name: Run the AppImage on modern Mesa
         shell: bash
         run: |
           set -euo pipefail
-          appimage=$(find src-tauri/target/release/bundle/appimage -maxdepth 1 -name '*.AppImage' -print -quit)
+          appimage=$(find src-tauri/target/release/bundle/appimage -maxdepth 1 -name '*.AppImage' -print -quit 2>/dev/null || true)
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/work" \
-            -e APPIMAGE="/work/$appimage" \
+            -e APPIMAGE="/work/${appimage:?no AppImage found}" \
             fedora:44 bash /work/.github/scripts/appimage-smoke.sh
 
       - name: Upload the AppImage
@@ -110,3 +94,4 @@ jobs:
           name: appimage-unsigned
           path: src-tauri/target/release/bundle/appimage/*.AppImage
           if-no-files-found: error
+          retention-days: 7
