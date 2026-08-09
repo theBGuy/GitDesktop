@@ -39,6 +39,7 @@ import type {
 } from "@/lib/git/types";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
+import { cn } from "@/lib/utils";
 import { CreateIssueDialog } from "./CreateIssueDialog";
 
 /** Open/closed glyph for a related issue, so state isn't conveyed by text alone. */
@@ -95,7 +96,12 @@ export function RelatedRow({
           size="icon-xs"
           aria-label={`Remove #${issue.number}`}
           disabled={pending || !!removeDisabledReason}
-          className="text-muted-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100 disabled:opacity-100"
+          className={cn(
+            "text-muted-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100",
+            // Full opacity only for the in-flight spinner — a permission-blocked
+            // remove keeps the vendored disabled dim and hover-reveal.
+            pending && "disabled:opacity-100",
+          )}
           onClick={onRemove}
         >
           {pending ? <Spinner /> : <XIcon />}

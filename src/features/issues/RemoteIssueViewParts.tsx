@@ -370,7 +370,9 @@ export function DueDateRow({
           // button swallows `title`, while the Label stays live either way.
           <span
             title={disabledReason}
-            className={blocked ? "inline-flex cursor-not-allowed" : undefined}
+            className={
+              blocked ? "inline-flex cursor-not-allowed" : "inline-flex"
+            }
           >
             <Button
               type="button"
@@ -439,7 +441,7 @@ function ConfidentialRow({
         <span
           title={disabledReason}
           className={
-            disabledReason ? "inline-flex cursor-not-allowed" : undefined
+            disabledReason ? "inline-flex cursor-not-allowed" : "inline-flex"
           }
         >
           <Switch
