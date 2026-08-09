@@ -1,0 +1,112 @@
+name: appimage-check
+
+# Builds an unsigned AppImage the way release.yml does, then proves it actually
+# runs on a modern-Mesa distro. Dispatch it by hand when touching the Linux
+# bundling path; the PR trigger is paths-limited to that path's own files, so
+# it never becomes a required check on unrelated work.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/appimage-check.yml"
+      - ".github/workflows/release.yml"
+      - ".github/actions/pin-linuxdeploy/**"
+      - ".github/scripts/appimage-smoke.sh"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  appimage:
+    # Mirrors release.yml's Linux leg environment — if that runner ever
+    # migrates, this one moves with it or the check stops proving anything.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6.0.9
+
+      - name: Install Node
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            build-essential \
+            libssl-dev \
+            file
+
+      - name: Pin newer linuxdeploy for AppImage bundling
+        uses: ./.github/actions/pin-linuxdeploy
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      # createUpdaterArtifacts in tauri.conf.json would demand the signing key;
+      # the inline override drops it without affecting the bundle's contents.
+      - name: Build unsigned AppImage
+        run: pnpm tauri build --bundles appimage --config '{"bundle":{"createUpdaterArtifacts":false}}'
+
+      # A bundled libwayland-client.so.0 shadows the host's and breaks EGL on
+      # Mesa 25+ systems. Kept identical to release.yml's guard step.
+      - name: Guard against a bundled libwayland-client
+        shell: bash
+        run: |
+          set -euo pipefail
+          appimage=$(find src-tauri/target/release/bundle/appimage -maxdepth 1 -name '*.AppImage' -print -quit)
+          if [ -z "$appimage" ]; then
+            echo "No AppImage found under src-tauri/target/release/bundle/appimage"
+            exit 1
+          fi
+          workdir=$(mktemp -d)
+          cp "$appimage" "$workdir/app.AppImage"
+          chmod +x "$workdir/app.AppImage"
+          # --appimage-extract avoids FUSE, which GitHub runners don't provide.
+          (cd "$workdir" && ./app.AppImage --appimage-extract >/dev/null)
+          # Match any soname: a bundled copy breaks EGL wherever it is placed.
+          found=$(find "$workdir/squashfs-root" -name 'libwayland-client.so*' -print -quit)
+          if [ -n "$found" ]; then
+            echo "FAIL: $(basename "$appimage") bundles $found"
+            exit 1
+          fi
+          echo "OK: $(basename "$appimage") does not bundle libwayland-client"
+
+      - name: Run the AppImage on modern Mesa
+        shell: bash
+        run: |
+          set -euo pipefail
+          appimage=$(find src-tauri/target/release/bundle/appimage -maxdepth 1 -name '*.AppImage' -print -quit)
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -e APPIMAGE="/work/$appimage" \
+            fedora:44 bash /work/.github/scripts/appimage-smoke.sh
+
+      - name: Upload the AppImage
+        uses: actions/upload-artifact@v7
+        with:
+          name: appimage-unsigned
+          path: src-tauri/target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error

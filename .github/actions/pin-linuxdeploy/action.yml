@@ -1,0 +1,31 @@
+name: Pin linuxdeploy
+description: >-
+  Seed the Tauri bundler's tool cache with a pinned linuxdeploy build, so the
+  AppImage bundle excludes the runner's stale libwayland-client.
+
+# Tauri's default linuxdeploy is a July-2024 build whose baked-in excludelist
+# predates the libwayland-client.so.0 exclusion, so it bundles the runner's
+# stale copy — that shadows the host's and breaks EGL on Mesa 25+ systems.
+# tauri-bundler only downloads a tool it can't find in ~/.cache/tauri, so
+# seeding the cache with a newer release wins.
+
+runs:
+  using: composite
+  steps:
+    - name: Seed ~/.cache/tauri with pinned linuxdeploy
+      shell: bash
+      env:
+        LINUXDEPLOY_RELEASE: 1-alpha-20251107-1
+        LINUXDEPLOY_SHA256: c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d
+      run: |
+        set -euo pipefail
+        cache_dir="$HOME/.cache/tauri"
+        target="$cache_dir/linuxdeploy-x86_64.AppImage"
+        mkdir -p "$cache_dir"
+        curl -fsSL --retry 3 \
+          -o "$target" \
+          "https://github.com/linuxdeploy/linuxdeploy/releases/download/${LINUXDEPLOY_RELEASE}/linuxdeploy-x86_64.AppImage"
+        # Only valid here: the bundler patches the cached binary in place (dd
+        # zeroes 3 bytes) before running it, so this never re-verifies later.
+        echo "${LINUXDEPLOY_SHA256}  ${target}" | sha256sum -c -
+        chmod +x "$target"
