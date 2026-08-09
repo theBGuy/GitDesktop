@@ -88,6 +88,9 @@ export function useRepoIdentity(repo: string) {
  * number-keyed maps, briefly-wrong data). Keeps previous data only when the previous
  * query's repo segment matches, so Load-more and Open/Closed switches still skip the
  * skeleton. `repoKeyIndex` is where the repo sits in the key (1 for every key here).
+ * A key that also varies on an identity axis beyond repo (lens, state) needs an inline
+ * comparator instead — matching repo alone would serve another axis's data (the PR and
+ * issue list hooks below do this).
  */
 export function keepPreviousDataForRepo(repo: string, repoKeyIndex = 1) {
   return <T>(
@@ -904,9 +907,10 @@ export function usePrList(
 
 /** Hydrates PR-list rows with each PR's CI rollup, keyed by number. Runs SEPARATELY from
  *  `usePrList` — a full rollup expansion inside the list query 504s on large GitHub
- *  repos. The numbers digest in the key is load-bearing: the list uses keepPreviousData,
- *  so on a tab switch this can fire against the PREVIOUS tab's rows, and keyed by
- *  state+limit alone that result would cache under the new tab's key. */
+ *  repos. The numbers digest in the key is load-bearing: the list keeps the previous
+ *  tab's rows as placeholder data, so on a tab switch this can fire against the PREVIOUS
+ *  tab's rows, and keyed by state+limit alone that result would cache under the new
+ *  tab's key. */
 export function usePrListCi(
   repo: string,
   enabled: boolean,
@@ -941,13 +945,12 @@ export function usePrListCi(
     },
     enabled: enabled && !!prs && prs.length > 0,
     staleTime: 30_000,
-    // Keeps the current icons while a "Load more" grows the list (that moves only the
-    // limit/digest segments), but ONLY within the same repo, lens AND state — the map is
-    // number-keyed too, so `usePrListMergeability`'s rationale below applies verbatim.
+    // Repo and lens must match: a fork numbers PRs independently of its parent, so a
+    // cross-lens map paints wrong icons. State stays free — the panel idles this query
+    // while the list serves another tab's rows (mirroring the mergeability gate), and
+    // open/closed sets are disjoint, so a cross-tab serve can't show another PR's status.
     placeholderData: (prev, prevQuery) =>
-      prevQuery?.queryKey?.[1] === repo &&
-      prevQuery?.queryKey?.[3] === lens &&
-      prevQuery?.queryKey?.[4] === state
+      prevQuery?.queryKey?.[1] === repo && prevQuery?.queryKey?.[3] === lens
         ? prev
         : undefined,
   });
@@ -1601,8 +1604,14 @@ export function useIssueList(
     // issuesDisabled is a permanent repo condition — retrying only delays the notice.
     retry: (failureCount, err) =>
       !(isAppError(err) && err.kind === "issuesDisabled") && failureCount < 1,
-    // Keep current rows visible while a grown "Load more" page loads.
-    placeholderData: keepPreviousDataForRepo(repo),
+    // State and limit stay free so a tab switch or "Load more" keeps the current rows
+    // instead of flashing skeletons, but lens must match: a fork numbers issues
+    // independently of its parent, so another lens's rows misdescribe the list and a
+    // click on one navigates by number to a different issue.
+    placeholderData: (prev, prevQuery) =>
+      prevQuery?.queryKey?.[1] === repo && prevQuery?.queryKey?.[3] === lens
+        ? prev
+        : undefined,
   });
 }
 

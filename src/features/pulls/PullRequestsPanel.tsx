@@ -67,13 +67,13 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // resets to the first page.
   const [limit, setLimit] = useState(PAGE_SIZE);
   const prList = usePrList(repoPath, ghReady, stateFilter, limit, lens);
-  // Row CI icons hydrate separately from the list (so the list paints immediately)
-  // and are provider-neutral now — the backend routes GitHub/GitLab/Bitbucket — so
-  // `ghReady` alone is the correct gate. Fires whenever the remote list is ready and
-  // non-empty (the hook self-disables on an empty list).
+  // Row CI icons hydrate separately from the list, so the list paints immediately. Idle
+  // while the list serves another tab's placeholder rows: otherwise the intermediate key
+  // caches a map fetched against rows that are about to be replaced, and that cached map
+  // becomes the placeholder source for the next key.
   const prListCi = usePrListCi(
     repoPath,
-    ghReady,
+    ghReady && !prList.isPlaceholderData,
     stateFilter,
     limit,
     prList.data,
@@ -84,8 +84,8 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // takes seconds on large GitHub repos and every active forge query joins the commit
   // mutation's awaited invalidation set, so it must be idle off this tab and off the
   // Closed tab, where no row has live mergeability to report.
-  // `!isPlaceholderData` covers the first half of a lens/tab switch: while the LIST is
-  // still serving the previous page's rows, this stays idle rather than describing a
+  // `!isPlaceholderData` covers the first half of a tab switch: while the LIST is
+  // still serving the previous tab's rows, this stays idle rather than describing a
   // page that isn't on screen. None of these gates stop a chip on their own, though —
   // a DISABLED query still renders placeholder data, so keeping the previous tab's or
   // lens's map off these rows is the hook's placeholder comparator's job.
