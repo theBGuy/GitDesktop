@@ -77,8 +77,8 @@ several branches can come current in one trip.
 If a plain `git fetch origin` has already run (your hand, your editor, a
 background sync), the new commits are sitting in your repository with
 only the tracking ref pointing at them, and your local branch is the one
-thing still stale. No second network trip needed: a repository can fetch
-from itself.
+thing still stale. No second network trip needed: a repository
+can fetch from itself.
 
 ```sh
 $ git fetch origin
@@ -167,8 +167,8 @@ checked-out branch with the same reasoning. For an idle branch, though,
 the two are not interchangeable. `branch -f` repoints the ref wherever
 you say, no questions asked; the refspec holds the fast-forward line
 you're about to meet. And for the branch you're on, the updater is
-the one you already know, `git pull`, for exactly the reconciliation
-reason above.
+the one you already know, `git pull`, for exactly the
+reconciliation reason above.
 
 ## When the branch has commits of its own
 
@@ -190,8 +190,8 @@ $ git rev-parse --short origin/main
 ```
 
 A fast-forward discards nothing; anything else could. It's the same
-conservatism as the checkout refusal, applied to history instead of the
-working tree.
+conservatism as the checkout refusal, applied to history instead of
+the working tree.
 
 Look at the two `rev-parse` calls, though. The `! [rejected]` line is
 truthful; the `origin/main` line under it never took effect — the ref
@@ -203,8 +203,8 @@ the tracking update; the habit that holds everywhere is to let
 `rev-parse` tell you what moved after any rejection, and to run a plain
 `git fetch origin` if you want the tracking ref current.
 
-You can insist. A leading `+` on the refspec (or `--force`) permits
-the non-fast-forward:
+You can insist. A leading `+` on the refspec (or `--force`)
+permits the non-fast-forward:
 
 ```sh
 $ git fetch origin +main:main
