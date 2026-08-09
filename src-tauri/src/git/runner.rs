@@ -111,8 +111,9 @@ impl GitJob {
 
     /// Consumes the guard, clearing the kill-on-close limit before its handle is
     /// closed. git can leave legitimately detached descendants behind a command that
-    /// SUCCEEDED (a background `gc --auto`), and those must outlive the guard; only
-    /// the timeout path — which drops the guard without calling this — tree-kills.
+    /// SUCCEEDED (a background `gc --auto`), and those must outlive the guard. Only a
+    /// REAPED command disarms: every abandoned path — a timeout, a failed stdin
+    /// write, a failed wait — drops the guard still armed and takes the tree with it.
     ///
     /// A failure to clear leaks the handle instead of closing it: the kernel
     /// reclaims it at process exit, whereas closing a still-armed job would kill
@@ -213,12 +214,12 @@ pub async fn run_git_raw_input(
             let mut stdin = child.stdin.take().expect("stdin was piped");
             stdin.write_all(text.as_bytes()).await.map_err(AppError::Io)?;
         }
-        let output = child.wait_with_output().await.map_err(AppError::Io);
+        let result = child.wait_with_output().await;
         #[cfg(windows)]
-        if let Some(job) = job {
+        if let (Ok(_), Some(job)) = (&result, job) {
             job.disarm();
         }
-        output
+        result.map_err(AppError::Io)
     };
     let output = tokio::time::timeout(timeout, run)
         .await
@@ -334,6 +335,7 @@ pub async fn run_git_mutating_input(
 mod job_tests {
     use super::GitJob;
     use std::os::windows::io::AsRawHandle;
+    use std::os::windows::process::CommandExt;
     use std::path::{Path, PathBuf};
 
     /// How long the grandchild holds its lock. Bounds the whole fixture: even a
@@ -360,17 +362,18 @@ mod job_tests {
             ),
         )
         .expect("write the holder script");
+        // A delay in front of the launch puts the grandchild strictly AFTER `arm()`,
+        // so neither test races the assignment. `ping` rather than `timeout`, which
+        // this fixture's null stdin breaks; and ONE raw argument, because std's
+        // quoting would escape the `&` that chains the two commands.
+        let command = format!(
+            "ping -n 2 127.0.0.1 >nul & powershell -NoProfile -NonInteractive \
+             -ExecutionPolicy Bypass -File \"{}\"",
+            script.display()
+        );
         let child = std::process::Command::new("cmd.exe")
-            .args([
-                "/c",
-                "powershell",
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-            ])
-            .arg(&script)
+            .arg("/c")
+            .raw_arg(&command)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
