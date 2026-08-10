@@ -12,6 +12,71 @@ under `changelog.d/` (see its README); those are assembled here at release time 
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-09
+
+### Added
+
+- **Code scanning and secret scanning in the Findings tab.** The tab now lists a
+  GitHub repo's open code scanning alerts (grouped by rule) and secret scanning alerts
+  (grouped by kind, each with a validity chip for the leaked credential) next to its
+  Dependabot alerts and security advisories, and a Dependabot alert's detail spells out
+  a base-metric table per CVSS version the advisory carries, its CWEs, its references
+  as labeled links, and whether the vulnerable package is a direct or transitive
+  dependency. A category the repository hasn't switched on says so and, with repo-admin
+  access, offers **Open security settings** to turn it on.
+- **Install with Homebrew on macOS.** GitDesktop is now on a Homebrew tap, so a
+  single command puts it on your Mac — no download-and-drag:
+  `brew install --cask thebguy/tap/gitdesktop`.
+- **macOS menu bar.** The **File** menu now opens repositories the way the rest
+  of the app does — **New Repository…**, **Open Repository…**, **Clone
+  Repository…**, and an **Open Recent** submenu of your last ten repos — and
+  **Settings…** sits in the GitDesktop menu where macOS apps keep it.
+
+### Changed
+
+- **Open, Clone and Create repository from any screen.** Their keyboard shortcuts and
+  command-palette entries stay available wherever you are in the app — Settings, the user
+  guide and Explore included.
+
+### Fixed
+
+- Branch-name generation no longer blames your AI ignore rules for files it hid because
+  their names aren't readable text — the AI is now told the two causes separately.
+- The Linux AppImage now starts on current distributions (Fedora 42+, Arch, and
+  other systems with recent Mesa graphics drivers) instead of aborting with an
+  EGL error or showing an empty window — it no longer bundles an outdated
+  Wayland library that conflicted with the host's graphics drivers.
+- Git, the GitHub/GitLab CLIs, agent tools, and commands run in the built-in
+  terminal no longer inherit the AppImage bundle's library paths — fixing
+  fetches and pushes failing with a `git-remote-https: symbol lookup error`
+  on newer Linux distributions.
+- The in-app guide now names both stash-and-reapply toggles under **Settings → General**
+  and documents the Merge dialog's *already up to date* preview outcome.
+- Syntax highlighting in a large file's diff no longer paints everything after a
+  hunk as one long comment or string. Each hunk is now highlighted on its own, so
+  a comment, template literal, or parameter list the hunk cuts in half can't
+  bleed color across the collapsed gaps between hunks.
+- On forks, switching the pull-request or issue list between the fork and upstream
+  views no longer briefly shows the other side's rows — or, for pull requests, their
+  CI icons — while the new list loads.
+- Write controls across pull requests, issues, CI runs and releases — merging,
+  labels, assignees, reviewers, milestones, hiding comments, pinning, locking,
+  sub-issues and dependencies, re-running or cancelling a run, publishing a release,
+  and the rest — now follow your actual access to the repository: where you don't
+  have the access an action needs, it stays visible but disabled and says what it
+  requires, instead of failing when you press it.
+- Leaving a local pull request's conflict-resolution view part-way through
+  **Resolve all** now leaves the Changes tab on your own working tree, instead of
+  showing the file the resolution run had reached inside the merge's hidden
+  worktree.
+- On Windows, a Git operation that hits its time limit is now stopped together
+  with the helper processes it started, instead of continuing to change the
+  repository in the background after the app reported it as failed.
+- Deleting a worktree with a big working tree — `node_modules`, build output, a
+  large checkout — now runs to completion instead of failing with a 30-second
+  timeout, and a deletion that was cut short part-way finishes on the next try
+  rather than insisting the worktree isn't there.
+
 ## [0.7.0] - 2026-08-08
 
 ### Added
@@ -2683,7 +2748,8 @@ built on Tauri 2; every GitHub feature runs through the GitHub CLI (`gh`).
 - Diff-renderer exceptions are caught by an error boundary instead of taking
   down the whole app.
 
-[Unreleased]: https://github.com/theBGuy/GitDesktop/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/theBGuy/GitDesktop/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/theBGuy/GitDesktop/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/theBGuy/GitDesktop/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/theBGuy/GitDesktop/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/theBGuy/GitDesktop/compare/v0.5.2...v0.6.0

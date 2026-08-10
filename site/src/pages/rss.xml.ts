@@ -28,7 +28,7 @@ export async function GET(context: APIContext) {
   return rss({
     title: "GitDesktop",
     description:
-      "Engineering notes from building a native Git client for GitHub, GitLab and Bitbucket.",
+      "Engineering notes from building a desktop Git client for GitHub, GitLab and Bitbucket.",
     site,
     // Match the site's own URL shape so readers and analytics agree.
     trailingSlash: true,

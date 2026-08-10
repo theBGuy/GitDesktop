@@ -18,7 +18,13 @@ const releases = `${repo}/releases`;
 // self-corrects for JS visitors.
 const rel = await getLatestRelease();
 
-const builds = [
+const buildTargets: {
+  id: string;
+  os: string;
+  detail: string;
+  suffix: string;
+  cmd?: string;
+}[] = [
   {
     id: "dl-win",
     os: "Windows",
@@ -30,6 +36,7 @@ const builds = [
     os: "macOS",
     detail: ".dmg · Apple Silicon & Intel (universal)",
     suffix: ".dmg",
+    cmd: "brew install --cask thebguy/tap/gitdesktop",
   },
   {
     id: "dl-linux-appimage",
@@ -49,7 +56,12 @@ const builds = [
     detail: "Fedora .rpm · x64 · dnf-based",
     suffix: ".rpm",
   },
-].map((b) => ({ ...b, href: assetBySuffix(rel, b.suffix) ?? releases }));
+];
+
+const builds = buildTargets.map((b) => ({
+  ...b,
+  href: assetBySuffix(rel, b.suffix) ?? releases,
+}));
 
 const releasedOn = rel.publishedAt
   ? ` (${formatReleaseDate(rel.publishedAt)})`
@@ -82,7 +94,7 @@ const softwareLd = JSON.stringify({
 
 <SiteLayout
   title="Download GitDesktop for Windows, macOS & Linux"
-  description="Free, open-source native builds of GitDesktop for Windows, macOS, and Linux — installer, .dmg, AppImage, .deb and .rpm, with signed auto-updates."
+  description="Free, open-source native builds of GitDesktop for Windows, macOS, and Linux — installer, .dmg (or Homebrew), AppImage, .deb and .rpm, with signed auto-updates."
   ogTitle="Download GitDesktop"
   ogDescription="Free and open source, for Windows, macOS and Linux."
   breadcrumbs={[{ name: "Download", path: "/download/" }]}
@@ -161,6 +173,19 @@ const softwareLd = JSON.stringify({
                 <div class="min-w-0">
                   <p class="font-medium text-ink">{b.os}</p>
                   <p class="text-sm text-muted">{b.detail}</p>
+                  {/* select-all makes one tap grab the whole command; the
+                      nowrap + own-axis scroll keeps it inside the row on
+                      narrow viewports instead of wrapping mid-command. */}
+                  {b.cmd && (
+                    <code
+                      class="mt-1.5 block w-fit max-w-full select-all overflow-x-auto whitespace-nowrap rounded border border-line bg-surface/60 px-2 py-1 font-mono text-xs text-ink"
+                      role="region"
+                      aria-label="Homebrew install command"
+                      tabindex="0"
+                    >
+                      {b.cmd}
+                    </code>
+                  )}
                 </div>
                 <a
                   id={b.id}

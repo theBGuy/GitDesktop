@@ -1,6 +1,6 @@
 [package]
 name = "gitdesktop"
-version = "0.7.0"
+version = "0.8.0"
 description = "A fast, native desktop Git client"
 authors = ["theBGuy"]
 edition = "2021"
@@ -35,7 +35,7 @@ keyring = { version = "3", features = ["windows-native", "apple-native", "sync-s
 trash = "5"
 tokio = { version = "1", features = ["process", "time", "macros", "sync", "rt-multi-thread", "io-std"] }
 thiserror = "2"
-base64 = "0.22.1"
+base64 = "0.23.1"
 tauri-plugin-notification = "2.3.3"
 os_info = "3"
 portable-pty = "0.9"
@@ -73,9 +73,11 @@ tauri-plugin-updater = "2"
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"
 # Broadcasting WM_SETTINGCHANGE so a freshly-added PATH entry (the "add gitdesktop
-# to PATH" launcher) reaches new terminals without a logout. See path_launcher.rs.
+# to PATH" launcher) reaches new terminals without a logout (path_launcher.rs), and
+# job objects so a timed-out git takes its whole process tree with it (runner.rs).
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
+  "Win32_System_JobObjects",
   "Win32_UI_WindowsAndMessaging",
 ] }
 

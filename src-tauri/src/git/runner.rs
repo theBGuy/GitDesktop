@@ -10,6 +10,12 @@ use crate::state::AppState;
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 pub const NETWORK_TIMEOUT: Duration = Duration::from_secs(600);
+/// Adding and removing a worktree both write or delete a whole checkout, so their
+/// cost is proportional to the tree rather than fixed. A node_modules-scale
+/// worktree exceeds the default budget by a wide margin on Windows, and the kill
+/// lands mid-materialize or mid-delete — leaving exactly the half-state the
+/// registered/prunable reconciliation in `git::worktree` then has to clean up.
+pub const WORKTREE_OP_TIMEOUT: Duration = Duration::from_secs(600);
 
 pub struct GitOutput {
     pub stdout: Vec<u8>,
@@ -50,6 +56,103 @@ async fn git_bin() -> AppResult<PathBuf> {
         })
         .await
         .cloned()
+}
+
+/// A Windows Job Object holding a spawned git process, armed so that closing the
+/// last handle kills everything still in it.
+///
+/// `kill_on_drop` only reaps the process we spawned, and on Windows that is
+/// usually `cmd\git.exe` — the Git-for-Windows SHIM, which runs the real
+/// `mingw64\bin\git.exe` as a child. Killing the shim on timeout therefore leaves
+/// the real git running as an orphan, still deleting/mutating the repo long after
+/// the app reported failure and released the per-repo lock.
+#[cfg(windows)]
+struct GitJob(windows_sys::Win32::Foundation::HANDLE);
+
+// SAFETY: a job-object HANDLE is a process-wide kernel handle with no thread
+// affinity, and the raw pointer is only ever handed back to Win32. The wrapper
+// exists so the guard can be held across awaits inside a `Send` future.
+#[cfg(windows)]
+unsafe impl Send for GitJob {}
+
+#[cfg(windows)]
+impl GitJob {
+    /// Puts `process` in a fresh kill-on-close job. `None` on any Win32 failure —
+    /// the caller then degrades to plain `kill_on_drop` rather than failing the
+    /// git call over a missing safety net.
+    ///
+    /// Processes the child spawns before the assignment lands don't join the job.
+    /// Assignment is two syscalls issued immediately after spawn while the shim has
+    /// yet to start the real git, so losing that race should take a pathological
+    /// scheduling delay — and `kill_on_drop` still covers the direct child anyway.
+    fn arm(process: std::os::windows::io::RawHandle) -> Option<Self> {
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+
+        // SAFETY: null attributes + null name is the documented way to create an
+        // unnamed job with default security; it returns null on failure.
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            return None;
+        }
+        // Owned from here so every early return closes the handle.
+        let job = GitJob(handle);
+        if !job.set_limit_flags(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE) {
+            return None;
+        }
+        // SAFETY: `job.0` is the handle we just created and `process` is the live
+        // child's handle, valid for as long as the caller holds the `Child`.
+        if unsafe { AssignProcessToJobObject(job.0, process) } == 0 {
+            return None;
+        }
+        Some(job)
+    }
+
+    /// Consumes the guard, clearing the kill-on-close limit before its handle is
+    /// closed. git can leave legitimately detached descendants behind a command that
+    /// SUCCEEDED (a background `gc --auto`), and those must outlive the guard. Only a
+    /// REAPED command disarms: every abandoned path — a timeout, a failed stdin
+    /// write, a failed wait — drops the guard still armed and takes the tree with it.
+    ///
+    /// A failure to clear leaks the handle instead of closing it: the kernel
+    /// reclaims it at process exit, whereas closing a still-armed job would kill
+    /// those descendants.
+    fn disarm(self) {
+        if !self.set_limit_flags(0) {
+            std::mem::forget(self);
+        }
+    }
+
+    fn set_limit_flags(&self, flags: u32) -> bool {
+        use windows_sys::Win32::System::JobObjects::{
+            JobObjectExtendedLimitInformation, SetInformationJobObject,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        };
+
+        // SAFETY: the struct is plain old data, so an all-zero value is a valid
+        // (limit-free) instance.
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        info.BasicLimitInformation.LimitFlags = flags;
+        // SAFETY: `self.0` is a valid job handle and the pointer/length pair
+        // describes the fully-initialized `info` living on this stack frame.
+        unsafe {
+            SetInformationJobObject(
+                self.0,
+                JobObjectExtendedLimitInformation,
+                std::ptr::from_ref(&info).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            ) != 0
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for GitJob {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` is a handle this type created and owns exclusively.
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
+    }
 }
 
 /// Runs git and returns the raw output regardless of exit code.
@@ -105,13 +208,20 @@ pub async fn run_git_raw_input(
     };
     let run = async {
         let mut child = cmd.spawn().map_err(spawn_err)?;
+        #[cfg(windows)]
+        let job = child.raw_handle().and_then(GitJob::arm);
         if let Some(text) = input {
             use tokio::io::AsyncWriteExt;
             // Dropping the handle closes the pipe so git sees EOF.
             let mut stdin = child.stdin.take().expect("stdin was piped");
             stdin.write_all(text.as_bytes()).await.map_err(AppError::Io)?;
         }
-        child.wait_with_output().await.map_err(AppError::Io)
+        let result = child.wait_with_output().await;
+        #[cfg(windows)]
+        if let (Ok(_), Some(job)) = (&result, job) {
+            job.disarm();
+        }
+        result.map_err(AppError::Io)
     };
     let output = tokio::time::timeout(timeout, run)
         .await
@@ -220,5 +330,134 @@ pub async fn run_git_mutating_input(
             run_git_input(Some(repo_path), args, input, timeout).await
         }
         other => other,
+    }
+}
+
+#[cfg(all(test, windows))]
+mod job_tests {
+    use super::GitJob;
+    use std::os::windows::io::AsRawHandle;
+    use std::os::windows::process::CommandExt;
+    use std::path::{Path, PathBuf};
+
+    /// How long the grandchild holds its lock. Bounds the whole fixture: even a
+    /// failing assertion can only leave a process around for this long.
+    const HOLD_SECS: u32 = 10;
+
+    /// A `cmd.exe` parent whose PowerShell GRANDCHILD opens a file with no sharing.
+    /// "Is the grandchild alive?" is then answerable by trying to open that file —
+    /// an observable scoped to this test, unlike a process-name search, which also
+    /// matches the prober and other sessions' processes.
+    fn spawn_locking_tree(dir: &Path) -> (std::process::Child, PathBuf) {
+        let lock = dir.join("held.lock");
+        let script = dir.join("hold.ps1");
+        // PowerShell escapes a single quote inside a single-quoted string by doubling
+        // it; an apostrophe in the temp path (a `C:\Users\O'Brien` profile) would
+        // otherwise close the literal and fail the test for the wrong reason.
+        let quoted = lock.display().to_string().replace('\'', "''");
+        std::fs::write(
+            &script,
+            format!(
+                "$f=[IO.File]::Open('{quoted}','OpenOrCreate','ReadWrite','None')\n\
+                 Start-Sleep -Seconds {HOLD_SECS}\n\
+                 $f.Close()\n"
+            ),
+        )
+        .expect("write the holder script");
+        // A delay in front of the launch puts the grandchild strictly AFTER `arm()`,
+        // so neither test races the assignment. `ping` rather than `timeout`, which
+        // this fixture's null stdin breaks; and ONE raw argument, because std's
+        // quoting would escape the `&` that chains the two commands.
+        let command = format!(
+            "ping -n 2 127.0.0.1 >nul & powershell -NoProfile -NonInteractive \
+             -ExecutionPolicy Bypass -File \"{}\"",
+            script.display()
+        );
+        let child = std::process::Command::new("cmd.exe")
+            .arg("/c")
+            .raw_arg(&command)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn the locking tree");
+        (child, lock)
+    }
+
+    /// Whether someone still holds the lock file exclusively. A file that doesn't
+    /// exist yet counts as unheld — the grandchild hasn't reached the open.
+    fn lock_held(lock: &Path) -> bool {
+        match std::fs::OpenOptions::new().write(true).open(lock) {
+            Ok(_) => false,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(_) => true,
+        }
+    }
+
+    fn wait_until(mut cond: impl FnMut() -> bool, secs: u64) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+        while std::time::Instant::now() < deadline {
+            if cond() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        cond()
+    }
+
+    /// Closing an ARMED job kills descendants the direct child spawned — the
+    /// behavior a timed-out `git` needs, since the Git-for-Windows shim runs the
+    /// real git as a child of its own.
+    #[test]
+    fn armed_job_close_kills_the_grandchild() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-job-armed-")
+            .tempdir()
+            .expect("create temp dir");
+        let (mut child, lock) = spawn_locking_tree(dir.path());
+        let job = GitJob::arm(child.as_raw_handle()).expect("job object armed");
+        assert!(
+            wait_until(|| lock_held(&lock), 30),
+            "the grandchild took the lock"
+        );
+
+        drop(job);
+        let _ = child.wait();
+        assert!(
+            wait_until(|| !lock_held(&lock), 15),
+            "the lock is released, so the grandchild died with the tree"
+        );
+    }
+
+    /// The control that proves the observable can fail: on the success path the job
+    /// is DISARMED before it closes, and Windows never cascades a kill on its own,
+    /// so the grandchild outlives the parent (git's detached `gc --auto` relies on
+    /// exactly this).
+    #[test]
+    fn disarmed_job_close_leaves_the_grandchild_running() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-job-disarmed-")
+            .tempdir()
+            .expect("create temp dir");
+        let (mut child, lock) = spawn_locking_tree(dir.path());
+        let job = GitJob::arm(child.as_raw_handle()).expect("job object armed");
+        assert!(
+            wait_until(|| lock_held(&lock), 30),
+            "the grandchild took the lock"
+        );
+
+        job.disarm();
+        child.kill().expect("kill the direct child");
+        let _ = child.wait();
+        assert!(
+            lock_held(&lock),
+            "the grandchild survives a disarmed close plus a direct parent kill"
+        );
+
+        // No leaked process: the holder's bounded sleep expires on its own.
+        assert!(
+            wait_until(|| !lock_held(&lock), u64::from(HOLD_SECS) + 15),
+            "the orphaned holder exits on its own"
+        );
     }
 }
