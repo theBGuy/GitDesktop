@@ -656,10 +656,19 @@ export const AiProviderSection = withForm({
     const [testResult, setTestResult] = useState<{
       ok: boolean;
       message?: string;
+      /** The draft signature this verdict was produced under (see testConfig). */
+      config: string;
     } | null>(null);
+    /** Signature over every DRAFT input testConnection reads. The verdict renders
+     *  only while the current signature still matches the one it was produced
+     *  under, so any route that changes the draft — including the footer's Discard,
+     *  which form.reset()s while this section stays mounted, and allow-list writes
+     *  from other sections — retires it without needing to know to clear it. A
+     *  key-order difference could only hide a verdict early, never keep a stale one. */
+    const testConfig = JSON.stringify({ ai, allowedHosts });
     /** Generation for the in-flight connection test. Bumping it makes a running
-     *  test discard its own outcome: the key or provider it was testing is gone,
-     *  so its verdict would re-pin a result describing a setup you just changed. */
+     *  test discard its own outcome — used for saved-key changes, which the draft
+     *  signature can't see (keys live in the keychain, not the form). */
     const testRun = useRef(0);
 
     function discardTestResult() {
@@ -691,7 +700,6 @@ export const AiProviderSection = withForm({
     });
 
     function setAi(next: AiSettings) {
-      discardTestResult();
       form.setFieldValue("ai", next);
     }
 
@@ -701,9 +709,6 @@ export const AiProviderSection = withForm({
       const host = normalizeHost(url);
       if (host && !allowedHosts.includes(host)) {
         form.setFieldValue("aiAllowedHosts", [...allowedHosts, host]);
-        // The draft allow list is an input to the test (testConnection hands it to
-        // guardedFetch), so a blocked-host verdict describes a setup this just changed.
-        discardTestResult();
       }
     }
 
@@ -723,6 +728,9 @@ export const AiProviderSection = withForm({
 
     async function testConnection() {
       const run = ++testRun.current;
+      // Captured before the first await: the verdict must carry the signature it
+      // was produced under, not whatever the draft holds when it resolves.
+      const config = testConfig;
       setTesting(true);
       setTestResult(null);
       try {
@@ -736,11 +744,13 @@ export const AiProviderSection = withForm({
         const result = await client.testConnection();
         if (run !== testRun.current) return;
         setTestResult(
-          result.ok ? { ok: true } : { ok: false, message: result.message },
+          result.ok
+            ? { ok: true, config }
+            : { ok: false, message: result.message, config },
         );
       } catch (e) {
         if (run !== testRun.current) return;
-        setTestResult({ ok: false, message: errorMessage(e) });
+        setTestResult({ ok: false, message: errorMessage(e), config });
       } finally {
         // Always released: the button is disabled while testing, so no newer run
         // can own this flag — a superseded run still has to hand it back.
@@ -871,12 +881,12 @@ export const AiProviderSection = withForm({
             {testing && <Spinner data-icon="inline-start" />}
             Test connection
           </Button>
-          {testResult?.ok && (
+          {testResult?.ok && testResult.config === testConfig && (
             <span className="flex items-center gap-1 text-xs text-success">
               <CheckCircleIcon className="size-4" /> Connected
             </span>
           )}
-          {testResult && !testResult.ok && (
+          {testResult && !testResult.ok && testResult.config === testConfig && (
             <span className="flex min-w-0 items-center gap-1 text-xs text-destructive">
               <XCircleIcon className="size-4 shrink-0" />
               <span className="line-clamp-2">{testResult.message}</span>
@@ -1060,10 +1070,7 @@ export const AiProviderSection = withForm({
           <AllowedHostsField
             hosts={allowedHosts}
             activeUrls={activeProviderUrls}
-            onChange={(next) => {
-              form.setFieldValue("aiAllowedHosts", next);
-              discardTestResult();
-            }}
+            onChange={(next) => form.setFieldValue("aiAllowedHosts", next)}
           />
         )}
 
