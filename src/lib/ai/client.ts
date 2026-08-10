@@ -21,15 +21,20 @@ export class MissingApiKeyError extends Error {
 
 /**
  * The provider's own explanation for a failed call, falling back to the generic
- * message. The AI SDK's `APICallError.message` is only the HTTP reason phrase
- * ("Bad Request"), while the cause sits unread in `responseBody` — Google answers
- * a rejected key with 400 + "Invalid Auth key.", so the bare phrase reads like a
- * malformed request instead of an auth problem. Google wraps the payload in an
- * array, OpenAI-compatible servers use a bare object; accept either, and keep the
- * generic message for a non-JSON body.
+ * message. When a provider's error body doesn't match the SDK's expected schema the
+ * SDK sets `APICallError.message` to the bare HTTP reason phrase and leaves the cause
+ * unread in `responseBody` — Google's body is array-wrapped, so a rejected key reads
+ * as "Bad Request" rather than "Invalid Auth key.". Two unwraps are load-bearing:
+ * retries replace the error with a `RetryError` whose body lives on `lastError`, and
+ * in-stream error parts arrive as the provider's already-parsed payload rather than
+ * an Error (so `String(e)` would render "[object Object]").
  */
 function providerErrorMessage(e: unknown): string {
-  const body = (e as { responseBody?: unknown } | null)?.responseBody;
+  const unwrapped = ((e as { lastError?: unknown } | null)?.lastError ?? e) as {
+    responseBody?: unknown;
+    message?: unknown;
+  } | null;
+  const body = unwrapped?.responseBody;
   if (typeof body === "string" && body.trim()) {
     try {
       const parsed: unknown = JSON.parse(body);
@@ -40,6 +45,13 @@ function providerErrorMessage(e: unknown): string {
     } catch {
       // Not JSON — the generic message is the best we have.
     }
+  }
+  if (
+    !(unwrapped instanceof Error) &&
+    typeof unwrapped?.message === "string" &&
+    unwrapped.message.trim()
+  ) {
+    return unwrapped.message;
   }
   return errorMessage(e);
 }
@@ -264,7 +276,7 @@ export async function runAgenticStream(opts: AgenticStreamOpts): Promise<void> {
         : {}),
     });
   } catch (e) {
-    throw new Error(annotateToolError(errorMessage(e)));
+    throw new Error(annotateToolError(providerErrorMessage(e)));
   }
 
   let buffer = "";
@@ -327,7 +339,7 @@ export async function runAgenticStream(opts: AgenticStreamOpts): Promise<void> {
           break;
         }
         case "error": {
-          throw new Error(annotateToolError(errorMessage(part.error)));
+          throw new Error(annotateToolError(providerErrorMessage(part.error)));
         }
         case "abort": {
           // `type: 'abort'` is real in the installed ai@6 TextStreamPart union; an
@@ -341,7 +353,7 @@ export async function runAgenticStream(opts: AgenticStreamOpts): Promise<void> {
     }
   } catch (e) {
     if (opts.abortSignal.aborted) return; // clean cancellation — not an error
-    throw new Error(annotateToolError(errorMessage(e)));
+    throw new Error(annotateToolError(providerErrorMessage(e)));
   }
 
   // A clean finish that produced no prose (all steps spent on tool calls, or ended on

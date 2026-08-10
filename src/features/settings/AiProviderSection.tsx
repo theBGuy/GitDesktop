@@ -657,6 +657,15 @@ export const AiProviderSection = withForm({
       ok: boolean;
       message?: string;
     } | null>(null);
+    /** Generation for the in-flight connection test. Bumping it makes a running
+     *  test discard its own outcome: the key or provider it was testing is gone,
+     *  so its verdict would re-pin a result describing a setup you just changed. */
+    const testRun = useRef(0);
+
+    function discardTestResult() {
+      testRun.current += 1;
+      setTestResult(null);
+    }
 
     // Keys save immediately to the OS keychain (they're not part of the
     // settings draft), so they get their own little form.
@@ -666,9 +675,9 @@ export const AiProviderSection = withForm({
         try {
           await setSecret(provider, value.key.trim());
           keyForm.reset({ key: "" });
-          // The old result described the old key; leaving it up makes a fixed
-          // problem look unfixed (only a provider/model change cleared it).
-          setTestResult(null);
+          // The old result described the old key, so leaving it up makes a fixed
+          // setup look broken.
+          discardTestResult();
           queryClient.invalidateQueries({
             queryKey: settingsKeys.secret(provider),
           });
@@ -682,7 +691,7 @@ export const AiProviderSection = withForm({
     });
 
     function setAi(next: AiSettings) {
-      setTestResult(null);
+      discardTestResult();
       form.setFieldValue("ai", next);
     }
 
@@ -702,7 +711,7 @@ export const AiProviderSection = withForm({
           queryKey: settingsKeys.secret(provider),
         });
         setConfirmClear(false);
-        setTestResult(null);
+        discardTestResult();
         toast.success("Key removed");
       } catch (e) {
         toastError(e);
@@ -710,25 +719,28 @@ export const AiProviderSection = withForm({
     }
 
     async function testConnection() {
+      const run = ++testRun.current;
       setTesting(true);
       setTestResult(null);
       try {
         // Use a typed-but-unsaved key and the unsaved allow list, so you can
-        // test a just-added host/key before saving the settings draft. Trimmed to
-        // match what Save stores, so a pasted key with stray whitespace doesn't
-        // fail the test and then work once saved.
+        // test a just-added host/key before saving the settings draft.
         const client = await createAiClient(
           ai,
-          keyForm.getFieldValue("key").trim(),
+          keyForm.getFieldValue("key"),
           allowedHosts,
         );
         const result = await client.testConnection();
+        if (run !== testRun.current) return;
         setTestResult(
           result.ok ? { ok: true } : { ok: false, message: result.message },
         );
       } catch (e) {
+        if (run !== testRun.current) return;
         setTestResult({ ok: false, message: errorMessage(e) });
       } finally {
+        // Always released: the button is disabled while testing, so no newer run
+        // can own this flag — a superseded run still has to hand it back.
         setTesting(false);
       }
     }
