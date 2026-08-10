@@ -701,6 +701,9 @@ export const AiProviderSection = withForm({
       const host = normalizeHost(url);
       if (host && !allowedHosts.includes(host)) {
         form.setFieldValue("aiAllowedHosts", [...allowedHosts, host]);
+        // The draft allow list is an input to the test (testConnection hands it to
+        // guardedFetch), so a blocked-host verdict describes a setup this just changed.
+        discardTestResult();
       }
     }
 
@@ -1057,7 +1060,10 @@ export const AiProviderSection = withForm({
           <AllowedHostsField
             hosts={allowedHosts}
             activeUrls={activeProviderUrls}
-            onChange={(next) => form.setFieldValue("aiAllowedHosts", next)}
+            onChange={(next) => {
+              form.setFieldValue("aiAllowedHosts", next);
+              discardTestResult();
+            }}
           />
         )}
 

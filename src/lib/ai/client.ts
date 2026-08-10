@@ -21,38 +21,47 @@ export class MissingApiKeyError extends Error {
 
 /**
  * The provider's own explanation for a failed call, falling back to the generic
- * message. When a provider's error body doesn't match the SDK's expected schema the
- * SDK sets `APICallError.message` to the bare HTTP reason phrase and leaves the cause
- * unread in `responseBody` — Google's body is array-wrapped, so a rejected key reads
- * as "Bad Request" rather than "Invalid Auth key.". Two unwraps are load-bearing:
- * retries replace the error with a `RetryError` whose body lives on `lastError`, and
- * in-stream error parts arrive as the provider's already-parsed payload rather than
- * an Error (so `String(e)` would render "[object Object]").
+ * message. Three constraints shape it: a body the SDK's error schema can't parse
+ * leaves `APICallError.message` as the bare HTTP reason phrase with the cause unread
+ * in `responseBody` (Google's is array-wrapped, so a rejected key reads "Bad Request"
+ * rather than "Invalid Auth key."); a retry moves that body onto `RetryError.lastError`,
+ * and `isRetryable` covers 429/5xx — the quota case; and an in-stream error part is the
+ * provider's already-parsed payload rather than an Error.
  */
+/** The human-readable reason out of a provider error payload, whether it nests under
+ *  `error` (OpenAI, Google) or sits bare on `message`, wrapped in an array (Google) or
+ *  not. One reader for both call sites below: the parsed response body and the raw
+ *  in-stream payload carry the same shapes, so they must accept the same set. */
+function errorTextOf(value: unknown): string | null {
+  const entry = (Array.isArray(value) ? value[0] : value) as {
+    error?: { message?: unknown };
+    message?: unknown;
+  } | null;
+  const message = entry?.error?.message ?? entry?.message;
+  return typeof message === "string" && message.trim() ? message : null;
+}
+
 function providerErrorMessage(e: unknown): string {
   const unwrapped = ((e as { lastError?: unknown } | null)?.lastError ?? e) as {
     responseBody?: unknown;
-    message?: unknown;
   } | null;
   const body = unwrapped?.responseBody;
   if (typeof body === "string" && body.trim()) {
     try {
-      const parsed: unknown = JSON.parse(body);
-      const entry = Array.isArray(parsed) ? parsed[0] : parsed;
-      const message = (entry as { error?: { message?: unknown } } | null)?.error
-        ?.message;
-      if (typeof message === "string" && message.trim()) return message;
+      const fromBody = errorTextOf(JSON.parse(body));
+      if (fromBody) return fromBody;
     } catch {
       // Not JSON — the generic message is the best we have.
     }
   }
-  if (
-    !(unwrapped instanceof Error) &&
-    typeof unwrapped?.message === "string" &&
-    unwrapped.message.trim()
-  ) {
-    return unwrapped.message;
+  // An Error's own `message` is what the generic fallback already returns; only a raw
+  // payload object needs reading here.
+  if (!(unwrapped instanceof Error)) {
+    const fromPayload = errorTextOf(unwrapped);
+    if (fromPayload) return fromPayload;
   }
+  // Deliberately the wrapper, not `unwrapped`: a retry's message embeds the last
+  // error's text and adds the attempt count, which is worth keeping.
   return errorMessage(e);
 }
 
