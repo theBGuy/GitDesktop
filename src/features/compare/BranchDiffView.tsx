@@ -6,10 +6,7 @@ import { DiffSurface } from "@/features/diff/DiffSurfaceLazy";
 import { FileRowActions } from "@/features/history/FileRowActions";
 import { useBranchDiffFiles, useBranchFileDiff } from "@/lib/git/queries";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
-import { cn } from "@/lib/utils";
-
-const PLACEHOLDER_FADE =
-  "transition-opacity duration-150 motion-reduce:transition-none";
+import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
 
 /**
  * The net change `compare` introduces relative to `base` (the three-dot diff,
@@ -43,18 +40,24 @@ export function BranchDiffView({
   // Diff off a deferred path so rapidly arrowing the file list only fetches +
   // renders the landed-on file; the highlight stays on effectivePath.
   const deferredPath = useDeferredValue(effectivePath);
-  // Gated on a settled file list: the path comes FROM that list, so while it's a
-  // placeholder the path belongs to the previous comparison. Fetching anyway
-  // succeeds with an empty diff and flashes "No changes to show".
+  // Fetch only once the path is one this comparison actually changed. The path
+  // comes FROM the file list, so it belongs to the previous comparison both while
+  // that list is a placeholder AND for the deferred frame after it settles — and a
+  // fetch there "succeeds" with an empty diff, flashing "No changes to show".
+  const diffEnabled =
+    !files.isPlaceholderData &&
+    (files.data?.some((f) => f.path === deferredPath) ?? false);
   const diff = useBranchFileDiff(
     repoPath,
     base,
     compare,
     deferredPath,
-    !files.isPlaceholderData,
+    diffEnabled,
   );
 
-  if (files.isPending) {
+  // A placeholder list is the PREVIOUS comparison's, so an empty one says nothing
+  // about this pair — hold the skeleton rather than claim "no changes" below.
+  if (files.isPending || (files.isPlaceholderData && files.data.length === 0)) {
     return (
       <div className="space-y-3 p-4">
         <Skeleton className="h-5 w-2/3" />
@@ -78,6 +81,10 @@ export function BranchDiffView({
   // The counts, totals and file list belong to the PREVIOUS comparison until the
   // selected one lands; fade them. The branch names are props — always current.
   const staleDim = files.isPlaceholderData && "opacity-80";
+  // The diff pane serves the previous file's diff for longer than the rest (its
+  // query stays on placeholder data through the gated window above), so it fades
+  // on its own state. Never nested inside another dim — 0.8² reads as disabled.
+  const diffDim = (staleDim || diff.isPlaceholderData) && "opacity-80";
 
   // Arrow keys walk the file list, mirroring the app's other lists.
   const onFilesKeyDown = listKeyboardNav({
@@ -89,7 +96,7 @@ export function BranchDiffView({
   });
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full flex-col" aria-busy={Boolean(staleDim)}>
       <header className="flex items-center gap-2 border-b px-4 py-3 text-xs">
         <span className="font-medium">
           <span className="font-mono">{compare}</span> vs{" "}
@@ -109,9 +116,13 @@ export function BranchDiffView({
         </span>
       </header>
 
-      <div className={cn("flex min-h-0 flex-1", PLACEHOLDER_FADE, staleDim)}>
+      <div className="flex min-h-0 flex-1">
         <aside
-          className="flex w-72 shrink-0 flex-col border-r"
+          className={cn(
+            "flex w-72 shrink-0 flex-col border-r",
+            PLACEHOLDER_FADE,
+            staleDim,
+          )}
           role="listbox"
           aria-label="Changed files"
         >
@@ -155,7 +166,7 @@ export function BranchDiffView({
             </FileRowActions>
           </ScrollArea>
         </aside>
-        <main className="min-w-0 flex-1">
+        <main className={cn("min-w-0 flex-1", PLACEHOLDER_FADE, diffDim)}>
           {deferredPath ? (
             <DiffSurface
               filePath={deferredPath}

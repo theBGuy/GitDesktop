@@ -4378,6 +4378,37 @@ mod tests {
 
     }
 
+    /// The diff pane discards a rendered body whose `file_path` doesn't match the
+    /// path it asked for (that mismatch is how it detects a stale placeholder), so
+    /// the echo must stay verbatim — including a `[slug]`-style name, which only
+    /// survives because the pathspec is quoted literally.
+    #[tokio::test]
+    async fn stash_file_diff_echoes_the_requested_path() {
+        let (dir, repo) = setup_repo("stash-file-diff-echo").await;
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("[slug]")).unwrap();
+        std::fs::write(root.join("plain.txt"), "one\n").unwrap();
+        std::fs::write(root.join("[slug]").join("a.txt"), "one\n").unwrap();
+        git(&repo, &["add", "."]).await;
+        git(&repo, &["commit", "-m", "seed"]).await;
+
+        std::fs::write(root.join("plain.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(root.join("[slug]").join("a.txt"), "one\ntwo\n").unwrap();
+        git(&repo, &["stash", "push", "-m", "echo test"]).await;
+
+        for path in ["plain.txt", "[slug]/a.txt"] {
+            let diff = git_stash_file_diff(repo.clone(), 0, path.to_string())
+                .await
+                .unwrap();
+            assert_eq!(diff.file_path, path);
+            assert!(
+                diff.text.contains("+two"),
+                "no hunk for {path}: {}",
+                diff.text
+            );
+        }
+    }
+
     #[test]
     fn parse_worktree_branches_reads_path_and_branch_and_detached() {
         // Main worktree on a branch, a linked worktree on another branch, and a

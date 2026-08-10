@@ -84,7 +84,7 @@ import {
 import { useUiStore } from "@/lib/stores/ui";
 import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
-import { cn } from "@/lib/utils";
+import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
 
 /** Platform-correct submit hint (Cmd+Enter on macOS, Ctrl+Enter else) — never a
  *  literal modifier (house platform-mod-key rule). */
@@ -1584,6 +1584,7 @@ export function JiraIssueView({
   const browseUrl = link.data
     ? `https://${link.data.siteHost}/browse/${issueKey}`
     : issue.url;
+  const staleDim = details.isPlaceholderData && "opacity-80";
 
   function submitComment() {
     const body = composeBody.trim();
@@ -1618,12 +1619,21 @@ export function JiraIssueView({
   }
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full flex-col" aria-busy={Boolean(staleDim)}>
       <header className="space-y-2 border-b px-4 py-3">
         <div className="flex items-start gap-2">
-          <h2 className="min-w-0 text-sm font-medium">
+          {/* The key is the PROP (always the issue you selected); the summary is
+              fetched, so it fades rather than disappearing — hiding it would
+              collapse the header's height mid-transition. */}
+          <h2
+            className={cn(
+              "min-w-0 text-sm font-medium",
+              PLACEHOLDER_FADE,
+              staleDim,
+            )}
+          >
             <span className="font-mono font-normal text-muted-foreground">
-              {issue.key}
+              {issueKey}
             </span>{" "}
             {issue.summary}
           </h2>
@@ -1697,12 +1707,7 @@ export function JiraIssueView({
               Root is `relative`-only) so a long issue can't leak a window
               scrollbar. */}
           <ScrollArea className="min-h-0 flex-1 overflow-hidden">
-            <div
-              className={cn(
-                "space-y-4 p-4 transition-opacity duration-150 motion-reduce:transition-none",
-                details.isPlaceholderData && "opacity-80",
-              )}
-            >
+            <div className={cn("space-y-4 p-4", PLACEHOLDER_FADE, staleDim)}>
               <div className="border-b pb-3">
                 {issue.descriptionMd.trim() ? (
                   <Markdown>{issue.descriptionMd}</Markdown>
@@ -1791,6 +1796,7 @@ export function JiraIssueView({
         </div>
 
         <JiraIssueSidebar
+          className={cn(PLACEHOLDER_FADE, staleDim)}
           repoPath={repoPath}
           issueKey={issueKey}
           // `?? null`: render read-only during the link-pending window; the

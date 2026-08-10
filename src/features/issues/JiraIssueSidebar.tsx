@@ -5,6 +5,7 @@ import type { JiraLink } from "@/lib/jira/store";
 import { formatStoryPoints, type JiraIssueDetails } from "@/lib/jira/types";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
+import { cn } from "@/lib/utils";
 import {
   IssueTypeMeta,
   JiraAssigneePicker,
@@ -39,6 +40,7 @@ export function JiraIssueSidebar({
   canDeleteOwnWorklogs,
   canEditAllWorklogs,
   canDeleteAllWorklogs,
+  className,
 }: {
   repoPath: string;
   issueKey: string;
@@ -54,12 +56,20 @@ export function JiraIssueSidebar({
   canDeleteOwnWorklogs: boolean;
   canEditAllWorklogs: boolean;
   canDeleteAllWorklogs: boolean;
+  /** Merged into the rail's own classes — the caller owns the placeholder fade,
+   *  since it holds the query whose data these rows render. */
+  className?: string;
 }) {
   const setDueDate = useJiraSetDueDate(repoPath, link);
   const selectIssue = useUiStore((s) => s.selectIssue);
 
   return (
-    <aside className="w-64 shrink-0 space-y-4 overflow-y-auto border-l p-4">
+    <aside
+      className={cn(
+        "w-64 shrink-0 space-y-4 overflow-y-auto border-l p-4",
+        className,
+      )}
+    >
       {/* Type + priority. Type is a muted glyph + name; priority is editable
           when permitted, else the muted value (omitted when neither present). */}
       {(issue.issueTypeName ||

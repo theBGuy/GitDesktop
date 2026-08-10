@@ -87,8 +87,8 @@ export function useRepoIdentity(repo: string) {
  * plain keepPreviousData would keep the previous repo's rows on screen (and, for
  * number-keyed maps, briefly-wrong data). Keeps previous data only when the previous
  * query's repo segment matches, so Load-more and Open/Closed switches still skip the
- * skeleton. `repoKeyIndex` is where the repo sits in the key (1 for every key in this
- * file and in jira/queries.ts).
+ * skeleton. `repoKeyIndex` is where the repo sits in the key (index 1 for every key
+ * passed to it).
  * A key that also varies on an identity axis beyond repo (lens, state) needs
  * `keepPreviousDataForKeyAxes` instead (the PR and issue list hooks below do):
  * matching repo alone would serve another axis's data.

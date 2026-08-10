@@ -831,6 +831,45 @@ mod tests {
         assert_eq!(noop.text, all.text);
     }
 
+    /// The diff pane discards a rendered body whose `file_path` doesn't match the
+    /// path it asked for (that mismatch is how it detects a stale placeholder), so
+    /// the echo must stay verbatim — including a `[slug]`-style name, which only
+    /// survives because the pathspec is quoted literally.
+    #[tokio::test]
+    async fn branch_file_diff_echoes_the_requested_path() {
+        let (_base, repo) = seed_repo("branchfilediff-echo").await;
+        let root = std::path::Path::new(&repo);
+
+        std::fs::create_dir_all(root.join("[slug]")).unwrap();
+        std::fs::write(root.join("plain.txt"), "one\n").unwrap();
+        std::fs::write(root.join("[slug]").join("a.txt"), "one\n").unwrap();
+        run(&repo, &["add", "-A"]).await;
+        run(&repo, &["commit", "-qm", "seed"]).await;
+        let base_sha = run(&repo, &["rev-parse", "HEAD"]).await.trim().to_string();
+
+        std::fs::write(root.join("plain.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(root.join("[slug]").join("a.txt"), "one\ntwo\n").unwrap();
+        run(&repo, &["add", "-A"]).await;
+        run(&repo, &["commit", "-qm", "work"]).await;
+
+        for path in ["plain.txt", "[slug]/a.txt"] {
+            let diff = git_branch_file_diff(
+                repo.clone(),
+                base_sha.clone(),
+                "HEAD".into(),
+                path.to_string(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(diff.file_path, path);
+            assert!(
+                diff.text.contains("+two"),
+                "no hunk for {path}: {}",
+                diff.text
+            );
+        }
+    }
+
     /// AI-ignore patterns are gitignore-style, so a bare NAME matches at any
     /// depth (not just the repo root), a bare DIRECTORY name hides that
     /// directory's contents wherever it sits, and a leading `/` anchors to the

@@ -504,6 +504,45 @@ mod tests {
         }
     }
 
+    /// The diff pane discards a rendered body whose `file_path` doesn't match the
+    /// path it asked for (that mismatch is how it detects a stale placeholder), so
+    /// the echo must stay verbatim — including a `[slug]`-style name, which only
+    /// survives because the pathspec is quoted literally.
+    #[tokio::test]
+    async fn commit_file_diff_echoes_the_requested_path() {
+        let (_dir, repo) = temp_repo("file-diff-echo");
+        git(&repo, &["init"]).await;
+        git(&repo, &["config", "user.email", "t@t"]).await;
+        git(&repo, &["config", "user.name", "t"]).await;
+        let root = Path::new(&repo);
+        std::fs::create_dir_all(root.join("[slug]")).unwrap();
+        std::fs::write(root.join("plain.txt"), "one\n").unwrap();
+        std::fs::write(root.join("[slug]").join("a.txt"), "one\n").unwrap();
+        git(&repo, &["add", "."]).await;
+        git(&repo, &["commit", "-m", "seed"]).await;
+        std::fs::write(root.join("plain.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(root.join("[slug]").join("a.txt"), "one\ntwo\n").unwrap();
+        git(&repo, &["commit", "-am", "change both"]).await;
+        let hash = run_git(Some(&repo), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap()
+            .stdout_lossy()
+            .trim()
+            .to_string();
+
+        for path in ["plain.txt", "[slug]/a.txt"] {
+            let diff = git_commit_file_diff(repo.clone(), hash.clone(), path.to_string())
+                .await
+                .unwrap();
+            assert_eq!(diff.file_path, path);
+            assert!(
+                diff.text.contains("+two"),
+                "no hunk for {path}: {}",
+                diff.text
+            );
+        }
+    }
+
     #[tokio::test]
     async fn blame_dash_prefixed_rev_rejected() {
         let (_dir, repo, _first, _second) = two_commit_repo("dash-rev").await;
