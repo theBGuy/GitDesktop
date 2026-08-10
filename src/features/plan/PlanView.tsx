@@ -17,12 +17,13 @@ import {
 import { AgentTranscript } from "@/features/sessions/AgentTranscript";
 import { selectSession } from "@/features/sessions/agentSelect";
 import { useSessionsStore } from "@/features/sessions/store";
-import type { AgentKind } from "@/lib/ai/agent";
+import { type AgentKind, defaultAgentKind } from "@/lib/ai/agent";
 import { formatUsd } from "@/lib/ai/cost";
 import { extractPlanQuestions } from "@/lib/ai/prompt";
 import { MODEL_SUGGESTIONS } from "@/lib/ai/providers";
 import { forgeFeatureReady, useForgeStatus } from "@/lib/git/queries";
 import { formatBinding } from "@/lib/hotkeys/binding";
+import { useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { CreateLocalIssueDialog } from "../issues/CreateLocalIssueDialog";
 import { ImplementPlanButton } from "./ImplementPlanButton";
@@ -113,8 +114,13 @@ export function PlanComposer({
   seed: PlanSeed | null;
 }) {
   const start = usePlanStore((s) => s.start);
+  const settings = useSettings();
   const [goal, setGoal] = useState(seed?.goal ?? "");
-  const [agent, setAgent] = useState<AgentKind>("claude");
+  // An explicit pick; null = follow the Settings default. Derived during render
+  // — no effect — so settings arriving late can't clobber a pick.
+  const [agentPick, setAgentPick] = useState<AgentKind | null>(null);
+  const agent: AgentKind =
+    agentPick ?? (settings.data ? defaultAgentKind(settings.data) : "claude");
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState("");
 
@@ -185,7 +191,7 @@ export function PlanComposer({
             <AgentPicker
               value={agent}
               onChange={(a) => {
-                setAgent(a);
+                setAgentPick(a);
                 setModel("");
               }}
             />

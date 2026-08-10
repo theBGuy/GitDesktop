@@ -31,10 +31,11 @@ import {
   captureAgentSelection,
   clearAgentSelection,
 } from "@/features/sessions/agentSelect";
-import type { AgentKind } from "@/lib/ai/agent";
+import { type AgentKind, defaultAgentKind } from "@/lib/ai/agent";
 import { formatUsd } from "@/lib/ai/cost";
 import { copyText } from "@/lib/clipboard";
 import { formatBinding } from "@/lib/hotkeys/binding";
+import { useSettings } from "@/lib/settings/queries";
 import { toastError } from "@/lib/toast";
 import {
   assembleSessionReport,
@@ -210,11 +211,16 @@ export function ResearchComposer({
   seed: ResearchSeed | null;
 }) {
   const start = useResearchStore((s) => s.start);
+  const settings = useSettings();
   const [topic, setTopic] = useState(seed?.topic ?? "");
   const [depth, setDepth] = useState<ResearchDepth>(
     seed?.depth ?? "brainstorm",
   );
-  const [agent, setAgent] = useState<AgentKind>("claude");
+  // An explicit pick; null = follow the Settings default. Derived during render
+  // — no effect — so settings arriving late can't clobber a pick.
+  const [agentPick, setAgentPick] = useState<AgentKind | null>(null);
+  const agent: AgentKind =
+    agentPick ?? (settings.data ? defaultAgentKind(settings.data) : "claude");
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState("");
 
@@ -266,7 +272,7 @@ export function ResearchComposer({
             <AgentPicker
               value={agent}
               onChange={(a) => {
-                setAgent(a);
+                setAgentPick(a);
                 setModel(""); // model lists differ between agents
               }}
             />

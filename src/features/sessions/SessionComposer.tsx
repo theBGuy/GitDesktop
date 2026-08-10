@@ -11,7 +11,7 @@ import {
 } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import type { AgentKind } from "@/lib/ai/agent";
+import { type AgentKind, defaultAgentKind } from "@/lib/ai/agent";
 import { estimateRunCost } from "@/lib/ai/cost";
 import type { ContainerStatus } from "@/lib/ai/sandbox";
 import { useContainerStatus } from "@/lib/ai/sandbox-queries";
@@ -195,12 +195,18 @@ export function SessionComposer({
   const pendingTask = useSessionsStore((s) => s.pendingTask);
   const setPendingTask = useSessionsStore((s) => s.setPendingTask);
   const sessions = useSessionsStore((s) => s.sessions);
+  // The start-agent default derives from settings, so this must resolve first.
+  const settings = useSettings();
   const [draft, setDraft] = useState("");
   const [startModel, setStartModel] = useState("");
   const [startEffort, setStartEffort] = useState("");
-  const [startAgent, setStartAgent] = useState<
-    "claude" | "codex" | "copilot" | "opencode"
-  >("claude");
+  // An explicit pick for a NEW session; null = follow the Settings default.
+  // Derived during render — no effect — so settings arriving late can't clobber
+  // a pick, and a later Settings change moves the unpicked default.
+  const [startAgentPick, setStartAgentPick] = useState<AgentKind | null>(null);
+  const startAgent: AgentKind =
+    startAgentPick ??
+    (settings.data ? defaultAgentKind(settings.data) : "claude");
   // MCP servers opted into for a NEW session. null = "use the default" (every
   // enabled registry server); a concrete array once the user picks. Frozen at
   // turn 1, so it only matters before a session exists.
@@ -305,7 +311,7 @@ export function SessionComposer({
     // onChange, so restoring an agent doesn't wipe the model restored with it.
     if (pendingTask.isolation !== undefined)
       setStartIsolation(pendingTask.isolation);
-    if (pendingTask.agent !== undefined) setStartAgent(pendingTask.agent);
+    if (pendingTask.agent !== undefined) setStartAgentPick(pendingTask.agent);
     if (pendingTask.model !== undefined) setStartModel(pendingTask.model);
     if (pendingTask.effort !== undefined) setStartEffort(pendingTask.effort);
     if (pendingTask.mode !== undefined) setMode(pendingTask.mode);
@@ -364,7 +370,6 @@ export function SessionComposer({
   // draft is a slash invocation, keyed on the repo ROOT (not the worktree) so it
   // stays cached across the session's worktree transition, and on the agent
   // (each CLI reads different dirs).
-  const settings = useSettings();
   const customCommands = settings.data?.customCommands;
   // Scope/override lookup keys for this repo (identity + raw path), so a
   // repo-scoped server or per-repo override set from a sibling worktree is
@@ -936,7 +941,7 @@ export function SessionComposer({
                 <AgentPicker
                   value={startAgent}
                   onChange={(a) => {
-                    setStartAgent(a);
+                    setStartAgentPick(a);
                     setStartModel(""); // model lists differ between agents
                     setStartMcp(null); // re-derive the new agent's default servers
                   }}

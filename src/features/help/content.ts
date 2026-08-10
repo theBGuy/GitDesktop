@@ -1547,22 +1547,25 @@ distills the whole session into a plan-ready brief to hand the planner, falling 
 full session if distillation is unavailable) or **Save report** as a local Markdown
 file (written to \`.gitdesktop/research/\` for you to review and commit — never committed for
 you). It's **read-only**: it searches and reads, but never changes your code. Pick any agent —
-**Claude**, **Codex**, **GitHub Copilot**, or **opencode** — each uses its own native web search
-and fetch. (opencode's web *search* needs its Exa integration enabled — web *fetch* always works.)
+**Claude**, **Codex**, **GitHub Copilot**, or **opencode** (the picker opens on your
+**Settings → AI** default agent) — each uses its own native web search and fetch.
+(opencode's web *search* needs its Exa integration enabled — web *fetch* always works.)
 
 ## Plan a task (read-only)
 
-**Plan a task** runs a read-only agent that explores the current repo and drafts an
-**agent-ready issue** — context, approach, affected files, acceptance criteria, and a
-test plan. It can ask clarifying questions; answer them and it refines the plan in the
-same conversation. The cited file paths are validated against the repo, so the plan stays
-grounded. From a finished plan you can **file it as a GitHub or local issue**, or **hand
-it straight to an implementing session**.
+**Plan a task** runs a read-only agent (the picker opens on your **Settings → AI**
+default agent) that explores the current repo and drafts an **agent-ready issue** —
+context, approach, affected files, acceptance criteria, and a test plan. It can ask
+clarifying questions; answer them and it refines the plan in the same conversation.
+The cited file paths are validated against the repo, so the plan stays grounded. From
+a finished plan you can **file it as a GitHub or local issue**, or **hand it straight
+to an implementing session**.
 
 ## Delegate a task
 
-**Delegate** starts a write-capable session. Describe the task, pick the **agent**,
-**model**, and **reasoning effort** (Low / Medium / High / Max), and send. The agent works
+**Delegate** starts a write-capable session. Describe the task, pick the
+**agent** (it opens on your **Settings → AI** default agent), **model**, and
+**reasoning effort** (Low / Medium / High / Max), and send. The agent works
 in an **isolated git worktree** — a throwaway branch (\`gd/session/…\`) that never touches
 your working tree — and commits a **checkpoint** each turn. It works in the open: the
 conversation shows a **step-by-step transcript** of each file it reads, edits, searches,
@@ -1798,6 +1801,13 @@ Left off, security audits use the review model. The choice applies to both autom
 and the **Security audit** button on a PR; picking a model in the PR panel still overrides
 both for that one run.
 
+**Default agent.** Under **Agent sessions**, *Default agent* decides which CLI a new
+**Session**, **Plan**, or **Research** run opens on. On **Auto** those runs follow the AI
+provider above whenever it's an agent CLI (and start on Claude when it isn't) — so
+choosing Codex as your provider starts your agent runs on Codex too. Pick an agent
+explicitly to pin it whatever the provider is. Either way it's only the starting point:
+the composer's agent picker still chooses per run.
+
 **Custom & LAN servers — allowed hosts.** To reach an Ollama or OpenAI-compatible server
 that isn't \`localhost\` (a box on your network, or a self-hosted endpoint), enter its URL in
 Settings → AI and add its host to the **Allowed hosts** list — or click **Allow host** on the
@@ -1995,8 +2005,8 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
 - **Appearance** — pick a theme: **System** (follows your OS's light/dark setting),
   **Light**, **Dark**, or **Slate** (a softer, blue-gray dark). Applies as you pick it,
   and *Cycle theme* in the command palette steps through them.
-{{ai}}- **AI** — providers, models, keys, instructions, agent-session isolation
-  (worktree / container), and the container image.
+{{ai}}- **AI** — providers, models, keys, instructions, and agent-session defaults: the
+  default agent, isolation (worktree / container), and the container image.
 - **Slash commands** — manage built-in and custom agent commands.
 - **MCP servers** — register Model Context Protocol servers (secrets in your OS keychain)
   that agent sessions can opt into.

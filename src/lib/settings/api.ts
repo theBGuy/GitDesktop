@@ -186,6 +186,12 @@ export interface AppSettings {
   /** Hide the app to the system tray on window close (so background work keeps
    *  running) instead of quitting. */
   closeToTray: boolean;
+  /** Which agent CLI a new Session, Plan, or Research run starts on. Not in
+   *  DEFAULT_SETTINGS — its absence is the meaningful "Auto" state: follow the
+   *  main AI provider when that's an agent CLI, else Claude. Inline union rather
+   *  than the `AgentKind` import, which would cycle (lib/ai/agent.ts imports
+   *  `McpServer` from here). */
+  defaultAgent?: "claude" | "codex" | "copilot" | "opencode";
   /** How write-capable agent sessions are isolated. "worktree" = the throwaway
    *  git worktree only (host, full-auto); "container" = also run inside an
    *  ephemeral Docker/Podman container for kernel-enforced filesystem

@@ -38,7 +38,7 @@ import {
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
-import { detectAgentCli, providerKind } from "@/lib/ai/agent";
+import { type AgentKind, detectAgentCli, providerKind } from "@/lib/ai/agent";
 import {
   entryMatchesUrl,
   isHostAllowed,
@@ -299,6 +299,16 @@ const REVIEW_TIMEOUT_ITEMS: Record<ReviewTimeout, string> = {
   "30": "30 minutes",
   "45": "45 minutes",
   "60": "60 minutes",
+};
+
+/** Default-agent labels — same `items` contract as the maps above. "auto" is the
+ *  UI stand-in for an absent `defaultAgent` (follow the AI provider). */
+const DEFAULT_AGENT_ITEMS: Record<"auto" | AgentKind, string> = {
+  auto: "Auto — follow the AI provider",
+  claude: "Claude",
+  codex: "Codex",
+  copilot: "GitHub Copilot",
+  opencode: "opencode",
 };
 
 /** Ollama base-URL field — the URL the local/LAN Ollama server is reached at. */
@@ -607,6 +617,8 @@ export const AiProviderSection = withForm({
       form.store,
       (s) => s.values.reviewTimeout ?? "auto",
     );
+    // `undefined` = Auto (no explicit default; new runs follow `ai.provider`).
+    const defaultAgent = useSelector(form.store, (s) => s.values.defaultAgent);
     const agentIsolation = useSelector(
       form.store,
       (s) => s.values.agentIsolation,
@@ -1028,22 +1040,61 @@ export const AiProviderSection = withForm({
 
         <div className="space-y-3 border-t pt-4">
           <div>
-            <h3 className="text-sm font-medium">Agent session isolation</h3>
+            <h3 className="text-sm font-medium">Agent sessions</h3>
             <p className="text-xs text-muted-foreground">
-              How the write-capable agent runs your delegated tasks.
+              Defaults for delegated agent runs — Session, Plan, and Research.
             </p>
           </div>
-          <AgentSandboxField
-            value={agentIsolation}
-            onChange={(v) => form.setFieldValue("agentIsolation", v)}
-            nodeVersion={agentImageNodeVersion}
-            onNodeVersion={(v) =>
-              form.setFieldValue("agentImageNodeVersion", v)
-            }
-            providers={agentImageProviders}
-            onProviders={(v) => form.setFieldValue("agentImageProviders", v)}
-            repoPath={repoPath}
-          />
+          <div className="space-y-2">
+            <Label htmlFor="default-agent">Default agent</Label>
+            <Select
+              items={DEFAULT_AGENT_ITEMS}
+              value={defaultAgent ?? "auto"}
+              onValueChange={(v) => {
+                if (!v) return;
+                // Clear to undefined (not an "auto" sentinel) so the field is
+                // truly absent and the resolver falls through to the provider.
+                form.setFieldValue(
+                  "defaultAgent",
+                  v === "auto" ? undefined : (v as AgentKind),
+                );
+              }}
+            >
+              <SelectTrigger id="default-agent" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {(
+                  Object.keys(DEFAULT_AGENT_ITEMS) as ("auto" | AgentKind)[]
+                ).map((id) => (
+                  <SelectItem key={id} value={id}>
+                    {DEFAULT_AGENT_ITEMS[id]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              {defaultAgent
+                ? `New Session, Plan, and Research runs start on ${DEFAULT_AGENT_ITEMS[defaultAgent]}.`
+                : `New Session, Plan, and Research runs follow the AI provider above when it's an agent CLI — right now they start on ${DEFAULT_AGENT_ITEMS[providerKind(ai.provider) ?? "claude"]}.`}
+            </p>
+          </div>
+          <div className="space-y-2">
+            {/* Sized below the section h3 so the sandbox controls read as its
+                subordinate group, not a second section. */}
+            <h4 className="text-xs font-medium">Isolation</h4>
+            <AgentSandboxField
+              value={agentIsolation}
+              onChange={(v) => form.setFieldValue("agentIsolation", v)}
+              nodeVersion={agentImageNodeVersion}
+              onNodeVersion={(v) =>
+                form.setFieldValue("agentImageNodeVersion", v)
+              }
+              providers={agentImageProviders}
+              onProviders={(v) => form.setFieldValue("agentImageProviders", v)}
+              repoPath={repoPath}
+            />
+          </div>
         </div>
 
         <Dialog open={confirmClear} onOpenChange={setConfirmClear}>

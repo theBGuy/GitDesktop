@@ -143,6 +143,18 @@ export function providerKind(provider: AiProviderId): AgentKind | null {
   return null;
 }
 
+/** The agent a NEW session, plan, or research run starts on: the explicit
+ *  Settings → AI default when set, else the main AI provider when it's an
+ *  agent CLI, else Claude. */
+export function defaultAgentKind(settings: {
+  defaultAgent?: AgentKind;
+  ai: { provider: AiProviderId };
+}): AgentKind {
+  return (
+    settings.defaultAgent ?? providerKind(settings.ai.provider) ?? "claude"
+  );
+}
+
 /** Resolves the CLI binary and reports version + login status for Settings. */
 export const detectAgentCli = (kind: AgentKind, path?: string) =>
   invoke<AgentInfo>("agent_detect", {
