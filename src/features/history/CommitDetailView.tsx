@@ -49,6 +49,9 @@ import { cn } from "@/lib/utils";
 import { FileRowActions } from "./FileRowActions";
 import { useAmendWithConfirm } from "./useAmendCommit";
 
+const PLACEHOLDER_FADE =
+  "transition-opacity duration-150 motion-reduce:transition-none";
+
 export function CommitDetailView({
   repoPath,
   hash,
@@ -79,7 +82,15 @@ export function CommitDetailView({
   // large IPC payload otherwise deserializes on the main thread and stalls
   // input). The file-list highlight still uses effectivePath, so it stays live.
   const deferredPath = useDeferredValue(effectivePath);
-  const diff = useCommitFileDiff(repoPath, hash, deferredPath);
+  // Gated on a settled file list: the path comes FROM that list, so while it's a
+  // placeholder the path is the previous commit's. Fetching anyway succeeds — with
+  // an empty diff for a file this commit never touched — and flashes "No changes".
+  const diff = useCommitFileDiff(
+    repoPath,
+    hash,
+    deferredPath,
+    !files.isPlaceholderData,
+  );
 
   // Commit-comment surface — mirrors the PR Commits drill-in (PrCommitDetail),
   // but lights up ONLY when the repo has a ready forge, the provider supports
@@ -193,10 +204,18 @@ export function CommitDetailView({
   const commit = details.data;
   const totalAdded = files.data.reduce((sum, f) => sum + f.added, 0);
   const totalDeleted = files.data.reduce((sum, f) => sum + f.deleted, 0);
+  // Everything derived from these two queries is the PREVIOUS commit's until the
+  // selected one lands; fade it so the pane never passes stale content off as
+  // current. The ⋯ actions act on the `hash` prop, so they stay solid.
+  const staleDim =
+    (details.isPlaceholderData || files.isPlaceholderData) && "opacity-80";
 
+  // Identity comes from the `hash` PROP, never `commit.hash`: while the next
+  // commit's details load, `details.data` is still the previous commit's
+  // placeholder — copying from it would hand over the wrong SHA.
   async function copyHash() {
     try {
-      await navigator.clipboard.writeText(commit.hash);
+      await navigator.clipboard.writeText(hash);
       toast.success("Commit hash copied");
     } catch {
       toast.error("Could not copy to clipboard");
@@ -228,30 +247,54 @@ export function CommitDetailView({
   return (
     <div className="flex h-full flex-col">
       <header className="space-y-1 border-b px-4 py-3">
-        <h2 className="text-sm font-medium">{commit.subject}</h2>
+        <h2 className={cn("text-sm font-medium", PLACEHOLDER_FADE, staleDim)}>
+          {commit.subject}
+        </h2>
         {commit.body && (
-          <p className="max-h-24 overflow-y-auto text-xs whitespace-pre-wrap text-muted-foreground">
+          <p
+            className={cn(
+              "max-h-24 overflow-y-auto text-xs whitespace-pre-wrap text-muted-foreground",
+              PLACEHOLDER_FADE,
+              staleDim,
+            )}
+          >
             {commit.body}
           </p>
         )}
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <CommitAuthorAvatar name={commit.author} email={commit.authorEmail} />
-          <span>{commit.author}</span>
-          <span>•</span>
-          <span>{formatRelativeTime(commit.date)}</span>
-          <span>•</span>
+          <CommitAuthorAvatar
+            name={commit.author}
+            email={commit.authorEmail}
+            className={cn(PLACEHOLDER_FADE, staleDim)}
+          />
+          <span className={cn(PLACEHOLDER_FADE, staleDim)}>
+            {commit.author}
+          </span>
+          <span className={cn(PLACEHOLDER_FADE, staleDim)}>•</span>
+          <span className={cn(PLACEHOLDER_FADE, staleDim)}>
+            {formatRelativeTime(commit.date)}
+          </span>
+          <span className={cn(PLACEHOLDER_FADE, staleDim)}>•</span>
           <button
             type="button"
-            className="inline-flex items-center gap-1 font-mono hover:text-foreground"
+            className={cn(
+              "inline-flex items-center gap-1 font-mono hover:text-foreground",
+              PLACEHOLDER_FADE,
+              staleDim,
+            )}
             onClick={copyHash}
             title="Copy full hash"
           >
-            {commit.hash.slice(0, 7)}
+            {hash.slice(0, 7)}
             <CopyIcon className="size-3" />
           </button>
           <span className="flex-1" />
-          <span className="text-success">+{totalAdded}</span>
-          <span className="text-destructive">-{totalDeleted}</span>
+          <span className={cn("text-success", PLACEHOLDER_FADE, staleDim)}>
+            +{totalAdded}
+          </span>
+          <span className={cn("text-destructive", PLACEHOLDER_FADE, staleDim)}>
+            -{totalDeleted}
+          </span>
           <DropdownMenu>
             <DropdownMenuTrigger
               render={
@@ -300,24 +343,27 @@ export function CommitDetailView({
                 Cherry-pick commit
               </DropdownMenuItem>
               <DropdownMenuSeparator />
-              <DropdownMenuItem
-                onClick={() => copyText(commit.hash, "SHA copied")}
-              >
+              <DropdownMenuItem onClick={() => copyText(hash, "SHA copied")}>
                 Copy SHA
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
-        <JiraRefRow
-          repoPath={repoPath}
-          sources={[
-            { label: "commit subject", text: commit.subject },
-            { label: "commit message body", text: commit.body },
-          ]}
-        />
+        {/* Absent rather than faded while the details are a placeholder: these
+            are CLICKABLE links mined from the message text, and a dimmed one
+            still navigates to the previous commit's issue. */}
+        {!details.isPlaceholderData && (
+          <JiraRefRow
+            repoPath={repoPath}
+            sources={[
+              { label: "commit subject", text: commit.subject },
+              { label: "commit message body", text: commit.body },
+            ]}
+          />
+        )}
       </header>
 
-      <div className="flex min-h-0 flex-1">
+      <div className={cn("flex min-h-0 flex-1", PLACEHOLDER_FADE, staleDim)}>
         <aside className="flex w-72 shrink-0 flex-col border-r">
           <p className="border-b px-3 py-1.5 text-xs text-muted-foreground">
             {files.data.length} changed file{files.data.length === 1 ? "" : "s"}

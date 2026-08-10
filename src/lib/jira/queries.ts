@@ -1,10 +1,10 @@
 import {
   keepPreviousData,
-  type QueryKey,
   useMutation,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
+import { keepPreviousDataForRepo } from "@/lib/git/queries";
 import type { ForgeUserRef } from "@/lib/git/types";
 import {
   jiraAccount,
@@ -49,20 +49,6 @@ import type {
 } from "./types";
 
 const jiraLinkKey = (repo: string) => ["jira-link", repo] as const;
-
-/**
- * `keepPreviousData` scoped to a single repo (the Jira twin of git/queries.ts's, kept local
- * so this module doesn't depend on it). Panels stay mounted across repo switches, so plain
- * keepPreviousData would flash the previous repo's Jira issue — keep previous data only
- * when the previous query was for the SAME repo (repo at query-key index 1).
- */
-function keepPreviousDataForRepo(repo: string, repoKeyIndex = 1) {
-  return <T>(
-    previousData: T | undefined,
-    previousQuery: { queryKey: QueryKey } | undefined,
-  ): T | undefined =>
-    previousQuery?.queryKey?.[repoKeyIndex] === repo ? previousData : undefined;
-}
 
 /** This repo's Jira link (or `null` when unlinked). */
 export function useJiraLink(repo: string) {

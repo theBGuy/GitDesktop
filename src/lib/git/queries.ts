@@ -87,7 +87,8 @@ export function useRepoIdentity(repo: string) {
  * plain keepPreviousData would keep the previous repo's rows on screen (and, for
  * number-keyed maps, briefly-wrong data). Keeps previous data only when the previous
  * query's repo segment matches, so Load-more and Open/Closed switches still skip the
- * skeleton. `repoKeyIndex` is where the repo sits in the key (1 for every key here).
+ * skeleton. `repoKeyIndex` is where the repo sits in the key (1 for every key in this
+ * file and in jira/queries.ts).
  * A key that also varies on an identity axis beyond repo (lens, state) needs
  * `keepPreviousDataForKeyAxes` instead (the PR and issue list hooks below do):
  * matching repo alone would serve another axis's data.
@@ -468,14 +469,18 @@ export function useCommitFiles(repo: string, hash: string | null) {
   });
 }
 
+/** `enabled` lets a caller hold the fetch off while its `file` argument is still
+ *  derived from placeholder data — see the call sites for why an eager fetch there
+ *  succeeds with a misleading empty diff. */
 export function useCommitFileDiff(
   repo: string,
   hash: string | null,
   file: string | null,
+  enabled = true,
 ) {
   return useQuery({
     ...commitFileDiffOptions(repo, hash ?? "", file ?? ""),
-    enabled: hash !== null && file !== null,
+    enabled: enabled && hash !== null && file !== null,
     placeholderData: keepPreviousDataForRepo(repo),
   });
 }
@@ -819,11 +824,14 @@ export function useBranchDiffFiles(
   });
 }
 
+/** `enabled`: same caller gate as `useCommitFileDiff` — hold the fetch off while
+ *  `file` still comes from a placeholder file list. */
 export function useBranchFileDiff(
   repo: string,
   base: string | null,
   compare: string | null,
   file: string | null,
+  enabled = true,
 ) {
   return useQuery({
     queryKey: repoKeys.branchFileDiff(
@@ -835,7 +843,11 @@ export function useBranchFileDiff(
     queryFn: () =>
       api.gitBranchFileDiff(repo, base ?? "", compare ?? "", file ?? ""),
     enabled:
-      base !== null && compare !== null && base !== compare && file !== null,
+      enabled &&
+      base !== null &&
+      compare !== null &&
+      base !== compare &&
+      file !== null,
     placeholderData: keepPreviousDataForRepo(repo),
   });
 }
@@ -974,8 +986,8 @@ export function usePrListCi(
 
 /** Hydrates PR-list rows with each PR's mergeability, keyed by number — the rows' conflict
  *  chip. Runs separately from `usePrList`, and its numbers digest in the key is
- *  load-bearing for the same reason as `usePrListCi`'s: it keeps a map built from one
- *  page's rows from caching under another page's key. `prs` never
+ *  load-bearing: the digest pins the key to the row set the map describes, so an
+ *  intermediate result can never cache under the next page's key. `prs` never
  *  reaches the backend (it re-queries the page from the filters): it is here only to
  *  form that digest and to keep the read off an empty page. */
 export function usePrListMergeability(

@@ -1579,6 +1579,11 @@ export function JiraIssueView({
   const isDone = issue.statusCategory === "done";
   const busy =
     comment.isPending || transition.isPending || transitionTo.isPending;
+  // Rebuild Jira's canonical browse path from the current `issueKey`: `issue.url`
+  // belongs to the LOADED issue, which is the previous one during a placeholder.
+  const browseUrl = link.data
+    ? `https://${link.data.siteHost}/browse/${issueKey}`
+    : issue.url;
 
   function submitComment() {
     const body = composeBody.trim();
@@ -1623,7 +1628,11 @@ export function JiraIssueView({
             {issue.summary}
           </h2>
           <span className="flex-1" />
+          {/* Absent while a placeholder is served: the verb comes from the
+              LOADED issue's status, so a click during that window would fire the
+              wrong transition against the issue you actually selected. */}
           {canTransition &&
+            !details.isPlaceholderData &&
             (isDone ? (
               <Button
                 variant="outline"
@@ -1651,7 +1660,7 @@ export function JiraIssueView({
             variant="outline"
             size="xs"
             className="cursor-pointer"
-            onClick={() => openUrl(issue.url)}
+            onClick={() => openUrl(browseUrl)}
             title="Open this issue in Jira"
           >
             <ArrowSquareOutIcon data-icon="inline-start" />
@@ -1688,7 +1697,12 @@ export function JiraIssueView({
               Root is `relative`-only) so a long issue can't leak a window
               scrollbar. */}
           <ScrollArea className="min-h-0 flex-1 overflow-hidden">
-            <div className="space-y-4 p-4">
+            <div
+              className={cn(
+                "space-y-4 p-4 transition-opacity duration-150 motion-reduce:transition-none",
+                details.isPlaceholderData && "opacity-80",
+              )}
+            >
               <div className="border-b pb-3">
                 {issue.descriptionMd.trim() ? (
                   <Markdown>{issue.descriptionMd}</Markdown>

@@ -8,6 +8,9 @@ import { useBranchDiffFiles, useBranchFileDiff } from "@/lib/git/queries";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { cn } from "@/lib/utils";
 
+const PLACEHOLDER_FADE =
+  "transition-opacity duration-150 motion-reduce:transition-none";
+
 /**
  * The net change `compare` introduces relative to `base` (the three-dot diff,
  * what a PR would show): a changed-file list plus the selected file's diff.
@@ -40,7 +43,16 @@ export function BranchDiffView({
   // Diff off a deferred path so rapidly arrowing the file list only fetches +
   // renders the landed-on file; the highlight stays on effectivePath.
   const deferredPath = useDeferredValue(effectivePath);
-  const diff = useBranchFileDiff(repoPath, base, compare, deferredPath);
+  // Gated on a settled file list: the path comes FROM that list, so while it's a
+  // placeholder the path belongs to the previous comparison. Fetching anyway
+  // succeeds with an empty diff and flashes "No changes to show".
+  const diff = useBranchFileDiff(
+    repoPath,
+    base,
+    compare,
+    deferredPath,
+    !files.isPlaceholderData,
+  );
 
   if (files.isPending) {
     return (
@@ -63,6 +75,9 @@ export function BranchDiffView({
 
   const totalAdded = files.data.reduce((sum, f) => sum + f.added, 0);
   const totalDeleted = files.data.reduce((sum, f) => sum + f.deleted, 0);
+  // The counts, totals and file list belong to the PREVIOUS comparison until the
+  // selected one lands; fade them. The branch names are props — always current.
+  const staleDim = files.isPlaceholderData && "opacity-80";
 
   // Arrow keys walk the file list, mirroring the app's other lists.
   const onFilesKeyDown = listKeyboardNav({
@@ -81,14 +96,20 @@ export function BranchDiffView({
           <span className="font-mono">{base}</span>
         </span>
         <span className="flex-1" />
-        <span className="text-muted-foreground">
+        <span
+          className={cn("text-muted-foreground", PLACEHOLDER_FADE, staleDim)}
+        >
           {files.data.length} file{files.data.length === 1 ? "" : "s"}
         </span>
-        <span className="text-success">+{totalAdded}</span>
-        <span className="text-destructive">-{totalDeleted}</span>
+        <span className={cn("text-success", PLACEHOLDER_FADE, staleDim)}>
+          +{totalAdded}
+        </span>
+        <span className={cn("text-destructive", PLACEHOLDER_FADE, staleDim)}>
+          -{totalDeleted}
+        </span>
       </header>
 
-      <div className="flex min-h-0 flex-1">
+      <div className={cn("flex min-h-0 flex-1", PLACEHOLDER_FADE, staleDim)}>
         <aside
           className="flex w-72 shrink-0 flex-col border-r"
           role="listbox"

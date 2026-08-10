@@ -1183,6 +1183,10 @@ export function DiffContent({
   // and a layout shift on the way to the real content — render nothing until
   // it's ready.
   if (isPending) return null;
+  // Every backend diff command echoes the requested path back verbatim, so a
+  // mismatch means `data` is a stale placeholder from the previously selected
+  // file's key. Re-scope this if the backend ever normalizes the path it returns.
+  if (data && data.filePath !== filePath) return null;
   if (isError || !data) {
     return <DiffPlaceholder message="Could not load diff for this file" />;
   }
