@@ -1680,7 +1680,13 @@ export function JiraIssueView({
         {/* Status stays in the header as a chip/dropdown next to the title
             (like the PR view's state pill); the rest of the metadata lives in
             the right-hand rail below. */}
-        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <div
+          className={cn(
+            "flex flex-wrap items-center gap-2 text-xs text-muted-foreground",
+            PLACEHOLDER_FADE,
+            staleDim,
+          )}
+        >
           {canTransition && link.data ? (
             <StatusMenu
               repoPath={repoPath}

@@ -419,7 +419,10 @@ export function CommitDetailView({
             </FileRowActions>
           </ScrollArea>
         </aside>
-        <main className={cn("min-w-0 flex-1", PLACEHOLDER_FADE, diffDim)}>
+        <main
+          aria-busy={Boolean(diffDim)}
+          className={cn("min-w-0 flex-1", PLACEHOLDER_FADE, diffDim)}
+        >
           {deferredPath ? (
             <DiffSurface
               filePath={deferredPath}
