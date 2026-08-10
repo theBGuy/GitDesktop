@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { getSecret } from "@/lib/git/api";
 import { guardedFetch } from "./guarded-fetch";
 import {
+  GOOGLE_AI_STUDIO_BASE_URL,
   MODEL_SUGGESTIONS,
   OLLAMA_CLOUD_HOST,
   OPENAI_COMPATIBLE_PRESETS,
@@ -30,6 +31,12 @@ export interface AvailableModels {
 /** OpenAI's /v1/models mixes in embeddings, audio, images… keep chat models. */
 const OPENAI_NON_CHAT =
   /embed|whisper|tts|dall-e|audio|realtime|moderation|image|transcribe|babbage|davinci|codex|search/i;
+
+/** Google's catalog mixes its text families in with media generators and other
+ *  non-chat entries (veo, lyria, nano-banana, aqa, antigravity) that share no
+ *  vocabulary with {@link OPENAI_NON_CHAT}. Allowlisting the two text families
+ *  excludes future media families by default instead of chasing each new name. */
+const GOOGLE_CHAT_FAMILY = /^(gemini|gemma)-/;
 
 async function fetchProviderModels(
   settings: AiSettings,
@@ -74,15 +81,16 @@ async function fetchProviderModels(
     case "google": {
       const key = await getSecret("google");
       if (!key) return [];
-      const json = await fetchJson(
-        "https://generativelanguage.googleapis.com/v1beta/openai/models",
-        {
-          Authorization: `Bearer ${key}`,
-        },
-      );
+      const json = await fetchJson(`${GOOGLE_AI_STUDIO_BASE_URL}/models`, {
+        Authorization: `Bearer ${key}`,
+      });
+      // Catalog ids can carry a `models/` prefix the inference call won't accept;
+      // stripping it is a no-op when they don't.
       return (json.data as { id: string }[])
         .map((m) => m.id.replace(/^models\//, ""))
-        .filter((id) => !OPENAI_NON_CHAT.test(id))
+        .filter(
+          (id) => GOOGLE_CHAT_FAMILY.test(id) && !OPENAI_NON_CHAT.test(id),
+        )
         .sort();
     }
     case "openai-compatible": {

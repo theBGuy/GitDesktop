@@ -4,7 +4,7 @@ import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import type { LanguageModel } from "ai";
 import { createOllama } from "ollama-ai-provider-v2";
 import { guardedFetch } from "./guarded-fetch";
-import { OLLAMA_CLOUD_HOST } from "./providers";
+import { GOOGLE_AI_STUDIO_BASE_URL, OLLAMA_CLOUD_HOST } from "./providers";
 import type { AiSettings } from "./types";
 
 // All providers go through `guardedFetch` (guarded-fetch.ts) — the Tauri fetch
@@ -30,8 +30,10 @@ export function createModel(
     case "openai":
       return createOpenAI({ apiKey: apiKey ?? "", fetch })(settings.model);
     case "google":
+      // Google AI Studio speaks the OpenAI protocol at a fixed base URL; `.chat()`
+      // for the same reason as `openai-compatible` below.
       return createOpenAI({
-        baseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
+        baseURL: GOOGLE_AI_STUDIO_BASE_URL,
         apiKey: apiKey ?? "",
         fetch,
       }).chat(settings.model);

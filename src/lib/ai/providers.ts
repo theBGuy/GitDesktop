@@ -18,6 +18,13 @@ export const PROVIDER_LABELS: Record<AiProviderId, string> = {
  *  server). Native API at `/api`, OpenAI-compatible model list at `/v1/models`. */
 export const OLLAMA_CLOUD_HOST = "https://ollama.com";
 
+/** Google AI Studio's OpenAI-compatible endpoint and key page. The first-class
+ *  `google` provider and the Gemini preset below reach the same service, so both
+ *  read these rather than repeating the literals. */
+export const GOOGLE_AI_STUDIO_BASE_URL =
+  "https://generativelanguage.googleapis.com/v1beta/openai";
+export const GOOGLE_AI_STUDIO_KEYS_URL = "https://aistudio.google.com/apikey";
+
 /** Presets for the `openai-compatible` provider — each is an OpenAI-compatible
  *  `/chat/completions` endpoint. The Vercel AI Gateway is an aggregator (one host,
  *  many models). Each preset's host is a built-in (always allowed by `allowed-hosts.ts`);
@@ -49,9 +56,9 @@ export const OPENAI_COMPATIBLE_PRESETS: OpenAiCompatiblePreset[] = [
   {
     id: "gemini",
     label: "Google Gemini",
-    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
-    models: ["gemini-3.6-flash", "gemini-2.5-flash"],
-    keysUrl: "https://aistudio.google.com/apikey",
+    baseUrl: GOOGLE_AI_STUDIO_BASE_URL,
+    models: ["gemini-3.6-flash", "gemini-2.5-pro", "gemini-2.5-flash"],
+    keysUrl: GOOGLE_AI_STUDIO_KEYS_URL,
   },
   {
     id: "deepseek",
@@ -121,7 +128,10 @@ export const MODEL_SUGGESTIONS: Record<AiProviderId, string[]> = {
   openai: ["gpt-4.1-mini", "gpt-4.1", "o4-mini"],
   // Generic fallback only; the picked preset's own models drive the live list.
   "openai-compatible": OPENAI_COMPATIBLE_PRESETS[0].models,
-  google: ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"],
+  // Gemini ids retire fast — the 1.5 line and 2.0 Flash are already shut down, and
+  // `defaultModelForProvider` stamps [0] on provider switch, so a stale first entry
+  // breaks the first generation before the live catalog is ever consulted.
+  google: ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.5-pro"],
   openrouter: [
     "anthropic/claude-haiku-4.5",
     "openai/gpt-4.1-mini",

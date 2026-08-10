@@ -7,6 +7,7 @@ import {
 } from "@phosphor-icons/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSelector } from "@tanstack/react-store";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import type { ReactNode } from "react";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
@@ -51,6 +52,7 @@ import {
   ALL_PROVIDER_IDS,
   defaultModelForProvider,
   GENERATION_PROVIDER_IDS,
+  GOOGLE_AI_STUDIO_KEYS_URL,
   isCliProvider,
   OPENAI_COMPATIBLE_PRESETS,
   PROVIDER_LABELS,
@@ -75,7 +77,8 @@ const KEY_HINTS: Partial<
   openai: { prefix: "sk-", minLength: 40 },
   anthropic: { prefix: "sk-ant-", minLength: 40 },
   openrouter: { prefix: "sk-or-", minLength: 40 },
-  google: { prefix: "AIza", minLength: 30 },
+  // No google entry: AI Studio issues both legacy `AIza…` keys and current `AQ.…`
+  // auth keys, so any single-prefix hint false-warns on a working key.
 };
 
 function keyShapeWarning(provider: AiProviderId, value: string): string | null {
@@ -822,14 +825,13 @@ export const AiProviderSection = withForm({
                 {provider === "google" && (
                   <>
                     Get an API key at{" "}
-                    <a
-                      href="https://aistudio.google.com/apikey"
-                      target="_blank"
-                      rel="noreferrer"
-                      className="underline"
+                    <button
+                      type="button"
+                      className="cursor-pointer underline underline-offset-2"
+                      onClick={() => openUrl(GOOGLE_AI_STUDIO_KEYS_URL)}
                     >
                       aistudio.google.com
-                    </a>
+                    </button>
                     .
                   </>
                 )}
