@@ -4,6 +4,7 @@ export const PROVIDER_LABELS: Record<AiProviderId, string> = {
   anthropic: "Anthropic",
   openai: "OpenAI",
   "openai-compatible": "OpenAI-compatible",
+  google: "Google AI Studio",
   openrouter: "OpenRouter",
   ollama: "Ollama (local)",
   "ollama-cloud": "Ollama Cloud",
@@ -49,7 +50,7 @@ export const OPENAI_COMPATIBLE_PRESETS: OpenAiCompatiblePreset[] = [
     id: "gemini",
     label: "Google Gemini",
     baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
-    models: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
+    models: ["gemini-3.6-flash", "gemini-2.5-flash"],
     keysUrl: "https://aistudio.google.com/apikey",
   },
   {
@@ -83,6 +84,7 @@ export const PROVIDERS_REQUIRING_KEY: AiProviderId[] = [
   "anthropic",
   "openai",
   "openai-compatible",
+  "google",
   "openrouter",
   "ollama-cloud",
 ];
@@ -119,6 +121,7 @@ export const MODEL_SUGGESTIONS: Record<AiProviderId, string[]> = {
   openai: ["gpt-4.1-mini", "gpt-4.1", "o4-mini"],
   // Generic fallback only; the picked preset's own models drive the live list.
   "openai-compatible": OPENAI_COMPATIBLE_PRESETS[0].models,
+  google: ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"],
   openrouter: [
     "anthropic/claude-haiku-4.5",
     "openai/gpt-4.1-mini",

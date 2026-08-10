@@ -5,6 +5,7 @@ const KNOWN_PROVIDERS: &[&str] = &[
     "anthropic",
     "openai",
     "openai-compatible",
+    "google",
     "openrouter",
     "ollama",
     "ollama-cloud",

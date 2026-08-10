@@ -4,6 +4,7 @@ export type AiProviderId =
   | "anthropic"
   | "openai"
   | "openai-compatible"
+  | "google"
   | "openrouter"
   | "ollama"
   | "ollama-cloud"

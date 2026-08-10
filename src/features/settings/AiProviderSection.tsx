@@ -75,6 +75,7 @@ const KEY_HINTS: Partial<
   openai: { prefix: "sk-", minLength: 40 },
   anthropic: { prefix: "sk-ant-", minLength: 40 },
   openrouter: { prefix: "sk-or-", minLength: 40 },
+  google: { prefix: "AIza", minLength: 30 },
 };
 
 function keyShapeWarning(provider: AiProviderId, value: string): string | null {
@@ -817,7 +818,21 @@ export const AiProviderSection = withForm({
               </div>
               <p className="text-xs text-muted-foreground">
                 Keys apply immediately and are shared by every feature using
-                this provider.
+                this provider.{" "}
+                {provider === "google" && (
+                  <>
+                    Get an API key at{" "}
+                    <a
+                      href="https://aistudio.google.com/apikey"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="underline"
+                    >
+                      aistudio.google.com
+                    </a>
+                    .
+                  </>
+                )}
               </p>
             </div>
           </form>

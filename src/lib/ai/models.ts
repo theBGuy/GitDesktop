@@ -71,6 +71,20 @@ async function fetchProviderModels(
       );
       return (json.data as { id: string }[]).map((m) => m.id);
     }
+    case "google": {
+      const key = await getSecret("google");
+      if (!key) return [];
+      const json = await fetchJson(
+        "https://generativelanguage.googleapis.com/v1beta/openai/models",
+        {
+          Authorization: `Bearer ${key}`,
+        },
+      );
+      return (json.data as { id: string }[])
+        .map((m) => m.id.replace(/^models\//, ""))
+        .filter((id) => !OPENAI_NON_CHAT.test(id))
+        .sort();
+    }
     case "openai-compatible": {
       const key = await getSecret("openai-compatible");
       const base = settings.openaiCompatibleBaseUrl.replace(/\/$/, "");

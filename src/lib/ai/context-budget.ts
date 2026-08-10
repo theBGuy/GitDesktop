@@ -175,6 +175,7 @@ async function resolveAutoProfile(
     }
     case "anthropic":
     case "openai":
+    case "google":
     case "openrouter":
     case "ollama-cloud":
     case "claude-cli":

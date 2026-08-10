@@ -29,6 +29,12 @@ export function createModel(
       return createAnthropic({ apiKey: apiKey ?? "", fetch })(settings.model);
     case "openai":
       return createOpenAI({ apiKey: apiKey ?? "", fetch })(settings.model);
+    case "google":
+      return createOpenAI({
+        baseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
+        apiKey: apiKey ?? "",
+        fetch,
+      }).chat(settings.model);
     case "openai-compatible":
       // Any OpenAI-compatible endpoint (custom base URL). `.chat()` forces the
       // `/chat/completions` API — third-party endpoints don't implement OpenAI's
