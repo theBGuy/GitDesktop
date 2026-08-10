@@ -666,6 +666,9 @@ export const AiProviderSection = withForm({
         try {
           await setSecret(provider, value.key.trim());
           keyForm.reset({ key: "" });
+          // The old result described the old key; leaving it up makes a fixed
+          // problem look unfixed (only a provider/model change cleared it).
+          setTestResult(null);
           queryClient.invalidateQueries({
             queryKey: settingsKeys.secret(provider),
           });
@@ -699,6 +702,7 @@ export const AiProviderSection = withForm({
           queryKey: settingsKeys.secret(provider),
         });
         setConfirmClear(false);
+        setTestResult(null);
         toast.success("Key removed");
       } catch (e) {
         toastError(e);
@@ -710,10 +714,12 @@ export const AiProviderSection = withForm({
       setTestResult(null);
       try {
         // Use a typed-but-unsaved key and the unsaved allow list, so you can
-        // test a just-added host/key before saving the settings draft.
+        // test a just-added host/key before saving the settings draft. Trimmed to
+        // match what Save stores, so a pasted key with stray whitespace doesn't
+        // fail the test and then work once saved.
         const client = await createAiClient(
           ai,
-          keyForm.getFieldValue("key"),
+          keyForm.getFieldValue("key").trim(),
           allowedHosts,
         );
         const result = await client.testConnection();

@@ -20,6 +20,31 @@ export class MissingApiKeyError extends Error {
 }
 
 /**
+ * The provider's own explanation for a failed call, falling back to the generic
+ * message. The AI SDK's `APICallError.message` is only the HTTP reason phrase
+ * ("Bad Request"), while the cause sits unread in `responseBody` — Google answers
+ * a rejected key with 400 + "Invalid Auth key.", so the bare phrase reads like a
+ * malformed request instead of an auth problem. Google wraps the payload in an
+ * array, OpenAI-compatible servers use a bare object; accept either, and keep the
+ * generic message for a non-JSON body.
+ */
+function providerErrorMessage(e: unknown): string {
+  const body = (e as { responseBody?: unknown } | null)?.responseBody;
+  if (typeof body === "string" && body.trim()) {
+    try {
+      const parsed: unknown = JSON.parse(body);
+      const entry = Array.isArray(parsed) ? parsed[0] : parsed;
+      const message = (entry as { error?: { message?: unknown } } | null)?.error
+        ?.message;
+      if (typeof message === "string" && message.trim()) return message;
+    } catch {
+      // Not JSON — the generic message is the best we have.
+    }
+  }
+  return errorMessage(e);
+}
+
+/**
  * Resolves `settings` to a ready model: reads the saved API key (or an unsaved
  * override), throwing {@link MissingApiKeyError} when a key-requiring provider has
  * none, then builds the guarded-fetch model. Shared by {@link createAiClient} and
@@ -100,7 +125,7 @@ export async function createAiClient(
               yield part.text;
               break;
             case "error":
-              throw new Error(errorMessage(part.error));
+              throw new Error(providerErrorMessage(part.error));
             case "abort":
               throw new DOMException(
                 "The generation was cancelled.",
@@ -123,7 +148,7 @@ export async function createAiClient(
         ) {
           throw new DOMException("The generation was cancelled.", "AbortError");
         }
-        throw new Error(errorMessage(e));
+        throw new Error(providerErrorMessage(e));
       }
     },
     async testConnection() {
@@ -139,7 +164,7 @@ export async function createAiClient(
               message: "Model returned an empty response.",
             } as const);
       } catch (e) {
-        return { ok: false, message: errorMessage(e) } as const;
+        return { ok: false, message: providerErrorMessage(e) } as const;
       }
     },
   };
