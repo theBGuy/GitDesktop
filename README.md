@@ -816,7 +816,7 @@ review via its subscription login. The full list is under
 
 - **Providers**: Anthropic, OpenAI, **Google AI Studio** (Gemini), **any
   OpenAI-compatible endpoint** (custom base URL, with one-click presets for
-  the Vercel AI Gateway, Google Gemini, DeepSeek, Mistral, and Z.ai),
+  the Vercel AI Gateway, DeepSeek, Mistral, and Z.ai),
   OpenRouter, **local or LAN Ollama**, **Ollama Cloud** (hosted models via
   an API key), and the **Claude Code / Codex / GitHub Copilot / opencode
   CLIs** (keyless, via your subscription, or opencode's free hosted models).

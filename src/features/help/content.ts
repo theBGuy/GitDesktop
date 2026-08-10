@@ -1780,10 +1780,10 @@ configured in **Settings → AI**.
 Bring your own model:
 
 - **Anthropic, OpenAI, Google AI Studio, OpenRouter, Ollama Cloud** — paste an API key
-  (stored in your OS keychain, never in app files). Google AI Studio reaches Gemini
-  directly; the OpenAI-compatible preset below points at the same endpoint.
+  (stored in your OS keychain, never in app files). Google AI Studio is Gemini: save
+  the key and the model picker fills with your live Gemini catalog.
 - **OpenAI-compatible** — any endpoint that speaks the OpenAI API, with one-click presets
-  for **Vercel AI Gateway, Google Gemini, DeepSeek, Mistral, and Z.ai (GLM)**.
+  for **Vercel AI Gateway, DeepSeek, Mistral, and Z.ai (GLM)**.
 - **Ollama (local or LAN)** — a local model (your code never leaves your machine), or one
   running on another machine on your network — set its URL in Settings.
 - **Claude Code, Codex, GitHub Copilot, opencode CLIs** — *keyless*: they reuse your
