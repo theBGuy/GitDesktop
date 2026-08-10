@@ -19,6 +19,22 @@ export class MissingApiKeyError extends Error {
   }
 }
 
+/** The human-readable reason out of a provider error payload, whether it nests under
+ *  `error` as an object (OpenAI, Google), sits bare on `message`, or is a plain string
+ *  under `error` (Ollama's native `/api`), array-wrapped (Google) or not. One reader
+ *  for both call sites below: the parsed response body and the raw in-stream payload
+ *  carry the same shapes, so they must accept the same set. */
+function errorTextOf(value: unknown): string | null {
+  const entry = (Array.isArray(value) ? value[0] : value) as {
+    error?: { message?: unknown } | string;
+    message?: unknown;
+  } | null;
+  const nested = entry?.error;
+  const message =
+    typeof nested === "string" ? nested : (nested?.message ?? entry?.message);
+  return typeof message === "string" && message.trim() ? message : null;
+}
+
 /**
  * The provider's own explanation for a failed call, falling back to the generic
  * message. Three constraints shape it: a body the SDK's error schema can't parse
@@ -28,19 +44,6 @@ export class MissingApiKeyError extends Error {
  * and `isRetryable` covers 429/5xx — the quota case; and an in-stream error part is the
  * provider's already-parsed payload rather than an Error.
  */
-/** The human-readable reason out of a provider error payload, whether it nests under
- *  `error` (OpenAI, Google) or sits bare on `message`, wrapped in an array (Google) or
- *  not. One reader for both call sites below: the parsed response body and the raw
- *  in-stream payload carry the same shapes, so they must accept the same set. */
-function errorTextOf(value: unknown): string | null {
-  const entry = (Array.isArray(value) ? value[0] : value) as {
-    error?: { message?: unknown };
-    message?: unknown;
-  } | null;
-  const message = entry?.error?.message ?? entry?.message;
-  return typeof message === "string" && message.trim() ? message : null;
-}
-
 function providerErrorMessage(e: unknown): string {
   const unwrapped = ((e as { lastError?: unknown } | null)?.lastError ?? e) as {
     responseBody?: unknown;
