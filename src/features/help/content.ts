@@ -1563,14 +1563,14 @@ to an implementing session**.
 
 ## Delegate a task
 
-**Delegate** starts a write-capable session. Describe the task, pick the
-**agent** (it opens on your **Settings → AI** default agent), **model**, and
-**reasoning effort** (Low / Medium / High / Max), and send. The agent works
-in an **isolated git worktree** — a throwaway branch (\`gd/session/…\`) that never touches
-your working tree — and commits a **checkpoint** each turn. It works in the open: the
-conversation shows a **step-by-step transcript** of each file it reads, edits, searches,
-and command it runs, interleaved with its narration. **Expand any edit step** to see that
-file's diff inline, watch its **live changes** mid-turn, or read the cumulative diff under
+**Delegate** starts a write-capable session. Describe the task, pick the **agent** (it
+opens on your **Settings → AI** default agent), **model**, and **reasoning effort**
+(Low / Medium / High / Max), and send. The agent works in an **isolated git worktree**
+— a throwaway branch (\`gd/session/…\`) that never touches your working tree — and
+commits a **checkpoint** each turn. It works in the open: the conversation shows a
+**step-by-step transcript** of each file it reads, edits, searches, and command it
+runs, interleaved with its narration. **Expand any edit step** to see that file's diff
+inline, watch its **live changes** mid-turn, or read the cumulative diff under
 **Changes**.
 
 In the composer you can:

@@ -1042,7 +1042,8 @@ export const AiProviderSection = withForm({
           <div>
             <h3 className="text-sm font-medium">Agent sessions</h3>
             <p className="text-xs text-muted-foreground">
-              Defaults for delegated agent runs — Session, Plan, and Research.
+              How new agent runs start — the agent that runs them, and how
+              sessions are isolated.
             </p>
           </div>
           <div className="space-y-2">

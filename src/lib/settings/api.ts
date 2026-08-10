@@ -188,9 +188,9 @@ export interface AppSettings {
   closeToTray: boolean;
   /** Which agent CLI a new Session, Plan, or Research run starts on. Not in
    *  DEFAULT_SETTINGS — its absence is the meaningful "Auto" state: follow the
-   *  main AI provider when that's an agent CLI, else Claude. Inline union rather
-   *  than the `AgentKind` import, which would cycle (lib/ai/agent.ts imports
-   *  `McpServer` from here). */
+   *  main AI provider when that's an agent CLI, else Claude. Inline union (the
+   *  sessions store does the same) to avoid a settings↔ai import cycle, even a
+   *  type-only one. */
   defaultAgent?: "claude" | "codex" | "copilot" | "opencode";
   /** How write-capable agent sessions are isolated. "worktree" = the throwaway
    *  git worktree only (host, full-auto); "container" = also run inside an

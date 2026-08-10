@@ -468,8 +468,11 @@ export function SessionComposer({
       repoPath,
       prompt: draft,
       // null = no explicit pick, so there's nothing to restore — collapse to absent.
+      // For agent that's load-bearing: the jump lands on the panel hosting Default
+      // agent, so an unpicked composer must follow a value changed there, not pin
+      // the stale derived one.
       isolation: startIsolation ?? undefined,
-      agent: startAgent,
+      agent: startAgentPick ?? undefined,
       model: startModel,
       effort: startEffort,
       mode,
