@@ -632,7 +632,13 @@ export const capabilities: Capability[] = [
     group: "AI · MCP & providers",
     ai: true,
     label:
-      "Bring your own model — Anthropic, OpenAI, OpenRouter, Ollama, or a keyless agent CLI (generation & review)",
+      "Bring your own model — Anthropic, OpenAI, Google AI Studio, OpenRouter, Ollama, or a keyless agent CLI (generation & review)",
+  },
+  {
+    group: "AI · MCP & providers",
+    ai: true,
+    label:
+      "Google AI Studio as a first-class provider — paste an AI Studio key and pick from your live Gemini catalog",
   },
   {
     group: "AI · MCP & providers",

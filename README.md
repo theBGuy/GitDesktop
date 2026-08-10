@@ -381,10 +381,10 @@ close the window.
   the PR's comments and history, reporting live what it's exploring
   ("Reading src/foo.rs…"). **Read-only end to end.** CLI agent models
   (Claude Code, Copilot CLI, opencode) get GitDesktop attached as a
-  read-only MCP server; HTTP/API models (Anthropic, OpenAI,
-  OpenAI-compatible, OpenRouter, Ollama) use a native tool loop with no
-  workspace to prepare, so reviews start instantly. When a diff outgrows the
-  prompt budget, one click enables agentic review for full coverage.
+  read-only MCP server; HTTP/API models (Anthropic, OpenAI, Google AI
+  Studio, OpenAI-compatible, OpenRouter, Ollama) use a native tool loop with
+  no workspace to prepare, so reviews start instantly. When a diff outgrows
+  the prompt budget, one click enables agentic review for full coverage.
 - **Notes for reviewers**: hand the reviewer context up front. An agent
   deposits per-branch notes via the GitDesktop MCP, or you type them in the
   Create PR dialog; on create they post as the PR's first comment and reach
@@ -814,13 +814,14 @@ review via its subscription login. The full list is under
 
 ## AI configuration
 
-- **Providers**: Anthropic, OpenAI, **any OpenAI-compatible endpoint**
-  (custom base URL, with one-click presets for the Vercel AI Gateway, Google
-  Gemini, DeepSeek, Mistral, and Z.ai), OpenRouter, **local or LAN Ollama**,
-  **Ollama Cloud** (hosted models via an API key), and the **Claude Code /
-  Codex / GitHub Copilot / opencode CLIs** (keyless, via your subscription,
-  or opencode's free hosted models). Separate models for generation vs.
-  review; live model lists in a searchable picker.
+- **Providers**: Anthropic, OpenAI, **Google AI Studio** (Gemini), **any
+  OpenAI-compatible endpoint** (custom base URL, with one-click presets for
+  the Vercel AI Gateway, Google Gemini, DeepSeek, Mistral, and Z.ai),
+  OpenRouter, **local or LAN Ollama**, **Ollama Cloud** (hosted models via
+  an API key), and the **Claude Code / Codex / GitHub Copilot / opencode
+  CLIs** (keyless, via your subscription, or opencode's free hosted models).
+  Separate models for generation vs. review; live model lists in a
+  searchable picker.
 - **Custom and LAN servers**: point Ollama or an OpenAI-compatible endpoint
   at a box on your network, not just `localhost`. Non-built-in hosts must be
   added to the **Allowed hosts** list (Settings → AI; one-click *Allow
@@ -874,9 +875,9 @@ from OS code signing.
   (you add it under Settings → Accounts for Bitbucket; a Jira link is set
   up per repo and can reuse it); optional.
 - An **AI provider** for the AI features (all optional): an API key
-  (Anthropic / OpenAI / OpenRouter / **Ollama Cloud**), a local **Ollama**
-  server, or a signed-in agent CLI (**Claude Code / Codex / GitHub Copilot /
-  opencode**).
+  (Anthropic / OpenAI / **Google AI Studio** / OpenRouter / **Ollama
+  Cloud**), a local **Ollama** server, or a signed-in agent CLI (**Claude
+  Code / Codex / GitHub Copilot / opencode**).
 
 ## Development
 

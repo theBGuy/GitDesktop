@@ -59,9 +59,10 @@ A few things worth knowing up front:
   **Slate** that's easier on the eyes — in **Settings → Appearance**, or cycle
   themes anytime from the command palette ({{kbd:command-palette}}).
 {{ai}}- **AI is optional.** Commit messages, PR descriptions, reviews, CI debugging, and
-  agent sessions can use Anthropic, OpenAI, OpenRouter, Ollama (local or cloud), an
-  OpenAI-compatible endpoint, or the Claude Code / Codex / GitHub Copilot / opencode
-  CLIs. You can hide every AI feature in **Settings → General**.
+  agent sessions can use Anthropic, OpenAI, Google AI Studio, OpenRouter, Ollama
+  (local or cloud), an OpenAI-compatible endpoint, or the Claude Code / Codex /
+  GitHub Copilot / opencode CLIs. You can hide every AI feature in
+  **Settings → General**.
 {{/ai}}
 ## Open your first repository
 
@@ -1080,9 +1081,10 @@ diff**, reads any file at any ref, searches the repo, runs history, and reads th
 PR's existing comments and threads — so big PRs stop hedging about the part they couldn't
 see. It works two ways depending on your review model. **CLI agent models** (Claude,
 Copilot, opencode) get the tools through GitDesktop attaching to the run as a **read-only
-MCP server**. **HTTP/API models** (Anthropic, OpenAI, OpenAI-compatible, OpenRouter,
-Ollama) get a **native, read-only tool loop** instead — with **no review workspace to
-prepare**, so those reviews start instantly (no "Preparing review workspace…" wait).
+MCP server**. **HTTP/API models** (Anthropic, OpenAI, Google AI Studio,
+OpenAI-compatible, OpenRouter, Ollama) get a **native, read-only tool loop**
+instead — with **no review workspace to prepare**, so those reviews start instantly
+(no "Preparing review workspace…" wait).
 Either way it's **read-only end to end** — only read tools exist in the loop, so the
 reviewer can explore but never modify — and the status line shows what it's reading as it
 goes. An agentic review reads your repository directly, so your **AI ignore patterns**
@@ -1777,8 +1779,9 @@ configured in **Settings → AI**.
 
 Bring your own model:
 
-- **Anthropic, OpenAI, OpenRouter, Ollama Cloud** — paste an API key (stored in your OS
-  keychain, never in app files).
+- **Anthropic, OpenAI, Google AI Studio, OpenRouter, Ollama Cloud** — paste an API key
+  (stored in your OS keychain, never in app files). Google AI Studio reaches Gemini
+  directly; the OpenAI-compatible preset below points at the same endpoint.
 - **OpenAI-compatible** — any endpoint that speaks the OpenAI API, with one-click presets
   for **Vercel AI Gateway, Google Gemini, DeepSeek, Mistral, and Z.ai (GLM)**.
 - **Ollama (local or LAN)** — a local model (your code never leaves your machine), or one

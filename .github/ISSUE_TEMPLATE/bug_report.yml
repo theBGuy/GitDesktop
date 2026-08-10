@@ -82,6 +82,7 @@ body:
         - Not applicable
         - Anthropic
         - OpenAI
+        - Google AI Studio
         - OpenRouter
         - Ollama (local)
         - Ollama Cloud

@@ -10,7 +10,7 @@ Software developers working in a desktop Git client all day, usually alongside a
 
 ## Product Purpose
 
-GitDesktop is an AI-native Git client: GitHub Desktop-style fundamentals (status, staging, branches, history, diffs, sync) plus first-class AI assistance — generated commit messages, PR titles/descriptions, and code/security review — with a bring-your-own-model setup (Anthropic, OpenAI, OpenRouter, local Ollama, Ollama Cloud, any OpenAI-compatible endpoint, plus keyless CLI agents — Claude Code, Codex, GitHub Copilot, opencode). It also covers the full pull-request loop (PRs and issues across GitHub, GitLab, and Bitbucket, plus private local PRs, with issues extending to linked Jira projects) without leaving the app. Success looks like: a developer keeps GitDesktop open all day, trusts it with destructive operations, and ships better-described commits and PRs with less typing.
+GitDesktop is an AI-native Git client: GitHub Desktop-style fundamentals (status, staging, branches, history, diffs, sync) plus first-class AI assistance — generated commit messages, PR titles/descriptions, and code/security review — with a bring-your-own-model setup (Anthropic, OpenAI, Google AI Studio, OpenRouter, local Ollama, Ollama Cloud, any OpenAI-compatible endpoint, plus keyless CLI agents — Claude Code, Codex, GitHub Copilot, opencode). It also covers the full pull-request loop (PRs and issues across GitHub, GitLab, and Bitbucket, plus private local PRs, with issues extending to linked Jira projects) without leaving the app. Success looks like: a developer keeps GitDesktop open all day, trusts it with destructive operations, and ships better-described commits and PRs with less typing.
 
 ## Brand Personality
 

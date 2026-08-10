@@ -11,6 +11,7 @@ const download = `${base}download/`;
 const providers = [
   { name: "Anthropic", note: "Claude, direct API" },
   { name: "OpenAI", note: "GPT, direct API" },
+  { name: "Google AI Studio", note: "Gemini, direct API" },
   {
     name: "OpenAI-compatible",
     note: "custom base URL — presets for Vercel AI Gateway, Gemini, DeepSeek, Mistral, Z.ai",
@@ -42,7 +43,7 @@ const agentAbilities = [
   description="Generated commits, code and security review, delegated agents, and an MCP server — bring your own model, keep your keys, and hide it all whenever you want."
   breadcrumbs={[{ name: "AI", path: "/ai/" }]}
   ogTitle="GitDesktop AI — you bring the model, you keep the keys"
-  ogDescription="Generated commits and reviews, delegated agents, and an MCP server — on your own models (Anthropic, OpenAI, OpenRouter, Ollama, or a keyless CLI). Fully hideable."
+  ogDescription="Generated commits and reviews, delegated agents, and an MCP server — on your own models (Anthropic, OpenAI, Google AI Studio, OpenRouter, Ollama, or a keyless CLI). Fully hideable."
 >
   <!-- Hero -->
   <section class="border-b border-line">
