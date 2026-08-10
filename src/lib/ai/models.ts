@@ -38,6 +38,17 @@ const OPENAI_NON_CHAT =
  *  excludes future media families by default instead of chasing each new name. */
 const GOOGLE_CHAT_FAMILY = /^(gemini|gemma)-/;
 
+/** Google's catalog, normalized for the model picker. The prefix strip must run
+ *  BEFORE the family test — a `models/`-prefixed id fails `^gemini-` and would
+ *  filter the whole catalog away. Shared by the `google` provider and the Gemini
+ *  preset, which read the same endpoint. */
+function googleChatModels(data: { id: string }[]): string[] {
+  return data
+    .map((m) => m.id.replace(/^models\//, ""))
+    .filter((id) => GOOGLE_CHAT_FAMILY.test(id) && !OPENAI_NON_CHAT.test(id))
+    .sort();
+}
+
 async function fetchProviderModels(
   settings: AiSettings,
   allowedHosts?: readonly string[],
@@ -84,14 +95,7 @@ async function fetchProviderModels(
       const json = await fetchJson(`${GOOGLE_AI_STUDIO_BASE_URL}/models`, {
         Authorization: `Bearer ${key}`,
       });
-      // Catalog ids can carry a `models/` prefix the inference call won't accept;
-      // stripping it is a no-op when they don't.
-      return (json.data as { id: string }[])
-        .map((m) => m.id.replace(/^models\//, ""))
-        .filter(
-          (id) => GOOGLE_CHAT_FAMILY.test(id) && !OPENAI_NON_CHAT.test(id),
-        )
-        .sort();
+      return googleChatModels(json.data as { id: string }[]);
     }
     case "openai-compatible": {
       const key = await getSecret("openai-compatible");
@@ -101,7 +105,11 @@ async function fetchProviderModels(
       const json = await fetchJson(`${base}/models`, {
         Authorization: `Bearer ${key}`,
       });
-      return (json.data as { id: string }[]).map((m) => m.id).sort();
+      const data = json.data as { id: string }[];
+      // The Gemini preset points at the same catalog as the `google` provider, so
+      // it needs the same normalization; other endpoints list only their own models.
+      if (base === GOOGLE_AI_STUDIO_BASE_URL) return googleChatModels(data);
+      return data.map((m) => m.id).sort();
     }
     case "openrouter": {
       // public endpoint, no key required

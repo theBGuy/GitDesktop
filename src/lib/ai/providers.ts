@@ -3,8 +3,8 @@ import type { AiProviderId } from "./types";
 export const PROVIDER_LABELS: Record<AiProviderId, string> = {
   anthropic: "Anthropic",
   openai: "OpenAI",
-  "openai-compatible": "OpenAI-compatible",
   google: "Google AI Studio",
+  "openai-compatible": "OpenAI-compatible",
   openrouter: "OpenRouter",
   ollama: "Ollama (local)",
   "ollama-cloud": "Ollama Cloud",
@@ -24,6 +24,16 @@ export const OLLAMA_CLOUD_HOST = "https://ollama.com";
 export const GOOGLE_AI_STUDIO_BASE_URL =
   "https://generativelanguage.googleapis.com/v1beta/openai";
 export const GOOGLE_AI_STUDIO_KEYS_URL = "https://aistudio.google.com/apikey";
+
+/** Suggested Gemini ids, shared by the first-class `google` provider and the Gemini
+ *  preset — same endpoint, so one list keeps the two from drifting apart. The head
+ *  is what `defaultModelForProvider("google")` stamps on a provider switch, so it
+ *  must be a currently-served model. */
+const GEMINI_MODELS = [
+  "gemini-3.6-flash",
+  "gemini-3.5-flash",
+  "gemini-2.5-pro",
+];
 
 /** Presets for the `openai-compatible` provider — each is an OpenAI-compatible
  *  `/chat/completions` endpoint. The Vercel AI Gateway is an aggregator (one host,
@@ -57,7 +67,7 @@ export const OPENAI_COMPATIBLE_PRESETS: OpenAiCompatiblePreset[] = [
     id: "gemini",
     label: "Google Gemini",
     baseUrl: GOOGLE_AI_STUDIO_BASE_URL,
-    models: ["gemini-3.6-flash", "gemini-2.5-pro", "gemini-2.5-flash"],
+    models: GEMINI_MODELS,
     keysUrl: GOOGLE_AI_STUDIO_KEYS_URL,
   },
   {
@@ -128,10 +138,9 @@ export const MODEL_SUGGESTIONS: Record<AiProviderId, string[]> = {
   openai: ["gpt-4.1-mini", "gpt-4.1", "o4-mini"],
   // Generic fallback only; the picked preset's own models drive the live list.
   "openai-compatible": OPENAI_COMPATIBLE_PRESETS[0].models,
-  // Gemini ids retire fast — the 1.5 line and 2.0 Flash are already shut down, and
-  // `defaultModelForProvider` stamps [0] on provider switch, so a stale first entry
-  // breaks the first generation before the live catalog is ever consulted.
-  google: ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.5-pro"],
+  // Gemini ids retire fast — the 1.5 line and 2.0 Flash are already shut down, so a
+  // stale first entry breaks the first generation before the live catalog loads.
+  google: GEMINI_MODELS,
   openrouter: [
     "anthropic/claude-haiku-4.5",
     "openai/gpt-4.1-mini",
