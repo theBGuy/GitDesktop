@@ -12,10 +12,13 @@ import type { AiSettings } from "./types";
 /** Static fallback model list when the live catalog is unavailable. For the
  *  openai-compatible provider it's the matching preset's own models (not the
  *  generic default), so e.g. picking DeepSeek without a key still suggests
- *  DeepSeek models. */
+ *  DeepSeek models. A base URL left over from the retired Gemini preset matches
+ *  no preset, so it takes the `google` suggestions rather than falling through to
+ *  the generic default's aggregator ids, which Google's endpoint rejects. */
 function fallbackModels(settings: AiSettings): string[] {
   if (settings.provider === "openai-compatible") {
     const base = settings.openaiCompatibleBaseUrl.replace(/\/$/, "");
+    if (base === GOOGLE_AI_STUDIO_BASE_URL) return MODEL_SUGGESTIONS.google;
     const preset = OPENAI_COMPATIBLE_PRESETS.find((p) => p.baseUrl === base);
     if (preset) return preset.models;
   }

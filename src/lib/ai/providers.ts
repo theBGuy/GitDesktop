@@ -18,9 +18,8 @@ export const PROVIDER_LABELS: Record<AiProviderId, string> = {
  *  server). Native API at `/api`, OpenAI-compatible model list at `/v1/models`. */
 export const OLLAMA_CLOUD_HOST = "https://ollama.com";
 
-/** Google AI Studio's OpenAI-compatible endpoint and key page. The first-class
- *  `google` provider and the Gemini preset below reach the same service, so both
- *  read these rather than repeating the literals. */
+/** Google AI Studio's fixed OpenAI-compatible endpoint — the `google` provider's
+ *  base URL and catalog host — and the key page linked from the Settings key hint. */
 export const GOOGLE_AI_STUDIO_BASE_URL =
   "https://generativelanguage.googleapis.com/v1beta/openai";
 export const GOOGLE_AI_STUDIO_KEYS_URL = "https://aistudio.google.com/apikey";
@@ -92,8 +91,8 @@ export const OPENAI_COMPATIBLE_PRESETS: OpenAiCompatiblePreset[] = [
 export const PROVIDERS_REQUIRING_KEY: AiProviderId[] = [
   "anthropic",
   "openai",
-  "openai-compatible",
   "google",
+  "openai-compatible",
   "openrouter",
   "ollama-cloud",
 ];

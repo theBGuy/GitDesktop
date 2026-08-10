@@ -3,8 +3,8 @@ import type { ContextBudgetProfile } from "./context-budget";
 export type AiProviderId =
   | "anthropic"
   | "openai"
-  | "openai-compatible"
   | "google"
+  | "openai-compatible"
   | "openrouter"
   | "ollama"
   | "ollama-cloud"

@@ -4,8 +4,8 @@ const SERVICE: &str = "com.thebguy.gitdesktop";
 const KNOWN_PROVIDERS: &[&str] = &[
     "anthropic",
     "openai",
-    "openai-compatible",
     "google",
+    "openai-compatible",
     "openrouter",
     "ollama",
     "ollama-cloud",
