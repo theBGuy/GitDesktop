@@ -119,10 +119,12 @@ export function PlanComposer({
   // An explicit pick; null = follow the Settings default. Derived during render
   // — no effect — so settings arriving late can't clobber a pick.
   const [agentPick, setAgentPick] = useState<AgentKind | null>(null);
-  const agent: AgentKind =
-    agentPick ?? (settings.data ? defaultAgentKind(settings.data) : "claude");
+  const agent: AgentKind = agentPick ?? defaultAgentKind(settings.data);
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState("");
+  // A model picked for one agent isn't in another's list; "" = the account
+  // default. Derived, so a default-agent change drops a model it can't run.
+  const modelForAgent = MODELS[agent].includes(model) ? model : "";
 
   const planningIssue = Boolean(seed?.issueTitle || seed?.issueBody);
   const canPlan = goal.trim().length > 0 || planningIssue;
@@ -137,7 +139,7 @@ export function PlanComposer({
       originResearchId: seed?.originResearchId,
       contextPack: seed?.contextPack,
       agent,
-      model,
+      model: modelForAgent,
       effort,
     });
   };
@@ -196,7 +198,7 @@ export function PlanComposer({
               }}
             />
             <ModelPicker
-              value={model}
+              value={modelForAgent}
               onChange={setModel}
               models={MODELS[agent]}
             />

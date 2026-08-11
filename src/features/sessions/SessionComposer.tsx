@@ -205,8 +205,13 @@ export function SessionComposer({
   // a pick, and a later Settings change moves the unpicked default.
   const [startAgentPick, setStartAgentPick] = useState<AgentKind | null>(null);
   const startAgent: AgentKind =
-    startAgentPick ??
-    (settings.data ? defaultAgentKind(settings.data) : "claude");
+    startAgentPick ?? defaultAgentKind(settings.data);
+  // A model picked for one agent isn't in another's list; "" = the account default.
+  // Derived, so every path that can move the agent — the picker, a stash restore,
+  // settings landing — drops a model the new agent can't run.
+  const startModelForAgent = modelsForAgent(startAgent).includes(startModel)
+    ? startModel
+    : "";
   // MCP servers opted into for a NEW session. null = "use the default" (every
   // enabled registry server); a concrete array once the user picks. Frozen at
   // turn 1, so it only matters before a session exists.
@@ -245,7 +250,7 @@ export function SessionComposer({
   const stashedRef = useRef<PendingTask | null>(null);
 
   const running = session?.running ?? false;
-  const model = session ? session.model : startModel;
+  const model = session ? session.model : startModelForAgent;
   // Agent is fixed once a session exists; while starting, it's user-selectable.
   const agent = session ? session.agent : startAgent;
   const models = modelsForAgent(agent);
@@ -564,7 +569,7 @@ export function SessionComposer({
       start(
         repoPath,
         text,
-        startModel,
+        startModelForAgent,
         startAgent,
         startEffort,
         undefined,
@@ -1033,7 +1038,11 @@ export function SessionComposer({
       <EnsembleRunDialog
         open={ensembleOpen}
         onOpenChange={setEnsembleOpen}
-        seed={{ agent: startAgent, model: startModel, effort: startEffort }}
+        seed={{
+          agent: startAgent,
+          model: startModelForAgent,
+          effort: startEffort,
+        }}
         estimate={costEstimate}
         onRun={runEnsemble}
       />

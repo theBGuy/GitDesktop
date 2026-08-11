@@ -1,5 +1,5 @@
 import { Channel } from "@tauri-apps/api/core";
-import type { McpServer } from "@/lib/settings/api";
+import type { AppSettings, McpServer } from "@/lib/settings/api";
 import { invoke } from "@/lib/tauri/invoke";
 import type { AiProviderId } from "./types";
 
@@ -145,11 +145,11 @@ export function providerKind(provider: AiProviderId): AgentKind | null {
 
 /** The agent a NEW session, plan, or research run starts on: the explicit
  *  Settings → AI default when set, else the main AI provider when it's an
- *  agent CLI, else Claude. */
-export function defaultAgentKind(settings: {
-  defaultAgent?: AgentKind;
-  ai: { provider: AiProviderId };
-}): AgentKind {
+ *  agent CLI, else Claude — including while settings are still loading. */
+export function defaultAgentKind(
+  settings?: Pick<AppSettings, "defaultAgent" | "ai">,
+): AgentKind {
+  if (!settings) return "claude";
   return (
     settings.defaultAgent ?? providerKind(settings.ai.provider) ?? "claude"
   );
