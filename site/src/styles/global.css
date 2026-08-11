@@ -562,7 +562,9 @@ kbd {
 /* Changelog page (/changelog/): .release/.notes markup is the set:html output
    of lib/changelog.ts, sharing .prose's link/strong/em/code/marker rules
    above. Never a bare `.release a` — these rules are unlayered, so it would
-   outrank the article-header links' utility classes. */
+   outrank the article-header links' utility classes; that same unlayered
+   position is what lets the scrollspy rule below beat the rail link's
+   `text-muted`. */
 .release .notes {
   list-style: disc;
 }

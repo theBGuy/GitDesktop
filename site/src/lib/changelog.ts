@@ -2,14 +2,12 @@
 // resolve import.meta.url against the bundled prerender chunk, not this file.
 import raw from "../../../CHANGELOG.md?raw";
 
-// Build-time parse of the repo-root CHANGELOG.md, per the fragment contract
-// (changelog.d/README.md): `## [x.y.z] - date`, `### ` categories, `- `
-// bullets with 2-space continuations (blank lines don't close a bullet);
-// inline bold/italic/code + http(s)
-// links, any other [label](target) collapsed to its label (the relative
-// links target the gitignored docs/ tree). Fail-open — unknown lines render
-// as prose, never throw: a throw would kill the production Pages build on a
-// release-day push, which no PR site gate fronts.
+// Build-time parse of the repo-root CHANGELOG.md (grammar = the fragment
+// contract in changelog.d/README.md). Three non-obvious contracts: an
+// indented continuation after a blank line rejoins its still-open bullet;
+// non-http [label](target) links collapse to their label (the relative ones
+// point into the gitignored docs/ tree); and parsing is fail-open — never
+// throw, because a release-day direct push has no PR site gate in front of it.
 
 export interface ReleaseCategory {
   name: string;
@@ -91,13 +89,13 @@ export function getChangelog(): Release[] {
   let bullet: string | null = null;
   let para: string | null = null;
 
+  // A blank line closes only a paragraph: the fragment validator accepts blank
+  // lines inside a bullet body, so an indented continuation may follow one and
+  // must rejoin its still-open bullet.
   const flushPara = () => {
     if (para !== null && release) release.intro.push(renderInline(para));
     para = null;
   };
-  // A blank line closes only a paragraph: the fragment validator accepts blank
-  // lines inside a bullet body, so an indented continuation may follow one and
-  // must rejoin its still-open bullet.
   const flush = () => {
     if (bullet !== null && category)
       category.bullets.push(renderInline(bullet));
