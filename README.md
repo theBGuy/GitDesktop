@@ -798,7 +798,8 @@ review via its subscription login. The full list is under
   position, size, and display (with copy-coords).
 - **Window memory**: GitDesktop reopens at the size and position you left
   it, and maximized if it was, validated against your current monitors so
-  an unplugged display can't strand it off-screen.
+  an unplugged display can't strand it off-screen. Your layout is saved as
+  you arrange the window, so a crash or a killed process doesn't lose it.
 - **Git settings**: Settings → **Git** configures your global git config
   from the app: the **default branch** for new repos (`init.defaultBranch`,
   honored by a command-line `git init` too), **line endings**

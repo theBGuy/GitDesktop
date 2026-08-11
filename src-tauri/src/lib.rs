@@ -65,9 +65,9 @@ pub fn run() {
         // GEOMETRY only — not visibility: the tray logic owns whether the window is
         // shown, and a saved "hidden" would reopen it invisible. The saves themselves
         // are driven from tray.rs — debounced on move/resize, plus one on close/quit —
-        // since `tauri dev` is usually killed rather than cleanly exited and
-        // close-to-tray isn't a real close, so the plugin's own save-on-exit can't be
-        // relied on.
+        // because the plugin's own save-on-exit can't be relied on: `tauri dev` is
+        // usually killed rather than cleanly exited, and close-to-tray isn't a real
+        // close.
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(tray::WINDOW_STATE_FLAGS)
