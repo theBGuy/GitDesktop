@@ -1287,7 +1287,9 @@ pub(crate) async fn detect_fork_pr_for_branch(
             "--json",
             FORK_PR_LIST_FIELDS,
         ],
-        GH_NETWORK_TIMEOUT,
+        // The short timeout: this advisory read sits on the publish path behind the
+        // Publish spinner, and a timeout folds to Ok(None) — publish proceeds.
+        GH_TIMEOUT,
     )
     .await
     else {
