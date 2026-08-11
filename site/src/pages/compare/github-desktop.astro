@@ -8,12 +8,11 @@
 // The verified-on stamp is rendered on the page; when a row changes upstream,
 // update the stamp in the same edit. A stale comparison is worse than none —
 // it's the first thing an HN thread checks.
-//
 import { Image } from "astro:assets";
 import appGithubPr from "../../assets/app-github-pr.png";
 import CompareTable from "../../components/CompareTable.astro";
 import SiteLayout from "../../layouts/SiteLayout.astro";
-import { type Group, type Row } from "../../lib/compare";
+import type { Group } from "../../lib/compare";
 
 const base = import.meta.env.BASE_URL;
 const repo = "https://github.com/theBGuy/GitDesktop";
@@ -26,7 +25,7 @@ const GHD_VERSION = "3.6.3";
 // load-bearing parity rows). The full matrix behind this runs ~130 rows; both
 // clients cover the fundamentals, which the intro says in prose instead of
 // padding the table.
-const groups: Group<Row>[] = [
+const groups: Group[] = [
   {
     title: "Where you can use it",
     rows: [

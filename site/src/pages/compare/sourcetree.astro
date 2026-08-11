@@ -11,7 +11,7 @@ import { Image } from "astro:assets";
 import appGithubPr from "../../assets/app-github-pr.png";
 import CompareTable from "../../components/CompareTable.astro";
 import SiteLayout from "../../layouts/SiteLayout.astro";
-import { type Group, type Row } from "../../lib/compare";
+import type { Group } from "../../lib/compare";
 
 const base = import.meta.env.BASE_URL;
 const repo = "https://github.com/theBGuy/GitDesktop";
@@ -21,7 +21,7 @@ const VERIFIED_ON = "August 11, 2026";
 const ST_WIN_VERSION = "3.4.31";
 const ST_MAC_VERSION = "4.2.19";
 
-const groups: Group<Row>[] = [
+const groups: Group[] = [
   {
     title: "Where you can use it",
     rows: [
@@ -314,8 +314,9 @@ const faqs = [
             <span class="text-ink">Nothing else to install.</span> Sourcetree
             bundles its own Git (system Git optional). GitDesktop needs system
             Git, plus <code class="text-ink">gh</code> or
-            <code class="text-ink">glab</code> for forge features — sign-in is
-            guided from inside the app, but it's still a real first-run step.
+            <code class="text-ink">glab</code> for GitHub and GitLab features
+            (Bitbucket needs only an API token) — sign-in is guided from inside
+            the app, but it's still a real first-run step.
           </span>
         </li>
         <li class="flex items-start gap-2.5 leading-relaxed text-body">

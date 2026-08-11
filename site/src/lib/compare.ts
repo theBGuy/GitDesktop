@@ -16,9 +16,9 @@ export interface Row {
   gd: Cell;
 }
 
-export interface Group<R> {
+export interface Group {
   title: string;
-  rows: R[];
+  rows: Row[];
 }
 
 export const stateText: Record<State, string> = {

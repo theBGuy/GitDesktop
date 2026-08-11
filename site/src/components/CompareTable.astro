@@ -1,11 +1,11 @@
 ---
 // The /compare/ pages' shared table: one competitor column vs GitDesktop,
-// grouped rows from lib/compare's Group<Row>.
-import { type Group, type Row, stateClass, stateText } from "../lib/compare";
+// grouped rows from lib/compare's Group.
+import { type Group, stateClass, stateText } from "../lib/compare";
 
 interface Props {
   competitor: string;
-  groups: Group<Row>[];
+  groups: Group[];
 }
 const { competitor, groups } = Astro.props;
 ---
