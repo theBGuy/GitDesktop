@@ -1154,9 +1154,10 @@ export function usePrMergeability(
   };
 }
 
-/** The key `usePrBaseDivergence` reads, so the update-branch mutation can
- *  invalidate exactly this question. */
-export const prBaseDivergenceKey = (
+/** The key `usePrBaseDivergence` reads. Update-branch relies on the repo-wide
+ *  prefix invalidation, which covers this key; nothing invalidates it
+ *  individually today. */
+const prBaseDivergenceKey = (
   repo: string,
   number: number,
   lens: RemoteLens | undefined,
@@ -4403,8 +4404,10 @@ export function usePrUpdateBranch(repo: string) {
 export function useApproveWorkflowRun(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (args: { runId: number }) =>
-      api.forgeCiRunApprove(repo, args.runId),
+    // `lens` is optional because the Actions tab is origin-scoped by design;
+    // the PR checks strip renders under either lens and must pass its own.
+    mutationFn: (args: { runId: number; lens?: RemoteLens }) =>
+      api.forgeCiRunApprove(repo, args.runId, args.lens),
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ["repo", repo, "actions"] });
       queryClient.invalidateQueries({ queryKey: ["repo", repo, "pr"] });

@@ -801,9 +801,9 @@ things follow from that (**GitHub** only — the fork model here is GitHub's):
   workflow run** is in the command palette as well, with no default shortcut.
 - **Push follow-up commits to the contributor's branch.** When you've committed on top
   of a fork pull request's head locally, publishing that branch would put a stray copy
-  in your own repository. GitDesktop recognizes the branch as that pull request's work
-  and offers to push your commits to its **branch on the fork** instead, wiring up the
-  remote it needs — the pull request picks them up. That takes the contributor's
+  in your own repository. When the branch's history shows it's that pull request's
+  work, GitDesktop offers to push your commits to its **branch on the fork** instead,
+  wiring up the remote it needs — the pull request picks them up. That takes the contributor's
   *Allow edits by maintainers*; without it the offer says so, and publishing to your
   own remote anyway is still one click away.
 

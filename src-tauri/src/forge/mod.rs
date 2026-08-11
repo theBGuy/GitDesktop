@@ -1897,7 +1897,11 @@ pub async fn forge_ci_run_rerun(repo_path: String, run_id: u64, failed: bool) ->
 /// a first-time contributor's fork PR). GitHub-only: GitDesktop surfaces run
 /// approval nowhere else, so the other providers refuse rather than guess.
 #[tauri::command]
-pub async fn forge_ci_run_approve(repo_path: String, run_id: u64) -> AppResult<()> {
+pub async fn forge_ci_run_approve(
+    repo_path: String,
+    run_id: u64,
+    lens: Option<String>,
+) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => Err(AppError::InvalidArgument(
             "Approving held runs is GitHub-only — GitDesktop has no run approval for GitLab pipelines.".into(),
@@ -1905,7 +1909,7 @@ pub async fn forge_ci_run_approve(repo_path: String, run_id: u64) -> AppResult<(
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
             "Approving held runs is GitHub-only — GitDesktop has no run approval for Bitbucket pipelines.".into(),
         )),
-        _ => crate::github::actions::gh_run_approve(repo_path, run_id).await,
+        _ => crate::github::actions::gh_run_approve(repo_path, run_id, lens).await,
     }
 }
 
@@ -1963,14 +1967,38 @@ fn remote_identity(url: &str) -> Option<(String, String)> {
     Some((remote_host(url)?, remote_path(url)?))
 }
 
+/// A fork's clone URL, spliced from `origin_url`: only the `owner/repo` path is
+/// replaced, so scheme, userinfo, host and PORT all survive — deriving from a bare
+/// host would drop `:8443` and collapse `ssh://` to scp form, yielding a remote git
+/// adds happily and can never reach. `.git` rides along only when origin had it.
+/// Userinfo carries over deliberately, embedded credential included: origin already
+/// stores that secret in the same `.git/config`, and dropping it would break a
+/// token-authed origin's fork remote.
+fn fork_url_from_origin(origin_url: &str, owner: &str, repo: &str) -> Option<String> {
+    let trimmed = origin_url.trim();
+    let path = remote_path(trimmed)?;
+    // `remote_path` trims trailing slashes then a `.git` suffix, so undoing both
+    // leaves the path as an exact tail — no re-parsing of the URL grammar here.
+    let body = trimmed.trim_end_matches('/');
+    let (body, suffix) = match body.strip_suffix(".git") {
+        Some(b) => (b, ".git"),
+        None => (body, ""),
+    };
+    let start = body.len().checked_sub(path.len())?;
+    if body.get(start..)? != path {
+        return None;
+    }
+    Some(format!("{}{owner}/{repo}{suffix}", &body[..start]))
+}
+
 /// The name of a remote pointing at `owner/repo` on origin's host, adding one if
 /// none exists. Idempotent: a second call finds the remote it added and returns
 /// the same name.
 ///
-/// The fork URL is built in ORIGIN's scheme (https vs ssh) so the new remote
-/// authenticates the way the repo already does. An existing remote whose URL
-/// matches wins over the name derivation, so a user's own `fork`/`contrib` remote
-/// is reused instead of duplicated.
+/// The fork URL is spliced from ORIGIN's own URL ([`fork_url_from_origin`]) so the
+/// new remote authenticates the way the repo already does. An existing remote whose
+/// URL matches wins over the name derivation, so a user's own `fork`/`contrib`
+/// remote is reused instead of duplicated.
 #[tauri::command]
 pub async fn forge_ensure_fork_remote(
     state: tauri::State<'_, crate::state::AppState>,
@@ -1991,15 +2019,11 @@ pub(crate) async fn forge_ensure_fork_remote_core(
     validate_repo_name(&repo)?;
     let origin_url =
         crate::git::remote::git_remote_url(repo_path.clone(), "origin".to_string()).await?;
-    let Some(host) = remote_host(&origin_url) else {
+    let Some(fork_url) = fork_url_from_origin(&origin_url, &owner, &repo) else {
         return Err(AppError::InvalidArgument(
-            "This repository's 'origin' has no host to derive a fork URL from.".into(),
+            "This repository's 'origin' URL has no repository path to derive a fork URL from."
+                .into(),
         ));
-    };
-    let fork_url = if is_https_remote(&origin_url) {
-        format!("https://{host}/{owner}/{repo}.git")
-    } else {
-        format!("git@{host}:{owner}/{repo}.git")
     };
     let want = remote_identity(&fork_url);
 
@@ -4060,23 +4084,72 @@ mod tests {
             "a URL match must not mint an owner-named remote"
         );
 
-        // An ssh origin yields an ssh fork URL.
-        let ssh_repo = dir.path().join("ssh-repo");
-        std::fs::create_dir_all(&ssh_repo).unwrap();
-        let ssh_s = ssh_repo.to_string_lossy().into_owned();
-        run(&ssh_s, &["init", "-q"]).await;
-        run(
-            &ssh_s,
-            &["remote", "add", "origin", "git@github.com:base/proj.git"],
-        )
-        .await;
-        forge_ensure_fork_remote_core(&state, ssh_s.clone(), "contrib".into(), "proj".into())
-            .await
-            .expect("ssh origin adds an ssh fork remote");
+        // Origin's own URL shape is spliced, not rebuilt from a bare host: scheme,
+        // userinfo and PORT must survive, or the remote git happily adds is one it
+        // can never reach.
+        for (tag, origin, expected) in [
+            ("scp", "git@github.com:base/proj.git", "git@github.com:contrib/proj.git"),
+            (
+                "ssh-port",
+                "ssh://git@ghe.acme.com:2222/base/proj.git",
+                "ssh://git@ghe.acme.com:2222/contrib/proj.git",
+            ),
+            (
+                "https-port",
+                "https://ghe.acme.com:8443/base/proj.git",
+                "https://ghe.acme.com:8443/contrib/proj.git",
+            ),
+            // No `.git` on origin ⇒ none on the fork URL either.
+            ("no-suffix", "https://ghe.acme.com:8443/base/proj", "https://ghe.acme.com:8443/contrib/proj"),
+        ] {
+            let sub = dir.path().join(tag);
+            std::fs::create_dir_all(&sub).unwrap();
+            let sub_s = sub.to_string_lossy().into_owned();
+            run(&sub_s, &["init", "-q"]).await;
+            run(&sub_s, &["remote", "add", "origin", origin]).await;
+            forge_ensure_fork_remote_core(&state, sub_s.clone(), "contrib".into(), "proj".into())
+                .await
+                .unwrap_or_else(|e| panic!("{tag}: {e:?}"));
+            assert_eq!(
+                run(&sub_s, &["remote", "get-url", "contrib"]).await.trim(),
+                expected,
+                "origin {origin}"
+            );
+        }
+    }
+
+    #[test]
+    fn fork_url_splices_the_path_and_keeps_scheme_userinfo_and_port() {
+        let f = |url: &str| fork_url_from_origin(url, "contrib", "proj");
         assert_eq!(
-            run(&ssh_s, &["remote", "get-url", "contrib"]).await.trim(),
-            "git@github.com:contrib/proj.git"
+            f("https://ghe.acme.com:8443/base/proj.git").as_deref(),
+            Some("https://ghe.acme.com:8443/contrib/proj.git")
         );
+        assert_eq!(
+            f("ssh://git@ghe.acme.com:2222/base/proj.git").as_deref(),
+            Some("ssh://git@ghe.acme.com:2222/contrib/proj.git")
+        );
+        assert_eq!(
+            f("git@github.com:base/proj.git").as_deref(),
+            Some("git@github.com:contrib/proj.git")
+        );
+        // A GitLab subgroup path is replaced whole — the fork lives at the top level.
+        assert_eq!(
+            f("https://gitlab.com/group/sub/proj.git").as_deref(),
+            Some("https://gitlab.com/contrib/proj.git")
+        );
+        // `.git` and a trailing slash ride only when origin carried them.
+        assert_eq!(
+            f("https://github.com/base/proj").as_deref(),
+            Some("https://github.com/contrib/proj")
+        );
+        assert_eq!(
+            f("https://github.com/base/proj.git/").as_deref(),
+            Some("https://github.com/contrib/proj.git")
+        );
+        // No repo path to splice → None, so the caller errors instead of guessing.
+        assert_eq!(f("https://github.com"), None);
+        assert_eq!(f(""), None);
     }
 
     /// The frontend keys off these exact names, and an unknown probe must travel

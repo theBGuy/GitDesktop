@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import { APPROVE_RUN_CONFIRM } from "@/features/pulls/ChecksRollup";
 import {
   forgeFeatureReady,
   useApproveWorkflowRun,
@@ -410,11 +411,7 @@ export function RunDetailView({
   }
 
   async function doApprove() {
-    const ok = await useConfirm.getState().ask({
-      title: "Approve and run workflows?",
-      body: "This runs the contributor's workflow code in this repository's CI.",
-      confirmLabel: "Approve and run",
-    });
+    const ok = await useConfirm.getState().ask(APPROVE_RUN_CONFIRM);
     if (!ok) return;
     approveRun.mutate(
       { runId },

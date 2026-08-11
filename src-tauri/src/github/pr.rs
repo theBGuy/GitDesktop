@@ -3,7 +3,7 @@ use tauri::State;
 
 use crate::error::{AppError, AppResult};
 use crate::forge::gitlab::null_to_default;
-use crate::git::runner::{run_git_raw, DEFAULT_TIMEOUT, NETWORK_TIMEOUT};
+use crate::git::runner::{run_git_raw, run_git_raw_input, DEFAULT_TIMEOUT, NETWORK_TIMEOUT};
 use crate::github::issue::{map_reaction_groups, repo_owner_name, IssueReactions};
 use crate::github::runner::{run_gh, run_gh_input, run_gh_raw, GH_NETWORK_TIMEOUT, GH_TIMEOUT};
 use crate::state::AppState;
@@ -1089,6 +1089,9 @@ pub async fn gh_pr_base_divergence(
         Some(owner) => format!("{owner}:{}", refs.head_ref_name),
         None => refs.head_ref_name.clone(),
     };
+    // Branch names ride the basehead unencoded: GitHub's capture is greedy and a
+    // git ref name can never contain `..`, so the `...` separator stays
+    // unambiguous even for slashed names (probed live 2026-08-11).
     let endpoint = format!("repos/{slug}/compare/{}...{head}", refs.base_ref_name);
     let out = run_gh(Some(&repo_path), &["api", &endpoint], GH_NETWORK_TIMEOUT).await?;
     let compare: RawCompare = serde_json::from_str(&out.stdout_lossy())
@@ -1113,7 +1116,6 @@ pub struct ForkPrMatch {
     pub head_ref_name: String,
     pub head_repo_owner: String,
     pub head_repo_name: String,
-    pub head_sha: String,
     /// "Allow edits by maintainers"; unknown degrades to `false`, so the caller
     /// disables the push-to-fork route rather than promising a push that would 403.
     pub maintainer_can_modify: bool,
@@ -1148,6 +1150,68 @@ struct RawForkPr {
 /// gh-supplied sha into git argv, where a `-`-leading value would read as a flag.
 fn is_object_id(s: &str) -> bool {
     (7..=64).contains(&s.len()) && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Whether `oid` sits OUTSIDE origin's own graph — the evidence that a fork PR's
+/// head is distinctive contributor work rather than a commit origin already has.
+/// `rev-list -1 <oid> --not --remotes=origin` prints the oid when no origin
+/// remote-tracking ref reaches it, and nothing when one does.
+///
+/// Positive proof only: a spawn failure or non-zero exit answers `false`, leaving
+/// the candidate suppressed — a false positive would offer a push to someone
+/// else's fork, while a dropped match is a pre-accepted miss.
+async fn oid_outside_origin_graph(repo_path: &str, oid: &str) -> bool {
+    run_git_raw(
+        Some(repo_path),
+        &["rev-list", "-1", oid, "--not", "--remotes=origin"],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .is_ok_and(|o| o.code == 0 && !o.stdout_lossy().trim().is_empty())
+}
+
+/// The one match a set of surviving candidates anchors, or `None` when they
+/// disagree. Never "the first one": `gh pr list` is newest-first, which is exactly
+/// the slot an attacker controls, and candidates collide on a shared ANCESTOR
+/// rather than a shared head — so a newer PR built on someone else's public commit
+/// would shadow the real one.
+///
+/// Smallest `ahead_count` wins: the most-derived head is the most specific claim on
+/// this branch, and for a stacked pair it names the deeper PR. A tie across
+/// DIFFERENT head repos is genuinely ambiguous about where a push would land, and
+/// an advisory guard must favor silence over aiming an outward push at the wrong
+/// fork; a tie inside ONE fork (duplicate PRs) is unambiguous about the
+/// destination, so the lowest number wins. Repo identity compares exactly — gh
+/// reports canonical casing for every candidate in one response, and a difference
+/// therefore means different repos.
+fn select_fork_pr_match(matches: Vec<ForkPrMatch>) -> Option<ForkPrMatch> {
+    let best = matches.iter().map(|m| m.ahead_count).min()?;
+    let mut tied: Vec<ForkPrMatch> = matches
+        .into_iter()
+        .filter(|m| m.ahead_count == best)
+        .collect();
+    let (owner, name) = (
+        tied[0].head_repo_owner.clone(),
+        tied[0].head_repo_name.clone(),
+    );
+    if tied
+        .iter()
+        .any(|m| m.head_repo_owner != owner || m.head_repo_name != name)
+    {
+        return None;
+    }
+    tied.sort_by_key(|m| m.number);
+    tied.into_iter().next()
+}
+
+/// A candidate's `(owner, name)` head identity, or `None` when GitHub reported an
+/// incomplete one — a DELETED head fork nulls both, and a match built from those
+/// renders "from /" and fails owner validation on the push path.
+fn fork_head_identity(pr: &RawForkPr) -> Option<(String, String)> {
+    let owner = pr.head_repository_owner.as_ref()?.login.clone();
+    let name = pr.head_repository.as_ref()?.name.clone();
+    (!owner.is_empty() && !name.is_empty() && !pr.head_ref_name.is_empty())
+        .then_some((owner, name))
 }
 
 /// The open fork PR whose head `branch` already contains, or `None`.
@@ -1202,25 +1266,58 @@ pub(crate) async fn detect_fork_pr_for_branch(
         return Ok(None);
     };
 
-    for pr in prs.into_iter().filter(|p| p.is_cross_repository) {
-        if !is_object_id(&pr.head_ref_oid) {
-            continue;
-        }
-        // The fork head may never have been fetched into this clone, and asking git
-        // about an absent object errors rather than answering — so an unfetched
-        // candidate is a KNOWN, accepted miss, not a match.
-        let present = run_git_raw(
-            Some(repo_path),
-            &["cat-file", "-e", &format!("{}^{{commit}}", pr.head_ref_oid)],
-            DEFAULT_TIMEOUT,
-        )
-        .await
-        .is_ok_and(|o| o.code == 0);
-        if !present {
+    // Only candidates a complete match can be built from: cross-repo, a usable oid,
+    // and a head identity GitHub still reports.
+    let candidates: Vec<(RawForkPr, String, String)> = prs
+        .into_iter()
+        .filter(|p| p.is_cross_repository && is_object_id(&p.head_ref_oid))
+        .filter_map(|p| {
+            let (owner, name) = fork_head_identity(&p)?;
+            Some((p, owner, name))
+        })
+        .collect();
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+
+    // One batched probe, not a spawn per candidate: this runs in front of every
+    // publish of an untracked branch. The fork head may never have been fetched into
+    // this clone, and an unfetched candidate is a KNOWN, accepted miss, not a match.
+    let probe: String = candidates
+        .iter()
+        .map(|(p, _, _)| format!("{}^{{commit}}\n", p.head_ref_oid))
+        .collect();
+    let Ok(out) = run_git_raw_input(
+        Some(repo_path),
+        &["cat-file", "--batch-check"],
+        Some(&probe),
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    else {
+        return Ok(None);
+    };
+    let text = out.stdout_lossy();
+    let lines: Vec<&str> = text.lines().collect();
+    // `--batch-check` emits one stdout line per input line, in order. Those are the
+    // COMMON forms, not an exhaustive set: `<input> missing` for an absent object,
+    // `<input> ambiguous` for a short rev with several candidates (the `^{commit}`
+    // suffix reports that one as missing), type errors going to stderr. Anything
+    // unrecognized falls closed — it fails the gates below and is dropped — and any
+    // other line count is unparseable, leaving every candidate an accepted miss.
+    if lines.len() != candidates.len() {
+        return Ok(None);
+    }
+
+    let mut survivors: Vec<ForkPrMatch> = Vec::new();
+    for ((pr, head_repo_owner, head_repo_name), line) in candidates.into_iter().zip(lines) {
+        if line.ends_with(" missing") {
             continue;
         }
         // `--is-ancestor` exits 0 for an ancestor AND for equal shas — a local branch
-        // sitting exactly on the PR head still matches (with `ahead_count` 0).
+        // sitting exactly on the PR head still matches (with `ahead_count` 0). Runs
+        // before the reachability veto: it is local and cheap, and rejects nearly
+        // every candidate, so almost none reach the extra spawn below.
         let is_ancestor = run_git_raw(
             Some(repo_path),
             &["merge-base", "--is-ancestor", &pr.head_ref_oid, &local_oid],
@@ -1229,6 +1326,17 @@ pub(crate) async fn detect_fork_pr_for_branch(
         .await
         .is_ok_and(|o| o.code == 0);
         if !is_ancestor {
+            continue;
+        }
+        // A match must rest on evidence the branch derives from the CONTRIBUTOR's own
+        // work: every candidate field is attacker-supplied, and forks share an object
+        // network, so a PR head pointing at a commit origin already has is an ancestor
+        // of half the maintainer's branches and would claim unrelated publishes.
+        // Silently inert on a clone whose origin fetch refspec maps PR refs into
+        // `refs/remotes/origin/*` (`+refs/pull/*/head:refs/remotes/origin/pr/*` and
+        // kin) — accepted, since that fail-open lands on pre-feature behavior and a
+        // code fix would have to guess at namespace conventions.
+        if !oid_outside_origin_graph(repo_path, &pr.head_ref_oid).await {
             continue;
         }
         let ahead_count = run_git_raw(
@@ -1245,19 +1353,18 @@ pub(crate) async fn detect_fork_pr_for_branch(
         .filter(|o| o.code == 0)
         .and_then(|o| o.stdout_lossy().trim().parse::<u64>().ok())
         .unwrap_or(0);
-        return Ok(Some(ForkPrMatch {
+        survivors.push(ForkPrMatch {
             number: pr.number,
             title: pr.title,
             url: pr.url,
             head_ref_name: pr.head_ref_name,
-            head_repo_owner: pr.head_repository_owner.map(|o| o.login).unwrap_or_default(),
-            head_repo_name: pr.head_repository.map(|r| r.name).unwrap_or_default(),
-            head_sha: pr.head_ref_oid,
+            head_repo_owner,
+            head_repo_name,
             maintainer_can_modify: pr.maintainer_can_modify.unwrap_or(false),
             ahead_count,
-        }));
+        });
     }
-    Ok(None)
+    Ok(select_fork_pr_match(survivors))
 }
 
 /// Reopens a closed (not merged) pull request.
@@ -5502,8 +5609,8 @@ fn scrape_pr_ref(stdout: &str) -> (u64, String) {
 mod tests {
     use super::{
         apply_stack_join, classify_merge_async, external_items_from_thread_nodes,
-        flatten_slurped_pages, gh_api_error_message, host_from_url, is_diff_too_large,
-        map_timeline_node, parse_actions_run_job,
+        flatten_slurped_pages, fork_head_identity, gh_api_error_message, host_from_url,
+        is_diff_too_large, is_object_id, map_timeline_node, parse_actions_run_job,
         parse_auth_accounts, parse_pr_url_repo, pr_edit_args, pull_stack_ref, real_check_time,
         real_time_or_empty, reconstruct_pr_diff, reject_upstream_create_metadata,
         rest_comment_to_out, rest_commit_to_out, rest_pull_to_pr_info, rest_review_to_out,
@@ -5513,9 +5620,10 @@ mod tests {
         GhPrRestCommit, GhPrRestCommitGitAuthor, GhPrRestCommitInner, GhPrRestPull, GhPrRestReview,
         GhStackEntry, MergeAsyncOutcome, MergeAsyncStatus, PrDetails, PrInfo, PrMergeOutcome,
         GhMergeabilityRow, PrMergeability, PrStackInfo, PrStackMember, PrTimelineEventOut,
-        RawLogin, RawPr,
+        oid_outside_origin_graph, select_fork_pr_match, ForkPrMatch, RawForkPr, RawLogin, RawPr,
     };
     use crate::error::AppError;
+    use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
 
     /// A bare list row — only the identity the stack join reads is meaningful.
     fn pr_row(number: u64) -> PrInfo {
@@ -6074,6 +6182,173 @@ mod tests {
             fields.iter().all(|f| f.trim() == *f && !f.is_empty()),
             "got: {PR_LIST_FIELDS}"
         );
+    }
+
+    /// The gate keeping a gh-supplied sha out of git argv, where a `-`-leading
+    /// value reads as a flag. Hex-only and length-bounded; uppercase is accepted
+    /// (git resolves it), which is the behavior this pins.
+    #[test]
+    fn is_object_id_accepts_hex_within_bounds_and_rejects_flags() {
+        assert!(is_object_id("0123456789abcdef0123456789abcdef01234567"));
+        assert!(is_object_id("ABCDEF0123456789ABCDEF0123456789ABCDEF01"));
+        assert!(is_object_id("DEADBEEF"));
+        // Boundaries: 7 and 64 in, 6 and 65 out.
+        assert!(is_object_id(&"a".repeat(7)));
+        assert!(is_object_id(&"a".repeat(64)));
+        assert!(!is_object_id(&"a".repeat(6)));
+        assert!(!is_object_id(&"a".repeat(65)));
+        // A flag-shaped or prefixed value is never an oid.
+        assert!(!is_object_id("-ffffff"));
+        assert!(!is_object_id("0xabcdef"));
+        assert!(!is_object_id(""));
+        assert!(!is_object_id("refs/heads/main"));
+    }
+
+    /// A deleted head fork nulls `headRepositoryOwner`/`headRepository`; a match
+    /// built from those renders "from /" and fails owner validation downstream, so
+    /// the candidate must be dropped at the source.
+    #[test]
+    fn fork_head_identity_requires_owner_name_and_branch() {
+        let parse = |json: &str| serde_json::from_str::<RawForkPr>(json).expect("parses");
+
+        let complete = parse(
+            r#"{"number":7,"headRefName":"feat","headRefOid":"abc1234",
+                "isCrossRepository":true,"headRepositoryOwner":{"login":"contrib"},
+                "headRepository":{"name":"proj"},"maintainerCanModify":true}"#,
+        );
+        assert_eq!(
+            fork_head_identity(&complete),
+            Some(("contrib".to_string(), "proj".to_string()))
+        );
+
+        // Deleted fork: both null.
+        let deleted = parse(
+            r#"{"number":7,"headRefName":"feat","headRefOid":"abc1234",
+                "isCrossRepository":true,"headRepositoryOwner":null,
+                "headRepository":null}"#,
+        );
+        assert_eq!(fork_head_identity(&deleted), None);
+
+        // Present but empty, and a missing head branch — each alone disqualifies.
+        for json in [
+            r#"{"headRefName":"feat","headRepositoryOwner":{"login":""},
+                "headRepository":{"name":"proj"}}"#,
+            r#"{"headRefName":"feat","headRepositoryOwner":{"login":"contrib"},
+                "headRepository":{"name":""}}"#,
+            r#"{"headRefName":"","headRepositoryOwner":{"login":"contrib"},
+                "headRepository":{"name":"proj"}}"#,
+        ] {
+            assert_eq!(fork_head_identity(&parse(json)), None, "json: {json}");
+        }
+    }
+
+    /// The selection rule behind the fork-PR guard. `gh pr list` is newest-first —
+    /// the slot an attacker controls — and candidates collide on a shared ancestor,
+    /// so "first match" is exactly the wrong rule.
+    #[test]
+    fn fork_pr_selection_prefers_the_most_derived_head_and_refuses_ambiguity() {
+        let m = |number: u64, owner: &str, ahead_count: u64| ForkPrMatch {
+            number,
+            title: String::new(),
+            url: String::new(),
+            head_ref_name: "feat".to_string(),
+            head_repo_owner: owner.to_string(),
+            head_repo_name: "proj".to_string(),
+            maintainer_can_modify: false,
+            ahead_count,
+        };
+        let pick = |v: Vec<ForkPrMatch>| select_fork_pr_match(v).map(|m| m.number);
+
+        assert_eq!(pick(vec![]), None);
+        assert_eq!(pick(vec![m(1, "contrib", 3)]), Some(1));
+        // The deeper head wins regardless of list order — a newer shadowing PR sits
+        // first in the response and must not win on position.
+        assert_eq!(pick(vec![m(9, "attacker", 40), m(3, "contrib", 2)]), Some(3));
+        assert_eq!(pick(vec![m(3, "contrib", 2), m(9, "attacker", 40)]), Some(3));
+        // Tied at the minimum across DIFFERENT forks: no answer, rather than aiming a
+        // push at whichever one happened to sort first.
+        assert_eq!(pick(vec![m(9, "attacker", 2), m(3, "contrib", 2)]), None);
+        // A losing candidate from another fork does not make the winner ambiguous.
+        assert_eq!(pick(vec![m(9, "attacker", 5), m(3, "contrib", 2)]), Some(3));
+        // Tied inside ONE fork is unambiguous about the destination — lowest number.
+        assert_eq!(pick(vec![m(9, "contrib", 2), m(3, "contrib", 2)]), Some(3));
+        // A different repo NAME on the same owner is still a different destination.
+        let mut other_name = m(9, "contrib", 2);
+        other_name.head_repo_name = "other".to_string();
+        assert_eq!(pick(vec![other_name, m(3, "contrib", 2)]), None);
+    }
+
+    /// The anti-spoofing gate, against a real repo (temp_dir, git on PATH): a fork
+    /// PR head that origin already reaches must never anchor a match, because forks
+    /// share an object network and a crafted PR could otherwise claim unrelated
+    /// local branches. Origin refs are fabricated with `update-ref`, so nothing is
+    /// ever fetched.
+    #[tokio::test]
+    async fn origin_reachable_oids_are_not_distinctive_contributor_work() {
+        async fn run(repo: &str, args: &[&str]) -> String {
+            run_git(Some(repo), args, DEFAULT_TIMEOUT)
+                .await
+                .unwrap()
+                .stdout_lossy()
+        }
+
+        let dir = tempfile::Builder::new()
+            .prefix("gd-pr-origin-graph-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+
+        run(&repo_s, &["init", "-q"]).await;
+        run(&repo_s, &["config", "user.email", "t@t.local"]).await;
+        run(&repo_s, &["config", "user.name", "T"]).await;
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        run(&repo_s, &["add", "-A"]).await;
+        run(&repo_s, &["commit", "-qm", "c1"]).await;
+        let upstream_oid = run(&repo_s, &["rev-parse", "HEAD"]).await.trim().to_string();
+        std::fs::write(repo.join("a.txt"), "two\n").unwrap();
+        run(&repo_s, &["add", "-A"]).await;
+        run(&repo_s, &["commit", "-qm", "c2"]).await;
+        let local_oid = run(&repo_s, &["rev-parse", "HEAD"]).await.trim().to_string();
+
+        // Before any origin ref exists there is nothing to exclude, so both oids read
+        // as outside origin's graph — the pre-fetch repo keeps its candidates.
+        assert!(oid_outside_origin_graph(&repo_s, &upstream_oid).await);
+
+        // origin/main reaches c1 (and only c1).
+        run(
+            &repo_s,
+            &["update-ref", "refs/remotes/origin/main", &upstream_oid],
+        )
+        .await;
+        assert!(
+            !oid_outside_origin_graph(&repo_s, &upstream_oid).await,
+            "a commit origin already has is upstream's work, never a match anchor"
+        );
+        assert!(
+            oid_outside_origin_graph(&repo_s, &local_oid).await,
+            "a commit no origin ref reaches is a legitimate candidate"
+        );
+
+        // Scoped to ORIGIN: another remote's refs must not launder a candidate away.
+        run(
+            &repo_s,
+            &["update-ref", "refs/remotes/fork/topic", &local_oid],
+        )
+        .await;
+        assert!(
+            oid_outside_origin_graph(&repo_s, &local_oid).await,
+            "only origin's refs decide this"
+        );
+
+        // Once origin advances onto c2, the same oid stops being distinctive.
+        run(
+            &repo_s,
+            &["update-ref", "refs/remotes/origin/main", &local_oid],
+        )
+        .await;
+        assert!(!oid_outside_origin_graph(&repo_s, &local_oid).await);
     }
 
     /// The detail view's mergeability rides the SAME `gh pr view` call, so the

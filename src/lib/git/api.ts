@@ -2502,8 +2502,16 @@ export const forgeEnsureForkRemote = (
 /** Approve a workflow run GitHub is holding for maintainer approval (a
  *  first-time contributor's fork PR). GitHub-only; the run read/rerun/cancel
  *  wrappers live in `lib/github/actions.ts`. */
-export const forgeCiRunApprove = (repoPath: string, runId: number) =>
-  invoke<void>("forge_ci_run_approve", { repoPath, runId });
+export const forgeCiRunApprove = (
+  repoPath: string,
+  runId: number,
+  lens?: RemoteLens,
+) =>
+  invoke<void>("forge_ci_run_approve", {
+    repoPath,
+    runId,
+    lens: lens ?? null,
+  });
 
 export const ghAccounts = () => invoke<GhAccounts>("gh_accounts");
 

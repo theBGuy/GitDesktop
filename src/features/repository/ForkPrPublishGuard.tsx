@@ -1,4 +1,5 @@
 import { WarningIcon } from "@phosphor-icons/react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -44,7 +45,6 @@ export function ForkPrPublishGuard({
 }) {
   const push = usePush(repoPath);
   const [ensuring, setEnsuring] = useState(false);
-  const primaryRef = useRef<HTMLButtonElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
   const noteId = useId();
 
@@ -103,25 +103,31 @@ export function ForkPrPublishGuard({
         if (!o) onClose();
       }}
     >
-      {/* Focus the action that updates the pull request, so Enter takes the
-          route the user came for; when it's denied, Cancel takes the focus —
-          no key press should publish to the wrong repository. */}
-      <DialogContent
-        initialFocus={() =>
-          showPushToFork && canPushToFork
-            ? primaryRef.current
-            : cancelRef.current
-        }
-      >
+      {/* Cancel always takes the initial focus: every field of the match comes
+          from a pull request an outsider authored, so the push it describes is
+          an outward write to a repository chosen by attacker-influenced data —
+          it must cost a deliberate Tab or click, never an ambient Enter. */}
+      <DialogContent initialFocus={() => cancelRef.current}>
         <DialogHeader>
           <DialogTitle>
             This branch belongs to a pull request from a fork
           </DialogTitle>
           <DialogDescription>
-            Its history matches PR #{match?.number} — {match?.title} — from{" "}
-            <span className="font-mono">{slug}</span>. Publishing to{" "}
+            Its history matches{" "}
+            {/* Link-styled button, not an anchor: an <a href> would navigate the
+                webview itself. Underlined at rest, matching the anchor styling
+                DialogDescription applies to its own links. */}
+            <button
+              type="button"
+              title="Open the pull request in your browser"
+              className="cursor-pointer underline underline-offset-3 hover:text-foreground"
+              onClick={() => match && openUrl(match.url).catch(toastError)}
+            >
+              PR #{match?.number} — {match?.title}
+            </button>{" "}
+            — from <span className="font-mono">{slug}</span>. Publishing to{" "}
             <span className="font-mono">{destination}</span> creates a separate
-            copy under this repository and won't update the pull request.
+            copy there and won't update the pull request.
           </DialogDescription>
         </DialogHeader>
         {!showPushToFork ? (
@@ -163,7 +169,6 @@ export function ForkPrPublishGuard({
           </Button>
           {showPushToFork ? (
             <Button
-              ref={primaryRef}
               disabled={!canPushToFork || pending}
               aria-describedby={noteId}
               onClick={() => void pushToFork()}

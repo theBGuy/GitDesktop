@@ -5,7 +5,7 @@ import {
   CaretDownIcon,
   WarningIcon,
 } from "@phosphor-icons/react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { ButtonGroup } from "@/components/ui/button-group";
@@ -69,7 +69,13 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // hint. These respect Settings → Keyboard rebindings for free.
   const bindings = useEffectiveBindings();
   const [forceConfirmOpen, setForceConfirmOpen] = useState(false);
-  const [forkPrMatch, setForkPrMatch] = useState<ForkPrMatch | null>(null);
+  // The publish intercepted by the fork-PR guard. The branch is captured at
+  // click time and travels with the match, so the dialog can only ever push the
+  // branch the detection ran for.
+  const [forkGuard, setForkGuard] = useState<{
+    match: ForkPrMatch;
+    branch: string;
+  } | null>(null);
   const [detecting, setDetecting] = useState(false);
 
   // A repo with no `origin` (e.g. created locally in GitDesktop) can't push;
@@ -139,6 +145,14 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     const id = setInterval(() => tick((n) => n + 1), 60_000);
     return () => clearInterval(id);
   }, [lastFetchedAt]);
+
+  // The live branch name, readable after an await: a handler's closure still
+  // holds the `head` of the render that created it, which can't tell whether
+  // HEAD moved during an async round-trip.
+  const headNameRef = useRef(head?.name);
+  useEffect(() => {
+    headNameRef.current = head?.name;
+  }, [head?.name]);
 
   const fetchTitle =
     lastFetchedAt === undefined
@@ -311,7 +325,11 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       () => null,
     );
     setDetecting(false);
-    if (match) setForkPrMatch(match);
+    // A HEAD that moved during the round-trip makes the match describe a branch
+    // we're no longer on; pushing it onto the PR head would be a legal
+    // fast-forward of the wrong work, so the moment has passed — just publish.
+    if (match && headNameRef.current === branch)
+      setForkGuard({ match, branch });
     else doPush(false);
   }
 
@@ -523,11 +541,11 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
 
       <ForkPrPublishGuard
         repoPath={repoPath}
-        match={forkPrMatch}
-        branch={head?.name ?? ""}
-        onClose={() => setForkPrMatch(null)}
+        match={forkGuard?.match ?? null}
+        branch={forkGuard?.branch ?? ""}
+        onClose={() => setForkGuard(null)}
         onPublishAnyway={() => {
-          setForkPrMatch(null);
+          setForkGuard(null);
           doPush(false);
         }}
       />

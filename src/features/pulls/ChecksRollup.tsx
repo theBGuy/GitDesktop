@@ -43,6 +43,16 @@ import { useConfirm } from "@/lib/stores/confirm";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 
+/** The one wording for releasing a held workflow run — this strip and the Actions
+ *  run view both ask through it, so the two prompts can't drift apart. It lives
+ *  here rather than in RunDetailView so sharing it can't pull that view's
+ *  AI debug subtree into the pull-request surface. */
+export const APPROVE_RUN_CONFIRM = {
+  title: "Approve and run workflows?",
+  body: "This runs the contributor's workflow code in this repository's CI.",
+  confirmLabel: "Approve and run",
+} as const;
+
 /** Tone + glyph for a CI check, so pass/fail is never conveyed by color alone.
  *  `provider` only distinguishes ACTION_REQUIRED — the one state whose meaning
  *  differs per forge. */
@@ -530,11 +540,7 @@ export function ChecksRollup({
 
   async function approveBlockedRuns() {
     if (writeBlocked) return;
-    const ok = await useConfirm.getState().ask({
-      title: "Approve and run workflows?",
-      body: "This runs the contributor's workflow code in this repository's CI.",
-      confirmLabel: "Approve and run",
-    });
+    const ok = await useConfirm.getState().ask(APPROVE_RUN_CONFIRM);
     if (!ok) return;
     setApproving(true);
     try {
@@ -542,7 +548,7 @@ export function ChecksRollup({
       // can't approve must not strand the rest of the batch.
       for (const id of blockedRunIds) {
         try {
-          await approveRun.mutateAsync({ runId: id });
+          await approveRun.mutateAsync({ runId: id, lens });
         } catch (e) {
           toastError(e);
         }
