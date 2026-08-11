@@ -57,6 +57,7 @@ import type {
 } from "@/lib/gitlab/security-findings";
 import {
   codeQualityFindingId,
+  secureFindingId,
   useGitLabFindings,
 } from "@/lib/gitlab/security-findings";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
@@ -224,8 +225,8 @@ function buildSecretGroups(alerts: SecretScanningAlertOut[]): SecretGroup[] {
 // ── GitLab pipeline findings ─────────────────────────────────────────────────
 
 interface GlSecureRow {
-  /** Unique per rendered row: the report's own finding id, or an index fallback
-   *  when it came through empty (duplicate `data-row` values misdirect focus). */
+  /** The rendered row's DOM id, built from the same `secureFindingId` the stored
+   *  selection uses — the two must agree or a click highlights another row. */
   id: string;
   finding: GlSecureFindingOut;
 }
@@ -261,18 +262,18 @@ function buildGlSecureGroups(
       SEVERITY_RANK[severityLevel(b.severity)],
   );
   const groups = new Map<string, GlSecureGroup>();
-  sorted.forEach((finding, i) => {
+  for (const finding of sorted) {
     // `||`, not `??`: the tolerant parse degrades a missing field to an empty
     // string, so an empty name must fall through the same as a null.
     const label = finding.name || fallbackLabel;
     const row: GlSecureRow = {
-      id: finding.id ? `${prefix}-${finding.id}` : `${prefix}-i${i}`,
+      id: `${prefix}-${secureFindingId(finding)}`,
       finding,
     };
     const bucket = groups.get(label);
     if (bucket) bucket.rows.push(row);
     else groups.set(label, { key: label, label, rows: [row] });
-  });
+  }
   return [...groups.values()];
 }
 
@@ -296,9 +297,12 @@ function buildGlQualityGroups(
   return [...groups.values()];
 }
 
-/** Whether two selections point at the same finding. Degenerate identities (a
- *  tolerated alert numbered 0, an advisory with no GHSA id) can't be told apart
- *  by the stored selection, so the first matching row wins. */
+/** Whether two selections point at the same finding. The GitLab arms carry a
+ *  derived composite (`secureFindingId` / `codeQualityFindingId`) precisely so an
+ *  id-less finding is still distinguishable. The GitHub arms keep first-match-wins
+ *  for their degenerate identities (an alert numbered 0, an advisory with no GHSA
+ *  id) — a recorded deferral, not an oversight: the server always sends those, so
+ *  only a tolerated parse degradation can blank one. */
 function sameFinding(a: SelectedFinding, b: SelectedFinding): boolean {
   if (a.type === "advisory")
     return b.type === "advisory" && a.ghsaId === b.ghsaId;
@@ -348,6 +352,7 @@ const matchesAdvisory = (adv: RepoAdvisoryOut, q: string) =>
 const matchesGlSecure = (f: GlSecureFindingOut, q: string) =>
   !q ||
   f.name.toLowerCase().includes(q) ||
+  f.description.toLowerCase().includes(q) ||
   f.file.toLowerCase().includes(q) ||
   f.severity.toLowerCase().includes(q) ||
   f.scannerName.toLowerCase().includes(q) ||
@@ -547,6 +552,12 @@ function LoadFailed({
   );
 }
 
+/** `"HEAD"` is the wire's sentinel for a ref we cannot name: a detached checkout,
+ *  and equally a branch read that failed or came back empty — the backend degrades
+ *  both to it and never queries pipelines under that name. No copy may therefore
+ *  claim a result *for* it; sentences name the ref actually listed instead. */
+const isUnnamedRef = (ref: string): boolean => ref === "HEAD";
+
 /** The project's scanning setup page, or null when the project URL is unknown —
  *  derived in one place so the panel-level card and the per-category cards can't
  *  drift apart on the path. */
@@ -575,17 +586,29 @@ function PipelineProvenance({ data }: { data: GlFindingsOut }) {
   // The finish time is what dates the findings; a still-listed pipeline that
   // never finished falls back to when it started rather than showing nothing.
   const when = pipeline.finishedAt ?? pipeline.createdAt;
+  // A failed pipeline still publishes artifacts and is deliberately accepted as
+  // a source, so its status is surfaced — otherwise a failed run reads as a
+  // healthy one above cards blaming setup. Success is the quiet default.
+  const degraded = pipeline.status !== "success";
   return (
     <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground">
       {data.usedFallback ? (
         <p className="w-full">
-          No pipelines on {data.requestedRef} yet — showing{" "}
-          {data.fallbackRef || "the default branch"}.
+          {isUnnamedRef(data.requestedRef)
+            ? `Detached checkout — showing ${data.fallbackRef || "the default branch"}.`
+            : `No pipelines on ${data.requestedRef} yet — showing ${data.fallbackRef || "the default branch"}.`}
         </p>
       ) : null}
       <p className="min-w-0 flex-1 truncate">
-        From pipeline #{pipeline.iid} ·{" "}
-        <span className="font-mono">{pipeline.ref}</span> @{" "}
+        From pipeline #{pipeline.iid}
+        {degraded && pipeline.status ? (
+          // Icon + the status word: the state is never carried by tone alone.
+          <span className="ml-1 inline-flex items-center gap-1 text-warning">
+            <WarningCircleIcon className="size-3" aria-hidden />
+            {pipeline.status}
+          </span>
+        ) : null}{" "}
+        · <span className="font-mono">{pipeline.ref}</span> @{" "}
         <span className="font-mono">{pipeline.sha.slice(0, 8)}</span> ·{" "}
         <RelativeTime date={when} />
       </p>
@@ -650,15 +673,22 @@ function GlNoPipelineCard({
     );
   }
   if (state === "runningOnly") {
-    const ref = data.usedFallback
-      ? data.fallbackRef || data.requestedRef
-      : data.requestedRef;
+    // Name only a ref whose pipelines were actually listed: on the "HEAD"
+    // sentinel that is the fallback branch, never the checkout itself.
+    const listed =
+      data.usedFallback || isUnnamedRef(data.requestedRef)
+        ? data.fallbackRef
+        : data.requestedRef;
     return (
       <ReasonCard
         icon={ClockIcon}
         // Canceled, skipped, manual and pending pipelines all land here, so this
         // promises no finish — only that a completed one would be read.
-        message={`No pipeline on ${ref} has finished yet — findings will appear once one completes.`}
+        message={
+          listed
+            ? `No pipeline on ${listed} has finished yet — findings will appear once one completes.`
+            : "No pipeline has finished yet — findings will appear once one completes."
+        }
         action={retryAction}
       />
     );
@@ -743,7 +773,9 @@ function GlUnavailableCard({
     return (
       <ReasonCard
         icon={WarningCircleIcon}
-        message={`This pipeline produced a ${category} report GitDesktop can't download. Add the gl-*-report.json file to artifacts:paths in that job to expose it.`}
+        // "the job that produces it" reads correctly whether this card speaks for
+        // one category or, hoisted, for all three (up to three jobs).
+        message={`This pipeline produced a ${category} report GitDesktop can't download. Add the gl-*-report.json file to artifacts:paths in the job that produces it.`}
         detail={detail}
         action={retryAction}
       />
@@ -793,6 +825,36 @@ function GlUnavailableCard({
   return _exhaustive;
 }
 
+/** The empty state for an available category with no rows. A wholly-clean report
+ *  and one whose items partly failed to parse must never read the same, so the
+ *  reassuring shield is reserved for the case where nothing was lost. The lossy
+ *  wording claims only what was read: one analyzer's report can parse clean while
+ *  a sibling's is lost, so "nothing readable" would deny a read that happened. */
+function GlSectionEmpty({
+  category,
+  cleanTitle,
+  detail,
+}: {
+  category: string;
+  cleanTitle: string;
+  detail: string | null;
+}) {
+  return (
+    <Empty className="py-8">
+      <EmptyHeader>
+        <EmptyMedia variant="icon">
+          {detail ? <InfoIcon /> : <ShieldCheckIcon />}
+        </EmptyMedia>
+        <EmptyTitle>
+          {detail
+            ? `No ${category} findings in the reports that could be read.`
+            : cleanTitle}
+        </EmptyTitle>
+      </EmptyHeader>
+    </Empty>
+  );
+}
+
 /** The grouped rows of SAST or secret detection. The group header carries the
  *  rule/secret name, so each row leads with where it was found. */
 function GlSecureRows({
@@ -830,7 +892,11 @@ function GlSecureRows({
                   : "hover:bg-muted/60",
               )}
               onClick={() =>
-                onSelect({ type: "glFinding", category, id: f.id })
+                onSelect({
+                  type: "glFinding",
+                  category,
+                  id: secureFindingId(f),
+                })
               }
             >
               <p className="flex items-center gap-2 text-[11px] text-muted-foreground">
@@ -1029,6 +1095,14 @@ export function FindingsPanel({
     !secrets.isError && secretsOut?.availability === "available";
   const advisoriesShown =
     !advisories.isError && advisoriesOut?.availability === "available";
+  // Equal availability AND equal detail across all three — what a pipeline-wide
+  // cause (a jobs-fetch failure, a pipeline with no scanning jobs) produces.
+  const glUniformState =
+    !!glOut &&
+    glOut.sast.availability === glOut.secretDetection.availability &&
+    glOut.sast.availability === glOut.codeQuality.availability &&
+    glOut.sast.detail === glOut.secretDetection.detail &&
+    glOut.sast.detail === glOut.codeQuality.detail;
   // Every GitLab category hangs off one pipeline, so a state other than "found"
   // hides all three at once.
   const glFound = !gl.isError && glOut?.pipelineState === "found";
@@ -1084,7 +1158,11 @@ export function FindingsPanel({
       for (const row of group.rows) {
         navRows.push({
           id: row.id,
-          finding: { type: "glFinding", category: "sast", id: row.finding.id },
+          finding: {
+            type: "glFinding",
+            category: "sast",
+            id: secureFindingId(row.finding),
+          },
         });
       }
     }
@@ -1097,7 +1175,7 @@ export function FindingsPanel({
           finding: {
             type: "glFinding",
             category: "secretDetection",
-            id: row.finding.id,
+            id: secureFindingId(row.finding),
           },
         });
       }
@@ -1181,7 +1259,7 @@ export function FindingsPanel({
           onChange={(e) => setFilterText(e.target.value)}
           placeholder={
             provider === "gitlab"
-              ? "Filter by rule, secret type, check, file, or severity"
+              ? "Filter by rule, secret type, check, file, severity, or description"
               : "Filter by package, rule, secret type, summary, GHSA, or CVE"
           }
           className="h-7"
@@ -1214,191 +1292,198 @@ export function FindingsPanel({
           ) : (
             <div onKeyDown={onListKeyDown}>
               <PipelineProvenance data={glOut} />
-
-              <SectionHeader title="SAST" />
-              {glOut.sast.availability !== "available" ? (
+              {glUniformState && glOut.sast.availability !== "available" ? (
+                /* One cause, one card — and no section headers, since naming
+                   three empty sections would only restate it. */
                 <GlUnavailableCard
                   availability={glOut.sast.availability}
                   detail={glOut.sast.detail}
-                  category="SAST"
-                  Category="SAST"
+                  category="findings"
+                  Category="Scanning"
                   onRetry={() => gl.refetch()}
                   onSetup={glSetupUrl ? () => openUrl(glSetupUrl) : undefined}
                 />
               ) : (
                 <>
-                  <GlPartialDetail detail={glOut.sast.detail} />
-                  {glSastGroups.length === 0 ? (
-                    allGlSast.length > 0 ? (
-                      <p className="px-3 py-4 text-xs text-muted-foreground">
-                        No SAST findings match the filter.
-                      </p>
-                    ) : (
-                      <Empty className="py-8">
-                        <EmptyHeader>
-                          <EmptyMedia variant="icon">
-                            <ShieldCheckIcon />
-                          </EmptyMedia>
-                          <EmptyTitle>
-                            No SAST findings in this pipeline
-                          </EmptyTitle>
-                        </EmptyHeader>
-                      </Empty>
-                    )
-                  ) : (
-                    <GlSecureRows
-                      groups={glSastGroups}
-                      category="sast"
-                      selectedRowId={selectedRowId}
-                      onSelect={selectFinding}
+                  <SectionHeader title="SAST" />
+                  {glOut.sast.availability !== "available" ? (
+                    <GlUnavailableCard
+                      availability={glOut.sast.availability}
+                      detail={glOut.sast.detail}
+                      category="SAST"
+                      Category="SAST"
+                      onRetry={() => gl.refetch()}
+                      onSetup={
+                        glSetupUrl ? () => openUrl(glSetupUrl) : undefined
+                      }
                     />
+                  ) : (
+                    <>
+                      <GlPartialDetail detail={glOut.sast.detail} />
+                      {glSastGroups.length === 0 ? (
+                        allGlSast.length > 0 ? (
+                          <p className="px-3 py-4 text-xs text-muted-foreground">
+                            No SAST findings match the filter.
+                          </p>
+                        ) : (
+                          <GlSectionEmpty
+                            category="SAST"
+                            cleanTitle="No SAST findings in this pipeline"
+                            detail={glOut.sast.detail}
+                          />
+                        )
+                      ) : (
+                        <GlSecureRows
+                          groups={glSastGroups}
+                          category="sast"
+                          selectedRowId={selectedRowId}
+                          onSelect={selectFinding}
+                        />
+                      )}
+                      {/* Outside the empty branch: filtering to zero matches must
+                          not strip the only way to reach rows past the window. */}
+                      {glOut.sast.truncated &&
+                        (limits.gitlab >= FINDINGS_LIMIT_CAP ? (
+                          <p className="border-t px-3 py-3 text-xs text-muted-foreground">
+                            Showing the first{" "}
+                            {allGlSast.length.toLocaleString()} SAST findings.
+                          </p>
+                        ) : (
+                          <LoadMoreRow
+                            count={allGlSast.length}
+                            loading={gl.isFetching}
+                            onLoadMore={() =>
+                              setFindingsLimits({
+                                ...limits,
+                                gitlab: Math.min(
+                                  limits.gitlab + PAGE_SIZE,
+                                  FINDINGS_LIMIT_CAP,
+                                ),
+                              })
+                            }
+                          />
+                        ))}
+                    </>
                   )}
-                  {/* Outside the empty branch: filtering to zero matches must
-                      not strip the only way to reach rows past the window. */}
-                  {glOut.sast.truncated &&
-                    (limits.gitlab >= FINDINGS_LIMIT_CAP ? (
-                      <p className="border-t px-3 py-3 text-xs text-muted-foreground">
-                        Showing the first {allGlSast.length.toLocaleString()}{" "}
-                        SAST findings.
-                      </p>
-                    ) : (
-                      <LoadMoreRow
-                        count={allGlSast.length}
-                        loading={gl.isFetching}
-                        onLoadMore={() =>
-                          setFindingsLimits({
-                            ...limits,
-                            gitlab: Math.min(
-                              limits.gitlab + PAGE_SIZE,
-                              FINDINGS_LIMIT_CAP,
-                            ),
-                          })
-                        }
-                      />
-                    ))}
-                </>
-              )}
 
-              <SectionHeader title="Secret detection" />
-              {glOut.secretDetection.availability !== "available" ? (
-                <GlUnavailableCard
-                  availability={glOut.secretDetection.availability}
-                  detail={glOut.secretDetection.detail}
-                  category="secret detection"
-                  Category="Secret detection"
-                  onRetry={() => gl.refetch()}
-                  onSetup={glSetupUrl ? () => openUrl(glSetupUrl) : undefined}
-                />
-              ) : (
-                <>
-                  <GlPartialDetail detail={glOut.secretDetection.detail} />
-                  {glSecretGroups.length === 0 ? (
-                    allGlSecrets.length > 0 ? (
-                      <p className="px-3 py-4 text-xs text-muted-foreground">
-                        No secret findings match the filter.
-                      </p>
-                    ) : (
-                      <Empty className="py-8">
-                        <EmptyHeader>
-                          <EmptyMedia variant="icon">
-                            <ShieldCheckIcon />
-                          </EmptyMedia>
-                          <EmptyTitle>
-                            No secrets detected in this pipeline
-                          </EmptyTitle>
-                        </EmptyHeader>
-                      </Empty>
-                    )
-                  ) : (
-                    <GlSecureRows
-                      groups={glSecretGroups}
-                      category="secretDetection"
-                      selectedRowId={selectedRowId}
-                      onSelect={selectFinding}
+                  <SectionHeader title="Secret detection" />
+                  {glOut.secretDetection.availability !== "available" ? (
+                    <GlUnavailableCard
+                      availability={glOut.secretDetection.availability}
+                      detail={glOut.secretDetection.detail}
+                      category="secret detection"
+                      Category="Secret detection"
+                      onRetry={() => gl.refetch()}
+                      onSetup={
+                        glSetupUrl ? () => openUrl(glSetupUrl) : undefined
+                      }
                     />
+                  ) : (
+                    <>
+                      <GlPartialDetail detail={glOut.secretDetection.detail} />
+                      {glSecretGroups.length === 0 ? (
+                        allGlSecrets.length > 0 ? (
+                          <p className="px-3 py-4 text-xs text-muted-foreground">
+                            No secret findings match the filter.
+                          </p>
+                        ) : (
+                          <GlSectionEmpty
+                            category="secret detection"
+                            cleanTitle="No secrets detected in this pipeline"
+                            detail={glOut.secretDetection.detail}
+                          />
+                        )
+                      ) : (
+                        <GlSecureRows
+                          groups={glSecretGroups}
+                          category="secretDetection"
+                          selectedRowId={selectedRowId}
+                          onSelect={selectFinding}
+                        />
+                      )}
+                      {glOut.secretDetection.truncated &&
+                        (limits.gitlab >= FINDINGS_LIMIT_CAP ? (
+                          <p className="border-t px-3 py-3 text-xs text-muted-foreground">
+                            Showing the first{" "}
+                            {allGlSecrets.length.toLocaleString()} secret
+                            findings.
+                          </p>
+                        ) : (
+                          <LoadMoreRow
+                            count={allGlSecrets.length}
+                            loading={gl.isFetching}
+                            onLoadMore={() =>
+                              setFindingsLimits({
+                                ...limits,
+                                gitlab: Math.min(
+                                  limits.gitlab + PAGE_SIZE,
+                                  FINDINGS_LIMIT_CAP,
+                                ),
+                              })
+                            }
+                          />
+                        ))}
+                    </>
                   )}
-                  {glOut.secretDetection.truncated &&
-                    (limits.gitlab >= FINDINGS_LIMIT_CAP ? (
-                      <p className="border-t px-3 py-3 text-xs text-muted-foreground">
-                        Showing the first {allGlSecrets.length.toLocaleString()}{" "}
-                        secret findings.
-                      </p>
-                    ) : (
-                      <LoadMoreRow
-                        count={allGlSecrets.length}
-                        loading={gl.isFetching}
-                        onLoadMore={() =>
-                          setFindingsLimits({
-                            ...limits,
-                            gitlab: Math.min(
-                              limits.gitlab + PAGE_SIZE,
-                              FINDINGS_LIMIT_CAP,
-                            ),
-                          })
-                        }
-                      />
-                    ))}
-                </>
-              )}
 
-              <SectionHeader title="Code quality" />
-              {glOut.codeQuality.availability !== "available" ? (
-                <GlUnavailableCard
-                  availability={glOut.codeQuality.availability}
-                  detail={glOut.codeQuality.detail}
-                  category="code quality"
-                  Category="Code quality"
-                  onRetry={() => gl.refetch()}
-                  onSetup={glSetupUrl ? () => openUrl(glSetupUrl) : undefined}
-                />
-              ) : (
-                <>
-                  <GlPartialDetail detail={glOut.codeQuality.detail} />
-                  {glQualityGroups.length === 0 ? (
-                    allGlQuality.length > 0 ? (
-                      <p className="px-3 py-4 text-xs text-muted-foreground">
-                        No code quality findings match the filter.
-                      </p>
-                    ) : (
-                      <Empty className="py-8">
-                        <EmptyHeader>
-                          <EmptyMedia variant="icon">
-                            <ShieldCheckIcon />
-                          </EmptyMedia>
-                          <EmptyTitle>
-                            No code quality findings in this pipeline
-                          </EmptyTitle>
-                        </EmptyHeader>
-                      </Empty>
-                    )
-                  ) : (
-                    <GlQualityRows
-                      groups={glQualityGroups}
-                      selectedRowId={selectedRowId}
-                      onSelect={selectFinding}
+                  <SectionHeader title="Code quality" />
+                  {glOut.codeQuality.availability !== "available" ? (
+                    <GlUnavailableCard
+                      availability={glOut.codeQuality.availability}
+                      detail={glOut.codeQuality.detail}
+                      category="code quality"
+                      Category="Code quality"
+                      onRetry={() => gl.refetch()}
+                      onSetup={
+                        glSetupUrl ? () => openUrl(glSetupUrl) : undefined
+                      }
                     />
+                  ) : (
+                    <>
+                      <GlPartialDetail detail={glOut.codeQuality.detail} />
+                      {glQualityGroups.length === 0 ? (
+                        allGlQuality.length > 0 ? (
+                          <p className="px-3 py-4 text-xs text-muted-foreground">
+                            No code quality findings match the filter.
+                          </p>
+                        ) : (
+                          <GlSectionEmpty
+                            category="code quality"
+                            cleanTitle="No code quality findings in this pipeline"
+                            detail={glOut.codeQuality.detail}
+                          />
+                        )
+                      ) : (
+                        <GlQualityRows
+                          groups={glQualityGroups}
+                          selectedRowId={selectedRowId}
+                          onSelect={selectFinding}
+                        />
+                      )}
+                      {glOut.codeQuality.truncated &&
+                        (limits.gitlab >= FINDINGS_LIMIT_CAP ? (
+                          <p className="border-t px-3 py-3 text-xs text-muted-foreground">
+                            Showing the first{" "}
+                            {allGlQuality.length.toLocaleString()} code quality
+                            findings.
+                          </p>
+                        ) : (
+                          <LoadMoreRow
+                            count={allGlQuality.length}
+                            loading={gl.isFetching}
+                            onLoadMore={() =>
+                              setFindingsLimits({
+                                ...limits,
+                                gitlab: Math.min(
+                                  limits.gitlab + PAGE_SIZE,
+                                  FINDINGS_LIMIT_CAP,
+                                ),
+                              })
+                            }
+                          />
+                        ))}
+                    </>
                   )}
-                  {glOut.codeQuality.truncated &&
-                    (limits.gitlab >= FINDINGS_LIMIT_CAP ? (
-                      <p className="border-t px-3 py-3 text-xs text-muted-foreground">
-                        Showing the first {allGlQuality.length.toLocaleString()}{" "}
-                        code quality findings.
-                      </p>
-                    ) : (
-                      <LoadMoreRow
-                        count={allGlQuality.length}
-                        loading={gl.isFetching}
-                        onLoadMore={() =>
-                          setFindingsLimits({
-                            ...limits,
-                            gitlab: Math.min(
-                              limits.gitlab + PAGE_SIZE,
-                              FINDINGS_LIMIT_CAP,
-                            ),
-                          })
-                        }
-                      />
-                    ))}
                 </>
               )}
             </div>

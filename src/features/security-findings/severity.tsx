@@ -1,5 +1,6 @@
 import {
   CircleIcon,
+  DotOutlineIcon,
   InfoIcon,
   QuestionIcon,
   WarningCircleIcon,
@@ -51,12 +52,14 @@ export const SEVERITY_LABEL: Record<SeverityLevel, string> = {
   unknown: "Unspecified",
 };
 
+/** One glyph per rung: `info` sits below `low`, so it takes the lightest mark
+ *  rather than repeating low's — adjacent rungs must not differ by label alone. */
 const SEVERITY_ICON: Record<SeverityLevel, typeof WarningIcon> = {
   critical: WarningIcon,
   high: WarningIcon,
   medium: WarningCircleIcon,
   low: InfoIcon,
-  info: InfoIcon,
+  info: DotOutlineIcon,
   unknown: CircleIcon,
 };
 
@@ -82,9 +85,9 @@ export function severityLevel(severity: string | null): SeverityLevel {
 
 /**
  * A compact severity chip — **Critical** / **High** / **Medium** / **Low** /
- * **Unspecified**. Icon + text carry the meaning (never color alone, per the
- * WCAG-AA rule); critical additionally fills its icon so it stays distinct from
- * high, which shares its tone.
+ * **Info** / **Unspecified**. Icon + text carry the meaning (never color alone,
+ * per the WCAG-AA rule); critical additionally fills its icon so it stays
+ * distinct from high, which shares its tone.
  */
 export function SeverityChip({ severity }: { severity: string | null }) {
   const level = severityLevel(severity);

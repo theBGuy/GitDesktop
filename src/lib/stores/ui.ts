@@ -73,9 +73,10 @@ export type SelectedFinding =
   | { type: "codeScanning"; number: number }
   | { type: "secretScanning"; number: number }
   | { type: "advisory"; ghsaId: string }
-  /** GitLab pipeline-report findings. `id` is the secure finding's own id, or —
-   *  for code quality — `codeQualityFindingId` (a fingerprint can repeat or be
-   *  missing, so the check name, path and line join the identity). */
+  /** GitLab pipeline-report findings. `id` is always a *derived* identity —
+   *  `secureFindingId` for SAST/secrets, `codeQualityFindingId` for code
+   *  quality — because a report can omit the id or fingerprint outright, and
+   *  every finding missing one would otherwise share the empty string. */
   | {
       type: "glFinding";
       category: "sast" | "secretDetection" | "codeQuality";

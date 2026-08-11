@@ -29,6 +29,7 @@ import type {
 } from "@/lib/gitlab/security-findings";
 import {
   codeQualityFindingId,
+  secureFindingId,
   useGitLabFindings,
 } from "@/lib/gitlab/security-findings";
 import { useUiStore } from "@/lib/stores/ui";
@@ -684,7 +685,7 @@ export function FindingDetailView({
       const category =
         selectedFinding.category === "sast" ? data.sast : data.secretDetection;
       const finding = category.findings.find(
-        (f) => f.id === selectedFinding.id,
+        (f) => secureFindingId(f) === selectedFinding.id,
       );
       if (finding)
         return (

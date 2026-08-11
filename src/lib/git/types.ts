@@ -656,8 +656,10 @@ export interface ForgeCapabilities {
   ci: boolean;
   webhooks: boolean;
   approvals: boolean;
-  /** Dependabot, code scanning and secret scanning alerts + repository security
-   *  advisories (GitHub-only surfaces). */
+  /** The Findings tab. Each provider reads what it actually has: GitHub the
+   *  platform alert APIs (Dependabot, code scanning, secret scanning, repository
+   *  advisories); GitLab the SAST, secret detection and code quality report
+   *  artifacts of a pipeline. Bitbucket has no analogue. */
   securityFindings: boolean;
 }
 

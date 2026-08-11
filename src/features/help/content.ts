@@ -1379,8 +1379,10 @@ GitLab keeps findings in a **pipeline's report artifacts** rather than in a
 repository-wide alert list, so the tab reads the newest **completed pipeline** for your
 checked-out branch — falling back to the **default branch** when your branch has no
 pipelines yet, and saying so — and splits it into **SAST**, **Secret detection**, and
-**Code quality**. A line above the list names the pipeline, branch, and commit the
-findings came from, with **View pipeline** to open it on GitLab.
+**Code quality**. Scans that run in **triggered child pipelines** are picked up too, so
+a parent that only orchestrates still reports what its children found. A line above the
+list names the pipeline, branch, and commit the findings came from, with **View
+pipeline** to open it on GitLab.
 
 Those analyzers run on **every GitLab tier**, Free included; it's GitLab's own
 vulnerability report that's Ultimate-only, so this is often the only place you'll see
@@ -1393,8 +1395,9 @@ GitLab** opens that line in the file at the exact commit the pipeline scanned. D
 secret *values* never leave the report — the raw extract is dropped before a finding
 reaches the app.
 
-Each section explains itself rather than looking clean; when there's no pipeline to
-read at all, one card stands in for all three:
+Each section explains itself rather than looking clean; when one cause covers all
+three — no pipeline to read yet, or one problem across every category — a single card
+stands in for them:
 
 - **Scanning isn't set up** — the project's CI has run no scanning, or this pipeline
   published no report of that kind. **Open scanning setup on GitLab** goes to the
@@ -1402,8 +1405,7 @@ read at all, one card stands in for all three:
 - **The report isn't downloadable** — the job lists it but GitLab returns a 404 for the
   file; add the \`gl-*-report.json\` to that job's \`artifacts:paths\` to expose it.
 - **The artifacts expired** — findings come back with the next pipeline run.
-- **Nothing has finished yet** — the branch has pipelines but none has completed, or
-  that job is still running in this one.
+- **Nothing has finished yet** — the branch has pipelines but none has completed.
 - **Your GitLab sign-in can't read** the project's pipelines or job artifacts.
 - **The check didn't complete** — you get a **Retry**.
 

@@ -21,8 +21,9 @@ use crate::forge::encode_query_value;
 use crate::forge::gitlab::{encode_project, glab_output_is_404, project_path};
 use crate::forge::glab::{run_glab_raw, GlabOutput, GLAB_NETWORK_TIMEOUT};
 
-/// A report bigger than this is refused rather than parsed — the artifact is
-/// attacker-influenceable in size and the whole body is held in memory.
+/// A report bigger than this is refused rather than parsed. `run_glab_raw` has
+/// already buffered the whole artifact by the time we look, so the cap bounds the
+/// PARSE — serde over an attacker-influenceable body — not the bytes held.
 const MAX_REPORT_BYTES: usize = 16 * 1024 * 1024;
 
 /// GitLab's `file_type` for each report we read, as the jobs payload spells them.
@@ -170,6 +171,10 @@ pub struct GlCodeQualityFindingOut {
 
 #[derive(Deserialize, Default)]
 struct RawProject {
+    /// The numeric project id, which is what a bridge's downstream pipeline
+    /// identifies its own project by.
+    #[serde(default)]
+    id: Option<u64>,
     #[serde(default)]
     default_branch: Option<String>,
     #[serde(default)]
@@ -214,6 +219,25 @@ struct RawJob {
     artifacts_expire_at: Option<String>,
     #[serde(default)]
     artifacts: Option<Vec<RawJobArtifact>>,
+}
+
+#[derive(Deserialize, Default, Clone, Debug)]
+struct RawDownstreamPipeline {
+    #[serde(default)]
+    id: Option<u64>,
+    /// Pipeline ids are instance-global, so this is what tells a parent-child
+    /// pipeline apart from a multi-project (`trigger: project:`) one.
+    #[serde(default)]
+    project_id: Option<u64>,
+}
+
+/// A `trigger:` job. Its work runs in a downstream pipeline whose jobs the
+/// parent's own jobs endpoint never lists.
+#[derive(Deserialize, Default, Clone, Debug)]
+struct RawBridge {
+    /// Null until the bridge triggers, and when creating the child failed.
+    #[serde(default)]
+    downstream_pipeline: Option<RawDownstreamPipeline>,
 }
 
 #[derive(Deserialize, Default)]
@@ -559,8 +583,10 @@ struct Tally<T> {
     items: Vec<T>,
     total: usize,
     readable_bodies: usize,
-    /// Findings known lost: items that failed to deserialize, plus one per body
-    /// that wasn't a readable report at all.
+    /// Bodies that arrived but weren't readable reports. Counted in REPORTS: how
+    /// many findings each hid is exactly what couldn't be read.
+    unreadable_bodies: usize,
+    /// Individual findings that failed to deserialize out of a readable report.
     dropped: usize,
 }
 
@@ -575,13 +601,12 @@ where
         items: Vec::new(),
         total: 0,
         readable_bodies: 0,
+        unreadable_bodies: 0,
         dropped: 0,
     };
     for body in bodies {
         let Some(values) = items_of(body) else {
-            // An unreadable body hides an unknown number of findings; one keeps
-            // the loss visible without inventing a census.
-            out.dropped += 1;
+            out.unreadable_bodies += 1;
             continue;
         };
         let count = values.len();
@@ -621,13 +646,20 @@ fn unreadable_detail(total: usize) -> Option<String> {
 
 /// The muted notice that rides an otherwise-`Available` category: part of the
 /// pipeline's output was unreadable, so the list is short rather than wrong.
-fn partial_loss_detail(dropped: usize) -> Option<String> {
-    (dropped > 0).then(|| {
-        format!(
-            "{dropped} {} in this pipeline's reports couldn't be read",
-            if dropped == 1 { "finding" } else { "findings" }
-        )
+/// Reports and findings stay separate units — a lost report hides an unknown
+/// number of findings, so folding it into a finding count would understate it.
+fn partial_loss_detail(lost_reports: usize, dropped_findings: usize) -> Option<String> {
+    let parts: Vec<String> = [
+        (lost_reports, "report", "reports"),
+        (dropped_findings, "finding", "findings"),
+    ]
+    .into_iter()
+    .filter(|(count, _, _)| *count > 0)
+    .map(|(count, singular, plural)| {
+        format!("{count} {}", if count == 1 { singular } else { plural })
     })
+    .collect();
+    (!parts.is_empty()).then(|| format!("{} couldn't be read", parts.join(" and ")))
 }
 
 /// A secure finding's identity. GitLab's `id` is a content hash, but a stripped
@@ -700,7 +732,10 @@ fn secure_envelope(fetch: CategoryFetch, limit: usize) -> GlSecureCategoryOut {
     findings.truncate(limit);
     GlSecureCategoryOut {
         availability: GlFindingAvailability::Available,
-        detail: partial_loss_detail(tallied.dropped + fetch.lost_reports),
+        detail: partial_loss_detail(
+            fetch.lost_reports + tallied.unreadable_bodies,
+            tallied.dropped,
+        ),
         findings,
         truncated,
     }
@@ -746,7 +781,10 @@ fn code_quality_envelope(fetch: CategoryFetch, limit: usize) -> GlCodeQualityCat
     findings.truncate(limit);
     GlCodeQualityCategoryOut {
         availability: GlFindingAvailability::Available,
-        detail: partial_loss_detail(tallied.dropped + fetch.lost_reports),
+        detail: partial_loss_detail(
+            fetch.lost_reports + tallied.unreadable_bodies,
+            tallied.dropped,
+        ),
         findings,
         truncated,
     }
@@ -858,35 +896,42 @@ async fn fetch_pipelines(
     fetch_json(repo_path, &endpoint, "pipelines").await
 }
 
-/// GitLab caps a jobs page at 100.
+/// GitLab caps a list page at 100.
 const JOBS_PER_PAGE: usize = 100;
-/// The jobs walk's ceiling. A fan-out pipeline can push the report job off page
-/// one, but a matrix build can also run thousands of jobs — three pages covers
-/// every realistic pipeline without an unbounded walk on a pathological one.
-const MAX_JOB_PAGES: u32 = 3;
+/// The list walk's ceiling, for jobs and bridges alike. Either can run past one
+/// page — a fan-out pipeline's jobs, a many-way `trigger:` matrix's bridges — but
+/// both can also run to thousands, so three pages covers every realistic pipeline
+/// without an unbounded walk on a pathological one.
+const MAX_LIST_PAGES: u32 = 3;
+/// How many downstream (child) pipelines a parent's bridges may contribute. The
+/// walk is ONE level deep: a grandchild would need its own bridges walk, and each
+/// child costs a serial page walk at up to 120 s per call.
+const MAX_BRIDGES: usize = 3;
 
 /// Whether the walk continues: a short page is the last one, and the ceiling
 /// stops a full page from paging forever.
-fn has_more_job_pages(page: u32, page_len: usize) -> bool {
-    page < MAX_JOB_PAGES && page_len == JOBS_PER_PAGE
+fn has_more_list_pages(page: u32, page_len: usize) -> bool {
+    page < MAX_LIST_PAGES && page_len == JOBS_PER_PAGE
 }
 
-/// Every job of a pipeline, up to the walk's ceiling.
-async fn fetch_jobs(repo_path: &str, enc: &str, pipeline_id: u64) -> AppResult<Listed<RawJob>> {
-    let mut all: Vec<RawJob> = Vec::new();
-    for page in 1..=MAX_JOB_PAGES {
-        let endpoint = format!(
-            "projects/{enc}/pipelines/{pipeline_id}/jobs?per_page={JOBS_PER_PAGE}&page={page}"
-        );
-        match fetch_json::<RawJob>(repo_path, &endpoint, "pipeline jobs").await? {
+/// Walks a 100-per-page list endpoint to the ceiling. `base` must already carry a
+/// query string — the page number is appended as `&page=`.
+async fn fetch_paged<T: serde::de::DeserializeOwned>(
+    repo_path: &str,
+    base: &str,
+    what: &str,
+) -> AppResult<Listed<T>> {
+    let mut all: Vec<T> = Vec::new();
+    for page in 1..=MAX_LIST_PAGES {
+        match fetch_json::<T>(repo_path, &format!("{base}&page={page}"), what).await? {
             Listed::Items(items) => {
                 let page_len = items.len();
                 all.extend(items);
-                if !has_more_job_pages(page, page_len) {
+                if !has_more_list_pages(page, page_len) {
                     break;
                 }
             }
-            // A later page failing must not erase the jobs already read; only a
+            // A later page failing must not erase what was already read; only a
             // failure with nothing in hand leaves the category unclassified.
             Listed::Unavailable(availability, detail) => {
                 if all.is_empty() {
@@ -897,6 +942,59 @@ async fn fetch_jobs(repo_path: &str, enc: &str, pipeline_id: u64) -> AppResult<L
         }
     }
     Ok(Listed::Items(all))
+}
+
+/// Every job of a pipeline, up to the walk's ceiling.
+async fn fetch_jobs(repo_path: &str, enc: &str, pipeline_id: u64) -> AppResult<Listed<RawJob>> {
+    let base = format!("projects/{enc}/pipelines/{pipeline_id}/jobs?per_page={JOBS_PER_PAGE}");
+    fetch_paged(repo_path, &base, "pipeline jobs").await
+}
+
+/// A pipeline's `trigger:` jobs. Measured 2026-08-11: the endpoint answers `[]`
+/// on a pipeline with no bridges, so the child walk costs nothing on the common
+/// single-pipeline layout.
+async fn fetch_bridges(
+    repo_path: &str,
+    enc: &str,
+    pipeline_id: u64,
+) -> AppResult<Listed<RawBridge>> {
+    let base = format!("projects/{enc}/pipelines/{pipeline_id}/bridges?per_page={JOBS_PER_PAGE}");
+    fetch_paged(repo_path, &base, "pipeline bridges").await
+}
+
+/// The child pipelines a bridge set points at, in order, deduped and capped.
+/// SAME-PROJECT children only: the endpoint lists multi-project (`trigger:
+/// project:`) bridges too, and a foreign pipeline id is another project's data —
+/// never walked, and never allowed to consume the bridge budget. A bridge with no
+/// `downstream_pipeline` never triggered, and an unstated project can't be proven
+/// local, so both contribute nothing.
+fn downstream_pipeline_ids(bridges: &[RawBridge], project_id: Option<u64>) -> Vec<u64> {
+    let Some(project_id) = project_id else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    bridges
+        .iter()
+        .filter_map(|b| {
+            let downstream = b.downstream_pipeline.as_ref()?;
+            (downstream.project_id? == project_id).then_some(downstream.id?)
+        })
+        .filter(|id| seen.insert(*id))
+        .take(MAX_BRIDGES)
+        .collect()
+}
+
+/// Whether a child-pipeline walk could still add anything: any category the
+/// parent's own jobs don't already answer. On the common single-pipeline layout
+/// every category is answered, so the bridges call never happens.
+fn needs_child_jobs(jobs: &[RawJob]) -> bool {
+    [
+        SAST_FILE_TYPE,
+        SECRET_DETECTION_FILE_TYPE,
+        CODE_QUALITY_FILE_TYPE,
+    ]
+    .iter()
+    .any(|file_type| candidates(jobs, file_type).is_empty())
 }
 
 /// The artifact download endpoint. The filename is third-party data off the job
@@ -981,6 +1079,7 @@ pub async fn pipeline_findings(repo_path: &str, limit: Option<u32>) -> AppResult
         ));
     };
     let default_branch = project.default_branch.unwrap_or_default();
+    let project_id = project.id;
     refs.project_web_url = project
         .web_url
         .map(|u| u.trim_end_matches('/').to_string())
@@ -1045,7 +1144,7 @@ pub async fn pipeline_findings(repo_path: &str, limit: Option<u32>) -> AppResult
     let pipeline_id = chosen.id.unwrap_or(0);
     let pipeline = pipeline_ref_out(chosen);
 
-    let jobs = match fetch_jobs(repo_path, &enc, pipeline_id).await? {
+    let mut jobs = match fetch_jobs(repo_path, &enc, pipeline_id).await? {
         Listed::Items(items) => items,
         Listed::Unavailable(availability, detail) => {
             return Ok(uniform_out(
@@ -1057,6 +1156,21 @@ pub async fn pipeline_findings(repo_path: &str, limit: Option<u32>) -> AppResult
             ))
         }
     };
+    // A monorepo that scans in a child pipeline publishes its reports on the
+    // CHILD's jobs, which the parent's jobs endpoint never lists — but only a
+    // category the parent leaves unanswered can gain anything, so the common
+    // single-pipeline layout never pays for the extra calls. Failures here are
+    // swallowed on purpose: a bridges hiccup must not turn a good read into an
+    // error when the parent's own jobs already answered.
+    if needs_child_jobs(&jobs) {
+        if let Ok(Listed::Items(bridges)) = fetch_bridges(repo_path, &enc, pipeline_id).await {
+            for child_id in downstream_pipeline_ids(&bridges, project_id) {
+                if let Ok(Listed::Items(child_jobs)) = fetch_jobs(repo_path, &enc, child_id).await {
+                    jobs.extend(child_jobs);
+                }
+            }
+        }
+    }
 
     let now = Utc::now();
     let sast = fetch_category(repo_path, &enc, &jobs, SAST_FILE_TYPE, now).await;
@@ -1554,11 +1668,12 @@ mod tests {
         let envelope = secure_envelope(fetch, 100);
         assert_eq!(envelope.availability, GlFindingAvailability::Available);
         assert_eq!(envelope.findings.len(), 2);
+        // A body that wasn't a readable report is a lost REPORT, not one finding.
         assert_eq!(
             envelope.detail.as_deref(),
-            Some("1 finding in this pipeline's reports couldn't be read")
+            Some("1 report couldn't be read")
         );
-        // Per-ITEM losses count the same way, and pluralize.
+        // Per-ITEM losses count in findings, and pluralize.
         let partial = r#"{"vulnerabilities":[
           { "id": "good", "severity": "Low" },
           { "id": "bad", "severity": 7 },
@@ -1569,17 +1684,22 @@ mod tests {
         assert_eq!(envelope.findings.len(), 1);
         assert_eq!(
             envelope.detail.as_deref(),
-            Some("2 findings in this pipeline's reports couldn't be read")
+            Some("2 findings couldn't be read")
         );
-        // A report that failed to DOWNLOAD counts too, next to one that parsed.
+        // A report that failed to DOWNLOAD counts in reports, next to one that
+        // parsed — never folded into the finding count, whose size it can't know.
         let mut mixed = bodies(&[CQ_REPORT]);
         mixed.lost_reports = 1;
         let cq = code_quality_envelope(mixed, 100);
         assert_eq!(cq.availability, GlFindingAvailability::Available);
         assert_eq!(cq.findings.len(), 4);
+        assert_eq!(cq.detail.as_deref(), Some("1 report couldn't be read"));
+        // Both kinds at once keep their own units.
+        let mut both = bodies(&[partial, "<html>502</html>"]);
+        both.lost_reports = 1;
         assert_eq!(
-            cq.detail.as_deref(),
-            Some("1 finding in this pipeline's reports couldn't be read")
+            secure_envelope(both, 100).detail.as_deref(),
+            Some("2 reports and 2 findings couldn't be read")
         );
         // Nothing lost → no notice.
         assert_eq!(secure_envelope(bodies(&[SAST_REPORT]), 100).detail, None);
@@ -1632,14 +1752,106 @@ mod tests {
     }
 
     #[test]
-    fn the_jobs_walk_stops_on_a_short_page_or_the_ceiling() {
-        assert!(has_more_job_pages(1, JOBS_PER_PAGE));
-        assert!(has_more_job_pages(2, JOBS_PER_PAGE));
+    fn child_pipeline_jobs_join_the_candidate_pool() {
+        // The parent runs only a build; the scanning happens in a child pipeline,
+        // so reading the parent alone would report "not configured".
+        let parent: Vec<RawJob> = serde_json::from_value(json!([
+            { "id": 1, "artifacts": [{ "file_type": "trace", "filename": "job.log" }] }
+        ]))
+        .expect("parent jobs deserialize");
+        let child: Vec<RawJob> = serde_json::from_value(json!([
+            { "id": 90, "artifacts": [
+                { "file_type": "sast", "filename": "gl-sast-report.json" }
+            ], "artifacts_expire_at": "2026-09-10T17:11:43.795Z" }
+        ]))
+        .expect("child jobs deserialize");
+        assert!(candidates(&parent, SAST_FILE_TYPE).is_empty());
+        let mut merged = parent;
+        merged.extend(child);
+        assert_eq!(
+            candidates(&merged, SAST_FILE_TYPE),
+            vec![ArtifactRef {
+                job_id: 90,
+                filename: "gl-sast-report.json".into(),
+                expire_at: Some("2026-09-10T17:11:43.795Z".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn the_child_walk_only_runs_when_a_category_is_unanswered() {
+        let all_three: Vec<RawJob> = serde_json::from_value(json!([
+            { "id": 1, "artifacts": [
+                { "file_type": "sast", "filename": "gl-sast-report.json" },
+                { "file_type": "secret_detection", "filename": "gl-secret-detection-report.json" },
+                { "file_type": "codequality", "filename": "gl-code-quality-report.json" }
+            ] }
+        ]))
+        .expect("jobs deserialize");
+        // Every category answered by the parent — the bridges call is pure cost.
+        assert!(!needs_child_jobs(&all_three));
+        // One category short still qualifies: the child may publish the rest.
+        let two_of_three: Vec<RawJob> = serde_json::from_value(json!([
+            { "id": 1, "artifacts": [
+                { "file_type": "sast", "filename": "gl-sast-report.json" },
+                { "file_type": "codequality", "filename": "gl-code-quality-report.json" }
+            ] }
+        ]))
+        .expect("jobs deserialize");
+        assert!(needs_child_jobs(&two_of_three));
+        // A parent that scans nothing is the monorepo case this exists for.
+        assert!(needs_child_jobs(&[]));
+    }
+
+    #[test]
+    fn only_same_project_child_pipelines_are_walked() {
+        // Field shape measured 2026-08-11 against a real parent-child pipeline.
+        const PARENT: u64 = 83906586;
+        let bridges: Vec<RawBridge> = serde_json::from_value(json!([
+            // Never triggered, or the child failed to create — both send null.
+            { "name": "trigger-web", "downstream_pipeline": null },
+            { "name": "child-scans", "downstream_pipeline": {
+                "id": 2752106301_u64, "project_id": PARENT, "ref": "main",
+                "status": "success", "source": "parent_pipeline" } },
+            // A multi-project `trigger: project:` bridge — another project's data.
+            { "name": "trigger-other-repo", "downstream_pipeline": {
+                "id": 2752106999_u64, "project_id": 12345678, "source": "pipeline" } },
+            // Neither of these can be proven local or addressed.
+            { "name": "trigger-docs", "downstream_pipeline": {} },
+            { "name": "trigger-idless", "downstream_pipeline": { "project_id": PARENT } },
+            // The same child listed twice is walked once.
+            { "name": "child-scans-again", "downstream_pipeline": {
+                "id": 2752106301_u64, "project_id": PARENT } }
+        ]))
+        .expect("bridges deserialize");
+        assert_eq!(
+            downstream_pipeline_ids(&bridges, Some(PARENT)),
+            vec![2752106301]
+        );
+        // No bridges at all is the common case and contributes nothing.
+        assert!(downstream_pipeline_ids(&[], Some(PARENT)).is_empty());
+        // An unknown parent project can't prove any child local.
+        assert!(downstream_pipeline_ids(&bridges, None).is_empty());
+        // The cap bounds the serial child walks, and foreign ids never eat it.
+        let many: Vec<RawBridge> = serde_json::from_value(json!((1..=10)
+            .map(|i| json!({ "downstream_pipeline": { "id": i, "project_id": PARENT } }))
+            .collect::<Vec<_>>()))
+        .expect("bridges deserialize");
+        assert_eq!(
+            downstream_pipeline_ids(&many, Some(PARENT)).len(),
+            MAX_BRIDGES
+        );
+    }
+
+    #[test]
+    fn the_list_walk_stops_on_a_short_page_or_the_ceiling() {
+        assert!(has_more_list_pages(1, JOBS_PER_PAGE));
+        assert!(has_more_list_pages(2, JOBS_PER_PAGE));
         // The ceiling stops a full page from paging forever.
-        assert!(!has_more_job_pages(MAX_JOB_PAGES, JOBS_PER_PAGE));
+        assert!(!has_more_list_pages(MAX_LIST_PAGES, JOBS_PER_PAGE));
         // A short page is the last one.
-        assert!(!has_more_job_pages(1, JOBS_PER_PAGE - 1));
-        assert!(!has_more_job_pages(1, 0));
+        assert!(!has_more_list_pages(1, JOBS_PER_PAGE - 1));
+        assert!(!has_more_list_pages(1, 0));
     }
 
     #[test]

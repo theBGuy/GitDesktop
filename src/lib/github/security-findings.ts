@@ -161,10 +161,11 @@ export interface AdvisoryVulnerabilityOut {
 
 // ── API wrappers ─────────────────────────────────────────────────────────────
 //
-// GitHub-only: every findings category here (Dependabot, code scanning, secret
-// scanning, repository advisories) has no GitLab/Bitbucket analogue, so these
-// stay `gh_*` and the panel gates on the `securityFindings` capability rather
-// than dispatching per provider.
+// The four GitHub categories (Dependabot, code scanning, secret scanning,
+// repository advisories) are platform alert stores with no direct analogue
+// elsewhere, so they keep their `gh_*` commands. The panel picks a query set by
+// provider on top of the `securityFindings` capability: GitLab reads pipeline
+// report artifacts via `forge_gl_pipeline_findings` instead of these.
 
 export const ghDependabotAlerts = (repoPath: string, limit: number) =>
   invoke<DependabotAlertsOut>("gh_dependabot_alerts", { repoPath, limit });

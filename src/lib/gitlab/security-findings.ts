@@ -104,12 +104,24 @@ export interface GlCodeQualityFindingOut {
   line: number | null;
 }
 
+/** Stable identity for a SAST or secret-detection finding. Reports may omit the
+ *  id entirely, and every id-less finding would otherwise share the empty string
+ *  as its identity — so the location stands in, mirroring the fields of Rust's
+ *  `SecureKey::Location` (the backend's dedup key). The join is not injective the
+ *  way that tuple is: report-controlled text containing the separator can still
+ *  collide, degrading to the documented first-match-wins rather than to a mix-up
+ *  of unrelated findings. */
+export const secureFindingId = (f: GlSecureFindingOut): string =>
+  f.id || `${f.name}:${f.file}:${f.startLine ?? ""}`;
+
 /** Stable identity for a code quality finding, mirroring the Rust side's
  *  composite. A fingerprint repeats across files for the same offending
  *  construct — and can be missing entirely — so the check name, path and line all
  *  join the key; without the check name, two different checks at one path:line
- *  collapse into each other. The panel and the detail pane must derive it
- *  identically or a selected row resolves to the wrong finding. */
+ *  collapse into each other. Same caveat as `secureFindingId`: the join is not
+ *  injective the way the Rust tuple is, and a separator-bearing collision degrades
+ *  to first-match-wins. The panel and the detail pane must derive it identically
+ *  or a selected row resolves to the wrong finding. */
 export const codeQualityFindingId = (f: GlCodeQualityFindingOut): string =>
   `${f.fingerprint}:${f.checkName}:${f.path}:${f.line ?? ""}`;
 

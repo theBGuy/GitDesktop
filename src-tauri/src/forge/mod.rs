@@ -10,7 +10,7 @@
 pub mod bitbucket;
 pub mod github;
 pub mod gitlab;
-mod gitlab_findings;
+pub mod gitlab_findings;
 pub mod glab;
 pub mod http;
 pub mod jira;

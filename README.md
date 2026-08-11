@@ -464,7 +464,8 @@ they're only published on public repositories.
 On a **GitLab** repo the same tab reads the newest completed **pipeline**
 for your checked-out branch — falling back to the default branch, and
 saying so — and lists its **SAST**, **secret detection**, and **code
-quality** findings straight out of the pipeline's report artifacts. Those
+quality** findings straight out of the pipeline's report artifacts,
+including scans that run in triggered child pipelines. Those
 analyzers run on every GitLab tier, Free included; it's GitLab's own
 vulnerability report that's Ultimate-only, so this is often the only place
 you'll see findings your pipelines already produce. A provenance strip
@@ -475,11 +476,13 @@ on GitLab** — a permalink to that line at the scanned commit. Detected
 secret *values* never leave the report: the raw extract is dropped before a
 finding reaches the app. Each section explains itself instead of looking
 clean — scanning not set up (with **Open scanning setup on GitLab**), a
-report GitLab won't serve (add the `gl-*-report.json` to that job's
-`artifacts:paths`), expired artifacts, nothing finished yet, an access
-problem, or a check that didn't complete — so an empty section only reads
-as clean once a parsed report proves it, and a partly unreadable pipeline
-says how much was lost.
+report GitLab won't serve (add the `gl-*-report.json` to `artifacts:paths`
+in the job that produces it), expired artifacts, nothing finished yet, an
+access problem, or a check that didn't complete — so an empty section only
+reads as clean once a parsed report proves it, and a partly unreadable
+pipeline says how much was lost. When one cause covers all three — no
+pipeline to read yet, or one problem across every category — a single card
+stands in for them.
 
 ### Insights
 
