@@ -1,0 +1,263 @@
+---
+// The full CHANGELOG.md, rendered on-site: one anchored section per release
+// with the same Added/Changed/Fixed groups that ship in the app's updater
+// notes. Freshness rides the existing pipeline — site-rebuild.yml pings the
+// Pages deploy hook on every release publish, so this page re-bakes with the
+// release facts the same way download.astro's version does.
+import SiteLayout from "../layouts/SiteLayout.astro";
+import { getChangelog } from "../lib/changelog";
+
+const base = import.meta.env.BASE_URL;
+
+const releases = getChangelog();
+const latest = releases[0];
+const oldest = releases[releases.length - 1];
+
+const utc = (iso: string) => new Date(`${iso}T00:00:00Z`);
+const fmtLong = (iso: string) =>
+  utc(iso).toLocaleDateString("en-US", {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+const fmtShort = (iso: string) =>
+  utc(iso).toLocaleDateString("en-US", {
+    month: "short",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+const sinceMonth = utc(oldest.date).toLocaleDateString("en-US", {
+  month: "long",
+  year: "numeric",
+  timeZone: "UTC",
+});
+
+// Word + glyph together (never a glyph alone): the glyph is decoration in the
+// site's diff idiom, the category name carries the meaning.
+const glyphs: Record<string, string> = { Added: "+", Changed: "~", Fixed: "✓" };
+---
+
+<SiteLayout
+  title="GitDesktop changelog — every release, in plain language"
+  description={`What's new in GitDesktop ${latest.version} (${fmtLong(latest.date)}) — and every feature, change, and fix in the releases before it, written for humans.`}
+  ogTitle="GitDesktop changelog"
+  ogDescription={`Every GitDesktop release since ${sinceMonth}, in plain language — the same notes the in-app updater shows.`}
+  breadcrumbs={[{ name: "Changelog", path: "/changelog/" }]}
+>
+  <section class="border-b border-line">
+    <div class="mx-auto max-w-6xl px-5 py-16 md:py-20">
+      <p data-reveal class="text-sm text-faint">
+        <span class="text-add" aria-hidden="true">//</span> changelog
+      </p>
+      <h1
+        data-reveal
+        style="transition-delay:60ms"
+        class="mt-5 max-w-[24ch] text-[clamp(1.9rem,4.5vw,3rem)] font-semibold tracking-tight"
+      >
+        Every release, in plain language.
+      </h1>
+      <p
+        data-reveal
+        style="transition-delay:120ms"
+        class="mt-6 max-w-[62ch] text-base leading-relaxed text-body sm:text-lg"
+      >
+        GitDesktop ships small and often. This is the full record since
+        {sinceMonth} — every feature, change, and fix, written for humans rather
+        than pasted from commit subjects. They're the same notes the in-app
+        updater shows with each new version.
+      </p>
+      <p data-reveal style="transition-delay:180ms" class="mt-5 text-sm text-muted">
+        Latest:
+        <a href={`#v${latest.version}`} class="text-mint underline-offset-4 hover:underline"
+          >v{latest.version}</a
+        > · {fmtLong(latest.date)} · installers on the
+        <a href={`${base}download/`} class="text-mint underline-offset-4 hover:underline"
+          >download page</a
+        >
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <div
+      class="mx-auto max-w-6xl px-5 py-12 md:py-16 lg:grid lg:grid-cols-[200px_minmax(0,1fr)] lg:items-start lg:gap-14"
+    >
+      <nav aria-label="Jump to a release" class="sticky top-20 hidden lg:block">
+        <ol class="space-y-0.5 border-l border-line pl-4 text-sm">
+          {
+            releases.map((r) => (
+              <li>
+                <a
+                  href={`#v${r.version}`}
+                  data-nav-version={r.version}
+                  class="flex items-baseline gap-2 rounded py-1 text-muted transition-colors hover:text-ink"
+                >
+                  <span>v{r.version}</span>
+                  <span class="text-xs text-faint">{fmtShort(r.date)}</span>
+                </a>
+              </li>
+            ))
+          }
+        </ol>
+      </nav>
+
+      <div class="min-w-0">
+        <details class="mb-10 rounded-lg border border-line-2 bg-surface px-4 py-3 lg:hidden">
+          <summary class="cursor-pointer text-sm text-muted">Jump to a release</summary>
+          <ol class="mt-3 grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm sm:grid-cols-3">
+            {
+              releases.map((r) => (
+                <li>
+                  <a
+                    href={`#v${r.version}`}
+                    class="flex items-baseline gap-2 py-0.5 text-muted transition-colors hover:text-ink"
+                  >
+                    <span>v{r.version}</span>
+                    <span class="text-xs text-faint">{fmtShort(r.date)}</span>
+                  </a>
+                </li>
+              ))
+            }
+          </ol>
+        </details>
+
+        {
+          releases.map((r, i) => (
+            <article
+              id={`v${r.version}`}
+              class:list={["release scroll-mt-20", i > 0 && "mt-14 border-t border-line pt-12"]}
+            >
+              <header class="flex flex-wrap items-baseline gap-x-4 gap-y-2">
+                <h2 class="text-2xl font-semibold tracking-tight">
+                  <a href={`#v${r.version}`} class="text-ink transition-colors hover:text-mint">
+                    v{r.version}
+                  </a>
+                </h2>
+                {i === 0 && (
+                  <span class="rounded-full border border-mint/40 bg-mint/10 px-2.5 py-0.5 text-xs font-medium text-mint">
+                    Latest
+                  </span>
+                )}
+                <span class="text-sm text-muted">{fmtLong(r.date)}</span>
+                <span class="flex items-baseline gap-4 text-sm">
+                  <a
+                    href={r.releaseUrl}
+                    class="text-muted underline decoration-line-2 underline-offset-4 transition-colors hover:text-ink"
+                  >
+                    release
+                  </a>
+                  {r.compareUrl && (
+                    <a
+                      href={r.compareUrl}
+                      class="text-muted underline decoration-line-2 underline-offset-4 transition-colors hover:text-ink"
+                    >
+                      full diff
+                    </a>
+                  )}
+                </span>
+              </header>
+
+              {r.intro.map((p) => (
+                <p class="mt-5 max-w-[72ch] leading-relaxed text-body" set:html={p} />
+              ))}
+
+              {r.categories.map((c) => (
+                <section class="mt-8">
+                  <h3 class="flex items-baseline gap-2 text-base font-semibold text-ink">
+                    {glyphs[c.name] && (
+                      <span class="text-mint" aria-hidden="true">
+                        {glyphs[c.name]}
+                      </span>
+                    )}
+                    {c.name}
+                  </h3>
+                  <ul class="notes mt-4 space-y-3 pl-5">
+                    {c.bullets.map((b) => (
+                      <li set:html={b} />
+                    ))}
+                  </ul>
+                </section>
+              ))}
+            </article>
+          ))
+        }
+      </div>
+    </div>
+  </section>
+
+  <script is:inline slot="scripts">
+    // Scrollspy for the desktop release rail — pure enhancement; without JS the
+    // rail is a plain list of working anchor links.
+    (function () {
+      var links = document.querySelectorAll("[data-nav-version]");
+      if (!links.length || !("IntersectionObserver" in window)) return;
+      var byVersion = {};
+      links.forEach(function (l) {
+        byVersion[l.getAttribute("data-nav-version")] = l;
+      });
+      var current = null;
+      var io = new IntersectionObserver(
+        function (entries) {
+          entries.forEach(function (e) {
+            if (!e.isIntersecting) return;
+            var link = byVersion[e.target.id.slice(1)];
+            if (!link || link === current) return;
+            if (current) current.removeAttribute("aria-current");
+            current = link;
+            current.setAttribute("aria-current", "location");
+          });
+        },
+        { rootMargin: "-10% 0px -70% 0px" },
+      );
+      document.querySelectorAll("article.release[id]").forEach(function (a) {
+        io.observe(a);
+      });
+    })();
+  </script>
+</SiteLayout>
+
+{/* Rendered via set:html, so Astro's scoped styles can't reach the content —
+    global, namespaced under .release/.notes. */}
+<style is:global>
+  .notes {
+    list-style: disc;
+  }
+  .notes li {
+    max-width: 76ch;
+    line-height: 1.75;
+    color: var(--color-body);
+  }
+  .notes li::marker {
+    color: var(--color-faint);
+  }
+  .release strong {
+    color: var(--color-ink);
+    font-weight: 600;
+  }
+  .release em {
+    font-style: italic;
+  }
+  .release code {
+    background: var(--color-surface-2);
+    padding: 0.12em 0.38em;
+    border-radius: 4px;
+    font-size: 0.88em;
+    color: var(--color-ink);
+  }
+  .notes a {
+    color: var(--color-mint);
+    text-decoration: underline;
+    text-decoration-color: oklch(0.82 0.12 178 / 0.45);
+    text-decoration-thickness: 1px;
+    text-underline-offset: 3px;
+  }
+  .notes a:hover,
+  .notes a:focus-visible {
+    text-decoration-color: var(--color-mint);
+  }
+  [data-nav-version][aria-current="location"] {
+    color: var(--color-ink);
+    font-weight: 500;
+  }
+</style>

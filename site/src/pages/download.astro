@@ -8,6 +8,7 @@ import {
   getLatestRelease,
 } from "../lib/release";
 
+const base = import.meta.env.BASE_URL;
 const repo = "https://github.com/theBGuy/GitDesktop";
 const releases = `${repo}/releases`;
 
@@ -199,8 +200,10 @@ const softwareLd = JSON.stringify({
           }
         </ul>
         <p class="mt-5 text-sm text-muted">
-          Latest builds, checksums, and release notes live on
-          <a href={releases} class="text-mint underline-offset-4 hover:underline">GitHub Releases</a>.
+          Latest builds and checksums live on
+          <a href={releases} class="text-mint underline-offset-4 hover:underline">GitHub Releases</a>;
+          what changed in each version is on the
+          <a href={`${base}changelog/`} class="text-mint underline-offset-4 hover:underline">changelog</a>.
         </p>
       </div>
 
