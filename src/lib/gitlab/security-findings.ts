@@ -38,6 +38,11 @@ export interface GlFindingsOut {
   usedFallback: boolean;
   /** The default branch name when `usedFallback`; null otherwise. */
   fallbackRef: string | null;
+  /** The project's default branch name, set on every exit where the project fetch
+   *  answered — including when no pipelines were found at all. Distinct from
+   *  `fallbackRef`, which means a default-branch pipeline was actually used: this
+   *  one says which ref was *looked at*, not which one supplied findings. */
+  defaultRef: string | null;
   /** e.g. `https://gitlab.com/group/name`, no trailing slash; null when unknown. */
   projectWebUrl: string | null;
   sast: GlSecureCategoryOut;

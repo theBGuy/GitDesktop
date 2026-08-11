@@ -1399,9 +1399,9 @@ Each section explains itself rather than looking clean; when one cause covers al
 three — no pipeline to read yet, or one problem across every category — a single card
 stands in for them:
 
-- **Scanning isn't set up** — the project's CI has run no scanning, or this pipeline
-  published no report of that kind. **Open scanning setup on GitLab** goes to the
-  project's Security configuration page.
+- **Scanning isn't set up** — no pipeline was found on your branch or the default
+  branch, or the pipeline published no report of that kind. **Open scanning setup on
+  GitLab** goes to the project's Security configuration page.
 - **The report isn't downloadable** — the job lists it but GitLab returns a 404 for the
   file; add the \`gl-*-report.json\` to that job's \`artifacts:paths\` to expose it.
 - **The artifacts expired** — findings come back with the next pipeline run.

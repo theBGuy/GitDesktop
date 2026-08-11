@@ -562,16 +562,21 @@ function LoadFailed({
  *  claim a result *for* it; sentences name the ref actually listed instead. */
 const isUnnamedRef = (ref: string): boolean => ref === "HEAD";
 
-/** The refs whose pipelines were actually listed, for copy that would otherwise
- *  claim something project-wide: the sentinel contributes nothing (never queried
- *  under a name), and a branch that IS the default is named once, not twice.
- *  Null when neither ref can be named. */
+/** The refs that were looked at, for copy that would otherwise claim something
+ *  project-wide. Built from `requestedRef` + `defaultRef` — NOT `fallbackRef`,
+ *  which is set only when a default-branch pipeline was actually used and so can
+ *  never name the second ref in the state this serves. The sentinel contributes
+ *  nothing (never queried under a name) and a branch that IS the default is named
+ *  once; null when neither can be named. */
 function checkedRefs(data: GlFindingsOut): string | null {
-  const requested = isUnnamedRef(data.requestedRef) ? null : data.requestedRef;
-  const fallback = data.fallbackRef;
-  if (requested && fallback && requested !== fallback)
-    return `${requested} or ${fallback}`;
-  return requested || fallback;
+  const names = [
+    isUnnamedRef(data.requestedRef) ? null : data.requestedRef,
+    data.defaultRef && data.defaultRef !== data.requestedRef
+      ? data.defaultRef
+      : null,
+  ].filter((name): name is string => name !== null);
+  if (names.length === 2) return `${names[0]} or ${names[1]}`;
+  return names[0] ?? null;
 }
 
 /** The project's scanning setup page, or null when the project URL is unknown —

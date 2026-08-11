@@ -79,6 +79,10 @@ pub struct GlFindingsOut {
     /// The default branch's pipelines were read instead of the requested ref's.
     pub used_fallback: bool,
     pub fallback_ref: Option<String>,
+    /// The default branch's NAME — the ref the fallback consults, stated whether
+    /// or not it was used; `fallback_ref` answers that separate question. `None`
+    /// only when the project lookup itself failed.
+    pub default_ref: Option<String>,
     pub project_web_url: Option<String>,
     pub sast: GlSecureCategoryOut,
     pub secret_detection: GlSecureCategoryOut,
@@ -795,6 +799,7 @@ struct RefContext {
     requested_ref: String,
     used_fallback: bool,
     fallback_ref: Option<String>,
+    default_ref: Option<String>,
     project_web_url: Option<String>,
 }
 
@@ -819,6 +824,7 @@ fn uniform_out(
         requested_ref: refs.requested_ref,
         used_fallback: refs.used_fallback,
         fallback_ref: refs.fallback_ref,
+        default_ref: refs.default_ref,
         project_web_url: refs.project_web_url,
         sast: secure(),
         secret_detection: secure(),
@@ -1048,6 +1054,7 @@ pub async fn pipeline_findings(repo_path: &str, limit: Option<u32>) -> AppResult
         requested_ref,
         used_fallback: false,
         fallback_ref: None,
+        default_ref: None,
         project_web_url: None,
     };
 
@@ -1079,6 +1086,9 @@ pub async fn pipeline_findings(repo_path: &str, limit: Option<u32>) -> AppResult
     };
     let default_branch = project.default_branch.unwrap_or_default();
     let project_id = project.id;
+    // Recorded BEFORE any fallback attempt, so every later exit — including the
+    // one where neither ref has a pipeline — can name the branch that was checked.
+    refs.default_ref = (!default_branch.is_empty()).then(|| default_branch.clone());
     refs.project_web_url = project
         .web_url
         .map(|u| u.trim_end_matches('/').to_string())
@@ -1181,6 +1191,7 @@ pub async fn pipeline_findings(repo_path: &str, limit: Option<u32>) -> AppResult
         requested_ref: refs.requested_ref,
         used_fallback: refs.used_fallback,
         fallback_ref: refs.fallback_ref,
+        default_ref: refs.default_ref,
         project_web_url: refs.project_web_url,
         sast: secure_envelope(sast, cap),
         secret_detection: secure_envelope(secrets, cap),
@@ -1338,6 +1349,7 @@ mod tests {
             requested_ref: "feature".into(),
             used_fallback: true,
             fallback_ref: Some("main".into()),
+            default_ref: Some("main".into()),
             project_web_url: Some("https://gitlab.com/g/r".into()),
             sast: secure_envelope(bodies(&[SAST_REPORT]), 100),
             secret_detection: GlSecureCategoryOut {
@@ -1353,6 +1365,7 @@ mod tests {
         assert_eq!(value["requestedRef"], json!("feature"));
         assert_eq!(value["usedFallback"], json!(true));
         assert_eq!(value["fallbackRef"], json!("main"));
+        assert_eq!(value["defaultRef"], json!("main"));
         assert_eq!(value["projectWebUrl"], json!("https://gitlab.com/g/r"));
         // `ref` and `type` are hand-pinned around the Rust keywords.
         assert_eq!(value["pipeline"]["ref"], json!("main"));
@@ -1388,6 +1401,51 @@ mod tests {
         assert_eq!(cq["path"], json!("src/app.py"));
         assert_eq!(cq["line"], json!(17));
         assert_eq!(value["codeQuality"]["truncated"], json!(true));
+    }
+
+    #[test]
+    fn the_no_pipelines_exit_still_names_the_default_branch() {
+        // Neither the checked-out ref nor the default branch had a pipeline, so
+        // nothing was USED — but the card has to say both refs were checked, and
+        // fallback_ref can't carry that (it means "a default pipeline supplied
+        // these findings").
+        let out = uniform_out(
+            GlPipelineState::None,
+            None,
+            RefContext {
+                requested_ref: "feature".into(),
+                used_fallback: false,
+                fallback_ref: None,
+                default_ref: Some("main".into()),
+                project_web_url: Some("https://gitlab.com/g/r".into()),
+            },
+            GlFindingAvailability::NotConfigured,
+            None,
+        );
+        let value = serde_json::to_value(&out).expect("envelope serializes");
+        assert_eq!(value["pipelineState"], json!("none"));
+        assert_eq!(value["requestedRef"], json!("feature"));
+        assert_eq!(value["defaultRef"], json!("main"));
+        assert_eq!(value["fallbackRef"], json!(null));
+        assert_eq!(value["usedFallback"], json!(false));
+        // Only a failed project lookup leaves the default branch unknown.
+        let unavailable = uniform_out(
+            GlPipelineState::Unavailable,
+            None,
+            RefContext {
+                requested_ref: "feature".into(),
+                used_fallback: false,
+                fallback_ref: None,
+                default_ref: None,
+                project_web_url: None,
+            },
+            GlFindingAvailability::Forbidden,
+            Some("403 Forbidden".into()),
+        );
+        assert_eq!(
+            serde_json::to_value(&unavailable).expect("envelope serializes")["defaultRef"],
+            json!(null)
+        );
     }
 
     #[test]
