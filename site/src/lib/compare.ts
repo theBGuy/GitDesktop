@@ -9,6 +9,13 @@ export interface Cell {
   note?: string;
 }
 
+export interface Row {
+  label: string;
+  /** The competitor's cell. */
+  them: Cell;
+  gd: Cell;
+}
+
 export interface Group<R> {
   title: string;
   rows: R[];

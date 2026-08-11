@@ -9,13 +9,9 @@
 // in the same edit — a stale comparison is worse than none.
 import { Image } from "astro:assets";
 import appGithubPr from "../../assets/app-github-pr.png";
+import CompareTable from "../../components/CompareTable.astro";
 import SiteLayout from "../../layouts/SiteLayout.astro";
-import {
-  type Cell,
-  type Group,
-  stateClass,
-  stateText,
-} from "../../lib/compare";
+import { type Group, type Row } from "../../lib/compare";
 
 const base = import.meta.env.BASE_URL;
 const repo = "https://github.com/theBGuy/GitDesktop";
@@ -25,24 +21,18 @@ const VERIFIED_ON = "August 11, 2026";
 const ST_WIN_VERSION = "3.4.31";
 const ST_MAC_VERSION = "4.2.19";
 
-interface Row {
-  label: string;
-  st: Cell;
-  gd: Cell;
-}
-
 const groups: Group<Row>[] = [
   {
     title: "Where you can use it",
     rows: [
       {
         label: "Linux",
-        st: { state: "no", note: "Windows & macOS only" },
+        them: { state: "no", note: "Windows & macOS only" },
         gd: { state: "yes", note: "Windows, macOS & Linux" },
       },
       {
         label: "Works without a vendor account",
-        st: {
+        them: {
           state: "no",
           note: "an Atlassian account is required to use the app",
         },
@@ -50,7 +40,7 @@ const groups: Group<Row>[] = [
       },
       {
         label: "Forges with full PR / CI / issue support",
-        st: { state: "no", note: "accounts add sign-in and clone lists" },
+        them: { state: "no", note: "accounts add sign-in and clone lists" },
         gd: {
           state: "yes",
           note: "GitHub, GitLab & Bitbucket — Bitbucket issues via linked Jira",
@@ -58,7 +48,7 @@ const groups: Group<Row>[] = [
       },
       {
         label: "Jira",
-        st: {
+        them: {
           state: "partial",
           note: "issue-key links in commit messages open the browser",
         },
@@ -66,7 +56,7 @@ const groups: Group<Row>[] = [
       },
       {
         label: "Mercurial",
-        st: { state: "yes", note: "still shipping, both platforms" },
+        them: { state: "yes", note: "still shipping, both platforms" },
         gd: { state: "no", note: "Git only" },
       },
     ],
@@ -76,7 +66,7 @@ const groups: Group<Row>[] = [
     rows: [
       {
         label: "Create a PR",
-        st: {
+        them: {
           state: "partial",
           note: "opens the forge's form in your browser",
         },
@@ -87,7 +77,7 @@ const groups: Group<Row>[] = [
       },
       {
         label: "Read & review a PR in-app",
-        st: { state: "no" },
+        them: { state: "no" },
         gd: {
           state: "yes",
           note: "conversation, files, checks, approve / request changes",
@@ -95,12 +85,15 @@ const groups: Group<Row>[] = [
       },
       {
         label: "Merge a PR in-app",
-        st: { state: "no" },
-        gd: { state: "yes", note: "merge / squash / rebase" },
+        them: { state: "no" },
+        gd: {
+          state: "yes",
+          note: "merge & squash on all three; rebase (GitHub), fast-forward (Bitbucket)",
+        },
       },
       {
         label: "Resolve a PR's conflicts in-app",
-        st: { state: "no" },
+        them: { state: "no" },
         gd: {
           state: "yes",
           note: "in a hidden worktree; your checkout untouched",
@@ -108,7 +101,7 @@ const groups: Group<Row>[] = [
       },
       {
         label: "Local PRs with no remote at all",
-        st: { state: "no" },
+        them: { state: "no" },
         gd: {
           state: "yes",
           note: "review & merge offline, promote to GitHub or GitLab later",
@@ -121,7 +114,7 @@ const groups: Group<Row>[] = [
     rows: [
       {
         label: "CI status in-app",
-        st: {
+        them: {
           state: "partial",
           note: "Bitbucket Pipelines per-commit status — macOS only",
         },
@@ -132,7 +125,7 @@ const groups: Group<Row>[] = [
       },
       {
         label: "Issues",
-        st: { state: "no", note: "commit-message links open the browser" },
+        them: { state: "no", note: "commit-message links open the browser" },
         gd: { state: "yes", note: "GitHub & GitLab in-app; local issues too" },
       },
     ],
@@ -142,12 +135,12 @@ const groups: Group<Row>[] = [
     rows: [
       {
         label: "Stage by file, hunk, or line",
-        st: { state: "yes" },
+        them: { state: "yes" },
         gd: { state: "yes", note: "plus drag-to-stage line selection" },
       },
       {
         label: "Interactive rebase",
-        st: { state: "yes", note: "squash, reword, edit, reorder, delete" },
+        them: { state: "yes", note: "squash, reword, edit, reorder, delete" },
         gd: {
           state: "yes",
           note: "pick / reword / squash / fixup / edit / drop",
@@ -155,12 +148,12 @@ const groups: Group<Row>[] = [
       },
       {
         label: "Git-flow",
-        st: { state: "yes", note: "built in" },
+        them: { state: "yes", note: "built in" },
         gd: { state: "no" },
       },
       {
         label: "Run your own scripts",
-        st: {
+        them: {
           state: "yes",
           note: "custom actions on the toolbar & context menu",
         },
@@ -171,7 +164,7 @@ const groups: Group<Row>[] = [
       },
       {
         label: "Linked worktrees",
-        st: {
+        them: {
           state: "no",
           note: "no worktree UI — open one as a separate repo",
         },
@@ -182,7 +175,7 @@ const groups: Group<Row>[] = [
       },
       {
         label: "Submodules",
-        st: {
+        them: {
           state: "yes",
           note: "add from the menu, manage from the sidebar",
         },
@@ -190,12 +183,12 @@ const groups: Group<Row>[] = [
       },
       {
         label: "Git LFS",
-        st: { state: "yes", note: "initialize & track from the menu" },
+        them: { state: "yes", note: "initialize & track from the menu" },
         gd: { state: "no", note: "system git-lfs works; no dedicated UI" },
       },
       {
         label: "Predict a merge before running it",
-        st: { state: "no", note: "conflicts surface after the merge runs" },
+        them: { state: "no", note: "conflicts surface after the merge runs" },
         gd: {
           state: "yes",
           note: "fast-forward / clean / conflicts, previewed in memory",
@@ -203,7 +196,7 @@ const groups: Group<Row>[] = [
       },
       {
         label: "Recover dropped stashes",
-        st: {
+        them: {
           state: "no",
           note: "the community answer is git fsck in a terminal",
         },
@@ -216,7 +209,7 @@ const groups: Group<Row>[] = [
     rows: [
       {
         label: "AI assistance",
-        st: { state: "no", note: "none shipped; requests open since 2023" },
+        them: { state: "no", note: "none shipped; requests open since 2023" },
         gd: {
           state: "yes",
           note: "commit messages, PR descriptions, review, delegated tasks — your own models",
@@ -224,7 +217,7 @@ const groups: Group<Row>[] = [
       },
       {
         label: "Works with AI fully out of the way",
-        st: { state: "yes", note: "there is none" },
+        them: { state: "yes", note: "there is none" },
         gd: { state: "yes", note: "one setting hides every AI surface" },
       },
     ],
@@ -234,12 +227,12 @@ const groups: Group<Row>[] = [
     rows: [
       {
         label: "Price",
-        st: { state: "yes", note: "free, commercial use included" },
+        them: { state: "yes", note: "free, commercial use included" },
         gd: { state: "yes", note: "free" },
       },
       {
         label: "Open source",
-        st: { state: "no", note: "proprietary EULA" },
+        them: { state: "no", note: "proprietary EULA" },
         gd: { state: "yes", note: "Apache-2.0" },
       },
     ],
@@ -318,6 +311,16 @@ const faqs = [
         <li class="flex items-start gap-2.5 leading-relaxed text-body">
           <span class="mt-px select-none text-add" aria-hidden="true">+</span>
           <span>
+            <span class="text-ink">Nothing else to install.</span> Sourcetree
+            bundles its own Git (system Git optional). GitDesktop needs system
+            Git, plus <code class="text-ink">gh</code> or
+            <code class="text-ink">glab</code> for forge features — sign-in is
+            guided from inside the app, but it's still a real first-run step.
+          </span>
+        </li>
+        <li class="flex items-start gap-2.5 leading-relaxed text-body">
+          <span class="mt-px select-none text-add" aria-hidden="true">+</span>
+          <span>
             <span class="text-ink">Mercurial.</span> Sourcetree is the rare
             mainstream client still shipping Mercurial support, on both
             platforms, with Hg-flow to match. GitDesktop is Git-only — if your
@@ -376,56 +379,7 @@ const faqs = [
         each other, the row says so.
       </p>
 
-      {/* tabindex: a keyboard user must be able to scroll the min-width table;
-          a focusable scroll region needs the role + name for AT. */}
-      <div
-        data-reveal
-        style="transition-delay:80ms"
-        class="mt-10 overflow-x-auto"
-        tabindex="0"
-        role="region"
-        aria-label="Feature comparison table"
-      >
-        <table class="w-full min-w-[640px] border-collapse text-[15px]">
-          <thead>
-            <tr class="border-b border-line-2 text-left">
-              <th scope="col" class="py-3 pr-6 font-normal text-faint">Capability</th>
-              <th scope="col" class="w-[26%] py-3 pr-6 font-medium text-ink">Sourcetree</th>
-              <th scope="col" class="w-[30%] py-3 font-medium text-ink">GitDesktop</th>
-            </tr>
-          </thead>
-          {
-            groups.map((group) => (
-              <tbody>
-                <tr>
-                  <th
-                    scope="rowgroup"
-                    colspan="3"
-                    class="pb-2 pt-8 text-left text-sm font-normal text-faint"
-                  >
-                    <span class="text-add" aria-hidden="true">//</span> {group.title}
-                  </th>
-                </tr>
-                {group.rows.map((row) => (
-                  <tr class="border-b border-line align-top">
-                    <th scope="row" class="py-3.5 pr-6 text-left font-normal text-body">
-                      {row.label}
-                    </th>
-                    <td class="py-3.5 pr-6">
-                      <span class={stateClass[row.st.state]}>{stateText[row.st.state]}</span>
-                      {row.st.note && <span class="text-sm text-muted"> — {row.st.note}</span>}
-                    </td>
-                    <td class="py-3.5">
-                      <span class={stateClass[row.gd.state]}>{stateText[row.gd.state]}</span>
-                      {row.gd.note && <span class="text-sm text-muted"> — {row.gd.note}</span>}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            ))
-          }
-        </table>
-      </div>
+      <CompareTable competitor="Sourcetree" groups={groups} />
 
       <p class="mt-6 max-w-[66ch] text-sm leading-relaxed text-muted">
         Every Sourcetree cell traces to a primary Atlassian source — release

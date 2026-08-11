@@ -1,0 +1,65 @@
+---
+// The /compare/ pages' shared table: one competitor column vs GitDesktop,
+// grouped rows from lib/compare's Group<Row>.
+import { type Group, type Row, stateClass, stateText } from "../lib/compare";
+
+interface Props {
+  competitor: string;
+  groups: Group<Row>[];
+}
+const { competitor, groups } = Astro.props;
+---
+
+{/* tabindex: a keyboard user must be able to scroll the min-width table;
+    a focusable scroll region needs the role + name for AT. */}
+<div
+  data-reveal
+  style="transition-delay:80ms"
+  class="mt-10 overflow-x-auto"
+  tabindex="0"
+  role="region"
+  aria-label="Feature comparison table"
+>
+  <table class="w-full min-w-[640px] border-collapse text-[15px]">
+    <thead>
+      <tr class="border-b border-line-2 text-left">
+        <th scope="col" class="py-3 pr-6 font-normal text-faint">Capability</th>
+        <th scope="col" class="w-[26%] py-3 pr-6 font-medium text-ink">{competitor}</th>
+        <th scope="col" class="w-[30%] py-3 font-medium text-ink">GitDesktop</th>
+      </tr>
+    </thead>
+    {
+      groups.map((group) => (
+        <tbody>
+          <tr>
+            <th
+              scope="rowgroup"
+              colspan="3"
+              class="pb-2 pt-8 text-left text-sm font-normal text-faint"
+            >
+              <span class="text-add" aria-hidden="true">
+                //
+              </span>{" "}
+              {group.title}
+            </th>
+          </tr>
+          {group.rows.map((row) => (
+            <tr class="border-b border-line align-top">
+              <th scope="row" class="py-3.5 pr-6 text-left font-normal text-body">
+                {row.label}
+              </th>
+              <td class="py-3.5 pr-6">
+                <span class={stateClass[row.them.state]}>{stateText[row.them.state]}</span>
+                {row.them.note && <span class="text-sm text-muted"> — {row.them.note}</span>}
+              </td>
+              <td class="py-3.5">
+                <span class={stateClass[row.gd.state]}>{stateText[row.gd.state]}</span>
+                {row.gd.note && <span class="text-sm text-muted"> — {row.gd.note}</span>}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      ))
+    }
+  </table>
+</div>

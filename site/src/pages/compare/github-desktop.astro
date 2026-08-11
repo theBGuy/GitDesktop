@@ -9,16 +9,11 @@
 // update the stamp in the same edit. A stale comparison is worse than none —
 // it's the first thing an HN thread checks.
 //
-// Row states are WORDS ("Yes" / "Partial" / "No"), never color or glyph alone.
 import { Image } from "astro:assets";
 import appGithubPr from "../../assets/app-github-pr.png";
+import CompareTable from "../../components/CompareTable.astro";
 import SiteLayout from "../../layouts/SiteLayout.astro";
-import {
-  type Cell,
-  type Group,
-  stateClass,
-  stateText,
-} from "../../lib/compare";
+import { type Group, type Row } from "../../lib/compare";
 
 const base = import.meta.env.BASE_URL;
 const repo = "https://github.com/theBGuy/GitDesktop";
@@ -26,12 +21,6 @@ const download = `${base}download/`;
 
 const VERIFIED_ON = "July 25, 2026";
 const GHD_VERSION = "3.6.3";
-
-interface Row {
-  label: string;
-  ghd: Cell;
-  gd: Cell;
-}
 
 // Distilled to the rows where the two clients genuinely diverge (plus a few
 // load-bearing parity rows). The full matrix behind this runs ~130 rows; both
@@ -43,7 +32,7 @@ const groups: Group<Row>[] = [
     rows: [
       {
         label: "Forges with full PR / CI / issue support",
-        ghd: { state: "partial", note: "GitHub only" },
+        them: { state: "partial", note: "GitHub only" },
         gd: {
           state: "yes",
           note: "GitHub, GitLab & Bitbucket — Bitbucket issues via linked Jira",
@@ -51,17 +40,17 @@ const groups: Group<Row>[] = [
       },
       {
         label: "Linux",
-        ghd: { state: "no", note: "macOS & Windows" },
+        them: { state: "no", note: "macOS & Windows" },
         gd: { state: "yes", note: "Windows, macOS & Linux" },
       },
       {
         label: "GitHub Enterprise",
-        ghd: { state: "yes" },
+        them: { state: "yes" },
         gd: { state: "yes", note: "via gh, per-host accounts" },
       },
       {
         label: "Jira",
-        ghd: { state: "no" },
+        them: { state: "no" },
         gd: { state: "yes", note: "linked Jira Cloud project per repo" },
       },
     ],
@@ -71,7 +60,7 @@ const groups: Group<Row>[] = [
     rows: [
       {
         label: "Read & review a PR in-app",
-        ghd: {
+        them: {
           state: "partial",
           note: "checks view; hands off to the browser",
         },
@@ -82,17 +71,17 @@ const groups: Group<Row>[] = [
       },
       {
         label: "Merge a PR in-app",
-        ghd: { state: "no" },
+        them: { state: "no" },
         gd: { state: "yes", note: "merge / squash / rebase" },
       },
       {
         label: "Edit title, labels, reviewers",
-        ghd: { state: "no" },
+        them: { state: "no" },
         gd: { state: "yes" },
       },
       {
         label: "Local PRs with no remote at all",
-        ghd: { state: "no" },
+        them: { state: "no" },
         gd: {
           state: "yes",
           note: "review & merge offline, promote to GitHub later",
@@ -105,22 +94,22 @@ const groups: Group<Row>[] = [
     rows: [
       {
         label: "PR checks rollup",
-        ghd: { state: "yes" },
+        them: { state: "yes" },
         gd: { state: "yes", note: "with a failing job's log peeked inline" },
       },
       {
         label: "Browse all workflow runs",
-        ghd: { state: "no", note: "PR-scoped checks only" },
+        them: { state: "no", note: "PR-scoped checks only" },
         gd: { state: "yes", note: "dedicated Actions tab" },
       },
       {
         label: "Dispatch, cancel, re-run workflows",
-        ghd: { state: "partial", note: "re-run only" },
+        them: { state: "partial", note: "re-run only" },
         gd: { state: "yes" },
       },
       {
         label: "Failed-step logs in-app",
-        ghd: { state: "no" },
+        them: { state: "no" },
         gd: { state: "yes" },
       },
     ],
@@ -130,12 +119,12 @@ const groups: Group<Row>[] = [
     rows: [
       {
         label: "Issues",
-        ghd: { state: "no", note: "opens github.com" },
+        them: { state: "no", note: "opens github.com" },
         gd: { state: "yes", note: "GitHub & GitLab in-app; local issues too" },
       },
       {
         label: "GitHub Discussions",
-        ghd: { state: "no" },
+        them: { state: "no" },
         gd: { state: "yes" },
       },
     ],
@@ -145,12 +134,12 @@ const groups: Group<Row>[] = [
     rows: [
       {
         label: "File history & blame",
-        ghd: { state: "no", note: "opens github.com" },
+        them: { state: "no", note: "opens github.com" },
         gd: { state: "yes", note: "rename-following history, per-line blame" },
       },
       {
         label: "Interactive rebase",
-        ghd: { state: "partial", note: "squash & reorder only" },
+        them: { state: "partial", note: "squash & reorder only" },
         gd: {
           state: "yes",
           note: "pick / reword / squash / fixup / edit / drop",
@@ -158,7 +147,7 @@ const groups: Group<Row>[] = [
       },
       {
         label: "Predict a merge before running it",
-        ghd: { state: "no" },
+        them: { state: "no" },
         gd: {
           state: "yes",
           note: "fast-forward / clean / conflicts, previewed in memory",
@@ -166,12 +155,12 @@ const groups: Group<Row>[] = [
       },
       {
         label: "Recover dropped stashes",
-        ghd: { state: "no" },
+        them: { state: "no" },
         gd: { state: "yes", note: "a git fsck scan finds and restores them" },
       },
       {
         label: "Force push",
-        ghd: { state: "partial", note: "plain force push" },
+        them: { state: "partial", note: "plain force push" },
         gd: {
           state: "yes",
           note: "--force-with-lease only, behind divergence detection",
@@ -179,7 +168,7 @@ const groups: Group<Row>[] = [
       },
       {
         label: "Git hooks management",
-        ghd: { state: "no" },
+        them: { state: "no" },
         gd: {
           state: "yes",
           note: "view / edit / disable, templates, husky & pre-commit aware",
@@ -187,7 +176,7 @@ const groups: Group<Row>[] = [
       },
       {
         label: "Linked worktrees",
-        ghd: { state: "yes", note: "since 3.6" },
+        them: { state: "yes", note: "since 3.6" },
         gd: { state: "yes", note: "plus worktree-aware branch switching" },
       },
     ],
@@ -197,7 +186,7 @@ const groups: Group<Row>[] = [
     rows: [
       {
         label: "AI without a Copilot relationship",
-        ghd: {
+        them: {
           state: "no",
           note: "Copilot access required (Copilot Free qualifies)",
         },
@@ -208,7 +197,7 @@ const groups: Group<Row>[] = [
       },
       {
         label: "AI code review & security audit",
-        ghd: { state: "no" },
+        them: { state: "no" },
         gd: {
           state: "yes",
           note: "dedicated review model, postable as a PR comment",
@@ -216,12 +205,12 @@ const groups: Group<Row>[] = [
       },
       {
         label: "Keep files out of AI context",
-        ghd: { state: "no" },
+        them: { state: "no" },
         gd: { state: "yes", note: "gitignore-style AI-ignore patterns" },
       },
       {
         label: "Hide every AI surface",
-        ghd: { state: "no" },
+        them: { state: "no" },
         gd: { state: "yes", note: "one setting, nothing left behind" },
       },
     ],
@@ -231,12 +220,12 @@ const groups: Group<Row>[] = [
     rows: [
       {
         label: "Price",
-        ghd: { state: "yes", note: "free" },
+        them: { state: "yes", note: "free" },
         gd: { state: "yes", note: "free" },
       },
       {
         label: "Open source",
-        ghd: { state: "yes", note: "MIT" },
+        them: { state: "yes", note: "MIT" },
         gd: { state: "yes", note: "Apache-2.0" },
       },
     ],
@@ -359,56 +348,7 @@ const faqs = [
         keeps to where they diverge.
       </p>
 
-      {/* tabindex: a keyboard user must be able to scroll the min-width table;
-          a focusable scroll region needs the role + name for AT. */}
-      <div
-        data-reveal
-        style="transition-delay:80ms"
-        class="mt-10 overflow-x-auto"
-        tabindex="0"
-        role="region"
-        aria-label="Feature comparison table"
-      >
-        <table class="w-full min-w-[640px] border-collapse text-[15px]">
-          <thead>
-            <tr class="border-b border-line-2 text-left">
-              <th scope="col" class="py-3 pr-6 font-normal text-faint">Capability</th>
-              <th scope="col" class="w-[26%] py-3 pr-6 font-medium text-ink">GitHub Desktop</th>
-              <th scope="col" class="w-[30%] py-3 font-medium text-ink">GitDesktop</th>
-            </tr>
-          </thead>
-          {
-            groups.map((group) => (
-              <tbody>
-                <tr>
-                  <th
-                    scope="rowgroup"
-                    colspan="3"
-                    class="pb-2 pt-8 text-left text-sm font-normal text-faint"
-                  >
-                    <span class="text-add" aria-hidden="true">//</span> {group.title}
-                  </th>
-                </tr>
-                {group.rows.map((row) => (
-                  <tr class="border-b border-line align-top">
-                    <th scope="row" class="py-3.5 pr-6 text-left font-normal text-body">
-                      {row.label}
-                    </th>
-                    <td class="py-3.5 pr-6">
-                      <span class={stateClass[row.ghd.state]}>{stateText[row.ghd.state]}</span>
-                      {row.ghd.note && <span class="text-sm text-muted"> — {row.ghd.note}</span>}
-                    </td>
-                    <td class="py-3.5">
-                      <span class={stateClass[row.gd.state]}>{stateText[row.gd.state]}</span>
-                      {row.gd.note && <span class="text-sm text-muted"> — {row.gd.note}</span>}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            ))
-          }
-        </table>
-      </div>
+      <CompareTable competitor="GitHub Desktop" groups={groups} />
 
       <p class="mt-6 max-w-[66ch] text-sm leading-relaxed text-muted">
         Distilled from a ~130-row working matrix, re-checked against GitHub
