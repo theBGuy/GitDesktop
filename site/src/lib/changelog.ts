@@ -5,7 +5,9 @@ import raw from "../../../CHANGELOG.md?raw";
 // Build-time parse of the repo-root CHANGELOG.md into per-release sections.
 // The grammar is the project's own fragment contract (changelog.d/README.md):
 // `## [x.y.z] - date` sections, `### Added|Changed|Fixed` groups, `- ` bullets
-// wrapped with 2-space continuations, inline bold/italic/code/links only.
+// wrapped with 2-space continuations, inline bold/italic/code and http(s)
+// links; any other [label](target) collapses to its bare label (the historical
+// relative links point into the gitignored docs/ tree, dead on every surface).
 // Parsing is fail-open — an unrecognized line renders as plain prose instead of
 // throwing, because a throw here would take down the production Pages build on
 // a release-day push that never runs the PR site gate.
@@ -44,6 +46,8 @@ function renderText(seg: string): string {
     /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
     '<a href="$2">$1</a>',
   );
+  // Runs after the http pass, so only non-http link syntax remains to collapse.
+  html = html.replace(/\[([^\]]+)\]\([^)\s]*\)/g, "$1");
   html = html.replace(/\*([^*]+)\*/g, "<em>$1</em>");
   return html;
 }
@@ -101,8 +105,10 @@ export function getChangelog(): Release[] {
     if (h2) {
       flush();
       category = null;
-      // Unreleased is empty on master between releases (fragments assemble
-      // into it only at release time) and unshipped either way — skip it.
+      // Any heading without a recognized date is skipped. Unreleased (empty on
+      // master between releases, unshipped either way) is the standing case; a
+      // malformed hand-edited date drops its section rather than mis-attaching
+      // its bullets to the previous release.
       if (!h2[2]) {
         release = null;
         continue;

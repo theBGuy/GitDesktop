@@ -2,16 +2,18 @@
 // The full CHANGELOG.md, rendered on-site: one anchored section per release
 // with the same Added/Changed/Fixed groups that ship in the app's updater
 // notes. Freshness rides the existing pipeline — site-rebuild.yml pings the
-// Pages deploy hook on every release publish, so this page re-bakes with the
-// release facts the same way download.astro's version does.
+// Pages deploy hook on every release publish, so this page re-bakes on
+// release day.
 import SiteLayout from "../layouts/SiteLayout.astro";
 import { getChangelog } from "../lib/changelog";
 
 const base = import.meta.env.BASE_URL;
 
 const releases = getChangelog();
-const latest = releases[0];
-const oldest = releases[releases.length - 1];
+// .at() + guards below keep the parser's fail-open promise at page level: a
+// changelog whose headings all stop parsing must not crash the Pages build.
+const latest = releases.at(0);
+const oldest = releases.at(-1);
 
 const utc = (iso: string) => new Date(`${iso}T00:00:00Z`);
 const fmtLong = (iso: string) =>
@@ -27,11 +29,12 @@ const fmtShort = (iso: string) =>
     year: "numeric",
     timeZone: "UTC",
   });
-const sinceMonth = utc(oldest.date).toLocaleDateString("en-US", {
-  month: "long",
-  year: "numeric",
-  timeZone: "UTC",
-});
+const sincePhrase = oldest
+  ? ` since ${utc(oldest.date).toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" })}`
+  : "";
+const description = latest
+  ? `What's new in GitDesktop ${latest.version} (${fmtLong(latest.date)}) — and every feature, change, and fix in the releases before it, written for humans.`
+  : "Every GitDesktop release, in plain language — the same notes the in-app updater shows.";
 
 // Word + glyph together (never a glyph alone): the glyph is decoration in the
 // site's diff idiom, the category name carries the meaning.
@@ -40,9 +43,9 @@ const glyphs: Record<string, string> = { Added: "+", Changed: "~", Fixed: "✓" 
 
 <SiteLayout
   title="GitDesktop changelog — every release, in plain language"
-  description={`What's new in GitDesktop ${latest.version} (${fmtLong(latest.date)}) — and every feature, change, and fix in the releases before it, written for humans.`}
+  description={description}
   ogTitle="GitDesktop changelog"
-  ogDescription={`Every GitDesktop release since ${sinceMonth}, in plain language — the same notes the in-app updater shows.`}
+  ogDescription={`Every GitDesktop release${sincePhrase}, in plain language — the same notes the in-app updater shows.`}
   breadcrumbs={[{ name: "Changelog", path: "/changelog/" }]}
 >
   <section class="border-b border-line">
@@ -62,20 +65,25 @@ const glyphs: Record<string, string> = { Added: "+", Changed: "~", Fixed: "✓" 
         style="transition-delay:120ms"
         class="mt-6 max-w-[62ch] text-base leading-relaxed text-body sm:text-lg"
       >
-        GitDesktop ships small and often. This is the full record since
-        {sinceMonth} — every feature, change, and fix, written for humans rather
-        than pasted from commit subjects. They're the same notes the in-app
-        updater shows with each new version.
+        GitDesktop ships small and often. This is the full record{sincePhrase} —
+        every feature, change, and fix, written for humans rather than pasted
+        from commit subjects. They're the same notes the in-app updater shows
+        with each new version.
       </p>
-      <p data-reveal style="transition-delay:180ms" class="mt-5 text-sm text-muted">
-        Latest:
-        <a href={`#v${latest.version}`} class="text-mint underline-offset-4 hover:underline"
-          >v{latest.version}</a
-        > · {fmtLong(latest.date)} · installers on the
-        <a href={`${base}download/`} class="text-mint underline-offset-4 hover:underline"
-          >download page</a
-        >
-      </p>
+      {
+        latest && (
+          <p data-reveal style="transition-delay:180ms" class="mt-5 text-sm text-muted">
+            Latest:
+            <a href={`#v${latest.version}`} class="text-mint underline-offset-4 hover:underline">
+              v{latest.version}
+            </a>{" "}
+            · {fmtLong(latest.date)} · installers on the
+            <a href={`${base}download/`} class="text-mint underline-offset-4 hover:underline">
+              download page
+            </a>
+          </p>
+        )
+      }
     </div>
   </section>
 
@@ -159,7 +167,7 @@ const glyphs: Record<string, string> = { Added: "+", Changed: "~", Fixed: "✓" 
               </header>
 
               {r.intro.map((p) => (
-                <p class="mt-5 max-w-[72ch] leading-relaxed text-body" set:html={p} />
+                <p class="intro mt-5 max-w-[72ch] leading-relaxed text-body" set:html={p} />
               ))}
 
               {r.categories.map((c) => (
@@ -245,7 +253,10 @@ const glyphs: Record<string, string> = { Added: "+", Changed: "~", Fixed: "✓" 
     font-size: 0.88em;
     color: var(--color-ink);
   }
-  .notes a {
+  /* .intro too, but never bare `.release a`: this block is unlayered global
+     CSS, so it would outrank the header links' utility classes. */
+  .notes a,
+  .release .intro a {
     color: var(--color-mint);
     text-decoration: underline;
     text-decoration-color: oklch(0.82 0.12 178 / 0.45);
@@ -253,7 +264,9 @@ const glyphs: Record<string, string> = { Added: "+", Changed: "~", Fixed: "✓" 
     text-underline-offset: 3px;
   }
   .notes a:hover,
-  .notes a:focus-visible {
+  .notes a:focus-visible,
+  .release .intro a:hover,
+  .release .intro a:focus-visible {
     text-decoration-color: var(--color-mint);
   }
   [data-nav-version][aria-current="location"] {
