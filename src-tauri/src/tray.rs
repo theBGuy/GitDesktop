@@ -1,3 +1,6 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
 use tauri::menu::MenuBuilder;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, State, Window, WindowEvent};
@@ -90,26 +93,56 @@ pub fn init_window_title(app: &AppHandle) {
     }
 }
 
-/// On window close, hide to the tray (keeping the app — and any in-flight
-/// review — running) when the user's "close to tray" preference is on. When
-/// it's off, the close proceeds and the app quits (it's the only window). The
-/// tray "Quit" bypasses this entirely via `app.exit`.
+/// Quiet period a move/resize must survive before its geometry save fires.
+const GEOMETRY_SAVE_DEBOUNCE: Duration = Duration::from_millis(1000);
+
+/// Bumped per move/resize event; a pending save runs only if it still holds the
+/// latest value. `Relaxed` is enough — the counter synchronizes nothing else.
+static GEOMETRY_SAVE_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// Move/resize events schedule a debounced geometry save. On window close,
+/// hide to the tray (keeping the app — and any in-flight review — running)
+/// when the user's "close to tray" preference is on. When it's off, the close
+/// proceeds and the app quits (it's the only window). The tray "Quit"
+/// bypasses this entirely via `app.exit`.
 pub fn handle_window_event(window: &Window, event: &WindowEvent) {
-    if let WindowEvent::CloseRequested { api, .. } = event {
-        // Persist geometry NOW, while the window is still visible at its real
-        // position. This is the reliable save point: `tauri dev` is usually killed
-        // (so the plugin's save-on-exit never runs), and a close-to-tray hide isn't
-        // a real close, so nothing else would capture the position.
-        let _ = window.app_handle().save_window_state(WINDOW_STATE_FLAGS);
-        if window.state::<AppState>().close_to_tray() {
-            let _ = window.hide();
-            api.prevent_close();
-        } else {
-            // No tray-resident lifetime wanted — quit explicitly rather than
-            // rely on last-window-closed auto-exit (a tray icon can keep the
-            // event loop alive).
-            window.app_handle().exit(0);
+    match event {
+        WindowEvent::CloseRequested { api, .. } => {
+            // Persist geometry NOW, while the window is still visible at its real
+            // position: this captures the last moments of movement the debounce
+            // below hasn't flushed yet, and a close-to-tray hide isn't a real close.
+            let _ = window.app_handle().save_window_state(WINDOW_STATE_FLAGS);
+            if window.state::<AppState>().close_to_tray() {
+                let _ = window.hide();
+                api.prevent_close();
+            } else {
+                // No tray-resident lifetime wanted — quit explicitly rather than
+                // rely on last-window-closed auto-exit (a tray icon can keep the
+                // event loop alive).
+                window.app_handle().exit(0);
+            }
         }
+        WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
+            // Debounce a save behind each event with its own timer task: an epoch
+            // counter lets only the newest task through, which is race-free where a
+            // single-flight debouncer has a lost-wakeup window, and tokio timers are
+            // cheap even at drag-rate storms. Skip while minimized: Windows reports a
+            // minimize as Moved(-32000, -32000), and although the plugin refuses
+            // position/size writes then, `is_maximized()` reads false — it would
+            // clobber a maximized layout if the app died while minimized.
+            let epoch = GEOMETRY_SAVE_EPOCH.fetch_add(1, Ordering::Relaxed) + 1;
+            let window = window.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(GEOMETRY_SAVE_DEBOUNCE).await;
+                if GEOMETRY_SAVE_EPOCH.load(Ordering::Relaxed) != epoch
+                    || window.is_minimized().unwrap_or(false)
+                {
+                    return;
+                }
+                let _ = window.app_handle().save_window_state(WINDOW_STATE_FLAGS);
+            });
+        }
+        _ => {}
     }
 }
 

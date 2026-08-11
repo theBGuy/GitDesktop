@@ -63,10 +63,11 @@ pub fn run() {
         // launches (and validates saved coords against the current monitors, so
         // an unplugged display can't strand the window off-screen). We persist
         // GEOMETRY only — not visibility: the tray logic owns whether the window is
-        // shown, and a saved "hidden" would reopen it invisible. The save itself is
-        // driven from the window-close handler (tray.rs), since `tauri dev` is
-        // usually killed rather than cleanly exited and close-to-tray isn't a real
-        // close — so the plugin's own save-on-exit can't be relied on.
+        // shown, and a saved "hidden" would reopen it invisible. The saves themselves
+        // are driven from tray.rs — debounced on move/resize, plus one on close/quit —
+        // since `tauri dev` is usually killed rather than cleanly exited and
+        // close-to-tray isn't a real close, so the plugin's own save-on-exit can't be
+        // relied on.
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(tray::WINDOW_STATE_FLAGS)
