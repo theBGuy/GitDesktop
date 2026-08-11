@@ -122,7 +122,8 @@ fn save_geometry(app: &AppHandle) {
 /// on `RunEvent::Exit`, and a minimize clears the runtime's cached maximized
 /// flag, so an iconic window has to be restored first or that save records
 /// `maximized: false`. Restored only when actually iconic, since unminimizing
-/// also shows the window and a tray-resident one must stay hidden.
+/// also shows the window; a tray-resident window is normally not iconic (one
+/// hidden while minimized flashes briefly before the quit).
 fn save_geometry_before_exit(app: &AppHandle) {
     if let Some(main) = app.get_webview_window("main") {
         if main.is_minimized().unwrap_or(false) {
