@@ -875,15 +875,15 @@ async fn fetch_json<T: serde::de::DeserializeOwned>(
     }
 }
 
-/// Recent pipelines for one ref. The `pipelines/latest?ref=` endpoint is BANNED
-/// here: it answers a ref with no pipelines with a bare `{"message":"403
-/// Forbidden"}` (measured 2026-08-11, gitlab.com), which would read as a
-/// permissions problem; the list endpoint answers `[]` honestly.
 /// The pipeline window. Wide enough to survive an auto-cancel storm: interrupted
 /// pushes fill the newest entries with `canceled` pipelines, and a window that
 /// holds only those would report "nothing has finished" for a branch that has.
 const PIPELINE_WINDOW: u32 = 50;
 
+/// Recent pipelines for one ref. The `pipelines/latest?ref=` endpoint is BANNED
+/// here: it answers a ref with no pipelines with a bare `{"message":"403
+/// Forbidden"}` (measured 2026-08-11, gitlab.com), which would read as a
+/// permissions problem; the list endpoint answers `[]` honestly.
 async fn fetch_pipelines(
     repo_path: &str,
     enc: &str,
@@ -897,7 +897,7 @@ async fn fetch_pipelines(
 }
 
 /// GitLab caps a list page at 100.
-const JOBS_PER_PAGE: usize = 100;
+const LIST_PER_PAGE: usize = 100;
 /// The list walk's ceiling, for jobs and bridges alike. Either can run past one
 /// page — a fan-out pipeline's jobs, a many-way `trigger:` matrix's bridges — but
 /// both can also run to thousands, so three pages covers every realistic pipeline
@@ -911,7 +911,7 @@ const MAX_BRIDGES: usize = 3;
 /// Whether the walk continues: a short page is the last one, and the ceiling
 /// stops a full page from paging forever.
 fn has_more_list_pages(page: u32, page_len: usize) -> bool {
-    page < MAX_LIST_PAGES && page_len == JOBS_PER_PAGE
+    page < MAX_LIST_PAGES && page_len == LIST_PER_PAGE
 }
 
 /// Walks a 100-per-page list endpoint to the ceiling. `base` must already carry a
@@ -946,19 +946,18 @@ async fn fetch_paged<T: serde::de::DeserializeOwned>(
 
 /// Every job of a pipeline, up to the walk's ceiling.
 async fn fetch_jobs(repo_path: &str, enc: &str, pipeline_id: u64) -> AppResult<Listed<RawJob>> {
-    let base = format!("projects/{enc}/pipelines/{pipeline_id}/jobs?per_page={JOBS_PER_PAGE}");
+    let base = format!("projects/{enc}/pipelines/{pipeline_id}/jobs?per_page={LIST_PER_PAGE}");
     fetch_paged(repo_path, &base, "pipeline jobs").await
 }
 
-/// A pipeline's `trigger:` jobs. Measured 2026-08-11: the endpoint answers `[]`
-/// on a pipeline with no bridges, so the child walk costs nothing on the common
-/// single-pipeline layout.
+/// A pipeline's `trigger:` jobs. Measured 2026-08-11: a pipeline with no bridges
+/// answers `[]` rather than 404, so the absence of children needs no special case.
 async fn fetch_bridges(
     repo_path: &str,
     enc: &str,
     pipeline_id: u64,
 ) -> AppResult<Listed<RawBridge>> {
-    let base = format!("projects/{enc}/pipelines/{pipeline_id}/bridges?per_page={JOBS_PER_PAGE}");
+    let base = format!("projects/{enc}/pipelines/{pipeline_id}/bridges?per_page={LIST_PER_PAGE}");
     fetch_paged(repo_path, &base, "pipeline bridges").await
 }
 
@@ -984,9 +983,9 @@ fn downstream_pipeline_ids(bridges: &[RawBridge], project_id: Option<u64>) -> Ve
         .collect()
 }
 
-/// Whether a child-pipeline walk could still add anything: any category the
-/// parent's own jobs don't already answer. On the common single-pipeline layout
-/// every category is answered, so the bridges call never happens.
+/// Whether a child-pipeline walk could still add anything: true when the parent's
+/// own jobs leave any category unanswered, which is the only case a child's jobs
+/// could change.
 fn needs_child_jobs(jobs: &[RawJob]) -> bool {
     [
         SAST_FILE_TYPE,
@@ -1157,11 +1156,10 @@ pub async fn pipeline_findings(repo_path: &str, limit: Option<u32>) -> AppResult
         }
     };
     // A monorepo that scans in a child pipeline publishes its reports on the
-    // CHILD's jobs, which the parent's jobs endpoint never lists — but only a
-    // category the parent leaves unanswered can gain anything, so the common
-    // single-pipeline layout never pays for the extra calls. Failures here are
-    // swallowed on purpose: a bridges hiccup must not turn a good read into an
-    // error when the parent's own jobs already answered.
+    // CHILD's jobs, which the parent's jobs endpoint never lists. Gated on a
+    // category the parent left unanswered, since that is the only case a child
+    // could change. Failures here are swallowed on purpose: a bridges hiccup must
+    // not turn an otherwise-good read into an error.
     if needs_child_jobs(&jobs) {
         if let Ok(Listed::Items(bridges)) = fetch_bridges(repo_path, &enc, pipeline_id).await {
             for child_id in downstream_pipeline_ids(&bridges, project_id) {
@@ -1845,12 +1843,12 @@ mod tests {
 
     #[test]
     fn the_list_walk_stops_on_a_short_page_or_the_ceiling() {
-        assert!(has_more_list_pages(1, JOBS_PER_PAGE));
-        assert!(has_more_list_pages(2, JOBS_PER_PAGE));
+        assert!(has_more_list_pages(1, LIST_PER_PAGE));
+        assert!(has_more_list_pages(2, LIST_PER_PAGE));
         // The ceiling stops a full page from paging forever.
-        assert!(!has_more_list_pages(MAX_LIST_PAGES, JOBS_PER_PAGE));
+        assert!(!has_more_list_pages(MAX_LIST_PAGES, LIST_PER_PAGE));
         // A short page is the last one.
-        assert!(!has_more_list_pages(1, JOBS_PER_PAGE - 1));
+        assert!(!has_more_list_pages(1, LIST_PER_PAGE - 1));
         assert!(!has_more_list_pages(1, 0));
     }
 

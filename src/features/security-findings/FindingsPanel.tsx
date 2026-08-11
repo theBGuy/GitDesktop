@@ -347,8 +347,9 @@ const matchesAdvisory = (adv: RepoAdvisoryOut, q: string) =>
   (adv.cveId?.toLowerCase().includes(q) ?? false) ||
   adv.vulnerabilities.some((v) => v.packageName.toLowerCase().includes(q));
 
-/** Identifier *values* (CVE ids, CWE numbers, rule keys) are what a user pastes
- *  in — the identifier's own display name repeats the finding name. */
+/** Identifiers match on BOTH name and value: reports spell a CWE as name
+ *  `CWE-79` with value `79`, so searching values alone would miss what the detail
+ *  pane actually shows — and the placeholder cues identifiers. */
 const matchesGlSecure = (f: GlSecureFindingOut, q: string) =>
   !q ||
   f.name.toLowerCase().includes(q) ||
@@ -356,7 +357,10 @@ const matchesGlSecure = (f: GlSecureFindingOut, q: string) =>
   f.file.toLowerCase().includes(q) ||
   f.severity.toLowerCase().includes(q) ||
   f.scannerName.toLowerCase().includes(q) ||
-  f.identifiers.some((i) => i.value.toLowerCase().includes(q));
+  f.identifiers.some(
+    (i) =>
+      i.name.toLowerCase().includes(q) || i.value.toLowerCase().includes(q),
+  );
 
 const matchesGlQuality = (f: GlCodeQualityFindingOut, q: string) =>
   !q ||
@@ -558,6 +562,18 @@ function LoadFailed({
  *  claim a result *for* it; sentences name the ref actually listed instead. */
 const isUnnamedRef = (ref: string): boolean => ref === "HEAD";
 
+/** The refs whose pipelines were actually listed, for copy that would otherwise
+ *  claim something project-wide: the sentinel contributes nothing (never queried
+ *  under a name), and a branch that IS the default is named once, not twice.
+ *  Null when neither ref can be named. */
+function checkedRefs(data: GlFindingsOut): string | null {
+  const requested = isUnnamedRef(data.requestedRef) ? null : data.requestedRef;
+  const fallback = data.fallbackRef;
+  if (requested && fallback && requested !== fallback)
+    return `${requested} or ${fallback}`;
+  return requested || fallback;
+}
+
 /** The project's scanning setup page, or null when the project URL is unknown —
  *  derived in one place so the panel-level card and the per-category cards can't
  *  drift apart on the path. */
@@ -595,7 +611,7 @@ function PipelineProvenance({ data }: { data: GlFindingsOut }) {
       {data.usedFallback ? (
         <p className="w-full">
           {isUnnamedRef(data.requestedRef)
-            ? `Detached checkout — showing ${data.fallbackRef || "the default branch"}.`
+            ? `No named branch checked out — showing ${data.fallbackRef || "the default branch"}.`
             : `No pipelines on ${data.requestedRef} yet — showing ${data.fallbackRef || "the default branch"}.`}
         </p>
       ) : null}
@@ -650,10 +666,14 @@ function GlNoPipelineCard({
   const setupUrl = glScanningSetupUrl(data);
 
   if (state === "none") {
+    // Only two refs were queried, so the sentence names them rather than
+    // clearing the whole project: pipelines can live on refs we never asked for
+    // (merge-request refs, tags, other branches).
+    const refs = checkedRefs(data);
     return (
       <ReasonCard
         icon={ShieldSlashIcon}
-        message="Scanning hasn't run in this project's CI yet. Add SAST, secret detection, or code quality jobs to see findings here."
+        message={`${refs ? `No pipelines found on ${refs}.` : "No pipelines found."} Add SAST, secret detection, or code quality jobs to see findings here.`}
         action={
           <div className="flex flex-wrap items-center gap-2">
             {setupUrl ? (
@@ -731,6 +751,7 @@ function GlUnavailableCard({
   detail,
   category,
   Category,
+  notConfiguredMessage,
   onRetry,
   onSetup,
 }: {
@@ -738,6 +759,9 @@ function GlUnavailableCard({
   detail: string | null;
   category: string;
   Category: string;
+  /** Replaces the per-category sentence where the shared template reads badly —
+   *  the hoisted card speaks for all three at once. */
+  notConfiguredMessage?: string;
   onRetry: () => void;
   onSetup?: () => void;
 }) {
@@ -754,7 +778,10 @@ function GlUnavailableCard({
         icon={ShieldSlashIcon}
         // Hedged deliberately: an analyzer job that ran and FAILED publishes no
         // artifacts either, and the wire can't tell that from never-configured.
-        message={`This pipeline didn't publish a ${category} report — most likely scanning isn't set up yet.`}
+        message={
+          notConfiguredMessage ??
+          `This pipeline didn't publish a ${category} report — most likely scanning isn't set up yet.`
+        }
         action={
           <div className="flex flex-wrap items-center gap-2">
             {onSetup ? (
@@ -1259,7 +1286,7 @@ export function FindingsPanel({
           onChange={(e) => setFilterText(e.target.value)}
           placeholder={
             provider === "gitlab"
-              ? "Filter by rule, secret type, check, file, severity, or description"
+              ? "Filter by rule, secret type, check, file, severity, description, or identifier"
               : "Filter by package, rule, secret type, summary, GHSA, or CVE"
           }
           className="h-7"
@@ -1300,6 +1327,7 @@ export function FindingsPanel({
                   detail={glOut.sast.detail}
                   category="findings"
                   Category="Scanning"
+                  notConfiguredMessage="This pipeline didn't publish any scanning reports — most likely scanning isn't set up yet."
                   onRetry={() => gl.refetch()}
                   onSetup={glSetupUrl ? () => openUrl(glSetupUrl) : undefined}
                 />
