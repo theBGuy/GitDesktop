@@ -1146,6 +1146,37 @@ struct RawForkPr {
     maintainer_can_modify: Option<bool>,
 }
 
+/// Per-candidate presence from `git cat-file --batch-check` stdout, or `None` when
+/// the stream doesn't line up with `expected` — an unparseable answer the caller
+/// turns into an all-miss.
+///
+/// git emits one line per input line, in order. Presence is proved POSITIVELY, by
+/// the `<oid> commit <size>` shape a resolved `^{commit}` probe produces, so every
+/// other form falls closed: `<input> missing` for an absent object, `<input>
+/// ambiguous` for a short rev with several candidates (with the `^{commit}` suffix
+/// that case reports as missing instead), and anything unrecognized. Type errors go
+/// to stderr and never reach this parse.
+fn batch_check_present(stdout: &str, expected: usize) -> Option<Vec<bool>> {
+    let lines: Vec<&str> = stdout.lines().collect();
+    if lines.len() != expected {
+        return None;
+    }
+    Some(
+        lines
+            .into_iter()
+            .map(|line| {
+                let mut parts = line.split_whitespace();
+                let (Some(oid), Some("commit"), Some(size), None) =
+                    (parts.next(), parts.next(), parts.next(), parts.next())
+                else {
+                    return false;
+                };
+                is_object_id(oid) && size.parse::<u64>().is_ok()
+            })
+            .collect(),
+    )
+}
+
 /// Whether a value is a bare git object id — the gate before interpolating a
 /// gh-supplied sha into git argv, where a `-`-leading value would read as a flag.
 fn is_object_id(s: &str) -> bool {
@@ -1297,21 +1328,15 @@ pub(crate) async fn detect_fork_pr_for_branch(
     else {
         return Ok(None);
     };
-    let text = out.stdout_lossy();
-    let lines: Vec<&str> = text.lines().collect();
-    // `--batch-check` emits one stdout line per input line, in order. Those are the
-    // COMMON forms, not an exhaustive set: `<input> missing` for an absent object,
-    // `<input> ambiguous` for a short rev with several candidates (the `^{commit}`
-    // suffix reports that one as missing), type errors going to stderr. Anything
-    // unrecognized falls closed — it fails the gates below and is dropped — and any
-    // other line count is unparseable, leaving every candidate an accepted miss.
-    if lines.len() != candidates.len() {
+    let Some(present) = batch_check_present(&out.stdout_lossy(), candidates.len()) else {
         return Ok(None);
-    }
+    };
 
     let mut survivors: Vec<ForkPrMatch> = Vec::new();
-    for ((pr, head_repo_owner, head_repo_name), line) in candidates.into_iter().zip(lines) {
-        if line.ends_with(" missing") {
+    for ((pr, head_repo_owner, head_repo_name), is_present) in
+        candidates.into_iter().zip(present)
+    {
+        if !is_present {
             continue;
         }
         // `--is-ancestor` exits 0 for an ancestor AND for equal shas — a local branch
@@ -5620,7 +5645,8 @@ mod tests {
         GhPrRestCommit, GhPrRestCommitGitAuthor, GhPrRestCommitInner, GhPrRestPull, GhPrRestReview,
         GhStackEntry, MergeAsyncOutcome, MergeAsyncStatus, PrDetails, PrInfo, PrMergeOutcome,
         GhMergeabilityRow, PrMergeability, PrStackInfo, PrStackMember, PrTimelineEventOut,
-        oid_outside_origin_graph, select_fork_pr_match, ForkPrMatch, RawForkPr, RawLogin, RawPr,
+        batch_check_present, oid_outside_origin_graph, select_fork_pr_match, ForkPrMatch,
+        RawForkPr, RawLogin, RawPr,
     };
     use crate::error::AppError;
     use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
@@ -6239,6 +6265,52 @@ mod tests {
                 "headRepository":{"name":"proj"}}"#,
         ] {
             assert_eq!(fork_head_identity(&parse(json)), None, "json: {json}");
+        }
+    }
+
+    /// The `cat-file --batch-check` presence parse. Presence must be proved by the
+    /// resolved `<oid> commit <size>` shape, so every other form git can emit — and
+    /// anything unrecognized — leaves the candidate a miss.
+    #[test]
+    fn batch_check_present_proves_presence_positively() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let other = "89abcdef0123456789abcdef0123456789abcdef";
+
+        // Every input resolved.
+        assert_eq!(
+            batch_check_present(&format!("{sha} commit 131\n{other} commit 245\n"), 2),
+            Some(vec![true, true])
+        );
+        // `missing` for an object this clone never fetched.
+        assert_eq!(
+            batch_check_present(&format!("{sha} commit 131\n{other}^{{commit}} missing\n"), 2),
+            Some(vec![true, false])
+        );
+        // `ambiguous` — git's answer for a short rev with several candidates. Our
+        // probe's `^{commit}` suffix reports that case as missing instead, so this
+        // shape rides the unrecognized path rather than a case of its own.
+        assert_eq!(
+            batch_check_present(&format!("5d2c ambiguous\n{sha} commit 131\n"), 2),
+            Some(vec![false, true])
+        );
+        // A truncated (or over-long) stream can't be mapped back to candidates.
+        assert_eq!(batch_check_present(&format!("{sha} commit 131\n"), 2), None);
+        assert_eq!(
+            batch_check_present(&format!("{sha} commit 131\n{other} commit 1\n"), 1),
+            None
+        );
+        assert_eq!(batch_check_present("", 0), Some(vec![]));
+        assert_eq!(batch_check_present("", 1), None);
+        // Shape guards: a non-commit type, a non-numeric size, a trailing field, and
+        // a non-oid first token are each unrecognized.
+        for bad in [
+            format!("{sha} blob 131"),
+            format!("{sha} commit huge"),
+            format!("{sha} commit 131 extra"),
+            format!("{sha} commit"),
+            "refs/heads/main commit 131".to_string(),
+        ] {
+            assert_eq!(batch_check_present(&bad, 1), Some(vec![false]), "line: {bad}");
         }
     }
 

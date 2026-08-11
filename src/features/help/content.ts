@@ -797,8 +797,9 @@ things follow from that (**GitHub** only — the fork model here is GitHub's):
 - **Approve a workflow run that's waiting on you.** GitHub holds a first-time
   contributor's Actions runs until a maintainer releases them. The check in the pull
   request's rollup says it's waiting for approval — and so does the run in the
-  **Actions** tab — and **Approve and run**, confirmed first, starts it. **Approve
-  workflow run** is in the command palette as well, with no default shortcut.
+  **Actions** tab — and **Approve and run**, confirmed first, starts it. From the
+  run's view, **Approve workflow run** is in the command palette too, with no
+  default shortcut.
 - **Push follow-up commits to the contributor's branch.** When you've committed on top
   of a fork pull request's head locally, publishing that branch would put a stray copy
   in your own repository. When the branch's history shows it's that pull request's

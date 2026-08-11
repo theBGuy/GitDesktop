@@ -858,6 +858,10 @@ export function RemotePrView({
   async function runUpdateBranch(rebase: boolean) {
     const base = details.data?.baseRefName;
     if (!base) return;
+    // The one refusal rule, shared by the button, the menu item, the palette and
+    // any future caller — no UI gate is the only thing between a viewer who may
+    // not push (or a second click) and the mutation.
+    if (updateBlockedReason !== undefined || updateBranch.isPending) return;
     if (rebase) {
       const ok = await useConfirm.getState().ask({
         title: `Rebase onto ${base}?`,

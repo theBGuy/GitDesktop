@@ -123,7 +123,7 @@ export function PrMergeabilityBanner({
       : arm === "resume" || arm === "behind"
         ? InfoIcon
         : WarningIcon;
-  const updateBlocked = updateBlockedReason !== undefined;
+  const updateDisabled = updateBusy || updateBlockedReason !== undefined;
 
   return (
     <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b px-3 py-1.5 text-xs">
@@ -223,40 +223,56 @@ export function PrMergeabilityBanner({
 
       {arm === "behind" && (
         <div className="flex items-center gap-1.5">
-          {/* Both controls wrap in a span so the refusal still shows on hover — a
-              native-disabled button swallows its `title` (same idiom as above). */}
+          {/* The wrapping span carries the refusal on hover — a natively-disabled
+              button swallows its own `title` (same idiom as above). */}
           <span className="inline-flex" title={updateBlockedReason}>
             <Button
               variant="ghost"
               size="xs"
-              disabled={updateBusy || updateBlocked}
+              disabled={updateDisabled}
               onClick={onUpdateBranch}
             >
               {updateBusy && <Spinner data-icon="inline-start" />}
               Update branch
             </Button>
           </span>
-          <DropdownMenu>
-            <DropdownMenuTrigger
-              render={
-                <span className="inline-flex" title={updateBlockedReason}>
+          {/* A span-wrapped `render` would swallow the caret's disabled state — the
+              vendored Button's `pointer-events-none` routes the click to the span,
+              which IS the trigger — so a refused update renders no trigger at all. */}
+          {updateDisabled ? (
+            <span className="inline-flex" title={updateBlockedReason}>
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                aria-label="Update branch options"
+                disabled
+              >
+                <CaretDownIcon />
+              </Button>
+            </span>
+          ) : (
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                render={
                   <Button
                     variant="ghost"
                     size="icon-xs"
                     aria-label="Update branch options"
-                    disabled={updateBusy || updateBlocked}
-                  >
-                    <CaretDownIcon />
-                  </Button>
-                </span>
-              }
-            />
-            <DropdownMenuContent align="end" className="min-w-48">
-              <DropdownMenuItem onClick={onUpdateWithRebase}>
-                Update with rebase…
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+                  />
+                }
+              >
+                <CaretDownIcon />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="min-w-48">
+                <DropdownMenuItem
+                  disabled={updateDisabled}
+                  onClick={onUpdateWithRebase}
+                >
+                  Update with rebase…
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
         </div>
       )}
 
