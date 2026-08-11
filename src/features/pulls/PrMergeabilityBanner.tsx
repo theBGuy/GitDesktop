@@ -1,10 +1,18 @@
 import {
+  CaretDownIcon,
   ClockIcon,
   InfoIcon,
   SparkleIcon,
   WarningIcon,
 } from "@phosphor-icons/react";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Spinner } from "@/components/ui/spinner";
 import type { ForgeProvider } from "@/lib/git/types";
 import { useAiEnabled, useReviewConfigured } from "@/lib/settings/queries";
 import { cn } from "@/lib/utils";
@@ -26,6 +34,7 @@ export type PrMergeabilityArm =
   | "checking"
   | "unknown"
   | "resume"
+  | "behind"
   | null;
 
 /**
@@ -42,10 +51,15 @@ export function PrMergeabilityBanner({
   hasResolveWorktree,
   busy,
   conflictFiles,
+  behindBy,
+  updateBlockedReason,
+  updateBusy,
   onResolve,
   onResolveWithAi,
   onDiscard,
   onRetry,
+  onUpdateBranch,
+  onUpdateWithRebase,
   retryBusy,
 }: {
   arm: PrMergeabilityArm;
@@ -57,10 +71,17 @@ export function PrMergeabilityBanner({
   busy: boolean;
   /** Predicted conflicting paths; empty when the prediction is clean or unavailable. */
   conflictFiles: string[];
+  /** Commits the base is ahead of the head — only read on the `behind` arm. */
+  behindBy: number;
+  /** Why updating the branch is refused, if it is; undefined = allowed. */
+  updateBlockedReason: string | undefined;
+  updateBusy: boolean;
   onResolve: () => void;
   onResolveWithAi: () => void;
   onDiscard: () => void;
   onRetry: () => void;
+  onUpdateBranch: () => void;
+  onUpdateWithRebase: () => void;
   /** A retry read is in flight. */
   retryBusy: boolean;
 }) {
@@ -99,9 +120,10 @@ export function PrMergeabilityBanner({
   const Icon =
     arm === "checking" || arm === "unknown"
       ? ClockIcon
-      : arm === "resume"
+      : arm === "resume" || arm === "behind"
         ? InfoIcon
         : WarningIcon;
+  const updateBlocked = updateBlockedReason !== undefined;
 
   return (
     <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b px-3 py-1.5 text-xs">
@@ -138,6 +160,12 @@ export function PrMergeabilityBanner({
             "Checking mergeability…"
           ) : arm === "unknown" ? (
             "Couldn't determine mergeability."
+          ) : arm === "behind" ? (
+            <>
+              {`This branch is ${behindBy} commit${behindBy === 1 ? "" : "s"} behind `}
+              <span className="font-mono">{base}</span>
+              {"."}
+            </>
           ) : (
             "An unfinished conflict resolution exists for this pull request."
           )}
@@ -190,6 +218,45 @@ export function PrMergeabilityBanner({
               {resolveLabel}
             </Button>
           </span>
+        </div>
+      )}
+
+      {arm === "behind" && (
+        <div className="flex items-center gap-1.5">
+          {/* Both controls wrap in a span so the refusal still shows on hover — a
+              native-disabled button swallows its `title` (same idiom as above). */}
+          <span className="inline-flex" title={updateBlockedReason}>
+            <Button
+              variant="ghost"
+              size="xs"
+              disabled={updateBusy || updateBlocked}
+              onClick={onUpdateBranch}
+            >
+              {updateBusy && <Spinner data-icon="inline-start" />}
+              Update branch
+            </Button>
+          </span>
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                <span className="inline-flex" title={updateBlockedReason}>
+                  <Button
+                    variant="ghost"
+                    size="icon-xs"
+                    aria-label="Update branch options"
+                    disabled={updateBusy || updateBlocked}
+                  >
+                    <CaretDownIcon />
+                  </Button>
+                </span>
+              }
+            />
+            <DropdownMenuContent align="end" className="min-w-48">
+              <DropdownMenuItem onClick={onUpdateWithRebase}>
+                Update with rebase…
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       )}
 

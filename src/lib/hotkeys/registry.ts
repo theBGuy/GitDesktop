@@ -735,6 +735,18 @@ export const ACTIONS = [
     category: "Pull requests",
     defaultBinding: null,
   },
+  {
+    id: "pr-update-branch",
+    label: "Update pull request branch",
+    category: "Pull requests",
+    defaultBinding: null,
+  },
+  {
+    id: "approve-workflow-run",
+    label: "Approve workflow run",
+    category: "Pull requests",
+    defaultBinding: null,
+  },
 ] as const satisfies readonly ActionDef[];
 
 export type ActionId = (typeof ACTIONS)[number]["id"];

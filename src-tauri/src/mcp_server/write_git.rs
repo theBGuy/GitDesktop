@@ -482,6 +482,9 @@ impl GitDesktopMcp {
             false,
             args.branch.clone(),
             args.remote.clone(),
+            // The MCP push tool has no cross-name destination — the local branch's
+            // own name is always the target.
+            None,
         )
         .await
         .map_err(app_err)?;
@@ -836,9 +839,17 @@ impl GitDesktopMcp {
     )]
     async fn force_push(&self) -> Result<CallToolResult, McpError> {
         self.ensure_destructive()?;
-        crate::git::remote::git_push_core(&self.state, self.repo.clone(), false, true, None, None)
-            .await
-            .map_err(app_err)?;
+        crate::git::remote::git_push_core(
+            &self.state,
+            self.repo.clone(),
+            false,
+            true,
+            None,
+            None,
+            None,
+        )
+        .await
+        .map_err(app_err)?;
         ok_text("force-pushed (with lease)")
     }
 

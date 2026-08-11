@@ -340,6 +340,16 @@ PR (comments and all) in one click.
   and on **GitHub** and **Bitbucket** it links out to the provider's
   detach page. A **Re-check fork status** button refreshes the fork badge
   in place afterward.
+- **Maintaining a fork's PR** (GitHub): a pull request that's fallen
+  **behind its base** says so under its header, and **Update branch** brings
+  it up to date — a merge by default, or **Update with rebase…** behind a
+  confirmation, since that rewrites the contributor's branch. A workflow run
+  GitHub is **holding for approval** — its gate on a first-time
+  contributor — carries **Approve and run** on the run itself and in the
+  PR's checks list. And publishing a local branch that already holds an open
+  fork PR's commits offers to push them to the **contributor's fork branch**
+  instead of leaving a stray copy on `origin`, wherever the PR allows edits
+  from maintainers.
 - **Record management**: a local PR's context menu in the list (or the
   command palette) can **Archive / Unarchive** or **Delete** it. Delete
   confirms; the branches are untouched.

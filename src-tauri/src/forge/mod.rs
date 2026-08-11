@@ -1893,6 +1893,22 @@ pub async fn forge_ci_run_rerun(repo_path: String, run_id: u64, failed: bool) ->
     }
 }
 
+/// Approve a CI run GitHub is withholding pending maintainer approval (the gate on
+/// a first-time contributor's fork PR). GitHub-only: GitDesktop surfaces run
+/// approval nowhere else, so the other providers refuse rather than guess.
+#[tauri::command]
+pub async fn forge_ci_run_approve(repo_path: String, run_id: u64) -> AppResult<()> {
+    match detect_non_github(&repo_path).await {
+        Some((Provider::GitLab, _)) => Err(AppError::InvalidArgument(
+            "Approving held runs is GitHub-only — GitDesktop has no run approval for GitLab pipelines.".into(),
+        )),
+        Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
+            "Approving held runs is GitHub-only — GitDesktop has no run approval for Bitbucket pipelines.".into(),
+        )),
+        _ => crate::github::actions::gh_run_approve(repo_path, run_id).await,
+    }
+}
+
 /// Cancel an in-flight CI run, behind the abstraction.
 #[tauri::command]
 pub async fn forge_ci_run_cancel(repo_path: String, run_id: u64) -> AppResult<()> {
@@ -1923,6 +1939,98 @@ pub async fn forge_ci_dispatch(
         }
         _ => github::dispatch_ci(&repo_path, &workflow, &git_ref, inputs).await,
     }
+}
+
+/// The open fork PR whose head `branch` already contains, if any — what tells the
+/// publish path that pushing this branch means pushing to a contributor's fork.
+/// GitHub-only: it's the only provider where a PR's head can live in a repository
+/// the maintainer doesn't own but may still push to.
+#[tauri::command]
+pub async fn forge_detect_fork_pr_for_branch(
+    repo_path: String,
+    branch: String,
+) -> AppResult<Option<crate::github::pr::ForkPrMatch>> {
+    match detect_non_github(&repo_path).await {
+        Some((Provider::GitLab | Provider::Bitbucket, _)) => Ok(None),
+        _ => crate::github::pr::detect_fork_pr_for_branch(&repo_path, &branch).await,
+    }
+}
+
+/// Normalize a remote URL to `(host, path)` for identity comparison — the same
+/// fork is reachable as `https://…/o/r`, `https://…/o/r.git`, or a differently-cased
+/// host, and all three name one remote.
+fn remote_identity(url: &str) -> Option<(String, String)> {
+    Some((remote_host(url)?, remote_path(url)?))
+}
+
+/// The name of a remote pointing at `owner/repo` on origin's host, adding one if
+/// none exists. Idempotent: a second call finds the remote it added and returns
+/// the same name.
+///
+/// The fork URL is built in ORIGIN's scheme (https vs ssh) so the new remote
+/// authenticates the way the repo already does. An existing remote whose URL
+/// matches wins over the name derivation, so a user's own `fork`/`contrib` remote
+/// is reused instead of duplicated.
+#[tauri::command]
+pub async fn forge_ensure_fork_remote(
+    state: tauri::State<'_, crate::state::AppState>,
+    repo_path: String,
+    owner: String,
+    repo: String,
+) -> AppResult<String> {
+    forge_ensure_fork_remote_core(&state, repo_path, owner, repo).await
+}
+
+pub(crate) async fn forge_ensure_fork_remote_core(
+    state: &crate::state::AppState,
+    repo_path: String,
+    owner: String,
+    repo: String,
+) -> AppResult<String> {
+    validate_owner(&owner)?;
+    validate_repo_name(&repo)?;
+    let origin_url =
+        crate::git::remote::git_remote_url(repo_path.clone(), "origin".to_string()).await?;
+    let Some(host) = remote_host(&origin_url) else {
+        return Err(AppError::InvalidArgument(
+            "This repository's 'origin' has no host to derive a fork URL from.".into(),
+        ));
+    };
+    let fork_url = if is_https_remote(&origin_url) {
+        format!("https://{host}/{owner}/{repo}.git")
+    } else {
+        format!("git@{host}:{owner}/{repo}.git")
+    };
+    let want = remote_identity(&fork_url);
+
+    let names = crate::git::remote::git_remotes(repo_path.clone()).await?;
+    for name in &names {
+        let Ok(url) = crate::git::remote::git_remote_url(repo_path.clone(), name.clone()).await
+        else {
+            continue;
+        };
+        if want.is_some() && remote_identity(&url) == want {
+            return Ok(name.clone());
+        }
+    }
+
+    // The URL isn't configured yet, so pick a free name: the owner, else an
+    // `-fork` suffix. Both taken by OTHER URLs means the user has to resolve it —
+    // silently retargeting one of theirs would break their remote.
+    let name = if !names.iter().any(|n| n == &owner) {
+        owner.clone()
+    } else {
+        let suffixed = format!("{owner}-fork");
+        if names.iter().any(|n| n == &suffixed) {
+            return Err(AppError::InvalidArgument(format!(
+                "The remote names '{owner}' and '{suffixed}' are both taken by other URLs — \
+                 rename or remove one, then try again."
+            )));
+        }
+        suffixed
+    };
+    crate::git::remote::git_remote_add_core(state, repo_path, name.clone(), fork_url).await?;
+    Ok(name)
 }
 
 /// A repo's releases (list view), behind the provider abstraction. GitHub delegates
@@ -3865,6 +3973,110 @@ mod tests {
         assert!(capped.len() <= README_CAP);
         assert_eq!(capped.len(), pad_len);
         assert!(capped.chars().all(|c| c == 'a'));
+    }
+
+    /// `forge_ensure_fork_remote_core` against a real repo (temp_dir, git on PATH):
+    /// it must be idempotent, must build the fork URL in origin's own scheme, and
+    /// must prefer an EXISTING remote whose URL already points at the fork over
+    /// minting an owner-named one.
+    #[tokio::test]
+    async fn ensure_fork_remote_is_idempotent_and_prefers_a_url_match() {
+        use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
+
+        async fn run(repo: &str, args: &[&str]) -> String {
+            run_git(Some(repo), args, DEFAULT_TIMEOUT)
+                .await
+                .unwrap()
+                .stdout_lossy()
+        }
+        async fn remotes(repo: &str) -> Vec<String> {
+            run(repo, &["remote"])
+                .await
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        }
+
+        let dir = tempfile::Builder::new()
+            .prefix("gd-forge-fork-remote-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        run(&repo_s, &["init", "-q"]).await;
+        run(
+            &repo_s,
+            &["remote", "add", "origin", "https://github.com/base/proj.git"],
+        )
+        .await;
+
+        let state = crate::state::AppState::default();
+        let first = forge_ensure_fork_remote_core(
+            &state,
+            repo_s.clone(),
+            "contrib".into(),
+            "proj".into(),
+        )
+        .await
+        .expect("first call adds the remote");
+        assert_eq!(first, "contrib");
+        assert_eq!(
+            run(&repo_s, &["remote", "get-url", "contrib"]).await.trim(),
+            "https://github.com/contrib/proj.git",
+            "the fork URL follows origin's https scheme"
+        );
+
+        let second = forge_ensure_fork_remote_core(
+            &state,
+            repo_s.clone(),
+            "contrib".into(),
+            "proj".into(),
+        )
+        .await
+        .expect("second call is a no-op");
+        assert_eq!(second, "contrib");
+        assert_eq!(
+            remotes(&repo_s).await,
+            vec!["contrib".to_string(), "origin".to_string()],
+            "no duplicate remote on the second call"
+        );
+
+        // A user's own remote already pointing at another fork wins over the
+        // owner-derived name — matched despite the missing `.git` and cased host.
+        run(
+            &repo_s,
+            &["remote", "add", "mine", "https://GitHub.com/other/proj"],
+        )
+        .await;
+        let matched =
+            forge_ensure_fork_remote_core(&state, repo_s.clone(), "other".into(), "proj".into())
+                .await
+                .expect("url match wins");
+        assert_eq!(matched, "mine");
+        assert!(
+            !remotes(&repo_s).await.iter().any(|n| n == "other"),
+            "a URL match must not mint an owner-named remote"
+        );
+
+        // An ssh origin yields an ssh fork URL.
+        let ssh_repo = dir.path().join("ssh-repo");
+        std::fs::create_dir_all(&ssh_repo).unwrap();
+        let ssh_s = ssh_repo.to_string_lossy().into_owned();
+        run(&ssh_s, &["init", "-q"]).await;
+        run(
+            &ssh_s,
+            &["remote", "add", "origin", "git@github.com:base/proj.git"],
+        )
+        .await;
+        forge_ensure_fork_remote_core(&state, ssh_s.clone(), "contrib".into(), "proj".into())
+            .await
+            .expect("ssh origin adds an ssh fork remote");
+        assert_eq!(
+            run(&ssh_s, &["remote", "get-url", "contrib"]).await.trim(),
+            "git@github.com:contrib/proj.git"
+        );
     }
 
     /// The frontend keys off these exact names, and an unknown probe must travel

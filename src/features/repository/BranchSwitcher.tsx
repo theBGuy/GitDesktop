@@ -32,6 +32,7 @@ import {
 import { useEffectiveBranchRules } from "@/lib/branch-rules/queries";
 import { copyText } from "@/lib/clipboard";
 import { isDirtyTreeRefusal } from "@/lib/error-summary";
+import { forgeDetectForkPrForBranch } from "@/lib/git/api";
 import {
   forgeFeatureReady,
   useBranchDivergence,
@@ -61,7 +62,7 @@ import {
   useUpdateBranchFrom,
   useUserWorktrees,
 } from "@/lib/git/queries";
-import type { Branch, RemoteBranch } from "@/lib/git/types";
+import type { Branch, ForkPrMatch, RemoteBranch } from "@/lib/git/types";
 import { listUserWorktrees, type UserWorktree } from "@/lib/git/worktree";
 import { secondaryClickLabel } from "@/lib/hotkeys/binding";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
@@ -86,6 +87,7 @@ import {
 import { CleanupBranchesDialog } from "./CleanupBranchesDialog";
 import { CreateBranchDialog } from "./CreateBranchDialog";
 import { DeleteWorktreeDialog } from "./DeleteWorktreeDialog";
+import { ForkPrPublishGuard } from "./ForkPrPublishGuard";
 import { OperationHistoryDialog } from "./OperationHistoryDialog";
 import { PromoteWorktreeDialog } from "./PromoteWorktreeDialog";
 import { RebaseOntoDialog } from "./RebaseOntoDialog";
@@ -227,6 +229,16 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   const [cleanupOpen, setCleanupOpen] = useState(false);
   const [pickerMode, setPickerMode] = useState<PickerMode | null>(null);
   const [rebaseOntoOpen, setRebaseOntoOpen] = useState(false);
+  // The publish intercepted by the fork-PR guard, with everything needed to
+  // resume it verbatim if the user publishes anyway.
+  const [forkGuard, setForkGuard] = useState<{
+    match: ForkPrMatch;
+    branch: Branch;
+    remote?: string;
+  } | null>(null);
+  // A fork-PR detection in flight — rides `busy`, so the menu items that started
+  // it can't fire twice.
+  const [detecting, setDetecting] = useState(false);
   // The pending switch target. `remote` is set only for remote-only rows, which
   // check out via `--track <remote>/<name>` (honoring the row's promised remote
   // + dodging multi-remote DWIM ambiguity); local switches leave it null.
@@ -869,8 +881,27 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // explicit `remote` (the chosen destination); a tracked push passes none and
   // the backend resolves to the branch's own upstream remote.
   function doPushBranch(branch: Branch, remote?: string) {
-    const publishing = !branch.upstream || branch.upstreamGone;
     setOpen(false);
+    if (branch.upstream && !branch.upstreamGone) runPushBranch(branch, remote);
+    else void beginPublishBranch(branch, remote);
+  }
+
+  // Publishing a branch that is really a local copy of a fork PR's head pushes a
+  // separate copy to this repo and leaves the PR untouched — check for that
+  // first, and let the guard offer the fork instead. Advisory: a detection
+  // failure is indistinguishable from no match and just publishes.
+  async function beginPublishBranch(branch: Branch, remote?: string) {
+    setDetecting(true);
+    const match = await forgeDetectForkPrForBranch(repoPath, branch.name).catch(
+      () => null,
+    );
+    setDetecting(false);
+    if (match) setForkGuard({ match, branch, remote });
+    else runPushBranch(branch, remote);
+  }
+
+  function runPushBranch(branch: Branch, remote?: string) {
+    const publishing = !branch.upstream || branch.upstreamGone;
     push.mutate(
       { setUpstream: false, branch: branch.name, remote },
       {
@@ -886,6 +917,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   }
 
   const busy =
+    detecting ||
     checkout.isPending ||
     checkoutRemote.isPending ||
     mergeBranch.isPending ||
@@ -2186,6 +2218,18 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         defaultBranch={defaultName}
         hasChanges={hasChanges}
         isPushed={Boolean(head?.upstream) && !head?.upstreamGone}
+      />
+
+      <ForkPrPublishGuard
+        repoPath={repoPath}
+        match={forkGuard?.match ?? null}
+        branch={forkGuard?.branch.name ?? ""}
+        destination={forkGuard?.remote ?? "origin"}
+        onClose={() => setForkGuard(null)}
+        onPublishAnyway={() => {
+          setForkGuard(null);
+          if (forkGuard) runPushBranch(forkGuard.branch, forkGuard.remote);
+        }}
       />
 
       <SwitchWithChangesDialog

@@ -115,6 +115,7 @@ import {
   useMergeRemotePr,
   useMinimizeComment,
   usePrApprovals,
+  usePrBaseDivergence,
   usePrDetails,
   usePrDiff,
   usePrList,
@@ -122,6 +123,7 @@ import {
   usePrReactions,
   usePrReviewThreads,
   usePrTimeline,
+  usePrUpdateBranch,
   useReopenPr,
   useRepoStatus,
   useRepoWriteAccess,
@@ -407,6 +409,18 @@ export function RemotePrView({
     lens,
     repoTab === "pulls" && isOpenPr,
   );
+  // How far the base has moved on — GitHub-only (the command has no forge dispatch
+  // and errors elsewhere). Hoisted like `previewEnabled` because a disabled query
+  // keeps serving its last value, so every reader has to gate on this too.
+  const divergenceEnabled =
+    repoTab === "pulls" && provider === "github" && isOpenPr;
+  const divergence = usePrBaseDivergence(
+    repoPath,
+    number,
+    lens,
+    divergenceEnabled,
+  );
+  const updateBranch = usePrUpdateBranch(repoPath);
   const mergeRemotePr = useMergeRemotePr(repoPath, lens);
   const abortRemotePrResolve = useAbortRemotePrResolve(repoPath);
   // The AI-resolution store the takeover follows — the banner's "Resolve with AI"
@@ -736,6 +750,39 @@ export function RemotePrView({
     !!isOpenPr &&
     !details.data?.crossRepository &&
     (serverConflicting || predictedConflict);
+  const behindBy = divergenceEnabled ? (divergence.data?.behindBy ?? 0) : 0;
+  // Updating the branch pushes the base onto the head, so it takes push permission —
+  // and on a fork the contributor's "allow edits by maintainers" too. Only an
+  // explicit denial blocks; unknown must never read as one.
+  const updateBlockedReason =
+    writeReason ??
+    (details.data?.crossRepository && details.data.maintainerCanModify === false
+      ? "The contributor hasn't allowed edits from maintainers."
+      : undefined);
+
+  // The banner's arm: server truth, then the local prediction where the forge has
+  // none, then the resume offer — the resolve worktree is only worth its own line
+  // when there's nothing more urgent to say about the merge. Behind-the-base is the
+  // quietest line of all, so it fills only the arm that would otherwise stay silent.
+  const bannerArm: PrMergeabilityArm = !isOpenPr
+    ? null
+    : serverConflicting
+      ? "conflicting"
+      : predictedConflict
+        ? "predicted"
+        : findResolve.data
+          ? "resume"
+          : mergeability.data?.state !== "checking"
+            ? behindBy > 0
+              ? "behind"
+              : null
+            : mergeability.polling
+              ? "checking"
+              : "unknown";
+  const canUpdateBranch =
+    bannerArm === "behind" &&
+    updateBlockedReason === undefined &&
+    !updateBranch.isPending;
 
   /** Enter the isolated-worktree resolution: a merge that pauses there on conflicts,
    *  and just pushes when there are none. `withAi` hands the conflicts the backend
@@ -803,6 +850,35 @@ export function RemotePrView({
       (canResolveConflicts || resolveWorktree !== null) &&
       !resolve &&
       !mergeRemotePr.isPending,
+  );
+
+  /** Bring the head up to date with its base, on the remote. The rebase variant
+   *  rewrites the head's history and force-pushes it — on a fork that branch is the
+   *  contributor's — so it asks first. */
+  async function runUpdateBranch(rebase: boolean) {
+    const base = details.data?.baseRefName;
+    if (!base) return;
+    if (rebase) {
+      const ok = await useConfirm.getState().ask({
+        title: `Rebase onto ${base}?`,
+        body: "Rebasing rewrites the pull request branch's history and force-pushes it. On a fork pull request, that branch belongs to the contributor.",
+        confirmLabel: "Rebase and update",
+      });
+      if (!ok) return;
+    }
+    updateBranch.mutate(
+      { number, rebase, lens },
+      {
+        onSuccess: () => toast.success(`Branch updated from ${base}.`),
+        onError,
+      },
+    );
+  }
+
+  useHotkeyAction(
+    "pr-update-branch",
+    () => void runUpdateBranch(false),
+    isSelectedPr && canUpdateBranch,
   );
 
   const [composeBody, setComposeBody] = useState("");
@@ -1521,23 +1597,6 @@ export function RemotePrView({
     });
   }
 
-  // The banner's arm: server truth, then the local prediction where the forge has
-  // none, then the resume offer — the resolve worktree is only worth its own line
-  // when there's nothing more urgent to say about the merge.
-  const bannerArm: PrMergeabilityArm = !isOpen
-    ? null
-    : serverConflicting
-      ? "conflicting"
-      : predictedConflict
-        ? "predicted"
-        : findResolve.data
-          ? "resume"
-          : mergeability.data?.state !== "checking"
-            ? null
-            : mergeability.polling
-              ? "checking"
-              : "unknown";
-
   // A conflict resolution in flight takes over the whole PR view: the merge lives in
   // an isolated worktree, and ResolveRemotePrView drives its file list, editor and
   // Finish/Discard in place of the PR's normal sections and footer.
@@ -1833,6 +1892,7 @@ export function RemotePrView({
           checks={pr.checks}
           repoPath={repoPath}
           provider={providerKey}
+          crossRepository={!!pr.crossRepository}
         />
         <div className="flex gap-1 pt-1">
           {/* The AI Review tab needs only the diff (forge-neutral) and a way to
@@ -1870,10 +1930,15 @@ export function RemotePrView({
         hasResolveWorktree={resolveWorktree !== null}
         busy={mergeRemotePr.isPending || abortRemotePrResolve.isPending}
         conflictFiles={predictedFiles}
+        behindBy={behindBy}
+        updateBlockedReason={updateBlockedReason}
+        updateBusy={updateBranch.isPending}
         onResolve={() => runResolve(false)}
         onResolveWithAi={() => runResolve(true)}
         onDiscard={() => void discardResolve()}
         onRetry={mergeability.retry}
+        onUpdateBranch={() => void runUpdateBranch(false)}
+        onUpdateWithRebase={() => void runUpdateBranch(true)}
         retryBusy={mergeability.isFetching}
       />
 

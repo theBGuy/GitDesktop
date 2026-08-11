@@ -1776,6 +1776,36 @@ export interface PrDetails {
    *  resolve flow has nowhere it may push. Optional for the same cache reason;
    *  absent is treated as not-a-fork (the push itself refuses non-fast-forward). */
   crossRepository?: boolean;
+  /** The base repo's maintainers may push to the fork's head branch ("allow edits
+   *  by maintainers"). GitHub only; absent/null = unknown, which must not be read
+   *  as a denial. */
+  maintainerCanModify?: boolean | null;
+}
+
+/** How far a pull request's head has drifted from its base — the update-branch
+ *  affordance's driver (`behindBy > 0` means the base has moved on). */
+export interface PrBaseDivergence {
+  aheadBy: number;
+  behindBy: number;
+}
+
+/** An open fork PR whose head commit a local branch already contains — the
+ *  maintainer is holding that contributor's work locally. */
+export interface ForkPrMatch {
+  number: number;
+  title: string;
+  url: string;
+  /** The branch name ON THE FORK — the push destination, which may differ from
+   *  the local branch's name. */
+  headRefName: string;
+  headRepoOwner: string;
+  headRepoName: string;
+  headSha: string;
+  /** "Allow edits by maintainers"; unknown degrades to false, so the caller
+   *  disables the push-to-fork route rather than promising a push that would 403. */
+  maintainerCanModify: boolean;
+  /** Local commits on top of the PR head (0 = nothing new to push). */
+  aheadCount: number;
 }
 
 /** A reviewer who has submitted a verdict, as supplied by the backend (GitLab

@@ -1259,6 +1259,9 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
             let (src, dst) = (endpoint_repo(&pr.source), endpoint_repo(&pr.destination));
             !src.is_empty() && !dst.is_empty() && src != dst
         },
+        // GitHub's "allow edits by maintainers" has no Bitbucket equivalent —
+        // unknown, not denied.
+        maintainer_can_modify: None,
     })
 }
 

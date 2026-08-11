@@ -25,7 +25,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Spinner } from "@/components/ui/spinner";
-import type { PullMode } from "@/lib/git/api";
+import { forgeDetectForkPrForBranch, type PullMode } from "@/lib/git/api";
 import {
   useAutoFetch,
   useFetchStatusStore,
@@ -39,6 +39,7 @@ import {
   useRepoStatus,
   useUpdateFromUpstream,
 } from "@/lib/git/queries";
+import type { ForkPrMatch } from "@/lib/git/types";
 import {
   bindingToAriaKeyshortcuts,
   formatBinding,
@@ -47,6 +48,7 @@ import { useEffectiveBindings, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useSettings } from "@/lib/settings/queries";
 import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
+import { ForkPrPublishGuard } from "./ForkPrPublishGuard";
 import { PublishRepoControl, usePublishProviders } from "./PublishRepoControl";
 import { useStashReapplyRecovery } from "./useStashReapplyRecovery";
 
@@ -67,6 +69,8 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // hint. These respect Settings → Keyboard rebindings for free.
   const bindings = useEffectiveBindings();
   const [forceConfirmOpen, setForceConfirmOpen] = useState(false);
+  const [forkPrMatch, setForkPrMatch] = useState<ForkPrMatch | null>(null);
+  const [detecting, setDetecting] = useState(false);
 
   // A repo with no `origin` (e.g. created locally in GitDesktop) can't push;
   // offer to create the hosted repo instead. Which providers can take this
@@ -101,6 +105,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     pull.isPending ||
     push.isPending ||
     updateUpstream.isPending ||
+    detecting ||
     recovery.pending;
   const onError = (e: unknown) => toastError(e);
 
@@ -289,6 +294,27 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     );
   }
 
+  // Publishing an untracked branch that is really a local copy of a fork PR's
+  // head pushes a separate copy to origin and leaves the PR untouched — check
+  // for that before publishing, and let the guard offer the fork instead. Purely
+  // advisory: a detection failure is indistinguishable from no match and just
+  // publishes. Pushes to a tracked upstream (and force pushes, which need one)
+  // are correct as they stand and never ask.
+  async function beginPush(force: boolean) {
+    const branch = head?.name;
+    if (force || hasUpstream || !branch) {
+      doPush(force);
+      return;
+    }
+    setDetecting(true);
+    const match = await forgeDetectForkPrForBranch(repoPath, branch).catch(
+      () => null,
+    );
+    setDetecting(false);
+    if (match) setForkPrMatch(match);
+    else doPush(false);
+  }
+
   // Hotkeys mirror the buttons' disabled states exactly.
   useHotkeyAction("fetch", () => doFetch(false), !noOrigin && !busy);
   // Pull needs no explicit `!detached` term: `hasUpstream` is already false on a
@@ -302,7 +328,10 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   );
   useHotkeyAction(
     "push",
-    () => (diverged ? setForceConfirmOpen(true) : doPush(false)),
+    () => {
+      if (diverged) setForceConfirmOpen(true);
+      else void beginPush(false);
+    },
     !noOrigin && !busy && !detached,
   );
   // Palette-only (defaultBinding: null) and gated on the fork's `upstream`
@@ -438,11 +467,11 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
               if (diverged) {
                 setForceConfirmOpen(true);
               } else {
-                doPush(false);
+                void beginPush(false);
               }
             }}
           >
-            {push.isPending ? (
+            {push.isPending || detecting ? (
               <Spinner data-icon="inline-start" />
             ) : diverged ? (
               <WarningIcon data-icon="inline-start" />
@@ -491,6 +520,17 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ForkPrPublishGuard
+        repoPath={repoPath}
+        match={forkPrMatch}
+        branch={head?.name ?? ""}
+        onClose={() => setForkPrMatch(null)}
+        onPublishAnyway={() => {
+          setForkPrMatch(null);
+          doPush(false);
+        }}
+      />
 
       {recovery.dialog}
     </div>

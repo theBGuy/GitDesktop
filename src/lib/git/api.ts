@@ -51,6 +51,7 @@ import type {
   ForgeSearchList,
   ForgeStatus,
   ForgeUserRef,
+  ForkPrMatch,
   GeneratedNotes,
   GhAccounts,
   GhBranchProtection,
@@ -88,6 +89,7 @@ import type {
   OpLogEntry,
   OrphanedStash,
   PagesInfo,
+  PrBaseDivergence,
   PrCiStatus,
   PrDetails,
   PrInfo,
@@ -766,12 +768,16 @@ export const gitSwitchAutostash = (
     reapply,
   });
 
+/** `remoteBranch` names the DESTINATION branch when it differs from the local
+ *  one (pushing back to a fork PR's head); it requires both `branch` and
+ *  `remote`, and never sets upstream. */
 export const gitPush = (
   repoPath: string,
   setUpstream: boolean,
   force = false,
   branch?: string,
   remote?: string,
+  remoteBranch?: string,
 ) =>
   invoke<void>("git_push", {
     repoPath,
@@ -779,6 +785,7 @@ export const gitPush = (
     force,
     branch: branch ?? null,
     remote: remote ?? null,
+    remoteBranch: remoteBranch ?? null,
   });
 
 export const gitRemotes = (repoPath: string) =>
@@ -2458,6 +2465,45 @@ export const forgePrReopen = (
   number: number,
   lens: RemoteLens,
 ) => invoke<void>("forge_pr_reopen", { repoPath, number, lens });
+
+/** Merge (or `rebase`) the base branch into a PR's head — GitHub's
+ *  "Update branch". Synchronous: the call resolves once GitHub has decided. */
+export const ghPrUpdateBranch = (
+  repoPath: string,
+  number: number,
+  rebase: boolean,
+  lens: RemoteLens,
+) => invoke<void>("gh_pr_update_branch", { repoPath, number, rebase, lens });
+
+/** How far a PR's head is ahead of / behind its base. */
+export const ghPrBaseDivergence = (
+  repoPath: string,
+  number: number,
+  lens: RemoteLens,
+) =>
+  invoke<PrBaseDivergence>("gh_pr_base_divergence", { repoPath, number, lens });
+
+/** The open fork PR whose head `branch` already contains, or null. Advisory —
+ *  a forge outage answers null rather than failing. */
+export const forgeDetectForkPrForBranch = (repoPath: string, branch: string) =>
+  invoke<ForkPrMatch | null>("forge_detect_fork_pr_for_branch", {
+    repoPath,
+    branch,
+  });
+
+/** The name of a remote pointing at `owner/repo` on origin's host, adding one if
+ *  needed. Idempotent — returns the same name on a second call. */
+export const forgeEnsureForkRemote = (
+  repoPath: string,
+  owner: string,
+  repo: string,
+) => invoke<string>("forge_ensure_fork_remote", { repoPath, owner, repo });
+
+/** Approve a workflow run GitHub is holding for maintainer approval (a
+ *  first-time contributor's fork PR). GitHub-only; the run read/rerun/cancel
+ *  wrappers live in `lib/github/actions.ts`. */
+export const forgeCiRunApprove = (repoPath: string, runId: number) =>
+  invoke<void>("forge_ci_run_approve", { repoPath, runId });
 
 export const ghAccounts = () => invoke<GhAccounts>("gh_accounts");
 

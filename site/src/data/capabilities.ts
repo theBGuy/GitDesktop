@@ -207,6 +207,11 @@ export const capabilities: Capability[] = [
   {
     group: "Pull requests & review",
     label:
+      "Fork PR maintainer actions — approve blocked workflow runs, update the branch, and push follow-ups to the contributor's fork",
+  },
+  {
+    group: "Pull requests & review",
+    label:
       "Stacked PRs — position badges and a stack navigator; create, extend, or dissolve a stack from the PR view; on GitHub, merge a stack bottom-up in one go",
   },
   {

@@ -5,6 +5,8 @@ import {
   CheckCircleIcon,
   CircleIcon,
   MinusCircleIcon,
+  PlayIcon,
+  WarningIcon,
   XCircleIcon,
 } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -18,8 +20,15 @@ import {
   useState,
 } from "react";
 import { LogBlock } from "@/components/LogBlock";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Spinner } from "@/components/ui/spinner";
 import { StatusIcon } from "@/features/actions/status";
+import {
+  useApproveWorkflowRun,
+  useRepoWriteAccess,
+  writeAccessReason,
+} from "@/lib/git/queries";
 import type { ForgeProvider, PrCheckOut } from "@/lib/git/types";
 import {
   isRunActive,
@@ -29,10 +38,18 @@ import {
   useRunFailedLogs,
 } from "@/lib/github/actions";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { useRepoLens } from "@/lib/repo-lens/queries";
+import { useConfirm } from "@/lib/stores/confirm";
+import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 
-/** Tone + glyph for a CI check, so pass/fail is never conveyed by color alone. */
-function checkPresentation(status: string): {
+/** Tone + glyph for a CI check, so pass/fail is never conveyed by color alone.
+ *  `provider` only distinguishes ACTION_REQUIRED — the one state whose meaning
+ *  differs per forge. */
+function checkPresentation(
+  status: string,
+  provider: ForgeProvider,
+): {
   tone: string;
   Icon: typeof CheckCircleIcon;
   label: string;
@@ -71,7 +88,18 @@ function checkPresentation(status: string): {
       bucket: "skipped",
     };
   }
-  // Everything still in flight — IN_PROGRESS/QUEUED/PENDING — plus
+  if (s === "ACTION_REQUIRED" && provider === "github") {
+    // GitHub's is the one ACTION_REQUIRED a maintainer can act on from here (a
+    // fork PR's run held for approval), so it names the wait instead of reading
+    // as generic pending. It keeps the pending bucket: nothing has run yet.
+    return {
+      tone: "text-warning",
+      Icon: WarningIcon,
+      label: "awaiting approval",
+      bucket: "pending",
+    };
+  }
+  // Everything still in flight — IN_PROGRESS/QUEUED/PENDING — plus non-GitHub
   // ACTION_REQUIRED (deliberately here: it awaits a human, so the amber warning
   // tone fits) falls through to the pending bucket.
   return {
@@ -96,7 +124,7 @@ function isRunningActionsCheck(
     provider === "github" &&
     Boolean(check.runId) &&
     !check.completedAt &&
-    checkPresentation(check.status).bucket === "pending"
+    checkPresentation(check.status, provider).bucket === "pending"
   );
 }
 
@@ -248,12 +276,15 @@ function RunSteps({ job }: { job: RunJob }) {
 function CheckRow({
   repoPath,
   check,
+  provider,
   rowId,
   runJob,
   isRunning,
 }: {
   repoPath: string;
   check: PrCheckOut;
+  /** The repo's forge provider — only the status label branches on it. */
+  provider: ForgeProvider;
   /** Unique row identity (the sorted index) for `data-row` + roving focus —
    *  GitHub allows two checks with the same `name`, so name can't be the id. */
   rowId: string;
@@ -264,7 +295,7 @@ function CheckRow({
    *  current-step peek + the expanded step checklist). */
   isRunning: boolean;
 }) {
-  const { tone, Icon, label } = checkPresentation(check.status);
+  const { tone, Icon, label } = checkPresentation(check.status, provider);
   const elapsed = duration(check.startedAt, check.completedAt);
   // "Actions check" = a details URL we parsed a run id out of. A job id peeks
   // one job's log; a run id without a job falls back to the run's failed logs.
@@ -416,24 +447,29 @@ export function ChecksRollup({
   checks,
   repoPath,
   provider,
+  crossRepository,
 }: {
   checks: PrCheckOut[];
   repoPath: string;
   /** The repo's forge provider — gates the running-Actions live-steps fetch to
    *  GitHub (GitLab checks also carry run/job ids but have no steps). */
   provider: ForgeProvider;
+  /** The PR's cross-repository (fork) flag, as the caller reads it off the PR.
+   *  Only the approval strip uses it: GitHub holds runs for approval on fork PRs
+   *  alone, so the affordance is fork-scoped by design. */
+  crossRepository: boolean;
 }) {
   const passed = checks.filter(
-    (c) => checkPresentation(c.status).bucket === "passed",
+    (c) => checkPresentation(c.status, provider).bucket === "passed",
   ).length;
   const failed = checks.filter(
-    (c) => checkPresentation(c.status).bucket === "failed",
+    (c) => checkPresentation(c.status, provider).bucket === "failed",
   ).length;
   const pending = checks.filter(
-    (c) => checkPresentation(c.status).bucket === "pending",
+    (c) => checkPresentation(c.status, provider).bucket === "pending",
   ).length;
   const skipped = checks.filter(
-    (c) => checkPresentation(c.status).bucket === "skipped",
+    (c) => checkPresentation(c.status, provider).bucket === "skipped",
   ).length;
 
   // Auto-expand on any failure — a failing PR should show what failed without a
@@ -453,13 +489,76 @@ export function ChecksRollup({
     prevFailed.current = failed;
   }, [failed]);
 
+  const approveRun = useApproveWorkflowRun(repoPath);
+  // Own busy state: the batch spans several sequential mutations, so the
+  // mutation's own `isPending` would flicker between them.
+  const [approving, setApproving] = useState(false);
+  // The blocked runs this rollup can approve. A run GitHub holds before it starts
+  // may not reach the check rollup at all — that shape is unverified — so an empty
+  // list renders nothing rather than an approval offer with nothing to approve.
+  // Ids narrow to number for the mutation's contract; anything unrepresentable is
+  // dropped rather than approved wrong.
+  const blockedRunIds =
+    crossRepository && provider === "github"
+      ? [
+          ...new Set(
+            checks
+              .filter(
+                (c) => c.status.toUpperCase() === "ACTION_REQUIRED" && c.runId,
+              )
+              .map((c) => Number(c.runId)),
+          ),
+        ].filter((id) => Number.isSafeInteger(id))
+      : [];
+
+  // Approving is a repo write, so an explicitly read-only viewer keeps the button
+  // (disabled, with the reason). Probed only when the strip renders — the id list
+  // already carries the fork + GitHub gate — and on the same lens the rest of the
+  // PR view uses, so it shares that query's cache entry.
+  const lens = useRepoLens(repoPath);
+  const writeAccess = useRepoWriteAccess(
+    repoPath,
+    lens,
+    blockedRunIds.length > 0,
+  );
+  const writeReason = writeAccessReason(writeAccess.data);
+  const writeBlocked = writeAccess.data?.canPush === false;
+  // A natively-disabled Button swallows `title`, so the reason rides the wrapper.
+  const blockedSpanClass = writeBlocked
+    ? "inline-flex cursor-not-allowed"
+    : "inline-flex";
+
+  async function approveBlockedRuns() {
+    if (writeBlocked) return;
+    const ok = await useConfirm.getState().ask({
+      title: "Approve and run workflows?",
+      body: "This runs the contributor's workflow code in this repository's CI.",
+      confirmLabel: "Approve and run",
+    });
+    if (!ok) return;
+    setApproving(true);
+    try {
+      // Sequential, and each failure is reported on its own: one run the viewer
+      // can't approve must not strand the rest of the batch.
+      for (const id of blockedRunIds) {
+        try {
+          await approveRun.mutateAsync({ runId: id });
+        } catch (e) {
+          toastError(e);
+        }
+      }
+    } finally {
+      setApproving(false);
+    }
+  }
+
   // Failures first, then pending, then passed, then skipped (least interesting);
   // stable within a bucket.
   const bucketRank = { failed: 0, pending: 1, passed: 2, skipped: 3 } as const;
   const sorted = [...checks].sort(
     (a, b) =>
-      bucketRank[checkPresentation(a.status).bucket] -
-      bucketRank[checkPresentation(b.status).bucket],
+      bucketRank[checkPresentation(a.status, provider).bucket] -
+      bucketRank[checkPresentation(b.status, provider).bucket],
   );
 
   // The distinct run ids of the still-running GitHub Actions checks — one
@@ -536,6 +635,31 @@ export function ChecksRollup({
 
   return (
     <div className="text-[11px]">
+      {blockedRunIds.length > 0 && (
+        <div className="mb-1.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border bg-warning/10 px-2.5 py-1.5">
+          <span className="flex min-w-0 items-center gap-1.5 text-warning">
+            <WarningIcon weight="fill" className="size-3 shrink-0" />
+            {`${blockedRunIds.length} workflow run${
+              blockedRunIds.length === 1 ? "" : "s"
+            } awaiting maintainer approval.`}
+          </span>
+          <span title={writeReason} className={blockedSpanClass}>
+            <Button
+              variant="outline"
+              size="xs"
+              disabled={approving || writeBlocked}
+              onClick={() => void approveBlockedRuns()}
+            >
+              {approving ? (
+                <Spinner data-icon="inline-start" />
+              ) : (
+                <PlayIcon data-icon="inline-start" />
+              )}
+              Approve and run
+            </Button>
+          </span>
+        </div>
+      )}
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -596,6 +720,7 @@ export function ChecksRollup({
                   rowId={rowId(i)}
                   repoPath={repoPath}
                   check={c}
+                  provider={provider}
                   isRunning={live}
                   runJob={runJob}
                 />

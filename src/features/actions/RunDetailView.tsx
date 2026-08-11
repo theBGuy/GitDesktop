@@ -6,6 +6,7 @@ import {
   PlayIcon,
   ProhibitIcon,
   SparkleIcon,
+  WarningIcon,
 } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useRef, useState } from "react";
@@ -17,6 +18,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import {
   forgeFeatureReady,
+  useApproveWorkflowRun,
   useForgeStatus,
   useRepoWriteAccess,
   writeAccessReason,
@@ -32,7 +34,9 @@ import {
   useRunDetail,
   useRunFailedLogs,
 } from "@/lib/github/actions";
+import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useAiEnabled } from "@/lib/settings/queries";
+import { useConfirm } from "@/lib/stores/confirm";
 import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { DebugJobDialog } from "./DebugJobDialog";
@@ -305,6 +309,7 @@ export function RunDetailView({
   const rerun = useRerunRun(repoPath);
   const cancel = useCancelRun(repoPath);
   const playJob = usePlayCiJob(repoPath);
+  const approveRun = useApproveWorkflowRun(repoPath);
   const aiEnabled = useAiEnabled();
   // Re-run and cancel are SHARED writes (GitHub + GitLab): `canWrite || …` keeps
   // GitHub's controls up while forge-status is pending and positively enables a
@@ -361,6 +366,15 @@ export function RunDetailView({
   // GitLab's cancel endpoint does cancel it — keep Cancel available there.
   const gitlabBlocked =
     provider === "gitlab" && run?.conclusion === "action_required";
+  // GitHub holds a first-time contributor's fork-PR run until a maintainer
+  // approves it. Which field carries that state is unverified, so accept it on
+  // either — a run that never reports it simply never shows the strip.
+  const approvalPending =
+    provider === "github" &&
+    (run?.status === "action_required" ||
+      run?.conclusion === "action_required");
+  const canApprove =
+    tabActive && approvalPending && !writeBlocked && !approveRun.isPending;
 
   function doRerun(failedOnly: boolean) {
     rerun.mutate(
@@ -394,6 +408,24 @@ export function RunDetailView({
       onError: toastError,
     });
   }
+
+  async function doApprove() {
+    const ok = await useConfirm.getState().ask({
+      title: "Approve and run workflows?",
+      body: "This runs the contributor's workflow code in this repository's CI.",
+      confirmLabel: "Approve and run",
+    });
+    if (!ok) return;
+    approveRun.mutate(
+      { runId },
+      {
+        onSuccess: () => toast.success("Workflow run approved."),
+        onError: toastError,
+      },
+    );
+  }
+
+  useHotkeyAction("approve-workflow-run", () => void doApprove(), canApprove);
 
   // A manual GitLab job arrives as completed + action_required; with the flag
   // gate GitHub never matches (its manual approvals work differently).
@@ -547,6 +579,33 @@ export function RunDetailView({
           </Button>
         </div>
       </div>
+
+      {approvalPending && (
+        // A persistent state belongs in the layout flow: the strip pushes the
+        // jobs list down rather than floating over the run header.
+        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 border-b bg-warning/10 px-4 py-2 text-xs">
+          <span className="flex min-w-0 items-center gap-1.5 text-warning">
+            <WarningIcon weight="fill" className="size-3.5 shrink-0" />
+            GitHub is waiting for a maintainer to approve this workflow run
+            before it starts.
+          </span>
+          <span title={writeReason} className={blockedSpanClass}>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={approveRun.isPending || writeBlocked}
+              onClick={() => void doApprove()}
+            >
+              {approveRun.isPending ? (
+                <Spinner data-icon="inline-start" />
+              ) : (
+                <PlayIcon data-icon="inline-start" />
+              )}
+              Approve and run
+            </Button>
+          </span>
+        </div>
+      )}
 
       {/* overflow-hidden contains the content's natural height (vendored Root is
           `relative`-only) so a long run can't leak a window scrollbar. */}

@@ -1322,6 +1322,9 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
             (Some(src), Some(tgt)) => src != tgt,
             _ => false,
         },
+        // GitHub's "allow edits by maintainers" has no GitLab equivalent — unknown,
+        // not denied.
+        maintainer_can_modify: None,
     })
 }
 

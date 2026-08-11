@@ -992,6 +992,274 @@ pub async fn gh_pr_close(repo_path: String, number: u64, lens: Option<String>) -
     Ok(())
 }
 
+/// Updates a PR's head branch with its base (`gh pr update-branch`) — merge by
+/// default, `rebase` to rebase instead. Synchronous by contract: GitHub's
+/// update-branch PUT returns the decision itself, unlike the async merge queue,
+/// so there is nothing to poll for here.
+#[tauri::command]
+pub async fn gh_pr_update_branch(
+    repo_path: String,
+    number: u64,
+    rebase: bool,
+    lens: Option<String>,
+) -> AppResult<()> {
+    let n = number.to_string();
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
+    let mut args = vec!["pr", "update-branch", n.as_str(), "--repo", slug.as_str()];
+    if rebase {
+        args.push("--rebase");
+    }
+    run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await?;
+    Ok(())
+}
+
+/// How far a PR's head branch has drifted from its base.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrBaseDivergence {
+    /// Commits on the head that the base lacks.
+    pub ahead_by: u64,
+    /// Commits on the base the head is missing — the update-branch driver.
+    pub behind_by: u64,
+}
+
+/// The head/base refs a divergence compare addresses.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawDivergenceRefs {
+    #[serde(default)]
+    base_ref_name: String,
+    #[serde(default)]
+    head_ref_name: String,
+    #[serde(default)]
+    is_cross_repository: bool,
+    head_repository_owner: Option<RawLogin>,
+}
+
+/// `ahead_by`/`behind_by` from the REST compare payload (snake_case on the wire,
+/// unlike the GraphQL surfaces gh's `--json` projections expose).
+#[derive(Deserialize)]
+struct RawCompare {
+    #[serde(default)]
+    ahead_by: u64,
+    #[serde(default)]
+    behind_by: u64,
+}
+
+/// How far a PR's head is ahead of / behind its base, for the update-branch
+/// affordance. Two calls: `gh pr view` for the refs, then a REST compare.
+#[tauri::command]
+pub async fn gh_pr_base_divergence(
+    repo_path: String,
+    number: u64,
+    lens: Option<String>,
+) -> AppResult<PrBaseDivergence> {
+    let n = number.to_string();
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
+    let out = run_gh(
+        Some(&repo_path),
+        &[
+            "pr",
+            "view",
+            &n,
+            "--repo",
+            &slug,
+            "--json",
+            "baseRefName,headRefName,isCrossRepository,headRepositoryOwner",
+        ],
+        GH_NETWORK_TIMEOUT,
+    )
+    .await?;
+    let refs: RawDivergenceRefs = serde_json::from_str(&out.stdout_lossy())
+        .map_err(|e| AppError::Gh(format!("could not parse gh pr view: {e}")))?;
+    if refs.base_ref_name.is_empty() || refs.head_ref_name.is_empty() {
+        return Err(AppError::Gh(format!(
+            "GitHub reported no base/head refs for #{number}"
+        )));
+    }
+    // A fork PR's head lives in another repo, so the compare must address it as
+    // `owner:branch` — a bare branch name would resolve against the BASE repo and
+    // compare the wrong (or a nonexistent) ref.
+    let head = match refs
+        .head_repository_owner
+        .map(|o| o.login)
+        .filter(|_| refs.is_cross_repository)
+        .filter(|s| !s.is_empty())
+    {
+        Some(owner) => format!("{owner}:{}", refs.head_ref_name),
+        None => refs.head_ref_name.clone(),
+    };
+    let endpoint = format!("repos/{slug}/compare/{}...{head}", refs.base_ref_name);
+    let out = run_gh(Some(&repo_path), &["api", &endpoint], GH_NETWORK_TIMEOUT).await?;
+    let compare: RawCompare = serde_json::from_str(&out.stdout_lossy())
+        .map_err(|e| AppError::Gh(format!("could not parse compare: {e}")))?;
+    Ok(PrBaseDivergence {
+        ahead_by: compare.ahead_by,
+        behind_by: compare.behind_by,
+    })
+}
+
+/// An open cross-repository (fork) PR whose head commit the local branch already
+/// contains — the maintainer is holding that PR's work locally and can push it
+/// back to the contributor's fork.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForkPrMatch {
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    /// The branch name ON THE FORK — the push destination, which may differ from
+    /// the local branch's name.
+    pub head_ref_name: String,
+    pub head_repo_owner: String,
+    pub head_repo_name: String,
+    pub head_sha: String,
+    /// "Allow edits by maintainers"; unknown degrades to `false`, so the caller
+    /// disables the push-to-fork route rather than promising a push that would 403.
+    pub maintainer_can_modify: bool,
+    /// Local commits on top of the PR head (0 = nothing new to push).
+    pub ahead_count: u64,
+}
+
+const FORK_PR_LIST_FIELDS: &str = "number,title,url,headRefName,headRefOid,isCrossRepository,headRepositoryOwner,headRepository,maintainerCanModify";
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawForkPr {
+    #[serde(default)]
+    number: u64,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    head_ref_name: String,
+    #[serde(default)]
+    head_ref_oid: String,
+    #[serde(default, deserialize_with = "null_to_default")]
+    is_cross_repository: bool,
+    head_repository_owner: Option<RawLogin>,
+    head_repository: Option<RawRepoName>,
+    #[serde(default)]
+    maintainer_can_modify: Option<bool>,
+}
+
+/// Whether a value is a bare git object id — the gate before interpolating a
+/// gh-supplied sha into git argv, where a `-`-leading value would read as a flag.
+fn is_object_id(s: &str) -> bool {
+    (7..=64).contains(&s.len()) && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// The open fork PR whose head `branch` already contains, or `None`.
+///
+/// Advisory by contract: every gh/network failure returns `Ok(None)` rather than
+/// an error, because the only caller is a pre-push check that must never block a
+/// publish on a forge outage.
+pub(crate) async fn detect_fork_pr_for_branch(
+    repo_path: &str,
+    branch: &str,
+) -> AppResult<Option<ForkPrMatch>> {
+    crate::git::branches::validate_ref_name(branch)?;
+    let head_ref = format!("refs/heads/{branch}");
+    let out = run_git_raw(
+        Some(repo_path),
+        &["rev-parse", &head_ref],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    if out.code != 0 {
+        return Ok(None); // no such local branch
+    }
+    let local_oid = out.stdout_lossy().trim().to_string();
+    if !is_object_id(&local_oid) {
+        return Ok(None);
+    }
+
+    let Ok(slug) = crate::github::gh_origin_slug(repo_path).await else {
+        return Ok(None);
+    };
+    let Ok(out) = run_gh(
+        Some(repo_path),
+        &[
+            "pr",
+            "list",
+            "--repo",
+            &slug,
+            "--state",
+            "open",
+            "--limit",
+            "50",
+            "--json",
+            FORK_PR_LIST_FIELDS,
+        ],
+        GH_NETWORK_TIMEOUT,
+    )
+    .await
+    else {
+        return Ok(None);
+    };
+    let Ok(prs) = serde_json::from_str::<Vec<RawForkPr>>(&out.stdout_lossy()) else {
+        return Ok(None);
+    };
+
+    for pr in prs.into_iter().filter(|p| p.is_cross_repository) {
+        if !is_object_id(&pr.head_ref_oid) {
+            continue;
+        }
+        // The fork head may never have been fetched into this clone, and asking git
+        // about an absent object errors rather than answering — so an unfetched
+        // candidate is a KNOWN, accepted miss, not a match.
+        let present = run_git_raw(
+            Some(repo_path),
+            &["cat-file", "-e", &format!("{}^{{commit}}", pr.head_ref_oid)],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .is_ok_and(|o| o.code == 0);
+        if !present {
+            continue;
+        }
+        // `--is-ancestor` exits 0 for an ancestor AND for equal shas — a local branch
+        // sitting exactly on the PR head still matches (with `ahead_count` 0).
+        let is_ancestor = run_git_raw(
+            Some(repo_path),
+            &["merge-base", "--is-ancestor", &pr.head_ref_oid, &local_oid],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .is_ok_and(|o| o.code == 0);
+        if !is_ancestor {
+            continue;
+        }
+        let ahead_count = run_git_raw(
+            Some(repo_path),
+            &[
+                "rev-list",
+                "--count",
+                &format!("{}..{local_oid}", pr.head_ref_oid),
+            ],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .ok()
+        .filter(|o| o.code == 0)
+        .and_then(|o| o.stdout_lossy().trim().parse::<u64>().ok())
+        .unwrap_or(0);
+        return Ok(Some(ForkPrMatch {
+            number: pr.number,
+            title: pr.title,
+            url: pr.url,
+            head_ref_name: pr.head_ref_name,
+            head_repo_owner: pr.head_repository_owner.map(|o| o.login).unwrap_or_default(),
+            head_repo_name: pr.head_repository.map(|r| r.name).unwrap_or_default(),
+            head_sha: pr.head_ref_oid,
+            maintainer_can_modify: pr.maintainer_can_modify.unwrap_or(false),
+            ahead_count,
+        }));
+    }
+    Ok(None)
+}
+
 /// Reopens a closed (not merged) pull request.
 #[tauri::command]
 pub async fn gh_pr_reopen(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
@@ -2470,6 +2738,11 @@ struct RawPr {
     merge_state_status: String,
     #[serde(default, deserialize_with = "null_to_default")]
     is_cross_repository: bool,
+    /// GitHub's own answer to "may the base repo's maintainers push to this fork
+    /// head" — absent (`None`) on any provider or projection that doesn't supply
+    /// it, which the frontend must not read as a denial.
+    #[serde(default)]
+    maintainer_can_modify: Option<bool>,
 }
 
 /// Whether a merge/pull request can currently merge, provider-neutral. `state` is
@@ -2833,6 +3106,10 @@ pub struct PrDetails {
     /// Whether the head branch lives in a different repository (a fork PR). The
     /// resolve-conflicts flow pushes to origin, so it is gated on this being false.
     pub cross_repository: bool,
+    /// Whether the base repo's maintainers may push to the fork's head branch
+    /// ("allow edits by maintainers"). GitHub only — `None` means unknown
+    /// (GitLab/Bitbucket, or a projection that didn't carry it), never "no".
+    pub maintainer_can_modify: Option<bool>,
 }
 
 /// A merge/pull request's approval summary — who has approved and whether the
@@ -2862,7 +3139,7 @@ pub struct ApprovalState {
     pub viewer_requested_changes: bool,
 }
 
-const PR_VIEW_FIELDS: &str = "id,number,title,body,author,state,isDraft,baseRefName,headRefName,additions,deletions,url,commits,files,reviews,comments,statusCheckRollup,labels,assignees,reviewRequests,mergeable,mergeStateStatus,isCrossRepository";
+const PR_VIEW_FIELDS: &str = "id,number,title,body,author,state,isDraft,baseRefName,headRefName,additions,deletions,url,commits,files,reviews,comments,statusCheckRollup,labels,assignees,reviewRequests,mergeable,mergeStateStatus,isCrossRepository,maintainerCanModify";
 
 const REPO_MERGE_SETTINGS_QUERY: &str = "query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed } }";
 
@@ -3220,6 +3497,7 @@ pub async fn gh_pr_view(
         stack_unknown,
         mergeability,
         cross_repository: raw.is_cross_repository,
+        maintainer_can_modify: raw.maintainer_can_modify,
     })
 }
 
@@ -5322,6 +5600,7 @@ mod tests {
             stack_unknown,
             mergeability: PrMergeability::unavailable(),
             cross_repository: false,
+            maintainer_can_modify: None,
         }
     }
 

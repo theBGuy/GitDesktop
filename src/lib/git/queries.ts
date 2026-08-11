@@ -1154,6 +1154,32 @@ export function usePrMergeability(
   };
 }
 
+/** The key `usePrBaseDivergence` reads, so the update-branch mutation can
+ *  invalidate exactly this question. */
+export const prBaseDivergenceKey = (
+  repo: string,
+  number: number,
+  lens: RemoteLens | undefined,
+) => ["repo", repo, "pr-base-divergence", number, lens ?? "origin"] as const;
+
+/** How far a PR's head is ahead of / behind its base — the "Update branch"
+ *  affordance's driver. `retry: false` keeps a repo without the permission (or a
+ *  non-GitHub one) from a retry storm; consumers treat an error as "unknown". */
+export function usePrBaseDivergence(
+  repo: string,
+  number: number | null,
+  lens: RemoteLens | undefined,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: prBaseDivergenceKey(repo, number ?? 0, lens),
+    queryFn: () => api.ghPrBaseDivergence(repo, number ?? 0, lens ?? "origin"),
+    enabled: enabled && number !== null,
+    staleTime: 60_000,
+    retry: false,
+  });
+}
+
 export function usePrDiff(
   repo: string,
   number: number | null,
@@ -3634,6 +3660,9 @@ export function usePush(repo: string) {
       force?: boolean;
       branch?: string;
       remote?: string;
+      /** Destination branch name when it differs from the local one (pushing to a
+       *  fork PR's head); requires `branch` and `remote`, and never tracks. */
+      remoteBranch?: string;
     }) =>
       api.gitPush(
         repo,
@@ -3641,6 +3670,7 @@ export function usePush(repo: string) {
         args.force ?? false,
         args.branch,
         args.remote,
+        args.remoteBranch,
       ),
   );
 }
@@ -4353,6 +4383,33 @@ export function useMergePr(repo: string, lens: RemoteLens) {
       return outcome;
     },
   );
+}
+
+/** Merge (or rebase) the base branch into a PR's head — GitHub's "Update branch".
+ *  Takes the merge mutation's whole-repo invalidation: the head branch moved on the
+ *  remote, so mergeability, checks, PR details and the PR list are all stale at once
+ *  (the `pr-base-divergence` key sits under the same repo prefix). */
+export function usePrUpdateBranch(repo: string) {
+  return useRepoMutation(
+    repo,
+    (args: { number: number; rebase: boolean; lens: RemoteLens }) =>
+      api.ghPrUpdateBranch(repo, args.number, args.rebase, args.lens),
+  );
+}
+
+/** Approve a workflow run GitHub is holding for maintainer approval (a first-time
+ *  contributor's fork PR). Invalidates the Actions subtree like re-run/cancel, plus
+ *  the PR subtree — the PR checks list renders these runs off PR details. */
+export function useApproveWorkflowRun(repo: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { runId: number }) =>
+      api.forgeCiRunApprove(repo, args.runId),
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["repo", repo, "actions"] });
+      queryClient.invalidateQueries({ queryKey: ["repo", repo, "pr"] });
+    },
+  });
 }
 
 /** GitLab pipeline statuses that count as "in flight" — the auto-merge affordance

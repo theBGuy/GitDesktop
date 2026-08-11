@@ -765,12 +765,47 @@ working, it's refused and your resolution is kept rather than overwritten. **Dis
 deletes the hidden worktree and touches nothing else. Leave a resolution unfinished and
 it's offered back the next time you open that pull request, as **Continue resolving**.
 
-Pull requests **from a fork** are read-only here: their head branch lives in another
-repository, so there's nowhere for GitDesktop to push, and hovering either button tells
-you that.
+This flow stops at a pull request **from a fork**: finishing a resolution means pushing
+it to a head branch in the contributor's repository, which the conflict resolver doesn't
+do — hovering either button tells you that. Pushing your own follow-up commits to a fork
+pull request's branch is a separate route that *does* work — see *Maintaining a pull
+request from a fork* below.
 
 **Resolve pull request conflicts** is in the command palette ({{kbd:command-palette}})
 too — no default shortcut, so give it one in **Settings → Keyboard**.
+
+## Behind the base branch
+
+When an open pull request merges cleanly but its base has moved on since, that same
+strip reads **This branch is N commits behind \`main\`**, and **Update branch** brings
+the head up to date on the forge — a merge of the base into it. The caret beside the
+button offers **Update with rebase…** instead, which rewrites the pull request
+branch's history and force-pushes it, so it asks you to confirm first: on a pull
+request from a fork, that branch is the contributor's. Both controls are disabled with
+the reason on hover when you don't have push access, or when a fork's author left
+GitHub's *Allow edits by maintainers* off. This reads GitHub's own comparison of the
+two branches, so it's **GitHub** only, and the line yields to anything more pressing —
+a conflict, or an unfinished resolution. **Update pull request branch** is in the
+command palette ({{kbd:command-palette}}) too — no default shortcut, so give it one in
+**Settings → Keyboard**.
+
+## Maintaining a pull request from a fork
+
+A fork pull request's head branch lives in the contributor's own repository, and two
+things follow from that (**GitHub** only — the fork model here is GitHub's):
+
+- **Approve a workflow run that's waiting on you.** GitHub holds a first-time
+  contributor's Actions runs until a maintainer releases them. The check in the pull
+  request's rollup says it's waiting for approval — and so does the run in the
+  **Actions** tab — and **Approve and run**, confirmed first, starts it. **Approve
+  workflow run** is in the command palette as well, with no default shortcut.
+- **Push follow-up commits to the contributor's branch.** When you've committed on top
+  of a fork pull request's head locally, publishing that branch would put a stray copy
+  in your own repository. GitDesktop recognizes the branch as that pull request's work
+  and offers to push your commits to its **branch on the fork** instead, wiring up the
+  remote it needs — the pull request picks them up. That takes the contributor's
+  *Allow edits by maintainers*; without it the offer says so, and publishing to your
+  own remote anyway is still one click away.
 
 ## Review comments
 
@@ -1305,6 +1340,12 @@ Actions workflow runs (needs \`gh\` + a GitHub remote). **GitLab pipelines** sho
   by text or scope to the current branch.
 - Click a run to see its **jobs and steps** with status and durations.
 - **Re-run all jobs**, **Re-run failed jobs**, or **Cancel** an in-progress run.
+- A run GitHub is **holding for approval** — its gate on a first-time contributor's
+  fork pull request — says so in the run, and **Approve and run** (it confirms first)
+  releases it. The same offer appears above the pull request's checks list,
+  and in the command palette with no default shortcut. Run approval is a GitHub feature,
+  so GitDesktop offers it there only — there's no approval action on GitLab or Bitbucket
+  pipelines.
 - **Run workflow…** manually dispatches a workflow (one with a \`workflow_dispatch\`
   trigger) on a branch you choose, including any **input parameters** it defines.
 - Expand any job for its **logs** — or a failed run's **failed-step logs** — inline, and
