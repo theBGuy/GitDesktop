@@ -344,6 +344,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     };
     // Remote PRs first, so they win ties against a local PR of equal state.
     for (const pr of [...(openPrs.data ?? []), ...(closedPrs.data ?? [])]) {
+      // A fork PR's head lives in the contributor's repository, so it must never
+      // badge a same-named local branch. Both lists are pinned to the origin lens
+      // above, so every cross-repo PR here heads from someone else's fork.
+      if (pr.crossRepository) continue;
       const state: PrState =
         pr.isDraft && pr.state === "OPEN"
           ? "draft"

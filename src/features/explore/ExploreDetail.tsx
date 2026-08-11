@@ -18,6 +18,7 @@ import { Markdown } from "@/components/ui/markdown";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import {
+  useForgeRepos,
   useForkRepoByName,
   useRepoReadme,
   useRepoStarred,
@@ -86,7 +87,15 @@ function ExploreDetailBody({
   onClone: (target: ExploreCloneTarget) => void;
 }) {
   const label = providerLabel(provider);
-  const canFork = features?.implemented.repoForkByName ?? false;
+  // Forking always creates the copy under your own account, so a repo you own
+  // personally is never a valid target — hidden, not disabled, since there's
+  // nothing actionable to explain. Personal ownership, not write access: org
+  // repos stay forkable; an unresolved viewer falls back to the capability gate.
+  const ownRepos = useForgeRepos(provider, true);
+  const viewer = ownRepos.data?.viewer ?? null;
+  const canFork =
+    (features?.implemented.repoForkByName ?? false) &&
+    !(viewer !== null && repo.owner === viewer);
   const canStar = features?.implemented.repoStar ?? false;
   const canReadme = features?.implemented.repoReadme ?? false;
 
