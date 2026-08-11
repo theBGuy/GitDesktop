@@ -273,6 +273,12 @@ struct GlabMr {
     labels: Vec<String>,
     #[serde(default)]
     created_at: String,
+    /// The head/target projects. Differing ids mean a fork MR; `None` on either
+    /// side leaves `cross_repository` false rather than guessing.
+    #[serde(default)]
+    source_project_id: Option<u64>,
+    #[serde(default)]
+    target_project_id: Option<u64>,
 }
 
 fn from_glab_mr(m: GlabMr) -> PrInfo {
@@ -298,9 +304,12 @@ fn from_glab_mr(m: GlabMr) -> PrInfo {
         // over rows already in hand — it has no probe to fail, so never unknown.
         stack: None,
         stack_unknown: false,
-        // The fork marker gates GITHUB stack membership; `glab mr list` carries no
-        // equivalent here, so it stays false rather than guessing.
-        cross_repository: false,
+        // A fork MR lives in a different project; either id missing leaves this
+        // false rather than guessing a fork the resolve flow would then refuse.
+        cross_repository: match (m.source_project_id, m.target_project_id) {
+            (Some(src), Some(tgt)) => src != tgt,
+            _ => false,
+        },
     }
 }
 
@@ -8672,6 +8681,29 @@ mod tests {
         assert_eq!(p.labels.len(), 2);
         // Opened-time maps through (CI status is a separate follow-up fetch).
         assert_eq!(p.created_at, "2026-07-01T10:00:00Z");
+        // The fixture carries no project ids at all — absent must read as same-repo.
+        assert!(!p.cross_repository);
+    }
+
+    /// A fork MR's source project differs from its target; either id absent (an
+    /// older cached shape) must read as same-repo, never as a fork.
+    #[test]
+    fn cross_repository_compares_mr_project_ids() {
+        let mr = |ids: &str| -> PrInfo {
+            let json = format!(
+                r#"{{"iid":7,"web_url":"","title":"t","target_branch":"main",
+                     "source_branch":"feat","state":"opened"{ids}}}"#
+            );
+            from_glab_mr(serde_json::from_str(&json).unwrap())
+        };
+        // Differing projects → a fork MR.
+        assert!(mr(r#","source_project_id":42,"target_project_id":7"#).cross_repository);
+        // Same project → a plain branch MR.
+        assert!(!mr(r#","source_project_id":7,"target_project_id":7"#).cross_repository);
+        // Either side missing or null → false rather than a guess.
+        assert!(!mr(r#","target_project_id":7"#).cross_repository);
+        assert!(!mr(r#","source_project_id":42"#).cross_repository);
+        assert!(!mr(r#","source_project_id":null,"target_project_id":7"#).cross_repository);
     }
 
     #[test]

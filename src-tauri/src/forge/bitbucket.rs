@@ -647,7 +647,12 @@ fn from_bb_pr(p: BbPr) -> PrInfo {
         // and no stack-membership gate for a fork head to inform.
         stack: None,
         stack_unknown: false,
-        cross_repository: false,
+        // A fork PR's source repo differs from its destination; either name absent
+        // (an unfielded payload) leaves this false rather than guessing.
+        cross_repository: {
+            let (src, dst) = (endpoint_repo(&p.source), endpoint_repo(&p.destination));
+            !src.is_empty() && !dst.is_empty() && src != dst
+        },
     }
 }
 
@@ -5342,6 +5347,11 @@ mod tests {
         .unwrap();
         assert_eq!(endpoint_repo(&absent.source), "");
         assert_eq!(endpoint_repo(&absent.destination), "");
+
+        // The list arm reads the same names off the same (unfielded) list payload.
+        assert!(from_bb_pr(fork).cross_repository);
+        assert!(!from_bb_pr(same).cross_repository);
+        assert!(!from_bb_pr(absent).cross_repository);
     }
 
     #[test]

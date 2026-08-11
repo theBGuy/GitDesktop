@@ -346,10 +346,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     for (const pr of [...(openPrs.data ?? []), ...(closedPrs.data ?? [])]) {
       // A cross-repository PR's head lives in a contributor's fork, so it must not
       // badge a same-named local branch. Safe as a blanket skip only because both
-      // lists above are origin-pinned; only GitHub's list arm populates the flag
-      // (GitLab/Bitbucket lists leave it false — their behavior is unchanged). A
-      // deliberately checked-out fork-PR head loses its badge too: accepted
-      // over-hide, since by name alone the two cases are indistinguishable.
+      // lists above are origin-pinned. A deliberately checked-out fork-PR head
+      // loses its badge too: accepted over-hide, since by name alone the two
+      // cases are indistinguishable.
       if (pr.crossRepository) continue;
       const state: PrState =
         pr.isDraft && pr.state === "OPEN"
