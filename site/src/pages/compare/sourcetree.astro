@@ -37,7 +37,7 @@ const groups: Group<Row>[] = [
     rows: [
       {
         label: "Linux",
-        st: { state: "no", note: "Windows & macOS; no Linux plans" },
+        st: { state: "no", note: "Windows & macOS only" },
         gd: { state: "yes", note: "Windows, macOS & Linux" },
       },
       {
@@ -51,7 +51,10 @@ const groups: Group<Row>[] = [
       {
         label: "Forges with full PR / CI / issue support",
         st: { state: "no", note: "accounts add sign-in and clone lists" },
-        gd: { state: "yes", note: "GitHub, GitLab & Bitbucket" },
+        gd: {
+          state: "yes",
+          note: "GitHub, GitLab & Bitbucket — Bitbucket issues via linked Jira",
+        },
       },
       {
         label: "Jira",
@@ -108,7 +111,7 @@ const groups: Group<Row>[] = [
         st: { state: "no" },
         gd: {
           state: "yes",
-          note: "review & merge offline, promote to a forge later",
+          note: "review & merge offline, promote to GitHub or GitLab later",
         },
       },
     ],
@@ -170,7 +173,7 @@ const groups: Group<Row>[] = [
         label: "Linked worktrees",
         st: {
           state: "no",
-          note: "requested since 2015, never added",
+          note: "no worktree UI — open one as a separate repo",
         },
         gd: {
           state: "yes",
@@ -179,7 +182,10 @@ const groups: Group<Row>[] = [
       },
       {
         label: "Submodules",
-        st: { state: "yes", note: "add & manage from the sidebar" },
+        st: {
+          state: "yes",
+          note: "add from the menu, manage from the sidebar",
+        },
         gd: { state: "partial", note: "status & update" },
       },
       {
@@ -243,7 +249,7 @@ const groups: Group<Row>[] = [
 const faqs = [
   {
     q: "Is GitDesktop a good Sourcetree alternative?",
-    a: "For Git work, yes. GitDesktop covers the fundamentals Sourcetree is loved for — staging by file, hunk, or line, interactive rebase, stashes, submodule status — and adds what Sourcetree hands to the browser: creating, reviewing, and merging pull requests, CI runs with logs, and issues, across GitHub, GitLab, and Bitbucket. It's free, open source (Apache-2.0), and needs no vendor account. If you rely on Mercurial or git-flow, Sourcetree keeps those — the table above is honest about it.",
+    a: "For Git work, yes. GitDesktop covers the fundamentals Sourcetree is loved for — staging by file, hunk, or line, interactive rebase, stashes, submodule status — and adds what Sourcetree hands to the browser: creating, reviewing, and merging pull requests, CI runs (with GitHub and GitLab step logs in-app), and issues, across GitHub, GitLab, and Bitbucket — Bitbucket issues through a linked Jira project. It's free, open source (Apache-2.0), and needs no vendor account. If you rely on Mercurial or git-flow, Sourcetree keeps those — the table above is honest about it.",
   },
   {
     q: "Is there a Sourcetree for Linux?",
@@ -255,7 +261,7 @@ const faqs = [
   },
   {
     q: "Is Sourcetree still maintained?",
-    a: "Yes, in a steady-patch sense: both apps shipped point releases through mid-2026 (Windows 3.4.31 in June, Mac 4.2.19 in July). But the two platforms run on separate codebases with a long-standing feature gap between them, Sourcetree doesn't appear on Atlassian's public product roadmap, and the big asks — worktree support requested since 2015, in-app pull requests since 2017 — remain open. It's stable, not evolving.",
+    a: "Yes, in a steady-patch sense: both apps shipped point releases through mid-2026 (Windows 3.4.31 in June, Mac 4.2.19 in July). But the two platforms run on separate codebases with a long-standing feature gap between them, community threads note it's absent from Atlassian's public product roadmap, and the big asks — worktree support requested since 2015, in-app pull requests since 2017 — remain open. It's stable, not evolving.",
   },
 ];
 ---
@@ -286,8 +292,9 @@ const faqs = [
         GitDesktop is a free, open-source Sourcetree alternative that runs on
         <span class="text-ink">Linux as well as Windows and macOS</span>, needs
         no vendor account, and keeps the pull-request loop — create, review,
-        merge, CI, issues — in the app instead of the browser, across
-        <span class="text-ink">GitHub, GitLab, and Bitbucket</span>. AI is
+        merge, CI — in the app instead of the browser, across
+        <span class="text-ink">GitHub, GitLab, and Bitbucket</span>, with
+        issues in-app too (via a linked Jira project on Bitbucket). AI is
         optional: your own models, or hidden entirely.
       </p>
       <p data-reveal style="transition-delay:180ms" class="mt-5 text-sm text-muted">
@@ -328,10 +335,10 @@ const faqs = [
         <li class="flex items-start gap-2.5 leading-relaxed text-body">
           <span class="mt-px select-none text-add" aria-hidden="true">+</span>
           <span>
-            <span class="text-ink">Scripts on the commit context menu.</span>
-            Custom actions bind your scripts to the toolbar and to right-click
-            on a commit. GitDesktop's Tasks tab runs saved and inline scripts
-            in a terminal, but doesn't attach them to commits.
+            <span class="text-ink">Scripts bound into the UI.</span>
+            Custom actions put your scripts on the toolbar and context menus.
+            GitDesktop's Tasks tab runs saved and inline scripts in a
+            terminal, without menu binding.
           </span>
         </li>
         <li class="flex items-start gap-2.5 leading-relaxed text-body">
@@ -348,10 +355,9 @@ const faqs = [
           <span class="mt-px select-none text-add" aria-hidden="true">+</span>
           <span>
             <span class="text-ink">More than a decade of ubiquity.</span> It's
-            been the default answer to "which free Git GUI" since the early
-            2010s. Teams have muscle memory and years of community answers built
-            around it, and free-for-commercial-use has always been part of the
-            deal.
+            been a default answer to "which free Git GUI" for a long time.
+            Teams have muscle memory and years of community answers built
+            around it, and it's free for commercial use.
           </span>
         </li>
       </ul>
@@ -370,7 +376,16 @@ const faqs = [
         each other, the row says so.
       </p>
 
-      <div data-reveal style="transition-delay:80ms" class="mt-10 overflow-x-auto">
+      {/* tabindex: a keyboard user must be able to scroll the min-width table;
+          a focusable scroll region needs the role + name for AT. */}
+      <div
+        data-reveal
+        style="transition-delay:80ms"
+        class="mt-10 overflow-x-auto"
+        tabindex="0"
+        role="region"
+        aria-label="Feature comparison table"
+      >
         <table class="w-full min-w-[640px] border-collapse text-[15px]">
           <thead>
             <tr class="border-b border-line-2 text-left">
@@ -416,7 +431,12 @@ const faqs = [
         Every Sourcetree cell traces to a primary Atlassian source — release
         notes, support documentation, or its public issue tracker — checked on
         the date above. Rows where both clients are simply fine were left out
-        on purpose.
+        on purpose. Also compared:
+        <a
+          href={`${base}compare/github-desktop/`}
+          class="text-mint underline-offset-4 hover:underline"
+          >GitDesktop vs GitHub Desktop</a
+        >.
       </p>
     </div>
   </section>
@@ -429,9 +449,10 @@ const faqs = [
         </h2>
         <p data-reveal class="mt-5 leading-relaxed text-body">
           Sourcetree's "Create Pull Request" opens a browser tab, and reading,
-          reviewing, or merging one was never added — Atlassian's own answer:
-          "we don't currently support listing or viewing PRs in Sourcetree." In
-          GitDesktop the whole loop lives next to your staging and history.
+          reviewing, or merging one was never added — Atlassian's own answer,
+          given in 2018 and never revisited since: "we don't currently support
+          listing or viewing PRs in Sourcetree." In GitDesktop the whole loop
+          lives next to your staging and history.
         </p>
       </div>
       <figure data-reveal style="transition-delay:120ms" class="window mt-10">
