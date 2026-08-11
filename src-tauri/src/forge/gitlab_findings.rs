@@ -81,7 +81,7 @@ pub struct GlFindingsOut {
     pub fallback_ref: Option<String>,
     /// The default branch's NAME — the ref the fallback consults, stated whether
     /// or not it was used; `fallback_ref` answers that separate question. `None`
-    /// only when the project lookup itself failed.
+    /// when the project lookup failed, or the project has no default branch yet.
     pub default_ref: Option<String>,
     pub project_web_url: Option<String>,
     pub sast: GlSecureCategoryOut,
@@ -1428,7 +1428,8 @@ mod tests {
         assert_eq!(value["defaultRef"], json!("main"));
         assert_eq!(value["fallbackRef"], json!(null));
         assert_eq!(value["usedFallback"], json!(false));
-        // Only a failed project lookup leaves the default branch unknown.
+        // A failed project lookup — or a project with no default branch yet —
+        // leaves the default branch unknown.
         let unavailable = uniform_out(
             GlPipelineState::Unavailable,
             None,
