@@ -399,6 +399,7 @@ pub fn run() {
             forge::forge_gl_mr_cancel_auto_merge,
             forge::forge_gl_remove_fork_relationship,
             forge::forge_gl_ci_play_job,
+            forge::forge_gl_pipeline_findings,
             forge::forge_gl_issue_time_stats,
             forge::forge_gl_mr_time_stats,
             forge::forge_gl_issue_set_time_estimate,

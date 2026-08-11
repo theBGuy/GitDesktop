@@ -292,7 +292,7 @@ export const capabilities: Capability[] = [
   {
     group: "CI, tags & releases",
     label:
-      "Findings tab — Dependabot, code & secret scanning alerts, advisories",
+      "Findings tab — GitHub Dependabot/scanning alerts & advisories; GitLab SAST, secrets & code quality",
     highlight: true,
   },
 

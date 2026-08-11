@@ -8,17 +8,26 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
-/** GitHub's advisory severity ladder, plus the bucket a missing or unrecognized
- *  value falls into (repo advisories may carry no severity at all). */
-export type SeverityLevel = "critical" | "high" | "medium" | "low" | "unknown";
+/** GitHub's advisory severity ladder plus GitLab's `Info` rung, and the bucket a
+ *  missing or unrecognized value falls into (repo advisories may carry no
+ *  severity at all). No GitHub surface reports `info`. */
+export type SeverityLevel =
+  | "critical"
+  | "high"
+  | "medium"
+  | "low"
+  | "info"
+  | "unknown";
 
 /** Severity tone, via the app's semantic tokens. Critical and high share the
- *  destructive tone and are told apart by icon weight + label, never by color. */
+ *  destructive tone and are told apart by icon weight + label, never by color;
+ *  everything at or below `low` is muted so the ladder never inverts. */
 export const SEVERITY_TONE: Record<SeverityLevel, string> = {
   critical: "text-destructive",
   high: "text-destructive",
   medium: "text-warning",
   low: "text-muted-foreground",
+  info: "text-muted-foreground",
   unknown: "text-muted-foreground",
 };
 
@@ -29,7 +38,8 @@ export const SEVERITY_RANK: Record<SeverityLevel, number> = {
   high: 1,
   medium: 2,
   low: 3,
-  unknown: 4,
+  info: 4,
+  unknown: 5,
 };
 
 export const SEVERITY_LABEL: Record<SeverityLevel, string> = {
@@ -37,6 +47,7 @@ export const SEVERITY_LABEL: Record<SeverityLevel, string> = {
   high: "High",
   medium: "Medium",
   low: "Low",
+  info: "Info",
   unknown: "Unspecified",
 };
 
@@ -45,6 +56,7 @@ const SEVERITY_ICON: Record<SeverityLevel, typeof WarningIcon> = {
   high: WarningIcon,
   medium: WarningCircleIcon,
   low: InfoIcon,
+  info: InfoIcon,
   unknown: CircleIcon,
 };
 
@@ -61,6 +73,8 @@ export function severityLevel(severity: string | null): SeverityLevel {
       return "medium";
     case "low":
       return "low";
+    case "info":
+      return "info";
     default:
       return "unknown";
   }
@@ -214,6 +228,74 @@ export function ValidityChip({ validity }: { validity: string | null }) {
     <Badge variant="outline" className={cn("gap-1", VALIDITY_TONE[level])}>
       <Icon weight={level === "active" ? "fill" : "regular"} />
       {VALIDITY_LABEL[level]}
+    </Badge>
+  );
+}
+
+// ── Code quality ─────────────────────────────────────────────────────────────
+
+/** A CodeClimate report's severity. Its own ladder, like SARIF: a `blocker` is a
+ *  maintainability call by a linter, not a security severity, so it is never
+ *  relabeled "Critical" — only *ranked* alongside them. */
+export type CqLevel =
+  | "blocker"
+  | "critical"
+  | "major"
+  | "minor"
+  | "info"
+  | "unknown";
+
+const CQ_LABEL: Record<CqLevel, string> = {
+  blocker: "Blocker",
+  critical: "Critical",
+  major: "Major",
+  minor: "Minor",
+  info: "Info",
+  unknown: "Unspecified",
+};
+
+/** The severity rung a CodeClimate level shares for ordering and visual weight.
+ *  Sort and tone only — `CQ_LABEL` is what names the level to the user. */
+const CQ_AS_SEVERITY: Record<CqLevel, SeverityLevel> = {
+  blocker: "critical",
+  critical: "high",
+  major: "medium",
+  minor: "low",
+  info: "info",
+  unknown: "unknown",
+};
+
+export function cqLevel(severity: string | null): CqLevel {
+  switch (severity?.toLowerCase()) {
+    case "blocker":
+      return "blocker";
+    case "critical":
+      return "critical";
+    case "major":
+      return "major";
+    case "minor":
+      return "minor";
+    case "info":
+      return "info";
+    default:
+      return "unknown";
+  }
+}
+
+/** Worst-first rank for a code quality finding, on the shared severity ladder. */
+export const cqRank = (severity: string | null): number =>
+  SEVERITY_RANK[CQ_AS_SEVERITY[cqLevel(severity)]];
+
+/** The chip for a code quality finding, labeled in CodeClimate's own words so
+ *  nothing is promoted to a severity the report never assigned. */
+export function CqChip({ severity }: { severity: string | null }) {
+  const level = cqLevel(severity);
+  const rung = CQ_AS_SEVERITY[level];
+  const Icon = SEVERITY_ICON[rung];
+  return (
+    <Badge variant="outline" className={cn("gap-1", SEVERITY_TONE[rung])}>
+      <Icon weight={rung === "critical" ? "fill" : "regular"} />
+      {CQ_LABEL[level]}
     </Badge>
   );
 }

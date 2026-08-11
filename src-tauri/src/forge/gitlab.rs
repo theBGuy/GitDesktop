@@ -205,7 +205,7 @@ fn gitlab_credential_entries(host: &str, glab_path: &str) -> Vec<String> {
 
 /// URL-encode a project's full path for use as a `glab api` project id. Only `/`
 /// needs escaping for the paths GitLab allows (letters/digits/`_`/`-`/`.`).
-fn encode_project(path: &str) -> String {
+pub(crate) fn encode_project(path: &str) -> String {
     path.replace('/', "%2F")
 }
 
@@ -216,7 +216,7 @@ fn encode_project(path: &str) -> String {
 use crate::forge::encode_query_value;
 
 /// The project's full path (`group/name`) from the repo's origin remote.
-async fn project_path(repo_path: &str) -> AppResult<String> {
+pub(crate) async fn project_path(repo_path: &str) -> AppResult<String> {
     let url =
         crate::git::remote::git_remote_url(repo_path.to_string(), "origin".to_string()).await?;
     crate::forge::remote_path(&url).ok_or_else(|| {
@@ -7861,7 +7861,7 @@ pub async fn starred(owner: &str, name: &str) -> AppResult<bool> {
 /// rate-limit failure that must be surfaced. glab prints the HTTP status to stderr
 /// (`404 Not Found`); some builds echo the JSON body (`{"message":"404 ... Not
 /// Found"}`) too, so scan both. Pure, so it's unit-testable.
-fn glab_output_is_404(stderr: &str, stdout: &str) -> bool {
+pub(crate) fn glab_output_is_404(stderr: &str, stdout: &str) -> bool {
     let hay = format!("{stderr}\n{stdout}").to_ascii_lowercase();
     hay.contains("404") || hay.contains("not found")
 }

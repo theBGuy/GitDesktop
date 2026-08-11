@@ -597,7 +597,9 @@ export function RepositoryView() {
                       ? `c${selectedFinding.number}`
                       : selectedFinding.type === "secretScanning"
                         ? `s${selectedFinding.number}`
-                        : `g${selectedFinding.ghsaId}`
+                        : selectedFinding.type === "glFinding"
+                          ? `gl:${selectedFinding.category}:${selectedFinding.id}`
+                          : `g${selectedFinding.ghsaId}`
                 }
                 repoPath={repoPath}
                 active={repoTab === "findings"}

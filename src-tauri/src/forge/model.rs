@@ -32,10 +32,12 @@ pub struct Capabilities {
     pub ci: bool,
     pub webhooks: bool,
     pub approvals: bool,
-    /// Reading the platform's own vulnerability findings (Dependabot, code
-    /// scanning and secret scanning alerts + repository security advisories).
-    /// GitHub-only — GitLab's equivalent is a paid-tier security dashboard and
-    /// Bitbucket Cloud has no analogue.
+    /// Reading the repo's vulnerability findings — from each platform's own
+    /// source: GitHub's alert APIs (Dependabot, code scanning, secret scanning +
+    /// repository advisories), and on GitLab the SAST / secret-detection /
+    /// code-quality report artifacts a CI pipeline publishes (readable on every
+    /// tier, unlike GitLab's own Ultimate-gated dashboard). Bitbucket Cloud has
+    /// no analogue.
     pub security_findings: bool,
 }
 
@@ -74,7 +76,7 @@ impl Capabilities {
                 ci: true,
                 webhooks: true,
                 approvals: true,
-                security_findings: false,
+                security_findings: true,
             },
             // Bitbucket Cloud: no labels, milestones, stars, reactions, or
             // discussions; PRs/CI(pipelines)/webhooks/approvals do work. Draft PRs
@@ -742,8 +744,8 @@ mod tests {
         let c = Capabilities::for_provider(Provider::GitLab);
         assert!(!c.discussions);
         assert!(c.labels && c.milestones && c.stars && c.reactions && c.approvals);
-        // Dependabot alerts / repo advisories are a GitHub surface.
-        assert!(!c.security_findings);
+        // Findings come from the pipeline's report artifacts, not an alert API.
+        assert!(c.security_findings);
     }
 
     #[test]

@@ -461,6 +461,26 @@ settings** (with repo-admin access) goes straight to Repository settings →
 Security to turn scanning on. Repository advisories have no such switch;
 they're only published on public repositories.
 
+On a **GitLab** repo the same tab reads the newest completed **pipeline**
+for your checked-out branch — falling back to the default branch, and
+saying so — and lists its **SAST**, **secret detection**, and **code
+quality** findings straight out of the pipeline's report artifacts. Those
+analyzers run on every GitLab tier, Free included; it's GitLab's own
+vulnerability report that's Ultimate-only, so this is often the only place
+you'll see findings your pipelines already produce. A provenance strip
+names the pipeline, branch, and commit the findings came from, with **View
+pipeline**; a finding's detail adds its severity, `file:line`, the scanner
+that raised it, its identifiers as links, the description, and **View file
+on GitLab** — a permalink to that line at the scanned commit. Detected
+secret *values* never leave the report: the raw extract is dropped before a
+finding reaches the app. Each section explains itself instead of looking
+clean — scanning not set up (with **Open scanning setup on GitLab**), a
+report GitLab won't serve (add the `gl-*-report.json` to that job's
+`artifacts:paths`), expired artifacts, nothing finished yet, an access
+problem, or a check that didn't complete — so an empty section only reads
+as clean once a parsed report proves it, and a partly unreadable pipeline
+says how much was lost.
+
 ### Insights
 
 A repository-graphs tab (Ctrl/Cmd-9): commit activity, code frequency

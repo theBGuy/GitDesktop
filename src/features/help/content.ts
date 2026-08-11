@@ -90,8 +90,9 @@ and **Insights**. The More button shows the active secondary tab's name, so the
 rail always says where you are.
 
 Switch tabs with the number keys ({{kbd:tab-changes}} through {{kbd:tab-insights}}; see
-*Keyboard & navigation*). Issues, Discussions, Actions, Findings, and Tags need \`gh\` and a
-GitHub remote{{ai}}; the **Agent** tab appears only when AI features are enabled{{/ai}}.
+*Keyboard & navigation*). Issues, Discussions, Actions, and Tags need \`gh\` and a
+GitHub remote; **Findings** works on a GitHub remote with \`gh\` or a GitLab one with
+\`glab\`{{ai}}; the **Agent** tab appears only when AI features are enabled{{/ai}}.
 
 > Tip: press {{kbd:command-palette}} anytime for the command palette — the fastest way
 > to find a feature when you don't know where it lives — or {{kbd:show-help}} to reopen
@@ -1337,9 +1338,11 @@ to jump to that run. You can also get an OS **notification** when a run finishes
     body: `# Findings
 
 The **Findings** tab (in the More ▾ menu; palette-only by default — bind a key in
-**Settings → Keyboard**) collects what GitHub's security scanning has turned up for the repo, so you
-can read it without opening the browser. It covers **GitHub** repositories; on a GitLab
-or Bitbucket repo the tab says so instead.
+**Settings → Keyboard**) collects what your repository's security scanning has turned up, so you
+can read it without opening the browser. It covers **GitHub** and **GitLab**
+repositories; on a Bitbucket repo the tab says so instead.
+
+## On a GitHub repository
 
 - **Dependabot alerts** — every open alert, grouped by the vulnerable package. Each one
   shows its **severity**, the **affected version range**, the **first patched version**,
@@ -1369,6 +1372,44 @@ instead of guessing, and keeps the settings link for either case. Advisories hav
 such switch — they're only published on public repositories, so their card says just
 that. When your GitHub access can't read a category, you see what GitHub said about it;
 when the check couldn't complete at all, you get a **Retry**.
+
+## On a GitLab repository
+
+GitLab keeps findings in a **pipeline's report artifacts** rather than in a
+repository-wide alert list, so the tab reads the newest **completed pipeline** for your
+checked-out branch — falling back to the **default branch** when your branch has no
+pipelines yet, and saying so — and splits it into **SAST**, **Secret detection**, and
+**Code quality**. A line above the list names the pipeline, branch, and commit the
+findings came from, with **View pipeline** to open it on GitLab.
+
+Those analyzers run on **every GitLab tier**, Free included; it's GitLab's own
+vulnerability report that's Ultimate-only, so this is often the only place you'll see
+findings your pipelines already produce.
+
+Move through the list with **↑ / ↓** and select a row for its detail: its **severity**,
+the **file and line**, the **scanner** that raised it, its **identifiers** (CVE, CWE,
+rule keys) as links where the report gives one, and the description. **View file on
+GitLab** opens that line in the file at the exact commit the pipeline scanned. Detected
+secret *values* never leave the report — the raw extract is dropped before a finding
+reaches the app.
+
+Each section explains itself rather than looking clean; when there's no pipeline to
+read at all, one card stands in for all three:
+
+- **Scanning isn't set up** — the project's CI has run no scanning, or this pipeline
+  published no report of that kind. **Open scanning setup on GitLab** goes to the
+  project's Security configuration page.
+- **The report isn't downloadable** — the job lists it but GitLab returns a 404 for the
+  file; add the \`gl-*-report.json\` to that job's \`artifacts:paths\` to expose it.
+- **The artifacts expired** — findings come back with the next pipeline run.
+- **Nothing has finished yet** — the branch has pipelines but none has completed, or
+  that job is still running in this one.
+- **Your GitLab sign-in can't read** the project's pipelines or job artifacts.
+- **The check didn't complete** — you get a **Retry**.
+
+An empty section only reads as clean once a report was actually parsed, and when part
+of a pipeline's output couldn't be read, a quiet line above the rows says so — a short
+list is never passed off as a whole one.
 
 The tab fetches when you open it — use the refresh button for the current state.`,
   },

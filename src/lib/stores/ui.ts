@@ -72,7 +72,15 @@ export type SelectedFinding =
   | { type: "alert"; number: number }
   | { type: "codeScanning"; number: number }
   | { type: "secretScanning"; number: number }
-  | { type: "advisory"; ghsaId: string };
+  | { type: "advisory"; ghsaId: string }
+  /** GitLab pipeline-report findings. `id` is the secure finding's own id, or —
+   *  for code quality — `codeQualityFindingId` (a fingerprint can repeat or be
+   *  missing, so the check name, path and line join the identity). */
+  | {
+      type: "glFinding";
+      category: "sast" | "secretDetection" | "codeQuality";
+      id: string;
+    };
 
 /** How many rows each Findings category has asked for. In the store (not panel
  *  state) so the list and the detail pane build identical query keys and share
@@ -82,6 +90,8 @@ export interface FindingsLimits {
   codeScanning: number;
   secretScanning: number;
   advisories: number;
+  /** Shared by GitLab's three categories — they come from one pipeline query. */
+  gitlab: number;
 }
 
 /** One page per category — matches the shared LoadMoreRow PAGE_SIZE. */
@@ -90,6 +100,7 @@ const DEFAULT_FINDINGS_LIMITS: FindingsLimits = {
   codeScanning: 100,
   secretScanning: 100,
   advisories: 100,
+  gitlab: 100,
 };
 
 export interface SelectedFile {

@@ -22,9 +22,19 @@ import {
   useRepoAdvisories,
   useSecretScanningAlerts,
 } from "@/lib/github/security-findings";
+import type {
+  GlCodeQualityFindingOut,
+  GlFindingsOut,
+  GlSecureFindingOut,
+} from "@/lib/gitlab/security-findings";
+import {
+  codeQualityFindingId,
+  useGitLabFindings,
+} from "@/lib/gitlab/security-findings";
 import { useUiStore } from "@/lib/stores/ui";
 import {
   CodeScanningChip,
+  CqChip,
   SeverityChip,
   ValidityChip,
   validityLabel,
@@ -43,6 +53,7 @@ function DetailShell({
   title,
   chip,
   htmlUrl,
+  linkLabel = "View on GitHub",
   meta,
   children,
 }: {
@@ -51,6 +62,8 @@ function DetailShell({
    *  category names its state in its own ladder's words. */
   chip: ReactNode;
   htmlUrl: string;
+  /** What the link-out opens, when it isn't the finding's page on GitHub. */
+  linkLabel?: string;
   meta: ReactNode;
   children: ReactNode;
 }) {
@@ -69,7 +82,7 @@ function DetailShell({
               onClick={() => openUrl(htmlUrl)}
             >
               <ArrowSquareOutIcon data-icon="inline-start" />
-              View on GitHub
+              {linkLabel}
             </Button>
           ) : null}
         </div>
@@ -419,6 +432,151 @@ function AdvisoryDetail({ advisory }: { advisory: RepoAdvisoryOut }) {
   );
 }
 
+/** The URL only when it's one the system browser should open. Identifier links
+ *  come from third-party report files, where a `file://` or `javascript:` value
+ *  has no meaning here. */
+function httpUrl(url: string | null): string | null {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:"
+      ? url
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A permalink to the finding's line at the pipeline's commit, or `""` when any
+ *  piece is missing. GitLab's own vulnerability pages are an Ultimate feature and
+ *  404 for exactly the Free-tier projects this reads reports for, so the blob
+ *  view is the only link that resolves. */
+function glBlobUrl(
+  data: GlFindingsOut,
+  path: string,
+  line: number | null,
+): string {
+  if (!data.projectWebUrl || !data.pipeline || !path) return "";
+  // Each segment encoded, `/` separators kept, so an odd path can't rewrite the
+  // URL it lands in.
+  const encoded = path.split("/").map(encodeURIComponent).join("/");
+  const anchor = line === null ? "" : `#L${line}`;
+  return `${data.projectWebUrl}/-/blob/${data.pipeline.sha}/${encoded}${anchor}`;
+}
+
+/** The pipeline these findings were read from, one click from the detail. */
+function GlPipelineRow({ data }: { data: GlFindingsOut }) {
+  const pipeline = data.pipeline;
+  if (!pipeline?.webUrl) return null;
+  return (
+    <Row label="Pipeline">
+      <button
+        type="button"
+        onClick={() => openUrl(pipeline.webUrl)}
+        className="inline-flex cursor-pointer items-center gap-1 hover:underline"
+      >
+        #{pipeline.iid}
+        <ArrowSquareOutIcon className="size-3" />
+      </button>
+    </Row>
+  );
+}
+
+function GlSecureDetail({
+  finding,
+  data,
+  fallbackTitle,
+}: {
+  finding: GlSecureFindingOut;
+  data: GlFindingsOut;
+  /** The category's own name for a finding whose report gave none. */
+  fallbackTitle: string;
+}) {
+  return (
+    <DetailShell
+      title={finding.name || fallbackTitle}
+      chip={<SeverityChip severity={finding.severity} />}
+      htmlUrl={glBlobUrl(data, finding.file, finding.startLine)}
+      linkLabel="View file on GitLab"
+      meta={
+        <>
+          <Row label="File">
+            <span className="font-mono">
+              {locationText(finding.file, finding.startLine)}
+            </span>
+          </Row>
+          {finding.scannerName ? (
+            <Row label="Scanner">{finding.scannerName}</Row>
+          ) : null}
+          {finding.identifiers.length > 0 ? (
+            <Row label="Identifiers">
+              <span className="flex flex-wrap gap-1">
+                {finding.identifiers.map((identifier, i) => {
+                  const label =
+                    identifier.name || identifier.value || identifier.type;
+                  const url = httpUrl(identifier.url);
+                  const key = `${identifier.type}-${identifier.value}-${i}`;
+                  return url ? (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => openUrl(url)}
+                      className="inline-flex cursor-pointer items-center gap-1 rounded border px-1.5 py-0.5 hover:bg-muted/40"
+                    >
+                      {label}
+                      <ArrowSquareOutIcon className="size-3 text-muted-foreground" />
+                    </button>
+                  ) : (
+                    <Badge key={key} variant="outline" className="font-normal">
+                      {label}
+                    </Badge>
+                  );
+                })}
+              </span>
+            </Row>
+          ) : null}
+          <GlPipelineRow data={data} />
+        </>
+      }
+    >
+      {/* Scanner descriptions carry fenced code and links, so they render as
+          markdown rather than as preformatted text. */}
+      {finding.description ? <Markdown>{finding.description}</Markdown> : null}
+    </DetailShell>
+  );
+}
+
+function GlQualityDetail({
+  finding,
+  data,
+}: {
+  finding: GlCodeQualityFindingOut;
+  data: GlFindingsOut;
+}) {
+  return (
+    <DetailShell
+      title={finding.checkName || "Unidentified check"}
+      chip={<CqChip severity={finding.severity} />}
+      htmlUrl={glBlobUrl(data, finding.path, finding.line)}
+      linkLabel="View file on GitLab"
+      meta={
+        <>
+          {/* No Severity row — the chip above already names it in the
+              CodeClimate ladder's own words. */}
+          <Row label="Path">
+            <span className="font-mono">
+              {locationText(finding.path, finding.line)}
+            </span>
+          </Row>
+          <GlPipelineRow data={data} />
+        </>
+      }
+    >
+      {finding.description ? <Markdown>{finding.description}</Markdown> : null}
+    </DetailShell>
+  );
+}
+
 export function FindingDetailView({
   repoPath,
   active,
@@ -431,38 +589,49 @@ export function FindingDetailView({
   const forge = useForgeStatus(repoPath);
   const enabled =
     forgeReady(forge.data) && forgeSupports(forge.data, "securityFindings");
-  // Same hooks + same store limits as the panel, so these are cache hits rather
-  // than a second fetch.
-  const alerts = useDependabotAlerts(repoPath, enabled, active, limits.alerts);
+  // Same hooks, same provider gate and same store limits as the panel, so these
+  // are cache hits rather than a second fetch — and the other provider's
+  // commands are never invoked.
+  const provider = forge.data?.provider;
+  const onGitHub = enabled && provider === "github";
+  const alerts = useDependabotAlerts(repoPath, onGitHub, active, limits.alerts);
   const codeScanning = useCodeScanningAlerts(
     repoPath,
-    enabled,
+    onGitHub,
     active,
     limits.codeScanning,
   );
   const secrets = useSecretScanningAlerts(
     repoPath,
-    enabled,
+    onGitHub,
     active,
     limits.secretScanning,
   );
   const advisories = useRepoAdvisories(
     repoPath,
-    enabled,
+    onGitHub,
     active,
     limits.advisories,
+  );
+  const gl = useGitLabFindings(
+    repoPath,
+    enabled && provider === "gitlab",
+    active,
+    limits.gitlab,
   );
 
   // Only the selected finding's own category decides the pending/error state —
   // a sibling category failing must not blank a finding that loaded fine.
   const query =
-    selectedFinding?.type === "advisory"
-      ? advisories
-      : selectedFinding?.type === "codeScanning"
-        ? codeScanning
-        : selectedFinding?.type === "secretScanning"
-          ? secrets
-          : alerts;
+    selectedFinding?.type === "glFinding"
+      ? gl
+      : selectedFinding?.type === "advisory"
+        ? advisories
+        : selectedFinding?.type === "codeScanning"
+          ? codeScanning
+          : selectedFinding?.type === "secretScanning"
+            ? secrets
+            : alerts;
 
   // Gated on `enabled`: a disabled query stays `isPending` forever, so an
   // ungated skeleton would spin here if the repo lost the capability mid-session.
@@ -504,6 +673,32 @@ export function FindingDetailView({
       (a) => a.ghsaId === selectedFinding.ghsaId,
     );
     if (advisory) return <AdvisoryDetail advisory={advisory} />;
+  } else if (selectedFinding?.type === "glFinding" && gl.data) {
+    const data = gl.data;
+    if (selectedFinding.category === "codeQuality") {
+      const finding = data.codeQuality.findings.find(
+        (f) => codeQualityFindingId(f) === selectedFinding.id,
+      );
+      if (finding) return <GlQualityDetail finding={finding} data={data} />;
+    } else {
+      const category =
+        selectedFinding.category === "sast" ? data.sast : data.secretDetection;
+      const finding = category.findings.find(
+        (f) => f.id === selectedFinding.id,
+      );
+      if (finding)
+        return (
+          <GlSecureDetail
+            finding={finding}
+            data={data}
+            fallbackTitle={
+              selectedFinding.category === "sast"
+                ? "Unidentified rule"
+                : "Unknown secret type"
+            }
+          />
+        );
+    }
   }
 
   return (

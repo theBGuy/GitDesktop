@@ -10,6 +10,7 @@
 pub mod bitbucket;
 pub mod github;
 pub mod gitlab;
+mod gitlab_findings;
 pub mod glab;
 pub mod http;
 pub mod jira;
@@ -3000,6 +3001,20 @@ pub async fn forge_gl_mr_cancel_auto_merge(repo_path: String, number: u64) -> Ap
 #[tauri::command]
 pub async fn forge_gl_remove_fork_relationship(repo_path: String) -> AppResult<()> {
     gl_only!(repo_path, gitlab::remove_fork_relationship(&repo_path))
+}
+
+/// The Findings tab's GitLab arm: security and quality reports read out of the
+/// newest completed pipeline's job artifacts. GitLab-only — GitHub's findings come
+/// from its own alert APIs (`github::security_findings`), not from CI artifacts.
+#[tauri::command]
+pub async fn forge_gl_pipeline_findings(
+    repo_path: String,
+    limit: Option<u32>,
+) -> AppResult<gitlab_findings::GlFindingsOut> {
+    gl_only!(
+        repo_path,
+        gitlab_findings::pipeline_findings(&repo_path, limit)
+    )
 }
 
 /// Play (start) a manual CI job. GitLab-only — GitHub Actions has no per-job
