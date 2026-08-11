@@ -140,8 +140,8 @@ contributors, language makeup, activity, traffic), open **Insights** from the me
 **Insights** tab.
 
 The app remembers each window's **position and size** across launches, including which
-monitor it was on — saved as you arrange the window, so an unexpected shutdown doesn't
-lose your layout. See **Settings → About** for the current coordinates.`,
+monitor it was on. Your layout is saved as you arrange the window, so an unexpected
+shutdown doesn't lose it. See **Settings → About** for the current coordinates.`,
   },
   {
     id: "explore",

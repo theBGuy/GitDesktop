@@ -46,7 +46,7 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
             "quit" => {
                 // Final flush before exiting — the window may have moved since the
                 // last debounced save.
-                save_geometry(app);
+                save_geometry_before_exit(app);
                 app.exit(0);
             }
             _ => {}
@@ -105,7 +105,9 @@ static GEOMETRY_SAVE_EPOCH: AtomicU64 = AtomicU64::new(0);
 /// that block on that thread, whose own move/resize handlers take the same lock —
 /// off-thread the two deadlock mid-drag. Skipped while minimized, where the plugin
 /// omits position/size but still records `maximized: false`, clobbering a maximized
-/// layout. (The plugin's own save on `RunEvent::Exit` stays unguarded upstream.)
+/// layout. Paths that end in `app.exit` use `save_geometry_before_exit` instead,
+/// which restores the window first so the plugin's own unguarded save on
+/// `RunEvent::Exit` reads the real state rather than an iconic one.
 fn save_geometry(app: &AppHandle) {
     let Some(main) = app.get_webview_window("main") else {
         return;
@@ -114,6 +116,20 @@ fn save_geometry(app: &AppHandle) {
         return;
     }
     let _ = app.save_window_state(WINDOW_STATE_FLAGS);
+}
+
+/// Geometry flush for the paths that quit: the plugin saves again — unguarded —
+/// on `RunEvent::Exit`, and a minimize clears the runtime's cached maximized
+/// flag, so an iconic window has to be restored first or that save records
+/// `maximized: false`. Restored only when actually iconic, since unminimizing
+/// also shows the window and a tray-resident one must stay hidden.
+fn save_geometry_before_exit(app: &AppHandle) {
+    if let Some(main) = app.get_webview_window("main") {
+        if main.is_minimized().unwrap_or(false) {
+            let _ = main.unminimize();
+        }
+    }
+    save_geometry(app);
 }
 
 /// Move/resize events schedule a debounced geometry save. On window close,
@@ -126,14 +142,15 @@ pub fn handle_window_event(window: &Window, event: &WindowEvent) {
         WindowEvent::CloseRequested { api, .. } => {
             // Final flush for movement the debounce below hasn't caught yet — a
             // close-to-tray hide isn't a real close, so nothing else captures it.
-            save_geometry(window.app_handle());
             if window.state::<AppState>().close_to_tray() {
+                save_geometry(window.app_handle());
                 let _ = window.hide();
                 api.prevent_close();
             } else {
                 // No tray-resident lifetime wanted — quit explicitly rather than
                 // rely on last-window-closed auto-exit (a tray icon can keep the
                 // event loop alive).
+                save_geometry_before_exit(window.app_handle());
                 window.app_handle().exit(0);
             }
         }
@@ -141,8 +158,7 @@ pub fn handle_window_event(window: &Window, event: &WindowEvent) {
             // Debounce behind a per-event timer task, gated on an epoch counter so
             // only the newest one saves — race-free where a single-flight debouncer
             // has a lost-wakeup window, and tokio timers are cheap enough to spend
-            // one task per event. The task only waits: the save itself hops back to
-            // the event-loop thread, which `save_geometry` requires.
+            // one task per event.
             let epoch = GEOMETRY_SAVE_EPOCH.fetch_add(1, Ordering::Relaxed) + 1;
             let app = window.app_handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -151,7 +167,11 @@ pub fn handle_window_event(window: &Window, event: &WindowEvent) {
                     return;
                 }
                 let handle = app.clone();
-                let _ = app.run_on_main_thread(move || save_geometry(&handle));
+                let _ = app.run_on_main_thread(move || {
+                    if GEOMETRY_SAVE_EPOCH.load(Ordering::Relaxed) == epoch {
+                        save_geometry(&handle);
+                    }
+                });
             });
         }
         _ => {}
