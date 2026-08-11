@@ -75,6 +75,9 @@ export function usePrAuditByBranch(
     };
     // Remote PRs first, so they win ties against a local PR of equal state.
     for (const pr of [...(openPrs.data ?? []), ...(closedPrs.data ?? [])]) {
+      // Fork PRs never attach by name — same guard and rationale as
+      // BranchSwitcher's prByBranch (origin-pinned lists; GitHub-only flag).
+      if (pr.crossRepository) continue;
       const state: PrAuditState =
         pr.isDraft && pr.state === "OPEN"
           ? "draft"

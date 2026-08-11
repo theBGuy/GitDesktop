@@ -185,7 +185,8 @@ From here:
 
 - **Clone** — pick a folder to clone into; GitDesktop opens the repo once it finishes.
 - **Fork** — create a fork under your account (on **GitHub, GitLab, and Bitbucket**). The
-  fork is created in the background, and then you're offered to **clone** it.
+  fork is created in the background, and then you're offered to **clone** it. It doesn't
+  appear on repositories you own personally — a fork always lands under your own account.
 - **Star / Unstar** — on **GitHub and GitLab** only. Bitbucket has no stars, so this action
   doesn't appear on Bitbucket results.
 - **View on GitHub / GitLab / Bitbucket** — open the repository on its host in your browser.
