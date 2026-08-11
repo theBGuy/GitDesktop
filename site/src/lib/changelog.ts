@@ -2,15 +2,14 @@
 // resolve import.meta.url against the bundled prerender chunk, not this file.
 import raw from "../../../CHANGELOG.md?raw";
 
-// Build-time parse of the repo-root CHANGELOG.md into per-release sections.
-// The grammar is the project's own fragment contract (changelog.d/README.md):
-// `## [x.y.z] - date` sections, `### Added|Changed|Fixed` groups, `- ` bullets
-// wrapped with 2-space continuations, inline bold/italic/code and http(s)
-// links; any other [label](target) collapses to its bare label (the historical
-// relative links point into the gitignored docs/ tree, dead on every surface).
-// Parsing is fail-open — an unrecognized line renders as plain prose instead of
-// throwing, because a throw here would take down the production Pages build on
-// a release-day push that never runs the PR site gate.
+// Build-time parse of the repo-root CHANGELOG.md, per the fragment contract
+// (changelog.d/README.md): `## [x.y.z] - date`, `### ` categories, `- `
+// bullets with 2-space continuations (blank lines don't close a bullet);
+// inline bold/italic/code + http(s)
+// links, any other [label](target) collapsed to its label (the relative
+// links target the gitignored docs/ tree). Fail-open — unknown lines render
+// as prose, never throw: a throw would kill the production Pages build on a
+// release-day push, which no PR site gate fronts.
 
 export interface ReleaseCategory {
   name: string;
@@ -92,12 +91,18 @@ export function getChangelog(): Release[] {
   let bullet: string | null = null;
   let para: string | null = null;
 
+  const flushPara = () => {
+    if (para !== null && release) release.intro.push(renderInline(para));
+    para = null;
+  };
+  // A blank line closes only a paragraph: the fragment validator accepts blank
+  // lines inside a bullet body, so an indented continuation may follow one and
+  // must rejoin its still-open bullet.
   const flush = () => {
     if (bullet !== null && category)
       category.bullets.push(renderInline(bullet));
-    if (para !== null && release) release.intro.push(renderInline(para));
     bullet = null;
-    para = null;
+    flushPara();
   };
 
   for (const line of lines) {
@@ -145,7 +150,7 @@ export function getChangelog(): Release[] {
       continue;
     }
     if (line.trim() === "") {
-      flush();
+      flushPara();
       continue;
     }
     if (/^\s/.test(line) && bullet !== null) {

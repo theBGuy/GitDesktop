@@ -496,7 +496,9 @@ kbd {
 /* Underlined, not mint-only: .legal underlines on :hover alone, which is
    meaning by color alone. Survivable across two legal pages, not at blog link
    density. */
-.prose a {
+.prose a,
+.release .notes a,
+.release .intro a {
   color: var(--color-mint);
   text-decoration: underline;
   text-decoration-color: oklch(0.82 0.12 178 / 0.45);
@@ -504,15 +506,21 @@ kbd {
   text-underline-offset: 3px;
 }
 .prose a:hover,
-.prose a:focus-visible {
+.prose a:focus-visible,
+.release .notes a:hover,
+.release .notes a:focus-visible,
+.release .intro a:hover,
+.release .intro a:focus-visible {
   text-decoration-color: var(--color-mint);
 }
 
-.prose strong {
+.prose strong,
+.release strong {
   color: var(--color-ink);
   font-weight: 600;
 }
-.prose em {
+.prose em,
+.release em {
   font-style: italic;
 }
 
@@ -530,7 +538,8 @@ kbd {
 .prose li + li {
   margin-top: 0.4rem;
 }
-.prose li::marker {
+.prose li::marker,
+.release .notes li::marker {
   color: var(--color-faint);
 }
 
@@ -541,12 +550,30 @@ kbd {
   max-width: var(--measure);
 }
 
-.prose :not(pre) > code {
+.prose :not(pre) > code,
+.release code {
   background: var(--color-surface-2);
   padding: 0.12em 0.38em;
   border-radius: 4px;
   font-size: 0.88em;
   color: var(--color-ink);
+}
+
+/* Changelog page (/changelog/): .release/.notes markup is the set:html output
+   of lib/changelog.ts, sharing .prose's link/strong/em/code/marker rules
+   above. Never a bare `.release a` — these rules are unlayered, so it would
+   outrank the article-header links' utility classes. */
+.release .notes {
+  list-style: disc;
+}
+.release .notes li {
+  max-width: 76ch;
+  line-height: 1.75;
+  color: var(--color-body);
+}
+[data-nav-version][aria-current="location"] {
+  color: var(--color-ink);
+  font-weight: 500;
 }
 
 /* html sets `overflow-x: clip`, which — unlike hidden — creates NO scroll

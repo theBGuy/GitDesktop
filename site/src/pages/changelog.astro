@@ -1,11 +1,10 @@
 ---
-// The full CHANGELOG.md, rendered on-site: one anchored section per release
-// with the same Added/Changed/Fixed groups that ship in the app's updater
-// notes. Freshness rides the existing pipeline — site-rebuild.yml pings the
-// Pages deploy hook on every release publish, so this page re-bakes on
-// release day.
+// Renders the repo-root CHANGELOG.md at build time — the same notes the
+// in-app updater ships. Fresh on release day with no extra machinery:
+// site-rebuild.yml pings the Pages deploy hook on every release publish.
 import SiteLayout from "../layouts/SiteLayout.astro";
 import { getChangelog } from "../lib/changelog";
+import { formatReleaseDate } from "../lib/release";
 
 const base = import.meta.env.BASE_URL;
 
@@ -16,13 +15,7 @@ const latest = releases.at(0);
 const oldest = releases.at(-1);
 
 const utc = (iso: string) => new Date(`${iso}T00:00:00Z`);
-const fmtLong = (iso: string) =>
-  utc(iso).toLocaleDateString("en-US", {
-    month: "long",
-    day: "numeric",
-    year: "numeric",
-    timeZone: "UTC",
-  });
+const fmtLong = (iso: string) => formatReleaseDate(utc(iso));
 const fmtShort = (iso: string) =>
   utc(iso).toLocaleDateString("en-US", {
     month: "short",
@@ -91,7 +84,10 @@ const glyphs: Record<string, string> = { Added: "+", Changed: "~", Fixed: "✓" 
     <div
       class="mx-auto max-w-6xl px-5 py-12 md:py-16 lg:grid lg:grid-cols-[200px_minmax(0,1fr)] lg:items-start lg:gap-14"
     >
-      <nav aria-label="Jump to a release" class="sticky top-20 hidden lg:block">
+      <nav
+        aria-label="Jump to a release"
+        class="sticky top-20 hidden max-h-[calc(100vh-6rem)] overflow-y-auto overscroll-contain lg:block"
+      >
         <ol class="space-y-0.5 border-l border-line pl-4 text-sm">
           {
             releases.map((r) => (
@@ -172,14 +168,16 @@ const glyphs: Record<string, string> = { Added: "+", Changed: "~", Fixed: "✓" 
 
               {r.categories.map((c) => (
                 <section class="mt-8">
-                  <h3 class="flex items-baseline gap-2 text-base font-semibold text-ink">
-                    {glyphs[c.name] && (
-                      <span class="text-mint" aria-hidden="true">
-                        {glyphs[c.name]}
-                      </span>
-                    )}
-                    {c.name}
-                  </h3>
+                  {c.name && (
+                    <h3 class="flex items-baseline gap-2 text-base font-semibold text-ink">
+                      {glyphs[c.name] && (
+                        <span class="text-mint" aria-hidden="true">
+                          {glyphs[c.name]}
+                        </span>
+                      )}
+                      {c.name}
+                    </h3>
+                  )}
                   <ul class="notes mt-4 space-y-3 pl-5">
                     {c.bullets.map((b) => (
                       <li set:html={b} />
@@ -224,53 +222,3 @@ const glyphs: Record<string, string> = { Added: "+", Changed: "~", Fixed: "✓" 
     })();
   </script>
 </SiteLayout>
-
-{/* Rendered via set:html, so Astro's scoped styles can't reach the content —
-    global, namespaced under .release/.notes. */}
-<style is:global>
-  .notes {
-    list-style: disc;
-  }
-  .notes li {
-    max-width: 76ch;
-    line-height: 1.75;
-    color: var(--color-body);
-  }
-  .notes li::marker {
-    color: var(--color-faint);
-  }
-  .release strong {
-    color: var(--color-ink);
-    font-weight: 600;
-  }
-  .release em {
-    font-style: italic;
-  }
-  .release code {
-    background: var(--color-surface-2);
-    padding: 0.12em 0.38em;
-    border-radius: 4px;
-    font-size: 0.88em;
-    color: var(--color-ink);
-  }
-  /* .intro too, but never bare `.release a`: this block is unlayered global
-     CSS, so it would outrank the header links' utility classes. */
-  .notes a,
-  .release .intro a {
-    color: var(--color-mint);
-    text-decoration: underline;
-    text-decoration-color: oklch(0.82 0.12 178 / 0.45);
-    text-decoration-thickness: 1px;
-    text-underline-offset: 3px;
-  }
-  .notes a:hover,
-  .notes a:focus-visible,
-  .release .intro a:hover,
-  .release .intro a:focus-visible {
-    text-decoration-color: var(--color-mint);
-  }
-  [data-nav-version][aria-current="location"] {
-    color: var(--color-ink);
-    font-weight: 500;
-  }
-</style>
