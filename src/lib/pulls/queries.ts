@@ -5,6 +5,7 @@ import {
 } from "@/lib/ai/external-context";
 import { resolveReviewerNotesContext } from "@/lib/ai/notes-context";
 import { useForgeStatus } from "@/lib/git/queries";
+import type { RemoteLens } from "@/lib/git/types";
 import {
   createLocalPr,
   deleteLocalPr,
@@ -62,20 +63,30 @@ export function useDeleteLocalPr(repo: string) {
 
 type PrKind = "remote" | "local";
 
-const reviewHistoryKey = (repo: string, kind: PrKind, ref: string) =>
-  ["review-history", repo, kind, ref] as const;
+const reviewHistoryKey = (
+  repo: string,
+  lens: RemoteLens,
+  kind: PrKind,
+  ref: string,
+) => ["review-history", repo, lens, kind, ref] as const;
 
 /** Persisted AI reviews for a PR (both modes), newest first. Read-only — never
  *  creates a record, so a never-reviewed PR's first run stays unchanged. */
-export function useReviewHistory(repo: string, kind: PrKind, ref: string) {
+export function useReviewHistory(
+  repo: string,
+  lens: RemoteLens,
+  kind: PrKind,
+  ref: string,
+) {
   return useQuery({
-    queryKey: reviewHistoryKey(repo, kind, ref),
-    queryFn: () => listReviews(repo, kind, ref),
+    queryKey: reviewHistoryKey(repo, lens, kind, ref),
+    queryFn: () => listReviews(repo, lens, kind, ref),
   });
 }
 
 function useReviewHistoryMutation<TArgs>(
   repo: string,
+  lens: RemoteLens,
   kind: PrKind,
   ref: string,
   fn: (args: TArgs) => Promise<void>,
@@ -85,15 +96,21 @@ function useReviewHistoryMutation<TArgs>(
     mutationFn: fn,
     onSettled: () =>
       queryClient.invalidateQueries({
-        queryKey: reviewHistoryKey(repo, kind, ref),
+        queryKey: reviewHistoryKey(repo, lens, kind, ref),
       }),
   });
 }
 
 /** Edits a stored review's text — backs "trim before re-running". */
-export function useUpdateReviewText(repo: string, kind: PrKind, ref: string) {
+export function useUpdateReviewText(
+  repo: string,
+  lens: RemoteLens,
+  kind: PrKind,
+  ref: string,
+) {
   return useReviewHistoryMutation(
     repo,
+    lens,
     kind,
     ref,
     ({ id, text }: { id: string; text: string }) =>
@@ -101,15 +118,25 @@ export function useUpdateReviewText(repo: string, kind: PrKind, ref: string) {
   );
 }
 
-export function useDeleteReview(repo: string, kind: PrKind, ref: string) {
-  return useReviewHistoryMutation(repo, kind, ref, (id: string) =>
+export function useDeleteReview(
+  repo: string,
+  lens: RemoteLens,
+  kind: PrKind,
+  ref: string,
+) {
+  return useReviewHistoryMutation(repo, lens, kind, ref, (id: string) =>
     deleteReview(repo, id),
   );
 }
 
-export function useClearReviews(repo: string, kind: PrKind, ref: string) {
-  return useReviewHistoryMutation(repo, kind, ref, () =>
-    clearReviewsFor(repo, kind, ref),
+export function useClearReviews(
+  repo: string,
+  lens: RemoteLens,
+  kind: PrKind,
+  ref: string,
+) {
+  return useReviewHistoryMutation(repo, lens, kind, ref, () =>
+    clearReviewsFor(repo, lens, kind, ref),
   );
 }
 

@@ -45,6 +45,7 @@ import {
 import { type ForgeProvider, providerLabel } from "@/lib/git/types";
 import { deleteRepoLens } from "@/lib/repo-lens/store";
 import { settingsKeys, useSettings } from "@/lib/settings/queries";
+import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { InlineConfirm } from "./parts";
@@ -333,6 +334,13 @@ function RemoveUpstreamAction({ repoPath }: { repoPath: string }) {
                       // Fire-and-forget — the lens read safe-defaults to origin,
                       // so a failure here is harmless.
                       deleteRepoLens(repoPath).catch(() => undefined);
+                      // Removing upstream collapses the lens to origin, so a still-
+                      // selected remote number would resolve against the other repo.
+                      // Same clears `useSetRepoLens` does on an explicit lens flip.
+                      const ui = useUiStore.getState();
+                      if (ui.selectedPr?.kind === "remote") ui.selectPr(null);
+                      if (ui.selectedIssue?.kind === "remote")
+                        ui.selectIssue(null);
                       toast.success("Upstream remote removed");
                       setConfirming(false);
                     },

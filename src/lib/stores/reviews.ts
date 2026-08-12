@@ -31,7 +31,7 @@ import type {
 } from "@/lib/ai/types";
 import { track } from "@/lib/analytics";
 import { readRepoInstructions } from "@/lib/git/api";
-import type { DiffStatEntry } from "@/lib/git/types";
+import type { DiffStatEntry, RemoteLens } from "@/lib/git/types";
 import { notifyIfUnfocused } from "@/lib/notify";
 import { saveReview } from "@/lib/pulls/reviews-history";
 import { queryClient } from "@/lib/query-client";
@@ -45,6 +45,11 @@ export interface ReviewContext {
   commitSubjects: string[];
   /** Repo working directory — the CLI agent runs here. */
   repoPath: string;
+  /** The origin|upstream lens the PR was opened under — scopes every per-PR store
+   *  this run touches (prior reviews, the own-comments digest), since a fork's two
+   *  lenses surface DIFFERENT PRs under the same number. "origin" for local PRs,
+   *  which have no forge lens. */
+  lens: RemoteLens;
   /** Target host — swaps the change-request noun + markdown flavor in the review
    *  system prompt. Absent (local PRs / commit reviews) keeps the base GitHub
    *  wording. */
@@ -548,6 +553,7 @@ export async function startReview(
       ? {}
       : await resolvePriorContext(
           target.repoPath,
+          context.lens,
           target.kind,
           target.ref,
           mode,
@@ -601,6 +607,7 @@ export async function startReview(
       ),
       resolveOwnCommentsContext(
         target.repoPath,
+        context.lens,
         target.kind,
         target.ref,
         context.provider,
@@ -746,6 +753,7 @@ export async function startReview(
         id: crypto.randomUUID(),
         kind: target.kind,
         ref: target.ref,
+        lens: context.lens,
         mode,
         model: ai.model,
         title,
@@ -765,6 +773,7 @@ export async function startReview(
             queryKey: [
               "review-history",
               target.repoPath,
+              context.lens,
               target.kind,
               target.ref,
             ],

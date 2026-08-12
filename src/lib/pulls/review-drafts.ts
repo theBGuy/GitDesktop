@@ -5,6 +5,7 @@ import {
   mergeById,
   repoIdentity,
 } from "@/lib/git/repo-identity";
+import type { RemoteLens } from "@/lib/git/types";
 import { storeName } from "@/lib/test-mode";
 
 /** One pending draft comment in a not-yet-submitted batch review. `id` is a local
@@ -21,8 +22,17 @@ export interface ReviewDraft {
   createdAt: string;
 }
 
-/** Drafts for one PR/MR, keyed by its number as a string. */
+/** Drafts for one PR/MR, keyed `${lens}#${number}`. The lens is part of the key
+ *  because a fork's origin and upstream lenses surface DIFFERENT PRs under the same
+ *  number — without it a draft written on one would be submitted against the other. */
 type PrDrafts = Record<string, ReviewDraft[]>;
+
+const draftKey = (lens: RemoteLens, number: number) => `${lens}#${number}`;
+
+/** The bare-number key this lens key supersedes — records written before the lens
+ *  dimension existed, which can only have been the origin lens. */
+const legacyDraftKey = (lens: RemoteLens, number: number) =>
+  lens === "origin" ? String(number) : undefined;
 
 // Personal app-data, keyed by repo path → per-PR drafts — never written into the
 // repo itself. Mirrors `local.ts`'s store idiom.
@@ -90,37 +100,59 @@ async function writeRepo(key: string, drafts: PrDrafts): Promise<void> {
   await store.save();
 }
 
+/** Folds a pre-lens bare-number entry onto its `origin#…` key, returning the map to
+ *  mutate. Non-destructive and incremental like the checkout-path fold above: the
+ *  drafts move with the caller's own write, one PR at a time, never as a sweep. */
+function foldLegacyKey(
+  all: PrDrafts,
+  lens: RemoteLens,
+  number: number,
+): PrDrafts {
+  const legacy = legacyDraftKey(lens, number);
+  if (legacy === undefined || all[legacy] === undefined) return all;
+  const k = draftKey(lens, number);
+  const next = { ...all, [k]: mergeById(all[k], all[legacy]) };
+  delete next[legacy];
+  return next;
+}
+
 export async function listDrafts(
   repo: string,
+  lens: RemoteLens,
   number: number,
 ): Promise<ReviewDraft[]> {
   const all = await readMerged(repo);
-  return all[String(number)] ?? [];
+  const own = all[draftKey(lens, number)];
+  const legacy = legacyDraftKey(lens, number);
+  const legacyDrafts = legacy === undefined ? undefined : all[legacy];
+  return legacyDrafts ? mergeById(own, legacyDrafts) : (own ?? []);
 }
 
 export async function addDraft(
   repo: string,
+  lens: RemoteLens,
   number: number,
   draft: ReviewDraft,
 ): Promise<void> {
   return serialize(async () => {
     const repoKey = await keyFor(repo);
-    const all = await readByKey(repoKey);
-    const k = String(number);
+    const all = foldLegacyKey(await readByKey(repoKey), lens, number);
+    const k = draftKey(lens, number);
     await writeRepo(repoKey, { ...all, [k]: [...(all[k] ?? []), draft] });
   });
 }
 
 export async function updateDraft(
   repo: string,
+  lens: RemoteLens,
   number: number,
   id: string,
   body: string,
 ): Promise<void> {
   return serialize(async () => {
     const repoKey = await keyFor(repo);
-    const all = await readByKey(repoKey);
-    const k = String(number);
+    const all = foldLegacyKey(await readByKey(repoKey), lens, number);
+    const k = draftKey(lens, number);
     const next = (all[k] ?? []).map((d) => (d.id === id ? { ...d, body } : d));
     await writeRepo(repoKey, { ...all, [k]: next });
   });
@@ -128,13 +160,14 @@ export async function updateDraft(
 
 export async function removeDraft(
   repo: string,
+  lens: RemoteLens,
   number: number,
   id: string,
 ): Promise<void> {
   return serialize(async () => {
     const repoKey = await keyFor(repo);
-    const all = await readByKey(repoKey);
-    const k = String(number);
+    const all = foldLegacyKey(await readByKey(repoKey), lens, number);
+    const k = draftKey(lens, number);
     await writeRepo(repoKey, {
       ...all,
       [k]: (all[k] ?? []).filter((d) => d.id !== id),
@@ -142,71 +175,98 @@ export async function removeDraft(
   });
 }
 
-export async function clearDrafts(repo: string, number: number): Promise<void> {
+export async function clearDrafts(
+  repo: string,
+  lens: RemoteLens,
+  number: number,
+): Promise<void> {
   return serialize(async () => {
     const repoKey = await keyFor(repo);
-    const all = await readByKey(repoKey);
-    const next = { ...all };
-    delete next[String(number)];
+    // Fold first: a discard must take the pre-lens entry with it, or `listDrafts`
+    // would read the legacy drafts straight back after the clear. Copied before the
+    // delete — the fold passes the store's own object through when there's nothing
+    // to fold, and that must not be mutated in place.
+    const next = { ...foldLegacyKey(await readByKey(repoKey), lens, number) };
+    delete next[draftKey(lens, number)];
     await writeRepo(repoKey, next);
   });
 }
 
 // ── React-query wrappers ─────────────────────────────────────────────────────
 
-const reviewDraftsKey = (repo: string, number: number) =>
-  ["repo", repo, "pr", number, "review-drafts"] as const;
+const reviewDraftsKey = (repo: string, lens: RemoteLens, number: number) =>
+  ["repo", repo, "pr", lens, number, "review-drafts"] as const;
 
 /** The persisted pending-review drafts for a PR/MR. */
-export function useReviewDrafts(repo: string, number: number) {
+export function useReviewDrafts(
+  repo: string,
+  lens: RemoteLens,
+  number: number,
+) {
   return useQuery({
-    queryKey: reviewDraftsKey(repo, number),
-    queryFn: () => listDrafts(repo, number),
+    queryKey: reviewDraftsKey(repo, lens, number),
+    queryFn: () => listDrafts(repo, lens, number),
     staleTime: Number.POSITIVE_INFINITY,
   });
 }
 
-export function useAddReviewDraft(repo: string, number: number) {
+export function useAddReviewDraft(
+  repo: string,
+  lens: RemoteLens,
+  number: number,
+) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (draft: ReviewDraft) => addDraft(repo, number, draft),
+    mutationFn: (draft: ReviewDraft) => addDraft(repo, lens, number, draft),
     onSettled: () =>
       void queryClient.invalidateQueries({
-        queryKey: reviewDraftsKey(repo, number),
+        queryKey: reviewDraftsKey(repo, lens, number),
       }),
   });
 }
 
-export function useUpdateReviewDraft(repo: string, number: number) {
+export function useUpdateReviewDraft(
+  repo: string,
+  lens: RemoteLens,
+  number: number,
+) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (args: { id: string; body: string }) =>
-      updateDraft(repo, number, args.id, args.body),
+      updateDraft(repo, lens, number, args.id, args.body),
     onSettled: () =>
       void queryClient.invalidateQueries({
-        queryKey: reviewDraftsKey(repo, number),
+        queryKey: reviewDraftsKey(repo, lens, number),
       }),
   });
 }
 
-export function useRemoveReviewDraft(repo: string, number: number) {
+export function useRemoveReviewDraft(
+  repo: string,
+  lens: RemoteLens,
+  number: number,
+) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (id: string) => removeDraft(repo, number, id),
+    mutationFn: (id: string) => removeDraft(repo, lens, number, id),
     onSettled: () =>
       void queryClient.invalidateQueries({
-        queryKey: reviewDraftsKey(repo, number),
+        queryKey: reviewDraftsKey(repo, lens, number),
       }),
   });
 }
 
-export function useClearReviewDrafts(repo: string, number: number) {
+export function useClearReviewDrafts(
+  repo: string,
+  lens: RemoteLens,
+  number: number,
+) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: () => clearDrafts(repo, number),
+    mutationFn: () => clearDrafts(repo, lens, number),
     onSettled: () =>
       void queryClient.invalidateQueries({
-        queryKey: reviewDraftsKey(repo, number),
+        queryKey: reviewDraftsKey(repo, lens, number),
       }),
   });
 }

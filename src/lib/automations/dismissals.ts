@@ -1,6 +1,7 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
 import type { ReviewMode } from "@/lib/ai/types";
 import { identityKeyFor, repoIdentity } from "@/lib/git/repo-identity";
+import type { RemoteLens } from "@/lib/git/types";
 import { storeName } from "@/lib/test-mode";
 import { ALL_ACTION_IDS } from "./types";
 
@@ -9,8 +10,8 @@ import { ALL_ACTION_IDS } from "./types";
  * auto re-review only aborts the in-flight run; without a persisted marker the
  * same head re-fires after an app relaunch (cancel advances no watermark). So on
  * cancel the runner records the PR head that was dismissed, keyed by
- * `(kind, ref, mode)` — the runner then skips a pr-sync whose head still matches
- * a dismissed head, and only re-fires once the head genuinely advances.
+ * `(lens, kind, ref, mode)` — the runner then skips a pr-sync whose head still
+ * matches a dismissed head, and only re-fires once the head genuinely advances.
  *
  * Keyed by the repo's worktree-stable identity (not its checkout path), mirroring
  * the review-history store, so a dismissal is shared across the main checkout and
@@ -18,8 +19,23 @@ import { ALL_ACTION_IDS } from "./types";
  */
 type DismissalMap = Record<string, string>;
 
-const cellKey = (kind: "remote" | "local", ref: string, mode: ReviewMode) =>
-  `${kind}#${ref}#${mode}`;
+/** Cell key for one PR + mode. The lens leads it because a fork's origin and
+ *  upstream lenses surface DIFFERENT PRs under the same number. */
+const cellKey = (
+  lens: RemoteLens,
+  kind: "remote" | "local",
+  ref: string,
+  mode: ReviewMode,
+) => `${lens}#${kind}#${ref}#${mode}`;
+
+/** The pre-lens cell prefix/key a lens cell supersedes — cells written before the
+ *  lens dimension existed, which can only have been the origin lens. Undefined on
+ *  any other lens, which has no legacy data by construction. */
+const legacyCellPrefix = (
+  lens: RemoteLens,
+  kind: "remote" | "local",
+  ref: string,
+) => (lens === "origin" ? `${kind}#${ref}#` : undefined);
 
 // Personal app-data, keyed by repo identity — never written into the repo itself.
 // Routed through storeName() so cold-start/test mode never pollutes real data.
@@ -108,20 +124,30 @@ const isReviewMode = (v: string): v is ReviewMode =>
  *  `fresh` re-reads the store from disk first — see {@link readDismissals}. */
 export async function getDismissedHeadMap(
   repo: string,
+  lens: RemoteLens,
   kind: "remote" | "local",
   ref: string,
   opts?: { fresh?: boolean },
 ): Promise<Partial<Record<ReviewMode, string>>> {
   const all = await readDismissals(repo, opts);
-  const prefix = `${kind}#${ref}#`;
   const byMode: Partial<Record<ReviewMode, string>> = {};
-  for (const [cell, headSha] of Object.entries(all)) {
-    if (!cell.startsWith(prefix)) continue;
-    // Cell and value both come from the store, so both are untrusted — keep only real
-    // modes, and only string heads (a hand-edited value would throw inside sameSha).
-    const mode = cell.slice(prefix.length);
-    if (isReviewMode(mode) && typeof headSha === "string")
-      byMode[mode] = headSha;
+  // Pre-lens cells still serve the origin lens until the next write folds them, and
+  // they lose to a lens cell for the same mode. No cell can match both prefixes: a
+  // lens cell leads with the lens, a pre-lens one with the kind.
+  const prefixes = [
+    legacyCellPrefix(lens, kind, ref),
+    `${lens}#${kind}#${ref}#`,
+  ];
+  for (const prefix of prefixes) {
+    if (prefix === undefined) continue;
+    for (const [cell, headSha] of Object.entries(all)) {
+      if (!cell.startsWith(prefix)) continue;
+      // Cell and value both come from the store, so both are untrusted — keep only real
+      // modes, and only string heads (a hand-edited value would throw inside sameSha).
+      const mode = cell.slice(prefix.length);
+      if (isReviewMode(mode) && typeof headSha === "string")
+        byMode[mode] = headSha;
+    }
   }
   return byMode;
 }
@@ -129,6 +155,7 @@ export async function getDismissedHeadMap(
 /** Records the head SHA dismissed for a PR + mode (overwriting any prior). */
 export async function setDismissedHead(
   repo: string,
+  lens: RemoteLens,
   kind: "remote" | "local",
   ref: string,
   mode: ReviewMode,
@@ -140,8 +167,12 @@ export async function setDismissedHead(
     // basing it on a launch-time cache would drop another instance's cells.
     await reloadRaw();
     const key = await keyFor(repo);
-    const all = (await store.get<DismissalMap>(key)) ?? {};
-    await store.set(key, { ...all, [cellKey(kind, ref, mode)]: headSha });
+    const all = { ...((await store.get<DismissalMap>(key)) ?? {}) };
+    // This watermark supersedes any pre-lens cell for the same PR + mode — dropping
+    // it here is the fold, one cell at a time, never a sweep over the store.
+    const preLens = legacyCellPrefix(lens, kind, ref);
+    if (preLens !== undefined) delete all[`${preLens}${mode}`];
+    await store.set(key, { ...all, [cellKey(lens, kind, ref, mode)]: headSha });
     // Flush past autoSave's ~100ms debounce so the next queued reload reads this
     // write back instead of a pre-write snapshot.
     await store.save();
@@ -157,6 +188,7 @@ export async function setDismissedHead(
  */
 export async function clearDismissedHead(
   repo: string,
+  lens: RemoteLens,
   kind: "remote" | "local",
   ref: string,
   mode: ReviewMode,
@@ -166,8 +198,12 @@ export async function clearDismissedHead(
     // Same reload-first rationale as setDismissedHead.
     await reloadRaw();
     const key = await keyFor(repo);
-    const all = (await store.get<DismissalMap>(key)) ?? {};
-    delete all[cellKey(kind, ref, mode)];
+    const all = { ...((await store.get<DismissalMap>(key)) ?? {}) };
+    delete all[cellKey(lens, kind, ref, mode)];
+    // The pre-lens cell goes too — it reads as this lens's watermark, so leaving it
+    // would keep re-blocking the re-run this call exists to unblock.
+    const preLens = legacyCellPrefix(lens, kind, ref);
+    if (preLens !== undefined) delete all[`${preLens}${mode}`];
     await store.set(key, all);
     // Flush for the same reason: an unflushed clear would be undone by the next
     // queued reload, re-blocking the re-run this call exists to unblock.

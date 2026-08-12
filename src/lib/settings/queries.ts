@@ -12,7 +12,7 @@ import {
   persistRepoOwners,
   relocateRecentRepo,
   removeRecentRepo,
-  saveSettings,
+  saveSettingsMerged,
   setRepoAlias,
 } from "./api";
 import type { RepoKeys } from "./mcp";
@@ -100,7 +100,7 @@ export function useReviewConfigured(): boolean {
 export function useSaveSettings() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (settings: AppSettings) => saveSettings(settings),
+    mutationFn: (settings: AppSettings) => saveSettingsMerged(settings),
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: settingsKeys.settings }),
   });

@@ -191,9 +191,11 @@ export async function prOpenEligible(
     // concurrently — separate stores, independent queues. `fresh` reloads from disk and
     // queues behind any writer: this is a gate, so it must see another instance's
     // just-written record, not this process's launch-time cache.
+    // Origin-pinned: this gate mirrors the origin-scoped poller, so it reads the
+    // fork's own PRs only.
     const [reviews, dismissedByMode] = await Promise.all([
-      listReviews(repoPath, "remote", ref, { fresh: true }),
-      getDismissedHeadMap(repoPath, "remote", ref, { fresh: true }),
+      listReviews(repoPath, "origin", "remote", ref, { fresh: true }),
+      getDismissedHeadMap(repoPath, "origin", "remote", ref, { fresh: true }),
     ]);
     for (const mode of ALL_ACTION_IDS) {
       // Newest-first, so this mode's first entry is the latest review for it.

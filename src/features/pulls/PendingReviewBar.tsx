@@ -4,6 +4,7 @@ import { MarkdownEditor } from "@/components/markdown-editor";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Markdown } from "@/components/ui/markdown";
+import type { RemoteLens } from "@/lib/git/types";
 import {
   type ReviewDraft,
   useClearReviewDrafts,
@@ -30,18 +31,21 @@ function draftLabel(draft: ReviewDraft): string {
  */
 export function DraftCommentCard({
   repoPath,
+  lens,
   number,
   draft,
 }: {
   repoPath: string;
+  /** The origin|upstream lens the parent PR view resolved (scopes the drafts). */
+  lens: RemoteLens;
   number: number;
   draft: ReviewDraft;
 }) {
   const [editing, setEditing] = useState(false);
   const [body, setBody] = useState(draft.body);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const updateDraft = useUpdateReviewDraft(repoPath, number);
-  const removeDraft = useRemoveReviewDraft(repoPath, number);
+  const updateDraft = useUpdateReviewDraft(repoPath, lens, number);
+  const removeDraft = useRemoveReviewDraft(repoPath, lens, number);
 
   function saveEdit() {
     const next = body.trim();
@@ -147,15 +151,18 @@ export function DraftCommentCard({
  */
 export function PendingReviewBar({
   repoPath,
+  lens,
   number,
   onSubmit,
 }: {
   repoPath: string;
+  /** The origin|upstream lens the parent PR view resolved (scopes the drafts). */
+  lens: RemoteLens;
   number: number;
   onSubmit: () => void;
 }) {
-  const drafts = useReviewDrafts(repoPath, number);
-  const clearDrafts = useClearReviewDrafts(repoPath, number);
+  const drafts = useReviewDrafts(repoPath, lens, number);
+  const clearDrafts = useClearReviewDrafts(repoPath, lens, number);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const count = drafts.data?.length ?? 0;
 

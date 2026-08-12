@@ -1,6 +1,8 @@
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback } from "react";
 import { toast } from "sonner";
+import { usePlanStore } from "@/features/plan/store";
+import { useResearchStore } from "@/features/research/store";
 import { track } from "@/lib/analytics";
 import { validateRepo } from "@/lib/git/api";
 import type { RepoInfo } from "@/lib/git/types";
@@ -84,6 +86,11 @@ export function useOpenRepoByPath() {
         // automations, Jira link, …) onto the new location's identity key. Purely
         // best-effort — a migration failure must never block opening the repo.
         await migrateRepoData(oldPath, info.root).catch(() => undefined);
+        // The plan/research stores hydrate once at startup, so their live runs
+        // still carry the old path — repoint them, or the sidebar loses them and
+        // their debounced autosave writes the pre-migration paths back to disk.
+        usePlanStore.getState().relocateRepoPath(oldPath, info.root);
+        useResearchStore.getState().relocateRepoPath(oldPath, info.root);
         await recordOpenAndTrack(info, "relocate");
       } catch (e) {
         if (isAppError(e) && e.kind === "notARepo") {

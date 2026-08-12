@@ -6,7 +6,7 @@ import {
   PencilSimpleIcon,
 } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useRef, useState } from "react";
+import { useEffectEvent, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   MarkdownEditor,
@@ -222,6 +222,24 @@ export function RemoteIssueView({
   const [transferOpen, setTransferOpen] = useState(false);
   const [transferDest, setTransferDest] = useState("");
   const [deleteOpen, setDeleteOpen] = useState(false);
+  // A different issue must never inherit this one's unsent draft or pending
+  // delete confirm — a render-time state adjustment, not an effect. The lens is
+  // part of the identity: it can collapse to "origin" without a remount (the
+  // upstream remote goes away), leaving the same number pointing at another repo.
+  const issueIdentity = `${lens}#${number}`;
+  const [lastIdentity, setLastIdentity] = useState(issueIdentity);
+  if (issueIdentity !== lastIdentity) {
+    setLastIdentity(issueIdentity);
+    setComposeBody("");
+    setDeletingCommentId(null);
+    setDeleteOpen(false);
+  }
+  // The restore below can land after the user switched issues; an effect event
+  // reads the LIVE identity so a late rejection can't resurrect text elsewhere.
+  const restoreDraft = useEffectEvent((submittedFor: string, body: string) => {
+    if (submittedFor !== issueIdentity) return;
+    setComposeBody((cur) => (cur.trim() ? cur : body));
+  });
   // Destination suggestions come from the viewer's repos on the SAME provider
   // as this repo; each query only fires while its dialog variant is open. The
   // GitLab list is repo-scoped so it targets the repo's own (possibly
@@ -286,12 +304,13 @@ export function RemoteIssueView({
     // Clear the draft immediately (the perceived-speed win) and append the
     // synthetic comment optimistically; on error restore the draft, but only if
     // the composer is still empty so we never clobber newly-typed text.
+    const submittedFor = issueIdentity;
     setComposeBody("");
     comment.mutate(
       { number, body, author: forge.data?.login ?? "You" },
       {
         onError: (e) => {
-          setComposeBody((cur) => (cur.trim() ? cur : body));
+          restoreDraft(submittedFor, body);
           onError(e);
         },
       },

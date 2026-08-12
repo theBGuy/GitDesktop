@@ -350,10 +350,11 @@ async function runTurn(
         t.error,
       ),
     );
-    // "Watching" = focused + Agent tab on screen + this session selected; then the streamed
-    // result is already visible, so stay quiet. Notifying otherwise covers multi-session and
-    // other-tab cases. A user Cancel is intentional, so it's never announced.
-    if (isWatchingAgentSurface(get().activeId, id)) return;
+    // "Watching" = focused + this session's repo open on its Agent tab + this session
+    // selected; then the streamed result is already visible, so stay quiet. Notifying
+    // otherwise covers multi-session, other-repo and other-tab cases. A user Cancel is
+    // intentional, so it's never announced.
+    if (isWatchingAgentSurface(get().activeId, id, s.repoPath)) return;
     if (t.status === "error" && t.error === "Cancelled.") return;
     const label =
       s.turns[0]?.prompt.trim().replace(/\s+/g, " ").slice(0, 70) ||
@@ -536,7 +537,15 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
         )
           persist(removeTranscript(s.id));
       }
-      set({ sessions: alive });
+      // Merge under any sessions created before hydration finished (newest state
+      // wins) — `start` isn't gated on hydration, so a replace would drop one.
+      const created = new Set(get().sessions.map((s) => s.id));
+      set({
+        sessions: [
+          ...alive.filter((s) => !created.has(s.id)),
+          ...get().sessions,
+        ],
+      });
     }
     set({ hydrated: true });
   },

@@ -46,9 +46,9 @@ export function SubmitReviewDialog({
   /** The origin|upstream lens the parent PR view resolved. */
   lens: RemoteLens;
 }) {
-  const drafts = useReviewDrafts(repoPath, number);
+  const drafts = useReviewDrafts(repoPath, lens, number);
   const submitReview = useSubmitReview(repoPath, lens);
-  const clearDrafts = useClearReviewDrafts(repoPath, number);
+  const clearDrafts = useClearReviewDrafts(repoPath, lens, number);
   const [verdict, setVerdict] = useState<ReviewVerdict>("comment");
   const [summary, setSummary] = useState("");
   const [error, setError] = useState<string | null>(null);

@@ -1,4 +1,5 @@
 import { gitDiffBetweenRefs, gitFetchObjects } from "@/lib/git/api";
+import type { RemoteLens } from "@/lib/git/types";
 import { getLatestReview } from "@/lib/pulls/reviews-history";
 import { filterDiffByAiIgnore } from "./ignore";
 import type { ReviewDeltaState, ReviewMode } from "./types";
@@ -40,13 +41,14 @@ export interface PriorContext {
  */
 export async function resolvePriorContext(
   repoPath: string,
+  lens: RemoteLens,
   kind: "remote" | "local",
   ref: string,
   mode: ReviewMode,
   currentHeadSha: string | undefined,
   exclude: string[],
 ): Promise<PriorContext> {
-  const prior = await getLatestReview(repoPath, kind, ref, mode);
+  const prior = await getLatestReview(repoPath, lens, kind, ref, mode);
   if (!prior?.text.trim()) return {};
   const base: PriorContext = {
     priorFindings: prior.text,

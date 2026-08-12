@@ -57,7 +57,7 @@ export function ReviewComposer({
   const [body, setBody] = useState("");
   const [pending, setPending] = useState(false);
   const createThread = useCreateReviewThread(repoPath, lens);
-  const addDraft = useAddReviewDraft(repoPath, number);
+  const addDraft = useAddReviewDraft(repoPath, lens, number);
 
   // The multi-line range, normalized: [from, line] with from <= line.
   const rangeFrom = fromLine !== undefined && fromLine < line ? fromLine : line;

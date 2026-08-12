@@ -30,7 +30,11 @@ import {
   useGlMrTimeStats,
   useSetMrTimeEstimate,
 } from "@/lib/git/queries";
-import type { ForgeProvider, ReviewThreadOut } from "@/lib/git/types";
+import type {
+  ForgeProvider,
+  RemoteLens,
+  ReviewThreadOut,
+} from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import type { ReviewDraft } from "@/lib/pulls/review-drafts";
 import { toastError } from "@/lib/toast";
@@ -114,6 +118,7 @@ export function PrFilesPane({
   threads,
   drafts,
   repoPath,
+  lens,
   number,
   lineWidget,
   onQuote,
@@ -133,9 +138,12 @@ export function PrFilesPane({
   /** All PR review threads; the pane anchors those on the selected file. */
   threads?: ReviewThreadOut[];
   /** Pending-review drafts; those on the selected file render as anchored cards
-   *  under their line (needs `repoPath`/`number` for the edit/delete writes). */
+   *  under their line (needs `repoPath`/`lens`/`number` for the edit/delete writes). */
   drafts?: ReviewDraft[];
   repoPath?: string;
+  /** The origin|upstream lens the parent PR view resolved — part of the draft
+   *  store's key, so the cards can't edit the other lens's same-numbered PR. */
+  lens?: RemoteLens;
   number?: number;
   /** The inline line-comment composer, passed straight to the diff. Absent =
    *  a read-only diff (unchanged). */
@@ -168,8 +176,8 @@ export function PrFilesPane({
       else threadsBySideLine.set(key, [t]);
     }
     const draftsBySideLine = new Map<string, ReviewDraft[]>();
-    // Drafts only render when the store owner keys (repoPath/number) are present.
-    if (repoPath !== undefined && number !== undefined) {
+    // Drafts only render when the store owner keys (repoPath/lens/number) are present.
+    if (repoPath !== undefined && lens !== undefined && number !== undefined) {
       for (const d of drafts ?? []) {
         if (d.path !== effectivePath || d.line <= 0) continue;
         const key = `${d.side}:${d.line}`;
@@ -203,11 +211,13 @@ export function PrFilesPane({
               />
             )}
             {repoPath !== undefined &&
+              lens !== undefined &&
               number !== undefined &&
               draftGroup.map((d) => (
                 <DraftCommentCard
                   key={d.id}
                   repoPath={repoPath}
+                  lens={lens}
                   number={number}
                   draft={d}
                 />
@@ -221,6 +231,7 @@ export function PrFilesPane({
     threads,
     drafts,
     repoPath,
+    lens,
     number,
     onQuote,
     onReply,

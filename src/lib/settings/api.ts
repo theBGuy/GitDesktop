@@ -667,3 +667,23 @@ export function setBitbucketTokenExpiresAt(
     await saveSettings({ ...settings, bitbucketTokenExpiresAt: value });
   });
 }
+
+/**
+ * Saves a whole settings object built by the UI (which holds a snapshot from before the
+ * user started editing) without losing what the chained writers changed meanwhile.
+ *
+ * `recentRepos` and `bitbucketTokenExpiresAt` are the only fields those writers own, so
+ * they're re-pinned from a read taken INSIDE the critical section — the caller's snapshot
+ * of them is stale by definition, every other field is the user's intent. Serialization is
+ * per-runtime: a second window writing settings is a separate chain.
+ */
+export function saveSettingsMerged(settings: AppSettings): Promise<void> {
+  return serializedRecentRepoWrite(async () => {
+    const fresh = await loadSettings();
+    await saveSettings({
+      ...settings,
+      recentRepos: fresh.recentRepos,
+      bitbucketTokenExpiresAt: fresh.bitbucketTokenExpiresAt,
+    });
+  });
+}

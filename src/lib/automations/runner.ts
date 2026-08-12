@@ -278,12 +278,19 @@ async function run(
   const gateState = async (prEvent: PrAutomationEvent) => {
     if (!gateSnapshot) {
       // Separate stores with independent queues, so neither read waits on the other.
+      // Origin-pinned like every other store touch on this path — the poller is
+      // origin-scoped, so these gates only ever cover the fork's own PRs.
       const [reviews, dismissed] = await Promise.all([
-        listReviews(prEvent.repoPath, prEvent.target.type, targetRef(prEvent), {
-          fresh: true,
-        }),
+        listReviews(
+          prEvent.repoPath,
+          "origin",
+          prEvent.target.type,
+          targetRef(prEvent),
+          { fresh: true },
+        ),
         getDismissedHeadMap(
           prEvent.repoPath,
+          "origin",
           prEvent.target.type,
           targetRef(prEvent),
           { fresh: true },
@@ -446,6 +453,7 @@ async function run(
       if (event.kind === "commit" || !event.headSha) return;
       void setDismissedHead(
         event.repoPath,
+        "origin",
         event.target.type,
         targetRef(event),
         action,
@@ -640,6 +648,7 @@ export function rerunAutomation(
       if (event.kind !== "commit") {
         await clearDismissedHead(
           event.repoPath,
+          "origin",
           event.target.type,
           targetRef(event),
           only,
@@ -772,6 +781,7 @@ async function generateReviewText(
       ? {}
       : await resolvePriorContext(
           event.repoPath,
+          "origin",
           event.target.type,
           targetRef(event),
           mode,
@@ -838,6 +848,7 @@ async function generateReviewText(
         ),
         resolveOwnCommentsContext(
           event.repoPath,
+          "origin",
           "remote",
           targetRef(event),
           provider,
@@ -1030,8 +1041,8 @@ async function deliver(
 /**
  * Persists an automated PR review into the keyed history store (same shape + key the
  * interactive path uses), so the next review of that PR + mode builds on it. Keyed by
- * `(kind, ref, mode)`; `text` is the raw findings, not the comment-wrapped body.
- * `thoughts` is display-only narration, never fed forward.
+ * `(lens, kind, ref, mode)`; `text` is the raw findings, not the comment-wrapped
+ * body. `thoughts` is display-only narration, never fed forward.
  */
 async function persistReviewHistory(
   event: PrAutomationEvent,
@@ -1051,6 +1062,8 @@ async function persistReviewHistory(
     id: crypto.randomUUID(),
     kind,
     ref,
+    // Origin-pinned like the rest of this path — the poller is origin-scoped.
+    lens: "origin",
     mode,
     model,
     title: event.title,
@@ -1061,6 +1074,6 @@ async function persistReviewHistory(
     finishedAt: now,
   });
   await queryClient.invalidateQueries({
-    queryKey: ["review-history", event.repoPath, kind, ref],
+    queryKey: ["review-history", event.repoPath, "origin", kind, ref],
   });
 }

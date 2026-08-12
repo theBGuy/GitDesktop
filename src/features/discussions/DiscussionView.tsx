@@ -7,7 +7,7 @@ import {
   TagIcon,
 } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useRef, useState } from "react";
+import { useEffectEvent, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   MarkdownEditor,
@@ -202,6 +202,30 @@ export function DiscussionView({
   const [labelsOpen, setLabelsOpen] = useState(false);
   const [draftLabels, setDraftLabels] = useState<Set<string>>(new Set());
   const [deletingDiscussion, setDeletingDiscussion] = useState(false);
+  // A different discussion must never inherit this one's unsent drafts, nor a
+  // reply target or delete confirm that no longer exists here — render-time,
+  // not an effect.
+  const [lastNumber, setLastNumber] = useState(number);
+  if (number !== lastNumber) {
+    setLastNumber(number);
+    setComposeBody("");
+    setReplyingTo(null);
+    setReplyBody("");
+    setDeletingCommentId(null);
+    setDeletingDiscussion(false);
+  }
+  // Both submits clear their composer only once the mutation resolves, which can
+  // be after a switch — an effect event reads the LIVE number so a late success
+  // can't wipe text the user has since typed against another discussion.
+  const clearComposeIfSame = useEffectEvent((submittedFor: number) => {
+    if (submittedFor !== number) return;
+    setComposeBody("");
+  });
+  const clearReplyIfSame = useEffectEvent((submittedFor: number) => {
+    if (submittedFor !== number) return;
+    setReplyBody("");
+    setReplyingTo(null);
+  });
 
   const onError = (e: unknown) => toastError(e);
   const d = details.data;
@@ -224,21 +248,20 @@ export function DiscussionView({
 
   function submitComment() {
     if (!d || !composeBody.trim()) return;
+    const submittedFor = number;
     addComment.mutate(
       { discussionId: d.id, body: composeBody.trim() },
-      { onSuccess: () => setComposeBody(""), onError },
+      { onSuccess: () => clearComposeIfSame(submittedFor), onError },
     );
   }
 
   function submitReply(commentId: string) {
     if (!d || !replyBody.trim()) return;
+    const submittedFor = number;
     addComment.mutate(
       { discussionId: d.id, body: replyBody.trim(), replyToId: commentId },
       {
-        onSuccess: () => {
-          setReplyBody("");
-          setReplyingTo(null);
-        },
+        onSuccess: () => clearReplyIfSame(submittedFor),
         onError,
       },
     );

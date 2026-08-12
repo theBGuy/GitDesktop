@@ -111,11 +111,6 @@ export function LocalPrView({
   const [selectedCommitHash, setSelectedCommitHash] = useState<string | null>(
     null,
   );
-  const [lastId, setLastId] = useState(id);
-  if (id !== lastId) {
-    setLastId(id);
-    setSelectedCommitHash(null);
-  }
   // The activity dock's "View" lands here via a pending hint; switch to the
   // review sub-tab once, then clear it. Guarded on this being the *selected* PR
   // so a still-mounted lagging view (deferredPr) can't swallow the hint first.
@@ -146,6 +141,16 @@ export function LocalPrView({
   } = useLocalConversation(pr, (mutate) => {
     if (pr) update.mutate({ id: pr.id, mutate });
   });
+  // A different PR must never inherit this one's drill-in, unsent drafts, or
+  // pending delete confirm — a render-time state adjustment, not an effect.
+  const [lastId, setLastId] = useState(id);
+  if (id !== lastId) {
+    setLastId(id);
+    setSelectedCommitHash(null);
+    setComment("");
+    setLabelInput("");
+    setDeletingCommentId(null);
+  }
   const [promoteOpen, setPromoteOpen] = useState(false);
   const ghStatus = useForgeStatus(repoPath);
   // Linked-issue chips on the local-PR edit path: the chips OWN the trailing ref
@@ -586,6 +591,9 @@ export function LocalPrView({
             body: pr.body,
             commitSubjects: ahead.map((c) => c.subject),
             repoPath,
+            // A local PR has no forge lens; "origin" keeps its per-PR review stores
+            // on the keys they used before the lens dimension existed.
+            lens: "origin",
             // `ahead` (git log) is newest-first, so the head is the first entry.
             headSha: ahead[0]?.hash,
             loadDiff: () =>

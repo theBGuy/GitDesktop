@@ -1,5 +1,6 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { identityKeyFor, repoIdentity } from "@/lib/git/repo-identity";
+import type { RemoteLens } from "@/lib/git/types";
 import { storeName } from "@/lib/test-mode";
 
 /**
@@ -17,7 +18,7 @@ import { storeName } from "@/lib/test-mode";
  */
 export interface OwnCommentsDigest {
   schemaVersion: 1;
-  /** `${kind}#${ref}` — one PR's ledger. */
+  /** `${lens}#${kind}#${ref}` — one PR's ledger (see {@link digestKey}). */
   key: string;
   /** Invalidation token:
    *  `v4#${count}#${newestCreatedAt}#${budget}#${cappedJoinedChars}#${uncappedChars}`
@@ -56,10 +57,24 @@ export interface OwnCommentsDigest {
   failed?: { fingerprint: string; at: number; model: string };
 }
 
+/** Store key for one PR's ledger. The lens is part of it because a fork's origin
+ *  and upstream lenses surface DIFFERENT PRs under the same number. */
+export const digestKey = (
+  lens: RemoteLens,
+  kind: "remote" | "local",
+  ref: string,
+) => `${lens}#${kind}#${ref}`;
+
+/** The pre-lens key a lens key supersedes — records written before the lens
+ *  dimension existed, which can only have been the origin lens. */
+function legacyDigestKey(key: string): string | undefined {
+  return key.startsWith("origin#") ? key.slice("origin#".length) : undefined;
+}
+
 // Records live in personal app-data, keyed by the repo's worktree-stable identity
 // (not its checkout path) so a PR's cached digest is shared across the main
 // checkout and every worktree. Routed through storeName() so cold-start/test mode
-// never pollutes real data. One digest per `${kind}#${ref}` key.
+// never pollutes real data. One digest per `digestKey` key.
 let storePromise: Promise<Store> | null = null;
 function getStore(): Promise<Store> {
   storePromise ??= load(storeName("own-comments-digest.json"), {
@@ -109,6 +124,7 @@ async function keyFor(repo: string): Promise<string> {
  *  returns undefined). */
 export async function getDigest(
   repoPath: string,
+  lens: RemoteLens,
   kind: "remote" | "local",
   ref: string,
 ): Promise<OwnCommentsDigest | undefined> {
@@ -121,10 +137,13 @@ export async function getDigest(
       ? {}
       : ((await store.get<Record<string, OwnCommentsDigest>>(repoPath)) ?? {});
   const bag = { ...legacy, ...primary };
-  return bag[`${kind}#${ref}`];
+  const key = digestKey(lens, kind, ref);
+  const preLens = legacyDigestKey(key);
+  // A pre-lens record still serves the origin lens until the next write folds it.
+  return bag[key] ?? (preLens === undefined ? undefined : bag[preLens]);
 }
 
-/** Upserts one PR's digest under its `${kind}#${ref}` key — replaces the prior
+/** Upserts one PR's digest under its {@link digestKey} — replaces the prior
  *  record for that key (one digest per PR). Serialized + force-saved so an
  *  overlapping save can't reload a pre-flush snapshot.
  *
@@ -142,6 +161,10 @@ export async function saveDigest(
     const store = await getStore();
     const bag = (await store.get<Record<string, OwnCommentsDigest>>(key)) ?? {};
     bag[record.key] = record;
+    // This write supersedes any pre-lens record for the same PR — dropping it here
+    // is the fold, one PR at a time, never a sweep over the store.
+    const preLens = legacyDigestKey(record.key);
+    if (preLens !== undefined) delete bag[preLens];
     await store.set(key, bag);
     // Flush now instead of on autoSave's debounce, so the next serialized reload
     // can't re-read a pre-write disk snapshot and drop this change.
@@ -166,6 +189,7 @@ export async function saveDigest(
  */
 export async function recordDigestFailure(
   repoPath: string,
+  lens: RemoteLens,
   kind: "remote" | "local",
   ref: string,
   failed: NonNullable<OwnCommentsDigest["failed"]>,
@@ -175,8 +199,13 @@ export async function recordDigestFailure(
     const key = await keyFor(repoPath);
     const store = await getStore();
     const bag = (await store.get<Record<string, OwnCommentsDigest>>(key)) ?? {};
-    const recordKey = `${kind}#${ref}`;
-    const existing = bag[recordKey];
+    const recordKey = digestKey(lens, kind, ref);
+    // Adopt any pre-lens record for this PR rather than stranding its ledger — the
+    // same one-PR-at-a-time fold `saveDigest` does.
+    const preLens = legacyDigestKey(recordKey);
+    const existing =
+      bag[recordKey] ?? (preLens === undefined ? undefined : bag[preLens]);
+    if (preLens !== undefined) delete bag[preLens];
     bag[recordKey] = {
       // No record yet → a ledger-less skeleton, so the failure has somewhere to
       // live without inventing a ledger that was never produced.

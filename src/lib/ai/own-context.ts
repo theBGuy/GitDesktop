@@ -1,7 +1,12 @@
 import { forgePrExternalReviews } from "@/lib/git/api";
-import type { ExternalReviewItem } from "@/lib/git/types";
+import type { ExternalReviewItem, RemoteLens } from "@/lib/git/types";
 import { GD_COMMENT_ANCHOR } from "./comment-branding";
-import { getDigest, recordDigestFailure, saveDigest } from "./own-digest-store";
+import {
+  digestKey,
+  getDigest,
+  recordDigestFailure,
+  saveDigest,
+} from "./own-digest-store";
 import { distillOwnComments } from "./own-distill";
 import {
   allocateBodyCaps,
@@ -268,6 +273,7 @@ function formatOwnComments(
  */
 export async function resolveOwnCommentsContext(
   repoPath: string,
+  lens: RemoteLens,
   kind: "remote" | "local",
   ref: string,
   provider: string = "github",
@@ -369,7 +375,7 @@ export async function resolveOwnCommentsContext(
     // (`distillBlockCap`, own-distill.ts), so the same fields now yield a
     // different ledger — no field moves, hence the tag.
     const fingerprint = `v4#${survivors.length}#${newest}#${budget}#${cappedJoinedLen}#${uncappedLen}`;
-    const cacheKey = `${kind}#${ref}`;
+    const cacheKey = digestKey(lens, kind, ref);
     // The generation model this attempt used, reported by the distiller as soon as it
     // resolves settings (one load, not two that could disagree). Empty if that load
     // threw or the provider runs on its account-default model.
@@ -391,14 +397,14 @@ export async function resolveOwnCommentsContext(
     // composed inside `distillOwnComments`, so a timeout still records.
     const rememberFailure = async () => {
       if (opts.signal?.aborted) return;
-      await recordDigestFailure(repoPath, kind, ref, {
+      await recordDigestFailure(repoPath, lens, kind, ref, {
         fingerprint,
         at: Date.now(),
         model: attemptedModel,
       });
     };
     try {
-      const cached = await getDigest(repoPath, kind, ref);
+      const cached = await getDigest(repoPath, lens, kind, ref);
       if (cached?.fingerprint === fingerprint && cached.ledger.trim()) {
         return {
           ownItems: [capLedger(cached.ledger, budget)],

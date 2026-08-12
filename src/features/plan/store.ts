@@ -19,6 +19,7 @@ import {
 import { terminalErrorMessage } from "@/lib/ai/terminal-error";
 import { gitListTracked, readRepoInstructions } from "@/lib/git/api";
 import { notify } from "@/lib/notify";
+import { norm } from "@/lib/repo-data-migration";
 import { loadSettings } from "@/lib/settings/api";
 import { pushNotification, repoNameFromPath } from "@/lib/stores/notifications";
 import { errorMessage } from "@/lib/tauri/invoke";
@@ -144,6 +145,10 @@ interface PlanState {
   restart: (id: string) => void;
   /** Drop a run from the list (cancelling any in-flight turn). */
   remove: (id: string) => void;
+  /** Repoint every run of a relocated repo at its new path, so they stay in the
+   *  sidebar and the next autosave writes the migrated paths back (an unpatched
+   *  list would re-persist the old ones over the on-disk migration). */
+  relocateRepoPath: (oldPath: string, newPath: string) => void;
 }
 
 function repoName(p: string): string {
@@ -211,7 +216,10 @@ export const usePlanStore = create<PlanState>((set, get) => {
     const notifyDone = (failed: boolean, hasQuestions = false) => {
       const run = get().runs.find((r) => r.id === id);
       if (!run) return;
-      if (!hasQuestions && isWatchingAgentSurface(get().activePlanId, id))
+      if (
+        !hasQuestions &&
+        isWatchingAgentSurface(get().activePlanId, id, run.repoPath)
+      )
         return;
       const label =
         run.origin?.issueTitle?.trim() || run.origin?.goal?.trim() || "Plan";
@@ -492,6 +500,17 @@ export const usePlanStore = create<PlanState>((set, get) => {
       set({
         runs: get().runs.filter((r) => r.id !== id),
         activePlanId: get().activePlanId === id ? null : get().activePlanId,
+      });
+    },
+
+    relocateRepoPath: (oldPath, newPath) => {
+      // No-match guard: a fresh array would trip the persistence subscribe
+      // into rewriting plans.json with identical content.
+      if (!get().runs.some((r) => norm(r.repoPath) === norm(oldPath))) return;
+      set({
+        runs: get().runs.map((r) =>
+          norm(r.repoPath) === norm(oldPath) ? { ...r, repoPath: newPath } : r,
+        ),
       });
     },
   };

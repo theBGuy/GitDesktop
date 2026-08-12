@@ -50,8 +50,10 @@ function loadStore(file: string) {
 }
 
 /** Normalize a path/key for comparison: forward slashes, no trailing slash,
- *  lower-cased (Windows paths differ in case in the wild). */
-function norm(s: string): string {
+ *  lower-cased (Windows paths differ in case in the wild). Exported because the
+ *  live plan/research stores re-home their in-memory runs on the same relocate —
+ *  they must match exactly the rows {@link migrateRawPathStore} rewrote. */
+export function norm(s: string): string {
   return s.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 }
 

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffectEvent, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import { Button } from "@/components/ui/button";
@@ -242,6 +242,23 @@ export function CommitComments({
 
   const [body, setBody] = useState("");
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  // Neither call site keys this component on the commit, so a different commit
+  // must never inherit the previous one's draft or pending delete confirm — a
+  // render-time state adjustment, not an effect. Identity is the same triple the
+  // comments are read and written under.
+  const commitIdentity = `${repoPath}#${lens}#${sha}`;
+  const [lastIdentity, setLastIdentity] = useState(commitIdentity);
+  if (commitIdentity !== lastIdentity) {
+    setLastIdentity(commitIdentity);
+    setBody("");
+    setDeletingId(null);
+  }
+  // The restore below can land after the user moved to another commit; an effect
+  // event reads the LIVE identity so a late rejection can't resurrect text there.
+  const restoreDraft = useEffectEvent((submittedFor: string, text: string) => {
+    if (submittedFor !== commitIdentity) return;
+    setBody((cur) => (cur.trim() ? cur : text));
+  });
 
   const list = comments.data ?? [];
   const whole = list.filter((c) => c.path == null);
@@ -270,13 +287,14 @@ export function CommitComments({
     // Clear the draft immediately (perceived-speed win); the hook appends the
     // synthetic comment optimistically. On error restore the draft, but only if
     // the composer is still empty so newly-typed text is never clobbered.
+    const submittedFor = commitIdentity;
     setBody("");
     createComment.mutate(
       { sha, body: text },
       {
         onSuccess: () => toast.success("Comment added"),
         onError: (e) => {
-          setBody((cur) => (cur.trim() ? cur : text));
+          restoreDraft(submittedFor, text);
           toastError(e);
         },
       },

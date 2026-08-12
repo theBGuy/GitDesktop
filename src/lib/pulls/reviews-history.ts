@@ -5,13 +5,14 @@ import {
   mergeById,
   repoIdentity,
 } from "@/lib/git/repo-identity";
+import type { RemoteLens } from "@/lib/git/types";
 import { storeName } from "@/lib/test-mode";
 
 /**
  * A finished AI review, persisted so the NEXT run of the same PR + mode can feed
  * it back as soft context. Free-form `text` is never parsed into structured data
  * — it stays the model's own markdown, which the next run must re-verify against
- * the current diff. Identity for "the previous review" is `(kind, ref, mode)`;
+ * the current diff. Identity for "the previous review" is `(lens, kind, ref, mode)`;
  * `mode` is part of the key so a security re-run never inherits general findings.
  */
 export interface PersistedReview {
@@ -20,6 +21,11 @@ export interface PersistedReview {
   kind: "remote" | "local";
   /** Remote PR number (as a string) or local PR id. */
   ref: string;
+  /** Which lens's PR this review covers — a fork's origin and upstream lenses
+   *  surface DIFFERENT PRs under the same number. Optional and additive
+   *  (`schemaVersion` stays 1): records written before the lens dimension read as
+   *  "origin", which is what they were. Local PRs carry the same "origin". */
+  lens?: RemoteLens;
   mode: ReviewMode;
   model: string;
   title: string;
@@ -36,12 +42,17 @@ export interface PersistedReview {
   finishedAt: number;
 }
 
-/** Reviews kept per `(kind, ref, mode)` — enough to show iteration, bounded so
- *  the store file never balloons. Pruned on every write. */
+/** Reviews kept per `(lens, kind, ref, mode)` — enough to show iteration, bounded
+ *  so the store file never balloons. Pruned on every write. */
 const MAX_PER_GROUP = 3;
 
-const groupKey = (r: Pick<PersistedReview, "kind" | "ref" | "mode">) =>
-  `${r.kind}#${r.ref}#${r.mode}`;
+/** A record's lens, defaulting the absent field on pre-lens records to the lens
+ *  they were written under. */
+const lensOf = (r: Pick<PersistedReview, "lens">): RemoteLens =>
+  r.lens ?? "origin";
+
+const groupKey = (r: Pick<PersistedReview, "lens" | "kind" | "ref" | "mode">) =>
+  `${lensOf(r)}#${r.kind}#${r.ref}#${r.mode}`;
 
 // Personal app-data, keyed by the repo's worktree-stable identity — never written
 // into the repo itself (the text quotes user source + may contain AI false
@@ -126,7 +137,7 @@ async function writeAll(
   await store.save();
 }
 
-/** Keeps only the newest `MAX_PER_GROUP` reviews per `(kind, ref, mode)`. */
+/** Keeps only the newest `MAX_PER_GROUP` reviews per `(lens, kind, ref, mode)`. */
 function prune(records: PersistedReview[]): PersistedReview[] {
   const groups = new Map<string, PersistedReview[]>();
   for (const r of records) {
@@ -164,6 +175,7 @@ async function read(
  *  re-reads the store from disk first — see {@link read}. */
 export async function getLatestReview(
   repo: string,
+  lens: RemoteLens,
   kind: "remote" | "local",
   ref: string,
   mode: ReviewMode,
@@ -171,7 +183,13 @@ export async function getLatestReview(
 ): Promise<PersistedReview | undefined> {
   const all = await read(repo, opts);
   return all
-    .filter((r) => r.kind === kind && r.ref === ref && r.mode === mode)
+    .filter(
+      (r) =>
+        lensOf(r) === lens &&
+        r.kind === kind &&
+        r.ref === ref &&
+        r.mode === mode,
+    )
     .sort((a, b) => b.finishedAt - a.finishedAt)[0];
 }
 
@@ -182,13 +200,14 @@ export async function getLatestReview(
  *  first — see {@link read}. */
 export async function listReviews(
   repo: string,
+  lens: RemoteLens,
   kind: "remote" | "local",
   ref: string,
   opts?: { fresh?: boolean },
 ): Promise<PersistedReview[]> {
   const all = await read(repo, opts);
   return all
-    .filter((r) => r.kind === kind && r.ref === ref)
+    .filter((r) => lensOf(r) === lens && r.kind === kind && r.ref === ref)
     .sort((a, b) => b.finishedAt - a.finishedAt);
 }
 
@@ -237,9 +256,11 @@ export async function deleteReview(repo: string, id: string): Promise<void> {
 }
 
 /** Clears every persisted review for ONE PR (both modes) — scoped so clearing
- *  from a PR's panel never touches the other PRs' history in the same repo. */
+ *  from a PR's panel never touches the other PRs' history in the same repo, nor the
+ *  other lens's same-numbered PR. */
 export async function clearReviewsFor(
   repo: string,
+  lens: RemoteLens,
   kind: "remote" | "local",
   ref: string,
 ): Promise<void> {
@@ -249,7 +270,9 @@ export async function clearReviewsFor(
     const all = await readByKey(key);
     await writeAll(
       key,
-      all.filter((r) => !(r.kind === kind && r.ref === ref)),
+      all.filter(
+        (r) => !(lensOf(r) === lens && r.kind === kind && r.ref === ref),
+      ),
     );
   });
 }

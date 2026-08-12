@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Markdown } from "@/components/ui/markdown";
 import { Textarea } from "@/components/ui/textarea";
+import type { RemoteLens } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import {
   useClearReviews,
@@ -29,17 +30,21 @@ import { ThoughtsDisclosure } from "./ThoughtsDisclosure";
  */
 export function ReviewHistory({
   repoPath,
+  lens,
   prKind,
   prRef,
 }: {
   repoPath: string;
+  /** The origin|upstream lens the PR was opened under — a fork's two lenses keep
+   *  separate histories for the same PR number. */
+  lens: RemoteLens;
   prKind: "remote" | "local";
   prRef: string;
 }) {
-  const history = useReviewHistory(repoPath, prKind, prRef);
-  const del = useDeleteReview(repoPath, prKind, prRef);
-  const clear = useClearReviews(repoPath, prKind, prRef);
-  const update = useUpdateReviewText(repoPath, prKind, prRef);
+  const history = useReviewHistory(repoPath, lens, prKind, prRef);
+  const del = useDeleteReview(repoPath, lens, prKind, prRef);
+  const clear = useClearReviews(repoPath, lens, prKind, prRef);
+  const update = useUpdateReviewText(repoPath, lens, prKind, prRef);
   const [open, setOpen] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);

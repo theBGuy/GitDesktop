@@ -13,6 +13,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   type KeyboardEvent as ReactKeyboardEvent,
   useEffect,
+  useEffectEvent,
   useMemo,
   useRef,
   useState,
@@ -1543,6 +1544,19 @@ export function JiraIssueView({
   const transitionTo = useJiraTransitionTo(repoPath, link.data);
   const [composeBody, setComposeBody] = useState("");
   const composerRef = useRef<MarkdownEditorHandle>(null);
+  // A different issue must never inherit this one's unsent comment draft — a
+  // render-time state adjustment, not an effect.
+  const [lastKey, setLastKey] = useState(issueKey);
+  if (issueKey !== lastKey) {
+    setLastKey(issueKey);
+    setComposeBody("");
+  }
+  // The restore below can land after the user switched issues; an effect event
+  // reads the LIVE key so a late rejection can't resurrect text elsewhere.
+  const restoreDraft = useEffectEvent((submittedFor: string, body: string) => {
+    if (submittedFor !== issueKey) return;
+    setComposeBody((cur) => (cur.trim() ? cur : body));
+  });
 
   // The link resolved to nothing (unlinked, or unlinked while this view was
   // open): the issue query is disabled, so it would otherwise sit on a pending
@@ -1591,12 +1605,13 @@ export function JiraIssueView({
     if (!body) return;
     // Clear the draft immediately (perceived speed); restore it on error, but
     // only if the composer is still empty so we never clobber newly-typed text.
+    const submittedFor = issueKey;
     setComposeBody("");
     comment.mutate(
       { issueKey, bodyMd: body },
       {
         onError: (e) => {
-          setComposeBody((cur) => (cur.trim() ? cur : body));
+          restoreDraft(submittedFor, body);
           toastError(e);
         },
       },

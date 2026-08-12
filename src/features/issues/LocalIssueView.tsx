@@ -101,6 +101,16 @@ export function LocalIssueView({
     if (issue) update.mutate({ id: issue.id, mutate });
   });
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // A different issue must never inherit this one's unsent drafts or pending
+  // delete confirm — a render-time state adjustment, not an effect.
+  const [lastId, setLastId] = useState(id);
+  if (id !== lastId) {
+    setLastId(id);
+    setComment("");
+    setLabelInput("");
+    setDeletingCommentId(null);
+    setConfirmDelete(false);
+  }
   const [promoteOpen, setPromoteOpen] = useState(false);
   const edit = useEditTitleBody({
     onSave: async ({ title, body }) => {

@@ -24,6 +24,12 @@ export function useGenerateCommitMessage(repoPath: string) {
   const generating = useUiStore((s) => s.generating);
 
   const generate = useCallback(async () => {
+    // The key is captured at start and re-checked at every write: setDraftFields
+    // mirrors into commitDrafts under the LIVE key, so a moved key means the user
+    // switched repo or branch — drop the remaining writes and abort the stream.
+    const startKey = useUiStore.getState().activeDraftKey;
+    // A null startKey (pre-branch-resolution) treats any later key as a move.
+    const keyMoved = () => useUiStore.getState().activeDraftKey !== startKey;
     setGenerating(true);
     const buffer = await run(
       async (settings) => {
@@ -58,6 +64,10 @@ export function useGenerateCommitMessage(repoPath: string) {
       },
       {
         onChunk: (buffer) => {
+          if (keyMoved()) {
+            cancel();
+            return;
+          }
           const { title, body } = splitCommitMessage(buffer);
           setCommitDraft(title, body);
         },
@@ -65,9 +75,16 @@ export function useGenerateCommitMessage(repoPath: string) {
     );
     // A non-null buffer means the stream ran to completion (not aborted, not
     // bailed) — mark the draft as AI-generated just as the old skeleton did.
-    if (buffer !== null) setCommitAiGenerated(true);
+    if (buffer !== null && !keyMoved()) setCommitAiGenerated(true);
     setGenerating(false);
-  }, [repoPath, run, setCommitDraft, setGenerating, setCommitAiGenerated]);
+  }, [
+    repoPath,
+    run,
+    cancel,
+    setCommitDraft,
+    setGenerating,
+    setCommitAiGenerated,
+  ]);
 
   return { generate, cancel, generating };
 }
