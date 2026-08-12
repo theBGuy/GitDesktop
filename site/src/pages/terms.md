@@ -16,7 +16,7 @@ not legal advice.
 ## The software license
 
 GitDesktop is open-source software licensed under the **Apache License 2.0**.
-That license — not this page — governs your rights to use, copy, modify, and
+That license, not this page, governs your rights to use, copy, modify, and
 distribute the software, and it controls in any conflict with these terms. A copy
 ships with the app and is in the [project repository](https://github.com/theBGuy/GitDesktop).
 
@@ -30,7 +30,7 @@ against your repositories, so **keep backups of important work.**
 ## Limitation of liability
 
 To the fullest extent permitted by law, the authors and contributors are **not
-liable** for any damages — including lost data, lost commits, or lost profits —
+liable** for any damages (including lost data, lost commits, or lost profits)
 arising from your use of GitDesktop, even if advised of the possibility.
 
 ## Third-party services

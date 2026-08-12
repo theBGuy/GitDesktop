@@ -234,19 +234,19 @@ const groups: Group[] = [
 const faqs = [
   {
     q: "Is GitDesktop a GitHub Desktop alternative?",
-    a: "Yes. GitDesktop is a free, open-source (Apache-2.0) GitHub Desktop alternative for Windows, macOS, and Linux. GitDesktop covers the same daily loop — staging, branches, history, diffs, sync — and adds the parts GitHub Desktop hands to the browser: reading, reviewing, and merging pull requests, browsing CI runs, and working issues, across GitHub, GitLab, and Bitbucket.",
+    a: "Yes. GitDesktop is a free, open-source (Apache-2.0) GitHub Desktop alternative for Windows, macOS, and Linux. GitDesktop covers the same daily loop (staging, branches, history, diffs, sync) and adds the parts GitHub Desktop hands to the browser: reading, reviewing, and merging pull requests, browsing CI runs, and working issues, across GitHub, GitLab, and Bitbucket.",
   },
   {
     q: "Does GitHub Desktop work with GitLab or Bitbucket?",
-    a: "No. GitHub Desktop can push and pull any git remote, but its hosted features — pull requests, checks, sign-in — are GitHub-only. GitDesktop runs the same pull-request, CI, and issue panels against GitHub, GitLab, and Bitbucket, each on its own authenticated identity.",
+    a: "No. GitHub Desktop can push and pull any git remote, but its hosted features (pull requests, checks, sign-in) are GitHub-only. GitDesktop runs the same pull-request, CI, and issue panels against GitHub, GitLab, and Bitbucket, each on its own authenticated identity.",
   },
   {
     q: "Do you need GitHub Copilot for AI features?",
-    a: "In GitHub Desktop, yes — its commit messages and conflict resolution are Copilot-powered and require Copilot access, even when bringing your own key. In GitDesktop, no — AI runs on your own Anthropic, OpenAI, or OpenRouter key, a local Ollama model, or a keyless CLI agent, and one setting hides every AI surface entirely.",
+    a: "In GitHub Desktop, yes: its commit messages and conflict resolution are Copilot-powered and require Copilot access, even when bringing your own key. In GitDesktop, no. AI runs on your own Anthropic, OpenAI, or OpenRouter key, a local Ollama model, or a keyless CLI agent, and one setting hides every AI surface entirely.",
   },
   {
     q: "What about the GitHub Copilot app?",
-    a: "The GitHub Copilot app is GitHub's second desktop product: an agent-orchestration shell with no manual Git surface — no staging, branching, or diffs you drive yourself, and GitHub-only. GitDesktop does both jobs in one window: a full manual Git client and agent delegation, on any of the three forges.",
+    a: "The GitHub Copilot app is GitHub's second desktop product: an agent-orchestration shell with no manual Git surface (no staging, branching, or diffs you drive yourself), and GitHub-only. GitDesktop does both jobs in one window: a full manual Git client and agent delegation, on any of the three forges.",
   },
 ];
 ---
@@ -276,8 +276,8 @@ const faqs = [
       >
         GitDesktop is a free, open-source GitHub Desktop alternative that keeps
         the same approachable daily loop and adds what GitHub Desktop sends to
-        the browser: the full pull-request loop, CI, and issues — across
-        <span class="text-ink">GitHub, GitLab, and Bitbucket</span> — with AI
+        the browser: the full pull-request loop, CI, and issues, across
+        <span class="text-ink">GitHub, GitLab, and Bitbucket</span>, with AI
         that runs on your own models, or switches off entirely.
       </p>
       <p data-reveal style="transition-delay:180ms" class="mt-5 max-w-[66ch] text-sm text-muted">
@@ -303,7 +303,7 @@ const faqs = [
             <span class="text-ink">Zero prerequisites.</span> GitHub Desktop bundles
             its own Git and signs in with a browser OAuth flow. GitDesktop needs
             system Git, plus <code class="text-ink">gh</code> or
-            <code class="text-ink">glab</code> for forge features — sign-in is
+            <code class="text-ink">glab</code> for forge features. Sign-in is
             guided from inside the app, but it's still a real first-run step.
           </span>
         </li>
@@ -342,7 +342,7 @@ const faqs = [
         Feature by feature
       </h2>
       <p data-reveal class="mt-5 max-w-[66ch] leading-relaxed text-body">
-        Both clients cover the fundamentals — clone, stage by file, hunk, or
+        Both clients cover the fundamentals: clone, stage by file, hunk, or
         line, commit, branch, stash, sync, and resolve conflicts. The table
         keeps to where they diverge.
       </p>
@@ -416,7 +416,7 @@ const faqs = [
         Try the whole loop.
       </h2>
       <p data-reveal style="transition-delay:80ms" class="mx-auto mt-5 max-w-[48ch] leading-relaxed text-body">
-        Free and open source. Keep GitHub Desktop installed — nothing here needs
+        Free and open source. Keep GitHub Desktop installed; nothing here needs
         an account, a migration, or a goodbye.
       </p>
       <div data-reveal style="transition-delay:140ms" class="mt-8 flex flex-wrap items-center justify-center gap-3">

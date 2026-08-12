@@ -242,19 +242,19 @@ const groups: Group[] = [
 const faqs = [
   {
     q: "Is GitDesktop a good Sourcetree alternative?",
-    a: "For Git work, yes. GitDesktop covers the fundamentals Sourcetree is loved for — staging by file, hunk, or line, interactive rebase, stashes, submodule status — and adds what Sourcetree hands to the browser: creating, reviewing, and merging pull requests, CI runs (with GitHub and GitLab step logs in-app), and issues, across GitHub, GitLab, and Bitbucket — Bitbucket issues through a linked Jira project. It's free, open source (Apache-2.0), and needs no vendor account. If you rely on Mercurial or git-flow, Sourcetree keeps those — the table above is honest about it.",
+    a: "For Git work, yes. GitDesktop covers the fundamentals Sourcetree is loved for (staging by file, hunk, or line, interactive rebase, stashes, submodule status) and adds what Sourcetree hands to the browser: creating, reviewing, and merging pull requests, CI runs (with GitHub and GitLab step logs in-app), and issues, across GitHub, GitLab, and Bitbucket. On Bitbucket, issues go through a linked Jira project. It's free, open source (Apache-2.0), and needs no vendor account. If you rely on Mercurial or git-flow, Sourcetree keeps those. The table above is honest about it.",
   },
   {
     q: "Is there a Sourcetree for Linux?",
-    a: "No. Atlassian ships Sourcetree for Windows and macOS only, and community answers as recent as April 2026 say Linux isn't on the roadmap. GitDesktop ships Windows, macOS, and Linux builds — including an AppImage and a Homebrew cask.",
+    a: "No. Atlassian ships Sourcetree for Windows and macOS only, and community answers as recent as April 2026 say Linux isn't on the roadmap. GitDesktop ships Windows, macOS, and Linux builds, including an AppImage and a Homebrew cask.",
   },
   {
     q: "Do you need an Atlassian account to use Sourcetree?",
-    a: "Yes — Atlassian's own install documentation says an Atlassian account is required to use Sourcetree, regardless of which forge your code lives on. GitDesktop has no vendor account at all: you sign in only to the forges you actually use (GitHub via gh, GitLab via glab, Bitbucket with an API token), and none of it is needed for local-only work.",
+    a: "Yes. Atlassian's own install documentation says an Atlassian account is required to use Sourcetree, regardless of which forge your code lives on. GitDesktop has no vendor account at all: you sign in only to the forges you actually use (GitHub via gh, GitLab via glab, Bitbucket with an API token), and none of it is needed for local-only work.",
   },
   {
     q: "Is Sourcetree still maintained?",
-    a: "Yes, in a steady-patch sense: both apps shipped point releases through mid-2026 (Windows 3.4.31 in June, Mac 4.2.19 in July). But the two platforms run on separate codebases with a long-standing feature gap between them, community threads note it's absent from Atlassian's public product roadmap, and the big asks — worktree support requested since 2015, in-app pull requests since 2017 — remain open. It's stable, not evolving.",
+    a: "Yes, in a steady-patch sense: both apps shipped point releases through mid-2026 (Windows 3.4.31 in June, Mac 4.2.19 in July). But the two platforms run on separate codebases with a long-standing feature gap between them, community threads note it's absent from Atlassian's public product roadmap, and the big asks (worktree support requested since 2015, in-app pull requests since 2017) remain open. It's stable, not evolving.",
   },
 ];
 ---
@@ -284,15 +284,15 @@ const faqs = [
       >
         GitDesktop is a free, open-source Sourcetree alternative that runs on
         <span class="text-ink">Linux as well as Windows and macOS</span>, needs
-        no vendor account, and keeps the pull-request loop — create, review,
-        merge, CI — in the app instead of the browser, across
+        no vendor account, and keeps the pull-request loop (create, review,
+        merge, CI) in the app instead of the browser, across
         <span class="text-ink">GitHub, GitLab, and Bitbucket</span>, with
         issues in-app too (via a linked Jira project on Bitbucket). AI is
         optional: your own models, or hidden entirely.
       </p>
       <p data-reveal style="transition-delay:180ms" class="mt-5 max-w-[66ch] text-sm text-muted">
         Verified against Sourcetree for Windows {ST_WIN_VERSION} and Sourcetree
-        for Mac {ST_MAC_VERSION} — two separate apps on separate release lines —
+        for Mac {ST_MAC_VERSION} (two separate apps on separate release lines)
         on {VERIFIED_ON}. Something stale?
         <a href={`${repo}/issues`} class="text-mint underline-offset-4 hover:underline"
           >Open an issue</a
@@ -315,7 +315,7 @@ const faqs = [
             bundles its own Git (system Git optional). GitDesktop needs system
             Git, plus <code class="text-ink">gh</code> or
             <code class="text-ink">glab</code> for GitHub and GitLab features
-            (Bitbucket needs only an API token) — sign-in is guided from inside
+            (Bitbucket needs only an API token). Sign-in is guided from inside
             the app, but it's still a real first-run step.
           </span>
         </li>
@@ -324,7 +324,7 @@ const faqs = [
           <span>
             <span class="text-ink">Mercurial.</span> Sourcetree is the rare
             mainstream client still shipping Mercurial support, on both
-            platforms, with Hg-flow to match. GitDesktop is Git-only — if your
+            platforms, with Hg-flow to match. GitDesktop is Git-only; if your
             repos are hg, Sourcetree remains the tool.
           </span>
         </li>
@@ -332,7 +332,7 @@ const faqs = [
           <span class="mt-px select-none text-add" aria-hidden="true">+</span>
           <span>
             <span class="text-ink">Git-flow, one menu item.</span> Initialize a
-            repo and the whole branch ceremony — feature, release, hotfix — is
+            repo and the whole branch ceremony (feature, release, hotfix) is
             driven from the UI. GitDesktop has no git-flow support.
           </span>
         </li>
@@ -374,7 +374,7 @@ const faqs = [
         Feature by feature
       </h2>
       <p data-reveal class="mt-5 max-w-[66ch] leading-relaxed text-body">
-        Both clients cover the fundamentals — clone, stage by file, hunk, or
+        Both clients cover the fundamentals: clone, stage by file, hunk, or
         line, commit, branch, stash, sync, and resolve conflicts. The table
         keeps to where they diverge. Where Sourcetree's two apps differ from
         each other, the row says so.
@@ -383,8 +383,8 @@ const faqs = [
       <CompareTable competitor="Sourcetree" groups={groups} />
 
       <p class="mt-6 max-w-[66ch] text-sm leading-relaxed text-muted">
-        Every Sourcetree cell traces to a primary Atlassian source — release
-        notes, support documentation, or its public issue tracker — checked on
+        Every Sourcetree cell traces to a primary Atlassian source (release
+        notes, support documentation, or its public issue tracker), checked on
         the date above. Rows where both clients are simply fine were left out
         on purpose. Also compared:
         <a
@@ -404,10 +404,10 @@ const faqs = [
         </h2>
         <p data-reveal class="mt-5 leading-relaxed text-body">
           Sourcetree's "Create Pull Request" opens a browser tab, and reading,
-          reviewing, or merging one was never added — Atlassian's own answer,
-          given in 2018 and never revisited since: "we don't currently support
-          listing or viewing PRs in Sourcetree." In GitDesktop the whole loop
-          lives next to your staging and history.
+          reviewing, or merging one was never added. Atlassian's own answer has
+          stood since 2018: "we don't currently support listing or viewing PRs
+          in Sourcetree." In GitDesktop the whole loop lives next to your
+          staging and history.
         </p>
       </div>
       <figure data-reveal style="transition-delay:120ms" class="window mt-10">
@@ -453,7 +453,7 @@ const faqs = [
       </h2>
       <p data-reveal style="transition-delay:80ms" class="mx-auto mt-5 max-w-[48ch] leading-relaxed text-body">
         Free, open source, and no account to create. Keep Sourcetree right
-        where it is — open one repo in GitDesktop and see which window you
+        where it is. Open one repo in GitDesktop and see which window you
         keep.
       </p>
       <div data-reveal style="transition-delay:140ms" class="mt-8 flex flex-wrap items-center justify-center gap-3">

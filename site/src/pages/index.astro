@@ -73,9 +73,9 @@ const forges = [
 
 <SiteLayout
   title="GitDesktop — Git client for GitHub, GitLab & Bitbucket"
-  description="A free, open-source GitHub Desktop alternative that also works with GitLab and Bitbucket — staging, diffs, pull requests, CI, and issues in one window."
+  description="A free, open-source GitHub Desktop alternative that also works with GitLab and Bitbucket: staging, diffs, pull requests, CI, and issues in one window."
   ogTitle="GitDesktop — the whole Git loop, one window"
-  ogDescription="GitHub Desktop fundamentals across GitHub, GitLab & Bitbucket, plus the full pull-request loop, code review, CI, and issues — in one fast window. With AI you control, or hide entirely."
+  ogDescription="GitHub Desktop fundamentals across GitHub, GitLab & Bitbucket, plus the full pull-request loop, code review, CI, and issues, in one fast window. With AI you control, or hide entirely."
 >
   <!-- ============================ AI-NATIVE VIEW ======================= -->
   <!-- Hero (AI) -->
@@ -109,8 +109,8 @@ const forges = [
           Everything <a href={`${base}compare/github-desktop/`} class="whitespace-nowrap text-ink underline decoration-line-2 underline-offset-4 transition-colors hover:decoration-mint">GitHub Desktop</a> does (staging, branches, diffs, history,
           sync), now across <span class="text-ink">GitHub, GitLab &amp; Bitbucket</span>,
           with the full pull-request loop, CI, and issues in one window. Then AI that
-          reads your diff for commits, PR descriptions, and code review — and takes on
-          whole delegated tasks — on your own models, or hidden entirely.
+          drafts commits and PR descriptions from your diff, reviews code, and takes
+          on whole delegated tasks — on your own models, or hidden entirely.
         </p>
         <div
           data-reveal
@@ -195,8 +195,8 @@ const forges = [
           style="transition-delay:120ms"
           class="mt-7 max-w-[58ch] text-base leading-relaxed text-body sm:text-lg"
         >
-          Everything you expect from <a href={`${base}compare/github-desktop/`} class="whitespace-nowrap text-ink underline decoration-line-2 underline-offset-4 transition-colors hover:decoration-mint">GitHub Desktop</a> — staging, branches, diffs,
-          history, sync — now across <span class="text-ink">GitHub, GitLab &amp;
+          Everything you expect from <a href={`${base}compare/github-desktop/`} class="whitespace-nowrap text-ink underline decoration-line-2 underline-offset-4 transition-colors hover:decoration-mint">GitHub Desktop</a> (staging, branches, diffs,
+          history, sync), now across <span class="text-ink">GitHub, GitLab &amp;
           Bitbucket</span>, with the full pull-request loop, CI, issues, and branch
           protection in one fast window. Built to be trusted with uncommitted
           work. No AI in sight.
@@ -275,13 +275,15 @@ const forges = [
           It writes the commit.<br class="hidden sm:block" /> You keep the keys.
         </h2>
         <p class="mt-6 max-w-[60ch] leading-relaxed text-body">
-          One click reads your staged diff and drafts the commit message — and the PR
-          title and description — in your conventions. It streams into the same fields
+          One click reads your staged diff and drafts the commit message in your
+          conventions; the PR dialog gives its title and description the same
+          treatment. It streams into the same fields
           you'd type in, so it's always editable and never blocks the manual path.
           Generating a PR description can also propose which of your open issues it
           <span class="text-ink">Closes</span> or relates to, chosen from a grounded
-          shortlist so it never invents an issue number — or, on a Bitbucket repo with a
-          linked Jira project, which linked-Jira tickets to mention.
+          shortlist so it never invents an issue number. On a Bitbucket repo with a
+          linked Jira project, it can propose linked-Jira tickets to mention instead,
+          drawn from the same grounded shortlist.
         </p>
         <p class="mt-4 max-w-[60ch] leading-relaxed text-muted">
           Bring your own model: Anthropic, OpenAI, Google AI Studio, any
@@ -308,7 +310,7 @@ const forges = [
         </h2>
         <p class="mt-6 max-w-[56ch] leading-relaxed text-body">
           Delegate a coding task to a <span class="text-ink">Claude, Codex, Copilot,
-          or opencode</span> agent — it works in an isolated worktree, so your own
+          or opencode</span> agent. It works in an isolated worktree, so your own
           checkout is never touched. Follow every file it reads and edits, expand any
           edit to its diff inline, then keep it as a branch, open a local PR from it,
           or discard it.
@@ -371,10 +373,10 @@ const forges = [
           A reviewer that actually reads the code.
         </h2>
         <p class="mt-6 leading-relaxed text-body">
-          Run a general review or a security audit on any pull request — local or on
-          GitHub, GitLab, or Bitbucket. It reads the changed files, flags real issues
+          Run a general review or a security audit on any pull request, whether local
+          or on GitHub, GitLab, or Bitbucket. It reads the changed files, flags real issues
           with a severity, and cites the exact lines. The result stays on your machine
-          unless you choose to post it — and it keeps running while you move between
+          unless you choose to post it. The review keeps running while you move between
           PRs, or even after you close the window, then pings you when it's done.
         </p>
         <p class="mt-4 leading-relaxed text-muted">
@@ -409,7 +411,7 @@ const forges = [
         <p class="mt-6 leading-relaxed text-body">
           One calm client for all three. GitDesktop routes every pull-request and CI
           action through a forge abstraction, so the same panels work whether your
-          remote points at GitHub, GitLab, or Bitbucket — each on its own authenticated
+          remote points at GitHub, GitLab, or Bitbucket, each on its own authenticated
           identity, none borrowing another's. Sign in and reconnect to GitHub and GitLab
           without leaving the app; GitDesktop spots an expired session, badges the
           account, and warns before a token lapses.
@@ -440,7 +442,7 @@ const forges = [
       </p>
       <p data-reveal class="mt-8 max-w-[62ch] text-sm leading-relaxed text-muted">
         GitHub &amp; GitLab go through their CLIs (<code class="text-ink">gh</code>,
-        <code class="text-ink">glab</code>) — including GitHub Enterprise and
+        <code class="text-ink">glab</code>), including GitHub Enterprise and
         self-managed GitLab; Bitbucket Cloud uses an Atlassian API token. A few things
         differ by platform, and we say so where they do.
       </p>
@@ -462,16 +464,16 @@ const forges = [
         <p class="mt-6 max-w-[56ch] leading-relaxed text-body">
           Link a <span class="text-ink">Jira Cloud</span> project to any repository and
           the Issues tab gains a Jira section: browse and filter your issues, read
-          status, type, priority, assignee, description and comments — plus agile
+          status, type, priority, assignee, description and comments, plus agile
           fields like story points, sprint, and a clickable epic when the project uses
           them. Create, comment, assign, set a due date, change priority, edit
-          labels, and close or reopen along the project's own workflow — every action
+          labels, and close or reopen along the project's own workflow, every action
           gated on your Jira permissions.
         </p>
         <p class="mt-4 max-w-[56ch] leading-relaxed text-muted">
           Especially handy for Bitbucket, whose native tracker Atlassian retires on
-          August 20, 2026 —
-          <a href={`${base}bitbucket-issues-sunset/`} class="text-mint underline-offset-4 hover:underline">what that means for your repos →</a>
+          August 20, 2026.
+          <a href={`${base}bitbucket-issues-sunset/`} class="text-mint underline-offset-4 hover:underline">What that means for your repos →</a>
         </p>
         <p class="mt-6 text-sm">
           <a href={`${base}integrations/`} class="text-mint underline-offset-4 hover:underline">More on Jira &amp; forges →</a>
@@ -504,7 +506,7 @@ const forges = [
   <!-- Local PRs (shared) -->
   <FeatureRow
     id="pull-requests"
-    title="Pull requests. Without the browser — or the cloud."
+    title="Pull requests. Without the browser. Or the cloud."
     image={appPrDialog}
     alt="The New local pull request dialog: merge one branch into another and review it locally"
     side="right"
@@ -515,11 +517,11 @@ const forges = [
       Open pull requests on GitHub, GitLab, and Bitbucket, or private
       <span class="text-ink">local PRs</span> that never leave your machine: propose a
       merge, review the diff, and merge with a <code class="text-ink">--no-ff</code>
-      commit — on a repo that isn't on any forge at all.
+      commit, even on a repo that isn't on any forge at all.
     </p>
     <p class="text-muted">
       A local-PR merge pre-shows whether it will conflict, and if it does you resolve
-      it in an isolated worktree that never touches your branch — then Finish or Abort.
+      it in an isolated worktree that never touches your branch, then Finish or Abort.
       Promote a local PR to a real GitHub PR, comments and all, in one click.
     </p>
   </FeatureRow>
@@ -534,7 +536,7 @@ const forges = [
     surface={true}
   >
     <p>
-      GitHub&nbsp;Actions, in the app — browse runs for the current branch, drill into
+      GitHub&nbsp;Actions, in the app: browse runs for the current branch, drill into
       jobs and steps, dispatch a workflow, and re-run or cancel. A PR's checks collapse
       into a pass/fail/pending/skipped rollup that shows a running check's current step
       live and peeks a failing job's log inline.
@@ -600,7 +602,7 @@ const forges = [
         <div data-reveal class="min-w-0">
           <h3 class="text-xl text-ink">Stage exactly what you mean.</h3>
           <p class="mt-4 max-w-[52ch] leading-relaxed text-body">
-            Stage — or discard — by file, by hunk, or by dragging across individual
+            Stage or discard by file, by hunk, or by dragging across individual
             lines, even within a brand-new file, to split a messy working tree into
             clean, reviewable commits, with partial patches applied via git's own
             <code class="text-ink">--cached</code>.
@@ -632,7 +634,7 @@ const forges = [
           <h3 class="text-xl text-ink">Read the whole story.</h3>
           <p class="mt-4 max-w-[52ch] leading-relaxed text-body">
             Browse history, search every commit, and blame any line back to the change
-            that introduced it — then cherry-pick, squash, reorder, or stash, without
+            that introduced it, then cherry-pick, squash, reorder, or stash, without
             leaving the keyboard.
           </p>
         </div>
@@ -650,12 +652,12 @@ const forges = [
     surface={true}
   >
     <p>
-      Compare any branch against another — ahead/behind counts, a three-dot diff, the
+      Compare any branch against another: ahead/behind counts, a three-dot diff, the
       full list of changed files, and every commit that isn't on the base yet.
     </p>
     <p class="text-muted">
-      Merging shows an advanced tooling panel that predicts the result in memory —
-      fast-forward, already up to date, clean, or which files will conflict — before
+      Merging shows an advanced tooling panel that predicts the result in memory
+      (fast-forward, already up to date, clean, or which files will conflict) before
       you commit to it.
     </p>
   </FeatureRow>
@@ -690,7 +692,7 @@ const forges = [
         <div class="min-w-0">
           <h3 class="text-ink">An operation journal.</h3>
           <p class="mt-2 max-w-[48ch] text-sm leading-relaxed text-muted">
-            Risky compound ops — merges, cherry-picks, rebases, history edits — are
+            Risky compound ops (merges, cherry-picks, rebases, history edits) are
             recorded, so an interrupted one surfaces a calm recovery notice with the
             exact state it started from.
           </p>
@@ -718,13 +720,13 @@ const forges = [
         </h2>
         <p class="mt-6 max-w-[56ch] leading-relaxed text-body">
           The reverse direction: run GitDesktop <span class="text-ink">as an MCP
-          server</span> and any external client — Claude Desktop, Cursor, Claude Code —
+          server</span> and any external client (Claude Desktop, Cursor, Claude Code)
           can understand a repo through read-only git, PR &amp; CI tools, across GitHub,
           GitLab, and Bitbucket. Settings writes the config into your repo's
           <code class="text-ink">.mcp.json</code> or installs it globally.
         </p>
         <p class="mt-4 max-w-[56ch] leading-relaxed text-muted">
-          Writes are an escalating opt-in ladder — each tier a separate flag, off by
+          Writes are an escalating opt-in ladder: each tier a separate flag, off by
           default, so read-only stays the default.
         </p>
         <p class="mt-6 text-sm">
@@ -776,7 +778,7 @@ const forges = [
       attach the cross-platform binaries.
     </p>
     <p class="text-muted">
-      Lightweight tags for a quick checkpoint; full releases when you ship — push, edit,
+      Lightweight tags for a quick checkpoint; full releases when you ship. Push, edit,
       delete, or download any asset, in the app.
     </p>
   </FeatureRow>
@@ -825,7 +827,7 @@ const forges = [
       </h2>
       <p data-reveal style="transition-delay:80ms" class="mx-auto mt-6 max-w-[48ch] leading-relaxed text-body">
         Free, open source, and local. Fast enough to live in, careful enough to trust
-        with your work — discards are recoverable and pushes use
+        with your work: discards are recoverable and pushes use
         <code class="text-ink">--force-with-lease</code>.
       </p>
       <div

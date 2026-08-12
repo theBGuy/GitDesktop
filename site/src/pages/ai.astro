@@ -53,7 +53,7 @@ const agentAbilities = [
         AI you actually control.
       </h1>
       <p data-reveal style="transition-delay:120ms" class="mt-6 max-w-[62ch] text-base leading-relaxed text-body sm:text-lg">
-        Every AI surface is optional, editable, and attributable — and it runs on
+        Every AI surface is optional, editable, and attributable. It runs on
         <span class="text-ink">your own model</span>: a cloud API, a local Ollama, or a
         keyless CLI you already pay for. Keys live in your OS keychain, never in app
         files, and a single switch hides all of it. It assists the workflow; it never
@@ -68,7 +68,7 @@ const agentAbilities = [
       <div data-reveal class="min-w-0">
         <h2 class="text-2xl tracking-[-0.02em] sm:text-3xl">It writes; you edit.</h2>
         <p class="mt-6 max-w-[46ch] leading-relaxed text-body">
-          One click reads your staged diff and drafts the message — streaming into the
+          One click reads your staged diff and drafts the message, streaming into the
           same field you'd type in, always editable.
         </p>
       </div>
@@ -101,8 +101,8 @@ const agentAbilities = [
         <div class="rule-mint mb-6 w-16"></div>
         <h2 class="text-2xl tracking-[-0.02em] sm:text-3xl">A reviewer that reads the code.</h2>
         <p class="mt-6 leading-relaxed text-body">
-          Run a general review or a security audit on any pull request — local or on
-          GitHub, GitLab, or Bitbucket. It reads the changed files, flags real issues
+          Run a general review or a security audit on any pull request, whether local
+          or on GitHub, GitLab, or Bitbucket. It reads the changed files, flags real issues
           with a severity, and cites the exact lines. The result stays on your machine
           unless you post it.
         </p>
@@ -128,15 +128,15 @@ const agentAbilities = [
         <div class="min-w-0">
           <h3 class="text-ink">Clearly machine-authored.</h3>
           <p class="mt-2 max-w-[48ch] text-sm leading-relaxed text-muted">
-            A branded header/footer and a robot avatar — and with a GitLab access token,
-            posted as the real project bot rather than your own account.
+            A branded header/footer and a robot avatar. With a GitLab access token, it
+            posts as the real project bot rather than your own account.
           </p>
         </div>
         <div class="min-w-0">
           <h3 class="text-ink">On a schedule, if you want.</h3>
           <p class="mt-2 max-w-[48ch] text-sm leading-relaxed text-muted">
             Automations run a review or security audit on commit, on PR open, or on new
-            commits to a reviewed PR — scoped by branch. And Debug-with-AI turns a failed
+            commits to a reviewed PR, scoped by branch. And Debug-with-AI turns a failed
             CI job's logs into a root cause and fix.
           </p>
         </div>
@@ -161,8 +161,8 @@ const agentAbilities = [
       <div data-reveal class="max-w-2xl">
         <h2 class="text-2xl tracking-[-0.02em] sm:text-3xl">Hand off whole tasks.</h2>
         <p class="mt-6 leading-relaxed text-body">
-          Beyond generation, GitDesktop drives full coding agents — the CLI you already
-          have, no extra subscription — and keeps every run inspectable and reversible.
+          Beyond generation, GitDesktop drives full coding agents (the CLI you already
+          have, no extra subscription) and keeps every run inspectable and reversible.
         </p>
       </div>
       <ul data-reveal style="transition-delay:80ms" class="mt-10 grid gap-x-12 gap-y-3.5 md:grid-cols-2">
@@ -197,15 +197,15 @@ const agentAbilities = [
         <h2 class="text-2xl tracking-[-0.02em] sm:text-3xl">GitDesktop as an MCP server.</h2>
         <p class="mt-6 max-w-[52ch] leading-relaxed text-body">
           The reverse direction: expose this repo's read-only git &amp; forge tools to any
-          external MCP client — Claude Desktop, Cursor, Claude Code. Settings shows a
+          external MCP client, like Claude Desktop, Cursor, or Claude Code. Settings shows a
           ready-to-paste snippet, writes it into the repo's
           <code class="text-ink">.mcp.json</code>, or installs it globally, with an
           Add-to-PATH launcher so the bare <code class="text-ink">gitdesktop-mcp</code>
           command resolves anywhere.
         </p>
         <p class="mt-4 max-w-[52ch] leading-relaxed text-muted">
-          It also hands a connected agent GitDesktop's own generation recipes — the fully
-          assembled commit-message, PR-description, and branch-name prompts — as tools and
+          It also hands a connected agent GitDesktop's own generation recipes (the fully
+          assembled commit-message, PR-description, and branch-name prompts) as tools and
           as MCP prompts. And you can bring your own MCP servers into a session, or browse
           the official registry to add new ones.
         </p>
@@ -216,7 +216,7 @@ const agentAbilities = [
           <McpConfig />
         </figure>
         <p class="mt-4 text-sm text-muted">
-          Writes are an escalating opt-in ladder — each tier a separate flag, off by
+          Writes are an escalating opt-in ladder, each tier a separate flag, off by
           default:
         </p>
         <ul class="ladder mt-3">
@@ -253,7 +253,7 @@ const agentAbilities = [
         <p class="mt-6 leading-relaxed text-body">
           Separate models for generation and review, in a searchable live picker. Point
           Ollama or an OpenAI-compatible endpoint at a box on your LAN, not just
-          localhost — non-built-in hosts are enforced against an allow-list before every
+          localhost. Non-built-in hosts are enforced against an allow-list before every
           request.
         </p>
       </div>
@@ -271,8 +271,8 @@ const agentAbilities = [
         <div class="min-w-0">
           <h3 class="text-sm text-ink">Custom instructions</h3>
           <p class="mt-2 text-sm leading-relaxed text-muted">
-            Global, or per-repo via <code class="text-ink">.gitdesktop/instructions.md</code>
-            — included in every generation and every AI review.
+            Global, or per-repo via <code class="text-ink">.gitdesktop/instructions.md</code>.
+            Both are included in every generation and every AI review.
           </p>
         </div>
         <div class="min-w-0">

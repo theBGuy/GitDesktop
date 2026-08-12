@@ -31,9 +31,9 @@ const forges = [
     forge: "gitlab",
     name: "GitLab",
     via: "via the GitLab CLI (glab)",
-    lead: "gitlab.com or self-managed — GitDesktop recognizes any host glab is signed in to. Browse and clone your projects, then read and act on merge requests, issues, pipelines, and releases in the same panels.",
+    lead: "gitlab.com or self-managed: GitDesktop recognizes any host glab is signed in to. Browse and clone your projects, then read and act on merge requests, issues, pipelines, and releases in the same panels.",
     features: [
-      "Merge requests — comment (edit/delete your own), close/reopen, edit title & description, react, edit labels & assignees, approve/unapprove, request changes, and merge (merge/squash) — including auto-merge when the pipeline succeeds",
+      "Merge requests — comment (edit/delete your own), close/reopen, edit title & description, react, edit labels & assignees, approve/unapprove, request changes, and merge (merge/squash), including auto-merge when the pipeline succeeds",
       "Issues — create, comment, close/reopen, labels, assignees, milestone, due date, confidential, time tracking (estimate + spent), and linked related issues; lock, move, or delete",
       "Pipelines — retry / cancel / run with CI/CD variables, and play a manual job",
       "Releases — publish, edit, delete, with asset uploads; star a project and publish a local repo to GitLab",
@@ -55,7 +55,7 @@ const forges = [
       "Pipelines — rerun, trigger (pick a custom pipeline, with variables), and stop; publish a local repo to Bitbucket",
       "Repo settings — General, default reviewers, branch restrictions, pipeline variables & schedules, deployment environments, webhooks, and a Danger zone",
     ],
-    note: "Build statuses link out (name, state, URL — no fetchable logs). Reopening a declined PR isn't available (a Bitbucket platform limit), and Bitbucket has no native issue tracker — link a Jira project instead (below).",
+    note: "Build statuses link out with name, state, and URL; logs aren't fetchable. Reopening a declined PR isn't available (a Bitbucket platform limit), and Bitbucket has no native issue tracker. Link a Jira project instead (below).",
     image: appBitbucket,
     alt: "A Bitbucket pull request in GitDesktop: a Tasks checklist, an approval, review comments, and the merge action",
   },
@@ -63,10 +63,10 @@ const forges = [
 
 const jiraFeatures = [
   "Browse and filter issues (open / closed / all), and read status, type, priority, assignee, labels, a Markdown description, and comments",
-  "Agile fields when the project uses them — story points, sprint, a clickable epic / parent, components, and fix versions — discovered automatically per site",
+  "Agile fields when the project uses them (story points, sprint, a clickable epic / parent, components, and fix versions), discovered automatically per site",
   "Create, comment in Markdown, assign, set a due date, change priority, edit labels, and close/reopen along the project's own workflow",
   "Time tracking, when the project has it on — log work with Jira's duration grammar (2d 4h 30m), set the original and remaining estimates, and edit or delete your own worklog entries",
-  "Edit or delete your own comments — and every action is gated on your Jira permissions, so what you can't do simply doesn't appear",
+  "Edit or delete your own comments, with every action gated on your Jira permissions, so what you can't do simply doesn't appear",
   "Issue keys in your branch, commits, and PR titles are linked back to the Issues tab; a local issue can be promoted to Jira",
 ];
 ---
@@ -74,7 +74,7 @@ const jiraFeatures = [
 <SiteLayout
   active="integrations"
   title="Integrations — GitHub, GitLab, Bitbucket & Jira | GitDesktop"
-  description="GitDesktop works with GitHub, GitLab, and Bitbucket — the full PR loop, CI, issues, and releases — plus linked Jira Cloud issues, each on its own identity."
+  description="GitDesktop works with GitHub, GitLab, and Bitbucket: the full PR loop, CI, issues, and releases, plus linked Jira Cloud issues, each on its own identity."
   breadcrumbs={[{ name: "Integrations", path: "/integrations/" }]}
   ogTitle="GitDesktop integrations — GitHub, GitLab, Bitbucket & Jira"
   ogDescription="One calm client across GitHub, GitLab, and Bitbucket, with linked Jira Cloud issues. The full loop for each, with the honest per-platform differences."
@@ -90,7 +90,7 @@ const jiraFeatures = [
         GitDesktop routes every pull-request and CI action through a forge
         abstraction, so the same panels work whether your remote points at
         <span class="text-ink">GitHub</span>, <span class="text-ink">GitLab</span>, or
-        <span class="text-ink">Bitbucket</span> — each on its own authenticated identity,
+        <span class="text-ink">Bitbucket</span>, each on its own authenticated identity,
         none borrowing another's. Issues are GitHub- and GitLab-native; on Bitbucket, link
         a <span class="text-ink">Jira Cloud</span> project for the tracker layer instead.
       </p>
@@ -134,7 +134,7 @@ const jiraFeatures = [
               ))}
             </ul>
             <p class="mt-6 border-t border-line pt-5 text-sm leading-relaxed text-muted">
-              <span class="text-ink">Good to know — </span>{f.note}
+              <span class="text-ink">Good to know: </span>{f.note}
             </p>
           </div>
           </div>
@@ -165,14 +165,14 @@ const jiraFeatures = [
         </div>
         <p class="mt-2 text-sm text-faint">with an Atlassian API token</p>
         <p class="mt-6 max-w-[46ch] leading-relaxed text-body">
-          Link a Jira Cloud site and project to any repository — from the repo menu or
-          the command palette — and its Issues tab gains a Jira section. Connect with an
+          Link a Jira Cloud site and project to any repository (from the repo menu or
+          the command palette) and its Issues tab gains a Jira section. Connect with an
           Atlassian API token, or reuse an existing Bitbucket credential.
         </p>
         <p class="mt-4 max-w-[46ch] text-sm leading-relaxed text-muted">
           Especially handy for Bitbucket, whose native tracker Atlassian retires on
-          August 20, 2026 —
-          <a href={`${base}bitbucket-issues-sunset/`} class="text-mint underline-offset-4 hover:underline">what that means for your repos →</a>
+          August 20, 2026.
+          <a href={`${base}bitbucket-issues-sunset/`} class="text-mint underline-offset-4 hover:underline">What that means for your repos →</a>
         </p>
       </div>
       <div data-reveal style="transition-delay:80ms" class="min-w-0">
@@ -187,7 +187,7 @@ const jiraFeatures = [
           }
         </ul>
         <p data-view="ai" class="mt-6 border-t border-line pt-5 text-sm leading-relaxed text-muted">
-          <span class="text-ink">And for agents — </span>a connected MCP client gets
+          <span class="text-ink">And for agents: </span>a connected MCP client gets
           <code class="text-ink">jira_*</code> tools to list and read the linked project,
           and (behind the remote-write opt-in) comment, create, assign, log work, and
           update issues, including their estimates.
