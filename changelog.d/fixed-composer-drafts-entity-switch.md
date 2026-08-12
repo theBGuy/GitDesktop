@@ -1,1 +1,3 @@
-- Comment boxes in pull request, issue, Jira, discussion, and commit views now start clean when you switch to a different item, so a draft written for one can't be posted to another.
+- Comment boxes in pull request, issue, Jira, discussion, and commit views
+  now start clean when you switch to a different item, so a draft written
+  for one can't be posted to another.
