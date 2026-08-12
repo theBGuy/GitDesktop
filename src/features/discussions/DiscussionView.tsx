@@ -341,16 +341,13 @@ export function DiscussionView({
     const addIds = ids([...draftLabels].filter((n) => !applied.has(n)));
     const removeIds = ids([...applied].filter((n) => !draftLabels.has(n)));
     if (addIds.length > 0 || removeIds.length > 0) {
-      editLabels.mutate(
-        {
-          kind: "discussion",
-          number: d.number,
-          labelableId: d.id,
-          addIds,
-          removeIds,
-        },
-        { onError },
-      );
+      editLabels.mutate({
+        kind: "discussion",
+        number: d.number,
+        labelableId: d.id,
+        addIds,
+        removeIds,
+      });
     }
   }
 

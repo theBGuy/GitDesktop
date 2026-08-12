@@ -6,7 +6,6 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Spinner } from "@/components/ui/spinner";
 import { useEditPrLabels, useRepoLabels } from "@/lib/git/queries";
 import type { RemoteLens, RepoLabel } from "@/lib/git/types";
-import { toastError } from "@/lib/toast";
 import { LabelChip } from "./Thread";
 
 /**
@@ -73,20 +72,17 @@ export function LabelsPopover({
     // would skip every GitLab edit. GitHub keys on the ids derived here; GitLab on
     // the names — the forge command takes whichever pair its provider addresses by.
     if (addNames.length > 0 || removeNames.length > 0) {
-      editLabels.mutate(
-        {
-          // `target` is this popover's surface ("issue" | "mr"); it doubles as the
-          // reconcile `kind`. (Discussions use their own view, not this popover.)
-          kind: target,
-          number,
-          labelableId,
-          addIds: ids(addNames),
-          removeIds: ids(removeNames),
-          addNames,
-          removeNames,
-        },
-        { onError: toastError },
-      );
+      editLabels.mutate({
+        // `target` is this popover's surface ("issue" | "mr"); it doubles as the
+        // reconcile `kind`. (Discussions use their own view, not this popover.)
+        kind: target,
+        number,
+        labelableId,
+        addIds: ids(addNames),
+        removeIds: ids(removeNames),
+        addNames,
+        removeNames,
+      });
     }
   }
 

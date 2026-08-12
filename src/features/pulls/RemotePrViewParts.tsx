@@ -37,7 +37,6 @@ import type {
 } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import type { ReviewDraft } from "@/lib/pulls/review-drafts";
-import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { DraftCommentCard } from "./PendingReviewBar";
 import { ReviewThreadCard, type SuggestionApply } from "./ReviewThreads";
@@ -457,7 +456,6 @@ export function MrTimeTracking({
   const stats = useGlMrTimeStats(repoPath, number);
   const setEstimate = useSetMrTimeEstimate(repoPath);
   const addSpent = useAddMrSpentTime(repoPath);
-  const onError = (e: unknown) => toastError(e);
 
   const data = stats.data;
   const humanEstimate = data?.humanTimeEstimate ?? "";
@@ -520,11 +518,9 @@ export function MrTimeTracking({
             disabledReason={disabledReason}
             idPrefix="mr"
             onSetEstimate={(duration) =>
-              setEstimate.mutate({ number, duration }, { onError })
+              setEstimate.mutate({ number, duration })
             }
-            onAddSpent={(duration) =>
-              addSpent.mutate({ number, duration }, { onError })
-            }
+            onAddSpent={(duration) => addSpent.mutate({ number, duration })}
           />
         )}
       </PopoverContent>

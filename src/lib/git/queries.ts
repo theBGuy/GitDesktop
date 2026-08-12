@@ -10,6 +10,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { isDirtyTreeRefusal } from "@/lib/error-summary";
 import { isAppError } from "@/lib/tauri/invoke";
 import { COLD_START_NO_GH, COLD_START_NO_GIT } from "@/lib/test-mode";
+import { toastError } from "@/lib/toast";
 import * as api from "./api";
 import { primeCommitAuthorIndex } from "./commit-avatar";
 import {
@@ -1793,11 +1794,17 @@ function useOptimisticIssueMutation<TArgs extends { number: number }, TData>(
       }
       return { key, restore };
     },
-    onError: (_e, _args, ctx) => {
-      if (!ctx?.restore) return;
-      queryClient.setQueryData<IssueDetails>(ctx.key, (cur) =>
-        cur ? { ...cur, ...ctx.restore } : cur,
-      );
+    // Reporting lives HERE, not in each caller's `mutate` options: react-query
+    // only runs mutate-scoped callbacks while the observer has listeners, and the
+    // views re-key their metadata rail per entity — so a switch mid-flight would
+    // roll the cache back with nothing said.
+    onError: (e, _args, ctx) => {
+      if (ctx?.restore) {
+        queryClient.setQueryData<IssueDetails>(ctx.key, (cur) =>
+          cur ? { ...cur, ...ctx.restore } : cur,
+        );
+      }
+      toastError(e);
     },
     // Narrow reconciliation: only the one issue's detail subtree (not repo-wide),
     // scoped to the lens the mutation ran under.
@@ -1916,6 +1923,10 @@ function useTimeTrackingMutation(
 ) {
   const queryClient = useQueryClient();
   return useMutation({
+    // Mutation-level so the report survives the caller unmounting mid-flight (the
+    // views re-key their rail per entity, and mutate-scoped callbacks stop firing
+    // once the observer loses its listeners).
+    onError: (e) => toastError(e),
     mutationFn,
     onSuccess: (stats, args) => {
       queryClient.setQueryData<GitLabTimeStats>(
@@ -1991,6 +2002,8 @@ export function useLinkIssue(repo: string) {
   return useMutation({
     mutationFn: (args: { number: number; targetNumber: number }) =>
       api.forgeGlIssueLink(repo, args.number, args.targetNumber),
+    // Mutation-level: see useTimeTrackingMutation.
+    onError: (e) => toastError(e),
     onSuccess: (_d, args) => {
       queryClient.invalidateQueries({
         queryKey: issueLinksKey(repo, args.number),
@@ -2009,6 +2022,8 @@ export function useUnlinkIssue(repo: string) {
   return useMutation({
     mutationFn: (args: { number: number; linkId: string }) =>
       api.forgeGlIssueUnlink(repo, args.number, args.linkId),
+    // Mutation-level: see useTimeTrackingMutation.
+    onError: (e) => toastError(e),
     onSuccess: (_d, args) =>
       queryClient.invalidateQueries({
         queryKey: issueLinksKey(repo, args.number),
@@ -5993,6 +6008,9 @@ export function useEditPrLabels(repo: string, lens: RemoteLens) {
         args.addNames ?? [],
         args.removeNames ?? [],
       ),
+    // Mutation-level: see useTimeTrackingMutation. The label pickers are keyed per
+    // entity, so a switch mid-flight used to drop the failure silently.
+    onError: (e) => toastError(e),
     onSettled: (_d, _e, args) => {
       // Issue/MR narrow keys carry the lens they were read under; discussions are
       // not lens-scoped (GitHub Discussions have no fork lens) — keyed as before.

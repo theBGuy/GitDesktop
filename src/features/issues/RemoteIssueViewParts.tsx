@@ -40,7 +40,6 @@ import type {
   RemoteLens,
 } from "@/lib/git/types";
 import { useUiStore } from "@/lib/stores/ui";
-import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { IssueDevelopment } from "./IssueDevelopment";
 import {
@@ -103,7 +102,6 @@ export function IssueSidebar({
   const setType = useSetIssueType(repoPath, lens);
   const setConfidential = useSetIssueConfidential(repoPath);
   const setDueDate = useSetIssueDueDate(repoPath);
-  const onError = (e: unknown) => toastError(e);
 
   // A provider we can only read from (Bitbucket, or a not-ready repo): static rail.
   if (
@@ -148,7 +146,7 @@ export function IssueSidebar({
             lens={lens}
             disabledReason={pickerDisabledReason}
             onChange={(next) =>
-              setAssignees.mutate({ number, assignees: next }, { onError })
+              setAssignees.mutate({ number, assignees: next })
             }
           />
         )}
@@ -161,7 +159,7 @@ export function IssueSidebar({
             lens={lens}
             disabledReason={pickerDisabledReason}
             onChange={(m, title) =>
-              setMilestone.mutate({ number, milestone: m, title }, { onError })
+              setMilestone.mutate({ number, milestone: m, title })
             }
           />
         ) : (
@@ -180,9 +178,7 @@ export function IssueSidebar({
             open={issue.state === "OPEN"}
             pending={setDueDate.isPending}
             disabledReason={pickerDisabledReason}
-            onChange={(dueDate) =>
-              setDueDate.mutate({ number, dueDate }, { onError })
-            }
+            onChange={(dueDate) => setDueDate.mutate({ number, dueDate })}
           />
         )}
         {canSetConfidential && (
@@ -191,7 +187,7 @@ export function IssueSidebar({
             pending={setConfidential.isPending}
             disabledReason={pickerDisabledReason}
             onChange={(confidential) =>
-              setConfidential.mutate({ number, confidential }, { onError })
+              setConfidential.mutate({ number, confidential })
             }
           />
         )}
@@ -236,10 +232,7 @@ export function IssueSidebar({
         lens={lens}
         disabledReason={pickerDisabledReason}
         onChange={(type) =>
-          setType.mutate(
-            { number, typeName: type?.name ?? null, type },
-            { onError },
-          )
+          setType.mutate({ number, typeName: type?.name ?? null, type })
         }
       />
       <AssigneesPopover
@@ -249,9 +242,7 @@ export function IssueSidebar({
         commitOnClose
         lens={lens}
         disabledReason={pickerDisabledReason}
-        onChange={(next) =>
-          setAssignees.mutate({ number, assignees: next }, { onError })
-        }
+        onChange={(next) => setAssignees.mutate({ number, assignees: next })}
       />
       <LabelsPopover
         repoPath={repoPath}
@@ -271,7 +262,7 @@ export function IssueSidebar({
         lens={lens}
         disabledReason={pickerDisabledReason}
         onChange={(m, title) =>
-          setMilestone.mutate({ number, milestone: m, title }, { onError })
+          setMilestone.mutate({ number, milestone: m, title })
         }
       />
       <div className="space-y-1.5">
@@ -643,7 +634,6 @@ function IssueTimeTrackingSection({
   const stats = useGlIssueTimeStats(repoPath, number);
   const setEstimate = useSetIssueTimeEstimate(repoPath);
   const addSpent = useAddIssueSpentTime(repoPath);
-  const onError = (e: unknown) => toastError(e);
 
   return (
     <div className="space-y-1.5">
@@ -657,12 +647,8 @@ function IssueTimeTrackingSection({
           pending={setEstimate.isPending || addSpent.isPending}
           disabledReason={disabledReason}
           idPrefix="issue"
-          onSetEstimate={(duration) =>
-            setEstimate.mutate({ number, duration }, { onError })
-          }
-          onAddSpent={(duration) =>
-            addSpent.mutate({ number, duration }, { onError })
-          }
+          onSetEstimate={(duration) => setEstimate.mutate({ number, duration })}
+          onAddSpent={(duration) => addSpent.mutate({ number, duration })}
         />
       )}
     </div>
@@ -693,7 +679,6 @@ function IssueLinksSection({
   const unlinkIssue = useUnlinkIssue(repoPath);
   const selectIssue = useUiStore((s) => s.selectIssue);
   const [adding, setAdding] = useState(false);
-  const onError = (e: unknown) => toastError(e);
 
   const data = links.data ?? [];
   const exclude = new Set<number>([number, ...data.map((l) => l.number)]);
@@ -739,9 +724,7 @@ function IssueLinksSection({
           issue={toRelated(l)}
           onOpen={open}
           removeDisabledReason={disabledReason}
-          onRemove={() =>
-            unlinkIssue.mutate({ number, linkId: l.linkId }, { onError })
-          }
+          onRemove={() => unlinkIssue.mutate({ number, linkId: l.linkId })}
         />
       ))}
 
@@ -767,7 +750,7 @@ function IssueLinksSection({
               onPick={(target) =>
                 linkIssue.mutate(
                   { number, targetNumber: target },
-                  { onSuccess: () => setAdding(false), onError },
+                  { onSuccess: () => setAdding(false) },
                 )
               }
             />
