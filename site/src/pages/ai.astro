@@ -216,8 +216,8 @@ const agentAbilities = [
           <McpConfig />
         </figure>
         <p class="mt-4 text-sm text-muted">
-          Writes are an escalating opt-in ladder, each tier a separate flag, off by
-          default:
+          Writes are an escalating opt-in ladder: each tier a separate flag, off by
+          default.
         </p>
         <ul class="ladder mt-3">
           <li data-default>
@@ -271,8 +271,9 @@ const agentAbilities = [
         <div class="min-w-0">
           <h3 class="text-sm text-ink">Custom instructions</h3>
           <p class="mt-2 text-sm leading-relaxed text-muted">
-            Global, or per-repo via <code class="text-ink">.gitdesktop/instructions.md</code>.
-            Both are included in every generation and every AI review.
+            Global instructions steer every generation and every AI review; a per-repo
+            <code class="text-ink">.gitdesktop/instructions.md</code> takes precedence
+            where both apply.
           </p>
         </div>
         <div class="min-w-0">

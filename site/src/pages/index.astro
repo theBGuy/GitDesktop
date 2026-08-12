@@ -277,13 +277,13 @@ const forges = [
         <p class="mt-6 max-w-[60ch] leading-relaxed text-body">
           One click reads your staged diff and drafts the commit message in your
           conventions; the PR dialog gives its title and description the same
-          treatment. It streams into the same fields
+          treatment. Generation streams into the same fields
           you'd type in, so it's always editable and never blocks the manual path.
           Generating a PR description can also propose which of your open issues it
           <span class="text-ink">Closes</span> or relates to, chosen from a grounded
           shortlist so it never invents an issue number. On a Bitbucket repo with a
           linked Jira project, it can propose linked-Jira tickets to mention instead,
-          drawn from the same grounded shortlist.
+          drawn from an equally grounded shortlist of the linked project's tickets.
         </p>
         <p class="mt-4 max-w-[60ch] leading-relaxed text-muted">
           Bring your own model: Anthropic, OpenAI, Google AI Studio, any
@@ -467,8 +467,8 @@ const forges = [
           status, type, priority, assignee, description and comments, plus agile
           fields like story points, sprint, and a clickable epic when the project uses
           them. Create, comment, assign, set a due date, change priority, edit
-          labels, and close or reopen along the project's own workflow, every action
-          gated on your Jira permissions.
+          labels, and close or reopen along the project's own workflow, with every
+          action gated on your Jira permissions.
         </p>
         <p class="mt-4 max-w-[56ch] leading-relaxed text-muted">
           Especially handy for Bitbucket, whose native tracker Atlassian retires on
@@ -720,7 +720,7 @@ const forges = [
         </h2>
         <p class="mt-6 max-w-[56ch] leading-relaxed text-body">
           The reverse direction: run GitDesktop <span class="text-ink">as an MCP
-          server</span> and any external client (Claude Desktop, Cursor, Claude Code)
+          server</span>, and any external client (Claude Desktop, Cursor, Claude Code)
           can understand a repo through read-only git, PR &amp; CI tools, across GitHub,
           GitLab, and Bitbucket. Settings writes the config into your repo's
           <code class="text-ink">.mcp.json</code> or installs it globally.
