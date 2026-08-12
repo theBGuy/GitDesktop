@@ -304,9 +304,13 @@ pub async fn gh_release_generate_notes(
     previous_tag: String,
 ) -> AppResult<GeneratedNotes> {
     validate_tag(&tag)?;
-    // Empty previous_tag = GitHub auto-detects; validate only when supplied.
-    if !previous_tag.trim().is_empty() {
-        validate_tag(previous_tag.trim())?;
+    let prev = previous_tag.trim();
+    // Empty previous_tag = GitHub auto-detects; validate only when supplied,
+    // with distinct wording — the dialog has BOTH tag fields.
+    if !prev.is_empty() {
+        crate::git::ops::validate_tag_name(prev).map_err(|_| {
+            AppError::InvalidArgument(format!("invalid previous tag: {prev}"))
+        })?;
     }
     // `gh api` has no `-R`; build the literal `repos/<slug>` path so a fork
     // generates notes for its OWN releases, not the parent's.
@@ -314,7 +318,7 @@ pub async fn gh_release_generate_notes(
     let notes_path = format!("repos/{slug}/releases/generate-notes");
     let tag_arg = format!("tag_name={tag}");
     let target_arg = format!("target_commitish={}", target.trim());
-    let prev_arg = format!("previous_tag_name={}", previous_tag.trim());
+    let prev_arg = format!("previous_tag_name={prev}");
     let mut args: Vec<&str> = vec![
         "api",
         "--method",
@@ -329,7 +333,7 @@ pub async fn gh_release_generate_notes(
         args.push(&target_arg);
     }
     // Empty = GitHub auto-detects the previous release.
-    if !previous_tag.trim().is_empty() {
+    if !prev.is_empty() {
         args.push("-f");
         args.push(&prev_arg);
     }

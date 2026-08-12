@@ -3496,8 +3496,9 @@ pub async fn git_unpushed_messages(
 
 /// The tag-name rules for every path a tag rides: `refs/tags/<name>` push and
 /// delete refspecs, `gh release` argv, and GitLab release endpoint paths. Adds
-/// the forms `git check-ref-format` forbids to the shared ref validator, which
-/// permits them only for branch start-points (rev expressions may use them).
+/// the rev-expression forms `git check-ref-format` forbids to the shared ref
+/// validator, which permits them only for branch start-points (rev expressions
+/// may use them).
 /// The single-`@` rule is deliberately absent — it matches the ENTIRE refname,
 /// never `refs/tags/<name>`, so a tag named `@` is creatable (probe-verified).
 /// CI-dispatch refs are free-text branch-or-tag and deliberately skip this.
