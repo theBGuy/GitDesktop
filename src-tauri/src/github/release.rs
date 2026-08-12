@@ -16,8 +16,9 @@ where
     Ok(Option::<String>::deserialize(d)?.unwrap_or_default())
 }
 
-/// Every `gh_release_*` entry point runs this before assembling argv, so a tag
-/// reaches gh only after the shared tag rules; remapped to this surface's wording.
+/// Every tag-taking `gh_release_*` entry point runs this before assembling argv,
+/// so a tag reaches gh only after the shared tag rules; remapped to this
+/// surface's wording.
 fn validate_tag(tag: &str) -> AppResult<()> {
     crate::git::ops::validate_tag_name(tag)
         .map_err(|_| AppError::InvalidArgument(format!("invalid tag: {tag}")))

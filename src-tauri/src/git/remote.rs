@@ -704,7 +704,7 @@ fn build_push_args(
     if untracked || gone || set_upstream {
         // Publish + track, under the LOCAL name.
         args.extend(["-u", target].map(str::to_string));
-        args.push(format!("refs/heads/{branch}:refs/heads/{branch}"));
+        args.push(publish_refspec(branch));
     } else if target == remotename {
         // Tracked → its own remote: target the remote branch name explicitly (it
         // may differ from the local one).
@@ -717,13 +717,15 @@ fn build_push_args(
         // Tracked, but pushing to a DIFFERENT remote than the upstream — a copy
         // under the local name, no `-u`, upstream config untouched (never retrack).
         args.push(target.to_string());
-        args.push(format!("refs/heads/{branch}:refs/heads/{branch}"));
+        args.push(publish_refspec(branch));
     }
     args
 }
 
-/// Fully-qualified same-name push refspec: qualified so a branch named `+x`
-/// can't read as a refspec force marker and `*`/`:` can't reshape the refspec.
+/// Fully-qualified same-name push refspec. Qualification alone only stops a
+/// leading `+`/`-` from reading as a force/delete marker at refspec position 0;
+/// the metacharacters that could reshape the refspec (`* ? [ : \`) are rejected
+/// by [`crate::git::branches::validate_ref_name`], which every caller runs first.
 pub(crate) fn publish_refspec(branch: &str) -> String {
     format!("refs/heads/{branch}:refs/heads/{branch}")
 }

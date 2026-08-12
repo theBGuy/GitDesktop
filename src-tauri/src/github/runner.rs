@@ -112,6 +112,8 @@ pub async fn run_gh(
 /// Like `run_gh`, but pipes `input` to gh's stdin — for `gh api --input -` with
 /// a JSON body (webhook create/update), where nested `config`/`events` don't
 /// fit the flat `-f key=value` form. Non-zero exit is an error carrying stderr.
+/// gh sets `Content-Type: application/json` on an `--input` body itself; glab
+/// does NOT (both measured), which is why the GitLab side sends it explicitly.
 pub async fn run_gh_input(
     repo_path: Option<&str>,
     args: &[&str],

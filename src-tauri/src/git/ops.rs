@@ -3494,12 +3494,19 @@ pub async fn git_unpushed_messages(
     Ok(messages)
 }
 
-/// Every tag/release name the app sends anywhere — refspecs, CLI argv, endpoint
-/// paths — goes through here. It layers the rev-expression forms `git
-/// check-ref-format` forbids onto the shared ref validator, which permits them
-/// only because branch start-points may be rev expressions; a tag never is.
+/// The tag-name rules for every path a tag rides: `refs/tags/<name>` push and
+/// delete refspecs, `gh release` argv, and GitLab release endpoint paths. Adds
+/// the forms `git check-ref-format` forbids to the shared ref validator, which
+/// permits them only for branch start-points (a tag is never a rev expression).
+/// CI-dispatch refs are free-text branch-or-tag and deliberately skip this.
 pub(crate) fn validate_tag_name(name: &str) -> AppResult<()> {
-    if name.contains('~') || name.contains('^') || name == "@" || name.contains("@{") {
+    // A lone `@` component covers the whole-name `@` too.
+    if name.contains('~')
+        || name.contains('^')
+        || name.contains("..")
+        || name.contains("@{")
+        || name.split('/').any(|part| part == "@")
+    {
         return Err(AppError::InvalidArgument(format!(
             "invalid tag name: {name}"
         )));
@@ -3664,14 +3671,14 @@ mod tests {
             "a:b", "a*b", "a?", "a[b", "a b", "a\\b", "a\u{7}b", "", "-x",
             // Rev-expression forms: a tag is never one, and git forbids them in
             // a real ref name.
-            "v1~1", "v1^2", "@", "a@{b",
+            "v1~1", "v1^2", "@", "a@{b", "v1..2", "v1/@/x",
         ] {
             assert!(
                 validate_tag_name(bad).is_err(),
                 "expected {bad:?} to be rejected"
             );
         }
-        for good in ["feat/x", "release-1.2", "v1.0.0", "a@b"] {
+        for good in ["feat/x", "release-1.2", "v1.0.0", "a@b", "v1/x"] {
             assert!(
                 validate_tag_name(good).is_ok(),
                 "expected {good:?} to be accepted"
@@ -4690,9 +4697,14 @@ detached
         assert_eq!(rev(&bare, "refs/tags/v1.0.0").await, head);
 
         // A glob name never reaches the refspec (it would mirror-push every tag).
-        assert!(git_push_tag_core(&state, repo, "v1.*".to_string())
-            .await
-            .is_err());
+        // Assert on the VALIDATOR's rejection: git refusing the odd refspec later
+        // would satisfy a bare `is_err()` for the wrong reason.
+        match git_push_tag_core(&state, repo, "v1.*".to_string()).await {
+            Err(AppError::InvalidArgument(msg)) => {
+                assert!(msg.contains("invalid tag name"), "got: {msg}");
+            }
+            other => panic!("expected the tag validator to reject the glob, got {other:?}"),
+        }
     }
 
     /// A second bare repo wired to `repo` under `remote` — what a fork clone's

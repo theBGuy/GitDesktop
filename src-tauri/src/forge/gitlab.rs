@@ -5652,6 +5652,12 @@ fn valid_variable_key(k: &str) -> bool {
         && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// The manual-pipeline body. `variables[]` is a nested array, the shape flat
+/// `-f` fields can't express — which is why this request goes over stdin.
+fn pipeline_body(git_ref: &str, vars: Vec<serde_json::Value>) -> serde_json::Value {
+    serde_json::json!({ "ref": git_ref, "variables": vars })
+}
+
 /// Manually run a new pipeline on a ref — GitLab's analogue of a workflow
 /// dispatch. `variables` POST as the REST `variables[]` array over stdin, so a
 /// value a user typed never reaches argv (nor any flag-encoding rules).
@@ -5674,7 +5680,7 @@ pub async fn run_pipeline(
     }
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/pipeline");
-    let body = serde_json::json!({ "ref": git_ref, "variables": vars });
+    let body = pipeline_body(git_ref, vars);
     run_glab_ex(
         Some(repo_path),
         &json_body_args("POST", &endpoint),
@@ -6780,8 +6786,9 @@ pub struct GitLabHookInput {
 
 /// The JSON body shared by hook create/update: url + SSL + every known event
 /// flag set explicitly true/false (so unchecking sticks on update). It rides
-/// stdin, so the secret token never reaches argv — an omitted `token` key
-/// leaves the stored secret untouched.
+/// stdin, so the secret token never reaches argv. Omitting `token` relies on the
+/// hook PUT's documented partial-update semantics (omitted fields unchanged) —
+/// the contract the form's blank-means-unchanged placeholder is written against.
 fn hook_body(input: &GitLabHookInput) -> AppResult<serde_json::Value> {
     let url = input.url.trim();
     if !(url.starts_with("https://") || url.starts_with("http://")) {
@@ -7131,10 +7138,12 @@ pub async fn set_variable(
     .await
     .map_err(|e| match e {
         // GitLab enforces maskability server-side (length ≥ 8, one line, Base64-ish
-        // alphabet) with a curt 400 — spell it out. Measured wordings: current
-        // GitLab says `value:[is invalid]`; older wordings said "masked".
+        // alphabet) with a curt 400 — spell it out. Measured: glab's stderr renders
+        // that 400 as `map[message:map[value:[is invalid]]]`; older GitLab wordings
+        // said "masked". Both renderings are matched, raw JSON included.
         AppError::Glab(msg)
-            if masked && (msg.contains("masked") || msg.contains("value:[is invalid")) =>
+            if masked
+                && (msg.contains("masked") || (msg.contains("value") && msg.contains("is invalid"))) =>
         AppError::Glab(
             "GitLab can't mask this value — masked values need at least 8 characters on a single line, without most special characters".into(),
         ),
@@ -7990,6 +7999,22 @@ mod tests {
                 "token key omitted entirely: {absent}"
             );
         }
+    }
+
+    /// The manual-pipeline body: the ref plus the REST `variables[]` array.
+    #[test]
+    fn pipeline_body_carries_ref_and_variables_array() {
+        let body = pipeline_body(
+            "main",
+            vec![serde_json::json!({ "key": "DEPLOY_ENV", "value": "prod" })],
+        );
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "ref": "main",
+                "variables": [{ "key": "DEPLOY_ENV", "value": "prod" }],
+            })
+        );
     }
 
     /// The create body carries the key; an update addresses it in the endpoint,
@@ -9444,7 +9469,7 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_variable_keys_reject_colon_and_flaggy_names() {
+    fn pipeline_variable_keys_reject_invalid_env_names() {
         // Env-var names only: no punctuation, no space, no leading digit.
         assert!(valid_variable_key("DEPLOY_ENV"));
         assert!(valid_variable_key("_private"));
