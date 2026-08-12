@@ -1546,7 +1546,8 @@ export function JiraIssueView({
   const composerRef = useRef<MarkdownEditorHandle>(null);
   // A different issue must never inherit this one's unsent comment draft — a
   // render-time state adjustment, not an effect. The repo is part of the identity
-  // because two repos linked to DIFFERENT Jira sites can share an issue key.
+  // because two repos linked to DIFFERENT Jira sites can share an issue key. The
+  // same identity keys the sidebar below, remounting its own per-issue drafts.
   const issueIdentity = `${repoPath}#${issueKey}`;
   const [lastIdentity, setLastIdentity] = useState(issueIdentity);
   if (issueIdentity !== lastIdentity) {
@@ -1819,6 +1820,9 @@ export function JiraIssueView({
         </div>
 
         <JiraIssueSidebar
+          // Remounts the rail per issue so its sections' drafts (log-work
+          // duration/note, the labels popover) can't commit against a new key.
+          key={issueIdentity}
           className={cn(PLACEHOLDER_FADE, staleDim)}
           repoPath={repoPath}
           issueKey={issueKey}

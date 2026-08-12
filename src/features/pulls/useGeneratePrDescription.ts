@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useEffect, useEffectEvent, useRef } from "react";
 import { toast } from "sonner";
 import { useAiStream } from "@/features/conversations/useAiStream";
 import { aiExcludePatterns } from "@/lib/ai/ignore";
@@ -229,4 +229,28 @@ export function useGeneratePrDescription(repoPath: string) {
   );
 
   return { generate, generateFromDiff, cancel, generating };
+}
+
+/**
+ * Cancels an in-flight generation when the entity on screen changes — the PR views
+ * keep their edit dialog mounted across a switch, so a stream started on one PR would
+ * otherwise keep writing into the next one's dialog.
+ *
+ * An EFFECT, not a render-time reset: cancelling aborts a live stream, and React may
+ * discard and replay a render. The ref is seeded with the current identity, so
+ * mounting cancels nothing, and it advances before the call so a re-render mid-cancel
+ * can't fire twice. `cancel` rides an effect event, so a caller passing an unstable
+ * function can't re-trigger the effect.
+ */
+export function useCancelOnIdentityChange(
+  identity: string,
+  cancel: () => void,
+): void {
+  const cancelNow = useEffectEvent(() => cancel());
+  const activeFor = useRef(identity);
+  useEffect(() => {
+    if (activeFor.current === identity) return;
+    activeFor.current = identity;
+    cancelNow();
+  }, [identity]);
 }

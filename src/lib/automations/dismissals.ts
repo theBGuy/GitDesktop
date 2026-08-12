@@ -19,14 +19,20 @@ import { ALL_ACTION_IDS } from "./types";
  */
 type DismissalMap = Record<string, string>;
 
-/** Cell key for one PR + mode. The lens leads it because a fork's origin and
- *  upstream lenses surface DIFFERENT PRs under the same number. */
+/** The cell-key prefix shared by every mode of one PR under one lens — the scan in
+ *  {@link getDismissedHeadMap} and {@link cellKey} compose from this one shape. The
+ *  lens leads it because a fork's origin and upstream lenses surface DIFFERENT PRs
+ *  under the same number. */
+const cellPrefix = (lens: RemoteLens, kind: "remote" | "local", ref: string) =>
+  `${lens}#${kind}#${ref}#`;
+
+/** Cell key for one PR + mode. */
 const cellKey = (
   lens: RemoteLens,
   kind: "remote" | "local",
   ref: string,
   mode: ReviewMode,
-) => `${lens}#${kind}#${ref}#${mode}`;
+) => `${cellPrefix(lens, kind, ref)}${mode}`;
 
 /** The pre-lens cell prefix a lens cell supersedes. Pre-lens cells recorded no lens, so
  *  policy adopts them as origin — the safe default. Undefined on any other lens: the fold
@@ -136,7 +142,7 @@ export async function getDismissedHeadMap(
   // lens cell leads with the lens, a pre-lens one with the kind.
   const prefixes = [
     legacyCellPrefix(lens, kind, ref),
-    `${lens}#${kind}#${ref}#`,
+    cellPrefix(lens, kind, ref),
   ];
   for (const prefix of prefixes) {
     if (prefix === undefined) continue;

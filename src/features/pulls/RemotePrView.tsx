@@ -216,7 +216,10 @@ import {
 } from "./StackSection";
 import { SubmitReviewDialog } from "./SubmitReviewDialog";
 import { useBranchPickerOptions } from "./useBranchPickerOptions";
-import { useGeneratePrDescription } from "./useGeneratePrDescription";
+import {
+  useCancelOnIdentityChange,
+  useGeneratePrDescription,
+} from "./useGeneratePrDescription";
 import {
   composeBodyWithJiraRefs,
   composeBodyWithRefs,
@@ -1327,16 +1330,9 @@ export function RemotePrView({
     setDeleteBranch(false);
     edit.setOpen(false);
   }
-  // The edit dialog's in-flight generation belongs to the PR it was started on,
-  // but cancelling ABORTS a live stream — an imperative effect, never part of the
-  // render-time block above, which React may discard and replay.
-  const cancelGeneration = useEffectEvent(() => prGen.cancel());
-  const generatingFor = useRef(entityKey);
-  useEffect(() => {
-    if (generatingFor.current === entityKey) return;
-    generatingFor.current = entityKey;
-    cancelGeneration();
-  }, [entityKey]);
+  // The edit dialog's in-flight generation belongs to the PR it was started on; the
+  // cancel is imperative, so it rides an effect rather than the block above.
+  useCancelOnIdentityChange(entityKey, prGen.cancel);
   // Default to the first changed file until the user picks one.
   const effectivePath =
     selectedPath && pr?.files.some((f) => f.path === selectedPath)

@@ -17,7 +17,7 @@ import {
   XIcon,
 } from "@phosphor-icons/react";
 import type { ReactNode } from "react";
-import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import { Badge } from "@/components/ui/badge";
@@ -75,7 +75,10 @@ import {
   type TimelineEntry,
 } from "./PrTimeline";
 import { ResolveConflictsView } from "./ResolveConflictsView";
-import { useGeneratePrDescription } from "./useGeneratePrDescription";
+import {
+  useCancelOnIdentityChange,
+  useGeneratePrDescription,
+} from "./useGeneratePrDescription";
 import {
   composeBodyWithRefs,
   splitBodyRefBlock,
@@ -174,16 +177,9 @@ export function LocalPrView({
     edit.setOpen(false);
   }
   const prGen = useGeneratePrDescription(repoPath);
-  // The edit dialog's in-flight generation belongs to the PR it was started on,
-  // but cancelling ABORTS a live stream — an imperative effect, never part of the
-  // render-time block above, which React may discard and replay.
-  const cancelGeneration = useEffectEvent(() => prGen.cancel());
-  const generatingFor = useRef(id);
-  useEffect(() => {
-    if (generatingFor.current === id) return;
-    generatingFor.current = id;
-    cancelGeneration();
-  }, [id]);
+  // The edit dialog's in-flight generation belongs to the PR it was started on; the
+  // cancel is imperative, so it rides an effect rather than the block above.
+  useCancelOnIdentityChange(id, prGen.cancel);
   // Context-sensitive reuse of the generate-commit-message binding (mod+g by
   // default) for the Edit dialog's chord + button hint — a rebinding drives both.
   const generateBinding =

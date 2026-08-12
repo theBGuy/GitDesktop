@@ -54,9 +54,11 @@ export function SubmitReviewDialog({
   const [summary, setSummary] = useState("");
   const [error, setError] = useState<string | null>(null);
   // The parent re-keys this dialog on the PR identity, so a switch can unmount it
-  // mid-submit — past `handleOpenChange`'s pending guard. The inline error below
-  // then has nowhere to render, and a failed (or PARTIAL) post would read as
-  // success; this is what lets the catch route it to a toast instead.
+  // mid-submit — past `handleOpenChange`'s pending guard. That takes away BOTH of
+  // this component's report channels: the inline error below has nowhere to render
+  // (hence the catch's toast fallback), and react-query stops delivering `mutate`
+  // callbacks once the observer loses its listeners (hence `mutateAsync` in the
+  // cleanup). Either loss would let a failed or PARTIAL post read as success.
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -133,12 +135,13 @@ export function SubmitReviewDialog({
     // Clearing the (client-only) drafts is a best-effort cleanup AFTER the post
     // landed; a failure here can't un-post, so surface it as a non-blocking
     // warning pointing at the pending bar's Discard — never as a submit error.
-    clearDrafts.mutate(undefined, {
-      onError: () =>
+    clearDrafts
+      .mutateAsync()
+      .catch(() =>
         toast.warning(
           "Review posted, but clearing the pending comments failed — discard them from the pending review bar so they aren't submitted again.",
         ),
-    });
+      );
   }
 
   return (
