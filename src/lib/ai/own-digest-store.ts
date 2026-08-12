@@ -65,8 +65,8 @@ export const digestKey = (
   ref: string,
 ) => `${lens}#${kind}#${ref}`;
 
-/** The pre-lens key a lens key supersedes — records written before the lens
- *  dimension existed, which can only have been the origin lens. */
+/** The pre-lens key a lens key supersedes. Pre-lens records recorded no lens, so policy
+ *  adopts them as origin — the safe default (the fork's own PR). */
 function legacyDigestKey(key: string): string | undefined {
   return key.startsWith("origin#") ? key.slice("origin#".length) : undefined;
 }

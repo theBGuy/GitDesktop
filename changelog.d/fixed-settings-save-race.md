@@ -1,2 +1,3 @@
-- Saving settings no longer overwrites recent-repository details that were
-  updated in the background while the Settings screen was open.
+- Saving settings no longer overwrites recent-repository details or your
+  Bitbucket token's expiry date when they changed in the background while
+  the Settings screen was open.

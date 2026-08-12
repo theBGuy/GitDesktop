@@ -202,27 +202,30 @@ export function DiscussionView({
   const [labelsOpen, setLabelsOpen] = useState(false);
   const [draftLabels, setDraftLabels] = useState<Set<string>>(new Set());
   const [deletingDiscussion, setDeletingDiscussion] = useState(false);
-  // A different discussion must never inherit this one's unsent drafts, nor a
-  // reply target or delete confirm that no longer exists here — render-time,
-  // not an effect.
-  const [lastNumber, setLastNumber] = useState(number);
-  if (number !== lastNumber) {
-    setLastNumber(number);
+  // A different discussion must never inherit this one's unsent drafts, reply
+  // target, delete confirm, or label draft — render-time, not an effect. The
+  // repo is part of the identity because discussion numbers repeat across repos.
+  const discussionIdentity = `${repoPath}#${number}`;
+  const [lastIdentity, setLastIdentity] = useState(discussionIdentity);
+  if (discussionIdentity !== lastIdentity) {
+    setLastIdentity(discussionIdentity);
     setComposeBody("");
     setReplyingTo(null);
     setReplyBody("");
     setDeletingCommentId(null);
     setDeletingDiscussion(false);
+    setLabelsOpen(false);
+    setDraftLabels(new Set());
   }
   // Both submits clear their composer only once the mutation resolves, which can
-  // be after a switch — an effect event reads the LIVE number so a late success
+  // be after a switch — an effect event reads the LIVE identity so a late success
   // can't wipe text the user has since typed against another discussion.
-  const clearComposeIfSame = useEffectEvent((submittedFor: number) => {
-    if (submittedFor !== number) return;
+  const clearComposeIfSame = useEffectEvent((submittedFor: string) => {
+    if (submittedFor !== discussionIdentity) return;
     setComposeBody("");
   });
-  const clearReplyIfSame = useEffectEvent((submittedFor: number) => {
-    if (submittedFor !== number) return;
+  const clearReplyIfSame = useEffectEvent((submittedFor: string) => {
+    if (submittedFor !== discussionIdentity) return;
     setReplyBody("");
     setReplyingTo(null);
   });
@@ -248,7 +251,7 @@ export function DiscussionView({
 
   function submitComment() {
     if (!d || !composeBody.trim()) return;
-    const submittedFor = number;
+    const submittedFor = discussionIdentity;
     addComment.mutate(
       { discussionId: d.id, body: composeBody.trim() },
       { onSuccess: () => clearComposeIfSame(submittedFor), onError },
@@ -257,7 +260,7 @@ export function DiscussionView({
 
   function submitReply(commentId: string) {
     if (!d || !replyBody.trim()) return;
-    const submittedFor = number;
+    const submittedFor = discussionIdentity;
     addComment.mutate(
       { discussionId: d.id, body: replyBody.trim(), replyToId: commentId },
       {

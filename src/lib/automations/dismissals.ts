@@ -28,9 +28,9 @@ const cellKey = (
   mode: ReviewMode,
 ) => `${lens}#${kind}#${ref}#${mode}`;
 
-/** The pre-lens cell prefix/key a lens cell supersedes — cells written before the
- *  lens dimension existed, which can only have been the origin lens. Undefined on
- *  any other lens, which has no legacy data by construction. */
+/** The pre-lens cell prefix a lens cell supersedes. Pre-lens cells recorded no lens, so
+ *  policy adopts them as origin — the safe default. Undefined on any other lens: the fold
+ *  targets only the bare pre-lens key, which policy assigns to origin. */
 const legacyCellPrefix = (
   lens: RemoteLens,
   kind: "remote" | "local",

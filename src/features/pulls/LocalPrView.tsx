@@ -17,7 +17,7 @@ import {
   XIcon,
 } from "@phosphor-icons/react";
 import type { ReactNode } from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { toast } from "sonner";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import { Badge } from "@/components/ui/badge";
@@ -141,16 +141,6 @@ export function LocalPrView({
   } = useLocalConversation(pr, (mutate) => {
     if (pr) update.mutate({ id: pr.id, mutate });
   });
-  // A different PR must never inherit this one's drill-in, unsent drafts, or
-  // pending delete confirm — a render-time state adjustment, not an effect.
-  const [lastId, setLastId] = useState(id);
-  if (id !== lastId) {
-    setLastId(id);
-    setSelectedCommitHash(null);
-    setComment("");
-    setLabelInput("");
-    setDeletingCommentId(null);
-  }
   const [promoteOpen, setPromoteOpen] = useState(false);
   const ghStatus = useForgeStatus(repoPath);
   // Linked-issue chips on the local-PR edit path: the chips OWN the trailing ref
@@ -171,7 +161,29 @@ export function LocalPrView({
       });
     },
   });
+  // A different PR must never inherit this one's drill-in, unsent drafts, or open
+  // delete/promote/edit dialogs — a render-time state adjustment, not an effect.
+  const [lastId, setLastId] = useState(id);
+  if (id !== lastId) {
+    setLastId(id);
+    setSelectedCommitHash(null);
+    setComment("");
+    setLabelInput("");
+    setDeletingCommentId(null);
+    setPromoteOpen(false);
+    edit.setOpen(false);
+  }
   const prGen = useGeneratePrDescription(repoPath);
+  // The edit dialog's in-flight generation belongs to the PR it was started on,
+  // but cancelling ABORTS a live stream — an imperative effect, never part of the
+  // render-time block above, which React may discard and replay.
+  const cancelGeneration = useEffectEvent(() => prGen.cancel());
+  const generatingFor = useRef(id);
+  useEffect(() => {
+    if (generatingFor.current === id) return;
+    generatingFor.current = id;
+    cancelGeneration();
+  }, [id]);
   // Context-sensitive reuse of the generate-commit-message binding (mod+g by
   // default) for the Edit dialog's chord + button hint — a rebinding drives both.
   const generateBinding =

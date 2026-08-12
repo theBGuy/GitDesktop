@@ -95,16 +95,18 @@ export function PrReviewPanel({
 }) {
   const settings = useSettings();
   const repoName = useUiStore((s) => s.repoName) ?? "";
-  // The review run is keyed by repo + PR so it survives this panel unmounting;
-  // memoized so its identity is stable across the panel's many re-renders.
+  // The review run is keyed by repo + lens + PR so it survives this panel
+  // unmounting; memoized so its identity is stable across the panel's many
+  // re-renders.
   const target = useMemo<ReviewTarget>(
     () => ({
       kind: prKind,
       repoPath: context.repoPath,
       repoName,
+      lens: context.lens,
       ref: prRef,
     }),
-    [prKind, context.repoPath, repoName, prRef],
+    [prKind, context.repoPath, repoName, context.lens, prRef],
   );
   const {
     generate,

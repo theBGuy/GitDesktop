@@ -222,17 +222,26 @@ export function RemoteIssueView({
   const [transferOpen, setTransferOpen] = useState(false);
   const [transferDest, setTransferDest] = useState("");
   const [deleteOpen, setDeleteOpen] = useState(false);
-  // A different issue must never inherit this one's unsent draft or pending
-  // delete confirm — a render-time state adjustment, not an effect. The lens is
-  // part of the identity: it can collapse to "origin" without a remount (the
-  // upstream remote goes away), leaving the same number pointing at another repo.
-  const issueIdentity = `${lens}#${number}`;
+  const edit = useEditTitleBody({
+    onSave: async ({ title, body }) => {
+      await editIssue.mutateAsync({ number, title, body });
+    },
+    successToast: "Issue updated",
+  });
+  // A different issue must never inherit this one's unsent draft or open
+  // delete/transfer/edit dialogs — a render-time state adjustment, not an effect.
+  // The lens is part of the identity: it can collapse to "origin" without a
+  // remount (upstream remote goes away), leaving the number pointing at another repo.
+  const issueIdentity = `${repoPath}#${lens}#${number}`;
   const [lastIdentity, setLastIdentity] = useState(issueIdentity);
   if (issueIdentity !== lastIdentity) {
     setLastIdentity(issueIdentity);
     setComposeBody("");
     setDeletingCommentId(null);
     setDeleteOpen(false);
+    setTransferOpen(false);
+    setTransferDest("");
+    edit.setOpen(false);
   }
   // The restore below can land after the user switched issues; an effect event
   // reads the LIVE identity so a late rejection can't resurrect text elsewhere.
@@ -253,12 +262,6 @@ export function RemoteIssueView({
   const onError = (e: unknown) => toastError(e);
 
   const issue = details.data;
-  const edit = useEditTitleBody({
-    onSave: async ({ title, body }) => {
-      await editIssue.mutateAsync({ number, title, body });
-    },
-    successToast: "Issue updated",
-  });
 
   if (details.isPending) {
     return (

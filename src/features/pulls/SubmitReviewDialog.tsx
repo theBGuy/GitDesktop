@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import { Button } from "@/components/ui/button";
@@ -18,6 +18,7 @@ import {
   useClearReviewDrafts,
   useReviewDrafts,
 } from "@/lib/pulls/review-drafts";
+import { toastError } from "@/lib/toast";
 
 /**
  * The submit-a-review dialog: a capability-gated verdict radio (Comment always;
@@ -52,6 +53,17 @@ export function SubmitReviewDialog({
   const [verdict, setVerdict] = useState<ReviewVerdict>("comment");
   const [summary, setSummary] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // The parent re-keys this dialog on the PR identity, so a switch can unmount it
+  // mid-submit — past `handleOpenChange`'s pending guard. The inline error below
+  // then has nowhere to render, and a failed (or PARTIAL) post would read as
+  // success; this is what lets the catch route it to a toast instead.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   const draftList = drafts.data ?? [];
   const count = draftList.length;
@@ -102,8 +114,13 @@ export function SubmitReviewDialog({
     } catch (e) {
       // The post itself failed — keep the dialog open, Submit re-armed, and show
       // the message verbatim (on GitLab/Bitbucket it can disclose partial posting,
-      // which the user needs to see in full).
-      setError(e instanceof Error ? e.message : String(e));
+      // which the user needs to see in full). Unmounted mid-submit, that surface is
+      // gone, so the failure rides a toast rather than vanishing.
+      if (mounted.current) {
+        setError(e instanceof Error ? e.message : String(e));
+      } else {
+        toastError(e);
+      }
       return;
     }
     // The review posted. From here Submit must NEVER re-arm — a second click

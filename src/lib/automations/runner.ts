@@ -170,13 +170,22 @@ function looksLikeProviderError(text: string): boolean {
  */
 function automationTarget(event: AutomationEvent): ReviewTarget {
   const repoName = event.repoPath.split(/[/\\]/).pop() ?? event.repoPath;
+  // Origin-pinned like every other store touch on this path — the poller is
+  // origin-scoped, so an automation row always belongs to the fork's own PR.
   if (event.kind === "commit") {
-    return { kind: "remote", repoPath: event.repoPath, repoName, ref: "" };
+    return {
+      kind: "remote",
+      repoPath: event.repoPath,
+      repoName,
+      lens: "origin",
+      ref: "",
+    };
   }
   return {
     kind: event.target.type,
     repoPath: event.repoPath,
     repoName,
+    lens: "origin",
     ref: targetRef(event),
   };
 }

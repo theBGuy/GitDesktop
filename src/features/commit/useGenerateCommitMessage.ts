@@ -29,6 +29,8 @@ export function useGenerateCommitMessage(repoPath: string) {
     // switched repo or branch — drop the remaining writes and abort the stream.
     const startKey = useUiStore.getState().activeDraftKey;
     // A null startKey (pre-branch-resolution) treats any later key as a move.
+    // On a move, cancel() always aborts THIS run: a second generation can't
+    // start while `generating` is set (CommitBox gates the button and hotkey).
     const keyMoved = () => useUiStore.getState().activeDraftKey !== startKey;
     setGenerating(true);
     const buffer = await run(

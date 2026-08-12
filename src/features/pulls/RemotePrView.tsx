@@ -288,14 +288,11 @@ export function RemotePrView({
   // targets the fork (origin) or its parent (upstream) — "origin" everywhere but a
   // GitHub fork whose lens is set upstream.
   const lens = useRepoLens(repoPath);
-  // Which PR is on screen. The lens is IN the identity because it can flip while
-  // this view stays mounted — removing the upstream remote collapses the gate, so
-  // the same number becomes a different repo's PR.
-  const entityKey = `${lens}#${number}`;
-  // The same identity for async mutation callbacks, which close over the entity
-  // they fired for and need the live one to compare against. Updated by the
-  // render-time reset below, so it can never lag a switch.
-  const liveEntityKey = useRef(entityKey);
+  // Which PR is on screen. `repoPath` because a number is only unique within one
+  // repo, and the lens because it can flip while this view stays MOUNTED —
+  // removing the upstream remote collapses the gate, so the same number becomes a
+  // different repo's PR.
+  const entityKey = `${repoPath}#${lens}#${number}`;
   // The viewer's push permission on the lens repo — the axis the per-action
   // forge flags don't cover. Only fetched once a provider is known; an
   // unanswered probe leaves every control exactly as it is.
@@ -894,6 +891,17 @@ export function RemotePrView({
   );
 
   const [composeBody, setComposeBody] = useState("");
+  // Both land after a mutation settles, by which time the user may have switched
+  // PRs — an effect event reads the LIVE identity, so a late settle can never
+  // resurrect text on, or blank the draft of, whatever PR is on screen now.
+  const restoreDraft = useEffectEvent((submittedFor: string, body: string) => {
+    if (submittedFor !== entityKey) return;
+    setComposeBody((cur) => (cur.trim() ? cur : body));
+  });
+  const clearDraft = useEffectEvent((submittedFor: string) => {
+    if (submittedFor !== entityKey) return;
+    setComposeBody("");
+  });
   const [deletingCommentId, setDeletingCommentId] = useState<string | null>(
     null,
   );
@@ -1100,13 +1108,13 @@ export function RemotePrView({
     }
     // Guard the deferred clear like submitComment's restore: after a PR
     // switch it would wipe text just typed on the newly shown PR.
-    const firedFor = entityKey;
+    const submittedFor = entityKey;
     requestChangesPr.mutate(
       { number, body: composeBody.trim() },
       {
         onSuccess: () => {
           toast.success("Requested changes");
-          if (liveEntityKey.current === firedFor) setComposeBody("");
+          clearDraft(submittedFor);
         },
         onError: (e) => {
           if (prev) queryClient.setQueryData(key, prev);
@@ -1122,18 +1130,14 @@ export function RemotePrView({
     // Clear the draft immediately (the perceived-speed win) and append the
     // synthetic comment optimistically; on error restore the draft, but only if
     // the composer is still empty so we never clobber newly-typed text.
-    const firedFor = entityKey;
+    const submittedFor = entityKey;
     setComposeBody("");
     comment.mutate(
       { number, body, author: forge.data?.login ?? "You" },
       {
         onSuccess: () => toast.success("Comment added"),
         onError: (e) => {
-          // Only restore onto the PR this text was written for: the composer is
-          // empty after a switch too, so an unguarded restore plants it on
-          // whatever PR is on screen when the failure lands.
-          if (liveEntityKey.current === firedFor)
-            setComposeBody((cur) => (cur.trim() ? cur : body));
+          restoreDraft(submittedFor, body);
           onError(e);
         },
       },
@@ -1306,15 +1310,33 @@ export function RemotePrView({
   const [lastEntity, setLastEntity] = useState(entityKey);
   if (entityKey !== lastEntity) {
     setLastEntity(entityKey);
-    liveEntityKey.current = entityKey;
     setSelectedPath(null);
     setSelectedCommitOid(null);
-    // A different PR must never inherit this one's conflict-resolution takeover,
-    // its unsent comment draft, or a comment-delete confirmation still open.
+    // Everything below is bound to the PR it was opened on — the conflict-resolution
+    // takeover, the dialogs and confirmations, the unsent draft — so a different PR
+    // must inherit none of it.
     setResolve(null);
     setComposeBody("");
     setDeletingCommentId(null);
+    setDeletingThreadCommentId(null);
+    setSubmitOpen(false);
+    setDiscardConfirmOpen(false);
+    setMergeOpen(false);
+    setMergeAuto(false);
+    setMergeStrategy("merge");
+    setDeleteBranch(false);
+    edit.setOpen(false);
   }
+  // The edit dialog's in-flight generation belongs to the PR it was started on,
+  // but cancelling ABORTS a live stream — an imperative effect, never part of the
+  // render-time block above, which React may discard and replay.
+  const cancelGeneration = useEffectEvent(() => prGen.cancel());
+  const generatingFor = useRef(entityKey);
+  useEffect(() => {
+    if (generatingFor.current === entityKey) return;
+    generatingFor.current = entityKey;
+    cancelGeneration();
+  }, [entityKey]);
   // Default to the first changed file until the user picks one.
   const effectivePath =
     selectedPath && pr?.files.some((f) => f.path === selectedPath)
@@ -3029,8 +3051,12 @@ export function RemotePrView({
       />
 
       {/* The batch submit-review dialog (Review control, pending-review bar, palette
-          action). Verdict caps ride canWrite for GitHub, forge flags elsewhere. */}
+          action). Verdict caps ride canWrite for GitHub, forge flags elsewhere.
+          Keyed on the entity: it owns verdict/summary/error state that ONLY its own
+          onOpenChange resets, so a switch has to remount it — closing it from the
+          reset block alone would leave the previous PR's verdict on the next open. */}
       <SubmitReviewDialog
+        key={entityKey}
         repoPath={repoPath}
         number={number}
         open={submitOpen}

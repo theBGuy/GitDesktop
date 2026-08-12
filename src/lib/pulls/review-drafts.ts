@@ -29,8 +29,8 @@ type PrDrafts = Record<string, ReviewDraft[]>;
 
 const draftKey = (lens: RemoteLens, number: number) => `${lens}#${number}`;
 
-/** The bare-number key this lens key supersedes — records written before the lens
- *  dimension existed, which can only have been the origin lens. */
+/** The bare-number key this lens key supersedes. Pre-lens drafts recorded no lens, so
+ *  policy adopts them as origin — the safe default (the fork's own PR). */
 const legacyDraftKey = (lens: RemoteLens, number: number) =>
   lens === "origin" ? String(number) : undefined;
 

@@ -1545,16 +1545,18 @@ export function JiraIssueView({
   const [composeBody, setComposeBody] = useState("");
   const composerRef = useRef<MarkdownEditorHandle>(null);
   // A different issue must never inherit this one's unsent comment draft — a
-  // render-time state adjustment, not an effect.
-  const [lastKey, setLastKey] = useState(issueKey);
-  if (issueKey !== lastKey) {
-    setLastKey(issueKey);
+  // render-time state adjustment, not an effect. The repo is part of the identity
+  // because two repos linked to DIFFERENT Jira sites can share an issue key.
+  const issueIdentity = `${repoPath}#${issueKey}`;
+  const [lastIdentity, setLastIdentity] = useState(issueIdentity);
+  if (issueIdentity !== lastIdentity) {
+    setLastIdentity(issueIdentity);
     setComposeBody("");
   }
   // The restore below can land after the user switched issues; an effect event
-  // reads the LIVE key so a late rejection can't resurrect text elsewhere.
+  // reads the LIVE identity so a late rejection can't resurrect text elsewhere.
   const restoreDraft = useEffectEvent((submittedFor: string, body: string) => {
-    if (submittedFor !== issueKey) return;
+    if (submittedFor !== issueIdentity) return;
     setComposeBody((cur) => (cur.trim() ? cur : body));
   });
 
@@ -1605,7 +1607,7 @@ export function JiraIssueView({
     if (!body) return;
     // Clear the draft immediately (perceived speed); restore it on error, but
     // only if the composer is still empty so we never clobber newly-typed text.
-    const submittedFor = issueKey;
+    const submittedFor = issueIdentity;
     setComposeBody("");
     comment.mutate(
       { issueKey, bodyMd: body },
