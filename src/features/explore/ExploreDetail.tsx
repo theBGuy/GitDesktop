@@ -98,7 +98,9 @@ function ExploreDetailBody({
   // personally is never a valid target — hidden, not disabled, since there's
   // nothing actionable to explain. Personal ownership, not write access: org
   // repos stay forkable; an unknown viewer (null, or the "" non-GitHub backends
-  // emit) falls back to the capability gate.
+  // emit) falls back to the capability gate. On Bitbucket the compare is inert in
+  // practice — `owner` is a workspace slug, `viewer` a username — which is why the
+  // guide scopes this behavior to GitHub and GitLab.
   const canFork =
     (features?.implemented.repoForkByName ?? false) &&
     !(viewer && repo.owner === viewer);
