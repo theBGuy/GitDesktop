@@ -543,8 +543,11 @@ pub struct PrInfo {
     pub stack_unknown: bool,
     /// The head branch lives in a FORK, so this PR can never be a stack member
     /// (GitHub stacks are same-repo only) and its head name may collide with a
-    /// same-repo branch. Populated by the GitHub list arm alone (gh's
-    /// `isCrossRepository`, hence the alias); other providers leave it false.
+    /// same-repo branch. Every provider's list arm populates it — GitHub from gh's
+    /// `isCrossRepository` (hence the alias), GitLab from differing project ids,
+    /// Bitbucket from differing endpoint repo names. Absent = same-repo — except on
+    /// the upstream-lens REST arm (`rest_pull_to_pr_info`), which serves fork→parent
+    /// rows and reports false unconditionally; consumers there must not trust it.
     #[serde(default, alias = "isCrossRepository")]
     pub cross_repository: bool,
 }
@@ -5358,6 +5361,12 @@ fn upstream_pulls_endpoint(parent_slug: &str, fork_owner: &str, head: &str) -> S
     format!("repos/{parent_slug}/pulls?head={owner}:{head}&state=open")
 }
 
+/// The projection for the branch duplicate probe. `isCrossRepository` is load-bearing:
+/// `gh pr list --head <branch>` matches a FORK PR by bare head name, so without the
+/// marker a contributor's same-named branch reads as your own open PR.
+const PRS_FOR_BRANCH_FIELDS: &str =
+    "number,url,title,baseRefName,headRefName,isDraft,state,isCrossRepository";
+
 /// Open PRs whose head is `head` (at most one per base) — lets the UI offer "View
 /// pull request" instead of "Create".
 ///
@@ -5407,7 +5416,7 @@ pub async fn gh_prs_for_branch(
             "--state",
             "open",
             "--json",
-            "number,url,title,baseRefName,headRefName,isDraft,state",
+            PRS_FOR_BRANCH_FIELDS,
         ],
         GH_TIMEOUT,
     )
@@ -5643,7 +5652,8 @@ mod tests {
         rest_comment_to_out, rest_commit_to_out, rest_pull_to_pr_info, rest_review_to_out,
         rollup_state_to_ci, scrape_pr_ref, split_commit_message, stack_members_from,
         map_gh_mergeability, stack_memberships_from, stack_write_args, stack_write_outcome_from,
-        PR_LIST_FIELDS, PR_VIEW_FIELDS, upstream_pulls_endpoint, GhPrFile, GhPrRestComment,
+        PR_LIST_FIELDS, PR_VIEW_FIELDS, PRS_FOR_BRANCH_FIELDS, upstream_pulls_endpoint, GhPrFile,
+        GhPrRestComment,
         GhPrRestCommit, GhPrRestCommitGitAuthor, GhPrRestCommitInner, GhPrRestPull, GhPrRestReview,
         GhStackEntry, MergeAsyncOutcome, MergeAsyncStatus, PrDetails, PrInfo, PrMergeOutcome,
         GhMergeabilityRow, PrMergeability, PrStackInfo, PrStackMember, PrTimelineEventOut,
@@ -6209,6 +6219,22 @@ mod tests {
         assert!(
             fields.iter().all(|f| f.trim() == *f && !f.is_empty()),
             "got: {PR_LIST_FIELDS}"
+        );
+    }
+
+    /// The branch duplicate probe needs the marker just as much: `gh pr list --head`
+    /// matches a fork PR by bare head name, so a missing field would silently let a
+    /// contributor's same-named branch pose as your own open PR.
+    #[test]
+    fn prs_for_branch_fields_request_the_fork_marker() {
+        let fields: Vec<&str> = PRS_FOR_BRANCH_FIELDS.split(',').collect();
+        assert!(
+            fields.contains(&"isCrossRepository"),
+            "got: {PRS_FOR_BRANCH_FIELDS}"
+        );
+        assert!(
+            fields.iter().all(|f| f.trim() == *f && !f.is_empty()),
+            "got: {PRS_FOR_BRANCH_FIELDS}"
         );
     }
 

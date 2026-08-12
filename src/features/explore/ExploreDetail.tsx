@@ -18,7 +18,6 @@ import { Markdown } from "@/components/ui/markdown";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import {
-  useForgeRepos,
   useForkRepoByName,
   useRepoReadme,
   useRepoStarred,
@@ -37,17 +36,22 @@ import type { ExploreCloneTarget } from "./ExploreCloneDialog";
 import { compactNumber } from "./explore-utils";
 
 /** The Explore detail pane: the selected repo's header, actions (clone / fork /
- *  star / view), and its lazily-fetched README. `features` gates fork/star; a
- *  selected repo drives the star + README queries. */
+ *  star / view), and its lazily-fetched README. `features` gates fork/star, and
+ *  `viewer` (the screen's own-repos query) additionally gates fork; a selected
+ *  repo drives the star + README queries. */
 export function ExploreDetail({
   provider,
   repo,
   features,
+  viewer,
   onClone,
 }: {
   provider: ForgeProvider;
   repo: ForgeSearchRepo | null;
   features: ForgeProviderFeatures | undefined;
+  /** The signed-in user's login; null while resolving, and may be "" when the
+   *  provider's viewer probe fails (both fall back to the capability-only gate). */
+  viewer: string | null;
   onClone: (target: ExploreCloneTarget) => void;
 }) {
   if (!repo) {
@@ -70,6 +74,7 @@ export function ExploreDetail({
       provider={provider}
       repo={repo}
       features={features}
+      viewer={viewer}
       onClone={onClone}
     />
   );
@@ -79,23 +84,24 @@ function ExploreDetailBody({
   provider,
   repo,
   features,
+  viewer,
   onClone,
 }: {
   provider: ForgeProvider;
   repo: ForgeSearchRepo;
   features: ForgeProviderFeatures | undefined;
+  viewer: string | null;
   onClone: (target: ExploreCloneTarget) => void;
 }) {
   const label = providerLabel(provider);
   // Forking always creates the copy under your own account, so a repo you own
   // personally is never a valid target — hidden, not disabled, since there's
   // nothing actionable to explain. Personal ownership, not write access: org
-  // repos stay forkable; an unresolved viewer falls back to the capability gate.
-  const ownRepos = useForgeRepos(provider, true);
-  const viewer = ownRepos.data?.viewer ?? null;
+  // repos stay forkable; an unknown viewer (null, or the "" non-GitHub backends
+  // emit) falls back to the capability gate.
   const canFork =
     (features?.implemented.repoForkByName ?? false) &&
-    !(viewer !== null && repo.owner === viewer);
+    !(viewer && repo.owner === viewer);
   const canStar = features?.implemented.repoStar ?? false;
   const canReadme = features?.implemented.repoReadme ?? false;
 

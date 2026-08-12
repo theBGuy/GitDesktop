@@ -606,6 +606,13 @@ fn endpoint_repo(ep: &Option<BbPrEndpoint>) -> String {
         .unwrap_or_default()
 }
 
+/// A fork PR's source repo differs from its destination; either name absent
+/// (an unfielded payload) leaves this false rather than guessing.
+fn cross_repo(source: &Option<BbPrEndpoint>, destination: &Option<BbPrEndpoint>) -> bool {
+    let (src, dst) = (endpoint_repo(source), endpoint_repo(destination));
+    !src.is_empty() && !dst.is_empty() && src != dst
+}
+
 fn branch_name(ep: &Option<BbPrEndpoint>) -> String {
     ep.as_ref()
         .and_then(|e| e.branch.as_ref())
@@ -647,12 +654,7 @@ fn from_bb_pr(p: BbPr) -> PrInfo {
         // and no stack-membership gate for a fork head to inform.
         stack: None,
         stack_unknown: false,
-        // A fork PR's source repo differs from its destination; either name absent
-        // (an unfielded payload) leaves this false rather than guessing.
-        cross_repository: {
-            let (src, dst) = (endpoint_repo(&p.source), endpoint_repo(&p.destination));
-            !src.is_empty() && !dst.is_empty() && src != dst
-        },
+        cross_repository: cross_repo(&p.source, &p.destination),
     }
 }
 
@@ -1258,12 +1260,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         // Bitbucket Cloud's PR payload carries no mergeability field, and its only
         // pre-check needs a write scope — so "unknown", never a guess.
         mergeability: PrMergeability::unavailable(),
-        // A fork PR's source repo differs from its destination; either name absent
-        // (an unfielded payload) leaves this false rather than guessing.
-        cross_repository: {
-            let (src, dst) = (endpoint_repo(&pr.source), endpoint_repo(&pr.destination));
-            !src.is_empty() && !dst.is_empty() && src != dst
-        },
+        cross_repository: cross_repo(&pr.source, &pr.destination),
         // GitHub's "allow edits by maintainers" has no Bitbucket equivalent —
         // unknown, not denied.
         maintainer_can_modify: None,
@@ -2752,10 +2749,12 @@ fn build_create_body(
 /// Find an existing OPEN PR from `head` into `base`. Pure (testable). `prs_for_branch`
 /// already constrains source + OPEN but NOT the destination, so filter on
 /// `base_ref_name == base` to catch only a genuine same-source→same-dest duplicate.
+/// A fork PR is never YOUR duplicate — its source branch lives in another repository,
+/// so a contributor's same-named branch must not block your create.
 fn duplicate_pr_number(open_prs: &[PrInfo], base: &str) -> Option<u64> {
     open_prs
         .iter()
-        .find(|p| p.base_ref_name == base)
+        .find(|p| p.base_ref_name == base && !p.cross_repository)
         .map(|p| p.number)
 }
 
@@ -5348,10 +5347,28 @@ mod tests {
         assert_eq!(endpoint_repo(&absent.source), "");
         assert_eq!(endpoint_repo(&absent.destination), "");
 
+        // One-sided absence is what the emptiness guards exist for: a bare `src != dst`
+        // would read the missing destination as a different repo and invent a fork.
+        let one_sided: BbPr = serde_json::from_str(
+            r#"{"id":7,"state":"OPEN",
+                "source":{"branch":{"name":"feat"},"repository":{"full_name":"me/app"}},
+                "destination":{"branch":{"name":"main"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(endpoint_repo(&one_sided.source), "me/app");
+        assert_eq!(endpoint_repo(&one_sided.destination), "");
+
+        // Both arms share `cross_repo`, so covering it covers the detail arm too.
+        assert!(cross_repo(&fork.source, &fork.destination));
+        assert!(!cross_repo(&same.source, &same.destination));
+        assert!(!cross_repo(&absent.source, &absent.destination));
+        assert!(!cross_repo(&one_sided.source, &one_sided.destination));
+
         // The list arm reads the same names off the same (unfielded) list payload.
         assert!(from_bb_pr(fork).cross_repository);
         assert!(!from_bb_pr(same).cross_repository);
         assert!(!from_bb_pr(absent).cross_repository);
+        assert!(!from_bb_pr(one_sided).cross_repository);
     }
 
     #[test]
@@ -6422,6 +6439,14 @@ mod tests {
         assert_eq!(duplicate_pr_number(&list, "main"), Some(7));
         // Empty list → no duplicate.
         assert_eq!(duplicate_pr_number(&[], "main"), None);
+
+        // A contributor's fork PR shares the source AND destination branch names but
+        // is not yours — it must never block your own create.
+        let from_fork = pr(r#"{"id":11,"title":"z","state":"OPEN",
+            "source":{"branch":{"name":"feature/x"},"repository":{"full_name":"them/app"}},
+            "destination":{"branch":{"name":"main"},"repository":{"full_name":"us/app"}}}"#);
+        assert!(from_fork.cross_repository);
+        assert_eq!(duplicate_pr_number(&[from_fork], "main"), None);
     }
 
     #[test]

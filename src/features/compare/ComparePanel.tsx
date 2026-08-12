@@ -105,8 +105,10 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
   const behind = comparison.data?.behind ?? [];
   const canPr = forgeFeatureReady(gh.data, "mrCreate");
   // An open PR from the current branch into the compared branch already exists.
+  // The probe is origin-pinned (above), so a cross-repository row heads from
+  // someone else's fork and must not flip Create into View.
   const existingPr = (branchPrs.data ?? []).find(
-    (p) => p.baseRefName === compareBranch,
+    (p) => p.baseRefName === compareBranch && !p.crossRepository,
   );
 
   useHotkeyAction(

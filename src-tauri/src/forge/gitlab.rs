@@ -419,10 +419,13 @@ fn infer_mr_stacks(open: &[(u64, &str, &str)]) -> HashMap<u64, (String, u32, u32
 /// is only as complete as the list in hand: callers pass the full open page (a
 /// truncated list would hide a chain's bottom and mis-position the rows above it),
 /// so the real limits are >100 open MRs and merged layers, which an open list has
-/// dropped entirely.
+/// dropped entirely. Cross-repository rows sit out the inference entirely: their
+/// source branch lives in another project, so its name says nothing about a chain
+/// in this one.
 fn apply_mr_stacks(prs: &mut [PrInfo]) {
     let rows: Vec<(u64, &str, &str)> = prs
         .iter()
+        .filter(|p| !p.cross_repository)
         .map(|p| {
             (
                 p.number,
@@ -8021,6 +8024,34 @@ mod tests {
             stack_unknown: false,
             cross_repository: false,
         }
+    }
+
+    /// The same row from a FORK: its source branch name is a coincidence, not a link.
+    fn fork_row(number: u64, head: &str, base: &str) -> PrInfo {
+        PrInfo {
+            cross_repository: true,
+            ..row(number, head, base, None)
+        }
+    }
+
+    #[test]
+    fn apply_mr_stacks_ignores_fork_rows() {
+        // A fork MR whose source branch happens to be named `feat-a` — the same name
+        // the real chain's bottom uses. Counted, it would make `feat-a` an ambiguous
+        // parent and poison the whole chain.
+        let mut prs = vec![
+            fork_row(99, "feat-a", "main"),
+            row(7, "feat-a", "main", None),
+            row(8, "feat-b", "feat-a", None),
+        ];
+        apply_mr_stacks(&mut prs);
+        // The fork row is never a member…
+        assert!(prs[0].stack.is_none());
+        // …and the real chain still marks, bottom→top.
+        let bottom = prs[1].stack.as_ref().expect("MR 7 is the chain bottom");
+        let top = prs[2].stack.as_ref().expect("MR 8 is the chain top");
+        assert_eq!((bottom.id.as_str(), bottom.position, bottom.size), ("mr-7", 1, 2));
+        assert_eq!((top.id.as_str(), top.position, top.size), ("mr-7", 2, 2));
     }
 
     #[test]

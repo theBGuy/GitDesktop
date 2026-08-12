@@ -156,6 +156,8 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
     !!gh.data?.repo &&
     !!gh.data?.login &&
     gh.data.repo.split("/")[0] === gh.data.login;
+  // One predicate for the menu item and its palette twin, so the two can't drift.
+  const canForkHere = canGh && (isGitLab || isBitbucket || !ownRepo);
   const starStatus = useRepoStarStatus(repoPath, canStar);
   const setStar = useSetRepoStar(repoPath);
   const starred = starStatus.data ?? false;
@@ -227,11 +229,7 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   useHotkeyAction("view-on-github", () => openWeb(), canGh);
   // create-issue is the in-app dialog (registered in RepositoryView + IssuesPanel);
   // the "Create issue on {host}" menu item below still opens the web page.
-  useHotkeyAction(
-    "fork-repository",
-    forkAction,
-    canGh && (isGitLab || isBitbucket || !ownRepo),
-  );
+  useHotkeyAction("fork-repository", forkAction, canForkHere);
   useHotkeyAction("open-in-terminal", () =>
     openInTerminal(
       repoPath,
@@ -341,20 +339,21 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
                 Create issue on {remoteLabel}
               </DropdownMenuItem>
             )}
-            {isGitLab || isBitbucket ? (
-              // The fork dialog's flow (fork + rewire remotes + set-default) is
-              // GitHub-only; GitLab/Bitbucket fork from their web page instead of
-              // hiding the affordance.
-              <DropdownMenuItem onClick={forkAction}>
-                <GitForkIcon />
-                Fork on {remoteLabel}…
-              </DropdownMenuItem>
-            ) : ownRepo ? null : (
-              <DropdownMenuItem onClick={() => setForkOpen(true)}>
-                <GitForkIcon />
-                Fork repository…
-              </DropdownMenuItem>
-            )}
+            {canForkHere &&
+              (isGitLab || isBitbucket ? (
+                // The fork dialog's flow (fork + rewire remotes + set-default) is
+                // GitHub-only; GitLab/Bitbucket fork from their web page instead of
+                // hiding the affordance.
+                <DropdownMenuItem onClick={forkAction}>
+                  <GitForkIcon />
+                  Fork on {remoteLabel}…
+                </DropdownMenuItem>
+              ) : (
+                <DropdownMenuItem onClick={() => setForkOpen(true)}>
+                  <GitForkIcon />
+                  Fork repository…
+                </DropdownMenuItem>
+              ))}
             <DropdownMenuSeparator />
           </>
         )}

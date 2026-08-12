@@ -494,9 +494,17 @@ export function CreatePrDialog({
 
   // Duplicate probe: an open PR from this head against the chosen target already
   // exists. Probe with the target's lens ("upstream" composes owner:branch
-  // Rust-side; pass the BARE head), matching ComparePanel's baseRefName match.
+  // Rust-side; pass the BARE head). The origin path skips cross-repository rows for
+  // the same reason ComparePanel does — an origin-pinned probe can only reach them
+  // via a contributor's same-named fork branch. The upstream lens keeps them,
+  // because there your own fork→parent duplicate IS cross-repository; that arm
+  // reports the flag false for every row today, so the qualifier guards the future.
   const branchPrs = usePrsForBranch(repoPath, head || null, open, createLens);
-  const existingPr = (branchPrs.data ?? []).find((p) => p.baseRefName === base);
+  const existingPr = (branchPrs.data ?? []).find(
+    (p) =>
+      p.baseRefName === base &&
+      (createLens === "upstream" || !p.crossRepository),
+  );
 
   // Linked-issue chip cluster — extraction seeding, AI union, candidate ranking and
   // the chip mutations live in the shared hook. Gated on a usable tracker AND the

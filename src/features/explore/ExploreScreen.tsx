@@ -87,6 +87,12 @@ export function ExploreScreen() {
   const showingYours = !searching && effectiveZeroMode === "yours";
 
   const features = useForgeProviderFeatures(provider);
+  // One observer for the signed-in user's repos, shared by the Yours list and the
+  // detail pane's own-repo Fork gate. Hoisted because a per-selection hook would
+  // refetch once the 5-minute staleTime lapsed — and on Bitbucket that read walks
+  // every workspace.
+  const ownRepos = useForgeRepos(provider, true);
+  const viewer = ownRepos.data?.viewer ?? null;
 
   // Esc closes Explore. Guarded so Base UI popups (which mark the event consumed)
   // get first claim; an effect event reads the latest closeExplore.
@@ -221,6 +227,7 @@ export function ExploreScreen() {
           {showingYours ? (
             <YoursResults
               provider={provider}
+              repos={ownRepos}
               selected={selected}
               onSelect={setSelected}
               onRowsChange={setFlatRepos}
@@ -244,6 +251,7 @@ export function ExploreScreen() {
               provider={provider}
               repo={selected}
               features={features.data}
+              viewer={viewer}
               onClone={setCloneTarget}
             />
           </div>
@@ -260,21 +268,22 @@ export function ExploreScreen() {
   );
 }
 
-/** The "Your repositories" zero-state list — reuses the clone browser's own-repos
- *  hook, mapped into the shared result-row shape and owner-grouped. */
+/** The "Your repositories" zero-state list — renders the screen's own-repos query
+ *  (the clone browser's hook), mapped into the shared result-row shape and
+ *  owner-grouped. */
 function YoursResults({
   provider,
+  repos,
   selected,
   onSelect,
   onRowsChange,
 }: {
   provider: ForgeProvider;
+  repos: ReturnType<typeof useForgeRepos>;
   selected: ForgeSearchRepo | null;
   onSelect: (repo: ForgeSearchRepo | null) => void;
   onRowsChange: (repos: ForgeSearchRepo[]) => void;
 }) {
-  const repos = useForgeRepos(provider, true);
-
   const rows = useMemo<ExploreRow[]>(() => {
     const data = repos.data;
     if (!data) return [];

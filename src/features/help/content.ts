@@ -127,6 +127,8 @@ Click the **⋮** menu next to the repo name for repo-wide actions:
 - On the host: **Star** the repository, **create an issue**, or **Fork** it (on GitLab
   and Bitbucket, forking opens the web fork page). Bitbucket has no stars and its
   issue tracker is retired, so those two actions don't appear for Bitbucket repos.
+  **Fork** doesn't appear on a GitHub repository you own personally — a fork always
+  lands under your own account (organization repositories stay forkable).
 - **Insights** (analytics), **manage files**, **submodules**, the **remote URL**,
   **branch rules**, **git hooks**, {{ai}}**automations**, {{/ai}}**repository settings**,
   an **alias**, copy the repo path, copy the branch name, copy the HEAD SHA, and
@@ -186,7 +188,8 @@ From here:
 - **Clone** — pick a folder to clone into; GitDesktop opens the repo once it finishes.
 - **Fork** — create a fork under your account (on **GitHub, GitLab, and Bitbucket**). The
   fork is created in the background, and then you're offered to **clone** it. It doesn't
-  appear on repositories you own personally — a fork always lands under your own account.
+  appear on repositories you own personally (GitHub and GitLab) — a fork always lands
+  under your own account.
 - **Star / Unstar** — on **GitHub and GitLab** only. Bitbucket has no stars, so this action
   doesn't appear on Bitbucket results.
 - **View on GitHub / GitLab / Bitbucket** — open the repository on its host in your browser.

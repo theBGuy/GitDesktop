@@ -1,3 +1,4 @@
-- Branch pull-request badges now attach only to pull requests opened from this
-  repository, so a contributor's fork branch with the same name no longer claims the
-  badge on your branch.
+- A contributor's fork branch with the same name as yours no longer masquerades as
+  your own work: branch pull-request badges, the Compare tab's and Create dialog's
+  duplicate checks, Bitbucket's duplicate-create guard, and GitLab stacked-MR
+  detection all now skip fork pull requests.
