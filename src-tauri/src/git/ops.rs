@@ -3497,16 +3497,12 @@ pub async fn git_unpushed_messages(
 /// The tag-name rules for every path a tag rides: `refs/tags/<name>` push and
 /// delete refspecs, `gh release` argv, and GitLab release endpoint paths. Adds
 /// the forms `git check-ref-format` forbids to the shared ref validator, which
-/// permits them only for branch start-points (a tag is never a rev expression).
+/// permits them only for branch start-points (rev expressions may use them).
+/// The single-`@` rule is deliberately absent — it matches the ENTIRE refname,
+/// never `refs/tags/<name>`, so a tag named `@` is creatable (probe-verified).
 /// CI-dispatch refs are free-text branch-or-tag and deliberately skip this.
 pub(crate) fn validate_tag_name(name: &str) -> AppResult<()> {
-    // A lone `@` component covers the whole-name `@` too.
-    if name.contains('~')
-        || name.contains('^')
-        || name.contains("..")
-        || name.contains("@{")
-        || name.split('/').any(|part| part == "@")
-    {
+    if name.contains('~') || name.contains('^') || name.contains("..") || name.contains("@{") {
         return Err(AppError::InvalidArgument(format!(
             "invalid tag name: {name}"
         )));
@@ -3669,16 +3665,17 @@ mod tests {
     fn validate_tag_name_rejects_refspec_metacharacters() {
         for bad in [
             "a:b", "a*b", "a?", "a[b", "a b", "a\\b", "a\u{7}b", "", "-x",
-            // Rev-expression forms: a tag is never one, and git forbids them in
-            // a real ref name.
-            "v1~1", "v1^2", "@", "a@{b", "v1..2", "v1/@/x",
+            // Rev-expression forms git itself refuses in a ref name.
+            "v1~1", "v1^2", "a@{b", "v1..2",
         ] {
             assert!(
                 validate_tag_name(bad).is_err(),
                 "expected {bad:?} to be rejected"
             );
         }
-        for good in ["feat/x", "release-1.2", "v1.0.0", "a@b", "v1/x"] {
+        // `@` and `@`-components are creatable tags (probe-verified) — git's
+        // anti-`@` rule matches the whole refname, never `refs/tags/<name>`.
+        for good in ["feat/x", "release-1.2", "v1.0.0", "a@b", "v1/x", "@", "v1/@/x"] {
             assert!(
                 validate_tag_name(good).is_ok(),
                 "expected {good:?} to be accepted"

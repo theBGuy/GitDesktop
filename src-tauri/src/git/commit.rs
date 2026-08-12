@@ -154,9 +154,7 @@ pub async fn git_global_default_branch() -> AppResult<String> {
 #[tauri::command]
 pub async fn git_set_global_default_branch(branch: String) -> AppResult<()> {
     let branch = branch.trim();
-    crate::git::branches::validate_ref_name(branch).map_err(|_| {
-        crate::error::AppError::InvalidArgument(format!("invalid branch name: {branch}"))
-    })?;
+    crate::git::branches::validate_ref_name(branch)?;
     run_git(
         None,
         &["config", "--global", "init.defaultBranch", branch],

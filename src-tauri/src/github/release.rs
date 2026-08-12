@@ -304,6 +304,10 @@ pub async fn gh_release_generate_notes(
     previous_tag: String,
 ) -> AppResult<GeneratedNotes> {
     validate_tag(&tag)?;
+    // Empty previous_tag = GitHub auto-detects; validate only when supplied.
+    if !previous_tag.trim().is_empty() {
+        validate_tag(previous_tag.trim())?;
+    }
     // `gh api` has no `-R`; build the literal `repos/<slug>` path so a fork
     // generates notes for its OWN releases, not the parent's.
     let slug = crate::github::gh_origin_slug(&repo_path).await?;

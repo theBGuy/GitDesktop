@@ -4909,8 +4909,7 @@ pub async fn publish_repo(
     }
     // The branch rides the publish push's refspec — validate it here, still
     // before the create.
-    crate::git::branches::validate_ref_name(&branch)
-        .map_err(|_| AppError::InvalidArgument(format!("invalid branch name: {branch}")))?;
+    crate::git::branches::validate_ref_name(&branch)?;
     // An origin remote may have appeared since the UI's (cached) no-origin
     // check — adding one externally then publishing would otherwise strand an
     // orphaned project when the post-create `remote add` fails.
@@ -5644,9 +5643,12 @@ pub async fn play_job(repo_path: &str, job_id: u64) -> AppResult<()> {
     Ok(())
 }
 
-/// A CI/CD variable key must be a valid env-var name — it becomes an
-/// environment variable in the pipeline's jobs: `[A-Za-z_][A-Za-z0-9_]*`.
-fn valid_variable_key(k: &str) -> bool {
+/// A key for a variable passed when running a pipeline manually — it becomes an
+/// environment variable in the jobs, so `[A-Za-z_][A-Za-z0-9_]*` (no leading
+/// digit). [`validate_variable_key`] shares the charset but guards the stored
+/// project CI/CD variables, permits a leading digit, and caps length — that
+/// difference is why the two aren't folded.
+fn valid_pipeline_variable_key(k: &str) -> bool {
     !k.is_empty()
         && !k.starts_with(|c: char| c.is_ascii_digit())
         && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -5671,7 +5673,7 @@ pub async fn run_pipeline(
     }
     let mut vars = Vec::with_capacity(variables.len());
     for (k, v) in variables {
-        if !valid_variable_key(k) {
+        if !valid_pipeline_variable_key(k) {
             return Err(AppError::InvalidArgument(format!(
                 "invalid variable name: {k} (letters, digits and _ only)"
             )));
@@ -7102,6 +7104,14 @@ fn variable_body(
     }
 }
 
+/// Does this 400 mean GitLab refused to MASK the value (length ≥ 8, one line,
+/// Base64-ish alphabet)? Measured: glab's stderr renders it as
+/// `map[message:map[value:[is invalid]]]`; older GitLab wordings said "masked".
+/// Both renderings are matched, raw JSON included.
+fn is_mask_rejection(msg: &str) -> bool {
+    msg.contains("masked") || (msg.contains("value") && msg.contains("is invalid"))
+}
+
 /// Create (`create: true`) or update a variable. Split endpoints on GitLab —
 /// POST 400s on an existing key, PUT 404s on a missing one — and the form
 /// knows which it's doing. Updates address the exact `scope` (a key can exist
@@ -7137,14 +7147,8 @@ pub async fn set_variable(
     )
     .await
     .map_err(|e| match e {
-        // GitLab enforces maskability server-side (length ≥ 8, one line, Base64-ish
-        // alphabet) with a curt 400 — spell it out. Measured: glab's stderr renders
-        // that 400 as `map[message:map[value:[is invalid]]]`; older GitLab wordings
-        // said "masked". Both renderings are matched, raw JSON included.
-        AppError::Glab(msg)
-            if masked
-                && (msg.contains("masked") || (msg.contains("value") && msg.contains("is invalid"))) =>
-        AppError::Glab(
+        // GitLab's curt 400 on an unmaskable value — spell out what it wants.
+        AppError::Glab(msg) if masked && is_mask_rejection(&msg) => AppError::Glab(
             "GitLab can't mask this value — masked values need at least 8 characters on a single line, without most special characters".into(),
         ),
         other => other,
@@ -7999,6 +8003,20 @@ mod tests {
                 "token key omitted entirely: {absent}"
             );
         }
+    }
+
+    /// A mask refusal gets the explanatory rewrite; the other measured 400s
+    /// pass through with GitLab's own message (substring match, not exhaustive).
+    #[test]
+    fn mask_rejection_matches_measured_renderings() {
+        assert!(is_mask_rejection(
+            "glab: map[message:map[value:[is invalid]]]"
+        ));
+        assert!(is_mask_rejection("value is invalid"));
+        assert!(is_mask_rejection("masked variables must be at least 8 characters"));
+        assert!(!is_mask_rejection(
+            "glab: map[message:map[key:[has already been taken]]]"
+        ));
     }
 
     /// The manual-pipeline body: the ref plus the REST `variables[]` array.
@@ -9471,14 +9489,14 @@ mod tests {
     #[test]
     fn pipeline_variable_keys_reject_invalid_env_names() {
         // Env-var names only: no punctuation, no space, no leading digit.
-        assert!(valid_variable_key("DEPLOY_ENV"));
-        assert!(valid_variable_key("_private"));
-        assert!(valid_variable_key("key2"));
-        assert!(!valid_variable_key(""));
-        assert!(!valid_variable_key("has:colon"));
-        assert!(!valid_variable_key("has space"));
-        assert!(!valid_variable_key("2leading"));
-        assert!(!valid_variable_key("-flag"));
+        assert!(valid_pipeline_variable_key("DEPLOY_ENV"));
+        assert!(valid_pipeline_variable_key("_private"));
+        assert!(valid_pipeline_variable_key("key2"));
+        assert!(!valid_pipeline_variable_key(""));
+        assert!(!valid_pipeline_variable_key("has:colon"));
+        assert!(!valid_pipeline_variable_key("has space"));
+        assert!(!valid_pipeline_variable_key("2leading"));
+        assert!(!valid_pipeline_variable_key("-flag"));
     }
 
     #[test]

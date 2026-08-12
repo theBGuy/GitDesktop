@@ -4951,8 +4951,7 @@ pub async fn publish_repo(
     }
     // The branch rides the publish push's refspec — validate it here, still
     // before the create POST.
-    crate::git::branches::validate_ref_name(&branch)
-        .map_err(|_| AppError::InvalidArgument(format!("invalid branch name: {branch}")))?;
+    crate::git::branches::validate_ref_name(&branch)?;
 
     // Origin must not already exist (an externally-added origin would strand an
     // orphaned repo when the post-create `remote add` fails).
