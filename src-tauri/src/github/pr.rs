@@ -9,10 +9,10 @@ use crate::github::runner::{run_gh, run_gh_input, run_gh_raw, GH_NETWORK_TIMEOUT
 use crate::state::AppState;
 
 fn validate_branch(name: &str) -> AppResult<()> {
-    if name.is_empty() || name.starts_with('-') {
-        return Err(AppError::InvalidArgument(format!("invalid branch: {name}")));
-    }
-    Ok(())
+    // The shared ref validator (empty / leading `-` / refspec metacharacters);
+    // remapped so this surface keeps its own wording.
+    crate::git::branches::validate_ref_name(name)
+        .map_err(|_| AppError::InvalidArgument(format!("invalid branch: {name}")))
 }
 
 #[derive(Serialize)]
@@ -5501,11 +5501,12 @@ pub(crate) async fn gh_pr_create_core(
 
         // Push `head` to origin — origin IS the fork; the PR's head lives there.
         let cred = crate::forge::credential_config_for_remote(&repo_path, "origin").await?;
+        let spec = crate::git::remote::publish_refspec(&head);
         crate::git::remote::run_git_mutating_with_creds(
             state,
             &repo_path,
             &cred,
-            &["push", "-u", "origin", &head],
+            &["push", "-u", "origin", &spec],
             NETWORK_TIMEOUT,
         )
         .await?;
@@ -5538,11 +5539,12 @@ pub(crate) async fn gh_pr_create_core(
 
     // gh can only open a PR for a branch that exists on the remote.
     let cred = crate::forge::credential_config_for_remote(&repo_path, "origin").await?;
+    let spec = crate::git::remote::publish_refspec(&head);
     crate::git::remote::run_git_mutating_with_creds(
         state,
         &repo_path,
         &cred,
-        &["push", "-u", "origin", &head],
+        &["push", "-u", "origin", &spec],
         NETWORK_TIMEOUT,
     )
     .await?;
@@ -5657,11 +5659,30 @@ mod tests {
         GhPrRestCommit, GhPrRestCommitGitAuthor, GhPrRestCommitInner, GhPrRestPull, GhPrRestReview,
         GhStackEntry, MergeAsyncOutcome, MergeAsyncStatus, PrDetails, PrInfo, PrMergeOutcome,
         GhMergeabilityRow, PrMergeability, PrStackInfo, PrStackMember, PrTimelineEventOut,
-        batch_check_present, oid_outside_origin_graph, select_fork_pr_match, ForkPrMatch,
-        RawForkPr, RawLogin, RawPr,
+        batch_check_present, oid_outside_origin_graph, select_fork_pr_match, validate_branch,
+        ForkPrMatch, RawForkPr, RawLogin, RawPr,
     };
     use crate::error::AppError;
     use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
+
+    /// Both PR branches ride a push refspec, so every character that could
+    /// reshape one is refused before any remote work: `:` would retarget the
+    /// push at an arbitrary remote ref, `*` would mirror-push every branch.
+    #[test]
+    fn validate_branch_rejects_refspec_metacharacters() {
+        for bad in ["a:b", "a*b", "a?", "a[b", "a b", "a\\b", "a\u{7}b", "", "-x"] {
+            assert!(
+                validate_branch(bad).is_err(),
+                "expected {bad:?} to be rejected"
+            );
+        }
+        for good in ["feat/x", "release-1.2", "v1.0.0"] {
+            assert!(
+                validate_branch(good).is_ok(),
+                "expected {good:?} to be accepted"
+            );
+        }
+    }
 
     /// A bare list row — only the identity the stack join reads is meaningful.
     fn pr_row(number: u64) -> PrInfo {

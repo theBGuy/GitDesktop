@@ -215,6 +215,23 @@ pub(crate) fn encode_project(path: &str) -> String {
 /// the Bitbucket provider, hence it lives in the parent `forge` module.
 use crate::forge::encode_query_value;
 
+/// `glab api` args that send a JSON body over stdin — the form every request
+/// carrying a secret uses, so the value never reaches argv. glab forwards an
+/// `--input` body raw without a content type, and GitLab 415s on that, so the
+/// header is ours to set.
+fn json_body_args<'a>(method: &'a str, endpoint: &'a str) -> [&'a str; 8] {
+    [
+        "api",
+        "--method",
+        method,
+        endpoint,
+        "--input",
+        "-",
+        "--header",
+        "Content-Type: application/json",
+    ]
+}
+
 /// The project's full path (`group/name`) from the repo's origin remote.
 pub(crate) async fn project_path(repo_path: &str) -> AppResult<String> {
     let url =
@@ -1848,16 +1865,7 @@ pub async fn commit_comment_create(
             let payload = serde_json::json!({ "body": body, "position": position });
             run_glab_ex(
                 Some(repo_path),
-                &[
-                    "api",
-                    "--method",
-                    "POST",
-                    &endpoint,
-                    "--input",
-                    "-",
-                    "--header",
-                    "Content-Type: application/json",
-                ],
+                &json_body_args("POST", &endpoint),
                 Some(&payload.to_string()),
                 &[],
                 GLAB_NETWORK_TIMEOUT,
@@ -4145,16 +4153,7 @@ pub async fn thread_create(
     let endpoint = format!("projects/{enc}/merge_requests/{number}/discussions");
     run_glab_ex(
         Some(repo_path),
-        &[
-            "api",
-            "--method",
-            "POST",
-            &endpoint,
-            "--input",
-            "-",
-            "--header",
-            "Content-Type: application/json",
-        ],
+        &json_body_args("POST", &endpoint),
         Some(&payload.to_string()),
         &[],
         GLAB_NETWORK_TIMEOUT,
@@ -4249,16 +4248,7 @@ pub async fn review_submit(
         let payload = serde_json::json!({ "note": c.body, "position": position });
         if let Err(e) = run_glab_ex(
             Some(repo_path),
-            &[
-                "api",
-                "--method",
-                "POST",
-                &draft_endpoint,
-                "--input",
-                "-",
-                "--header",
-                "Content-Type: application/json",
-            ],
+            &json_body_args("POST", &draft_endpoint),
             Some(&payload.to_string()),
             &[],
             GLAB_NETWORK_TIMEOUT,
@@ -4917,6 +4907,10 @@ pub async fn publish_repo(
             "check out a branch before publishing (detached HEAD)".into(),
         ));
     }
+    // The branch rides the publish push's refspec — validate it here, still
+    // before the create.
+    crate::git::branches::validate_ref_name(&branch)
+        .map_err(|_| AppError::InvalidArgument(format!("invalid branch name: {branch}")))?;
     // An origin remote may have appeared since the UI's (cached) no-origin
     // check — adding one externally then publishing would otherwise strand an
     // orphaned project when the post-create `remote add` fails.
@@ -4994,7 +4988,8 @@ pub async fn publish_repo(
         push_args.push("-c");
         push_args.push(entry);
     }
-    push_args.extend(["push", "-u", "origin", &branch]);
+    let spec = crate::git::remote::publish_refspec(&branch);
+    push_args.extend(["push", "-u", "origin", &spec]);
     crate::git::runner::run_git_mutating(
         state,
         repo_path,
@@ -5101,9 +5096,10 @@ pub async fn create_mr(
     assignees: &[String],
 ) -> AppResult<PrRef> {
     for b in [base, head] {
-        if b.is_empty() || b.starts_with('-') {
-            return Err(AppError::InvalidArgument(format!("invalid branch: {b}")));
-        }
+        // The shared ref validator (empty / leading `-` / refspec metacharacters);
+        // remapped so this surface keeps its own wording.
+        crate::git::branches::validate_ref_name(b)
+            .map_err(|_| AppError::InvalidArgument(format!("invalid branch: {b}")))?;
     }
     let title = title.trim();
     if title.is_empty() {
@@ -5127,7 +5123,8 @@ pub async fn create_mr(
         push_args.push("-c");
         push_args.push(entry);
     }
-    push_args.extend(["push", "-u", "origin", head]);
+    let spec = crate::git::remote::publish_refspec(head);
+    push_args.extend(["push", "-u", "origin", &spec]);
     crate::git::runner::run_git_mutating(
         state,
         repo_path,
@@ -5647,29 +5644,17 @@ pub async fn play_job(repo_path: &str, job_id: u64) -> AppResult<()> {
     Ok(())
 }
 
-/// A CI/CD variable key must be a valid env-var name. The `key:value` token
-/// `glab ci run --variables-env` takes splits on the FIRST colon, so anything
-/// beyond `[A-Za-z_][A-Za-z0-9_]*` (a colon especially) would corrupt the value.
+/// A CI/CD variable key must be a valid env-var name — it becomes an
+/// environment variable in the pipeline's jobs: `[A-Za-z_][A-Za-z0-9_]*`.
 fn valid_variable_key(k: &str) -> bool {
     !k.is_empty()
         && !k.starts_with(|c: char| c.is_ascii_digit())
         && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// One `--variables` token: glab reads the flag's value through a CSV reader
-/// (pflag StringSlice), so a bare comma in a VALUE would split it into bogus
-/// extra `key:value` entries — silently corrupting the variables. A fully
-/// CSV-quoted field (embedded quotes doubled) passes commas and quotes through
-/// intact (validated live: `"REGIONS:a,b"` → one variable `a,b`).
-fn variable_token(key: &str, value: &str) -> String {
-    format!("\"{key}:{}\"", value.replace('"', "\"\""))
-}
-
 /// Manually run a new pipeline on a ref — GitLab's analogue of a workflow
-/// dispatch. `variables` become CI/CD env variables via `glab ci run`'s
-/// `--variables key:value` tokens, CSV-quoted (see [`variable_token`]) — the
-/// REST `variables[]` array form doesn't survive glab's `-f` field encoding, so
-/// the purpose-built subcommand is the safe path.
+/// dispatch. `variables` POST as the REST `variables[]` array over stdin, so a
+/// value a user typed never reaches argv (nor any flag-encoding rules).
 pub async fn run_pipeline(
     repo_path: &str,
     git_ref: &str,
@@ -5678,18 +5663,26 @@ pub async fn run_pipeline(
     if git_ref.is_empty() || git_ref.starts_with('-') {
         return Err(AppError::InvalidArgument(format!("invalid ref: {git_ref}")));
     }
-    let mut args: Vec<String> = vec!["ci".into(), "run".into(), "-b".into(), git_ref.into()];
+    let mut vars = Vec::with_capacity(variables.len());
     for (k, v) in variables {
         if !valid_variable_key(k) {
             return Err(AppError::InvalidArgument(format!(
                 "invalid variable name: {k} (letters, digits and _ only)"
             )));
         }
-        args.push("--variables".into());
-        args.push(variable_token(k, v));
+        vars.push(serde_json::json!({ "key": k, "value": v }));
     }
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    run_glab(Some(repo_path), &arg_refs, GLAB_NETWORK_TIMEOUT).await?;
+    let enc = encode_project(&project_path(repo_path).await?);
+    let endpoint = format!("projects/{enc}/pipeline");
+    let body = serde_json::json!({ "ref": git_ref, "variables": vars });
+    run_glab_ex(
+        Some(repo_path),
+        &json_body_args("POST", &endpoint),
+        Some(&body.to_string()),
+        &[],
+        GLAB_NETWORK_TIMEOUT,
+    )
+    .await?;
     Ok(())
 }
 
@@ -5855,6 +5848,7 @@ pub async fn view_release(repo_path: &str, tag: &str) -> AppResult<ReleaseDetail
     if tag.is_empty() {
         return Err(AppError::InvalidArgument("a tag is required".into()));
     }
+    crate::git::ops::validate_tag_name(tag)?;
     let enc = encode_project(&project_path(repo_path).await?);
     // The tag is a single path segment — percent-encode it so a `/` in a tag like
     // `release/1.0` (or any query-significant byte) can't break the endpoint path.
@@ -5881,9 +5875,7 @@ pub async fn create_release(
     notes: &str,
     target: &str,
 ) -> AppResult<String> {
-    if tag.is_empty() || tag.starts_with('-') {
-        return Err(AppError::InvalidArgument(format!("invalid tag: {tag}")));
-    }
+    crate::git::ops::validate_tag_name(tag)?;
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/releases");
     let mut args: Vec<String> = vec![
@@ -5920,6 +5912,7 @@ pub async fn edit_release(repo_path: &str, tag: &str, title: &str, notes: &str) 
     if tag.is_empty() {
         return Err(AppError::InvalidArgument("a tag is required".into()));
     }
+    crate::git::ops::validate_tag_name(tag)?;
     let enc = encode_project(&project_path(repo_path).await?);
     let enc_tag = encode_query_value(tag);
     let endpoint = format!("projects/{enc}/releases/{enc_tag}");
@@ -5946,6 +5939,7 @@ pub async fn delete_release(repo_path: &str, tag: &str, cleanup_tag: bool) -> Ap
     if tag.is_empty() {
         return Err(AppError::InvalidArgument("a tag is required".into()));
     }
+    crate::git::ops::validate_tag_name(tag)?;
     let enc = encode_project(&project_path(repo_path).await?);
     let enc_tag = encode_query_value(tag);
     let endpoint = format!("projects/{enc}/releases/{enc_tag}");
@@ -5973,9 +5967,7 @@ pub async fn delete_release(repo_path: &str, tag: &str, cleanup_tag: bool) -> Ap
 /// (`file#name#type`), so a `#`-bearing path can't be passed unambiguously — reject
 /// it rather than upload under a mangled name.
 pub async fn upload_release_asset(repo_path: &str, tag: &str, file_path: &str) -> AppResult<()> {
-    if tag.is_empty() || tag.starts_with('-') {
-        return Err(AppError::InvalidArgument(format!("invalid tag: {tag}")));
-    }
+    crate::git::ops::validate_tag_name(tag)?;
     if file_path.is_empty() || file_path.starts_with('-') {
         return Err(AppError::InvalidArgument("a file is required".into()));
     }
@@ -6007,6 +5999,7 @@ pub async fn delete_release_asset(repo_path: &str, tag: &str, asset_name: &str) 
     if tag.is_empty() {
         return Err(AppError::InvalidArgument("a tag is required".into()));
     }
+    crate::git::ops::validate_tag_name(tag)?;
     if asset_name.is_empty() {
         return Err(AppError::InvalidArgument(
             "an asset name is required".into(),
@@ -6785,9 +6778,11 @@ pub struct GitLabHookInput {
     pub events: Vec<String>,
 }
 
-/// The `-f` args shared by hook create/update: url + SSL + every known event
-/// flag set explicitly true/false (so unchecking sticks on update).
-fn hook_args(input: &GitLabHookInput) -> AppResult<Vec<String>> {
+/// The JSON body shared by hook create/update: url + SSL + every known event
+/// flag set explicitly true/false (so unchecking sticks on update). It rides
+/// stdin, so the secret token never reaches argv — an omitted `token` key
+/// leaves the stored secret untouched.
+fn hook_body(input: &GitLabHookInput) -> AppResult<serde_json::Value> {
     let url = input.url.trim();
     if !(url.starts_with("https://") || url.starts_with("http://")) {
         return Err(AppError::InvalidArgument(
@@ -6806,32 +6801,35 @@ fn hook_args(input: &GitLabHookInput) -> AppResult<Vec<String>> {
             "select at least one event".into(),
         ));
     }
-    let mut args = vec![format!("url={url}")];
+    let mut body = serde_json::Map::new();
+    body.insert("url".to_string(), url.into());
     for e in HOOK_EVENTS {
-        args.push(format!("{e}={}", input.events.iter().any(|x| x == e)));
+        body.insert(e.to_string(), input.events.iter().any(|x| x == e).into());
     }
-    args.push(format!(
-        "enable_ssl_verification={}",
-        input.enable_ssl_verification
-    ));
+    body.insert(
+        "enable_ssl_verification".to_string(),
+        input.enable_ssl_verification.into(),
+    );
     if let Some(token) = input.token.as_deref() {
         if !token.is_empty() {
-            args.push(format!("token={token}"));
+            body.insert("token".to_string(), token.into());
         }
     }
-    Ok(args)
+    Ok(serde_json::Value::Object(body))
 }
 
 pub async fn create_hook(repo_path: &str, input: GitLabHookInput) -> AppResult<()> {
-    let fields = hook_args(&input)?;
+    let body = hook_body(&input)?;
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/hooks");
-    let mut args: Vec<&str> = vec!["api", "--method", "POST", &endpoint];
-    for f in &fields {
-        args.push("-f");
-        args.push(f);
-    }
-    run_glab(Some(repo_path), &args, GLAB_NETWORK_TIMEOUT).await?;
+    run_glab_ex(
+        Some(repo_path),
+        &json_body_args("POST", &endpoint),
+        Some(&body.to_string()),
+        &[],
+        GLAB_NETWORK_TIMEOUT,
+    )
+    .await?;
     Ok(())
 }
 
@@ -6839,15 +6837,17 @@ pub async fn update_hook(repo_path: &str, hook_id: &str, input: GitLabHookInput)
     let hook_id: u64 = hook_id
         .parse()
         .map_err(|_| AppError::InvalidArgument("invalid webhook id".into()))?;
-    let fields = hook_args(&input)?;
+    let body = hook_body(&input)?;
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/hooks/{hook_id}");
-    let mut args: Vec<&str> = vec!["api", "--method", "PUT", &endpoint];
-    for f in &fields {
-        args.push("-f");
-        args.push(f);
-    }
-    run_glab(Some(repo_path), &args, GLAB_NETWORK_TIMEOUT).await?;
+    run_glab_ex(
+        Some(repo_path),
+        &json_body_args("PUT", &endpoint),
+        Some(&body.to_string()),
+        &[],
+        GLAB_NETWORK_TIMEOUT,
+    )
+    .await?;
     Ok(())
 }
 
@@ -7079,6 +7079,22 @@ fn scope_filter(scope: &str) -> String {
     )
 }
 
+/// The create/update body. `key` rides the body only on create — an update
+/// addresses its key in the endpoint, and resending it there reads as a rename.
+fn variable_body(
+    create: bool,
+    key: &str,
+    value: &str,
+    protected: bool,
+    masked: bool,
+) -> serde_json::Value {
+    if create {
+        serde_json::json!({ "key": key, "value": value, "protected": protected, "masked": masked })
+    } else {
+        serde_json::json!({ "value": value, "protected": protected, "masked": masked })
+    }
+}
+
 /// Create (`create: true`) or update a variable. Split endpoints on GitLab —
 /// POST 400s on an existing key, PUT 404s on a missing one — and the form
 /// knows which it's doing. Updates address the exact `scope` (a key can exist
@@ -7102,29 +7118,28 @@ pub async fn set_variable(
             format!("projects/{enc}/variables/{key}{}", scope_filter(scope)),
         )
     };
-    let key_arg = format!("key={key}");
-    let value_arg = format!("value={value}");
-    let protected_arg = format!("protected={protected}");
-    let masked_arg = format!("masked={masked}");
-    let mut args = vec!["api", "--method", method, &endpoint, "-f", &value_arg];
-    if create {
-        args.push("-f");
-        args.push(&key_arg);
-    }
-    args.push("-f");
-    args.push(&protected_arg);
-    args.push("-f");
-    args.push(&masked_arg);
-    run_glab(Some(repo_path), &args, GLAB_NETWORK_TIMEOUT)
-        .await
-        .map_err(|e| match e {
-            // GitLab enforces maskability server-side (length ≥ 8, one line,
-            // Base64-ish alphabet) with a curt 400 — spell it out.
-            AppError::Glab(msg) if masked && msg.contains("masked") => AppError::Glab(
-                "GitLab can't mask this value — masked values need at least 8 characters on a single line, without most special characters".into(),
-            ),
-            other => other,
-        })?;
+    // The value rides stdin, never argv: a masked variable readable in the
+    // process table isn't masked at all.
+    let body = variable_body(create, key, value, protected, masked);
+    run_glab_ex(
+        Some(repo_path),
+        &json_body_args(method, &endpoint),
+        Some(&body.to_string()),
+        &[],
+        GLAB_NETWORK_TIMEOUT,
+    )
+    .await
+    .map_err(|e| match e {
+        // GitLab enforces maskability server-side (length ≥ 8, one line, Base64-ish
+        // alphabet) with a curt 400 — spell it out. Measured wordings: current
+        // GitLab says `value:[is invalid]`; older wordings said "masked".
+        AppError::Glab(msg)
+            if masked && (msg.contains("masked") || msg.contains("value:[is invalid")) =>
+        AppError::Glab(
+            "GitLab can't mask this value — masked values need at least 8 characters on a single line, without most special characters".into(),
+        ),
+        other => other,
+    })?;
     Ok(())
 }
 
@@ -7943,6 +7958,59 @@ mod tests {
         let retarget = edit_mr_args("projects/9/merge_requests/7", "T", "D", Some("main"));
         assert_eq!(retarget[..plain.len()], plain[..]);
         assert_eq!(retarget[plain.len()..], ["-f", "target_branch=main"]);
+    }
+
+    /// The hook body carries the secret token only when the form supplied one:
+    /// an absent/empty token must leave the key out entirely, or the request
+    /// would clear GitLab's stored secret (it never returns it to re-send).
+    /// Event flags are real JSON booleans; `-f` is `--raw-field`, so the old
+    /// form sent the strings "true"/"false" — GitLab accepts either.
+    #[test]
+    fn hook_body_carries_the_token_only_when_set() {
+        let input = |token: Option<&str>| GitLabHookInput {
+            url: "https://example.com/hook".to_string(),
+            token: token.map(str::to_string),
+            enable_ssl_verification: true,
+            events: vec!["push_events".to_string()],
+        };
+
+        let with = hook_body(&input(Some("s3cret"))).unwrap();
+        assert_eq!(with["url"], "https://example.com/hook");
+        assert_eq!(with["token"], "s3cret");
+        assert_eq!(with["push_events"], serde_json::json!(true));
+        assert_eq!(with["issues_events"], serde_json::json!(false));
+        assert_eq!(with["enable_ssl_verification"], serde_json::json!(true));
+
+        for absent in [
+            hook_body(&input(None)).unwrap(),
+            hook_body(&input(Some(""))).unwrap(),
+        ] {
+            assert!(
+                absent.get("token").is_none(),
+                "token key omitted entirely: {absent}"
+            );
+        }
+    }
+
+    /// The create body carries the key; an update addresses it in the endpoint,
+    /// so repeating it in the body would read as a rename. Both flags are real
+    /// JSON booleans, and the value itself never touches argv.
+    #[test]
+    fn variable_body_sends_the_key_on_create_only() {
+        let created = variable_body(true, "DEPLOY_ENV", "s3cret", true, false);
+        assert_eq!(created["key"], "DEPLOY_ENV");
+        assert_eq!(created["value"], "s3cret");
+        assert_eq!(created["protected"], serde_json::json!(true));
+        assert_eq!(created["masked"], serde_json::json!(false));
+
+        let updated = variable_body(false, "DEPLOY_ENV", "s3cret", false, true);
+        assert!(
+            updated.get("key").is_none(),
+            "an update omits the key entirely: {updated}"
+        );
+        assert_eq!(updated["value"], "s3cret");
+        assert_eq!(updated["protected"], serde_json::json!(false));
+        assert_eq!(updated["masked"], serde_json::json!(true));
     }
 
     /// `(iid, position, size)` per MR, sorted — the readable shape of an inference.
@@ -9377,8 +9445,7 @@ mod tests {
 
     #[test]
     fn pipeline_variable_keys_reject_colon_and_flaggy_names() {
-        // The `key:value` token splits on the FIRST colon — a colon-bearing key
-        // would silently corrupt the value, and a leading digit isn't an env var.
+        // Env-var names only: no punctuation, no space, no leading digit.
         assert!(valid_variable_key("DEPLOY_ENV"));
         assert!(valid_variable_key("_private"));
         assert!(valid_variable_key("key2"));
@@ -9387,25 +9454,6 @@ mod tests {
         assert!(!valid_variable_key("has space"));
         assert!(!valid_variable_key("2leading"));
         assert!(!valid_variable_key("-flag"));
-    }
-
-    #[test]
-    fn pipeline_variable_values_survive_commas_and_quotes() {
-        // glab CSV-splits the --variables flag value; the token must be a fully
-        // quoted CSV field with embedded quotes doubled (forms validated live).
-        assert_eq!(variable_token("KEY", "simple"), "\"KEY:simple\"");
-        assert_eq!(
-            variable_token("REGIONS", "us-east-1,eu-west-1"),
-            "\"REGIONS:us-east-1,eu-west-1\""
-        );
-        assert_eq!(
-            variable_token("NOTE", "say \"hi\", ok"),
-            "\"NOTE:say \"\"hi\"\", ok\""
-        );
-        assert_eq!(
-            variable_token("MSG", "hello: world"),
-            "\"MSG:hello: world\""
-        );
     }
 
     #[test]

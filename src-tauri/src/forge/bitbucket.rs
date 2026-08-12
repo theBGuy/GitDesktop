@@ -2907,9 +2907,10 @@ pub async fn create_pr(
     reviewers: &[String],
 ) -> AppResult<PrRef> {
     for b in [base, head] {
-        if b.is_empty() || b.starts_with('-') {
-            return Err(AppError::InvalidArgument(format!("invalid branch: {b}")));
-        }
+        // The shared ref validator (empty / leading `-` / refspec metacharacters);
+        // remapped so this surface keeps its own wording.
+        crate::git::branches::validate_ref_name(b)
+            .map_err(|_| AppError::InvalidArgument(format!("invalid branch: {b}")))?;
     }
     let title = title.trim();
     if title.is_empty() {
@@ -2930,8 +2931,9 @@ pub async fn create_pr(
     // the same `credential_config_for_remote` funnel every other network op uses; an
     // unconfigured user (or an SSH origin) gets no entries — fail-open.
     let cred = crate::forge::credential_config_for_remote(repo_path, "origin").await?;
+    let spec = crate::git::remote::publish_refspec(head);
     let push_args =
-        crate::git::remote::with_credentials(&cred, &["push", "-u", "origin", head]);
+        crate::git::remote::with_credentials(&cred, &["push", "-u", "origin", &spec]);
     let push_refs: Vec<&str> = push_args.iter().map(String::as_str).collect();
     crate::git::runner::run_git_mutating(
         state,
@@ -4947,6 +4949,10 @@ pub async fn publish_repo(
             "check out a branch before publishing (detached HEAD)".into(),
         ));
     }
+    // The branch rides the publish push's refspec — validate it here, still
+    // before the create POST.
+    crate::git::branches::validate_ref_name(&branch)
+        .map_err(|_| AppError::InvalidArgument(format!("invalid branch name: {branch}")))?;
 
     // Origin must not already exist (an externally-added origin would strand an
     // orphaned repo when the post-create `remote add` fails).
@@ -5009,10 +5015,11 @@ pub async fn publish_repo(
         return Err(AppError::Bitbucket(format!("{created_hint}adding the 'origin' remote failed: {e}")));
     }
 
+    let spec = crate::git::remote::publish_refspec(&branch);
     if let Err(e) = crate::git::runner::run_git_mutating(
         state,
         repo_path,
-        &["-c", "credential.interactive=false", "push", "-u", "origin", &branch],
+        &["-c", "credential.interactive=false", "push", "-u", "origin", &spec],
         crate::git::runner::NETWORK_TIMEOUT,
     )
     .await

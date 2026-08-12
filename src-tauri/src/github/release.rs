@@ -16,11 +16,11 @@ where
     Ok(Option::<String>::deserialize(d)?.unwrap_or_default())
 }
 
+/// Every `gh_release_*` entry point runs this before assembling argv, so a tag
+/// reaches gh only after the shared tag rules; remapped to this surface's wording.
 fn validate_tag(tag: &str) -> AppResult<()> {
-    if tag.is_empty() || tag.starts_with('-') {
-        return Err(AppError::InvalidArgument(format!("invalid tag: {tag}")));
-    }
-    Ok(())
+    crate::git::ops::validate_tag_name(tag)
+        .map_err(|_| AppError::InvalidArgument(format!("invalid tag: {tag}")))
 }
 
 /// One release in the list view (merged with tags on the frontend by tagName).
