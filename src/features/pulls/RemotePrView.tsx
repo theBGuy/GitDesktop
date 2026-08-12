@@ -1310,6 +1310,7 @@ export function RemotePrView({
   // Reset per-PR view state when a different PR is shown — a render-time state
   // adjustment, not an effect. Keyed on the lens-bearing identity, not the number:
   // a lens flip under a mounted view is a different repo's PR at the same number.
+  // The same identity re-keys the metadata pickers, whose drafts live inside them.
   const [lastEntity, setLastEntity] = useState(entityKey);
   if (entityKey !== lastEntity) {
     setLastEntity(entityKey);
@@ -1763,8 +1764,13 @@ export function RemotePrView({
           <span className="text-success">+{pr.additions}</span>
           <span className="text-destructive">-{pr.deletions}</span>
         </div>
+        {/* The three metadata pickers below are keyed on the entity: each seeds a
+            draft on open and commits it on close by diffing against LIVE props, and
+            a keyboard PR switch leaves the popover open (no outside press to close
+            it) — so without the key the old PR's draft lands on the new one. */}
         {isOpen && canEditLabels ? (
           <LabelsPopover
+            key={entityKey}
             repoPath={repoPath}
             enabled
             number={number}
@@ -1787,6 +1793,7 @@ export function RemotePrView({
             read-only chips, like the labels row. */}
         {isOpen && canEditAssignees ? (
           <AssigneesPopover
+            key={entityKey}
             repoPath={repoPath}
             enabled
             value={pr.assignees}
@@ -1822,6 +1829,7 @@ export function RemotePrView({
         {isOpen && canEditReviewers ? (
           <div className="flex flex-wrap items-center gap-1.5">
             <ReviewersPopover
+              key={entityKey}
               repoPath={repoPath}
               number={number}
               enabled

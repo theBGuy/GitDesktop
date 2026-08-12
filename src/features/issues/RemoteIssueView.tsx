@@ -232,6 +232,7 @@ export function RemoteIssueView({
   // delete/transfer/edit dialogs — a render-time state adjustment, not an effect.
   // The lens is part of the identity: it can collapse to "origin" without a
   // remount (upstream remote goes away), leaving the number pointing at another repo.
+  // The same identity keys the sidebar below, remounting its own per-issue drafts.
   const issueIdentity = `${repoPath}#${lens}#${number}`;
   const [lastIdentity, setLastIdentity] = useState(issueIdentity);
   if (issueIdentity !== lastIdentity) {
@@ -862,6 +863,9 @@ export function RemoteIssueView({
           )}
         </div>
         <IssueSidebar
+          // Remounts the rail per issue so its sections' drafts (the uncontrolled
+          // "Add spent" input, the link picker) can't commit against a new number.
+          key={issueIdentity}
           repoPath={repoPath}
           number={number}
           issue={issue}
