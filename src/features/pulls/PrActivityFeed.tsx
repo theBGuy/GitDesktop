@@ -125,10 +125,12 @@ export function usePrThreadClaims(
  * entry so the sort is provider-neutral; adjacent commit entries coalesce into
  * one "pushed N commits" row.
  *
- * Its own component so the conversation composer's per-keystroke state stays
- * outside this subtree. Every capability flag arrives separately — the
- * `canX ? handler : undefined` pairs ARE the disabled-control convention and
- * must not collapse to one write flag.
+ * Extraction's realized win is `usePrThreadClaims`' memoized derivations —
+ * review⇄thread grouping no longer recomputes on composer keystrokes (the JSX
+ * itself still re-renders while RemotePrView bails out of the React Compiler).
+ * Every capability flag arrives separately — the `canX ? handler : undefined`
+ * pairs ARE the disabled-control convention and must not collapse to one write
+ * flag.
  */
 export function PrActivityFeed({
   pr,

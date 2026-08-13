@@ -24,10 +24,10 @@ import type {
  * wired for this provider?) and decides what RENDERS. `writeBlocked` is
  * PERMISSION and decides only what is ENABLED — consumers disable-with-reason
  * and never hide on permission. Triage is a SEPARATE, lower tier granting
- * labels, assignees, milestones, review requests and hiding comments without
- * push, so a triage control keys on `triageAccessReason`, never on
- * `writeBlocked`. Absent or unanswered probe data leaves `writeBlocked` false
- * (fail open).
+ * labels, assignees, milestones, review requests, hiding comments and
+ * close/reopen without push, so a triage control keys on `triageAccessReason`,
+ * never on `writeBlocked`. Absent or unanswered probe data leaves
+ * `writeBlocked` false (fail open).
  */
 export function usePrCapabilities(
   forgeData: ForgeStatus | undefined,

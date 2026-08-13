@@ -282,9 +282,11 @@ export function RemotePrView({
     !!forge.data?.provider,
   );
   const writeReason = writeAccessReason(writeAccess.data);
-  // Labels, assignees, reviewers and hiding comments are granted at TRIAGE tier,
-  // below push — gating them on the write axis would strip a triager's controls.
+  // Labels, assignees, reviewers, hiding comments and close/reopen are granted
+  // at TRIAGE tier, below push — gating them on the write axis would strip a
+  // triager's controls.
   const triageReason = triageAccessReason(writeAccess.data);
+  const triageBlocked = !!triageReason;
   // Menu items can't show a tooltip once disabled — they carry the compact
   // reason in their label instead.
   const triageItemReason = triageReason ? TRIAGE_ACCESS_ITEM_REASON : undefined;
@@ -2510,8 +2512,8 @@ export function RemotePrView({
             <DisabledReasonButton
               variant="outline"
               size="sm"
-              disabled={busy || writeBlocked}
-              reason={writeReason}
+              disabled={busy || triageBlocked}
+              reason={triageReason}
               onClick={() =>
                 closePr.mutate(number, {
                   onSuccess: () => toast.success(`Closed #${number}`),
@@ -2624,8 +2626,8 @@ export function RemotePrView({
           <DisabledReasonButton
             variant="outline"
             size="sm"
-            disabled={busy || writeBlocked}
-            reason={writeReason}
+            disabled={busy || triageBlocked}
+            reason={triageReason}
             onClick={() =>
               reopenPr.mutate(number, {
                 onSuccess: () => toast.success(`Reopened #${number}`),

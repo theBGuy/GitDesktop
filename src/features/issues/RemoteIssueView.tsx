@@ -122,10 +122,10 @@ export function RemoteIssueView({
   // The viewer's permission on the lens repo — a PERMISSION axis the per-action
   // flags below don't cover, so it never hides a control: it only disables one,
   // and only on an explicit denial. Triage is its own, LOWER tier: labels,
-  // assignees, milestones, hide-comments and the other issue-metadata rows come
-  // with it without push, so those read `canTriage`; pin, transfer, delete and
-  // branch creation are write-tier. Each blocked flag derives from its reason so
-  // the two can never disagree.
+  // assignees, milestones, hide-comments, close/reopen and the other
+  // issue-metadata rows come with it without push, so those read `canTriage`;
+  // pin, transfer, delete and branch creation are write-tier. Each blocked flag
+  // derives from its reason so the two can never disagree.
   const writeAccess = useRepoWriteAccess(repoPath, lens, !!provider);
   const writeReason = writeAccessReason(writeAccess.data);
   const triageReason = triageAccessReason(writeAccess.data);
@@ -427,8 +427,8 @@ export function RemoteIssueView({
             <DisabledReasonButton
               variant="outline"
               size="sm"
-              disabled={busy || writeBlocked}
-              reason={writeReason}
+              disabled={busy || triageBlocked}
+              reason={triageReason}
               onClick={() => doClose("completed")}
             >
               Close issue
@@ -439,14 +439,14 @@ export function RemoteIssueView({
                 `title` (house trigger idiom). */}
             {canWrite && (
               <DropdownMenu>
-                <span title={writeReason} className="inline-flex">
+                <span title={triageReason} className="inline-flex">
                   <DropdownMenuTrigger
                     render={
                       <Button
                         variant="outline"
                         size="icon-sm"
                         aria-label="Other close options"
-                        disabled={busy || writeBlocked}
+                        disabled={busy || triageBlocked}
                       />
                     }
                   >
@@ -468,8 +468,8 @@ export function RemoteIssueView({
           <DisabledReasonButton
             variant="outline"
             size="sm"
-            disabled={busy || writeBlocked}
-            reason={writeReason}
+            disabled={busy || triageBlocked}
+            reason={triageReason}
             onClick={() =>
               reopenIssue.mutate(number, {
                 onSuccess: () => toast.success(`Reopened #${number}`),
