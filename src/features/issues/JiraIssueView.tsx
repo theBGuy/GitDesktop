@@ -12,7 +12,6 @@ import {
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   type KeyboardEvent as ReactKeyboardEvent,
-  useEffect,
   useEffectEvent,
   useMemo,
   useRef,
@@ -21,10 +20,7 @@ import {
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
-import {
-  MarkdownEditor,
-  type MarkdownEditorHandle,
-} from "@/components/markdown-editor";
+import type { MarkdownEditorHandle } from "@/components/markdown-editor";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -47,10 +43,11 @@ import { Input } from "@/components/ui/input";
 import { Markdown } from "@/components/ui/markdown";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
+import { CommentComposer } from "@/features/conversations/CommentComposer";
+import { CommentEditor } from "@/features/conversations/CommentEditor";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { JiraIssueSidebar } from "@/features/issues/JiraIssueSidebar";
 import type { ForgeUserRef } from "@/lib/git/types";
-import { formatBinding } from "@/lib/hotkeys/binding";
 import { formatHmDelta, isValidJiraDuration } from "@/lib/jira/duration";
 import {
   useJiraAssign,
@@ -85,11 +82,8 @@ import {
 import { useUiStore } from "@/lib/stores/ui";
 import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
+import { useDebouncedValue } from "@/lib/use-debounced-value";
 import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
-
-/** Platform-correct submit hint (Cmd+Enter on macOS, Ctrl+Enter else) — never a
- *  literal modifier (house platform-mod-key rule). */
-const SUBMIT_HINT = formatBinding("mod+enter");
 
 /** The category icon + tone shared by the chip and every menu row (so meaning is
  *  never color-only). `done` → the closed/merged treatment; else open/success. */
@@ -275,14 +269,7 @@ export function JiraAssigneePicker({
   const assign = useJiraAssign(repoPath, link);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const [debounced, setDebounced] = useState("");
-
-  // Debounce the search input (server-driven) — mirrors the project-search
-  // idiom in RepoJiraDialog; no shared debounce hook exists.
-  useEffect(() => {
-    const t = setTimeout(() => setDebounced(query.trim()), 250);
-    return () => clearTimeout(t);
-  }, [query]);
+  const debounced = useDebouncedValue(query.trim(), 250);
 
   const users = useJiraUserSearch(link, issueKey, debounced, open);
   // Offer Unassign first when someone is assigned; search results follow. Drop
@@ -757,16 +744,6 @@ function JiraCommentItem({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const editorRef = useRef<MarkdownEditorHandle>(null);
-
-  // Focus the editor one frame LATE: the actions DropdownMenu returns focus to
-  // its trigger as it closes, landing AFTER the textarea's autoFocus mount and
-  // stealing it.
-  useEffect(() => {
-    if (!editing) return;
-    const raf = requestAnimationFrame(() => editorRef.current?.focus());
-    return () => cancelAnimationFrame(raf);
-  }, [editing]);
 
   // Own-scoped perms apply to the viewer's own comment; ALL-scoped perms (project
   // admins) apply to anyone's — so the affordance shows for others' comments too.
@@ -785,10 +762,6 @@ function JiraCommentItem({
 
   function saveEdit() {
     const body = draft.trim();
-    if (!body || body === comment.bodyMd.trim()) {
-      setEditing(false);
-      return;
-    }
     edit.mutate(
       { issueKey, commentId: comment.id, bodyMd: body },
       {
@@ -858,51 +831,18 @@ function JiraCommentItem({
         )}
       </p>
       {editing ? (
-        <div className="space-y-2">
-          <MarkdownEditor
-            ref={editorRef}
-            aria-label="Edit comment"
-            value={draft}
-            onChange={setDraft}
-            onKeyDown={(e) => {
-              if (
-                (e.ctrlKey || e.metaKey) &&
-                e.key === "Enter" &&
-                draft.trim() &&
-                !edit.isPending
-              ) {
-                e.preventDefault();
-                saveEdit();
-              }
-            }}
-            rows={3}
-            disabled={edit.isPending}
-            textareaClassName="max-h-48 min-h-16 resize-y"
-          />
-          <div className="flex items-center gap-2">
-            <Button
-              size="xs"
-              variant="outline"
-              disabled={
-                !draft.trim() ||
-                draft.trim() === comment.bodyMd.trim() ||
-                edit.isPending
-              }
-              onClick={saveEdit}
-              title={SUBMIT_HINT}
-            >
-              Save
-            </Button>
-            <Button
-              size="xs"
-              variant="ghost"
-              disabled={edit.isPending}
-              onClick={() => setEditing(false)}
-            >
-              Cancel
-            </Button>
-          </div>
-        </div>
+        <CommentEditor
+          ariaLabel="Edit comment"
+          value={draft}
+          onChange={setDraft}
+          onSubmit={saveEdit}
+          onCancel={() => setEditing(false)}
+          canSubmit={
+            draft.trim().length > 0 && draft.trim() !== comment.bodyMd.trim()
+          }
+          pending={edit.isPending}
+          textareaClassName="max-h-48 min-h-16 resize-y"
+        />
       ) : comment.bodyMd.trim() ? (
         <Markdown>{comment.bodyMd}</Markdown>
       ) : (
@@ -1771,51 +1711,18 @@ export function JiraIssueView({
           </ScrollArea>
 
           {canComment && (
-            <div className="space-y-2 border-t p-3">
-              <MarkdownEditor
-                ref={composerRef}
-                aria-label="Leave a comment"
-                placeholder="Leave a comment…"
-                value={composeBody}
-                onChange={setComposeBody}
-                onKeyDown={(e) => {
-                  if (
-                    (e.ctrlKey || e.metaKey) &&
-                    e.key === "Enter" &&
-                    composeBody.trim() &&
-                    !comment.isPending
-                  ) {
-                    e.preventDefault();
-                    submitComment();
-                  }
-                }}
-                rows={2}
-                disabled={comment.isPending}
-                textareaClassName="max-h-32 min-h-12 resize-y"
-              />
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={!composeBody.trim() || comment.isPending}
-                  onClick={submitComment}
-                  title={SUBMIT_HINT}
-                >
-                  Comment
-                </Button>
-                {composeBody.trim() && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    disabled={comment.isPending}
-                    onClick={() => setComposeBody("")}
-                    title="Discard this draft"
-                  >
-                    Clear
-                  </Button>
-                )}
-              </div>
-            </div>
+            <CommentComposer
+              ref={composerRef}
+              ariaLabel="Leave a comment"
+              placeholder="Leave a comment…"
+              value={composeBody}
+              onChange={setComposeBody}
+              onSubmit={submitComment}
+              onClear={() => setComposeBody("")}
+              submitLabel="Comment"
+              busy={comment.isPending}
+              disabled={comment.isPending}
+            />
           )}
         </div>
 

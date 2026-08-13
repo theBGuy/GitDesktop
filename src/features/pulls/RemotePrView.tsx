@@ -31,11 +31,7 @@ import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { SelectControl } from "@/components/form/fields";
-import {
-  MarkdownEditor,
-  type MarkdownEditorHandle,
-} from "@/components/markdown-editor";
-import { RelativeTime } from "@/components/relative-time";
+import type { MarkdownEditorHandle } from "@/components/markdown-editor";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -49,10 +45,8 @@ import { Markdown } from "@/components/ui/markdown";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
-import {
-  type CommitRow,
-  CommitsList,
-} from "@/features/conversations/CommitsList";
+import { CommentComposer } from "@/features/conversations/CommentComposer";
+import { CommitsList } from "@/features/conversations/CommitsList";
 import { DeleteCommentDialog } from "@/features/conversations/DeleteCommentDialog";
 import {
   EditTitleBodyDialog,
@@ -61,12 +55,7 @@ import {
 import { LabelsPopover } from "@/features/conversations/LabelsPopover";
 import { makeQuoteReply } from "@/features/conversations/quoteReply";
 import { ReactionBar } from "@/features/conversations/ReactionBar";
-import {
-  AuthorAvatar,
-  hasVisibleBody,
-  LabelChip,
-  Thread,
-} from "@/features/conversations/Thread";
+import { AuthorAvatar, LabelChip } from "@/features/conversations/Thread";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import type { LineWidget } from "@/features/diff/DiffSurface";
 import { AssigneesPopover } from "@/features/issues/IssueMetaPickers";
@@ -158,7 +147,6 @@ import {
   type PrThreadOut,
   providerLabel,
   type RemoteLens,
-  type ReviewThreadOut,
 } from "@/lib/git/types";
 import { formatBinding } from "@/lib/hotkeys/binding";
 import { useEffectiveBindings, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
@@ -177,6 +165,7 @@ import { cn } from "@/lib/utils";
 import { ChecksRollup } from "./ChecksRollup";
 import { LinkedIssuesField } from "./LinkedIssuesField";
 import { PendingReviewBar } from "./PendingReviewBar";
+import { PrActivityFeed, usePrThreadClaims } from "./PrActivityFeed";
 import { PrCommitDetail } from "./PrCommitDetail";
 import {
   type PrMergeabilityArm,
@@ -184,13 +173,6 @@ import {
 } from "./PrMergeabilityBanner";
 import { PrReviewPanel } from "./PrReviewPanel";
 import { PrTasksChip, PrTasksSection } from "./PrTasksSection";
-import {
-  PushedCommitsRow,
-  StaleReviewMarker,
-  sortTimeline,
-  type TimelineEntry,
-  TimelineEventRow,
-} from "./PrTimeline";
 import {
   MergePrDialog,
   MrTimeTracking,
@@ -202,14 +184,7 @@ import {
 } from "./ResolveRemotePrView";
 import { ReviewComposer } from "./ReviewComposer";
 import { ReviewersPopover, userRefHint } from "./ReviewersPopover";
-import {
-  lineLabel,
-  ReviewThreadList,
-  ReviewThreadsBlock,
-  SUBMIT_HINT,
-  type SuggestionApply,
-  threadToMarkdown,
-} from "./ReviewThreads";
+import { ReviewThreadsBlock, type SuggestionApply } from "./ReviewThreads";
 import {
   StackOffer,
   type StackOfferHandle,
@@ -1276,52 +1251,9 @@ export function RemotePrView({
       target: { type: "remote", number },
     });
   }
-  // Each rendered review "claims" the line-comment threads it owns (GitHub
-  // `reviewId`; always "" on GitLab/Bitbucket, which don't model reviews). Claimed
-  // threads render inline under their review; the rest fall to the residual block.
-  const renderedReviews = (pr?.reviews ?? []).filter(
-    (r) => hasVisibleBody(r.body) || r.state,
-  );
-  // Threads grouped by owning review — built once, reused for the claimed-id set
-  // and each review's inline slice.
-  const threadsByReview = new Map<string, ReviewThreadOut[]>();
-  for (const t of reviewThreads.data ?? []) {
-    if (!t.reviewId) continue;
-    const bucket = threadsByReview.get(t.reviewId);
-    if (bucket) bucket.push(t);
-    else threadsByReview.set(t.reviewId, [t]);
-  }
-  const claimedThreadIds = new Set(
-    renderedReviews.flatMap((r) =>
-      (threadsByReview.get(r.id) ?? []).map((t) => t.id),
-    ),
-  );
-  // Thread-reply wrapper reviews: replying to a review thread outside a batched
-  // review makes GitHub auto-wrap the reply in a new empty-body `COMMENTED` review.
-  // It's a wrapper iff it has no visible body, is `COMMENTED` (the backend delivers
-  // GitHub's uppercase state verbatim), AND claims no threads. Accepted tradeoff: a
-  // genuinely empty COMMENTED review with no fetched threads also renders as the
-  // compact row. GitLab/Bitbucket emit no review rows.
-  const wrapperReviewIds = new Set(
-    renderedReviews
-      .filter(
-        (r) =>
-          !hasVisibleBody(r.body) &&
-          r.state === "COMMENTED" &&
-          (threadsByReview.get(r.id)?.length ?? 0) === 0,
-      )
-      .map((r) => r.id),
-  );
-  // The thread a wrapper review wraps: the review thread that contains a comment
-  // whose `reviewId` is this review's id. Undefined when the thread wasn't
-  // fetched (pagination edge) — the row then renders generic, without a locator.
-  const wrappedThreadFor = (reviewId: string): ReviewThreadOut | undefined =>
-    (reviewThreads.data ?? []).find((t) =>
-      t.comments.some((c) => c.reviewId === reviewId),
-    );
-  const residualThreads = (reviewThreads.data ?? []).filter(
-    (t) => !claimedThreadIds.has(t.id),
-  );
+  // One derivation of which review owns which line-comment threads, shared by the
+  // feed and the residual block below it.
+  const threadClaims = usePrThreadClaims(pr, reviewThreads.data);
   // Guards for the merge dialog's "delete head branch on the remote" checkbox:
   // every forge refuses to delete the DEFAULT branch (so the option is hidden),
   // and a local branch RULE can block deleting the head (so it's disabled with a
@@ -2179,300 +2111,53 @@ export function RemotePrView({
                   editable={pr.state === "OPEN"}
                 />
               )}
-              {/* The merged activity feed: reviews + comments + commits + timeline
-                  events, date-sorted oldest→newest. Each source maps to a
-                  {date, sortKey, node} entry so the sort is provider-neutral;
-                  adjacent commit entries coalesce into one "pushed N commits" row. */}
-              {(() => {
-                // Newest commit date drives approval staleness. gh returns
-                // oldest-first, but be defensive: max over all commit dates.
-                const newestCommitMs = pr.commits.reduce((max, c) => {
-                  const t = new Date(c.date).getTime();
-                  return Number.isNaN(t) ? max : Math.max(max, t);
-                }, 0);
-                const commitsSince = (isoDate: string) => {
-                  const t = new Date(isoDate).getTime();
-                  if (Number.isNaN(t)) return 0;
-                  return pr.commits.filter((c) => {
-                    const ct = new Date(c.date).getTime();
-                    return !Number.isNaN(ct) && ct > t;
-                  }).length;
-                };
-
-                const entries: TimelineEntry[] = [];
-
-                // A stale APPROVED/CHANGES_REQUESTED review (dated before the newest
-                // commit) gets a warning marker after its card.
-                for (const r of renderedReviews) {
-                  // A wrapper review renders as a compact row instead of an empty
-                  // "commented" card, with a jump link when its thread was fetched.
-                  if (wrapperReviewIds.has(r.id)) {
-                    const t = wrappedThreadFor(r.id);
-                    const locator = t
-                      ? [t.path, lineLabel(t.startLine, t.line)]
-                          .filter(Boolean)
-                          .join(" · ")
-                      : "";
-                    entries.push({
-                      date: r.date,
-                      sortKey: 1,
-                      node: (
-                        <div
-                          key={`reply-wrap-${r.id || `${r.author}-${r.date}`}`}
-                          className="flex items-start gap-2 text-xs"
-                        >
-                          <AuthorAvatar
-                            login={r.author}
-                            avatarUrl={r.authorAvatarUrl}
-                          />
-                          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-1.5 py-1 text-muted-foreground">
-                            <span className="font-medium text-foreground">
-                              {displayLogin(r.author)}
-                            </span>
-                            <span>replied in a review thread</span>
-                            {locator && (
-                              <span className="min-w-0 truncate">
-                                · {locator}
-                              </span>
-                            )}
-                            {t && (
-                              <button
-                                type="button"
-                                className="shrink-0 text-primary underline-offset-2 hover:underline cursor-pointer"
-                                onClick={() => {
-                                  // Route through the reveal seam, not a raw DOM
-                                  // scroll: the owning ReviewThreadList opens the
-                                  // resolved-group expander + expands the card
-                                  // before scrolling. Set the section first so the
-                                  // list is mounted when it reads the request.
-                                  setSection("conversation");
-                                  setRevealThreadId(t.id);
-                                }}
-                              >
-                                View thread
-                              </button>
-                            )}
-                            {r.date && (
-                              <span className="shrink-0 text-muted-foreground/80">
-                                · <RelativeTime date={r.date} />
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      ),
-                    });
-                    continue;
-                  }
-                  const ownThreads = threadsByReview.get(r.id) ?? [];
-                  const copyMarkdown =
-                    ownThreads.length > 0
-                      ? [
-                          r.body.trim() ? r.body.trim() : null,
-                          ...ownThreads.map(threadToMarkdown),
-                        ]
-                          .filter(Boolean)
-                          .join("\n\n---\n\n")
-                      : undefined;
-                  const isVerdict =
-                    r.state === "APPROVED" || r.state === "CHANGES_REQUESTED";
-                  const reviewMs = new Date(r.date).getTime();
-                  const stale =
-                    isVerdict &&
-                    newestCommitMs > 0 &&
-                    !Number.isNaN(reviewMs) &&
-                    reviewMs < newestCommitMs;
-                  entries.push({
-                    date: r.date,
-                    sortKey: 1,
-                    node: (
-                      <div key={`review-${r.id || `${r.author}-${r.date}`}`}>
-                        <Thread
-                          thread={r}
-                          onQuote={
-                            canWrite && hasVisibleBody(r.body)
-                              ? () => quoteReply(r.body)
-                              : undefined
-                          }
-                          copyMarkdown={copyMarkdown}
-                        />
-                        {stale && (
-                          <StaleReviewMarker
-                            commitsSince={commitsSince(r.date)}
-                          />
-                        )}
-                        {ownThreads.length > 0 && (
-                          // The review's own line-comment threads, nested under it
-                          // (a 1px border-l rail). GitLab/Bitbucket never reach
-                          // here — their threads carry no reviewId, so nothing is
-                          // claimed.
-                          <div className="mt-2 border-l pl-3">
-                            <ReviewThreadList
-                              threads={ownThreads}
-                              onQuote={quoteReply}
-                              onReply={
-                                canThreadReply
-                                  ? (threadId, body) =>
-                                      threadReply.mutateAsync({
-                                        threadId,
-                                        body,
-                                      })
-                                  : undefined
-                              }
-                              onResolve={
-                                canThreadResolve
-                                  ? (threadId, resolved) =>
-                                      threadResolve.mutateAsync({
-                                        threadId,
-                                        resolved,
-                                      })
-                                  : undefined
-                              }
-                              onEditComment={
-                                canEditOwnThreadComments
-                                  ? saveThreadCommentEdit
-                                  : undefined
-                              }
-                              onDeleteComment={
-                                canEditOwnThreadComments
-                                  ? setDeletingThreadCommentId
-                                  : undefined
-                              }
-                              provider={providerKey}
-                              apply={suggestionApply}
-                              fileDiffLookup={fileDiffLookup}
-                              revealThreadId={revealThreadId}
-                              onRevealed={() => setRevealThreadId(null)}
-                            />
-                          </div>
-                        )}
-                      </div>
-                    ),
-                  });
+              <PrActivityFeed
+                pr={pr}
+                timeline={timeline.data}
+                reactions={reactions.data}
+                claims={threadClaims}
+                providerKey={providerKey}
+                suggestionApply={suggestionApply}
+                fileDiffLookup={fileDiffLookup}
+                disabledReason={triageItemReason}
+                revealThreadId={revealThreadId}
+                setRevealThreadId={setRevealThreadId}
+                setSection={setSection}
+                // Drill into the commit via the Commits-tab machinery
+                // (selectedCommitOid → PrCommitDetail).
+                onSelectCommit={(oid) => {
+                  setSelectedCommitOid(oid);
+                  setSection("commits");
+                }}
+                canWrite={canWrite}
+                canThreadReply={canThreadReply}
+                canThreadResolve={canThreadResolve}
+                canEditOwnThreadComments={canEditOwnThreadComments}
+                canEditOwnComments={canEditOwnComments}
+                canReact={canReact}
+                onQuote={quoteReply}
+                onThreadReply={(threadId, body) =>
+                  threadReply.mutateAsync({ threadId, body })
                 }
-
-                // Conversation comments.
-                for (const c of pr.comments.filter((c) =>
-                  hasVisibleBody(c.body),
-                )) {
-                  entries.push({
-                    date: c.date,
-                    sortKey: 2,
-                    node: (
-                      <div key={`comment-${c.id}`} data-comment-id={c.id}>
-                        <Thread
-                          thread={c}
-                          onQuote={
-                            canWrite ? () => quoteReply(c.body) : undefined
-                          }
-                          onSaveEdit={
-                            canEditOwnComments && c.viewerDidAuthor
-                              ? (body) => saveCommentEdit(c.id, body)
-                              : undefined
-                          }
-                          onDelete={
-                            canEditOwnComments && c.viewerDidAuthor
-                              ? () => setDeletingCommentId(c.id)
-                              : undefined
-                          }
-                          onHide={
-                            canWrite && !c.isMinimized
-                              ? (classifier) => hideComment(c.id, classifier)
-                              : undefined
-                          }
-                          onUnhide={
-                            canWrite && c.isMinimized
-                              ? () => unhideComment(c.id)
-                              : undefined
-                          }
-                          disabledReason={triageItemReason}
-                          reactions={
-                            canReact
-                              ? reactions.data?.comments[c.id]
-                              : undefined
-                          }
-                          onToggleReaction={
-                            canReact
-                              ? (content, active) =>
-                                  toggleReaction(c.id, content, active)
-                              : undefined
-                          }
-                        />
-                      </div>
-                    ),
-                  });
+                onThreadResolve={(threadId, resolved) =>
+                  threadResolve.mutateAsync({ threadId, resolved })
                 }
-
-                // Commits — carried as bare markers; adjacent runs coalesce into
-                // a single "pushed N commits" row after sorting.
-                for (const c of pr.commits) {
-                  entries.push({
-                    date: c.date,
-                    sortKey: 0,
-                    commit: {
-                      id: c.oid,
-                      subject: c.headline,
-                      shortSha: c.oid.slice(0, 7),
-                      author: c.author,
-                      date: c.date,
-                    },
-                  });
-                }
-
-                // Timeline events — provider-neutral (GitHub, GitLab, Bitbucket);
-                // empty otherwise.
-                for (const [i, ev] of (timeline.data ?? []).entries()) {
-                  entries.push({
-                    date: ev.date,
-                    sortKey: 3,
-                    node: <TimelineEventRow key={`event-${i}`} event={ev} />,
-                  });
-                }
-
-                const sorted = sortTimeline(entries);
-
-                // Coalesce adjacent commit markers into grouped "pushed N" rows.
-                const rendered: React.ReactNode[] = [];
-                let run: CommitRow[] = [];
-                let runStart = 0;
-                const flush = () => {
-                  if (run.length === 0) return;
-                  rendered.push(
-                    <PushedCommitsRow
-                      key={`push-${runStart}-${run[0].id}`}
-                      commits={run}
-                      // Drill into the commit via the Commits-tab machinery
-                      // (selectedCommitOid → PrCommitDetail).
-                      onSelectCommit={(oid) => {
-                        setSelectedCommitOid(oid);
-                        setSection("commits");
-                      }}
-                    />,
-                  );
-                  run = [];
-                };
-                for (let i = 0; i < sorted.length; i++) {
-                  const entry = sorted[i];
-                  if (entry.commit) {
-                    if (run.length === 0) runStart = i;
-                    run.push(entry.commit);
-                  } else {
-                    flush();
-                    rendered.push(entry.node);
-                  }
-                }
-                flush();
-
-                if (rendered.length === 0) return null;
-                return <div className="space-y-4">{rendered}</div>;
-              })()}
+                onEditThreadComment={saveThreadCommentEdit}
+                onDeleteThreadComment={setDeletingThreadCommentId}
+                onEditComment={saveCommentEdit}
+                onDeleteComment={setDeletingCommentId}
+                onHideComment={hideComment}
+                onUnhideComment={unhideComment}
+                onToggleReaction={toggleReaction}
+              />
               {/* Residual review threads — those NOT shown inline under a review
                   above: all threads on GitLab/Bitbucket (no reviewId), plus
                   standalone line comments on GitHub. Retitled when reviews claimed
                   threads above so it doesn't read as a duplicate. */}
               <ReviewThreadsBlock
-                threads={residualThreads}
+                threads={threadClaims.residualThreads}
                 heading={
-                  claimedThreadIds.size > 0
+                  threadClaims.claimedThreadIds.size > 0
                     ? "Other line comments"
                     : "Review comments"
                 }
@@ -2520,163 +2205,135 @@ export function RemotePrView({
               the composer shows (the first MR writes), but the GitHub-only Review
               menu stays hidden; Bitbucket has neither, so the bar hides. */}
           {canComment && (
-            <div className="space-y-2 border-t p-3">
-              <MarkdownEditor
-                ref={composerRef}
-                aria-label="Leave a comment"
-                placeholder="Leave a comment…"
-                value={composeBody}
-                onChange={setComposeBody}
-                onKeyDown={(e) => {
-                  if (
-                    (e.ctrlKey || e.metaKey) &&
-                    e.key === "Enter" &&
-                    composeBody.trim() &&
-                    !busy
-                  ) {
-                    e.preventDefault();
-                    submitComment();
-                  }
-                }}
-                rows={2}
-                textareaClassName="max-h-32 min-h-12 resize-y"
-              />
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={!composeBody.trim() || busy}
-                  onClick={submitComment}
-                  title={SUBMIT_HINT}
-                >
-                  Comment
-                </Button>
-                {/* The Review control opens the batch submit dialog for every
-                    provider (verdict + summary + pending draft comments). GitHub
-                    rides `canWrite` via canSubmitReview; GitLab/Bitbucket enable it
-                    through the forge flag. */}
-                {isOpen && canSubmitReview && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={busy}
-                    onClick={() => setSubmitOpen(true)}
-                    title="Submit a review (verdict, summary, and any pending comments)"
-                  >
-                    Review…
-                  </Button>
-                )}
-                {isOpen && canApprove && (
-                  <>
+            <CommentComposer
+              ref={composerRef}
+              value={composeBody}
+              onChange={setComposeBody}
+              onSubmit={submitComment}
+              onClear={() => setComposeBody("")}
+              submitLabel="Comment"
+              ariaLabel="Leave a comment"
+              placeholder="Leave a comment…"
+              busy={busy}
+              actions={
+                <>
+                  {/* The Review control opens the batch submit dialog for every
+                      provider (verdict + summary + pending draft comments). GitHub
+                      rides `canWrite` via canSubmitReview; GitLab/Bitbucket enable it
+                      through the forge flag. */}
+                  {isOpen && canSubmitReview && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={busy}
+                      onClick={() => setSubmitOpen(true)}
+                      title="Submit a review (verdict, summary, and any pending comments)"
+                    >
+                      Review…
+                    </Button>
+                  )}
+                  {isOpen && canApprove && (
+                    <>
+                      <DisabledReasonButton
+                        variant="outline"
+                        size="sm"
+                        // On an approvals read-error we can't know the viewer's state,
+                        // so disable rather than present a confident (possibly wrong)
+                        // Approve that would fire the wrong direction on click. The
+                        // failed read has no other surface, so it rides `reason` —
+                        // hoverable and announced while the button is unavailable.
+                        disabled={
+                          busy || approvals.isPending || approvals.isError
+                        }
+                        reason={
+                          approvals.isError
+                            ? "Couldn't load approval state"
+                            : null
+                        }
+                        // Unknown state is announced as unknown: a failed read
+                        // must not claim "not pressed" while the reason says the
+                        // state couldn't be loaded.
+                        aria-pressed={
+                          approvals.isError
+                            ? undefined
+                            : (approval?.viewerHasApproved ?? false)
+                        }
+                        onClick={toggleApproval}
+                        title={
+                          approval?.viewerHasApproved
+                            ? "Revoke your approval"
+                            : `Approve this ${prNoun}`
+                        }
+                        className={cn(
+                          approval?.viewerHasApproved &&
+                            "border-success/40 text-success hover:text-success",
+                        )}
+                      >
+                        <CheckCircleIcon data-icon="inline-start" />
+                        {approval?.viewerHasApproved ? "Approved" : "Approve"}
+                      </DisabledReasonButton>
+                      {approvalNote && (
+                        <span
+                          className="text-xs text-muted-foreground"
+                          title={
+                            approval && approval.approvedBy.length > 0
+                              ? `Approved by ${approval.approvedBy.join(", ")}`
+                              : undefined
+                          }
+                        >
+                          {approvalNote}
+                        </span>
+                      )}
+                    </>
+                  )}
+                  {isOpen && canRequestChanges && (
                     <DisabledReasonButton
                       variant="outline"
                       size="sm"
-                      // On an approvals read-error we can't know the viewer's state,
-                      // so disable rather than present a confident (possibly wrong)
-                      // Approve that would fire the wrong direction on click. The
-                      // failed read has no other surface, so it rides `reason` —
-                      // hoverable and announced while the button is unavailable.
+                      // Bitbucket: a true toggle. GitLab: one-shot — once requested
+                      // the button is the state indicator (the direct undo is
+                      // Premium-only), so it stays ENABLED with a no-op handler and
+                      // its how-to-clear title reachable. Same disable-on-unknown
+                      // posture as the approve toggle: `reason` carries the read
+                      // failure nothing else reports, and DisabledReasonButton keeps
+                      // the disabled button focusable so that reason is announced
+                      // rather than lost.
                       disabled={
                         busy || approvals.isPending || approvals.isError
                       }
                       reason={
-                        approvals.isError
-                          ? "Couldn't load approval state"
-                          : null
+                        approvals.isError ? "Couldn't load review state" : null
                       }
-                      // Unknown state is announced as unknown: a failed read
-                      // must not claim "not pressed" while the reason says the
-                      // state couldn't be loaded.
+                      // Unknown state is announced as unknown (same as approve).
                       aria-pressed={
                         approvals.isError
                           ? undefined
-                          : (approval?.viewerHasApproved ?? false)
+                          : (approval?.viewerRequestedChanges ?? false)
                       }
-                      onClick={toggleApproval}
+                      onClick={requestChanges}
                       title={
-                        approval?.viewerHasApproved
-                          ? "Revoke your approval"
-                          : `Approve this ${prNoun}`
+                        approval?.viewerRequestedChanges
+                          ? canUnrequestChanges
+                            ? "Revoke your change request"
+                            : "You've requested changes — approve, or remove yourself as a reviewer on GitLab, to clear"
+                          : composeBody.trim()
+                            ? "Request changes, posting your draft as a comment"
+                            : `Request changes on this ${prNoun} (adds you as a reviewer)`
                       }
                       className={cn(
-                        approval?.viewerHasApproved &&
-                          "border-success/40 text-success hover:text-success",
+                        approval?.viewerRequestedChanges &&
+                          "border-warning/40 text-warning",
                       )}
                     >
-                      <CheckCircleIcon data-icon="inline-start" />
-                      {approval?.viewerHasApproved ? "Approved" : "Approve"}
+                      <XCircleIcon data-icon="inline-start" />
+                      {approval?.viewerRequestedChanges
+                        ? "Changes requested"
+                        : "Request changes"}
                     </DisabledReasonButton>
-                    {approvalNote && (
-                      <span
-                        className="text-xs text-muted-foreground"
-                        title={
-                          approval && approval.approvedBy.length > 0
-                            ? `Approved by ${approval.approvedBy.join(", ")}`
-                            : undefined
-                        }
-                      >
-                        {approvalNote}
-                      </span>
-                    )}
-                  </>
-                )}
-                {isOpen && canRequestChanges && (
-                  <DisabledReasonButton
-                    variant="outline"
-                    size="sm"
-                    // Bitbucket: a true toggle. GitLab: one-shot — once requested
-                    // the button is the state indicator (the direct undo is
-                    // Premium-only), so it stays ENABLED with a no-op handler and
-                    // its how-to-clear title reachable. Same disable-on-unknown
-                    // posture as the approve toggle: `reason` carries the read
-                    // failure nothing else reports, and DisabledReasonButton keeps
-                    // the disabled button focusable so that reason is announced
-                    // rather than lost.
-                    disabled={busy || approvals.isPending || approvals.isError}
-                    reason={
-                      approvals.isError ? "Couldn't load review state" : null
-                    }
-                    // Unknown state is announced as unknown (same as approve).
-                    aria-pressed={
-                      approvals.isError
-                        ? undefined
-                        : (approval?.viewerRequestedChanges ?? false)
-                    }
-                    onClick={requestChanges}
-                    title={
-                      approval?.viewerRequestedChanges
-                        ? canUnrequestChanges
-                          ? "Revoke your change request"
-                          : "You've requested changes — approve, or remove yourself as a reviewer on GitLab, to clear"
-                        : composeBody.trim()
-                          ? "Request changes, posting your draft as a comment"
-                          : `Request changes on this ${prNoun} (adds you as a reviewer)`
-                    }
-                    className={cn(
-                      approval?.viewerRequestedChanges &&
-                        "border-warning/40 text-warning",
-                    )}
-                  >
-                    <XCircleIcon data-icon="inline-start" />
-                    {approval?.viewerRequestedChanges
-                      ? "Changes requested"
-                      : "Request changes"}
-                  </DisabledReasonButton>
-                )}
-                {composeBody.trim() && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="ml-auto"
-                    disabled={busy}
-                    onClick={() => setComposeBody("")}
-                    title="Discard this draft (e.g. a quote reply)"
-                  >
-                    Clear
-                  </Button>
-                )}
-              </div>
-            </div>
+                  )}
+                </>
+              }
+            />
           )}
         </>
       )}

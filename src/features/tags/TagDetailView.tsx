@@ -27,6 +27,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
+import { formatBytes } from "@/features/repository/insights/primitives";
 import { presentError } from "@/lib/error-summary";
 import { UPDATER_MANIFEST_NAME } from "@/lib/git/api";
 import {
@@ -53,15 +54,6 @@ import { useUiStore } from "@/lib/stores/ui";
 import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { CreateReleaseDialog } from "./CreateReleaseDialog";
-
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  const kb = n / 1024;
-  if (kb < 1024) return `${Math.round(kb)} KB`;
-  const mb = kb / 1024;
-  if (mb < 1024) return `${mb.toFixed(1)} MB`;
-  return `${(mb / 1024).toFixed(1)} GB`;
-}
 
 export function TagDetailView({
   repoPath,

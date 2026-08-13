@@ -13,7 +13,8 @@
 //!
 //! Pagination default: one page at the endpoint's max `pagelen`, no `next`-following
 //! (the PR-list endpoint caps at 50; repos/pipelines allow 100). Readers that DO follow
-//! `next` bound it at 5 pages and say so at their call site.
+//! `next` go through [`bb_paginate`], which bounds them at [`BB_MAX_PAGES`]; each
+//! states that bound at its call site.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -30,7 +31,10 @@ use crate::forge::model::{
     Capabilities, CompletedReviewerOut, ForgeForkResult, ForgeRepo, ForgeRepoList, ForgeSearchList,
     ForgeSearchRepo, ForgeStatus, ForgeUserRef, Implemented, Provider,
 };
-use crate::forge::{cap_readme, validate_owner, validate_repo_name};
+use crate::forge::{
+    cap_readme, validate_owner, validate_repo_name, FORK_POLL_ATTEMPTS, FORK_POLL_DELAY,
+    README_CANDIDATES,
+};
 use crate::forge::Forge;
 use crate::github::actions::{RunDetail, RunJob, WorkflowRun};
 use crate::github::pr::{
@@ -343,18 +347,60 @@ struct BbCloneLink {
     href: String,
 }
 
-/// A paginated envelope (`{values, …}`). `next` is ignored under the single-page
-/// policy; kept undeserialized.
+/// A paginated envelope (`{values, next, …}`). `next` is an ABSOLUTE URL to the next
+/// page; only [`bb_paginate`] follows it — the many single-page reads deserialize the
+/// envelope and ignore it, per the module's pagination policy.
 #[derive(Deserialize)]
 struct BbPage<T> {
     #[serde(default = "Vec::new")]
     values: Vec<T>,
+    #[serde(default)]
+    next: Option<String>,
 }
 
+// A derived `Default` would demand `T: Default`, which no item type needs to satisfy.
 impl<T> Default for BbPage<T> {
     fn default() -> Self {
-        Self { values: Vec::new() }
+        Self {
+            values: Vec::new(),
+            next: None,
+        }
     }
+}
+
+/// Page bound shared by every `next`-following read — a hard stop so a pathological
+/// repo can't stall a panel behind unbounded requests. Pages past it are dropped
+/// silently: no error, no truncation flag, so the caller can't tell.
+const BB_MAX_PAGES: usize = 5;
+
+/// The next page's URL, or `None` when there is no page to follow. An ABSENT and an
+/// EMPTY `next` both mean end-of-pages — an empty string is not a followable URL, and
+/// requesting it would re-GET the API base. Pure (testable).
+fn next_page_url(next: Option<String>) -> Option<String> {
+    next.filter(|url| !url.is_empty())
+}
+
+/// Follow `next` from `first_url`, returning the raw `values` of every page up to
+/// [`BB_MAX_PAGES`] in server order. Each `next` is used VERBATIM — it carries the
+/// original request's `fields=`/`pagelen=`/trailing-slash form, so rebuilding the URL
+/// from a base would silently change the query. A page that fails to fetch or parse
+/// aborts the whole read; `what` names the endpoint in that error.
+async fn bb_paginate<T: serde::de::DeserializeOwned>(
+    creds: &BbCredentials,
+    first_url: String,
+    what: &str,
+) -> AppResult<Vec<T>> {
+    let mut url = first_url;
+    let mut out: Vec<T> = Vec::new();
+    for _ in 0..BB_MAX_PAGES {
+        let page: BbPage<T> = http::bb_get_json(creds, &url, what).await?;
+        out.extend(page.values);
+        match next_page_url(page.next) {
+            Some(next) => url = next,
+            None => break,
+        }
+    }
+    Ok(out)
 }
 
 // ── Repository listing (clone browser) ─────────────────────────────────────────
@@ -2258,16 +2304,6 @@ fn group_bb_threads(comments: Vec<BbComment>, viewer_uuid: &str) -> Vec<ReviewTh
         .collect()
 }
 
-/// One `…/comments` page — `values` plus the absolute `next` link (the generic
-/// `BbPage` drops `next`, so comment pagination needs its own struct).
-#[derive(Deserialize, Default)]
-struct BbCommentsPage {
-    #[serde(default)]
-    values: Vec<BbComment>,
-    #[serde(default)]
-    next: Option<String>,
-}
-
 /// Fetch a PR's comments, following `next` up to 5 pages (500 at `pagelen=100`, the
 /// `workspace_members`/`pr_tasks` idiom). `comments_path` is the `…/comments` endpoint
 /// WITHOUT a query string, because `view_pr`'s base already carries the
@@ -2278,17 +2314,7 @@ async fn fetch_all_pr_comments(
     creds: &http::BbCredentials,
     comments_path: &str,
 ) -> AppResult<Vec<BbComment>> {
-    let mut url = format!("{comments_path}?pagelen=100");
-    let mut comments: Vec<BbComment> = Vec::new();
-    for _ in 0..5 {
-        let page: BbCommentsPage = http::bb_get_json(creds, &url, "comments").await?;
-        comments.extend(page.values);
-        match page.next {
-            Some(next) if !next.is_empty() => url = next,
-            _ => break,
-        }
-    }
-    Ok(comments)
+    bb_paginate(creds, format!("{comments_path}?pagelen=100"), "comments").await
 }
 
 /// File:line-anchored review threads on a PR — Bitbucket inline comments grouped with
@@ -2609,16 +2635,6 @@ pub async fn set_pr_reviewers(repo_path: &str, number: u64, uuids: &[String]) ->
     Ok(())
 }
 
-/// One `/workspaces/{ws}/members` page — `values` plus the absolute `next` link
-/// (one of several bounded `next`-following reads; the bound is below).
-#[derive(Deserialize, Default)]
-struct BbMembersPage {
-    #[serde(default)]
-    values: Vec<BbMembership>,
-    #[serde(default)]
-    next: Option<String>,
-}
-
 /// A workspace-membership wrapper (`{type, user, workspace}`) — only the user matters.
 #[derive(Deserialize, Default)]
 struct BbMembership {
@@ -2663,20 +2679,14 @@ fn reviewer_candidates_from(members: Vec<BbUser>, author_uuid: &str) -> Vec<Forg
 /// [`reviewer_candidates`] (which then filters the PR author) and
 /// [`member_candidates`] (which keeps everyone).
 async fn workspace_members(creds: &BbCredentials, ws: &str) -> AppResult<Vec<BbUser>> {
-    let mut members: Vec<BbUser> = Vec::new();
-    let mut url = format!(
+    // `next` is in the `fields` selector on purpose: omit it and the server omits the
+    // link, silently truncating the walk to page 1.
+    let url = format!(
         "workspaces/{}/members?pagelen=100&fields=values.user.uuid,values.user.display_name,values.user.nickname,values.user.links.avatar.href,next",
         encode_query_value(ws),
     );
-    for _ in 0..5 {
-        let page: BbMembersPage = http::bb_get_json(creds, &url, "workspace members").await?;
-        members.extend(page.values.into_iter().filter_map(|m| m.user));
-        match page.next {
-            Some(next) if !next.is_empty() => url = next,
-            _ => break,
-        }
-    }
-    Ok(members)
+    let memberships: Vec<BbMembership> = bb_paginate(creds, url, "workspace members").await?;
+    Ok(memberships.into_iter().filter_map(|m| m.user).collect())
 }
 
 /// The reviewer picker's candidate list: the repo's WORKSPACE members, minus the user
@@ -3312,15 +3322,6 @@ struct BbTask {
     links: Option<BbHtmlLinks>,
 }
 
-/// One `…/tasks` page — `values` plus the absolute `next` link (bounded pagination).
-#[derive(Deserialize, Default)]
-struct BbTasksPage {
-    #[serde(default)]
-    values: Vec<BbTask>,
-    #[serde(default)]
-    next: Option<String>,
-}
-
 /// A task user's display name: display_name → nickname → "" (never a username — task
 /// user objects don't carry one).
 fn task_user_name(u: &BbUser) -> String {
@@ -3352,17 +3353,9 @@ fn from_bb_task(t: BbTask) -> PrTask {
 pub async fn pr_tasks(repo_path: &str, number: u64) -> AppResult<Vec<PrTask>> {
     let creds = http::load_credentials().await?;
     let base = repo_base(repo_path).await?;
-    let mut url = format!("{base}/pullrequests/{number}/tasks?pagelen=100");
-    let mut out: Vec<PrTask> = Vec::new();
-    for _ in 0..5 {
-        let page: BbTasksPage = http::bb_get_json(&creds, &url, "pull request tasks").await?;
-        out.extend(page.values.into_iter().map(from_bb_task));
-        match page.next {
-            Some(next) if !next.is_empty() => url = next,
-            _ => break,
-        }
-    }
-    Ok(out)
+    let url = format!("{base}/pullrequests/{number}/tasks?pagelen=100");
+    let tasks: Vec<BbTask> = bb_paginate(&creds, url, "pull request tasks").await?;
+    Ok(tasks.into_iter().map(from_bb_task).collect())
 }
 
 /// Parse a task id from the String the frontend carries (numeric server id). A
@@ -3779,16 +3772,6 @@ struct BbRawEnvironment {
     restrictions: Option<BbEnvRestrictions>,
 }
 
-/// One `…/environments/` page — `values` plus the absolute `next` link (bounded
-/// pagination, ≤5 pages).
-#[derive(Deserialize, Default)]
-struct BbEnvironmentsPage {
-    #[serde(default)]
-    values: Vec<BbRawEnvironment>,
-    #[serde(default)]
-    next: Option<String>,
-}
-
 fn from_bb_environment(e: BbRawEnvironment) -> BbEnvironment {
     BbEnvironment {
         uuid: e.uuid,
@@ -3806,17 +3789,9 @@ fn from_bb_environment(e: BbRawEnvironment) -> BbEnvironment {
 pub async fn environments(repo_path: &str) -> AppResult<Vec<BbEnvironment>> {
     let creds = http::load_credentials().await?;
     let base = repo_base(repo_path).await?;
-    let mut url = format!("{base}/environments/");
-    let mut out: Vec<BbEnvironment> = Vec::new();
-    for _ in 0..5 {
-        let page: BbEnvironmentsPage =
-            http::bb_get_json(&creds, &url, "environments").await?;
-        out.extend(page.values.into_iter().map(from_bb_environment));
-        match page.next {
-            Some(next) if !next.is_empty() => url = next,
-            _ => break,
-        }
-    }
+    let raw: Vec<BbRawEnvironment> =
+        bb_paginate(&creds, format!("{base}/environments/"), "environments").await?;
+    let mut out: Vec<BbEnvironment> = raw.into_iter().map(from_bb_environment).collect();
     out.sort_by_key(|e| e.rank);
     Ok(out)
 }
@@ -4225,35 +4200,30 @@ struct BbWorkspaceMembership {
     administrator: bool,
 }
 
-/// One `/2.0/user/workspaces` page (values + `next` for bounded pagination).
-#[derive(Deserialize, Default)]
-struct BbWorkspacesPage {
-    #[serde(default)]
-    values: Vec<BbWorkspaceMembership>,
-    #[serde(default)]
-    next: Option<String>,
+/// Map one `/2.0/user/workspaces` membership onto a [`BitbucketWorkspace`] — `None`
+/// for an entry with no nested workspace or an empty slug. Pure (testable).
+fn from_bb_workspace_membership(m: BbWorkspaceMembership) -> Option<BitbucketWorkspace> {
+    let administrator = m.administrator;
+    m.workspace
+        .map(|w| w.slug)
+        .filter(|s| !s.is_empty())
+        .map(|slug| BitbucketWorkspace { slug, administrator })
 }
 
 /// The viewer's workspaces (`GET /2.0/user/workspaces`), account-scoped (no repo).
 /// Follows `next` up to 5 pages. Skips entries with no nested workspace / empty slug.
 pub async fn workspaces() -> AppResult<Vec<BitbucketWorkspace>> {
     let creds = http::load_credentials().await?;
-    let mut out: Vec<BitbucketWorkspace> = Vec::new();
-    let mut url = "user/workspaces?pagelen=100".to_string();
-    for _ in 0..5 {
-        let page: BbWorkspacesPage = http::bb_get_json(&creds, &url, "workspaces").await?;
-        for m in page.values {
-            let administrator = m.administrator;
-            if let Some(slug) = m.workspace.map(|w| w.slug).filter(|s| !s.is_empty()) {
-                out.push(BitbucketWorkspace { slug, administrator });
-            }
-        }
-        match page.next {
-            Some(next) if !next.is_empty() => url = next,
-            _ => break,
-        }
-    }
-    Ok(out)
+    let memberships: Vec<BbWorkspaceMembership> = bb_paginate(
+        &creds,
+        "user/workspaces?pagelen=100".to_string(),
+        "workspaces",
+    )
+    .await?;
+    Ok(memberships
+        .into_iter()
+        .filter_map(from_bb_workspace_membership)
+        .collect())
 }
 
 // ── Default reviewers ────────────────────────────────────────────────────────
@@ -4263,37 +4233,23 @@ pub async fn workspaces() -> AppResult<Vec<BitbucketWorkspace>> {
 pub async fn default_reviewers(repo_path: &str) -> AppResult<Vec<ForgeUserRef>> {
     let creds = http::load_credentials().await?;
     let base = repo_base(repo_path).await?;
-    let mut out: Vec<ForgeUserRef> = Vec::new();
-    let mut url = format!("{base}/default-reviewers?pagelen=100");
-    for _ in 0..5 {
-        let page: BbUsersPage = http::bb_get_json(&creds, &url, "default reviewers").await?;
-        for u in page.values {
+    let url = format!("{base}/default-reviewers?pagelen=100");
+    let users: Vec<BbUser> = bb_paginate(&creds, url, "default reviewers").await?;
+    Ok(users
+        .into_iter()
+        .filter_map(|u| {
             let id = u.uuid.clone().unwrap_or_default();
             if id.is_empty() {
-                continue;
+                return None;
             }
-            out.push(ForgeUserRef {
+            Some(ForgeUserRef {
                 id,
                 label: user_login(&u),
                 avatar_url: user_avatar(&u),
                 is_bot: false,
-            });
-        }
-        match page.next {
-            Some(next) if !next.is_empty() => url = next,
-            _ => break,
-        }
-    }
-    Ok(out)
-}
-
-/// A paginated page of bare user objects, with `next` (default reviewers list).
-#[derive(Deserialize, Default)]
-struct BbUsersPage {
-    #[serde(default)]
-    values: Vec<BbUser>,
-    #[serde(default)]
-    next: Option<String>,
+            })
+        })
+        .collect())
 }
 
 /// Add a default reviewer (`PUT .../default-reviewers/{pct-enc-braced-uuid}`, empty
@@ -4390,27 +4346,9 @@ fn build_branch_restriction_body(kind: &str, pattern: &str, value: Option<u32>) 
 pub async fn branch_restrictions(repo_path: &str) -> AppResult<Vec<BitbucketBranchRestriction>> {
     let creds = http::load_credentials().await?;
     let base = repo_base(repo_path).await?;
-    let mut out: Vec<BitbucketBranchRestriction> = Vec::new();
-    let mut url = format!("{base}/branch-restrictions?pagelen=100");
-    for _ in 0..5 {
-        let page: BbRestrictionsPage =
-            http::bb_get_json(&creds, &url, "branch restrictions").await?;
-        out.extend(page.values.into_iter().map(from_bb_branch_restriction));
-        match page.next {
-            Some(next) if !next.is_empty() => url = next,
-            _ => break,
-        }
-    }
-    Ok(out)
-}
-
-/// A paginated page of branch restrictions (values + `next`).
-#[derive(Deserialize, Default)]
-struct BbRestrictionsPage {
-    #[serde(default)]
-    values: Vec<BbBranchRestrictionRaw>,
-    #[serde(default)]
-    next: Option<String>,
+    let url = format!("{base}/branch-restrictions?pagelen=100");
+    let raw: Vec<BbBranchRestrictionRaw> = bb_paginate(&creds, url, "branch restrictions").await?;
+    Ok(raw.into_iter().map(from_bb_branch_restriction).collect())
 }
 
 /// Create a branch restriction (`POST .../branch-restrictions` → 201 with numeric id).
@@ -4548,26 +4486,9 @@ fn from_bb_pipeline_variable(v: BbPipelineVariableRaw) -> BitbucketPipelineVaria
 pub async fn pipeline_variables(repo_path: &str) -> AppResult<Vec<BitbucketPipelineVariable>> {
     let creds = http::load_credentials().await?;
     let base = repo_base(repo_path).await?;
-    let mut out: Vec<BitbucketPipelineVariable> = Vec::new();
-    let mut url = format!("{base}/pipelines_config/variables/?pagelen=100");
-    for _ in 0..5 {
-        let page: BbVariablesPage =
-            http::bb_get_json(&creds, &url, "pipeline variables").await?;
-        out.extend(page.values.into_iter().map(from_bb_pipeline_variable));
-        match page.next {
-            Some(next) if !next.is_empty() => url = next,
-            _ => break,
-        }
-    }
-    Ok(out)
-}
-
-#[derive(Deserialize, Default)]
-struct BbVariablesPage {
-    #[serde(default)]
-    values: Vec<BbPipelineVariableRaw>,
-    #[serde(default)]
-    next: Option<String>,
+    let url = format!("{base}/pipelines_config/variables/?pagelen=100");
+    let raw: Vec<BbPipelineVariableRaw> = bb_paginate(&creds, url, "pipeline variables").await?;
+    Ok(raw.into_iter().map(from_bb_pipeline_variable).collect())
 }
 
 /// Create a pipeline variable (`POST .../pipelines_config/variables/` → 201).
@@ -4679,26 +4600,9 @@ fn build_schedule_create_body(ref_name: &str, cron_pattern: &str, enabled: bool)
 pub async fn pipeline_schedules(repo_path: &str) -> AppResult<Vec<BitbucketPipelineSchedule>> {
     let creds = http::load_credentials().await?;
     let base = repo_base(repo_path).await?;
-    let mut out: Vec<BitbucketPipelineSchedule> = Vec::new();
-    let mut url = format!("{base}/pipelines_config/schedules/?pagelen=100");
-    for _ in 0..5 {
-        let page: BbSchedulesPage =
-            http::bb_get_json(&creds, &url, "pipeline schedules").await?;
-        out.extend(page.values.into_iter().map(from_bb_pipeline_schedule));
-        match page.next {
-            Some(next) if !next.is_empty() => url = next,
-            _ => break,
-        }
-    }
-    Ok(out)
-}
-
-#[derive(Deserialize, Default)]
-struct BbSchedulesPage {
-    #[serde(default)]
-    values: Vec<BbPipelineScheduleRaw>,
-    #[serde(default)]
-    next: Option<String>,
+    let url = format!("{base}/pipelines_config/schedules/?pagelen=100");
+    let raw: Vec<BbPipelineScheduleRaw> = bb_paginate(&creds, url, "pipeline schedules").await?;
+    Ok(raw.into_iter().map(from_bb_pipeline_schedule).collect())
 }
 
 /// Create a pipeline schedule (`POST .../pipelines_config/schedules/` → 201).
@@ -4806,25 +4710,9 @@ fn build_hook_body(input: &BitbucketHookInput) -> serde_json::Value {
 pub async fn hooks(repo_path: &str) -> AppResult<Vec<BitbucketHook>> {
     let creds = http::load_credentials().await?;
     let base = repo_base(repo_path).await?;
-    let mut out: Vec<BitbucketHook> = Vec::new();
-    let mut url = format!("{base}/hooks?pagelen=100");
-    for _ in 0..5 {
-        let page: BbHooksPage = http::bb_get_json(&creds, &url, "webhooks").await?;
-        out.extend(page.values.into_iter().map(from_bb_hook));
-        match page.next {
-            Some(next) if !next.is_empty() => url = next,
-            _ => break,
-        }
-    }
-    Ok(out)
-}
-
-#[derive(Deserialize, Default)]
-struct BbHooksPage {
-    #[serde(default)]
-    values: Vec<BbHookRaw>,
-    #[serde(default)]
-    next: Option<String>,
+    let url = format!("{base}/hooks?pagelen=100");
+    let raw: Vec<BbHookRaw> = bb_paginate(&creds, url, "webhooks").await?;
+    Ok(raw.into_iter().map(from_bb_hook).collect())
 }
 
 /// Create a webhook (`POST .../hooks` → 201).
@@ -5232,13 +5120,14 @@ pub async fn fork_repo(owner: &str, name: &str) -> AppResult<ForgeForkResult> {
     })
 }
 
-/// Poll `GET repositories/{full_name}` up to 5 times (2s apart); ready on the first
-/// 2xx. `false` if it never became ready in the bound (not an error).
+/// Poll `GET repositories/{full_name}` on the shared [`FORK_POLL_ATTEMPTS`] /
+/// [`FORK_POLL_DELAY`] cadence; ready on the first 2xx. `false` if it never became
+/// ready in the bound (not an error).
 async fn poll_fork_ready(creds: &BbCredentials, full_name: &str) -> bool {
     let path = format!("repositories/{full_name}");
-    for attempt in 0..5 {
+    for attempt in 0..FORK_POLL_ATTEMPTS {
         if attempt > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            tokio::time::sleep(FORK_POLL_DELAY).await;
         }
         if let Ok((status, _)) = http::bb_get_text_status(creds, &path).await {
             if (200..300).contains(&status) {
@@ -5274,7 +5163,7 @@ pub async fn repo_readme(owner: &str, name: &str) -> AppResult<Option<String>> {
     let Some(branch) = branch else {
         return Ok(None);
     };
-    for candidate in ["README.md", "readme.md", "README.rst", "README"] {
+    for candidate in README_CANDIDATES {
         let src_path = format!(
             "repositories/{}/{}/src/{}/{}",
             encode_query_value(owner),
@@ -7177,7 +7066,7 @@ definitions:
 
     #[test]
     fn workspace_membership_carries_administrator_flag() {
-        let page: BbWorkspacesPage = serde_json::from_str(
+        let page: BbPage<BbWorkspaceMembership> = serde_json::from_str(
             r#"{"values":[
                 {"administrator":true,"workspace":{"slug":"team-a"}},
                 {"administrator":false,"workspace":{"slug":"team-b"}},
@@ -7189,19 +7078,45 @@ definitions:
         let out: Vec<BitbucketWorkspace> = page
             .values
             .into_iter()
-            .filter_map(|m| {
-                let administrator = m.administrator;
-                m.workspace
-                    .map(|w| w.slug)
-                    .filter(|s| !s.is_empty())
-                    .map(|slug| BitbucketWorkspace { slug, administrator })
-            })
+            .filter_map(from_bb_workspace_membership)
             .collect();
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].slug, "team-a");
         assert!(out[0].administrator);
         assert_eq!(out[1].slug, "team-b");
         assert!(!out[1].administrator);
+    }
+
+    #[test]
+    fn page_envelope_reads_next_link() {
+        let page: BbPage<BbWorkspace> = serde_json::from_str(
+            r#"{"values":[{"slug":"team-a"}],
+                "next":"https://api.bitbucket.org/2.0/user/workspaces?page=2"}"#,
+        )
+        .unwrap();
+        assert_eq!(page.values.len(), 1);
+        assert_eq!(
+            page.next.as_deref(),
+            Some("https://api.bitbucket.org/2.0/user/workspaces?page=2")
+        );
+    }
+
+    #[test]
+    fn next_page_url_follows_only_a_non_empty_link() {
+        // No `next` key at all — the last page.
+        assert_eq!(next_page_url(None), None);
+        // An EMPTY `next` is also end-of-pages; following it would re-GET the API base.
+        assert_eq!(next_page_url(Some(String::new())), None);
+        let link = "https://api.bitbucket.org/2.0/user/workspaces?page=2";
+        assert_eq!(next_page_url(Some(link.to_string())), Some(link.to_string()));
+    }
+
+    #[test]
+    fn page_envelope_without_next_is_the_last_page() {
+        let page: BbPage<BbWorkspace> =
+            serde_json::from_str(r#"{"values":[{"slug":"team-a"}]}"#).unwrap();
+        assert_eq!(page.values.len(), 1);
+        assert!(page.next.is_none());
     }
 
     #[test]

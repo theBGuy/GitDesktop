@@ -137,8 +137,9 @@ export function RepoJiraDialog({
     setShowCredentialForm(false);
   }, [open, existingLink]);
 
-  // Debounce the project search input (server-driven query) — self-contained, no
-  // shared debounce hook exists.
+  // Debounced locally, not via useDebouncedValue: the dialog stays mounted across
+  // open/close, so the reset above must clear this SYNCHRONOUSLY — the search is
+  // gated on the site alone, and a lagging value refires the old query on reopen.
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQuery(projectQuery.trim()), 250);
     return () => clearTimeout(t);

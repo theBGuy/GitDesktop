@@ -13,7 +13,6 @@ import {
   XIcon,
 } from "@phosphor-icons/react";
 import { useState } from "react";
-import { MarkdownEditor } from "@/components/markdown-editor";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -33,6 +32,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Markdown } from "@/components/ui/markdown";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { CommentComposer } from "@/features/conversations/CommentComposer";
 import { DeleteCommentDialog } from "@/features/conversations/DeleteCommentDialog";
 import {
   EditTitleBodyDialog,
@@ -43,7 +43,6 @@ import { useLocalConversation } from "@/features/conversations/useLocalConversat
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { copyText } from "@/lib/clipboard";
 import { forgeFeatureReady, useForgeStatus } from "@/lib/git/queries";
-import { formatBinding } from "@/lib/hotkeys/binding";
 import {
   useDeleteLocalIssue,
   useLocalIssues,
@@ -56,10 +55,6 @@ import { toastError } from "@/lib/toast";
 import { PlanIssueButton } from "../plan/PlanIssueButton";
 import { SolveIssueButton } from "../sessions/SolveIssueButton";
 import { PromoteLocalIssueDialog } from "./PromoteLocalIssueDialog";
-
-/** Platform-correct submit hint (Cmd+Enter on macOS, Ctrl+Enter else) — never a
- *  literal modifier (house platform-mod-key rule). */
-const SUBMIT_HINT = formatBinding("mod+enter");
 
 export function LocalIssueView({
   repoPath,
@@ -301,45 +296,16 @@ export function LocalIssueView({
         </div>
       </ScrollArea>
 
-      <div className="space-y-2 border-t p-3">
-        <MarkdownEditor
-          ref={composerRef}
-          aria-label="Leave a note"
-          placeholder="Leave a note…"
-          value={comment}
-          onChange={setComment}
-          onKeyDown={(e) => {
-            if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
-              e.preventDefault();
-              addComment();
-            }
-          }}
-          rows={2}
-          textareaClassName="max-h-32 min-h-12 resize-y"
-        />
-        <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={!comment.trim()}
-            onClick={addComment}
-            title={SUBMIT_HINT}
-          >
-            Comment
-          </Button>
-          {comment.trim() && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="ml-auto"
-              onClick={() => setComment("")}
-              title="Discard this draft (e.g. a quote reply)"
-            >
-              Clear
-            </Button>
-          )}
-        </div>
-      </div>
+      <CommentComposer
+        ref={composerRef}
+        ariaLabel="Leave a note"
+        placeholder="Leave a note…"
+        value={comment}
+        onChange={setComment}
+        onSubmit={addComment}
+        onClear={() => setComment("")}
+        submitLabel="Comment"
+      />
 
       <div className="flex items-center gap-2 border-t p-3">
         <Button

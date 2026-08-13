@@ -15,6 +15,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Markdown } from "@/components/ui/markdown";
 import { Spinner } from "@/components/ui/spinner";
+import { SUBMIT_HINT } from "@/features/conversations/CommentComposer";
 import { Thread } from "@/features/conversations/Thread";
 import { copyText } from "@/lib/clipboard";
 import type {
@@ -22,15 +23,10 @@ import type {
   ForgeProvider,
   ReviewThreadOut,
 } from "@/lib/git/types";
-import { formatBinding } from "@/lib/hotkeys/binding";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { synthesizeThreadHunk } from "./suggestion-utils";
-
-/** Platform-correct submit-shortcut hint (⌘+Enter on macOS, Ctrl+Enter else) —
- *  never hardcode the modifier. Exported so RemotePrView shares one definition. */
-export const SUBMIT_HINT = formatBinding("mod+enter");
 
 /** Sets a hover title only when the element is actually clipped (measures
  *  `currentTarget`, not an inner span) — the file-group header truncates. */

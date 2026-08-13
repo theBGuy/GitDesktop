@@ -154,7 +154,10 @@ export function ReviewersPopover({
                       onCheckedChange={(v) => toggle(user, v === true)}
                     />
                     <ForgeUserAvatar user={user} ghHost={ghHost} />
-                    <span className="flex-1 truncate">
+                    <span
+                      className="flex-1 truncate"
+                      title={hint ? `${user.label} (${hint})` : user.label}
+                    >
                       {user.label}
                       {hint && (
                         <span className="text-muted-foreground"> · {hint}</span>

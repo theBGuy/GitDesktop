@@ -1068,6 +1068,65 @@ fn status_category_of(fields: &Value) -> String {
         .to_string()
 }
 
+/// The scalar fields every reader of an issue's `fields` object pulls out identically.
+/// Owned Strings, so each caller moves them straight into its own target struct
+/// ([`JiraIssueInfo`] / [`JiraIssueDetails`] are distinct types with no shared base).
+struct CommonIssueFields {
+    summary: String,
+    status_name: String,
+    issue_type_name: String,
+    issue_type_icon_url: String,
+    priority_name: String,
+    created_at: String,
+    updated_at: String,
+}
+
+/// Read the common scalar fields off an issue's `fields`, defensively — every one
+/// degrades to `""`, and an absent `issuetype` object collapses both of its fields
+/// rather than erroring. Pure.
+fn common_issue_fields(fields: &Value) -> CommonIssueFields {
+    let issue_type = fields.get("issuetype");
+    CommonIssueFields {
+        summary: fields
+            .get("summary")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        status_name: fields
+            .get("status")
+            .and_then(|s| s.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        issue_type_name: issue_type
+            .and_then(|t| t.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        issue_type_icon_url: issue_type
+            .and_then(|t| t.get("iconUrl"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        priority_name: fields
+            .get("priority")
+            .and_then(|p| p.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        created_at: fields
+            .get("created")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        updated_at: fields
+            .get("updated")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+    }
+}
+
 /// Map one issue JSON object onto [`JiraIssueInfo`], defensively. Returns `None` when
 /// the object has no usable `key` (so one malformed issue doesn't sink the list); every
 /// other field degrades to empty/None rather than erroring. `map` supplies the site's
@@ -1083,38 +1142,20 @@ fn map_issue_info(
         return None;
     }
     let fields = issue.get("fields").cloned().unwrap_or(Value::Null);
-    let status_name = fields
-        .get("status")
-        .and_then(|s| s.get("name"))
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let issue_type = fields.get("issuetype");
-    let issue_type_name = issue_type
-        .and_then(|t| t.get("name"))
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let issue_type_icon_url = issue_type
-        .and_then(|t| t.get("iconUrl"))
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let priority_name = fields
-        .get("priority")
-        .and_then(|p| p.get("name"))
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
+    let CommonIssueFields {
+        summary,
+        status_name,
+        issue_type_name,
+        issue_type_icon_url,
+        priority_name,
+        created_at,
+        updated_at,
+    } = common_issue_fields(&fields);
     let assignee = parse_user(fields.get("assignee"));
     let labels = parse_labels(fields.get("labels"));
     let (sprint_name, sprint_state) = extract_sprint(&fields, map);
     Some(JiraIssueInfo {
-        summary: fields
-            .get("summary")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
+        summary,
         status_name,
         status_category: status_category_of(&fields),
         issue_type_name,
@@ -1122,16 +1163,8 @@ fn map_issue_info(
         priority_name,
         assignee,
         labels,
-        created_at: fields
-            .get("created")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
-        updated_at: fields
-            .get("updated")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
+        created_at,
+        updated_at,
         story_points: extract_story_points(&fields, map),
         sprint_name,
         sprint_state,
@@ -1904,7 +1937,15 @@ pub async fn issue_view(site: &str, key: &str) -> AppResult<JiraIssueDetails> {
     // any failure yields None and the issue view still succeeds.
     let viewer_account_id = resolve_viewer_account_id(&creds, &site).await;
 
-    let issue_type = fields.get("issuetype");
+    let CommonIssueFields {
+        summary,
+        status_name,
+        issue_type_name,
+        issue_type_icon_url,
+        priority_name,
+        created_at,
+        updated_at,
+    } = common_issue_fields(&fields);
     let (sprint_name, sprint_state) = extract_sprint(&fields, &map);
     let description_md = fields
         .get("description")
@@ -1913,47 +1954,17 @@ pub async fn issue_view(site: &str, key: &str) -> AppResult<JiraIssueDetails> {
         .unwrap_or_default();
 
     Ok(JiraIssueDetails {
-        summary: fields
-            .get("summary")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
-        status_name: fields
-            .get("status")
-            .and_then(|s| s.get("name"))
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
+        summary,
+        status_name,
         status_category: status_category_of(&fields),
-        issue_type_name: issue_type
-            .and_then(|t| t.get("name"))
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
-        issue_type_icon_url: issue_type
-            .and_then(|t| t.get("iconUrl"))
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
-        priority_name: fields
-            .get("priority")
-            .and_then(|p| p.get("name"))
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
+        issue_type_name,
+        issue_type_icon_url,
+        priority_name,
         assignee: parse_user(fields.get("assignee")),
         reporter: parse_user(fields.get("reporter")),
         labels: parse_labels(fields.get("labels")),
-        created_at: fields
-            .get("created")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
-        updated_at: fields
-            .get("updated")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
+        created_at,
+        updated_at,
         due_date: fields
             .get("duedate")
             .and_then(Value::as_str)
@@ -2142,12 +2153,9 @@ fn is_valid_transition_id(id: &str) -> bool {
 /// Extract `(statusName, statusCategoryKey)` from an `issue?fields=status` response. Pure.
 fn status_of_issue(issue: &Value) -> (String, String) {
     let fields = issue.get("fields").cloned().unwrap_or(Value::Null);
-    let status_name = fields
-        .get("status")
-        .and_then(|s| s.get("name"))
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
+    // The caller fetches `?fields=status`, so the reader's other fields are
+    // structurally empty here and only the status name is meaningful.
+    let status_name = common_issue_fields(&fields).status_name;
     (status_name, status_category_of(&fields))
 }
 

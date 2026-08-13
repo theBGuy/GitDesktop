@@ -142,6 +142,18 @@ pub(crate) fn validate_owner(owner: &str) -> AppResult<()> {
 /// truncated on a char boundary by [`cap_readme`].
 const README_CAP: usize = 300 * 1024;
 
+/// README filenames each provider probes in order; the first that exists wins.
+/// (GitHub is absent — its API serves the README from a dedicated endpoint.)
+pub(crate) const README_CANDIDATES: &[&str] = &["README.md", "readme.md", "README.rst", "README"];
+
+/// Fork-readiness poll cadence, shared by all three providers' `poll_fork_ready`:
+/// a fork is freshly created and may not be gettable/populated yet, so each polls
+/// its own readiness signal on this bound and reports `false` (never an error) when
+/// it expires.
+pub(crate) const FORK_POLL_ATTEMPTS: u32 = 5;
+/// Delay between fork-readiness attempts (skipped before the first).
+pub(crate) const FORK_POLL_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Cap a README body at [`README_CAP`] bytes, truncating on a UTF-8 `char`
 /// boundary (never mid code-point).
 pub(crate) fn cap_readme(body: &str) -> String {

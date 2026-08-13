@@ -11,7 +11,9 @@ use crate::forge::model::{
     Capabilities, ForgeForkResult, ForgeRepo, ForgeRepoList, ForgeSearchList, ForgeSearchRepo,
     ForgeStatus, Implemented, Provider,
 };
-use crate::forge::{validate_owner, validate_repo_name, Forge};
+use crate::forge::{
+    validate_owner, validate_repo_name, Forge, FORK_POLL_ATTEMPTS, FORK_POLL_DELAY,
+};
 use crate::github::pr::{gh_list_repos, gh_status, GhRepo, GhStatus};
 use crate::github::runner::{run_gh, run_gh_raw, GH_NETWORK_TIMEOUT, GH_TIMEOUT};
 
@@ -1077,14 +1079,15 @@ async fn find_viewer_fork(owner: &str, name: &str, login: &str) -> AppResult<Opt
     Ok(hit)
 }
 
-/// Poll a fork's `commits?per_page=1` up to 5 times (2s apart) — the fork is
-/// cloneable once GitHub has populated it. Returns `true` on the first success,
-/// `false` if it never became ready in the bound (not an error).
+/// Poll a fork's `commits?per_page=1` on the shared [`FORK_POLL_ATTEMPTS`] /
+/// [`FORK_POLL_DELAY`] cadence — the fork is cloneable once GitHub has populated it.
+/// Returns `true` on the first success, `false` if it never became ready in the bound
+/// (not an error).
 async fn poll_fork_ready(full_name: &str) -> bool {
     let endpoint = format!("repos/{full_name}/commits?per_page=1");
-    for attempt in 0..5 {
+    for attempt in 0..FORK_POLL_ATTEMPTS {
         if attempt > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            tokio::time::sleep(FORK_POLL_DELAY).await;
         }
         if let Ok(out) = run_gh_raw(None, &["api", &endpoint], GH_TIMEOUT).await {
             if out.code == 0 {

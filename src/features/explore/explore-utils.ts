@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react";
 import type { ForgeRepo, ForgeSearchRepo } from "@/lib/git/types";
 
 /** Compact star/number formatting (1.2k) — module-level so it's built once. */
@@ -6,21 +5,6 @@ export const compactNumber = new Intl.NumberFormat(undefined, {
   notation: "compact",
   maximumFractionDigits: 1,
 });
-
-/**
- * Debounce a rapidly-changing value (a search input) so it only reaches the
- * query hook after it settles — GitHub's code-search bucket is ~30 req/min, so a
- * keystroke-per-request would burn it. Returns the last value that held steady
- * for `delayMs`.
- */
-export function useDebouncedValue<T>(value: T, delayMs: number): T {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => {
-    const id = setTimeout(() => setDebounced(value), delayMs);
-    return () => clearTimeout(id);
-  }, [value, delayMs]);
-  return debounced;
-}
 
 /** A flat, virtualizer-friendly view of owner-grouped repos: a header row per
  *  owner followed by that owner's repos. */

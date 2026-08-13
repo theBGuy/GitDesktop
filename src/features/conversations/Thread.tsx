@@ -2,7 +2,6 @@ import { DotsThreeIcon } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { type ReactNode, useState } from "react";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
-import { MarkdownEditor } from "@/components/markdown-editor";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -21,6 +20,7 @@ import type { MinimizeReason } from "@/lib/git/api";
 import { displayLogin } from "@/lib/git/bot-login";
 import { useActiveForgeGhHost, useActiveGhHost } from "@/lib/git/host";
 import type { PrThreadOut, Reaction, RepoLabel } from "@/lib/git/types";
+import { CommentEditor } from "./CommentEditor";
 import { ReactionBar } from "./ReactionBar";
 
 /**
@@ -245,31 +245,18 @@ export function Thread({
         )}
       </p>
       {editing ? (
-        <div className="space-y-2">
-          <MarkdownEditor
-            aria-label="Edit comment"
-            value={draft}
-            onChange={setDraft}
-            rows={3}
-            textareaClassName="max-h-48 min-h-16 resize-y font-mono"
-          />
-          <div className="flex items-center gap-2">
-            <Button
-              size="xs"
-              variant="outline"
-              disabled={!draft.trim() || draft.trim() === thread.body.trim()}
-              onClick={() => {
-                onSaveEdit?.(draft.trim());
-                setEditing(false);
-              }}
-            >
-              Save
-            </Button>
-            <Button size="xs" variant="ghost" onClick={() => setEditing(false)}>
-              Cancel
-            </Button>
-          </div>
-        </div>
+        <CommentEditor
+          ariaLabel="Edit comment"
+          value={draft}
+          onChange={setDraft}
+          canSubmit={!!draft.trim() && draft.trim() !== thread.body.trim()}
+          onSubmit={() => {
+            onSaveEdit?.(draft.trim());
+            setEditing(false);
+          }}
+          onCancel={() => setEditing(false)}
+          textareaClassName="max-h-48 min-h-16 resize-y font-mono"
+        />
       ) : minimized && !expanded ? (
         <button
           type="button"

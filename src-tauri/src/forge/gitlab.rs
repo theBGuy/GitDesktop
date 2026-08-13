@@ -15,7 +15,10 @@ use crate::forge::model::{
     Capabilities, CompletedReviewerOut, ForgeForkResult, ForgeRepo, ForgeRepoList, ForgeSearchList,
     ForgeSearchRepo, ForgeStatus, ForgeUserRef, Implemented, Provider,
 };
-use crate::forge::{cap_readme, validate_owner, validate_repo_name};
+use crate::forge::{
+    cap_readme, validate_owner, validate_repo_name, FORK_POLL_ATTEMPTS, FORK_POLL_DELAY,
+    README_CANDIDATES,
+};
 use crate::forge::Forge;
 use crate::github::actions::{RunDetail, RunJob, WorkflowRun};
 use crate::github::issue::{IssueDetails, IssueInfo, IssueReactions, Milestone, Reaction};
@@ -7827,14 +7830,15 @@ pub async fn fork_repo(owner: &str, name: &str) -> AppResult<ForgeForkResult> {
     })
 }
 
-/// Poll `projects/{id}` until `import_status == "finished"` (5×2s). Returns `true`
-/// on the first finished read, `false` if it never finished within the bound (not
-/// an error — the fork exists).
+/// Poll `projects/{id}` until `import_status == "finished"`, on the shared
+/// [`FORK_POLL_ATTEMPTS`] / [`FORK_POLL_DELAY`] cadence. Returns `true` on the first
+/// finished read, `false` if it never finished within the bound (not an error — the
+/// fork exists).
 async fn poll_fork_ready(id: u64) -> bool {
     let endpoint = format!("projects/{id}");
-    for attempt in 0..5 {
+    for attempt in 0..FORK_POLL_ATTEMPTS {
         if attempt > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            tokio::time::sleep(FORK_POLL_DELAY).await;
         }
         if let Ok(out) = run_glab_raw(None, &["api", &endpoint], GLAB_TIMEOUT).await {
             if out.code == 0 {
@@ -7924,7 +7928,7 @@ pub async fn repo_readme(
     let enc = encode_project(&format!("{owner}/{name}"));
     let git_ref = default_branch.filter(|b| !b.is_empty()).unwrap_or("HEAD");
     let ref_enc = encode_query_value(git_ref);
-    for candidate in ["README.md", "readme.md", "README.rst", "README"] {
+    for candidate in README_CANDIDATES {
         let file_enc = encode_query_value(candidate);
         let endpoint = format!("projects/{enc}/repository/files/{file_enc}/raw?ref={ref_enc}");
         let out = run_glab_raw(None, &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;

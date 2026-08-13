@@ -21,6 +21,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
+import { SUBMIT_HINT } from "@/features/conversations/CommentComposer";
 import { LabelChip } from "@/features/conversations/Thread";
 import { AssigneesPopover } from "@/features/issues/IssueMetaPickers";
 import { REVIEWER_NOTES_MARKER } from "@/lib/ai/notes-context";
@@ -66,10 +67,6 @@ import {
   useJiraMentionChips,
   useLinkedIssueChips,
 } from "./useLinkedIssueChips";
-
-/** Platform-correct submit hint (Cmd+Enter on macOS, Ctrl+Enter else) — never a
- *  literal modifier (house platform-mod-key rule). */
-const SUBMIT_HINT = formatBinding("mod+enter");
 
 export function CreatePrDialog({
   repoPath,
@@ -882,7 +879,10 @@ export function CreatePrDialog({
                               className="size-2 shrink-0 rounded-full"
                               style={{ backgroundColor: `#${label.color}` }}
                             />
-                            <span className="flex-1 truncate">
+                            <span
+                              className="flex-1 truncate"
+                              title={label.name}
+                            >
                               {label.name}
                             </span>
                           </label>

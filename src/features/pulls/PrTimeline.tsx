@@ -13,7 +13,12 @@ import {
   WarningIcon,
   XCircleIcon,
 } from "@phosphor-icons/react";
-import { type KeyboardEvent, type MouseEvent, useState } from "react";
+import {
+  type KeyboardEvent,
+  type MouseEvent,
+  type ReactNode,
+  useState,
+} from "react";
 import { RelativeTime } from "@/components/relative-time";
 import type { CommitRow } from "@/features/conversations/CommitsList";
 import type { PrTimelineEvent } from "@/lib/git/types";
@@ -21,9 +26,10 @@ import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { cn } from "@/lib/utils";
 
 /** A merged timeline entry: the keys the feed sorts by, plus EITHER a ready
- *  `node` (reviews, comments, events — RemotePrView owns their wiring) OR a
- *  `commit` marker that the consumer coalesces into a grouped "pushed N" row
- *  after sorting. Built in RemotePrView; the light rows + sort helper live here. */
+ *  `node` (reviews, comments, events — the building view owns their wiring) OR a
+ *  `commit` marker that {@link coalesceCommitRuns} groups into a "pushed N" row
+ *  after sorting. Built in PrActivityFeed (remote PRs) and LocalPrView (local
+ *  ones); the light rows, the sort and the coalescer live here. */
 export interface TimelineEntry {
   /** ISO date used to order the feed (oldest→newest). "" sinks to the top. */
   date: string;
@@ -47,6 +53,41 @@ export function sortTimeline(entries: TimelineEntry[]): TimelineEntry[] {
   return [...entries].sort(
     (a, b) => ms(a.date) - ms(b.date) || a.sortKey - b.sortKey,
   );
+}
+
+/** Walk SORTED entries, emitting each ready `node` in place and folding every run
+ *  of adjacent commit markers into whatever `renderPush` returns (a grouped
+ *  "pushed N commits" row). `runStart` is the run's index into `sorted`, so a
+ *  caller's key stays stable across refetches and PushedCommitsRow keeps its
+ *  disclosure state.
+ *
+ *  `renderPush` receives a COPY of the run: the accumulator is cleared in place
+ *  and React doesn't read props until the whole render returns, so handing out
+ *  the live array would make every earlier row show the last run's commits. */
+export function coalesceCommitRuns(
+  sorted: TimelineEntry[],
+  renderPush: (run: CommitRow[], runStart: number) => ReactNode,
+): ReactNode[] {
+  const rendered: ReactNode[] = [];
+  const run: CommitRow[] = [];
+  let runStart = 0;
+  const flush = () => {
+    if (run.length === 0) return;
+    rendered.push(renderPush([...run], runStart));
+    run.length = 0;
+  };
+  for (let i = 0; i < sorted.length; i++) {
+    const entry = sorted[i];
+    if (entry.commit) {
+      if (run.length === 0) runStart = i;
+      run.push(entry.commit);
+    } else {
+      flush();
+      rendered.push(entry.node);
+    }
+  }
+  flush();
+  return rendered;
 }
 
 /** Sets a hover title only when the content is actually clipped by `truncate`;

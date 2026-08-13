@@ -1,6 +1,5 @@
 import { DotsThreeIcon, RobotIcon } from "@phosphor-icons/react";
 import { useState } from "react";
-import { MarkdownEditor } from "@/components/markdown-editor";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
@@ -12,6 +11,7 @@ import {
 import { Markdown } from "@/components/ui/markdown";
 import { copyText } from "@/lib/clipboard";
 import { formatRelativeTime } from "@/lib/time";
+import { CommentEditor } from "./CommentEditor";
 
 /**
  * A comment on a local (offline) PR or issue. Local comments aren't tied to
@@ -112,31 +112,18 @@ export function LocalComment({
         )}
       </p>
       {editing ? (
-        <div className="space-y-2">
-          <MarkdownEditor
-            aria-label="Edit comment"
-            value={draft}
-            onChange={setDraft}
-            rows={3}
-            textareaClassName="max-h-48 min-h-16 resize-y"
-          />
-          <div className="flex items-center gap-2">
-            <Button
-              size="xs"
-              variant="outline"
-              disabled={!draft.trim() || draft.trim() === comment.body.trim()}
-              onClick={() => {
-                onSaveEdit(draft.trim());
-                setEditing(false);
-              }}
-            >
-              Save
-            </Button>
-            <Button size="xs" variant="ghost" onClick={() => setEditing(false)}>
-              Cancel
-            </Button>
-          </div>
-        </div>
+        <CommentEditor
+          ariaLabel="Edit comment"
+          value={draft}
+          onChange={setDraft}
+          canSubmit={!!draft.trim() && draft.trim() !== comment.body.trim()}
+          onSubmit={() => {
+            onSaveEdit(draft.trim());
+            setEditing(false);
+          }}
+          onCancel={() => setEditing(false)}
+          textareaClassName="max-h-48 min-h-16 resize-y"
+        />
       ) : hidden && !expanded ? (
         <button
           type="button"

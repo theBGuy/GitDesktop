@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { ConfirmDialog } from "@/components/confirm-dialog";
-import { MarkdownEditor } from "@/components/markdown-editor";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Markdown } from "@/components/ui/markdown";
+import { CommentEditor } from "@/features/conversations/CommentEditor";
 import type { RemoteLens } from "@/lib/git/types";
 import {
   type ReviewDraft,
@@ -47,12 +47,11 @@ export function DraftCommentCard({
   const updateDraft = useUpdateReviewDraft(repoPath, lens, number);
   const removeDraft = useRemoveReviewDraft(repoPath, lens, number);
 
+  const next = body.trim();
+  const canSave = next.length > 0 && next !== draft.body.trim();
+
   function saveEdit() {
-    const next = body.trim();
-    if (!next || next === draft.body.trim()) {
-      setEditing(false);
-      return;
-    }
+    if (!canSave) return;
     updateDraft.mutate(
       { id: draft.id, body: next },
       {
@@ -97,28 +96,16 @@ export function DraftCommentCard({
         )}
       </div>
       {editing ? (
-        <div className="space-y-2">
-          <MarkdownEditor
-            aria-label="Edit pending comment"
-            value={body}
-            onChange={setBody}
-            rows={3}
-            textareaClassName="max-h-48 min-h-16 resize-y"
-          />
-          <div className="flex items-center gap-2">
-            <Button
-              size="xs"
-              variant="outline"
-              disabled={!body.trim() || updateDraft.isPending}
-              onClick={saveEdit}
-            >
-              Save
-            </Button>
-            <Button size="xs" variant="ghost" onClick={() => setEditing(false)}>
-              Cancel
-            </Button>
-          </div>
-        </div>
+        <CommentEditor
+          value={body}
+          onChange={setBody}
+          onSubmit={saveEdit}
+          onCancel={() => setEditing(false)}
+          canSubmit={canSave}
+          pending={updateDraft.isPending}
+          ariaLabel="Edit pending comment"
+          textareaClassName="max-h-48 min-h-16 resize-y"
+        />
       ) : (
         <Markdown>{draft.body}</Markdown>
       )}

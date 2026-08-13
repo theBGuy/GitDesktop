@@ -63,7 +63,11 @@ import {
 } from "@/lib/gitlab/security-findings";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
-import { type SelectedFinding, useUiStore } from "@/lib/stores/ui";
+import {
+  type FindingsLimits,
+  type SelectedFinding,
+  useUiStore,
+} from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
 import {
   CodeScanningChip,
@@ -1012,6 +1016,148 @@ function GlQualityRows({
   );
 }
 
+/** The tail below a section's rows: at the row cap it states what is shown, and
+ *  below the cap it offers the next page. Callers render it outside their empty
+ *  branch, gated on `truncated` alone — filtering to zero matches must not strip
+ *  the only way to reach rows past the fetched window. `noun` words this
+ *  sentence only; a section's filter noun can differ ("No alerts match the
+ *  filter." over "dependency alerts"), so the two are never shared. */
+function FindingsTruncationTail({
+  truncated,
+  loaded,
+  noun,
+  limits,
+  limitKey,
+  setLimits,
+  loading,
+}: {
+  truncated: boolean;
+  /** Rows loaded so far — what the sentence counts, never the server total. */
+  loaded: number;
+  noun: string;
+  limits: FindingsLimits;
+  /** Which limit this section grows; GitLab's three categories share one, so it
+   *  can't be derived from the section. */
+  limitKey: keyof FindingsLimits;
+  setLimits: (limits: FindingsLimits) => void;
+  /** The owning query's `isFetching`, so only its own button spins. */
+  loading: boolean;
+}) {
+  if (!truncated) return null;
+  if (limits[limitKey] >= FINDINGS_LIMIT_CAP) {
+    return (
+      <p className="border-t px-3 py-3 text-xs text-muted-foreground">
+        Showing the first {loaded.toLocaleString()} {noun}.
+      </p>
+    );
+  }
+  return (
+    <LoadMoreRow
+      count={loaded}
+      loading={loading}
+      onLoadMore={() =>
+        setLimits({
+          ...limits,
+          [limitKey]: Math.min(
+            limits[limitKey] + PAGE_SIZE,
+            FINDINGS_LIMIT_CAP,
+          ),
+        })
+      }
+    />
+  );
+}
+
+/** One GitLab category's section: its header, then either the card explaining
+ *  why the category is unavailable or its body — partial-read notice, rows or an
+ *  empty state, truncation tail. Rows differ per category, so they arrive as
+ *  children rather than as a union of group types; `category`, `Category`,
+ *  `cleanTitle` and `noun` are independent wordings, none derivable from
+ *  another. */
+function GlFindingsSection({
+  title,
+  availability,
+  detail,
+  category,
+  Category,
+  cleanTitle,
+  noun,
+  hasGroups,
+  loaded,
+  truncated,
+  limits,
+  setLimits,
+  loading,
+  onRetry,
+  onSetup,
+  children,
+}: {
+  title: string;
+  availability: GlFindingAvailability;
+  detail: string | null;
+  category: string;
+  Category: string;
+  cleanTitle: string;
+  /** Names the rows in both the filter-empty line and the cap sentence — the two
+   *  agree for every GitLab category. */
+  noun: string;
+  hasGroups: boolean;
+  /** Rows loaded before filtering: what separates "nothing matched the filter"
+   *  from "nothing was found". */
+  loaded: number;
+  truncated: boolean;
+  limits: FindingsLimits;
+  setLimits: (limits: FindingsLimits) => void;
+  loading: boolean;
+  onRetry: () => void;
+  onSetup?: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <>
+      <SectionHeader title={title} />
+      {availability !== "available" ? (
+        <GlUnavailableCard
+          availability={availability}
+          detail={detail}
+          category={category}
+          Category={Category}
+          onRetry={onRetry}
+          onSetup={onSetup}
+        />
+      ) : (
+        <>
+          <GlPartialDetail detail={detail} />
+          {hasGroups ? (
+            children
+          ) : loaded > 0 ? (
+            <p className="px-3 py-4 text-xs text-muted-foreground">
+              No {noun} match the filter.
+            </p>
+          ) : (
+            <GlSectionEmpty
+              category={category}
+              cleanTitle={cleanTitle}
+              detail={detail}
+            />
+          )}
+          {/* One limit key for all three categories: they come from a single
+              pipeline query, so growing any one grows all three. */}
+          <FindingsTruncationTail
+            truncated={truncated}
+            loaded={loaded}
+            noun={noun}
+            limits={limits}
+            limitKey="gitlab"
+            setLimits={setLimits}
+            loading={loading}
+          />
+        </>
+      )}
+    </>
+  );
+}
+
 export function FindingsPanel({
   repoPath,
   active,
@@ -1336,185 +1482,79 @@ export function FindingsPanel({
                 />
               ) : (
                 <>
-                  <SectionHeader title="SAST" />
-                  {glOut.sast.availability !== "available" ? (
-                    <GlUnavailableCard
-                      availability={glOut.sast.availability}
-                      detail={glOut.sast.detail}
-                      category="SAST"
-                      Category="SAST"
-                      onRetry={() => gl.refetch()}
-                      onSetup={
-                        glSetupUrl ? () => openUrl(glSetupUrl) : undefined
-                      }
+                  <GlFindingsSection
+                    title="SAST"
+                    availability={glOut.sast.availability}
+                    detail={glOut.sast.detail}
+                    category="SAST"
+                    Category="SAST"
+                    cleanTitle="No SAST findings in this pipeline"
+                    noun="SAST findings"
+                    hasGroups={glSastGroups.length > 0}
+                    loaded={allGlSast.length}
+                    truncated={glOut.sast.truncated}
+                    limits={limits}
+                    setLimits={setFindingsLimits}
+                    loading={gl.isFetching}
+                    onRetry={() => gl.refetch()}
+                    onSetup={glSetupUrl ? () => openUrl(glSetupUrl) : undefined}
+                  >
+                    <GlSecureRows
+                      groups={glSastGroups}
+                      category="sast"
+                      selectedRowId={selectedRowId}
+                      onSelect={selectFinding}
                     />
-                  ) : (
-                    <>
-                      <GlPartialDetail detail={glOut.sast.detail} />
-                      {glSastGroups.length === 0 ? (
-                        allGlSast.length > 0 ? (
-                          <p className="px-3 py-4 text-xs text-muted-foreground">
-                            No SAST findings match the filter.
-                          </p>
-                        ) : (
-                          <GlSectionEmpty
-                            category="SAST"
-                            cleanTitle="No SAST findings in this pipeline"
-                            detail={glOut.sast.detail}
-                          />
-                        )
-                      ) : (
-                        <GlSecureRows
-                          groups={glSastGroups}
-                          category="sast"
-                          selectedRowId={selectedRowId}
-                          onSelect={selectFinding}
-                        />
-                      )}
-                      {/* Outside the empty branch: filtering to zero matches must
-                          not strip the only way to reach rows past the window. */}
-                      {glOut.sast.truncated &&
-                        (limits.gitlab >= FINDINGS_LIMIT_CAP ? (
-                          <p className="border-t px-3 py-3 text-xs text-muted-foreground">
-                            Showing the first{" "}
-                            {allGlSast.length.toLocaleString()} SAST findings.
-                          </p>
-                        ) : (
-                          <LoadMoreRow
-                            count={allGlSast.length}
-                            loading={gl.isFetching}
-                            onLoadMore={() =>
-                              setFindingsLimits({
-                                ...limits,
-                                gitlab: Math.min(
-                                  limits.gitlab + PAGE_SIZE,
-                                  FINDINGS_LIMIT_CAP,
-                                ),
-                              })
-                            }
-                          />
-                        ))}
-                    </>
-                  )}
+                  </GlFindingsSection>
 
-                  <SectionHeader title="Secret detection" />
-                  {glOut.secretDetection.availability !== "available" ? (
-                    <GlUnavailableCard
-                      availability={glOut.secretDetection.availability}
-                      detail={glOut.secretDetection.detail}
-                      category="secret detection"
-                      Category="Secret detection"
-                      onRetry={() => gl.refetch()}
-                      onSetup={
-                        glSetupUrl ? () => openUrl(glSetupUrl) : undefined
-                      }
+                  <GlFindingsSection
+                    title="Secret detection"
+                    availability={glOut.secretDetection.availability}
+                    detail={glOut.secretDetection.detail}
+                    category="secret detection"
+                    Category="Secret detection"
+                    cleanTitle="No secrets detected in this pipeline"
+                    noun="secret findings"
+                    hasGroups={glSecretGroups.length > 0}
+                    loaded={allGlSecrets.length}
+                    truncated={glOut.secretDetection.truncated}
+                    limits={limits}
+                    setLimits={setFindingsLimits}
+                    loading={gl.isFetching}
+                    onRetry={() => gl.refetch()}
+                    onSetup={glSetupUrl ? () => openUrl(glSetupUrl) : undefined}
+                  >
+                    <GlSecureRows
+                      groups={glSecretGroups}
+                      category="secretDetection"
+                      selectedRowId={selectedRowId}
+                      onSelect={selectFinding}
                     />
-                  ) : (
-                    <>
-                      <GlPartialDetail detail={glOut.secretDetection.detail} />
-                      {glSecretGroups.length === 0 ? (
-                        allGlSecrets.length > 0 ? (
-                          <p className="px-3 py-4 text-xs text-muted-foreground">
-                            No secret findings match the filter.
-                          </p>
-                        ) : (
-                          <GlSectionEmpty
-                            category="secret detection"
-                            cleanTitle="No secrets detected in this pipeline"
-                            detail={glOut.secretDetection.detail}
-                          />
-                        )
-                      ) : (
-                        <GlSecureRows
-                          groups={glSecretGroups}
-                          category="secretDetection"
-                          selectedRowId={selectedRowId}
-                          onSelect={selectFinding}
-                        />
-                      )}
-                      {glOut.secretDetection.truncated &&
-                        (limits.gitlab >= FINDINGS_LIMIT_CAP ? (
-                          <p className="border-t px-3 py-3 text-xs text-muted-foreground">
-                            Showing the first{" "}
-                            {allGlSecrets.length.toLocaleString()} secret
-                            findings.
-                          </p>
-                        ) : (
-                          <LoadMoreRow
-                            count={allGlSecrets.length}
-                            loading={gl.isFetching}
-                            onLoadMore={() =>
-                              setFindingsLimits({
-                                ...limits,
-                                gitlab: Math.min(
-                                  limits.gitlab + PAGE_SIZE,
-                                  FINDINGS_LIMIT_CAP,
-                                ),
-                              })
-                            }
-                          />
-                        ))}
-                    </>
-                  )}
+                  </GlFindingsSection>
 
-                  <SectionHeader title="Code quality" />
-                  {glOut.codeQuality.availability !== "available" ? (
-                    <GlUnavailableCard
-                      availability={glOut.codeQuality.availability}
-                      detail={glOut.codeQuality.detail}
-                      category="code quality"
-                      Category="Code quality"
-                      onRetry={() => gl.refetch()}
-                      onSetup={
-                        glSetupUrl ? () => openUrl(glSetupUrl) : undefined
-                      }
+                  <GlFindingsSection
+                    title="Code quality"
+                    availability={glOut.codeQuality.availability}
+                    detail={glOut.codeQuality.detail}
+                    category="code quality"
+                    Category="Code quality"
+                    cleanTitle="No code quality findings in this pipeline"
+                    noun="code quality findings"
+                    hasGroups={glQualityGroups.length > 0}
+                    loaded={allGlQuality.length}
+                    truncated={glOut.codeQuality.truncated}
+                    limits={limits}
+                    setLimits={setFindingsLimits}
+                    loading={gl.isFetching}
+                    onRetry={() => gl.refetch()}
+                    onSetup={glSetupUrl ? () => openUrl(glSetupUrl) : undefined}
+                  >
+                    <GlQualityRows
+                      groups={glQualityGroups}
+                      selectedRowId={selectedRowId}
+                      onSelect={selectFinding}
                     />
-                  ) : (
-                    <>
-                      <GlPartialDetail detail={glOut.codeQuality.detail} />
-                      {glQualityGroups.length === 0 ? (
-                        allGlQuality.length > 0 ? (
-                          <p className="px-3 py-4 text-xs text-muted-foreground">
-                            No code quality findings match the filter.
-                          </p>
-                        ) : (
-                          <GlSectionEmpty
-                            category="code quality"
-                            cleanTitle="No code quality findings in this pipeline"
-                            detail={glOut.codeQuality.detail}
-                          />
-                        )
-                      ) : (
-                        <GlQualityRows
-                          groups={glQualityGroups}
-                          selectedRowId={selectedRowId}
-                          onSelect={selectFinding}
-                        />
-                      )}
-                      {glOut.codeQuality.truncated &&
-                        (limits.gitlab >= FINDINGS_LIMIT_CAP ? (
-                          <p className="border-t px-3 py-3 text-xs text-muted-foreground">
-                            Showing the first{" "}
-                            {allGlQuality.length.toLocaleString()} code quality
-                            findings.
-                          </p>
-                        ) : (
-                          <LoadMoreRow
-                            count={allGlQuality.length}
-                            loading={gl.isFetching}
-                            onLoadMore={() =>
-                              setFindingsLimits({
-                                ...limits,
-                                gitlab: Math.min(
-                                  limits.gitlab + PAGE_SIZE,
-                                  FINDINGS_LIMIT_CAP,
-                                ),
-                              })
-                            }
-                          />
-                        ))}
-                    </>
-                  )}
+                  </GlFindingsSection>
                 </>
               )}
             </div>
@@ -1614,29 +1654,15 @@ export function FindingsPanel({
                     </div>
                   ))
                 )}
-                {/* Outside the empty branch: filtering to zero matches must not
-                    strip the only way to reach rows past the fetched window. */}
-                {alertsOut.truncated &&
-                  (limits.alerts >= FINDINGS_LIMIT_CAP ? (
-                    <p className="border-t px-3 py-3 text-xs text-muted-foreground">
-                      Showing the first {allAlerts.length.toLocaleString()}{" "}
-                      dependency alerts.
-                    </p>
-                  ) : (
-                    <LoadMoreRow
-                      count={allAlerts.length}
-                      loading={alerts.isFetching}
-                      onLoadMore={() =>
-                        setFindingsLimits({
-                          ...limits,
-                          alerts: Math.min(
-                            limits.alerts + PAGE_SIZE,
-                            FINDINGS_LIMIT_CAP,
-                          ),
-                        })
-                      }
-                    />
-                  ))}
+                <FindingsTruncationTail
+                  truncated={alertsOut.truncated}
+                  loaded={allAlerts.length}
+                  noun="dependency alerts"
+                  limits={limits}
+                  limitKey="alerts"
+                  setLimits={setFindingsLimits}
+                  loading={alerts.isFetching}
+                />
               </>
             )}
 
@@ -1749,28 +1775,15 @@ export function FindingsPanel({
                     </div>
                   ))
                 )}
-                {codeScanningOut.truncated &&
-                  (limits.codeScanning >= FINDINGS_LIMIT_CAP ? (
-                    <p className="border-t px-3 py-3 text-xs text-muted-foreground">
-                      Showing the first{" "}
-                      {allCodeScanning.length.toLocaleString()} code scanning
-                      alerts.
-                    </p>
-                  ) : (
-                    <LoadMoreRow
-                      count={allCodeScanning.length}
-                      loading={codeScanning.isFetching}
-                      onLoadMore={() =>
-                        setFindingsLimits({
-                          ...limits,
-                          codeScanning: Math.min(
-                            limits.codeScanning + PAGE_SIZE,
-                            FINDINGS_LIMIT_CAP,
-                          ),
-                        })
-                      }
-                    />
-                  ))}
+                <FindingsTruncationTail
+                  truncated={codeScanningOut.truncated}
+                  loaded={allCodeScanning.length}
+                  noun="code scanning alerts"
+                  limits={limits}
+                  limitKey="codeScanning"
+                  setLimits={setFindingsLimits}
+                  loading={codeScanning.isFetching}
+                />
               </>
             )}
 
@@ -1888,27 +1901,15 @@ export function FindingsPanel({
                     </div>
                   ))
                 )}
-                {secretsOut.truncated &&
-                  (limits.secretScanning >= FINDINGS_LIMIT_CAP ? (
-                    <p className="border-t px-3 py-3 text-xs text-muted-foreground">
-                      Showing the first {allSecrets.length.toLocaleString()}{" "}
-                      secret scanning alerts.
-                    </p>
-                  ) : (
-                    <LoadMoreRow
-                      count={allSecrets.length}
-                      loading={secrets.isFetching}
-                      onLoadMore={() =>
-                        setFindingsLimits({
-                          ...limits,
-                          secretScanning: Math.min(
-                            limits.secretScanning + PAGE_SIZE,
-                            FINDINGS_LIMIT_CAP,
-                          ),
-                        })
-                      }
-                    />
-                  ))}
+                <FindingsTruncationTail
+                  truncated={secretsOut.truncated}
+                  loaded={allSecrets.length}
+                  noun="secret scanning alerts"
+                  limits={limits}
+                  limitKey="secretScanning"
+                  setLimits={setFindingsLimits}
+                  loading={secrets.isFetching}
+                />
               </>
             )}
 
@@ -2000,27 +2001,15 @@ export function FindingsPanel({
                     );
                   })
                 )}
-                {advisoriesOut.truncated &&
-                  (limits.advisories >= FINDINGS_LIMIT_CAP ? (
-                    <p className="border-t px-3 py-3 text-xs text-muted-foreground">
-                      Showing the first {allAdvisories.length.toLocaleString()}{" "}
-                      security advisories.
-                    </p>
-                  ) : (
-                    <LoadMoreRow
-                      count={allAdvisories.length}
-                      loading={advisories.isFetching}
-                      onLoadMore={() =>
-                        setFindingsLimits({
-                          ...limits,
-                          advisories: Math.min(
-                            limits.advisories + PAGE_SIZE,
-                            FINDINGS_LIMIT_CAP,
-                          ),
-                        })
-                      }
-                    />
-                  ))}
+                <FindingsTruncationTail
+                  truncated={advisoriesOut.truncated}
+                  loaded={allAdvisories.length}
+                  noun="security advisories"
+                  limits={limits}
+                  limitKey="advisories"
+                  setLimits={setFindingsLimits}
+                  loading={advisories.isFetching}
+                />
               </>
             )}
           </div>

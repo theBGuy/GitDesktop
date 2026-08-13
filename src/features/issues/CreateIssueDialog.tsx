@@ -308,7 +308,9 @@ export function CreateIssueDialog({
                             className="size-2 shrink-0 rounded-full"
                             style={{ backgroundColor: `#${label.color}` }}
                           />
-                          <span className="flex-1 truncate">{label.name}</span>
+                          <span className="flex-1 truncate" title={label.name}>
+                            {label.name}
+                          </span>
                         </label>
                       ))}
                     </Popover.Popup>

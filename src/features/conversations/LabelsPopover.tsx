@@ -9,10 +9,10 @@ import type { RemoteLens, RepoLabel } from "@/lib/git/types";
 import { LabelChip } from "./Thread";
 
 /**
- * Labels editor + chips, shared by the issue and PR views (labels are a
- * Labelable, so the same `labelableId`-keyed mutation works for both). Edits are
- * drafted while the popover is open and committed as one batched mutation on
- * close — instant checkboxes, one network call.
+ * Labels editor + chips, shared by the issue, PR and discussion views (labels
+ * are a Labelable, so the same `labelableId`-keyed mutation works for all).
+ * Edits are drafted while the popover is open and committed as one batched
+ * mutation on close — instant checkboxes, one network call.
  */
 export function LabelsPopover({
   repoPath,
@@ -29,7 +29,7 @@ export function LabelsPopover({
   /** The issue/MR number — GitLab keys the write on it (GitHub uses `labelableId`). */
   number: number;
   /** Which surface these labels live on — GitLab's endpoint differs (issues vs MRs). */
-  target: "issue" | "mr";
+  target: "issue" | "mr" | "discussion";
   labelableId: string;
   labels: RepoLabel[];
   /** The origin|upstream lens the parent PR/issue surface resolved. */
@@ -73,8 +73,8 @@ export function LabelsPopover({
     // the names — the forge command takes whichever pair its provider addresses by.
     if (addNames.length > 0 || removeNames.length > 0) {
       editLabels.mutate({
-        // `target` is this popover's surface ("issue" | "mr"); it doubles as the
-        // reconcile `kind`. (Discussions use their own view, not this popover.)
+        // `target` is this popover's surface; it doubles as the reconcile `kind`,
+        // which is what picks the wire shape and the caches to invalidate.
         kind: target,
         number,
         labelableId,

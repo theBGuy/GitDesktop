@@ -19,7 +19,6 @@ import {
 import type { ReactNode } from "react";
 import { useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { MarkdownEditor } from "@/components/markdown-editor";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -32,6 +31,7 @@ import { Input } from "@/components/ui/input";
 import { Markdown } from "@/components/ui/markdown";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { BranchDiffView } from "@/features/compare/BranchDiffView";
+import { CommentComposer } from "@/features/conversations/CommentComposer";
 import { CommitsList } from "@/features/conversations/CommitsList";
 import { DeleteCommentDialog } from "@/features/conversations/DeleteCommentDialog";
 import {
@@ -71,6 +71,7 @@ import { LocalPrLifecycleRow } from "./LocalPrTimeline";
 import { PromoteLocalPrDialog } from "./PromoteLocalPrDialog";
 import { PrReviewPanel } from "./PrReviewPanel";
 import {
+  coalesceCommitRuns,
   PushedCommitsRow,
   sortTimeline,
   type TimelineEntry,
@@ -87,10 +88,6 @@ import {
 } from "./useLinkedIssueChips";
 
 type Section = "conversation" | "commits" | "files" | "review";
-
-/** Platform-correct submit hint (Cmd+Enter on macOS, Ctrl+Enter else) — never a
- *  literal modifier (house platform-mod-key rule). */
-const SUBMIT_HINT = formatBinding("mod+enter");
 
 export function LocalPrView({
   repoPath,
@@ -805,38 +802,21 @@ export function LocalPrView({
                   });
                 }
 
-                const sorted = sortTimeline(entries);
-
                 // Coalesce adjacent commit markers into grouped "pushed N" rows;
                 // everything else renders its own node.
-                const rendered: ReactNode[] = [];
-                const commitRun: NonNullable<TimelineEntry["commit"]>[] = [];
-                let runStart = 0;
-                const flush = () => {
-                  if (commitRun.length === 0) return;
-                  rendered.push(
+                const rendered = coalesceCommitRuns(
+                  sortTimeline(entries),
+                  (run, runStart) => (
                     <PushedCommitsRow
-                      key={`push-${runStart}-${commitRun[0].id}`}
-                      commits={[...commitRun]}
+                      key={`push-${runStart}-${run[0].id}`}
+                      commits={run}
                       onSelectCommit={(hash) => {
                         setSelectedCommitHash(hash);
                         setSection("commits");
                       }}
-                    />,
-                  );
-                  commitRun.length = 0;
-                };
-                for (let i = 0; i < sorted.length; i++) {
-                  const entry = sorted[i];
-                  if (entry.commit) {
-                    if (commitRun.length === 0) runStart = i;
-                    commitRun.push(entry.commit);
-                  } else {
-                    flush();
-                    rendered.push(entry.node);
-                  }
-                }
-                flush();
+                    />
+                  ),
+                );
 
                 return <div className="space-y-4">{rendered}</div>;
               })()}
@@ -844,33 +824,17 @@ export function LocalPrView({
           </ScrollArea>
           {/* Shown for closed PRs too, so you can comment / quote-reply after
               closing; approving stays open-only. */}
-          <div className="space-y-2 border-t p-3">
-            <MarkdownEditor
-              ref={composerRef}
-              aria-label="Leave a note"
-              placeholder="Leave a note…"
-              value={comment}
-              onChange={setComment}
-              onKeyDown={(e) => {
-                if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
-                  e.preventDefault();
-                  addComment();
-                }
-              }}
-              rows={2}
-              textareaClassName="max-h-32 min-h-12 resize-y"
-            />
-            <div className="flex items-center gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={!comment.trim()}
-                onClick={addComment}
-                title={SUBMIT_HINT}
-              >
-                Comment
-              </Button>
-              {pr.status === "open" && (
+          <CommentComposer
+            ref={composerRef}
+            value={comment}
+            onChange={setComment}
+            onSubmit={addComment}
+            onClear={() => setComment("")}
+            submitLabel="Comment"
+            ariaLabel="Leave a note"
+            placeholder="Leave a note…"
+            actions={
+              pr.status === "open" && (
                 <Button
                   variant={pr.approved ? "secondary" : "outline"}
                   size="sm"
@@ -880,20 +844,9 @@ export function LocalPrView({
                   <CheckCircleIcon data-icon="inline-start" />
                   {pr.approved ? "Approved" : "Approve"}
                 </Button>
-              )}
-              {comment.trim() && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="ml-auto"
-                  onClick={() => setComment("")}
-                  title="Discard this draft (e.g. a quote reply)"
-                >
-                  Clear
-                </Button>
-              )}
-            </div>
-          </div>
+              )
+            }
+          />
         </>
       )}
 

@@ -1,10 +1,8 @@
-import { Popover } from "@base-ui/react/popover";
 import {
   ArrowSquareOutIcon,
   CaretUpIcon,
   CheckCircleIcon,
   DotsThreeIcon,
-  TagIcon,
 } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffectEvent, useRef, useState } from "react";
@@ -15,7 +13,6 @@ import {
 } from "@/components/markdown-editor";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -37,13 +34,17 @@ import { Markdown } from "@/components/ui/markdown";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import {
+  CommentComposer,
+  SUBMIT_HINT,
+} from "@/features/conversations/CommentComposer";
 import { DeleteCommentDialog } from "@/features/conversations/DeleteCommentDialog";
+import { LabelsPopover } from "@/features/conversations/LabelsPopover";
 import { makeQuoteReply } from "@/features/conversations/quoteReply";
 import { ReactionBar } from "@/features/conversations/ReactionBar";
 import {
   AuthorAvatar,
   hasVisibleBody,
-  LabelChip,
   Thread,
 } from "@/features/conversations/Thread";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
@@ -60,12 +61,10 @@ import {
   useDeleteDiscussionComment,
   useDiscussionDetails,
   useDiscussionReactions,
-  useEditPrLabels,
   useLockDiscussion,
   useMarkDiscussionAnswer,
   useMinimizeComment,
   useReopenDiscussion,
-  useRepoLabels,
   useToggleDiscussionUpvote,
   useToggleReaction,
   useUnlockDiscussion,
@@ -73,7 +72,6 @@ import {
   useUpdateDiscussionComment,
 } from "@/lib/git/queries";
 import type { PrThreadOut } from "@/lib/git/types";
-import { formatBinding } from "@/lib/hotkeys/binding";
 import { useUiStore } from "@/lib/stores/ui";
 import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
@@ -181,10 +179,6 @@ export function DiscussionView({
     ["repo", repoPath, "discussion", number, "reactions"] as const,
     details.data?.id ?? "",
   );
-  // Discussions are a GitHub-only surface with no fork/upstream lens (repo labels
-  // are identical either way); the "origin" lens just satisfies the shared hooks.
-  const editLabels = useEditPrLabels(repoPath, "origin");
-  const repoLabels = useRepoLabels(repoPath, true, "origin");
   const lockDiscussion = useLockDiscussion(repoPath);
   const unlockDiscussion = useUnlockDiscussion(repoPath);
   const closeDiscussion = useCloseDiscussion(repoPath);
@@ -201,12 +195,10 @@ export function DiscussionView({
   const [deletingCommentId, setDeletingCommentId] = useState<string | null>(
     null,
   );
-  const [labelsOpen, setLabelsOpen] = useState(false);
-  const [draftLabels, setDraftLabels] = useState<Set<string>>(new Set());
   const [deletingDiscussion, setDeletingDiscussion] = useState(false);
   // A different discussion must never inherit this one's unsent drafts, reply
-  // target, delete confirm, or label draft — render-time, not an effect. The
-  // repo is part of the identity because discussion numbers repeat across repos.
+  // target, or delete confirm — render-time, not an effect. The repo is part of
+  // the identity because discussion numbers repeat across repos.
   const discussionIdentity = `${repoPath}#${number}`;
   const [lastIdentity, setLastIdentity] = useState(discussionIdentity);
   if (discussionIdentity !== lastIdentity) {
@@ -216,8 +208,6 @@ export function DiscussionView({
     setReplyBody("");
     setDeletingCommentId(null);
     setDeletingDiscussion(false);
-    setLabelsOpen(false);
-    setDraftLabels(new Set());
   }
   // Both submits clear their composer only once the mutation resolves, which can
   // be after a switch — an effect event reads the LIVE identity so a late success
@@ -315,42 +305,6 @@ export function DiscussionView({
 
   function toggleReaction(subjectId: string, content: string, active: boolean) {
     toggleReactionMutation.mutate({ subjectId, content, active }, { onError });
-  }
-
-  function toggleDraftLabel(name: string, on: boolean) {
-    setDraftLabels((prev) => {
-      const next = new Set(prev);
-      if (on) next.add(name);
-      else next.delete(name);
-      return next;
-    });
-  }
-
-  function handleLabelsOpenChange(open: boolean) {
-    if (!d) return;
-    if (open) {
-      setDraftLabels(new Set(d.labels.map((l) => l.name)));
-      setLabelsOpen(true);
-      return;
-    }
-    setLabelsOpen(false);
-    const applied = new Set(d.labels.map((l) => l.name));
-    const idByName = new Map(
-      (repoLabels.data ?? []).map((l) => [l.name, l.id]),
-    );
-    const ids = (names: string[]) =>
-      names.map((n) => idByName.get(n)).filter((id): id is string => !!id);
-    const addIds = ids([...draftLabels].filter((n) => !applied.has(n)));
-    const removeIds = ids([...applied].filter((n) => !draftLabels.has(n)));
-    if (addIds.length > 0 || removeIds.length > 0) {
-      editLabels.mutate({
-        kind: "discussion",
-        number: d.number,
-        labelableId: d.id,
-        addIds,
-        removeIds,
-      });
-    }
   }
 
   function referenceInNewIssue() {
@@ -523,67 +477,23 @@ export function DiscussionView({
           <span>•</span>
           <span>opened {formatRelativeTime(d.createdAt)}</span>
         </div>
-        <div className="flex flex-wrap items-center gap-1.5">
-          <Popover.Root open={labelsOpen} onOpenChange={handleLabelsOpenChange}>
-            <Popover.Trigger
-              render={
-                <Button variant="ghost" size="xs" aria-label="Edit labels" />
-              }
-            >
-              {editLabels.isPending ? (
-                <Spinner data-icon="inline-start" />
-              ) : (
-                <TagIcon data-icon="inline-start" />
-              )}
-              Labels
-            </Popover.Trigger>
-            <Popover.Portal>
-              <Popover.Positioner
-                align="start"
-                sideOffset={4}
-                className="isolate z-50"
-              >
-                <Popover.Popup className="w-60 rounded-none bg-popover p-2 text-popover-foreground shadow-md ring-1 ring-foreground/10">
-                  <p className="px-1 pb-1.5 text-xs font-medium">Labels</p>
-                  {(repoLabels.data ?? []).length === 0 && (
-                    <p className="px-1 py-1 text-xs text-muted-foreground">
-                      {repoLabels.isPending
-                        ? "Loading labels…"
-                        : "This repository has no labels."}
-                    </p>
-                  )}
-                  {(repoLabels.data ?? []).map((label) => (
-                    <label
-                      key={label.name}
-                      className="flex cursor-pointer items-center gap-2 px-1 py-1.5 text-xs hover:bg-muted/60"
-                    >
-                      <Checkbox
-                        checked={draftLabels.has(label.name)}
-                        onCheckedChange={(v) =>
-                          toggleDraftLabel(label.name, v === true)
-                        }
-                      />
-                      <span
-                        aria-hidden
-                        className="size-2 shrink-0 rounded-full"
-                        style={{ backgroundColor: `#${label.color}` }}
-                      />
-                      <span className="flex-1 truncate">{label.name}</span>
-                    </label>
-                  ))}
-                  {(repoLabels.data ?? []).length > 0 && (
-                    <p className="mt-1 border-t px-1 pt-1.5 text-[11px] text-muted-foreground">
-                      Changes apply when this closes.
-                    </p>
-                  )}
-                </Popover.Popup>
-              </Popover.Positioner>
-            </Popover.Portal>
-          </Popover.Root>
-          {d.labels.map((label) => (
-            <LabelChip key={label.name} label={label} />
-          ))}
-        </div>
+        {/* Keyed on the discussion: the popover seeds a draft on open and commits
+            it on close against LIVE props, and this view is never remounted per
+            discussion — so without the key a keyboard switch with it open lands
+            the old discussion's draft on the new one. The prefix keeps the key
+            unique among siblings (duplicates leak the unmounted DOM).
+            Discussions are GitHub-only with no fork/upstream lens (repo labels
+            are identical either way); "origin" just satisfies the shared hooks. */}
+        <LabelsPopover
+          key={`labels-${discussionIdentity}`}
+          repoPath={repoPath}
+          enabled
+          number={number}
+          target="discussion"
+          labelableId={d.id}
+          labels={d.labels}
+          lens="origin"
+        />
       </header>
       {/* overflow-hidden contains the thread's natural height (vendored Root is
           `relative`-only) so a long discussion can't leak a window scrollbar. */}
@@ -776,7 +686,7 @@ export function DiscussionView({
                           variant="outline"
                           disabled={!replyBody.trim() || busy}
                           onClick={() => submitReply(c.id)}
-                          title={formatBinding("mod+enter")}
+                          title={SUBMIT_HINT}
                         >
                           Reply
                         </Button>
@@ -799,49 +709,17 @@ export function DiscussionView({
           )}
         </div>
       </ScrollArea>
-      <div className="space-y-2 border-t p-3">
-        <MarkdownEditor
-          ref={composerRef}
-          aria-label="Add to the discussion"
-          placeholder="Add to the discussion…"
-          value={composeBody}
-          onChange={setComposeBody}
-          onKeyDown={(e) => {
-            if (
-              (e.ctrlKey || e.metaKey) &&
-              e.key === "Enter" &&
-              composeBody.trim() &&
-              !busy
-            ) {
-              e.preventDefault();
-              submitComment();
-            }
-          }}
-          rows={2}
-          textareaClassName="max-h-32 min-h-12 resize-y"
-        />
-        <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={!composeBody.trim() || busy}
-            onClick={submitComment}
-            title={formatBinding("mod+enter")}
-          >
-            Comment
-          </Button>
-          {composeBody.trim() && (
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setComposeBody("")}
-              title="Discard this draft (e.g. a quote reply)"
-            >
-              Clear
-            </Button>
-          )}
-        </div>
-      </div>
+      <CommentComposer
+        ref={composerRef}
+        value={composeBody}
+        onChange={setComposeBody}
+        onSubmit={submitComment}
+        onClear={() => setComposeBody("")}
+        submitLabel="Comment"
+        ariaLabel="Add to the discussion"
+        placeholder="Add to the discussion…"
+        busy={busy}
+      />
 
       <DeleteCommentDialog
         commentId={deletingCommentId}

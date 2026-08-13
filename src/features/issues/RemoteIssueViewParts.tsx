@@ -4,7 +4,7 @@ import {
   PlusIcon,
 } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useState } from "react";
+import { Fragment, type ReactNode, useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import {
@@ -50,13 +50,101 @@ import {
 } from "./IssueMetaPickers";
 import { IssuePicker, IssueRelationships, RelatedRow } from "./IssueRelations";
 
-/** The issue's right-hand metadata rail. Three shapes by provider:
- *  • GitHub (`canWrite`): the full interactive rail — type / assignees / labels /
- *    milestone pickers plus relationships, development, and Projects/Notifications.
- *  • GitLab (labels / assignees / milestone editable, the rest GitHub-only): a
- *    hybrid rail — the three pickers and a link out.
- *  • Read-only (Bitbucket / not-ready): a static rail ({@link ReadOnlyIssueSidebar})
- *    of just what the issue payload carries. */
+/** One row of an issue's metadata rail. Two shapes, because the shared pickers
+ *  label themselves inside their trigger ("Assignees"/"Milestone"/"Type") and a
+ *  wrapper heading would double-label them: a row with no `heading` is hosted
+ *  bare, one with a `heading` gets the muted section header above its value. */
+export type IssueRailRow = {
+  key: string;
+  /** Mount gate — see {@link IssueRail}. */
+  when: boolean;
+  heading?: string;
+  render: () => ReactNode;
+};
+
+/** Renders an ordered rail: the shared shell plus each row that passes its gate.
+ *  A gated-out row is never rendered rather than rendered-and-disabled, because
+ *  the GitHub-only rows fetch `gh_*` and the GitLab-only rows fetch GitLab on
+ *  mount — an always-mounted list would fire both providers' APIs on every
+ *  issue. This is why the per-provider rails existed, and why one list still
+ *  can't be unconditional. */
+export function IssueRail({ rows }: { rows: IssueRailRow[] }) {
+  return (
+    <aside className="w-64 shrink-0 space-y-4 overflow-y-auto border-l p-4">
+      {rows.map((row) => {
+        if (!row.when) return null;
+        return row.heading === undefined ? (
+          <Fragment key={row.key}>{row.render()}</Fragment>
+        ) : (
+          <div key={row.key} className="space-y-1.5">
+            <p className="text-xs font-medium text-muted-foreground">
+              {row.heading}
+            </p>
+            {row.render()}
+          </div>
+        );
+      })}
+    </aside>
+  );
+}
+
+/** A rail row's link out. Every one targets the issue's own URL — only the
+ *  framing (Links / Projects / Notifications) differs per provider surface. */
+function RailLinkButton({
+  url,
+  children,
+}: {
+  url: string;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => openUrl(url)}
+      className="flex cursor-pointer items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground hover:underline"
+    >
+      <ArrowSquareOutIcon className="size-3" />
+      {children}
+    </button>
+  );
+}
+
+/** The static milestone row: the hybrid rail's fallback when the picker isn't
+ *  available, and the read-only rail's only milestone shape. */
+function milestoneValueRow(issue: IssueDetails, when: boolean): IssueRailRow {
+  return {
+    key: "milestone-value",
+    when: when && issue.milestone !== null,
+    heading: "Milestone",
+    render: () => <p className="text-xs">{issue.milestone?.title}</p>,
+  };
+}
+
+/** The "View on <provider>" row every non-GitHub rail ends with. */
+function viewOnRemoteRow(
+  issue: IssueDetails,
+  remoteLabel: string,
+  when: boolean,
+): IssueRailRow {
+  return {
+    key: "links",
+    when,
+    heading: "Links",
+    render: () => (
+      <RailLinkButton url={issue.url}>View on {remoteLabel}</RailLinkButton>
+    ),
+  };
+}
+
+/** The issue's right-hand metadata rail — one ordered row list, each row gated on
+ *  the capability that feeds it. Assignees / labels / milestone are the shared
+ *  three; issue type, projects, relationships, development and notifications are
+ *  GitHub-only (their data comes from `gh_*`); due date, confidential, time
+ *  tracking and related issues are GitLab-only (GitHub pins those four
+ *  capabilities false, so the two groups can never appear together). A provider
+ *  we can only read from gets the static rail instead
+ *  ({@link ReadOnlyIssueSidebar}). The affordance carries the cue: a ghost-button
+ *  picker means editable; a muted label + value means read-only. */
 export function IssueSidebar({
   repoPath,
   number,
@@ -118,195 +206,176 @@ export function IssueSidebar({
     return <ReadOnlyIssueSidebar issue={issue} remoteLabel={remoteLabel} />;
   }
 
-  // GitLab: Labels + Assignees + Milestone are editable, but the GitHub-only
-  // surfaces (issue type, relationships, development, projects/notifications)
-  // aren't wired — a hybrid of the editable pickers and a link out. The affordance
-  // carries the cue: a ghost-button picker means editable; a muted label + value
-  // means read-only.
-  if (!canWrite) {
-    return (
-      <aside className="w-64 shrink-0 space-y-4 overflow-y-auto border-l p-4">
-        {canEditLabels && (
-          <LabelsPopover
-            repoPath={repoPath}
-            enabled
-            number={number}
-            target="issue"
-            labelableId={issue.id}
-            labels={issue.labels}
-            lens={lens}
-            disabledReason={pickerDisabledReason}
-          />
-        )}
-        {canEditAssignees && (
-          <AssigneesPopover
-            repoPath={repoPath}
-            enabled
-            value={issue.assignees}
-            commitOnClose
-            lens={lens}
-            disabledReason={pickerDisabledReason}
-            onChange={(next) =>
-              setAssignees.mutate({ number, assignees: next })
-            }
-          />
-        )}
-        {canSetMilestone ? (
-          <MilestoneMenu
-            repoPath={repoPath}
-            enabled
-            value={issue.milestone?.number ?? null}
-            valueLabel={issue.milestone?.title}
-            lens={lens}
-            disabledReason={pickerDisabledReason}
-            onChange={(m, title) =>
-              setMilestone.mutate({ number, milestone: m, title })
-            }
-          />
-        ) : (
-          issue.milestone && (
-            <div className="space-y-1.5">
-              <p className="text-xs font-medium text-muted-foreground">
-                Milestone
-              </p>
-              <p className="text-xs">{issue.milestone.title}</p>
-            </div>
-          )
-        )}
-        {canSetDueDate && (
-          <DueDateRow
-            value={issue.dueDate}
-            open={issue.state === "OPEN"}
-            pending={setDueDate.isPending}
-            disabledReason={pickerDisabledReason}
-            onChange={(dueDate) => setDueDate.mutate({ number, dueDate })}
-          />
-        )}
-        {canSetConfidential && (
-          <ConfidentialRow
-            value={issue.confidential}
-            pending={setConfidential.isPending}
-            disabledReason={pickerDisabledReason}
-            onChange={(confidential) =>
-              setConfidential.mutate({ number, confidential })
-            }
-          />
-        )}
-        {canTrackTime && (
-          <IssueTimeTrackingSection
-            repoPath={repoPath}
-            number={number}
-            editable={issue.state === "OPEN"}
-            disabledReason={pickerDisabledReason}
-          />
-        )}
-        {canLinkIssues && (
-          <IssueLinksSection
-            repoPath={repoPath}
-            number={number}
-            editable={issue.state === "OPEN"}
-            lens={lens}
-            disabledReason={pickerDisabledReason}
-          />
-        )}
-        <div className="space-y-1.5">
-          <p className="text-xs font-medium text-muted-foreground">Links</p>
-          <button
-            type="button"
-            onClick={() => openUrl(issue.url)}
-            className="flex cursor-pointer items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground hover:underline"
-          >
-            <ArrowSquareOutIcon className="size-3" />
-            View on {remoteLabel}
-          </button>
-        </div>
-      </aside>
-    );
-  }
+  // GitHub-only rows gate on `canWrite` ("not a known read-only provider", true
+  // while the forge probe is pending) — never a provider equality check.
+  const rows: IssueRailRow[] = [
+    {
+      key: "type",
+      when: canWrite,
+      render: () => (
+        <IssueTypeMenu
+          repoPath={repoPath}
+          enabled
+          value={issue.issueType}
+          lens={lens}
+          disabledReason={pickerDisabledReason}
+          onChange={(type) =>
+            setType.mutate({ number, typeName: type?.name ?? null, type })
+          }
+        />
+      ),
+    },
+    {
+      key: "assignees",
+      when: canEditAssignees,
+      render: () => (
+        <AssigneesPopover
+          repoPath={repoPath}
+          enabled
+          value={issue.assignees}
+          commitOnClose
+          lens={lens}
+          disabledReason={pickerDisabledReason}
+          onChange={(next) => setAssignees.mutate({ number, assignees: next })}
+        />
+      ),
+    },
+    {
+      key: "labels",
+      when: canEditLabels,
+      render: () => (
+        <LabelsPopover
+          repoPath={repoPath}
+          enabled
+          number={number}
+          target="issue"
+          labelableId={issue.id}
+          labels={issue.labels}
+          lens={lens}
+          disabledReason={pickerDisabledReason}
+        />
+      ),
+    },
+    {
+      key: "milestone",
+      when: canSetMilestone,
+      render: () => (
+        <MilestoneMenu
+          repoPath={repoPath}
+          enabled
+          value={issue.milestone?.number ?? null}
+          valueLabel={issue.milestone?.title}
+          lens={lens}
+          disabledReason={pickerDisabledReason}
+          onChange={(m, title) =>
+            setMilestone.mutate({ number, milestone: m, title })
+          }
+        />
+      ),
+    },
+    milestoneValueRow(issue, !canSetMilestone),
+    {
+      key: "projects",
+      when: canWrite,
+      heading: "Projects",
+      render: () => (
+        <RailLinkButton url={issue.url}>Manage on GitHub</RailLinkButton>
+      ),
+    },
+    {
+      key: "relationships",
+      when: canWrite,
+      render: () => (
+        <IssueRelationships
+          repoPath={repoPath}
+          number={number}
+          lens={lens}
+          disabledReason={pickerDisabledReason}
+        />
+      ),
+    },
+    {
+      key: "development",
+      when: canWrite,
+      // The rail's one PUSH-tier affordance (creating a linked branch), so it
+      // takes the write reason where every other row takes the triage one.
+      render: () => (
+        <IssueDevelopment
+          repoPath={repoPath}
+          number={number}
+          issueId={issue.id}
+          issueTitle={issue.title}
+          issueUrl={issue.url}
+          lens={lens}
+          disabledReason={writeItemReason}
+        />
+      ),
+    },
+    {
+      key: "notifications",
+      when: canWrite,
+      heading: "Notifications",
+      render: () => (
+        <RailLinkButton url={issue.url}>Subscribe on GitHub</RailLinkButton>
+      ),
+    },
+    {
+      key: "due-date",
+      when: canSetDueDate,
+      render: () => (
+        <DueDateRow
+          value={issue.dueDate}
+          open={issue.state === "OPEN"}
+          pending={setDueDate.isPending}
+          disabledReason={pickerDisabledReason}
+          onChange={(dueDate) => setDueDate.mutate({ number, dueDate })}
+        />
+      ),
+    },
+    {
+      key: "confidential",
+      when: canSetConfidential,
+      render: () => (
+        <ConfidentialRow
+          value={issue.confidential}
+          pending={setConfidential.isPending}
+          disabledReason={pickerDisabledReason}
+          onChange={(confidential) =>
+            setConfidential.mutate({ number, confidential })
+          }
+        />
+      ),
+    },
+    {
+      key: "time-tracking",
+      when: canTrackTime,
+      render: () => (
+        <IssueTimeTrackingSection
+          repoPath={repoPath}
+          number={number}
+          editable={issue.state === "OPEN"}
+          disabledReason={pickerDisabledReason}
+        />
+      ),
+    },
+    {
+      key: "related",
+      when: canLinkIssues,
+      render: () => (
+        <IssueLinksSection
+          repoPath={repoPath}
+          number={number}
+          editable={issue.state === "OPEN"}
+          lens={lens}
+          disabledReason={pickerDisabledReason}
+        />
+      ),
+    },
+    // GitHub frames its link out as Projects + Notifications above instead.
+    viewOnRemoteRow(issue, remoteLabel, !canWrite),
+  ];
 
-  return (
-    <aside className="w-64 shrink-0 space-y-4 overflow-y-auto border-l p-4">
-      <IssueTypeMenu
-        repoPath={repoPath}
-        enabled
-        value={issue.issueType}
-        lens={lens}
-        disabledReason={pickerDisabledReason}
-        onChange={(type) =>
-          setType.mutate({ number, typeName: type?.name ?? null, type })
-        }
-      />
-      <AssigneesPopover
-        repoPath={repoPath}
-        enabled
-        value={issue.assignees}
-        commitOnClose
-        lens={lens}
-        disabledReason={pickerDisabledReason}
-        onChange={(next) => setAssignees.mutate({ number, assignees: next })}
-      />
-      <LabelsPopover
-        repoPath={repoPath}
-        enabled
-        number={number}
-        target="issue"
-        labelableId={issue.id}
-        labels={issue.labels}
-        lens={lens}
-        disabledReason={pickerDisabledReason}
-      />
-      <MilestoneMenu
-        repoPath={repoPath}
-        enabled
-        value={issue.milestone?.number ?? null}
-        valueLabel={issue.milestone?.title}
-        lens={lens}
-        disabledReason={pickerDisabledReason}
-        onChange={(m, title) =>
-          setMilestone.mutate({ number, milestone: m, title })
-        }
-      />
-      <div className="space-y-1.5">
-        <p className="text-xs font-medium text-muted-foreground">Projects</p>
-        <button
-          type="button"
-          onClick={() => openUrl(issue.url)}
-          className="flex cursor-pointer items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground hover:underline"
-        >
-          <ArrowSquareOutIcon className="size-3" />
-          Manage on GitHub
-        </button>
-      </div>
-      <IssueRelationships
-        repoPath={repoPath}
-        number={number}
-        lens={lens}
-        disabledReason={pickerDisabledReason}
-      />
-      <IssueDevelopment
-        repoPath={repoPath}
-        number={number}
-        issueId={issue.id}
-        issueTitle={issue.title}
-        issueUrl={issue.url}
-        lens={lens}
-        disabledReason={writeItemReason}
-      />
-      <div className="space-y-1.5">
-        <p className="text-xs font-medium text-muted-foreground">
-          Notifications
-        </p>
-        <button
-          type="button"
-          onClick={() => openUrl(issue.url)}
-          className="flex cursor-pointer items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground hover:underline"
-        >
-          <ArrowSquareOutIcon className="size-3" />
-          Subscribe on GitHub
-        </button>
-      </div>
-    </aside>
-  );
+  return <IssueRail rows={rows} />;
 }
 
 /** Whether a due date lies before today, in LOCAL time (`Date`/`toISOString`
@@ -784,69 +853,62 @@ function ReadOnlyIssueSidebar({
     issue.dueDate !== null ||
     issue.confidential;
 
-  return (
-    <aside className="w-64 shrink-0 space-y-4 overflow-y-auto border-l p-4">
-      {issue.assignees.length > 0 && (
-        <div className="space-y-1.5">
-          <p className="text-xs font-medium text-muted-foreground">Assignees</p>
-          <ul className="space-y-1">
-            {issue.assignees.map((user) => (
-              <li key={user.id} className="flex items-center gap-1.5 text-xs">
-                <AuthorAvatar login={user.id} avatarUrl={user.avatarUrl} />
-                <span className="truncate">{user.label}</span>
-              </li>
-            ))}
-          </ul>
+  const rows: IssueRailRow[] = [
+    {
+      key: "assignees",
+      when: issue.assignees.length > 0,
+      heading: "Assignees",
+      render: () => (
+        <ul className="space-y-1">
+          {issue.assignees.map((user) => (
+            <li key={user.id} className="flex items-center gap-1.5 text-xs">
+              <AuthorAvatar login={user.id} avatarUrl={user.avatarUrl} />
+              <span className="truncate" title={user.label}>
+                {user.label}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ),
+    },
+    {
+      key: "labels",
+      when: issue.labels.length > 0,
+      heading: "Labels",
+      render: () => (
+        <div className="flex flex-wrap gap-1.5">
+          {issue.labels.map((label) => (
+            <LabelChip key={label.name} label={label} />
+          ))}
         </div>
-      )}
-      {issue.labels.length > 0 && (
-        <div className="space-y-1.5">
-          <p className="text-xs font-medium text-muted-foreground">Labels</p>
-          <div className="flex flex-wrap gap-1.5">
-            {issue.labels.map((label) => (
-              <LabelChip key={label.name} label={label} />
-            ))}
-          </div>
-        </div>
-      )}
-      {issue.milestone && (
-        <div className="space-y-1.5">
-          <p className="text-xs font-medium text-muted-foreground">Milestone</p>
-          <p className="text-xs">{issue.milestone.title}</p>
-        </div>
-      )}
-      {issue.dueDate && (
-        <div className="space-y-1.5">
-          <p className="text-xs font-medium text-muted-foreground">Due date</p>
-          <p className="text-xs">{issue.dueDate}</p>
-        </div>
-      )}
-      {issue.confidential && (
-        <div className="space-y-1.5">
-          <p className="text-xs font-medium text-muted-foreground">
-            Confidential
-          </p>
-          <p className="text-xs">Only visible to project members.</p>
-        </div>
-      )}
-      {!hasMeta && (
+      ),
+    },
+    milestoneValueRow(issue, true),
+    {
+      key: "due-date",
+      when: !!issue.dueDate,
+      heading: "Due date",
+      render: () => <p className="text-xs">{issue.dueDate}</p>,
+    },
+    {
+      key: "confidential",
+      when: issue.confidential,
+      heading: "Confidential",
+      render: () => <p className="text-xs">Only visible to project members.</p>,
+    },
+    {
+      key: "empty",
+      when: !hasMeta,
+      render: () => (
         <p className="text-xs text-muted-foreground">
-          No labels, assignees, or milestone.
+          No assignees, labels, milestone, or due date.
         </p>
-      )}
-      <div className="space-y-1.5">
-        <p className="text-xs font-medium text-muted-foreground">Links</p>
-        <button
-          type="button"
-          onClick={() => openUrl(issue.url)}
-          className="flex cursor-pointer items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground hover:underline"
-        >
-          <ArrowSquareOutIcon className="size-3" />
-          View on {remoteLabel}
-        </button>
-      </div>
-    </aside>
-  );
+      ),
+    },
+    viewOnRemoteRow(issue, remoteLabel, true),
+  ];
+
+  return <IssueRail rows={rows} />;
 }
 
 /** Transfer/move-to-another-repo dialog. Presentational — the parent owns the

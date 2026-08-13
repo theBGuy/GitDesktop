@@ -1197,7 +1197,7 @@ next to any local issues. Open one to read the description and comments — and 
 issue **writes**: **comment** on the issue (and **edit** or **delete** your own comments),
 **close / reopen** it, **edit** its title and
 description, **react** with emoji on the description and comments (GitLab's award emoji),
-and set its **labels**, **assignees**, and **milestone** right in the side
+and set its **assignees**, **labels**, and **milestone** right in the side
 rail. The rail also carries GitLab-unique fields: a **due date** (type a date and
 press Enter, or pick from the calendar; **Clear** removes it, and an open issue past
 its date reads "Past due"), a **confidential** toggle (hides the issue from

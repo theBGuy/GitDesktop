@@ -41,6 +41,7 @@ import {
   uniqueServerName,
 } from "@/lib/settings/mcp-registry";
 import { formatRelativeTime } from "@/lib/time";
+import { useDebouncedValue } from "@/lib/use-debounced-value";
 import { useLatestRef } from "@/lib/use-latest-ref";
 
 /** Compact number for stars/installs (87729 → "87.7K"). */
@@ -87,7 +88,7 @@ export function BrowseRegistryDialog({
 }) {
   const [source, setSource] = useState<"registry" | "github">("registry");
   const [query, setQuery] = useState("");
-  const [debounced, setDebounced] = useState("");
+  const debounced = useDebouncedValue(query.trim(), 300);
   const [activeIndex, setActiveIndex] = useState(-1);
   // Registry names added this session — flips their row to "Added".
   const [added, setAdded] = useState<Set<string>>(new Set());
@@ -99,12 +100,6 @@ export function BrowseRegistryDialog({
   // Read the live list through a ref for name-uniqueness on add, without making
   // anything else depend on it (which would re-render the search results).
   const existingRef = useLatestRef(existing);
-
-  // Debounce the query so typing doesn't fire a request per keystroke.
-  useEffect(() => {
-    const t = setTimeout(() => setDebounced(query.trim()), 300);
-    return () => clearTimeout(t);
-  }, [query]);
 
   // Cursor-paginated registry search. TanStack Query owns abort (via signal),
   // caching, retry, and next-page fetching, keyed on the debounced query.

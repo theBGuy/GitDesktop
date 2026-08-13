@@ -12,6 +12,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { SUBMIT_HINT } from "@/features/conversations/CommentComposer";
 import { REVIEWER_NOTES_MARKER } from "@/lib/ai/notes-context";
 import { triggerAutomations } from "@/lib/automations/runner";
 import { required, useAppForm } from "@/lib/form";
@@ -38,10 +39,6 @@ import {
   composeBodyWithRefs,
   useLinkedIssueChips,
 } from "./useLinkedIssueChips";
-
-/** Platform-correct submit hint (Cmd+Enter on macOS, Ctrl+Enter else) — never a
- *  literal modifier (house platform-mod-key rule). */
-const SUBMIT_HINT = formatBinding("mod+enter");
 
 // Rendered exactly ONCE, hoisted in RepositoryView — never render it inside a tab
 // panel. Its success handler's `setRepoTab("pulls")` would hide a panel host's

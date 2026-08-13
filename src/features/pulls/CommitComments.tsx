@@ -4,6 +4,10 @@ import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import { Button } from "@/components/ui/button";
 import { Markdown } from "@/components/ui/markdown";
+import {
+  CommentComposer,
+  SUBMIT_HINT,
+} from "@/features/conversations/CommentComposer";
 import { DeleteCommentDialog } from "@/features/conversations/DeleteCommentDialog";
 import { Thread } from "@/features/conversations/Thread";
 import type { DiffLineAnchor } from "@/features/diff/DiffSurface";
@@ -20,7 +24,6 @@ import type {
   RemoteLens,
 } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
-import { SUBMIT_HINT } from "./ReviewThreads";
 
 export type DiffSections = ReturnType<typeof splitUnifiedDiff>;
 
@@ -391,36 +394,15 @@ export function CommitComments({
       </div>
 
       {canComment && (
-        <div className="space-y-2 border-t p-3">
-          <MarkdownEditor
-            aria-label="Comment on this commit"
-            placeholder="Leave a comment…"
-            value={body}
-            onChange={setBody}
-            onKeyDown={(e) => {
-              if (
-                (e.ctrlKey || e.metaKey) &&
-                e.key === "Enter" &&
-                body.trim() &&
-                !busy
-              ) {
-                e.preventDefault();
-                submit();
-              }
-            }}
-            rows={2}
-            textareaClassName="max-h-32 min-h-12 resize-y"
-          />
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={!body.trim() || busy}
-            onClick={submit}
-            title={SUBMIT_HINT}
-          >
-            Comment
-          </Button>
-        </div>
+        <CommentComposer
+          ariaLabel="Comment on this commit"
+          placeholder="Leave a comment…"
+          value={body}
+          onChange={setBody}
+          onSubmit={submit}
+          submitLabel="Comment"
+          busy={busy}
+        />
       )}
 
       <DeleteCommentDialog

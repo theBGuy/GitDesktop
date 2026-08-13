@@ -38,7 +38,7 @@ function unresolved(tasks: PrTask[]): number {
 
 /**
  * Scroll to (or open) the PR comment a task is attached to. Prefers the in-DOM
- * comment mount (`[data-comment-id]`, annotated by RemotePrView on the comment
+ * comment mount (`[data-comment-id]`, annotated by PrActivityFeed on the comment
  * Threads); falls back to the task's web URL when the comment isn't rendered.
  */
 function viewComment(commentId: string, url: string) {

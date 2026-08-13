@@ -175,7 +175,9 @@ export function AssigneesPopover({
                     onCheckedChange={(v) => toggle(user, v === true)}
                   />
                   <ForgeUserAvatar user={user} ghHost={ghHost} />
-                  <span className="flex-1 truncate">{user.label}</span>
+                  <span className="flex-1 truncate" title={user.label}>
+                    {user.label}
+                  </span>
                 </label>
               ))}
             </Popover.Popup>

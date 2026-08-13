@@ -30,6 +30,7 @@ import type { ForgeProvider, ForgeSearchRepo } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
 import { errorMessage, isAppError } from "@/lib/tauri/invoke";
+import { useDebouncedValue } from "@/lib/use-debounced-value";
 import {
   ExploreCloneDialog,
   type ExploreCloneTarget,
@@ -42,7 +43,6 @@ import {
   exploreOptionId,
   forgeRepoToSearchRepo,
   groupReposByOwner,
-  useDebouncedValue,
 } from "./explore-utils";
 
 type SortOption = "best" | "stars" | "updated";
@@ -76,6 +76,8 @@ export function ExploreScreen() {
   const [flatRepos, setFlatRepos] = useState<ForgeSearchRepo[]>([]);
   const detailRef = useRef<HTMLDivElement>(null);
 
+  // 400ms sized against GitHub code search's ~30 req/min bucket — a
+  // keystroke-per-request would burn it.
   const query = useDebouncedValue(rawQuery.trim(), 400);
   const isBitbucket = provider === "bitbucket";
   // Bitbucket retired its global search: no Popular feed, and an empty query has
