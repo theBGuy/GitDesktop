@@ -1,4 +1,5 @@
 import { SparkleIcon } from "@phosphor-icons/react";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import type { FileEntry } from "@/lib/git/types";
@@ -121,34 +122,33 @@ export function GenerateBranchNameButton({
           Generating…
         </Button>
       ) : (
-        // Wrap so the reason still shows when the button is disabled — a
-        // native-disabled button swallows the tooltip.
-        <span className="inline-flex" title={reason}>
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            className="text-muted-foreground"
-            disabled={!canGenerate}
-            onClick={() =>
-              gen.generate({
-                entries,
-                recentBranches: recentBranches.slice(0, 20),
-                useWorkingTree,
-                // Only when naming the very branch those commits sit on.
-                workingTreeSubjects:
-                  nameTarget === "checked-out-branch"
-                    ? (committedFallback?.subjects ?? [])
-                    : [],
-                committedFallback,
-                onName,
-              })
-            }
-          >
-            <SparkleIcon data-icon="inline-start" />
-            Generate from changes
-          </Button>
-        </span>
+        <DisabledReasonButton
+          type="button"
+          variant="ghost"
+          size="xs"
+          className="text-muted-foreground"
+          disabled={!canGenerate}
+          // `reason` doubles as the enabled-state hint ("Suggest a name from…").
+          reason={canGenerate ? null : reason}
+          title={reason}
+          onClick={() =>
+            gen.generate({
+              entries,
+              recentBranches: recentBranches.slice(0, 20),
+              useWorkingTree,
+              // Only when naming the very branch those commits sit on.
+              workingTreeSubjects:
+                nameTarget === "checked-out-branch"
+                  ? (committedFallback?.subjects ?? [])
+                  : [],
+              committedFallback,
+              onName,
+            })
+          }
+        >
+          <SparkleIcon data-icon="inline-start" />
+          Generate from changes
+        </DisabledReasonButton>
       )}
     </div>
   );

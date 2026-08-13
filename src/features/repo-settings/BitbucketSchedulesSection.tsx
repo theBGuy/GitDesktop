@@ -2,6 +2,7 @@ import { PlusIcon } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -223,16 +224,15 @@ function ScheduleRow({
           onAct={onRemove}
         />
       ) : syncing ? (
-        <span title="Syncing with Bitbucket…" className="inline-flex">
-          <Button
-            size="sm"
-            variant="ghost"
-            className="text-muted-foreground"
-            disabled
-          >
-            Delete
-          </Button>
-        </span>
+        <DisabledReasonButton
+          size="sm"
+          variant="ghost"
+          className="text-muted-foreground"
+          disabled
+          reason="Syncing with Bitbucket…"
+        >
+          Delete
+        </DisabledReasonButton>
       ) : (
         <Button
           size="sm"

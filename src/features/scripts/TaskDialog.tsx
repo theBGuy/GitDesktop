@@ -1,6 +1,7 @@
 import { PlusIcon, SparkleIcon, XIcon } from "@phosphor-icons/react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -402,30 +403,23 @@ export function TaskDialog({
                 Analyzing…
               </Button>
             ) : (
-              // A natively-disabled button swallows pointer events, so its own
-              // `title` never shows — the explanation lives on a wrapping span
-              // (the repo's established pattern for disabled-control tooltips).
-              <span
-                title={
-                  canAnalyze
-                    ? "Read the script and fill in the name, description, and documented arguments"
-                    : sourceKind === "file"
-                      ? "Choose a script file first"
-                      : "Write or generate a script first"
+              <DisabledReasonButton
+                type="button"
+                variant="ghost"
+                size="xs"
+                className="text-muted-foreground"
+                disabled={!canAnalyze}
+                reason={
+                  sourceKind === "file"
+                    ? "Choose a script file first"
+                    : "Write or generate a script first"
                 }
+                title="Read the script and fill in the name, description, and documented arguments"
+                onClick={runAnalyze}
               >
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="xs"
-                  className="text-muted-foreground"
-                  disabled={!canAnalyze}
-                  onClick={runAnalyze}
-                >
-                  <SparkleIcon data-icon="inline-start" />
-                  Analyze with AI
-                </Button>
-              </span>
+                <SparkleIcon data-icon="inline-start" />
+                Analyze with AI
+              </DisabledReasonButton>
             ))}
         </div>
 

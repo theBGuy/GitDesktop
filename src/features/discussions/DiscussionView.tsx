@@ -136,6 +136,8 @@ function UpvoteButton({
   return (
     <button
       type="button"
+      aria-label={`Upvote, ${count}`}
+      aria-pressed={active}
       disabled={disabled}
       onClick={onClick}
       className={cn(

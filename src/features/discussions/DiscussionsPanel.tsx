@@ -1,5 +1,6 @@
 import { CaretDownIcon, PlusIcon } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -92,6 +93,10 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
       d.categoryName.toLowerCase().includes(query),
   );
 
+  const categoryLabel = activeCat
+    ? `${activeCat.emoji ? `${activeCat.emoji} ` : ""}${activeCat.name}`
+    : "All categories";
+
   const navTargets = visible.map((d) => ({ number: d.number }));
   const onListKeyDown = listKeyboardNav({
     items: navTargets,
@@ -106,25 +111,25 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex items-center gap-1 border-b p-2">
         <DropdownMenu>
-          <DropdownMenuTrigger
-            render={
-              <Button
-                variant="outline"
-                size="xs"
-                disabled={!listEnabled}
-                title={
-                  listEnabled
-                    ? undefined
-                    : "Sign in to GitHub to browse discussions"
-                }
-              />
+          {/* A trigger can't take the disabled-reason primitive — a `render`
+              target can't carry its wrapper — so the reason rides a span around
+              the trigger, whose own `disabled` keeps the button inert. */}
+          <span
+            className={cn("inline-flex", !listEnabled && "cursor-not-allowed")}
+            title={
+              listEnabled
+                ? undefined
+                : "Sign in to GitHub to browse discussions"
             }
           >
-            {activeCat
-              ? `${activeCat.emoji ? `${activeCat.emoji} ` : ""}${activeCat.name}`
-              : "All categories"}
-            <CaretDownIcon data-icon="inline-end" />
-          </DropdownMenuTrigger>
+            <DropdownMenuTrigger
+              disabled={!listEnabled}
+              render={<Button variant="outline" size="xs" />}
+            >
+              {categoryLabel}
+              <CaretDownIcon data-icon="inline-end" />
+            </DropdownMenuTrigger>
+          </span>
           <DropdownMenuContent align="start" className="min-w-52">
             <DropdownMenuItem
               onClick={() => chooseCategory(null)}
@@ -148,21 +153,18 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
             ))}
           </DropdownMenuContent>
         </DropdownMenu>
-        <Button
+        <DisabledReasonButton
           variant="ghost"
           size="xs"
-          className="ml-auto"
+          wrapperClassName="ml-auto"
           disabled={!listEnabled}
-          title={
-            listEnabled
-              ? "New discussion"
-              : "Sign in to GitHub to start a discussion"
-          }
+          reason="Sign in to GitHub to start a discussion"
+          title="New discussion"
           onClick={() => setCreateOpen(true)}
         >
           <PlusIcon data-icon="inline-start" />
           New
-        </Button>
+        </DisabledReasonButton>
       </div>
       <div className="border-b p-2">
         <Input

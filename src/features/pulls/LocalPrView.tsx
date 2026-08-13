@@ -17,7 +17,7 @@ import {
   XIcon,
 } from "@phosphor-icons/react";
 import type { ReactNode } from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import { Badge } from "@/components/ui/badge";
@@ -65,6 +65,7 @@ import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
+import { cn } from "@/lib/utils";
 import { LinkedIssuesField } from "./LinkedIssuesField";
 import { LocalPrLifecycleRow } from "./LocalPrTimeline";
 import { PromoteLocalPrDialog } from "./PromoteLocalPrDialog";
@@ -114,17 +115,42 @@ export function LocalPrView({
   const [selectedCommitHash, setSelectedCommitHash] = useState<string | null>(
     null,
   );
+  const aiEnabled = useAiEnabled();
+  // The sub-tabs the strip renders — every writer of `section` gates on this, so
+  // no path can select a tab that isn't there. A local PR has no forge, so the
+  // Review tab rides the AI setting alone (no capability axis to consult).
+  const availableSections = useMemo<Section[]>(
+    () =>
+      aiEnabled
+        ? ["conversation", "commits", "files", "review"]
+        : ["conversation", "commits", "files"],
+    [aiEnabled],
+  );
   // The activity dock's "View" lands here via a pending hint; switch to the
-  // review sub-tab once, then clear it. Guarded on this being the *selected* PR
-  // so a still-mounted lagging view (deferredPr) can't swallow the hint first.
+  // review sub-tab once if it's available, then clear the hint either way — an
+  // unusable hint must not survive to fire against a later PR. Guarded on this
+  // being the *selected* PR so a still-mounted lagging view (deferredPr) can't
+  // swallow the hint first.
   useEffect(() => {
     const isSelected = selectedPr?.kind === "local" && selectedPr.id === id;
     if (pendingPrSection === "review" && isSelected) {
-      setSection("review");
+      if (availableSections.includes("review")) setSection("review");
       setPendingPrSection(null);
     }
-  }, [pendingPrSection, setPendingPrSection, selectedPr, id]);
-  const aiEnabled = useAiEnabled();
+  }, [
+    pendingPrSection,
+    setPendingPrSection,
+    selectedPr,
+    id,
+    availableSections,
+  ]);
+  // Availability can drop away under the selection (Hide AI toggled), which
+  // would leave a blank body under a strip with no pressed tab — fall back to
+  // the tab every PR always has. Layout effect: a passive one paints that empty
+  // frame before reconciling.
+  useLayoutEffect(() => {
+    if (!availableSections.includes(section)) setSection("conversation");
+  }, [availableSections, section]);
   const rulesConfig = useEffectiveBranchRules(repoPath);
   const {
     comment,
@@ -458,6 +484,16 @@ export function LocalPrView({
     );
   }
 
+  // The Merge control's state. Hoisted because the refusal has to sit on the
+  // wrapping span while `disabled` sits on the trigger — a disabled trigger is
+  // what actually keeps the menu shut.
+  const mergeBlocked = !canMerge || merge.isPending || dirtyBlocks;
+  const mergeReason = !canMerge
+    ? "Approve the PR before merging"
+    : dirtyBlocks
+      ? "Commit or stash your changes before merging into the current branch"
+      : `Merge ${pr.head} into ${pr.base}`;
+
   return (
     <div className="flex h-full flex-col">
       <header className="space-y-2 border-b px-4 py-3">
@@ -566,11 +602,7 @@ export function LocalPrView({
           </div>
         )}
         <div className="flex gap-1 pt-1">
-          {(
-            (aiEnabled
-              ? ["conversation", "commits", "files", "review"]
-              : ["conversation", "commits", "files"]) as Section[]
-          ).map((s) => (
+          {availableSections.map((s) => (
             <Button
               key={s}
               variant={section === s ? "secondary" : "ghost"}
@@ -842,6 +874,7 @@ export function LocalPrView({
                 <Button
                   variant={pr.approved ? "secondary" : "outline"}
                   size="sm"
+                  aria-pressed={pr.approved}
                   onClick={toggleApprove}
                 >
                   <CheckCircleIcon data-icon="inline-start" />
@@ -992,25 +1025,26 @@ export function LocalPrView({
               </Button>
             )}
             <DropdownMenu>
-              <DropdownMenuTrigger
-                render={
-                  <Button
-                    size="sm"
-                    disabled={!canMerge || merge.isPending || dirtyBlocks}
-                    title={
-                      !canMerge
-                        ? "Approve the PR before merging"
-                        : dirtyBlocks
-                          ? "Commit or stash your changes before merging into the current branch"
-                          : `Merge ${pr.head} into ${pr.base}`
-                    }
-                  >
-                    <GitMergeIcon data-icon="inline-start" />
-                    Merge
-                    <CaretDownIcon data-icon="inline-end" />
-                  </Button>
-                }
-              />
+              {/* A natively-disabled Button swallows `title`, so the refusal
+                  rides a wrapping span (house idiom) — outside the trigger,
+                  which carries `disabled` itself so a blocked merge can't open
+                  the menu. */}
+              <span
+                title={mergeReason}
+                className={cn(
+                  "inline-flex",
+                  mergeBlocked && "cursor-not-allowed",
+                )}
+              >
+                <DropdownMenuTrigger
+                  disabled={mergeBlocked}
+                  render={<Button size="sm" />}
+                >
+                  <GitMergeIcon data-icon="inline-start" />
+                  Merge
+                  <CaretDownIcon data-icon="inline-end" />
+                </DropdownMenuTrigger>
+              </span>
               <DropdownMenuContent align="end" className="w-56">
                 <DropdownMenuItem
                   disabled={

@@ -9,6 +9,7 @@ import {
   useState,
 } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -396,8 +397,7 @@ export interface SuggestionApply {
  * Apply shows only when the originals were recovered — the thread's own hunk
  * (GitHub) or one synthesized from the file's diff section (GitLab/Bitbucket) must
  * fully cover the range — AND an `apply` prop is present; otherwise it degrades to
- * a labeled replacement-only block. Every disabled state explains WHY via a
- * wrapping `<span title>` (a native-disabled button swallows its own tooltip).
+ * a labeled replacement-only block.
  */
 function SuggestionBlock({
   thread,
@@ -469,19 +469,16 @@ function SuggestionBlock({
         {originals && apply && (
           <>
             <span className="flex-1" />
-            {/* Wrap the (possibly) disabled Button so its `title` still shows —
-                a native-disabled button swallows the tooltip. */}
-            <span title={disabledReason ?? undefined}>
-              <Button
-                variant="outline"
-                size="xs"
-                disabled={pending || applied || disabledReason !== null}
-                onClick={runApply}
-              >
-                {pending && <Spinner className="size-3" />}
-                {applied ? "Applied ✓" : "Apply"}
-              </Button>
-            </span>
+            <DisabledReasonButton
+              variant="outline"
+              size="xs"
+              disabled={pending || applied || disabledReason !== null}
+              reason={disabledReason}
+              onClick={runApply}
+            >
+              {pending && <Spinner className="size-3" />}
+              {applied ? "Applied ✓" : "Apply"}
+            </DisabledReasonButton>
           </>
         )}
       </div>
@@ -766,23 +763,17 @@ export function ReviewThreadCard({
                   textareaClassName="max-h-32 min-h-12 resize-y"
                 />
                 <div className="flex items-center gap-2">
-                  {/* Wrap the disabled Button so its `title` (the "why") still
-                      shows — a natively-disabled button swallows the tooltip. */}
-                  <span
-                    title={
-                      !replyBody.trim() ? "Write a reply first" : SUBMIT_HINT
-                    }
+                  <DisabledReasonButton
+                    variant="outline"
+                    size="sm"
+                    disabled={!replyBody.trim() || replyPending}
+                    reason={!replyBody.trim() ? "Write a reply first" : null}
+                    title={SUBMIT_HINT}
+                    onClick={submitReply}
                   >
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={!replyBody.trim() || replyPending}
-                      onClick={submitReply}
-                    >
-                      {replyPending && <Spinner className="size-3" />}
-                      Reply
-                    </Button>
-                  </span>
+                    {replyPending && <Spinner className="size-3" />}
+                    Reply
+                  </DisabledReasonButton>
                   <Button
                     variant="ghost"
                     size="sm"

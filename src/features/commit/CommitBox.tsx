@@ -2,6 +2,7 @@ import { InfoIcon, SparkleIcon, XIcon } from "@phosphor-icons/react";
 import { AnimatePresence, m } from "motion/react";
 import { useEffect } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
@@ -223,27 +224,17 @@ export function CommitBox({ repoPath }: { repoPath: string }) {
                 transition={quickTransition}
               >
                 {aiConfigured ? (
-                  // Wrap the (possibly) disabled button so its `title` — the
-                  // reason — still shows (a native-disabled button swallows the
-                  // tooltip via the vendored Button's pointer-events-none).
-                  <span
-                    className="inline-flex"
-                    title={
-                      stagedCount === 0
-                        ? "Stage changes to generate a commit message"
-                        : "Generate commit message with AI"
-                    }
+                  <DisabledReasonButton
+                    variant="outline"
+                    size="sm"
+                    disabled={stagedCount === 0}
+                    reason="Stage changes to generate a commit message"
+                    title="Generate commit message with AI"
+                    onClick={generate}
                   >
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={stagedCount === 0}
-                      onClick={generate}
-                    >
-                      <SparkleIcon data-icon="inline-start" />
-                      Generate
-                    </Button>
-                  </span>
+                    <SparkleIcon data-icon="inline-start" />
+                    Generate
+                  </DisabledReasonButton>
                 ) : (
                   // AI is on but no provider is set up yet — turn the dead-end
                   // Generate click into a one-time path to Settings → AI.
@@ -261,39 +252,32 @@ export function CommitBox({ repoPath }: { repoPath: string }) {
             )}
           </AnimatePresence>
         )}
-        {/* Wrap so the disabled reason still shows on hover — a native-disabled
-            button swallows its `title` (vendored Button's pointer-events-none).
-            When enabled, the wrapper carries the keybinding hint instead. */}
-        <span
-          className="inline-flex min-w-0 flex-1"
-          title={
-            canCommit && !generating
-              ? formatBinding("mod+enter")
-              : locked
-                ? "This branch requires changes via a pull request"
-                : title.trim().length === 0
-                  ? "Enter a commit title first"
-                  : stagedCount === 0 && !amending
-                    ? "Stage changes to commit"
-                    : formatBinding("mod+enter")
+        <DisabledReasonButton
+          size="sm"
+          wrapperClassName="min-w-0 flex-1"
+          className="min-w-0 flex-1"
+          disabled={!canCommit || generating}
+          reason={
+            locked
+              ? "This branch requires changes via a pull request"
+              : title.trim().length === 0
+                ? "Enter a commit title first"
+                : stagedCount === 0 && !amending
+                  ? "Stage changes to commit"
+                  : null
           }
+          title={formatBinding("mod+enter")}
+          onClick={doCommit}
         >
-          <Button
-            size="sm"
-            className="min-w-0 flex-1"
-            disabled={!canCommit || generating}
-            onClick={doCommit}
-          >
-            {commit.isPending && <Spinner data-icon="inline-start" />}
-            <span className="truncate">
-              {amending
-                ? "Amend last commit"
-                : `Commit${stagedCount > 0 ? ` (${stagedCount})` : ""}${
-                    branchName ? ` to ${branchName}` : ""
-                  }`}
-            </span>
-          </Button>
-        </span>
+          {commit.isPending && <Spinner data-icon="inline-start" />}
+          <span className="truncate">
+            {amending
+              ? "Amend last commit"
+              : `Commit${stagedCount > 0 ? ` (${stagedCount})` : ""}${
+                  branchName ? ` to ${branchName}` : ""
+                }`}
+          </span>
+        </DisabledReasonButton>
       </div>
     </div>
   );

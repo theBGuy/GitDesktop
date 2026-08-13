@@ -26,6 +26,7 @@ import {
   useSetHookEnabled,
   useWriteHook,
 } from "@/lib/git/queries";
+import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { HOOK_TEMPLATES } from "./templates";
@@ -144,6 +145,15 @@ export function HooksDialog({
     );
   }
 
+  // Arrow keys walk the hook list, mirroring the app's other lists.
+  const onHooksKeyDown = listKeyboardNav({
+    items: entries,
+    activeIndex: entries.findIndex((e) => e.name === selected),
+    onActivate: (e) => setSelected(e.name),
+    rowKey: (e) => e.name,
+    rowAttr: "data-hook",
+  });
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-4xl">
@@ -226,11 +236,12 @@ export function HooksDialog({
         ) : (
           <div className="flex h-112 gap-3">
             <ScrollArea className="w-52 shrink-0 border-r pr-2">
-              <div className="space-y-0.5">
+              <div className="space-y-0.5" onKeyDown={onHooksKeyDown}>
                 {entries.map((e) => (
                   <button
                     key={e.name}
                     type="button"
+                    data-hook={e.name}
                     onClick={() => setSelected(e.name)}
                     className={cn(
                       "flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-xs",

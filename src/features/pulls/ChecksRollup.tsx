@@ -19,11 +19,11 @@ import {
   useRef,
   useState,
 } from "react";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { LogBlock } from "@/components/LogBlock";
-import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
-import { StatusIcon } from "@/features/actions/status";
+import { StatusIcon, statusLabel } from "@/features/actions/status";
 import {
   useApproveWorkflowRun,
   useRepoWriteAccess,
@@ -256,11 +256,22 @@ function RunSteps({ job }: { job: RunJob }) {
             key={step.number}
             className="flex items-center gap-2 text-[11px]"
           >
-            <StatusIcon
-              status={step.status}
-              conclusion={step.conclusion}
-              className="size-3.5"
-            />
+            {/* The step's state is shape + color alone in the icon, so a
+                wrapping role="img" names it (aria-label is not valid, nor
+                reliably announced, on a bare `<svg>`). No `title` — announced,
+                not hovered, so the row's only tooltip stays the clipped step
+                name. */}
+            <span
+              role="img"
+              aria-label={statusLabel(step.status, step.conclusion)}
+              className="flex shrink-0 items-center"
+            >
+              <StatusIcon
+                status={step.status}
+                conclusion={step.conclusion}
+                className="size-3.5"
+              />
+            </span>
             <span
               className="min-w-0 flex-1 truncate"
               onMouseEnter={clipTitle(step.name)}
@@ -331,11 +342,16 @@ function CheckRow({
         ) : (
           <CaretRightIcon className="size-3 shrink-0 text-muted-foreground" />
         ))}
-      <Icon
-        className={cn("size-3.5 shrink-0", tone)}
+      {/* The state word rides a wrapping span: aria-label is not valid (nor
+          reliably announced) on a bare `<svg>`. No `title` — a tooltip here would
+          shadow the row's own ("Open this check" / the clipped check name). */}
+      <span
+        role="img"
         aria-label={label}
-        weight="fill"
-      />
+        className="flex shrink-0 items-center"
+      >
+        <Icon className={cn("size-3.5", tone)} weight="fill" aria-hidden />
+      </span>
       <span
         className="min-w-0 flex-1 truncate font-medium"
         onMouseEnter={clipTitle(check.name)}
@@ -533,10 +549,6 @@ export function ChecksRollup({
   );
   const writeReason = writeAccessReason(writeAccess.data);
   const writeBlocked = writeAccess.data?.canPush === false;
-  // A natively-disabled Button swallows `title`, so the reason rides the wrapper.
-  const blockedSpanClass = writeBlocked
-    ? "inline-flex cursor-not-allowed"
-    : "inline-flex";
 
   async function approveBlockedRuns() {
     if (writeBlocked) return;
@@ -649,21 +661,20 @@ export function ChecksRollup({
               blockedRunIds.length === 1 ? "" : "s"
             } awaiting maintainer approval.`}
           </span>
-          <span title={writeReason} className={blockedSpanClass}>
-            <Button
-              variant="outline"
-              size="xs"
-              disabled={approving || writeBlocked}
-              onClick={() => void approveBlockedRuns()}
-            >
-              {approving ? (
-                <Spinner data-icon="inline-start" />
-              ) : (
-                <PlayIcon data-icon="inline-start" />
-              )}
-              Approve and run
-            </Button>
-          </span>
+          <DisabledReasonButton
+            variant="outline"
+            size="xs"
+            disabled={approving || writeBlocked}
+            reason={writeReason}
+            onClick={() => void approveBlockedRuns()}
+          >
+            {approving ? (
+              <Spinner data-icon="inline-start" />
+            ) : (
+              <PlayIcon data-icon="inline-start" />
+            )}
+            Approve and run
+          </DisabledReasonButton>
         </div>
       )}
       <button

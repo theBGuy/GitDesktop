@@ -1,6 +1,7 @@
 import { GithubLogoIcon, PlusIcon, TrashIcon } from "@phosphor-icons/react";
 import { useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -430,19 +431,13 @@ export function BranchRulesDialog({
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button
+          <DisabledReasonButton
             onClick={doSave}
             disabled={!dirty || saving.isPending}
-            title={
-              !dirty
-                ? "No changes to save"
-                : saving.isPending
-                  ? "Saving…"
-                  : undefined
-            }
+            reason={!dirty ? "No changes to save" : "Saving…"}
           >
             {scope === "shared" ? "Save to repository" : "Save changes"}
-          </Button>
+          </DisabledReasonButton>
         </DialogFooter>
       </DialogContent>
     </Dialog>

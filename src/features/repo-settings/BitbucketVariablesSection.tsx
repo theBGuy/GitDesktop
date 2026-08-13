@@ -2,6 +2,7 @@ import { PlusIcon, XIcon } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -280,23 +281,23 @@ function VariableRow({
             onAct={onRemove}
           />
         ) : syncing ? (
-          // A natively-disabled Button drops its title, so wrap it to explain why.
-          <span title="Syncing with Bitbucket…" className="inline-flex">
-            <Button
-              size="sm"
-              variant="ghost"
-              className="text-muted-foreground"
-              disabled
-            >
-              <XIcon />
-            </Button>
-          </span>
+          <DisabledReasonButton
+            size="sm"
+            variant="ghost"
+            className="text-muted-foreground"
+            disabled
+            aria-label="Delete variable"
+            reason="Syncing with Bitbucket…"
+          >
+            <XIcon />
+          </DisabledReasonButton>
         ) : (
           <Button
             size="sm"
             variant="ghost"
             className="text-muted-foreground hover:text-destructive"
             onClick={onConfirm}
+            aria-label="Delete variable"
             title="Delete"
           >
             <XIcon />
@@ -313,11 +314,14 @@ function VariableRow({
           spellCheck={false}
         />
         {syncing ? (
-          <span title="Syncing with Bitbucket…" className="inline-flex">
-            <Button size="sm" variant="outline" disabled>
-              Save
-            </Button>
-          </span>
+          <DisabledReasonButton
+            size="sm"
+            variant="outline"
+            disabled
+            reason="Syncing with Bitbucket…"
+          >
+            Save
+          </DisabledReasonButton>
         ) : (
           <Button
             size="sm"

@@ -1,5 +1,6 @@
 import { useEffectEvent, useMemo, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import { Button } from "@/components/ui/button";
 import { Markdown } from "@/components/ui/markdown";
@@ -570,20 +571,18 @@ export function CommitLineComposer({
         textareaClassName="max-h-48 min-h-16 resize-y"
       />
       <div className="flex items-center gap-2">
-        {/* Wrap the (possibly) disabled submit so its `title` — the reason —
-            still shows; a native-disabled button swallows the tooltip. */}
-        <span
-          title={disabledReason ?? (!body.trim() ? undefined : SUBMIT_HINT)}
+        <DisabledReasonButton
+          variant="outline"
+          size="sm"
+          disabled={!body.trim() || !canPost || createComment.isPending}
+          reason={
+            disabledReason ?? (!body.trim() ? "Write a comment first" : null)
+          }
+          title={SUBMIT_HINT}
+          onClick={submit}
         >
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={!body.trim() || !canPost || createComment.isPending}
-            onClick={submit}
-          >
-            Comment
-          </Button>
-        </span>
+          Comment
+        </DisabledReasonButton>
         <Button
           variant="ghost"
           size="sm"

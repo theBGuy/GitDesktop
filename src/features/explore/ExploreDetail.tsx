@@ -5,6 +5,7 @@ import {
 } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useState } from "react";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -150,6 +151,11 @@ function ExploreDetailBody({
   const starLoaded = starred.data !== undefined;
   const isStarred = starred.data ?? false;
 
+  const stars = repo.stars ?? null;
+  const starText = stars === null ? "" : compactNumber.format(stars);
+  const starLabel =
+    stars === null ? null : `${starText} ${stars === 1 ? "star" : "stars"}`;
+
   return (
     <div className="flex flex-col gap-4 p-4">
       <div className="space-y-2">
@@ -181,10 +187,17 @@ function ExploreDetailBody({
           </div>
         )}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
-          {repo.stars != null && (
-            <span className="flex items-center gap-0.5 tabular-nums">
+          {starLabel !== null && (
+            // role="img" prunes the icon AND the number, so the label carries
+            // both the count and its unit.
+            <span
+              role="img"
+              aria-label={starLabel}
+              title={starLabel}
+              className="flex items-center gap-0.5 tabular-nums"
+            >
               <StarIcon className="size-3" />
-              {compactNumber.format(repo.stars)}
+              {starText}
             </span>
           )}
           {repo.language && <span>{repo.language}</span>}
@@ -236,23 +249,18 @@ function ExploreDetailBody({
         )}
         {canStar && (
           // Disabled until the starred state resolves — toggling on `undefined`
-          // would always star (`!undefined === true`). The wrapping span carries
-          // the reason since a native-disabled button swallows its `title`.
-          <span
-            className="inline-flex"
-            title={starLoaded ? undefined : "Checking star state…"}
+          // would always star (`!undefined === true`).
+          <DisabledReasonButton
+            size="sm"
+            variant="outline"
+            aria-pressed={starLoaded ? isStarred : undefined}
+            disabled={!starLoaded}
+            reason="Checking star state…"
+            onClick={toggleStar}
           >
-            <Button
-              size="sm"
-              variant="outline"
-              aria-pressed={isStarred}
-              disabled={!starLoaded}
-              onClick={toggleStar}
-            >
-              <StarIcon weight={isStarred ? "fill" : "regular"} />
-              {isStarred ? "Unstar" : "Star"}
-            </Button>
-          </span>
+            <StarIcon weight={isStarred ? "fill" : "regular"} />
+            {isStarred ? "Unstar" : "Star"}
+          </DisabledReasonButton>
         )}
         {repo.webUrl && (
           <Button

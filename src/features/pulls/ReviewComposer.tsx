@@ -1,4 +1,5 @@
 import { type KeyboardEvent, useState } from "react";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import { Button } from "@/components/ui/button";
 import { useCreateReviewThread } from "@/lib/git/queries";
@@ -161,19 +162,16 @@ export function ReviewComposer({
         <span className="min-w-0 truncate font-mono text-[11px] text-muted-foreground">
           {anchorLabel}
         </span>
-        {/* Wrap the (possibly) disabled suggestion button so its `title` — the
-            reason — still shows (a native-disabled button swallows the tooltip). */}
-        <span title={suggestionDisabledReason ?? undefined}>
-          <Button
-            variant="ghost"
-            size="xs"
-            className="shrink-0 text-muted-foreground"
-            disabled={!canSuggest}
-            onClick={insertSuggestion}
-          >
-            Add suggestion
-          </Button>
-        </span>
+        <DisabledReasonButton
+          variant="ghost"
+          size="xs"
+          className="shrink-0 text-muted-foreground"
+          disabled={!canSuggest}
+          reason={suggestionDisabledReason}
+          onClick={insertSuggestion}
+        >
+          Add suggestion
+        </DisabledReasonButton>
       </div>
       {provider === "bitbucket" && isRange && (
         <p className="text-[11px] text-muted-foreground">

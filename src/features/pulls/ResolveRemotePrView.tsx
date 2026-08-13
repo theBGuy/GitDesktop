@@ -5,6 +5,7 @@ import {
 } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { ConflictFileView } from "@/features/repository/ConflictFileView";
@@ -195,21 +196,15 @@ export function ResolveRemotePrView({
           >
             Discard
           </Button>
-          {/* Wrap so the disabled reason still shows on hover — a native-disabled
-              button swallows its `title` (vendored Button's pointer-events-none). */}
-          <span
-            className="inline-flex"
-            title={remaining > 0 ? "Resolve every conflict first" : undefined}
+          <DisabledReasonButton
+            size="xs"
+            disabled={busy || remaining > 0}
+            reason={remaining > 0 ? "Resolve every conflict first" : undefined}
+            onClick={onFinish}
           >
-            <Button
-              size="xs"
-              disabled={busy || remaining > 0}
-              onClick={onFinish}
-            >
-              {finish.isPending && <Spinner data-icon="inline-start" />}
-              Finish &amp; push
-            </Button>
-          </span>
+            {finish.isPending && <Spinner data-icon="inline-start" />}
+            Finish &amp; push
+          </DisabledReasonButton>
         </div>
       </div>
 

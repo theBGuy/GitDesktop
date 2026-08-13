@@ -7,6 +7,7 @@ import {
   XIcon,
 } from "@phosphor-icons/react";
 import { useState } from "react";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import {
   Combobox,
@@ -51,8 +52,9 @@ export function StateIcon({ state }: { state: string }) {
   );
 }
 
-/** A clickable related-issue row with a hover remove button. `pending` disables
- *  the remove button and shows a spinner so a slow unlink can't double-fire. */
+/** A clickable related-issue row with an always-visible remove button. Callers
+ *  that pass `pending` get it disabled with a spinner while their unlink is in
+ *  flight, so a slow one can't double-fire. */
 export function RelatedRow({
   issue,
   onOpen,
@@ -70,7 +72,7 @@ export function RelatedRow({
   removeDisabledReason?: string;
 }) {
   return (
-    <div className="group flex items-center gap-1.5 text-xs">
+    <div className="flex items-center gap-1.5 text-xs">
       <StateIcon state={issue.state} />
       <button
         type="button"
@@ -81,32 +83,23 @@ export function RelatedRow({
         <span className="text-muted-foreground">#{issue.number}</span>{" "}
         {issue.title}
       </button>
-      {/* A natively disabled button swallows `title`, so the reason rides a
-          wrapping span. */}
-      <span
-        title={removeDisabledReason}
-        className={
-          removeDisabledReason
-            ? "inline-flex cursor-not-allowed"
-            : "inline-flex"
-        }
+      <DisabledReasonButton
+        variant="ghost"
+        size="icon-xs"
+        aria-label={`Remove #${issue.number}`}
+        disabled={pending || !!removeDisabledReason}
+        reason={removeDisabledReason}
+        className={cn(
+          "text-muted-foreground",
+          // Full opacity only for the in-flight spinner, on both disabled
+          // paths: a reason-less pending remove is natively disabled, a
+          // permission-blocked one is aria-disabled.
+          pending && "disabled:opacity-100 aria-disabled:opacity-100",
+        )}
+        onClick={onRemove}
       >
-        <Button
-          variant="ghost"
-          size="icon-xs"
-          aria-label={`Remove #${issue.number}`}
-          disabled={pending || !!removeDisabledReason}
-          className={cn(
-            "text-muted-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100",
-            // Full opacity only for the in-flight spinner — a permission-blocked
-            // remove keeps the vendored disabled dim.
-            pending && "disabled:opacity-100",
-          )}
-          onClick={onRemove}
-        >
-          {pending ? <Spinner /> : <XIcon />}
-        </Button>
-      </span>
+        {pending ? <Spinner /> : <XIcon />}
+      </DisabledReasonButton>
     </div>
   );
 }

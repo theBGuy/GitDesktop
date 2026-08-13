@@ -2,6 +2,7 @@ import { CaretRightIcon, CheckIcon, CopyIcon } from "@phosphor-icons/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useMemo, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -350,48 +351,44 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
           <span className="text-xs font-medium">{label}</span>
           <div className="flex items-center gap-2">
             {status?.installed && (
-              // A title on a natively-disabled button never surfaces, so wrap it.
-              <span title={removeReason ?? undefined}>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  disabled={removeReason !== null}
-                  onClick={() => removeGlobal(client)}
-                >
-                  {removing ? (
-                    <>
-                      <Spinner className="size-3" /> Removing…
-                    </>
-                  ) : (
-                    "Remove"
-                  )}
-                </Button>
-              </span>
-            )}
-            {/* A title on a natively-disabled button never surfaces, so wrap it. */}
-            <span title={installReason ?? undefined}>
-              <Button
+              <DisabledReasonButton
                 type="button"
-                variant="outline"
+                variant="ghost"
                 size="sm"
-                disabled={installReason !== null}
-                onClick={() => install(client, false)}
+                disabled={removeReason !== null}
+                reason={removeReason}
+                onClick={() => removeGlobal(client)}
               >
-                {installing ? (
+                {removing ? (
                   <>
-                    <Spinner className="size-3" />{" "}
-                    {status?.installed && (!status.current || drift)
-                      ? "Reinstalling…"
-                      : "Adding…"}
+                    <Spinner className="size-3" /> Removing…
                   </>
-                ) : status?.installed && (!status.current || drift) ? (
-                  "Reinstall"
                 ) : (
-                  "Install"
+                  "Remove"
                 )}
-              </Button>
-            </span>
+              </DisabledReasonButton>
+            )}
+            <DisabledReasonButton
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={installReason !== null}
+              reason={installReason}
+              onClick={() => install(client, false)}
+            >
+              {installing ? (
+                <>
+                  <Spinner className="size-3" />{" "}
+                  {status?.installed && (!status.current || drift)
+                    ? "Reinstalling…"
+                    : "Adding…"}
+                </>
+              ) : status?.installed && (!status.current || drift) ? (
+                "Reinstall"
+              ) : (
+                "Install"
+              )}
+            </DisabledReasonButton>
           </div>
         </div>
         {globalStatusLoading ? (
@@ -590,54 +587,49 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
               Paste into your client's MCP config
             </span>
             <div className="flex items-center gap-2">
-              {/* A title on a natively-disabled button never surfaces, so wrap it. */}
-              <span title={entryDisabledReason ?? undefined}>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  disabled={entryDisabledReason !== null}
-                  onClick={copy}
-                >
-                  {copied ? (
-                    <>
-                      <CheckIcon data-icon="inline-start" /> Copied
-                    </>
-                  ) : (
-                    <>
-                      <CopyIcon data-icon="inline-start" /> Copy
-                    </>
-                  )}
-                </Button>
-              </span>
-              <span
-                title={
+              <DisabledReasonButton
+                type="button"
+                variant="ghost"
+                size="sm"
+                disabled={entryDisabledReason !== null}
+                reason={entryDisabledReason}
+                onClick={copy}
+              >
+                {copied ? (
+                  <>
+                    <CheckIcon data-icon="inline-start" /> Copied
+                  </>
+                ) : (
+                  <>
+                    <CopyIcon data-icon="inline-start" /> Copy
+                  </>
+                )}
+              </DisabledReasonButton>
+              <DisabledReasonButton
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={
+                  !repoPath ||
+                  busyTarget !== null ||
+                  entryDisabledReason !== null
+                }
+                reason={
                   entryDisabledReason ??
                   (repoPath
                     ? undefined
                     : "Open a repository to write its .mcp.json")
                 }
+                onClick={() => install("project", false)}
               >
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  disabled={
-                    !repoPath ||
-                    busyTarget !== null ||
-                    entryDisabledReason !== null
-                  }
-                  onClick={() => install("project", false)}
-                >
-                  {busyTarget === "project" ? (
-                    <>
-                      <Spinner className="size-3" /> Writing…
-                    </>
-                  ) : (
-                    "Write to .mcp.json"
-                  )}
-                </Button>
-              </span>
+                {busyTarget === "project" ? (
+                  <>
+                    <Spinner className="size-3" /> Writing…
+                  </>
+                ) : (
+                  "Write to .mcp.json"
+                )}
+              </DisabledReasonButton>
             </div>
           </div>
           {launcherErrorMessage && (
@@ -762,27 +754,23 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
                 >
                   Cancel
                 </Button>
-                {/* A title on a natively-disabled button never surfaces, so wrap it. */}
-                <span title={confirmDisabledReason ?? undefined}>
-                  <Button
-                    type="button"
-                    size="sm"
-                    disabled={
-                      busyTarget !== null || confirmDisabledReason !== null
-                    }
-                    onClick={() =>
-                      confirmTarget && install(confirmTarget, true)
-                    }
-                  >
-                    {busyTarget !== null ? (
-                      <>
-                        <Spinner className="size-3" /> Replacing…
-                      </>
-                    ) : (
-                      "Replace entry"
-                    )}
-                  </Button>
-                </span>
+                <DisabledReasonButton
+                  type="button"
+                  size="sm"
+                  disabled={
+                    busyTarget !== null || confirmDisabledReason !== null
+                  }
+                  reason={confirmDisabledReason}
+                  onClick={() => confirmTarget && install(confirmTarget, true)}
+                >
+                  {busyTarget !== null ? (
+                    <>
+                      <Spinner className="size-3" /> Replacing…
+                    </>
+                  ) : (
+                    "Replace entry"
+                  )}
+                </DisabledReasonButton>
               </DialogFooter>
             </DialogContent>
           </Dialog>

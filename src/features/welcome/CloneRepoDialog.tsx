@@ -504,6 +504,17 @@ function RepoRow({
     : repo.fork
       ? GitForkIcon
       : BookBookmarkIcon;
+  // One glyph stands for both states, so its label names both; role="img" hides
+  // the icon from readers, leaving the label to carry the meaning alone. A plain
+  // repo stays unlabelled — nothing in the app badges a repo "public". The glyph
+  // takes no `title`: the row already hovers its description / full name.
+  const stateLabel = repo.private
+    ? repo.fork
+      ? "Private fork"
+      : "Private repository"
+    : repo.fork
+      ? "Fork"
+      : null;
   return (
     <button
       type="button"
@@ -517,7 +528,17 @@ function RepoRow({
         active ? "bg-accent text-accent-foreground" : "hover:bg-muted/60",
       )}
     >
-      <Icon className="size-3.5 shrink-0 text-muted-foreground" />
+      {stateLabel ? (
+        <span
+          role="img"
+          aria-label={stateLabel}
+          className="flex shrink-0 items-center text-muted-foreground"
+        >
+          <Icon className="size-3.5" aria-hidden />
+        </span>
+      ) : (
+        <Icon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+      )}
       <span className="min-w-0 flex-1 truncate">{repo.name}</span>
       {repo.archived && (
         <Badge variant="secondary" className="shrink-0 text-[10px]">

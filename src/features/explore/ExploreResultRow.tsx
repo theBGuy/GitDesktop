@@ -26,6 +26,20 @@ export function ExploreResultRow({
     : repo.fork
       ? GitForkIcon
       : BookBookmarkIcon;
+  // One glyph stands for both states, so its label names both; role="img" hides
+  // the icon from readers, leaving the label to carry the meaning alone. A plain
+  // repo stays unlabelled — nothing in the app badges a repo "public".
+  const stateLabel = repo.private
+    ? repo.fork
+      ? "Private fork"
+      : "Private repository"
+    : repo.fork
+      ? "Fork"
+      : null;
+  const stars = repo.stars ?? null;
+  const starText = stars === null ? "" : compactNumber.format(stars);
+  const starLabel =
+    stars === null ? null : `${starText} ${stars === 1 ? "star" : "stars"}`;
   return (
     <button
       type="button"
@@ -39,7 +53,21 @@ export function ExploreResultRow({
       )}
     >
       <span className="flex items-center gap-2">
-        <Icon className="size-3.5 shrink-0 text-muted-foreground" />
+        {stateLabel ? (
+          <span
+            role="img"
+            aria-label={stateLabel}
+            title={stateLabel}
+            className="flex shrink-0 items-center text-muted-foreground"
+          >
+            <Icon className="size-3.5" aria-hidden />
+          </span>
+        ) : (
+          <Icon
+            className="size-3.5 shrink-0 text-muted-foreground"
+            aria-hidden
+          />
+        )}
         <span className="min-w-0 flex-1 truncate">
           <span className="text-muted-foreground">{repo.owner}/</span>
           <span className="font-medium">{repo.name}</span>
@@ -49,10 +77,17 @@ export function ExploreResultRow({
             Archived
           </Badge>
         )}
-        {repo.stars != null && (
-          <span className="flex shrink-0 items-center gap-0.5 tabular-nums text-muted-foreground">
+        {starLabel !== null && (
+          // role="img" prunes the icon AND the number, so the label carries both
+          // the count and its unit.
+          <span
+            role="img"
+            aria-label={starLabel}
+            title={starLabel}
+            className="flex shrink-0 items-center gap-0.5 tabular-nums text-muted-foreground"
+          >
             <StarIcon className="size-3" />
-            {compactNumber.format(repo.stars)}
+            {starText}
           </span>
         )}
       </span>

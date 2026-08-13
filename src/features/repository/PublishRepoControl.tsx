@@ -1,5 +1,6 @@
 import { CaretDownIcon, UploadSimpleIcon } from "@phosphor-icons/react";
 import { useState } from "react";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -107,13 +108,15 @@ export function PublishRepoControl({
           Publish repository…
         </Button>
       ) : disabledTitle ? (
-        // `title` on a natively-disabled Button never shows — wrap it in a span.
-        <span title={disabledTitle}>
-          <Button variant="outline" size="sm" disabled>
-            <UploadSimpleIcon data-icon="inline-start" />
-            Publish repository…
-          </Button>
-        </span>
+        <DisabledReasonButton
+          variant="outline"
+          size="sm"
+          disabled
+          reason={disabledTitle}
+        >
+          <UploadSimpleIcon data-icon="inline-start" />
+          Publish repository…
+        </DisabledReasonButton>
       ) : null}
       <PublishDialog
         repoPath={repoPath}

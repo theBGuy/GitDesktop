@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useId, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
@@ -360,16 +361,17 @@ export function RepoJiraDialog({
                   />
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
-                  <span title={validateReason ?? undefined}>
-                    <Button
-                      size="sm"
-                      disabled={!canValidate || validating}
-                      onClick={validate}
-                    >
-                      {validating && <Spinner data-icon="inline-start" />}
-                      Validate &amp; save
-                    </Button>
-                  </span>
+                  <DisabledReasonButton
+                    size="sm"
+                    disabled={!canValidate || validating}
+                    // No `reason`: the same text renders as visible warning copy
+                    // beside the button, so announcing it would double up.
+                    title={validateReason ?? undefined}
+                    onClick={validate}
+                  >
+                    {validating && <Spinner data-icon="inline-start" />}
+                    Validate &amp; save
+                  </DisabledReasonButton>
                   {validateReason && (
                     <span className="text-xs text-warning">
                       {validateReason}
@@ -464,17 +466,16 @@ export function RepoJiraDialog({
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          {canSave && dirty && !save.isPending ? (
-            <Button onClick={doSave}>Save</Button>
-          ) : (
-            <span
-              title={saveReason ?? (save.isPending ? "Saving…" : undefined)}
-            >
-              <Button onClick={doSave} disabled>
-                Save
-              </Button>
-            </span>
-          )}
+          <DisabledReasonButton
+            // Below `sm` the footer stacks and stretches the wrapper span; the
+            // Button has to fill it to match the full-width Cancel beside it.
+            className="w-full"
+            disabled={!canSave || !dirty || save.isPending}
+            reason={saveReason ?? (save.isPending ? "Saving…" : undefined)}
+            onClick={doSave}
+          >
+            Save
+          </DisabledReasonButton>
         </DialogFooter>
       </DialogContent>
     </Dialog>

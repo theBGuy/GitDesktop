@@ -1582,51 +1582,58 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           }
         }}
       >
-        <Popover.Trigger
-          render={
-            <Button
-              variant="ghost"
-              size="sm"
-              // Large shrink factor: flex removes space proportionally to
-              // factor × base size, so the header cascade collapses branch (20)
-              // → CI badge (4) → repo (1) — the label absorbs the pressure
-              // first.
-              className="min-w-0 shrink-20"
-              disabled={busy || amending}
-              title={
-                amending
-                  ? "Finish or stop amending to switch branches"
-                  : undefined
-              }
-            >
-              <GitBranchIcon data-icon="inline-start" />
-              <span
-                className="min-w-0 truncate"
-                // Only expose the full label as a tooltip when it's actually
-                // clipped — measured just-in-time on hover, so no ref needed.
-                // Remove the attribute (not title="") when unclipped: an empty
-                // title="" is still a title in Chromium and would suppress the
-                // Button's own conditional (amending) title above.
-                onMouseEnter={(e) => {
-                  const el = e.currentTarget;
-                  if (el) {
-                    if (el.scrollWidth > el.clientWidth)
-                      el.title = currentLabel;
-                    else el.removeAttribute("title");
-                  }
-                }}
-              >
-                {currentLabel}
-              </span>
-              {head?.detached && (
-                <Badge variant="secondary" className="ml-1 shrink-0">
-                  detached
-                </Badge>
-              )}
-              <CaretDownIcon data-icon="inline-end" />
-            </Button>
+        {/* The reason rides the wrapper because the trigger's `render` target
+            can't carry one: a disabled trigger drops pointer events, so its own
+            `title` never surfaces. The wrapper is the header's flex item, so it
+            carries the large shrink factor — flex removes space proportionally
+            to factor × base size, so the cascade collapses branch (20) → CI
+            badge (4) while the repo switcher holds its natural width, and the
+            branch label absorbs the pressure first. The
+            button must opt back in with `shrink`: the vendored Button ships
+            `shrink-0`, which would otherwise pin it at full width inside a
+            shrinking wrapper. */}
+        <span
+          className={cn(
+            "inline-flex min-w-0 shrink-20",
+            amending && "cursor-not-allowed",
+          )}
+          title={
+            amending ? "Finish or stop amending to switch branches" : undefined
           }
-        />
+        >
+          <Popover.Trigger
+            disabled={busy || amending}
+            render={
+              <Button variant="ghost" size="sm" className="min-w-0 shrink">
+                <GitBranchIcon data-icon="inline-start" />
+                <span
+                  className="min-w-0 truncate"
+                  // Only expose the full label as a tooltip when it's actually
+                  // clipped — measured just-in-time on hover, so no ref needed.
+                  // Remove the attribute (not title="") when unclipped: an empty
+                  // title="" is still a title in Chromium and would suppress the
+                  // wrapper's conditional (amending) title above.
+                  onMouseEnter={(e) => {
+                    const el = e.currentTarget;
+                    if (el) {
+                      if (el.scrollWidth > el.clientWidth)
+                        el.title = currentLabel;
+                      else el.removeAttribute("title");
+                    }
+                  }}
+                >
+                  {currentLabel}
+                </span>
+                {head?.detached && (
+                  <Badge variant="secondary" className="ml-1 shrink-0">
+                    detached
+                  </Badge>
+                )}
+                <CaretDownIcon data-icon="inline-end" />
+              </Button>
+            }
+          />
+        </span>
         <Popover.Portal>
           <Popover.Positioner
             align="start"

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import { Button } from "@/components/ui/button";
 import {
@@ -217,19 +218,17 @@ export function SubmitReviewDialog({
           >
             Cancel
           </Button>
-          {/* Wrap the (possibly) disabled submit so its `title` — the reason —
-              still shows; a native-disabled button swallows the tooltip. */}
-          <span
-            title={
+          <DisabledReasonButton
+            disabled={summaryMissing || pending}
+            reason={
               summaryMissing
                 ? "A summary is required to request changes."
                 : undefined
             }
+            onClick={submit}
           >
-            <Button disabled={summaryMissing || pending} onClick={submit}>
-              Submit review
-            </Button>
-          </span>
+            Submit review
+          </DisabledReasonButton>
         </DialogFooter>
       </DialogContent>
     </Dialog>

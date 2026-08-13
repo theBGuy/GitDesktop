@@ -13,6 +13,7 @@ import {
 import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { type ReactNode, useRef, useState } from "react";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -1263,25 +1264,22 @@ export function FindingsPanel({
       <div className="flex items-center gap-1 border-b p-2">
         <p className="text-xs text-muted-foreground">Security findings</p>
         <div className="ml-auto flex items-center gap-1">
-          {/* A `title` on a disabled Button never surfaces — the wrapper span is
-              what carries the explanation while the control is unusable. */}
-          <span title={refreshReason}>
-            <Button
-              variant="outline"
-              size="icon-sm"
-              aria-label="Refresh findings"
-              disabled={!enabled || refreshing}
-              onClick={() =>
-                queryClient.invalidateQueries({
-                  queryKey: ["repo", repoPath, "findings"],
-                })
-              }
-            >
-              <ArrowClockwiseIcon
-                className={cn(refreshing && "animate-spin")}
-              />
-            </Button>
-          </span>
+          <DisabledReasonButton
+            variant="outline"
+            size="icon-sm"
+            aria-label="Refresh findings"
+            disabled={!enabled || refreshing}
+            // `refreshReason` doubles as the enabled-state hint ("Refresh findings").
+            reason={enabled ? null : refreshReason}
+            title={refreshReason}
+            onClick={() =>
+              queryClient.invalidateQueries({
+                queryKey: ["repo", repoPath, "findings"],
+              })
+            }
+          >
+            <ArrowClockwiseIcon className={cn(refreshing && "animate-spin")} />
+          </DisabledReasonButton>
         </div>
       </div>
       <div className="border-b p-2">

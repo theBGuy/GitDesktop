@@ -7,6 +7,7 @@ import {
 } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import { ButtonGroup } from "@/components/ui/button-group";
 import {
@@ -373,65 +374,65 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
 
   return (
     <div className="flex items-center gap-2">
-      {/* Every segment is wrapped in a `title` <span> so a disabled button's
-          reason still shows on hover (a natively disabled button swallows its
-          own tooltip). Those spans have no `data-slot`, so they opt out of
-          ButtonGroup's border-collapse/rounding child selectors
-          (`*:data-slot:rounded-r-none` + `[&>[data-slot]~[data-slot]]`) — the
-          primitive then contributes only layout + `role="group"`, and THIS call
-          site owns the seams explicitly on the Buttons. The vendored Button is
-          square (`rounded-none` in its cva root and `sm` variant), so the only
+      {/* Every segment rides a wrapper span — DisabledReasonButton's own, and
+          the dropdown trigger's. Those spans have no `data-slot`, so they opt
+          out of ButtonGroup's border-collapse/rounding child selectors
+          (`*:data-slot:rounded-r-none` + `[&>[data-slot]~[data-slot]]`) —
+          ButtonGroup then contributes only layout + `role="group"`, and THIS
+          call site owns the seams explicitly on the Buttons. The vendored Button
+          is square (`rounded-none` in its cva root and `sm` variant), so the only
           load-bearing seam class is `border-l-0` on the joins. Keep it that way: a
-          future reorder must set these classes, not lean on the primitive's
+          future reorder must set these classes, not lean on ButtonGroup's
           adjacency magic (it has now misfired on two arrangements). The group's
           `*:focus-visible:z-10` also can't reach the Buttons through the spans,
           so each Button carries `focus-visible:relative focus-visible:z-10`. */}
       <ButtonGroup>
-        <span className="inline-flex" title={fetchHintTitle}>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={busy}
-            aria-keyshortcuts={fetchKeyshortcuts}
-            className="focus-visible:relative focus-visible:z-10"
-            onClick={() => doFetch(false)}
-          >
-            {fetchRemote.isPending ? (
-              <Spinner data-icon="inline-start" />
-            ) : (
-              <ArrowsClockwiseIcon data-icon="inline-start" />
-            )}
-            Fetch
-          </Button>
-        </span>
-        <span className="inline-flex" title={pullTitle}>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={busy || !hasUpstream || diverged}
-            aria-label={pullDescription}
-            aria-keyshortcuts={pullKeyshortcuts}
-            className="border-l-0 focus-visible:relative focus-visible:z-10"
-            onClick={() => doPull("ffOnly")}
-          >
-            {/* Covers the recovery compounds too: with the preference on they
-                run with no dialog open to show progress. */}
-            {pull.isPending || recovery.pending ? (
-              <Spinner data-icon="inline-start" />
-            ) : (
-              <ArrowDownIcon data-icon="inline-start" />
-            )}
-            Pull
-            {behindCount > 0 && (
-              <span
-                aria-hidden="true"
-                className="text-muted-foreground tabular-nums"
-              >
-                {behindCount}
-              </span>
-            )}
-          </Button>
-        </span>
+        <DisabledReasonButton
+          variant="outline"
+          size="sm"
+          disabled={busy}
+          title={fetchHintTitle}
+          aria-keyshortcuts={fetchKeyshortcuts}
+          className="focus-visible:relative focus-visible:z-10"
+          onClick={() => doFetch(false)}
+        >
+          {fetchRemote.isPending ? (
+            <Spinner data-icon="inline-start" />
+          ) : (
+            <ArrowsClockwiseIcon data-icon="inline-start" />
+          )}
+          Fetch
+        </DisabledReasonButton>
+        <DisabledReasonButton
+          variant="outline"
+          size="sm"
+          disabled={busy || !hasUpstream || diverged}
+          // No `reason` on Pull or Push: `aria-label` already announces the
+          // description, so a describedby copy would read it twice; the wrapper
+          // still hovers `pullTitle`, shortcut included.
+          title={pullTitle}
+          aria-label={pullDescription}
+          aria-keyshortcuts={pullKeyshortcuts}
+          className="border-l-0 focus-visible:relative focus-visible:z-10"
+          onClick={() => doPull("ffOnly")}
+        >
+          {/* Covers the recovery compounds too: with the preference on they
+              run with no dialog open to show progress. */}
+          {pull.isPending || recovery.pending ? (
+            <Spinner data-icon="inline-start" />
+          ) : (
+            <ArrowDownIcon data-icon="inline-start" />
+          )}
+          Pull
+          {behindCount > 0 && (
+            <span
+              aria-hidden="true"
+              className="text-muted-foreground tabular-nums"
+            >
+              {behindCount}
+            </span>
+          )}
+        </DisabledReasonButton>
         <span className="inline-flex">
           <DropdownMenu>
             <DropdownMenuTrigger
@@ -473,40 +474,39 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
             </DropdownMenuContent>
           </DropdownMenu>
         </span>
-        <span className="inline-flex" title={pushTitle}>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={busy || detached}
-            aria-label={pushDescription}
-            aria-keyshortcuts={pushKeyshortcuts}
-            className="border-l-0 focus-visible:relative focus-visible:z-10"
-            onClick={() => {
-              if (diverged) {
-                setForceConfirmOpen(true);
-              } else {
-                void beginPush(false);
-              }
-            }}
-          >
-            {push.isPending || detecting ? (
-              <Spinner data-icon="inline-start" />
-            ) : diverged ? (
-              <WarningIcon data-icon="inline-start" />
-            ) : (
-              <ArrowUpIcon data-icon="inline-start" />
-            )}
-            {pushLabel}
-            {aheadCount > 0 && (
-              <span
-                aria-hidden="true"
-                className="text-muted-foreground tabular-nums"
-              >
-                {aheadCount}
-              </span>
-            )}
-          </Button>
-        </span>
+        <DisabledReasonButton
+          variant="outline"
+          size="sm"
+          disabled={busy || detached}
+          title={pushTitle}
+          aria-label={pushDescription}
+          aria-keyshortcuts={pushKeyshortcuts}
+          className="border-l-0 focus-visible:relative focus-visible:z-10"
+          onClick={() => {
+            if (diverged) {
+              setForceConfirmOpen(true);
+            } else {
+              void beginPush(false);
+            }
+          }}
+        >
+          {push.isPending || detecting ? (
+            <Spinner data-icon="inline-start" />
+          ) : diverged ? (
+            <WarningIcon data-icon="inline-start" />
+          ) : (
+            <ArrowUpIcon data-icon="inline-start" />
+          )}
+          {pushLabel}
+          {aheadCount > 0 && (
+            <span
+              aria-hidden="true"
+              className="text-muted-foreground tabular-nums"
+            >
+              {aheadCount}
+            </span>
+          )}
+        </DisabledReasonButton>
       </ButtonGroup>
 
       <Dialog open={forceConfirmOpen} onOpenChange={setForceConfirmOpen}>

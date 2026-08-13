@@ -1,6 +1,7 @@
 import { ArrowClockwiseIcon, PlayIcon } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useRef, useState } from "react";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import {
   Empty,
@@ -62,6 +63,13 @@ export function ActionsPanel({
   const writeReason = writeAccessReason(writeAccess.data);
   const writeBlocked = writeAccess.data?.canPush === false;
   const runNoun = isPipelines ? "pipeline" : "workflow";
+  const runHint =
+    writeReason ??
+    (ghReady
+      ? `Run a ${runNoun}`
+      : isGitLab
+        ? "Sign in with the GitLab CLI (glab) to run pipelines"
+        : "Sign in with GitHub CLI to run workflows");
   const status = useRepoStatus(repoPath);
   const currentBranch = status.data?.branch.name ?? null;
 
@@ -101,61 +109,46 @@ export function ActionsPanel({
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex items-center gap-1 border-b p-2">
-        <Button
+        <DisabledReasonButton
           variant={branchOnly ? "secondary" : "ghost"}
           size="xs"
           aria-pressed={branchOnly}
           disabled={!currentBranch}
+          reason="No current branch"
           title={
-            currentBranch
-              ? `Show runs on ${currentBranch} only`
-              : "No current branch"
+            currentBranch ? `Show runs on ${currentBranch} only` : undefined
           }
           onClick={() => setBranchOnly((v) => !v)}
         >
           This branch
-        </Button>
+        </DisabledReasonButton>
         <div className="ml-auto flex items-center gap-1">
           {canDispatch && (
-            // A natively-disabled Button swallows `title`, so the hint rides the
-            // wrapping span (house idiom) — it covers the enabled case too.
-            <span
-              title={
-                writeReason ??
-                (ghReady
-                  ? `Run a ${runNoun}`
-                  : isGitLab
-                    ? "Sign in with the GitLab CLI (glab) to run pipelines"
-                    : "Sign in with GitHub CLI to run workflows")
-              }
-              className={cn(
-                "inline-flex",
-                writeBlocked && "cursor-not-allowed",
-              )}
+            <DisabledReasonButton
+              variant="ghost"
+              size="xs"
+              disabled={!ghReady || writeBlocked}
+              reason={runHint}
+              title={runHint}
+              onClick={() => setRunOpen(true)}
             >
-              <Button
-                variant="ghost"
-                size="xs"
-                disabled={!ghReady || writeBlocked}
-                onClick={() => setRunOpen(true)}
-              >
-                <PlayIcon data-icon="inline-start" />
-                Run {runNoun}…
-              </Button>
-            </span>
+              <PlayIcon data-icon="inline-start" />
+              Run {runNoun}…
+            </DisabledReasonButton>
           )}
-          <Button
+          <DisabledReasonButton
             variant="outline"
             size="icon-sm"
             aria-label="Refresh runs"
             disabled={!ghReady || runs.isFetching}
-            title={ghReady ? "Refresh runs" : "Connect this repo to load runs"}
+            reason={ghReady ? undefined : "Connect this repo to load runs"}
+            title="Refresh runs"
             onClick={() => runs.refetch()}
           >
             <ArrowClockwiseIcon
               className={cn(runs.isFetching && "animate-spin")}
             />
-          </Button>
+          </DisabledReasonButton>
         </div>
       </div>
       <div className="border-b p-2">
@@ -227,23 +220,16 @@ export function ActionsPanel({
               </EmptyHeader>
               {canDispatch && (
                 <EmptyContent>
-                  <span
-                    title={writeReason}
-                    className={cn(
-                      "inline-flex",
-                      writeBlocked && "cursor-not-allowed",
-                    )}
+                  <DisabledReasonButton
+                    variant="outline"
+                    size="sm"
+                    disabled={writeBlocked}
+                    reason={writeReason}
+                    onClick={() => setRunOpen(true)}
                   >
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={writeBlocked}
-                      onClick={() => setRunOpen(true)}
-                    >
-                      <PlayIcon data-icon="inline-start" />
-                      Run {runNoun}…
-                    </Button>
-                  </span>
+                    <PlayIcon data-icon="inline-start" />
+                    Run {runNoun}…
+                  </DisabledReasonButton>
                 </EmptyContent>
               )}
             </Empty>

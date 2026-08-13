@@ -3,6 +3,7 @@ import { useSelector } from "@tanstack/react-store";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -234,15 +235,18 @@ function GitHubAccounts() {
                             </Button>
                           )}
                           {!account.active && (
-                            <Button
+                            <DisabledReasonButton
                               variant="outline"
                               size="xs"
                               disabled={!canSwitch || switchAccount.isPending}
-                              title={
+                              // Only the CLI-version term is a reason; an
+                              // in-flight switch would announce it falsely.
+                              reason={
                                 canSwitch
-                                  ? `Make ${account.login} the active account on ${account.host}`
+                                  ? undefined
                                   : "Switching needs GitHub CLI 2.40 or newer"
                               }
+                              title={`Make ${account.login} the active account on ${account.host}`}
                               onClick={() =>
                                 switchAccount.mutate(
                                   { host: account.host, login: account.login },
@@ -260,7 +264,7 @@ function GitHubAccounts() {
                                 <Spinner data-icon="inline-start" />
                               )}
                               Switch
-                            </Button>
+                            </DisabledReasonButton>
                           )}
                         </div>
                       );
@@ -565,24 +569,21 @@ function GitLabAccount() {
               </form.AppField>
 
               <div className="flex items-center gap-2">
-                {/* A natively-disabled button swallows its title tooltip, so wrap
-                    it in a span that carries the reason. */}
-                <span
+                <DisabledReasonButton
+                  type="submit"
+                  size="sm"
+                  disabled={!canSubmit || setToken.isPending}
+                  // No `reason`: the same text renders as the visible warning
+                  // beside the button, so announcing it would double up.
                   title={
                     canSubmit
                       ? undefined
                       : "Paste a project or group access token"
                   }
                 >
-                  <Button
-                    type="submit"
-                    size="sm"
-                    disabled={!canSubmit || setToken.isPending}
-                  >
-                    {setToken.isPending && <Spinner data-icon="inline-start" />}
-                    Connect
-                  </Button>
-                </span>
+                  {setToken.isPending && <Spinner data-icon="inline-start" />}
+                  Connect
+                </DisabledReasonButton>
                 {!canSubmit && (
                   <span className="text-xs text-warning">
                     Paste a project or group access token
@@ -859,13 +860,16 @@ function BitbucketAccount() {
               </div>
 
               <div className="flex items-center gap-2">
-                {/* A natively-disabled button swallows its title tooltip, so wrap
-                    it in a span that carries the reason. */}
-                <span title={disabledReason ?? undefined}>
-                  <Button type="submit" size="sm" disabled={!canSubmit}>
-                    {connected ? "Save token" : "Connect"}
-                  </Button>
-                </span>
+                <DisabledReasonButton
+                  type="submit"
+                  size="sm"
+                  disabled={!canSubmit}
+                  // No `reason`: the same text renders as the visible warning
+                  // beside the button, so announcing it would double up.
+                  title={disabledReason ?? undefined}
+                >
+                  {connected ? "Save token" : "Connect"}
+                </DisabledReasonButton>
                 {replacing && (
                   <Button
                     type="button"

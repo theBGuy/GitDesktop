@@ -8,6 +8,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -47,6 +48,7 @@ import {
   writeAccessReason,
 } from "@/lib/git/queries";
 import { providerLabel } from "@/lib/git/types";
+import { useConfirm } from "@/lib/stores/confirm";
 import { useUiStore } from "@/lib/stores/ui";
 import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
@@ -85,11 +87,6 @@ export function TagDetailView({
   const writeAccess = useRepoWriteAccess(repoPath, undefined, !!provider);
   const writeReason = writeAccessReason(writeAccess.data);
   const writeBlocked = writeAccess.data?.canPush === false;
-  // A natively-disabled Button swallows `title`, so every hint below rides a
-  // wrapping span (house idiom).
-  const blockedSpanClass = writeBlocked
-    ? "inline-flex cursor-not-allowed"
-    : "inline-flex";
   const remoteLabel = providerLabel(provider);
   // Ask the provider for a release only when connected; otherwise it's just a tag.
   const release = useReleaseDetails(repoPath, ghReady ? tag : null);
@@ -157,6 +154,25 @@ export function TagDetailView({
     );
   }
 
+  // Shared by both provider arms, which differ in what is actually lost: GitHub's
+  // uploaded binary is gone for good, while a GitLab asset link can be re-added.
+  async function onDeleteAsset(assetName: string, kind: "asset" | "link") {
+    const ok = await useConfirm.getState().ask({
+      title: `Delete ${assetName}?`,
+      body:
+        kind === "asset"
+          ? "Removes this asset from the release. This cannot be undone."
+          : "Removes this link from the release.",
+      confirmLabel: "Delete",
+      confirmVariant: "destructive",
+    });
+    if (!ok) return;
+    deleteAsset.mutate(
+      { tag, assetName },
+      { onSuccess: () => toast.success("Asset deleted"), onError },
+    );
+  }
+
   // ── Release view ───────────────────────────────────────────────────────────
   if (rel) {
     // The updater manifest is a GitHub-only Tauri asset, so the sync affordance only
@@ -180,67 +196,64 @@ export function TagDetailView({
             {canManage && (
               <>
                 {rel.isDraft && (
-                  <span title={writeReason} className={blockedSpanClass}>
-                    <Button
-                      variant="outline"
-                      size="xs"
-                      disabled={editRelease.isPending || writeBlocked}
-                      onClick={() =>
-                        editRelease.mutate(
-                          {
-                            tag,
-                            title: "",
-                            notes: "",
-                            prerelease: rel.isPrerelease,
-                            draft: false,
-                            // Omit --latest so GitHub applies its default (a newly
-                            // published stable release becomes Latest, like the web UI).
-                            // A draft's isLatest is structurally false — sending it here
-                            // was the bug that stripped Latest on publish.
-                            latest: undefined,
-                          },
-                          {
-                            onSuccess: () => toast.success("Published"),
-                            onError,
-                          },
-                        )
-                      }
-                    >
-                      Publish
-                    </Button>
-                  </span>
+                  <DisabledReasonButton
+                    variant="outline"
+                    size="xs"
+                    disabled={editRelease.isPending || writeBlocked}
+                    reason={writeReason}
+                    onClick={() =>
+                      editRelease.mutate(
+                        {
+                          tag,
+                          title: "",
+                          notes: "",
+                          prerelease: rel.isPrerelease,
+                          draft: false,
+                          // Omit --latest so GitHub applies its default (a newly
+                          // published stable release becomes Latest, like the web UI).
+                          // A draft's isLatest is structurally false — sending it here
+                          // was the bug that stripped Latest on publish.
+                          latest: undefined,
+                        },
+                        {
+                          onSuccess: () => toast.success("Published"),
+                          onError,
+                        },
+                      )
+                    }
+                  >
+                    Publish
+                  </DisabledReasonButton>
                 )}
-                <span title={writeReason} className={blockedSpanClass}>
-                  <Button
-                    variant="outline"
-                    size="xs"
-                    disabled={writeBlocked}
-                    onClick={() => {
-                      setEditTitle(rel.name);
-                      setEditNotes(rel.body);
-                      setEditPrerelease(rel.isPrerelease);
-                      setEditLatest(isLatest);
-                      setEditSyncUpdater(true);
-                      setSyncArmed(false);
-                      setEditOpen(true);
-                    }}
-                  >
-                    Edit
-                  </Button>
-                </span>
-                <span title={writeReason} className={blockedSpanClass}>
-                  <Button
-                    variant="outline"
-                    size="xs"
-                    disabled={writeBlocked}
-                    onClick={() => {
-                      setCleanupTag(false);
-                      setDeleteOpen(true);
-                    }}
-                  >
-                    Delete
-                  </Button>
-                </span>
+                <DisabledReasonButton
+                  variant="outline"
+                  size="xs"
+                  disabled={writeBlocked}
+                  reason={writeReason}
+                  onClick={() => {
+                    setEditTitle(rel.name);
+                    setEditNotes(rel.body);
+                    setEditPrerelease(rel.isPrerelease);
+                    setEditLatest(isLatest);
+                    setEditSyncUpdater(true);
+                    setSyncArmed(false);
+                    setEditOpen(true);
+                  }}
+                >
+                  Edit
+                </DisabledReasonButton>
+                <DisabledReasonButton
+                  variant="outline"
+                  size="xs"
+                  disabled={writeBlocked}
+                  reason={writeReason}
+                  onClick={() => {
+                    setCleanupTag(false);
+                    setDeleteOpen(true);
+                  }}
+                >
+                  Delete
+                </DisabledReasonButton>
               </>
             )}
             {rel.url && (
@@ -286,21 +299,20 @@ export function TagDetailView({
                 <span className="flex-1" />
                 {/* GitHub attaches a binary; GitLab uploads + links the file. */}
                 {canManage && (
-                  <span title={writeReason} className={blockedSpanClass}>
-                    <Button
-                      variant="ghost"
-                      size="xs"
-                      disabled={uploadAsset.isPending || writeBlocked}
-                      onClick={onUpload}
-                    >
-                      {uploadAsset.isPending ? (
-                        <Spinner data-icon="inline-start" />
-                      ) : (
-                        <UploadSimpleIcon data-icon="inline-start" />
-                      )}
-                      Upload
-                    </Button>
-                  </span>
+                  <DisabledReasonButton
+                    variant="ghost"
+                    size="xs"
+                    disabled={uploadAsset.isPending || writeBlocked}
+                    reason={writeReason}
+                    onClick={onUpload}
+                  >
+                    {uploadAsset.isPending ? (
+                      <Spinner data-icon="inline-start" />
+                    ) : (
+                      <UploadSimpleIcon data-icon="inline-start" />
+                    )}
+                    Upload
+                  </DisabledReasonButton>
                 )}
               </div>
               {rel.assets.length === 0 ? (
@@ -309,10 +321,7 @@ export function TagDetailView({
                 </p>
               ) : (
                 rel.assets.map((a) => (
-                  <div
-                    key={a.name}
-                    className="group flex items-center gap-2 text-xs"
-                  >
+                  <div key={a.name} className="flex items-center gap-2 text-xs">
                     <span
                       className="min-w-0 flex-1 truncate font-mono"
                       title={a.name}
@@ -332,27 +341,17 @@ export function TagDetailView({
                         >
                           <DownloadSimpleIcon />
                         </Button>
-                        <span title={writeReason} className={blockedSpanClass}>
-                          <Button
-                            variant="ghost"
-                            size="icon-xs"
-                            aria-label={`Delete ${a.name}`}
-                            disabled={writeBlocked}
-                            className="text-muted-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
-                            onClick={() =>
-                              deleteAsset.mutate(
-                                { tag, assetName: a.name },
-                                {
-                                  onSuccess: () =>
-                                    toast.success("Asset deleted"),
-                                  onError,
-                                },
-                              )
-                            }
-                          >
-                            <TrashIcon />
-                          </Button>
-                        </span>
+                        <DisabledReasonButton
+                          variant="ghost"
+                          size="icon-xs"
+                          aria-label={`Delete ${a.name}`}
+                          disabled={deleteAsset.isPending || writeBlocked}
+                          reason={writeReason}
+                          className="text-muted-foreground"
+                          onClick={() => onDeleteAsset(a.name, "asset")}
+                        >
+                          <TrashIcon />
+                        </DisabledReasonButton>
                       </>
                     ) : (
                       // GitLab asset links carry no size/download count — open the
@@ -371,30 +370,17 @@ export function TagDetailView({
                           </Button>
                         )}
                         {canManage && (
-                          <span
-                            title={writeReason}
-                            className={blockedSpanClass}
+                          <DisabledReasonButton
+                            variant="ghost"
+                            size="icon-xs"
+                            aria-label={`Delete ${a.name}`}
+                            disabled={deleteAsset.isPending || writeBlocked}
+                            reason={writeReason}
+                            className="text-muted-foreground"
+                            onClick={() => onDeleteAsset(a.name, "link")}
                           >
-                            <Button
-                              variant="ghost"
-                              size="icon-xs"
-                              aria-label={`Delete ${a.name}`}
-                              disabled={writeBlocked}
-                              className="text-muted-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
-                              onClick={() =>
-                                deleteAsset.mutate(
-                                  { tag, assetName: a.name },
-                                  {
-                                    onSuccess: () =>
-                                      toast.success("Asset deleted"),
-                                    onError,
-                                  },
-                                )
-                              }
-                            >
-                              <TrashIcon />
-                            </Button>
-                          </span>
+                            <TrashIcon />
+                          </DisabledReasonButton>
                         )}
                       </>
                     )}
@@ -646,16 +632,15 @@ export function TagDetailView({
           <h2 className="font-mono text-sm font-medium">{tag}</h2>
           <span className="flex-1" />
           {ghReady && canCreate && (
-            <span title={writeReason} className={blockedSpanClass}>
-              <Button
-                variant="outline"
-                size="xs"
-                disabled={writeBlocked}
-                onClick={() => setCreateReleaseOpen(true)}
-              >
-                Create release
-              </Button>
-            </span>
+            <DisabledReasonButton
+              variant="outline"
+              size="xs"
+              disabled={writeBlocked}
+              reason={writeReason}
+              onClick={() => setCreateReleaseOpen(true)}
+            >
+              Create release
+            </DisabledReasonButton>
           )}
         </div>
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">

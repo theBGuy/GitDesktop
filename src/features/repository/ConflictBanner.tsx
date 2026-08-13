@@ -1,6 +1,7 @@
 import { InfoIcon, SparkleIcon, WarningIcon } from "@phosphor-icons/react";
 import { useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -123,34 +124,27 @@ export function ConflictBanner({
             >
               Abort
             </Button>
-            {/* Wrap so the disabled reason still shows on hover — a
-                native-disabled button swallows its `title` (vendored Button's
-                pointer-events-none). */}
-            <span
-              className="inline-flex"
-              title={
+            <DisabledReasonButton
+              size="xs"
+              disabled={busy || conflictedCount > 0}
+              reason={
                 conflictedCount > 0 ? "Resolve every conflict first" : undefined
               }
+              onClick={() =>
+                continueOp.mutate(op, {
+                  onSuccess: () =>
+                    toast.success(
+                      op === "merge"
+                        ? "Merge completed"
+                        : `${opVerb} continued`,
+                    ),
+                  onError,
+                })
+              }
             >
-              <Button
-                size="xs"
-                disabled={busy || conflictedCount > 0}
-                onClick={() =>
-                  continueOp.mutate(op, {
-                    onSuccess: () =>
-                      toast.success(
-                        op === "merge"
-                          ? "Merge completed"
-                          : `${opVerb} continued`,
-                      ),
-                    onError,
-                  })
-                }
-              >
-                {continueOp.isPending && <Spinner data-icon="inline-start" />}
-                {OP_LABELS[op].cont}
-              </Button>
-            </span>
+              {continueOp.isPending && <Spinner data-icon="inline-start" />}
+              {OP_LABELS[op].cont}
+            </DisabledReasonButton>
 
             <Dialog open={confirmAbort} onOpenChange={setConfirmAbort}>
               <DialogContent>

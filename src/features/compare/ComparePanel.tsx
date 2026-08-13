@@ -7,6 +7,7 @@ import {
 } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useState } from "react";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import {
   Empty,
@@ -230,53 +231,39 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
           </Button>
         )}
         {canPr && compareBranch && !existingPr && (
-          // Wrap so the disabled reason still shows on hover — a native-disabled
-          // button swallows its `title` (vendored Button's pointer-events-none).
-          <span
-            className="inline-flex w-full"
-            title={
-              ahead.length === 0
-                ? `${currentName} has no commits to propose onto ${compareBranch}`
-                : `Open a ${prNoun} into ${compareBranch}`
-            }
+          <DisabledReasonButton
+            variant="outline"
+            size="sm"
+            wrapperClassName="w-full"
+            className="w-full"
+            disabled={ahead.length === 0}
+            reason={`${currentName} has no commits to propose onto ${compareBranch}`}
+            title={`Open a ${prNoun} into ${compareBranch}`}
+            onClick={() => setPrOpen(true)}
           >
-            <Button
-              variant="outline"
-              size="sm"
-              className="w-full"
-              disabled={ahead.length === 0}
-              onClick={() => setPrOpen(true)}
-            >
-              <GitPullRequestIcon data-icon="inline-start" />
-              Create {prNoun}…
-            </Button>
-          </span>
+            <GitPullRequestIcon data-icon="inline-start" />
+            Create {prNoun}…
+          </DisabledReasonButton>
         )}
         {compareBranch && compareBranch !== currentName && (
-          <span
-            className="inline-flex w-full"
-            title={
-              ahead.length === 0
-                ? `${currentName} has no commits to propose onto ${compareBranch}`
-                : `Propose merging ${currentName} into ${compareBranch} locally`
+          <DisabledReasonButton
+            variant="ghost"
+            size="sm"
+            wrapperClassName="w-full"
+            className="w-full"
+            disabled={ahead.length === 0}
+            reason={`${currentName} has no commits to propose onto ${compareBranch}`}
+            title={`Propose merging ${currentName} into ${compareBranch} locally`}
+            onClick={() =>
+              openLocalPrCreate({
+                defaultHead: currentName ?? undefined,
+                defaultBase: compareBranch ?? undefined,
+              })
             }
           >
-            <Button
-              variant="ghost"
-              size="sm"
-              className="w-full"
-              disabled={ahead.length === 0}
-              onClick={() =>
-                openLocalPrCreate({
-                  defaultHead: currentName ?? undefined,
-                  defaultBase: compareBranch ?? undefined,
-                })
-              }
-            >
-              <GitBranchIcon data-icon="inline-start" />
-              Create local PR…
-            </Button>
-          </span>
+            <GitBranchIcon data-icon="inline-start" />
+            Create local PR…
+          </DisabledReasonButton>
         )}
       </div>
 

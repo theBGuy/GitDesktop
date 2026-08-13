@@ -7,6 +7,7 @@ import {
 } from "@phosphor-icons/react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -330,26 +331,29 @@ export function EditHistoryDialog({
                           Cancel
                         </Button>
                       ) : (
-                        // Wrap so the title still shows when the button is
-                        // disabled — a native-disabled button swallows it.
-                        <span
-                          className="inline-flex"
+                        <DisabledReasonButton
+                          type="button"
+                          variant="ghost"
+                          size="xs"
+                          disabled={ai.generating || !messages.isSuccess}
                           title="Generate this commit's message with AI"
+                          // `ai.generating` here means ANOTHER row is
+                          // generating — this row's own run renders Cancel.
+                          reason={
+                            ai.generating
+                              ? "Another commit message is generating"
+                              : messages.isError
+                                ? "Couldn't load commit messages"
+                                : "Loading commit messages…"
+                          }
+                          onClick={() => {
+                            setGenHash(row.hash);
+                            ai.generate(`${row.hash}^`, row.hash);
+                          }}
                         >
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="xs"
-                            disabled={ai.generating || !messages.isSuccess}
-                            onClick={() => {
-                              setGenHash(row.hash);
-                              ai.generate(`${row.hash}^`, row.hash);
-                            }}
-                          >
-                            <SparkleIcon data-icon="inline-start" />
-                            Generate
-                          </Button>
-                        </span>
+                          <SparkleIcon data-icon="inline-start" />
+                          Generate
+                        </DisabledReasonButton>
                       ))}
                   </div>
                 )}

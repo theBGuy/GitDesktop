@@ -56,6 +56,8 @@ export function ReactionBar({
         <button
           key={r.content}
           type="button"
+          aria-label={`${label(r.content)} reaction, ${r.count}`}
+          aria-pressed={r.viewerReacted}
           disabled={disabled}
           onClick={() => onToggle(r.content, r.viewerReacted)}
           className={cn(
@@ -95,6 +97,8 @@ export function ReactionBar({
                 <button
                   key={content}
                   type="button"
+                  aria-label={`React with ${label(content)}`}
+                  aria-pressed={reacted.has(content)}
                   disabled={disabled}
                   onClick={() => {
                     onToggle(content, reacted.has(content));

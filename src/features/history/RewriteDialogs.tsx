@@ -1,6 +1,7 @@
 import { SparkleIcon, XIcon } from "@phosphor-icons/react";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -187,28 +188,21 @@ export function SquashDialog({
                 Cancel
               </Button>
             ) : (
-              // Wrap so the title still shows when the button is disabled — a
-              // native-disabled button swallows the tooltip. `runHead` is the
-              // collapsing step's tip, so without it there's no range to diff.
-              <span
-                className="mr-auto"
-                title={
-                  runHead
-                    ? "Generate the commit message with AI"
-                    : "Nothing to generate from — this squash has no run of commits to combine"
-                }
+              // `runHead` is the collapsing step's tip, so without it there's no
+              // range to diff.
+              <DisabledReasonButton
+                type="button"
+                variant="outline"
+                size="sm"
+                wrapperClassName="mr-auto"
+                disabled={!runHead}
+                title="Generate the commit message with AI"
+                reason="Nothing to generate from — this squash has no run of commits to combine"
+                onClick={() => runHead && ai.generate(base, runHead)}
               >
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  disabled={!runHead}
-                  onClick={() => runHead && ai.generate(base, runHead)}
-                >
-                  <SparkleIcon data-icon="inline-start" />
-                  Generate
-                </Button>
-              </span>
+                <SparkleIcon data-icon="inline-start" />
+                Generate
+              </DisabledReasonButton>
             )}
             <Button
               type="button"

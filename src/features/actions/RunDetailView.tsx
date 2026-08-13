@@ -11,6 +11,7 @@ import {
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { LogBlock } from "@/components/LogBlock";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -143,32 +144,23 @@ function JobRow({
           )}
         </button>
         {onPlay && (
-          // A natively disabled button swallows `title`, so the reason rides a
-          // wrapping span.
-          <span
-            title={playDisabledReason}
-            className={
-              playDisabledReason
-                ? "inline-flex cursor-not-allowed"
-                : "inline-flex"
-            }
+          <DisabledReasonButton
+            variant="ghost"
+            size="xs"
+            wrapperClassName="mr-2"
+            className="text-muted-foreground"
+            disabled={playing || !!playDisabledReason}
+            reason={playDisabledReason}
+            aria-label={`Run job ${job.name}`}
+            onClick={onPlay}
           >
-            <Button
-              variant="ghost"
-              size="xs"
-              className="mr-2 shrink-0 text-muted-foreground"
-              disabled={playing || !!playDisabledReason}
-              aria-label={`Run job ${job.name}`}
-              onClick={onPlay}
-            >
-              {playing ? (
-                <Spinner data-icon="inline-start" />
-              ) : (
-                <PlayIcon data-icon="inline-start" />
-              )}
-              Run job
-            </Button>
-          </span>
+            {playing ? (
+              <Spinner data-icon="inline-start" />
+            ) : (
+              <PlayIcon data-icon="inline-start" />
+            )}
+            Run job
+          </DisabledReasonButton>
         )}
         {onDebug && (
           <Button
@@ -336,11 +328,6 @@ export function RunDetailView({
   );
   const writeReason = writeAccessReason(writeAccess.data);
   const writeBlocked = writeAccess.data?.canPush === false;
-  // Shared by every disabled-with-reason wrapper below (a natively-disabled
-  // Button swallows `title`, so it rides the span).
-  const blockedSpanClass = writeBlocked
-    ? "inline-flex cursor-not-allowed"
-    : "inline-flex";
   const remoteLabel = providerLabel(provider);
   // GitLab pipelines and Bitbucket steps carry no per-job step list; only GitHub
   // jobs do — so the steps placeholder is suppressed for both.
@@ -474,106 +461,90 @@ export function RunDetailView({
         <div className="mt-3 flex flex-wrap items-center gap-2">
           {active || gitlabBlocked
             ? canCancel && (
-                <span title={writeReason} className={blockedSpanClass}>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={cancel.isPending || writeBlocked}
-                    onClick={doCancel}
-                  >
-                    {cancel.isPending ? (
-                      <Spinner data-icon="inline-start" />
-                    ) : (
-                      <ProhibitIcon data-icon="inline-start" />
-                    )}
-                    Cancel run
-                  </Button>
-                </span>
+                <DisabledReasonButton
+                  variant="outline"
+                  size="sm"
+                  disabled={cancel.isPending || writeBlocked}
+                  reason={writeReason}
+                  onClick={doCancel}
+                >
+                  {cancel.isPending ? (
+                    <Spinner data-icon="inline-start" />
+                  ) : (
+                    <ProhibitIcon data-icon="inline-start" />
+                  )}
+                  Cancel run
+                </DisabledReasonButton>
               )
             : provider === "gitlab"
               ? canRerun &&
                 retryable && (
-                  <span
-                    title={
-                      writeReason ??
-                      "Restart this pipeline's failed and canceled jobs"
-                    }
-                    className={blockedSpanClass}
+                  <DisabledReasonButton
+                    variant="outline"
+                    size="sm"
+                    disabled={rerun.isPending || writeBlocked}
+                    reason={writeReason}
+                    title="Restart this pipeline's failed and canceled jobs"
+                    onClick={() => doRerun(true)}
                   >
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={rerun.isPending || writeBlocked}
-                      onClick={() => doRerun(true)}
-                    >
-                      <ArrowClockwiseIcon data-icon="inline-start" />
-                      Retry pipeline
-                    </Button>
-                  </span>
+                    <ArrowClockwiseIcon data-icon="inline-start" />
+                    Retry pipeline
+                  </DisabledReasonButton>
                 )
               : provider === "bitbucket"
                 ? canRerun &&
                   bitbucketRerunnable && (
-                    <span
-                      title={
-                        writeReason ?? "Trigger this pipeline's branch again"
-                      }
-                      className={blockedSpanClass}
+                    <DisabledReasonButton
+                      variant="outline"
+                      size="sm"
+                      disabled={rerun.isPending || writeBlocked}
+                      reason={writeReason}
+                      title="Trigger this pipeline's branch again"
+                      onClick={() => doRerun(true)}
                     >
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={rerun.isPending || writeBlocked}
-                        onClick={() => doRerun(true)}
-                      >
-                        <ArrowClockwiseIcon data-icon="inline-start" />
-                        Rerun pipeline
-                      </Button>
-                    </span>
+                      <ArrowClockwiseIcon data-icon="inline-start" />
+                      Rerun pipeline
+                    </DisabledReasonButton>
                   )
                 : canWrite && (
                     <>
-                      <span title={writeReason} className={blockedSpanClass}>
-                        <Button
+                      <DisabledReasonButton
+                        variant="outline"
+                        size="sm"
+                        disabled={rerun.isPending || writeBlocked}
+                        reason={writeReason}
+                        onClick={() => doRerun(false)}
+                      >
+                        <ArrowClockwiseIcon data-icon="inline-start" />
+                        Re-run all jobs
+                      </DisabledReasonButton>
+                      {failed && (
+                        <DisabledReasonButton
                           variant="outline"
                           size="sm"
                           disabled={rerun.isPending || writeBlocked}
-                          onClick={() => doRerun(false)}
+                          reason={writeReason}
+                          onClick={() => doRerun(true)}
                         >
                           <ArrowClockwiseIcon data-icon="inline-start" />
-                          Re-run all jobs
-                        </Button>
-                      </span>
-                      {failed && (
-                        <span title={writeReason} className={blockedSpanClass}>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            disabled={rerun.isPending || writeBlocked}
-                            onClick={() => doRerun(true)}
-                          >
-                            <ArrowClockwiseIcon data-icon="inline-start" />
-                            Re-run failed jobs
-                          </Button>
-                        </span>
+                          Re-run failed jobs
+                        </DisabledReasonButton>
                       )}
                     </>
                   )}
-          <Button
+          <DisabledReasonButton
             variant="ghost"
             size="sm"
-            className="ml-auto cursor-pointer"
+            wrapperClassName="ml-auto"
+            className="cursor-pointer"
             disabled={!run.url}
-            title={
-              run.url
-                ? `Open this run on ${remoteLabel}`
-                : "No URL for this run"
-            }
+            reason="No URL for this run"
+            title={`Open this run on ${remoteLabel}`}
             onClick={() => run.url && openUrl(run.url)}
           >
             <ArrowSquareOutIcon data-icon="inline-start" />
             View on {remoteLabel}
-          </Button>
+          </DisabledReasonButton>
         </div>
       </div>
 
@@ -586,21 +557,20 @@ export function RunDetailView({
             GitHub is waiting for a maintainer to approve this workflow run
             before it starts.
           </span>
-          <span title={writeReason} className={blockedSpanClass}>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={approveRun.isPending || writeBlocked}
-              onClick={() => void doApprove()}
-            >
-              {approveRun.isPending ? (
-                <Spinner data-icon="inline-start" />
-              ) : (
-                <PlayIcon data-icon="inline-start" />
-              )}
-              Approve and run
-            </Button>
-          </span>
+          <DisabledReasonButton
+            variant="outline"
+            size="sm"
+            disabled={approveRun.isPending || writeBlocked}
+            reason={writeReason}
+            onClick={() => void doApprove()}
+          >
+            {approveRun.isPending ? (
+              <Spinner data-icon="inline-start" />
+            ) : (
+              <PlayIcon data-icon="inline-start" />
+            )}
+            Approve and run
+          </DisabledReasonButton>
         </div>
       )}
 

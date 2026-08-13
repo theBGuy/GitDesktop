@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -47,7 +48,6 @@ import { deleteRepoLens } from "@/lib/repo-lens/store";
 import { settingsKeys, useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
-import { cn } from "@/lib/utils";
 import { InlineConfirm } from "./parts";
 import { ScopeRefreshHint } from "./ScopeRefreshHint";
 
@@ -156,18 +156,23 @@ function Row({
 
 const OWNER_HINT = "Needs the Owner role on GitLab";
 
-/** A danger-zone trigger whose disabled state still explains itself: the
- *  vendored Button renders a NATIVE `disabled`, which swallows pointer events
- *  (so a `title` on the button never shows) — the hint rides a wrapping span. */
+/** A danger-zone trigger whose disabled state still explains itself. `className`
+ *  stays the row's layout hook (it lands on the wrapper, as it always has). */
 function DangerButton({
   hint,
   className,
   ...props
-}: ComponentProps<typeof Button> & { hint?: string }) {
+}: Omit<ComponentProps<typeof Button>, "className"> & {
+  hint?: string;
+  className?: string;
+}) {
   return (
-    <span title={hint} className={cn("inline-flex", className)}>
-      <Button size="sm" {...props} />
-    </span>
+    <DisabledReasonButton
+      size="sm"
+      reason={hint}
+      wrapperClassName={className}
+      {...props}
+    />
   );
 }
 

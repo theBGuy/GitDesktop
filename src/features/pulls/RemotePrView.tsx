@@ -21,12 +21,14 @@ import {
   type ReactNode,
   useEffect,
   useEffectEvent,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { SelectControl } from "@/components/form/fields";
 import {
@@ -485,15 +487,52 @@ export function RemotePrView({
   // gate on it so a still-mounted lagging view (deferredPr) can't answer first.
   const isSelectedPr =
     selectedPr?.kind === "remote" && selectedPr.id === String(number);
+  const aiEnabled = useAiEnabled();
+  // The sub-tabs the strip renders — every writer of `section` gates on this, so
+  // no path can select a tab that isn't there. The AI Review tab needs only the
+  // diff (forge-neutral) and a way to post the result as a comment, so it
+  // follows canComment, which covers GitLab MRs too (canWrite implies
+  // canComment for GitHub).
+  const availableSections = useMemo<Section[]>(
+    () =>
+      aiEnabled && canComment
+        ? ["conversation", "commits", "files", "review"]
+        : ["conversation", "commits", "files"],
+    [aiEnabled, canComment],
+  );
+  // Until the forge probe answers, `canComment` is a provisional verdict: an
+  // unresolved provider fails open through canWrite, so the Review tab reads
+  // available and then drops once a GitLab/Bitbucket answer lands. Both effects
+  // below wait for the real answer rather than act on the guess. Only the forge
+  // query counts — `writeAccess` feeds `writeBlocked`, not availability, and it
+  // stays pending forever on a repo with no provider (it's a disabled query).
+  const capabilitiesSettled = !forge.isPending;
   // The activity dock's "View" lands here via a pending hint; switch to the
-  // review sub-tab once, then clear it.
+  // review sub-tab once if it's available, then clear the hint either way so
+  // an unusable hint can't fire against a later PR. (Until capabilities settle
+  // the hint is left armed — navigating away in that sub-second window can
+  // carry it to the next PR; accepted.)
   useEffect(() => {
+    if (!capabilitiesSettled) return;
     if (pendingPrSection === "review" && isSelectedPr) {
-      setSection("review");
+      if (availableSections.includes("review")) setSection("review");
       setPendingPrSection(null);
     }
-  }, [pendingPrSection, setPendingPrSection, isSelectedPr]);
-  const aiEnabled = useAiEnabled();
+  }, [
+    pendingPrSection,
+    setPendingPrSection,
+    isSelectedPr,
+    availableSections,
+    capabilitiesSettled,
+  ]);
+  // Availability can drop away under the selection (Hide AI toggled, a
+  // capability lost on refetch), which would leave a blank body under a strip
+  // with no pressed tab — fall back to the tab every PR always has. Layout
+  // effect: a passive one paints that empty frame before reconciling.
+  useLayoutEffect(() => {
+    if (!capabilitiesSettled) return;
+    if (!availableSections.includes(section)) setSection("conversation");
+  }, [availableSections, section, capabilitiesSettled]);
   const rulesConfig = useEffectiveBranchRules(repoPath);
   const defaultBranch = useDefaultBranch(repoPath);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -1679,6 +1718,27 @@ export function RemotePrView({
     );
   }
 
+  // The Merge control's state. Hoisted because the refusal has to sit on the
+  // wrapping span while `disabled` sits on the trigger — a disabled trigger is
+  // what actually keeps the menu (and with it an unguarded merge) shut.
+  const mergeBlocked =
+    busy ||
+    writeBlocked ||
+    pr.isDraft ||
+    mergeGuardMissing ||
+    allMergeMethodsBlocked;
+  // Permission outranks the availability hints: a viewer who can't push can't
+  // act on any of them.
+  const mergeReason =
+    writeReason ??
+    (pr.isDraft
+      ? `Mark the ${prNoun} ready before merging`
+      : mergeGuardMissing
+        ? "Reload to merge — couldn't load the head commit to guard the merge"
+        : allMergeMethodsBlocked
+          ? "No merge method is enabled by both this repository's settings and its branch rules"
+          : `Merge this ${prNoun}`);
+
   return (
     <div className="flex h-full flex-col">
       <header className="space-y-2 border-b px-4 py-3">
@@ -1693,11 +1753,17 @@ export function RemotePrView({
           {isOpen &&
             canWrite &&
             (repoStatus.data?.branch?.name === pr.headRefName ? (
-              <span title={`${pr.headRefName} is the current branch`}>
-                <Button variant="outline" size="xs" disabled>
-                  <CheckCircleIcon data-icon="inline-start" />
-                  Checked out
-                </Button>
+              // A status, not an action — no button role and no tab stop.
+              // role="img" prunes the icon AND the wording, so the label states
+              // the whole thing on its own.
+              <span
+                role="img"
+                aria-label={`Checked out — ${pr.headRefName} is the current branch`}
+                title={`${pr.headRefName} is the current branch`}
+                className="inline-flex h-6 shrink-0 items-center gap-1 border border-border bg-background pr-2 pl-1.5 text-xs font-medium whitespace-nowrap text-muted-foreground"
+              >
+                <CheckCircleIcon className="size-3" aria-hidden />
+                Checked out
               </span>
             ) : (
               <Button
@@ -1946,14 +2012,7 @@ export function RemotePrView({
           crossRepository={!!pr.crossRepository}
         />
         <div className="flex gap-1 pt-1">
-          {/* The AI Review tab needs only the diff (forge-neutral) and a way to
-              post the result as a comment — so it follows canComment, which
-              covers GitLab MRs too (canWrite implies canComment for GitHub). */}
-          {(
-            (aiEnabled && canComment
-              ? ["conversation", "commits", "files", "review"]
-              : ["conversation", "commits", "files"]) as Section[]
-          ).map((s) => (
+          {availableSections.map((s) => (
             <Button
               key={s}
               variant={section === s ? "secondary" : "ghost"}
@@ -2505,23 +2564,35 @@ export function RemotePrView({
                 )}
                 {isOpen && canApprove && (
                   <>
-                    <Button
+                    <DisabledReasonButton
                       variant="outline"
                       size="sm"
                       // On an approvals read-error we can't know the viewer's state,
                       // so disable rather than present a confident (possibly wrong)
-                      // Approve that would fire the wrong direction on click.
+                      // Approve that would fire the wrong direction on click. The
+                      // failed read has no other surface, so it rides `reason` —
+                      // hoverable and announced while the button is unavailable.
                       disabled={
                         busy || approvals.isPending || approvals.isError
                       }
-                      aria-pressed={approval?.viewerHasApproved ?? false}
-                      onClick={toggleApproval}
-                      title={
+                      reason={
                         approvals.isError
                           ? "Couldn't load approval state"
-                          : approval?.viewerHasApproved
-                            ? "Revoke your approval"
-                            : `Approve this ${prNoun}`
+                          : null
+                      }
+                      // Unknown state is announced as unknown: a failed read
+                      // must not claim "not pressed" while the reason says the
+                      // state couldn't be loaded.
+                      aria-pressed={
+                        approvals.isError
+                          ? undefined
+                          : (approval?.viewerHasApproved ?? false)
+                      }
+                      onClick={toggleApproval}
+                      title={
+                        approval?.viewerHasApproved
+                          ? "Revoke your approval"
+                          : `Approve this ${prNoun}`
                       }
                       className={cn(
                         approval?.viewerHasApproved &&
@@ -2530,7 +2601,7 @@ export function RemotePrView({
                     >
                       <CheckCircleIcon data-icon="inline-start" />
                       {approval?.viewerHasApproved ? "Approved" : "Approve"}
-                    </Button>
+                    </DisabledReasonButton>
                     {approvalNote && (
                       <span
                         className="text-xs text-muted-foreground"
@@ -2546,27 +2617,36 @@ export function RemotePrView({
                   </>
                 )}
                 {isOpen && canRequestChanges && (
-                  <Button
+                  <DisabledReasonButton
                     variant="outline"
                     size="sm"
                     // Bitbucket: a true toggle. GitLab: one-shot — once requested
                     // the button is the state indicator (the direct undo is
-                    // Premium-only). It stays FOCUSABLE then (the handler no-ops)
-                    // so keyboard/AT users can reach the how-to-clear title. Same
-                    // disable-on-unknown posture as the approve toggle.
+                    // Premium-only), so it stays ENABLED with a no-op handler and
+                    // its how-to-clear title reachable. Same disable-on-unknown
+                    // posture as the approve toggle: `reason` carries the read
+                    // failure nothing else reports, and DisabledReasonButton keeps
+                    // the disabled button focusable so that reason is announced
+                    // rather than lost.
                     disabled={busy || approvals.isPending || approvals.isError}
-                    aria-pressed={approval?.viewerRequestedChanges ?? false}
+                    reason={
+                      approvals.isError ? "Couldn't load review state" : null
+                    }
+                    // Unknown state is announced as unknown (same as approve).
+                    aria-pressed={
+                      approvals.isError
+                        ? undefined
+                        : (approval?.viewerRequestedChanges ?? false)
+                    }
                     onClick={requestChanges}
                     title={
-                      approvals.isError
-                        ? "Couldn't load review state"
-                        : approval?.viewerRequestedChanges
-                          ? canUnrequestChanges
-                            ? "Revoke your change request"
-                            : "You've requested changes — approve, or remove yourself as a reviewer on GitLab, to clear"
-                          : composeBody.trim()
-                            ? "Request changes, posting your draft as a comment"
-                            : `Request changes on this ${prNoun} (adds you as a reviewer)`
+                      approval?.viewerRequestedChanges
+                        ? canUnrequestChanges
+                          ? "Revoke your change request"
+                          : "You've requested changes — approve, or remove yourself as a reviewer on GitLab, to clear"
+                        : composeBody.trim()
+                          ? "Request changes, posting your draft as a comment"
+                          : `Request changes on this ${prNoun} (adds you as a reviewer)`
                     }
                     className={cn(
                       approval?.viewerRequestedChanges &&
@@ -2577,7 +2657,7 @@ export function RemotePrView({
                     {approval?.viewerRequestedChanges
                       ? "Changes requested"
                       : "Request changes"}
-                  </Button>
+                  </DisabledReasonButton>
                 )}
                 {composeBody.trim() && (
                   <Button
@@ -2746,28 +2826,20 @@ export function RemotePrView({
                 <ClockCountdownIcon className="size-3.5 shrink-0" />
                 Auto-merge enabled
               </span>
-              <span
-                title={writeReason}
-                className={
-                  writeBlocked
-                    ? "inline-flex cursor-not-allowed"
-                    : "inline-flex"
+              <DisabledReasonButton
+                variant="outline"
+                size="sm"
+                disabled={busy || writeBlocked}
+                reason={writeReason}
+                onClick={() =>
+                  cancelAutoMerge.mutate(number, {
+                    onSuccess: () => toast.success("Auto-merge canceled"),
+                    onError,
+                  })
                 }
               >
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={busy || writeBlocked}
-                  onClick={() =>
-                    cancelAutoMerge.mutate(number, {
-                      onSuccess: () => toast.success("Auto-merge canceled"),
-                      onError,
-                    })
-                  }
-                >
-                  Cancel auto-merge
-                </Button>
-              </span>
+                Cancel auto-merge
+              </DisabledReasonButton>
             </div>
           )}
           <span className="flex-1" />
@@ -2789,41 +2861,26 @@ export function RemotePrView({
           {canMerge && (
             <DropdownMenu>
               {/* A natively-disabled Button swallows `title`, so the hint rides a
-                  wrapping span (house idiom). */}
-              <DropdownMenuTrigger
-                render={
-                  <span
-                    title={
-                      // Permission outranks the availability hints: a viewer who
-                      // can't push can't act on any of them.
-                      writeReason ??
-                      (pr.isDraft
-                        ? `Mark the ${prNoun} ready before merging`
-                        : mergeGuardMissing
-                          ? "Reload to merge — couldn't load the head commit to guard the merge"
-                          : allMergeMethodsBlocked
-                            ? "No merge method is enabled by both this repository's settings and its branch rules"
-                            : `Merge this ${prNoun}`)
-                    }
-                    className={writeBlocked ? "cursor-not-allowed" : undefined}
-                  >
-                    <Button
-                      size="sm"
-                      disabled={
-                        busy ||
-                        writeBlocked ||
-                        pr.isDraft ||
-                        mergeGuardMissing ||
-                        allMergeMethodsBlocked
-                      }
-                    >
-                      <GitMergeIcon data-icon="inline-start" />
-                      Merge
-                      <CaretDownIcon data-icon="inline-end" />
-                    </Button>
-                  </span>
-                }
-              />
+                  wrapping span (house idiom). The span stays OUTSIDE the trigger:
+                  as the trigger it would take the click the disabled button
+                  refuses and open the menu anyway — merging past every gate,
+                  including GitLab's stale-head guard. */}
+              <span
+                title={mergeReason}
+                className={cn(
+                  "inline-flex",
+                  mergeBlocked && "cursor-not-allowed",
+                )}
+              >
+                <DropdownMenuTrigger
+                  disabled={mergeBlocked}
+                  render={<Button size="sm" />}
+                >
+                  <GitMergeIcon data-icon="inline-start" />
+                  Merge
+                  <CaretDownIcon data-icon="inline-end" />
+                </DropdownMenuTrigger>
+              </span>
               <DropdownMenuContent align="end" className="w-56">
                 {/* GitLab has no per-MR rebase-merge (that's the project's merge_method
                     setting), so it gets only merge + squash. Bitbucket offers

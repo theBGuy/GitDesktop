@@ -5,6 +5,7 @@ import {
   SparkleIcon,
   WarningIcon,
 } from "@phosphor-icons/react";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -188,54 +189,41 @@ export function PrMergeabilityBanner({
             </Button>
           )}
           {conflicting && canResolveWithAi && (
-            <span
-              className="inline-flex"
-              title={forkBlocked ? FORK_BLOCKED_REASON : undefined}
-            >
-              <Button
-                variant="ghost"
-                size="xs"
-                disabled={busy || forkBlocked}
-                onClick={onResolveWithAi}
-              >
-                <SparkleIcon data-icon="inline-start" />
-                Resolve with AI
-              </Button>
-            </span>
-          )}
-          {/* Wrap so the disabled reason still shows on hover — a native-disabled
-              button swallows its `title` (vendored Button's pointer-events-none). */}
-          <span
-            className="inline-flex"
-            title={forkBlocked ? FORK_BLOCKED_REASON : undefined}
-          >
-            <Button
+            <DisabledReasonButton
               variant="ghost"
               size="xs"
               disabled={busy || forkBlocked}
-              onClick={onResolve}
+              reason={forkBlocked ? FORK_BLOCKED_REASON : undefined}
+              onClick={onResolveWithAi}
             >
-              {resolveLabel}
-            </Button>
-          </span>
+              <SparkleIcon data-icon="inline-start" />
+              Resolve with AI
+            </DisabledReasonButton>
+          )}
+          <DisabledReasonButton
+            variant="ghost"
+            size="xs"
+            disabled={busy || forkBlocked}
+            reason={forkBlocked ? FORK_BLOCKED_REASON : undefined}
+            onClick={onResolve}
+          >
+            {resolveLabel}
+          </DisabledReasonButton>
         </div>
       )}
 
       {arm === "behind" && (
         <div className="flex items-center gap-1.5">
-          {/* The wrapping span carries the refusal on hover — a natively-disabled
-              button swallows its own `title` (same idiom as above). */}
-          <span className="inline-flex" title={updateBlockedReason}>
-            <Button
-              variant="ghost"
-              size="xs"
-              disabled={updateDisabled}
-              onClick={onUpdateBranch}
-            >
-              {updateBusy && <Spinner data-icon="inline-start" />}
-              Update branch
-            </Button>
-          </span>
+          <DisabledReasonButton
+            variant="ghost"
+            size="xs"
+            disabled={updateDisabled}
+            reason={updateBlockedReason}
+            onClick={onUpdateBranch}
+          >
+            {updateBusy && <Spinner data-icon="inline-start" />}
+            Update branch
+          </DisabledReasonButton>
           {/* A span-wrapped `render` would swallow the caret's disabled state — the
               vendored Button's `pointer-events-none` routes the click to the span,
               which IS the trigger — so a refused update renders no trigger at all. */}

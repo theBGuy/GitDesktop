@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -218,19 +219,16 @@ export function RepoAutomationsDialog({
           ) : (
             <>
               <div className="flex justify-end">
-                <Button
+                <DisabledReasonButton
                   variant="ghost"
                   size="xs"
                   onClick={resetToGlobal}
                   disabled={!hasOverrides}
-                  title={
-                    hasOverrides
-                      ? "Remove all overrides and inherit the global defaults"
-                      : "No overrides to reset"
-                  }
+                  reason="No overrides to reset"
+                  title="Remove all overrides and inherit the global defaults"
                 >
                   Reset to global defaults
-                </Button>
+                </DisabledReasonButton>
               </div>
               <LifecycleEditor cellState={cellState} onCellPatch={patchCell} />
             </>
@@ -240,15 +238,13 @@ export function RepoAutomationsDialog({
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          {dirty && !save.isPending ? (
-            <Button onClick={doSave}>Save changes</Button>
-          ) : (
-            <span title={save.isPending ? "Saving…" : "No changes to save"}>
-              <Button onClick={doSave} disabled>
-                Save changes
-              </Button>
-            </span>
-          )}
+          <DisabledReasonButton
+            onClick={doSave}
+            disabled={!dirty || save.isPending}
+            reason={save.isPending ? "Saving…" : "No changes to save"}
+          >
+            Save changes
+          </DisabledReasonButton>
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -5,6 +5,7 @@ import {
 } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useState } from "react";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -357,25 +358,19 @@ export function DueDateRow({
           Due date
         </Label>
         {value !== null && (
-          // The hint sits on the controls, not the row: a disabled input or
-          // button swallows `title`, while the Label stays live either way.
-          <span
-            title={disabledReason}
-            className={
-              blocked ? "inline-flex cursor-not-allowed" : "inline-flex"
-            }
+          // The hint sits on the control, not the row — the Label stays live
+          // either way.
+          <DisabledReasonButton
+            type="button"
+            variant="ghost"
+            size="xs"
+            className="text-muted-foreground"
+            disabled={pending || blocked}
+            reason={disabledReason}
+            onClick={() => onChange(null)}
           >
-            <Button
-              type="button"
-              variant="ghost"
-              size="xs"
-              className="text-muted-foreground"
-              disabled={pending || blocked}
-              onClick={() => onChange(null)}
-            >
-              Clear
-            </Button>
-          </span>
+            Clear
+          </DisabledReasonButton>
         )}
       </div>
       {/* Uncontrolled while focused (key remounts on external change) so the
@@ -695,26 +690,18 @@ function IssueLinksSection({
         </span>
         <span className="flex-1" />
         {editable && !adding && (
-          // A natively disabled button swallows `title`, so the reason rides a
-          // wrapping span.
-          <span
-            title={disabledReason}
-            className={
-              disabledReason ? "inline-flex cursor-not-allowed" : "inline-flex"
-            }
+          <DisabledReasonButton
+            variant="ghost"
+            size="xs"
+            aria-label="Link a related issue"
+            disabled={!!disabledReason}
+            reason={disabledReason}
+            onClick={() => setAdding(true)}
           >
-            <Button
-              variant="ghost"
-              size="xs"
-              aria-label="Link a related issue"
-              disabled={!!disabledReason}
-              onClick={() => setAdding(true)}
-            >
-              <PlusIcon data-icon="inline-start" />
-              Add
-              <CaretDownIcon data-icon="inline-end" />
-            </Button>
-          </span>
+            <PlusIcon data-icon="inline-start" />
+            Add
+            <CaretDownIcon data-icon="inline-end" />
+          </DisabledReasonButton>
         )}
       </div>
 

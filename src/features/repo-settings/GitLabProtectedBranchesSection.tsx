@@ -1,6 +1,7 @@
 import { CaretLeftIcon, PlusIcon } from "@phosphor-icons/react";
 import { useId, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -186,18 +187,15 @@ function ProtectedBranchRow({
             onAct={onUnprotect}
           />
         ) : branch.inherited ? (
-          // A natively disabled Button swallows pointer events, so its own title
-          // never shows — wrap it so the explanation surfaces on hover.
-          <span title={inheritedHint} className="inline-flex">
-            <Button
-              size="sm"
-              variant="ghost"
-              className="text-muted-foreground"
-              disabled
-            >
-              Unprotect
-            </Button>
-          </span>
+          <DisabledReasonButton
+            size="sm"
+            variant="ghost"
+            className="text-muted-foreground"
+            disabled
+            reason={inheritedHint}
+          >
+            Unprotect
+          </DisabledReasonButton>
         ) : (
           <Button
             size="sm"
