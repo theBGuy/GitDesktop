@@ -669,9 +669,10 @@ notice** at the top of this tab (and the Issues tab) reminds you to reconnect be
 lapses.
 
 What you can *do* here follows your access on the repository: when you lack the access an
-action needs — push access to **merge**, a lighter tier (GitHub's triage, GitLab's
-Reporter) for **labels**, **assignees**, and **reviewers** — the control stays where it is,
-disabled, and says what it requires instead of failing when you press it.
+action needs — push access to **merge** or to flip a pull request between **draft** and
+**ready for review**, a lighter tier (GitHub's triage, GitLab's Reporter) for **labels**,
+**assignees**, **reviewers**, and **closing or reopening** — the control stays where it
+is, disabled, and says what it requires instead of failing when you press it.
 
 ## Fork · Upstream lens
 
@@ -1171,9 +1172,9 @@ add labels, **close / reopen**, **lock**, and **transfer** an issue to another r
   issue.
 
 As on the Pull Requests tab, these follow your access on the repository: an action you
-don't have the access for — a lighter tier for labels, assignees and milestones, push
-access for pinning, transferring or creating a branch — stays visible but disabled and
-says what it needs.
+don't have the access for — a lighter tier for labels, assignees, milestones, and
+closing or reopening, push access for pinning, transferring or creating a branch —
+stays visible but disabled and says what it needs.
 
 ## Fork · Upstream lens
 
