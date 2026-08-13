@@ -1582,16 +1582,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           }
         }}
       >
-        {/* The reason rides the wrapper because the trigger's `render` target
-            can't carry one: a disabled trigger drops pointer events, so its own
-            `title` never surfaces. The wrapper is the header's flex item, so it
-            carries the large shrink factor — flex removes space proportionally
-            to factor × base size, so the cascade collapses branch (20) → CI
-            badge (4) while the repo switcher holds its natural width, and the
-            branch label absorbs the pressure first. The
-            button must opt back in with `shrink`: the vendored Button ships
-            `shrink-0`, which would otherwise pin it at full width inside a
-            shrinking wrapper. */}
+        {/* The reason rides the wrapper (a disabled trigger drops pointer
+            events, so its own `title` never surfaces), and the wrapper is the
+            header's flex item, so it owns the shrink-20 that makes the branch
+            label collapse before the CI badge (4); the inner Button needs
+            `shrink` to undo the vendored `shrink-0`, or nothing truncates. */}
         <span
           className={cn(
             "inline-flex min-w-0 shrink-20",

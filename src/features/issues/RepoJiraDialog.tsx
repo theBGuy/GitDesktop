@@ -467,11 +467,15 @@ export function RepoJiraDialog({
             Cancel
           </Button>
           <DisabledReasonButton
-            // Below `sm` the footer stacks and stretches the wrapper span; the
-            // Button has to fill it to match the full-width Cancel beside it.
-            className="w-full"
             disabled={!canSave || !dirty || save.isPending}
-            reason={saveReason ?? (save.isPending ? "Saving…" : undefined)}
+            reason={
+              saveReason ??
+              (save.isPending
+                ? "Saving…"
+                : dirty
+                  ? undefined
+                  : "No changes to save")
+            }
             onClick={doSave}
           >
             Save

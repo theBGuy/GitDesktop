@@ -432,6 +432,9 @@ export function BranchRulesDialog({
             Cancel
           </Button>
           <DisabledReasonButton
+            // Below `sm` the footer stacks and stretches the wrapper span; the
+            // Button fills it to match the stretched Cancel beside it.
+            className="w-full"
             onClick={doSave}
             disabled={!dirty || saving.isPending}
             reason={!dirty ? "No changes to save" : "Saving…"}

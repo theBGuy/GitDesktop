@@ -6,8 +6,9 @@ import {
 } from "@phosphor-icons/react";
 import { Badge } from "@/components/ui/badge";
 import type { ForgeSearchRepo } from "@/lib/git/types";
+import { repoStateLabel } from "@/lib/repo-labels";
 import { cn } from "@/lib/utils";
-import { compactNumber, exploreOptionId } from "./explore-utils";
+import { exploreOptionId, starParts } from "./explore-utils";
 
 /** One repository result row — a `role="option"` in the results listbox. Row
  *  anatomy mirrors the clone browser's RepoRow (leading icon by private/fork
@@ -26,20 +27,8 @@ export function ExploreResultRow({
     : repo.fork
       ? GitForkIcon
       : BookBookmarkIcon;
-  // One glyph stands for both states, so its label names both; role="img" hides
-  // the icon from readers, leaving the label to carry the meaning alone. A plain
-  // repo stays unlabelled — nothing in the app badges a repo "public".
-  const stateLabel = repo.private
-    ? repo.fork
-      ? "Private fork"
-      : "Private repository"
-    : repo.fork
-      ? "Fork"
-      : null;
-  const stars = repo.stars ?? null;
-  const starText = stars === null ? "" : compactNumber.format(stars);
-  const starLabel =
-    stars === null ? null : `${starText} ${stars === 1 ? "star" : "stars"}`;
+  const stateLabel = repoStateLabel(repo.private, repo.fork);
+  const star = starParts(repo.stars ?? null);
   return (
     <button
       type="button"
@@ -77,17 +66,17 @@ export function ExploreResultRow({
             Archived
           </Badge>
         )}
-        {starLabel !== null && (
+        {star && (
           // role="img" prunes the icon AND the number, so the label carries both
           // the count and its unit.
           <span
             role="img"
-            aria-label={starLabel}
-            title={starLabel}
+            aria-label={star.label}
+            title={star.label}
             className="flex shrink-0 items-center gap-0.5 tabular-nums text-muted-foreground"
           >
-            <StarIcon className="size-3" />
-            {starText}
+            <StarIcon className="size-3" aria-hidden />
+            {star.text}
           </span>
         )}
       </span>

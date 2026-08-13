@@ -82,6 +82,18 @@ export function groupReposByOwner(
   ]);
 }
 
+/**
+ * Visible text + self-contained accessible label for a star count (role="img"
+ * suppresses descendants, so the label must carry number AND unit itself).
+ */
+export function starParts(
+  stars: number | null,
+): { text: string; label: string } | null {
+  if (stars === null) return null;
+  const text = compactNumber.format(stars);
+  return { text, label: `${text} ${stars === 1 ? "star" : "stars"}` };
+}
+
 /** Stable DOM id per result row, so the search input's aria-activedescendant can
  *  point at the keyboard-highlighted option for screen readers. */
 export const exploreOptionId = (fullName: string) =>

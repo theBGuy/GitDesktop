@@ -1980,8 +1980,8 @@ first load; any duplicates are merged and disclosed once with a toast.`,
 **Git hooks…** (in the repo ⋮ menu) manages the scripts in your repo's \`.git/hooks\` —
 the small programs Git runs at points like *before commit* or *before push*.
 
-- See every hook with its state (active / disabled / inactive) and **edit** it in a
-  built-in editor.
+- See every hook with its state (active / disabled / inactive) — the list is
+  arrow-navigable — and **edit** it in a built-in editor.
 - **Enable or disable** a hook without deleting it, or delete it outright.
 - **Templates** give you a one-click starting script for any of the standard hooks
   (pre-commit, commit-msg, pre-push, …).

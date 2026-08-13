@@ -286,7 +286,7 @@ function VariableRow({
             variant="ghost"
             className="text-muted-foreground"
             disabled
-            aria-label="Delete variable"
+            aria-label={`Delete ${variable.key}`}
             reason="Syncing with Bitbucket…"
           >
             <XIcon />
@@ -297,7 +297,7 @@ function VariableRow({
             variant="ghost"
             className="text-muted-foreground hover:text-destructive"
             onClick={onConfirm}
-            aria-label="Delete variable"
+            aria-label={`Delete ${variable.key}`}
             title="Delete"
           >
             <XIcon />

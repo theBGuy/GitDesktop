@@ -34,7 +34,7 @@ import {
 import { useConfirm } from "@/lib/stores/confirm";
 import { toastError } from "@/lib/toast";
 import type { ExploreCloneTarget } from "./ExploreCloneDialog";
-import { compactNumber } from "./explore-utils";
+import { starParts } from "./explore-utils";
 
 /** The Explore detail pane: the selected repo's header, actions (clone / fork /
  *  star / view), and its lazily-fetched README. `features` gates fork/star, and
@@ -151,10 +151,7 @@ function ExploreDetailBody({
   const starLoaded = starred.data !== undefined;
   const isStarred = starred.data ?? false;
 
-  const stars = repo.stars ?? null;
-  const starText = stars === null ? "" : compactNumber.format(stars);
-  const starLabel =
-    stars === null ? null : `${starText} ${stars === 1 ? "star" : "stars"}`;
+  const star = starParts(repo.stars ?? null);
 
   return (
     <div className="flex flex-col gap-4 p-4">
@@ -187,17 +184,17 @@ function ExploreDetailBody({
           </div>
         )}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
-          {starLabel !== null && (
+          {star && (
             // role="img" prunes the icon AND the number, so the label carries
             // both the count and its unit.
             <span
               role="img"
-              aria-label={starLabel}
-              title={starLabel}
+              aria-label={star.label}
+              title={star.label}
               className="flex items-center gap-0.5 tabular-nums"
             >
-              <StarIcon className="size-3" />
-              {starText}
+              <StarIcon className="size-3" aria-hidden />
+              {star.text}
             </span>
           )}
           {repo.language && <span>{repo.language}</span>}

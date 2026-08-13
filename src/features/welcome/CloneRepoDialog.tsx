@@ -27,6 +27,7 @@ import { cloneRepo, forgeClone, validateRepo } from "@/lib/git/api";
 import { useForgeRepos } from "@/lib/git/queries";
 import type { ForgeProvider, ForgeRepo } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { repoStateLabel } from "@/lib/repo-labels";
 import { useAddRecentRepo, useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { errorMessage, isAppError } from "@/lib/tauri/invoke";
@@ -504,17 +505,9 @@ function RepoRow({
     : repo.fork
       ? GitForkIcon
       : BookBookmarkIcon;
-  // One glyph stands for both states, so its label names both; role="img" hides
-  // the icon from readers, leaving the label to carry the meaning alone. A plain
-  // repo stays unlabelled — nothing in the app badges a repo "public". The glyph
-  // takes no `title`: the row already hovers its description / full name.
-  const stateLabel = repo.private
-    ? repo.fork
-      ? "Private fork"
-      : "Private repository"
-    : repo.fork
-      ? "Fork"
-      : null;
+  // The glyph takes no `title`: the row already hovers its description / full
+  // name.
+  const stateLabel = repoStateLabel(repo.private, repo.fork);
   return (
     <button
       type="button"

@@ -260,7 +260,8 @@ function RunSteps({ job }: { job: RunJob }) {
                 wrapping role="img" names it (aria-label is not valid, nor
                 reliably announced, on a bare `<svg>`). No `title` — announced,
                 not hovered, so the row's only tooltip stays the clipped step
-                name. */}
+                name. StatusIcon takes no aria props; the role prunes its svg
+                regardless. */}
             <span
               role="img"
               aria-label={statusLabel(step.status, step.conclusion)}

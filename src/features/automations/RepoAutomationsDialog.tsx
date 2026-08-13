@@ -239,6 +239,9 @@ export function RepoAutomationsDialog({
             Cancel
           </Button>
           <DisabledReasonButton
+            // Below `sm` the footer stacks and stretches the wrapper span; the
+            // Button fills it to match the stretched Cancel beside it.
+            className="w-full"
             onClick={doSave}
             disabled={!dirty || save.isPending}
             reason={save.isPending ? "Saving…" : "No changes to save"}
