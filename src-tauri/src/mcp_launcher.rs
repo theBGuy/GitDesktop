@@ -150,6 +150,12 @@ fn marker_path(dest: &Path) -> PathBuf {
 /// Whether the managed copy at `dest` is stale relative to `want`. Stale ⇔ the
 /// dest exe is absent, OR the marker is missing/unparseable, OR any of its three
 /// fields differs from `want`.
+///
+/// The marker attests WHICH source/version the copy was made from — not the
+/// copy's bytes. In-place tampering of `dest` is outside the contract: a writer
+/// with that access could forge the sibling marker too, and every crash or
+/// quarantine path self-repairs (dest-absent is stale; `copy_into_place` writes
+/// the marker only after the exe rename lands).
 fn is_stale(dest: &Path, want: &Marker) -> bool {
     if !dest.exists() {
         return true;
@@ -533,8 +539,10 @@ mod tests {
     #[test]
     fn ensure_in_dir_skips_the_copy_a_racer_already_did() {
         // What makes the loser of the race cheap instead of a redundant ~50MB
-        // copy: the under-lock staleness re-check. Tampering with the dest body
-        // (the marker still matches) makes the skipped copy observable.
+        // copy: the under-lock staleness re-check. Rewriting the dest body while
+        // the marker matches is ONLY the observable for "the copy was skipped" —
+        // content integrity is deliberately not the marker's contract (see
+        // `is_stale`).
         let (_guard, dir) = scratch_dir("skip-redundant");
         let (source, _bin, dest) = fake_source(&dir, b"launcher bytes");
         let want = marker_for(&source, "1.2.3").unwrap();
@@ -545,7 +553,7 @@ mod tests {
         assert_eq!(
             std::fs::read(&dest).unwrap(),
             b"tampered".to_vec(),
-            "fresh marker ⇒ the copy is skipped, not redone"
+            "fresh marker ⇒ the copy is skipped, not redone (skip observable; integrity is not the marker contract)"
         );
     }
 

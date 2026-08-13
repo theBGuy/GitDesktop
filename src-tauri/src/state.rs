@@ -258,8 +258,9 @@ mod agent_cancel_tests {
         let adopted = "tombstone-adopted-0004";
         state.cancel_agent(unadopted);
         state.cancel_agent(adopted);
-        // A run that registers later adopts the tombstone and holds its own clone,
-        // which is exactly what the sweep's strong-count check must see.
+        // A run that registers later adopts the tombstone, CLEARING its stamp — the
+        // stamp short-circuit is what saves it from the sweep; the strong-count arm
+        // guards the separate transient-clone race, not this path.
         let _held = state.register_agent_cancel(adopted);
 
         sweep_unadopted_tombstone(&state.agent_cancels, unadopted);

@@ -73,7 +73,9 @@ static PTY_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new
 /// to bound memory against a child that has genuinely stopped reading — a healthy
 /// child that's merely busy must never lose a keystroke to it. Input past the cap
 /// is dropped rather than queued: a wedged PTY's input is already lost, and
-/// dropping it beats growing without bound.
+/// dropping it beats growing without bound. The gate reads the BACKLOG only, so
+/// one oversized chunk still lands (memory bound = cap + one in-flight chunk)
+/// rather than a healthy giant paste being dropped whole.
 const PTY_INPUT_QUEUE_CAP: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
@@ -471,7 +473,7 @@ fn queue_pty_input(
     data: Vec<u8>,
 ) {
     let len = data.len();
-    if queued.load(std::sync::atomic::Ordering::Relaxed) + len > PTY_INPUT_QUEUE_CAP {
+    if queued.load(std::sync::atomic::Ordering::Relaxed) >= PTY_INPUT_QUEUE_CAP {
         return;
     }
     queued.fetch_add(len, std::sync::atomic::Ordering::Relaxed);
