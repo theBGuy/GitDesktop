@@ -17,6 +17,19 @@ async function fetchJson(url: string): Promise<Record<string, unknown>> {
   return res.json();
 }
 
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return v != null && typeof v === "object";
+}
+
+/** One string field off a nested registry object, else null. Registry responses
+ *  are untrusted: a non-string value here reaches JSX, where an object or array
+ *  throws "Objects are not valid as a React child". */
+function stringField(parent: unknown, key: string): string | null {
+  if (!isRecord(parent)) return null;
+  const value = parent[key];
+  return typeof value === "string" ? value : null;
+}
+
 async function fetchPackageInfo(
   ecosystem: string,
   name: string,
@@ -24,18 +37,18 @@ async function fetchPackageInfo(
   switch (ecosystem) {
     case "npm": {
       const j = await fetchJson(`https://registry.npmjs.org/${name}/latest`);
-      return { description: (j.description as string) ?? null };
+      return {
+        description: typeof j.description === "string" ? j.description : null,
+      };
     }
     case "cargo": {
       const j = await fetchJson(`https://crates.io/api/v1/crates/${name}`);
-      const crate = j.crate as { description?: string } | undefined;
-      return { description: crate?.description ?? null };
+      return { description: stringField(j.crate, "description") };
     }
     case "pypi":
     case "pip": {
       const j = await fetchJson(`https://pypi.org/pypi/${name}/json`);
-      const info = j.info as { summary?: string } | undefined;
-      return { description: info?.summary ?? null };
+      return { description: stringField(j.info, "summary") };
     }
     default:
       return { description: null };

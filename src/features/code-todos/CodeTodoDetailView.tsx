@@ -6,6 +6,7 @@ import {
 import hljs from "highlight.js/lib/common";
 import { useState } from "react";
 import { toast } from "sonner";
+import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { diffLang } from "@/features/diff/diff-lang";
@@ -17,7 +18,6 @@ import {
   useTodoScanInvalidate,
 } from "@/lib/git/queries";
 import type { BlameLine } from "@/lib/git/types";
-import { formatRelativeTime } from "@/lib/time";
 import { cn } from "@/lib/utils";
 import { MarkerChip } from "./MarkerChip";
 import { basename } from "./markers";
@@ -160,9 +160,14 @@ export function CodeTodoDetailView({
         {todoLine && isRealCommit(todoLine.hash) && (
           <p className="mt-2 text-xs text-muted-foreground">
             Added by {todoLine.author}
-            {todoLine.time
-              ? ` · ${formatRelativeTime(new Date(todoLine.time * 1000).toISOString())}`
-              : ""}
+            {todoLine.time ? (
+              <>
+                {" · "}
+                <RelativeTime
+                  date={new Date(todoLine.time * 1000).toISOString()}
+                />
+              </>
+            ) : null}
           </p>
         )}
         {blame.isError && (

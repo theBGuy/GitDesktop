@@ -4100,14 +4100,6 @@ export function useConflictPreview(
   });
 }
 
-export function useReviewPr(repo: string) {
-  return useRepoMutation(
-    repo,
-    (args: { number: number; action: api.ReviewAction; body: string }) =>
-      api.ghPrReview(repo, args.number, args.action, args.body),
-  );
-}
-
 export function useCommentPr(repo: string, lens: RemoteLens) {
   return useOptimisticCreateCommentMutation(repo, "pr", lens, (args) =>
     api.forgePrComment(repo, args.number, args.body, args.asBot, lens),

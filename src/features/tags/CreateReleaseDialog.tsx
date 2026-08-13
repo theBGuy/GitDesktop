@@ -14,6 +14,7 @@ import {
   MarkdownEditor,
   type MarkdownEditorHandle,
 } from "@/components/markdown-editor";
+import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import {
   Combobox,
@@ -60,7 +61,6 @@ import type { CommitSummary } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
-import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { useGenerateReleaseNotes } from "./useGenerateReleaseNotes";
@@ -563,7 +563,7 @@ function TargetPicker({
                   <span className="block truncate">{c.subject}</span>
                   <span className="text-muted-foreground">
                     <span className="font-mono">{c.hash.slice(0, 7)}</span> ·{" "}
-                    {formatRelativeTime(c.date)}
+                    <RelativeTime date={c.date} />
                   </span>
                 </span>
               </>

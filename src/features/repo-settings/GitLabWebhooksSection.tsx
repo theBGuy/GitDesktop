@@ -8,6 +8,7 @@ import {
 } from "@phosphor-icons/react";
 import { useState } from "react";
 import { toast } from "sonner";
+import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -25,7 +26,6 @@ import {
   useGlUpdateHook,
 } from "@/lib/git/queries";
 import type { GitLabHook, GitLabHookDelivery } from "@/lib/git/types";
-import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { AsyncListBody, DeliveryPayload, InlineConfirm } from "./parts";
 
@@ -120,9 +120,12 @@ export function GitLabWebhooksSection({
                 </p>
                 <p className="mt-0.5 text-muted-foreground">
                   {eventsSummary(h.events)}
-                  {h.createdAt
-                    ? ` · added ${formatRelativeTime(h.createdAt)}`
-                    : ""}
+                  {h.createdAt && (
+                    <>
+                      {" · added "}
+                      <RelativeTime date={h.createdAt} />
+                    </>
+                  )}
                 </p>
               </div>
               {h.alertStatus !== "executable" && (
@@ -421,7 +424,9 @@ function DeliveryRow({
           <span className="truncate font-mono">{delivery.trigger}</span>
           <span className="ml-auto shrink-0 text-muted-foreground">
             {delivery.duration > 0 ? `${delivery.duration.toFixed(2)}s · ` : ""}
-            {delivery.createdAt ? formatRelativeTime(delivery.createdAt) : ""}
+            {delivery.createdAt ? (
+              <RelativeTime date={delivery.createdAt} />
+            ) : null}
           </span>
         </button>
         <Button

@@ -42,7 +42,6 @@ fn validate_repo_name(name: &str) -> AppResult<()> {
 /// Pins the origin slug: `gh api`'s `{owner}/{repo}` placeholders auto-resolve
 /// to the PARENT on a fork with an `upstream` remote — so an unpinned call would
 /// archive the upstream repo. Build the literal `repos/<slug>` path instead.
-#[tauri::command]
 pub async fn gh_repo_set_archived(repo_path: String, archived: bool) -> AppResult<()> {
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
     let body = json!({ "archived": archived });
@@ -67,7 +66,6 @@ pub async fn gh_repo_set_archived(repo_path: String, archived: bool) -> AppResul
 ///
 /// Pins the origin slug so a fork's rename can't retarget the upstream parent
 /// (see `gh_repo_set_archived`).
-#[tauri::command]
 pub async fn gh_repo_rename(repo_path: String, new_name: String) -> AppResult<()> {
     let new_name = new_name.trim();
     validate_repo_name(new_name)?;
@@ -93,7 +91,6 @@ pub async fn gh_repo_rename(repo_path: String, new_name: String) -> AppResult<()
 /// Changes repository visibility. `visibility` ∈ public | private | internal
 /// (`internal` needs the org to belong to an enterprise — gh's error explains).
 /// Pins the origin slug (see `gh_repo_set_archived`).
-#[tauri::command]
 pub async fn gh_repo_set_visibility(repo_path: String, visibility: String) -> AppResult<()> {
     if !matches!(visibility.as_str(), "public" | "private" | "internal") {
         return Err(AppError::InvalidArgument(format!(
@@ -124,7 +121,6 @@ pub async fn gh_repo_set_visibility(repo_path: String, visibility: String) -> Ap
 ///
 /// Pins the origin slug: without it a fork's transfer would target the upstream
 /// PARENT (see `gh_repo_set_archived`).
-#[tauri::command]
 pub async fn gh_repo_transfer(
     repo_path: String,
     new_owner: String,
@@ -159,7 +155,6 @@ pub async fn gh_repo_transfer(
 ///
 /// Pins the origin slug: an unpinned DELETE on a fork with an `upstream` remote
 /// would resolve to — and delete — the PARENT repo (see `gh_repo_set_archived`).
-#[tauri::command]
 pub async fn gh_repo_delete(repo_path: String) -> AppResult<()> {
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
     run_gh(

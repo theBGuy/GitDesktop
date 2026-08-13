@@ -1,5 +1,6 @@
 import { CopyIcon } from "@phosphor-icons/react";
 import { useMemo, useState } from "react";
+import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -11,7 +12,6 @@ import { splitUnifiedDiff } from "@/lib/git/diff-split";
 import { useCommitComments, usePrCommitDiff } from "@/lib/git/queries";
 import type { PrCommitOut, RemoteLens } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
-import { formatRelativeTime } from "@/lib/time";
 import { cn } from "@/lib/utils";
 import {
   CommitComments,
@@ -177,7 +177,7 @@ export function PrCommitDetail({
           </span>
           <span>{commit.author}</span>
           <span>•</span>
-          <span>{commit.date && formatRelativeTime(commit.date)}</span>
+          <span>{commit.date && <RelativeTime date={commit.date} />}</span>
           <span>•</span>
           <button
             type="button"

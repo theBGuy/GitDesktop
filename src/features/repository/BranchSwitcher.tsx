@@ -14,6 +14,7 @@ import {
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -76,7 +77,6 @@ import {
   useSettings,
 } from "@/lib/settings/queries";
 import { type SelectedPr, useUiStore } from "@/lib/stores/ui";
-import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import {
@@ -1382,7 +1382,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                   })()}
                 {branch.lastCommitDate && (
                   <span className="ml-auto shrink-0 text-[11px] text-muted-foreground">
-                    {formatRelativeTime(branch.lastCommitDate)}
+                    <RelativeTime date={branch.lastCommitDate} />
                   </span>
                 )}
               </span>
@@ -1532,7 +1532,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
               )}
               {branch.lastCommitDate && (
                 <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
-                  {formatRelativeTime(branch.lastCommitDate)}
+                  <RelativeTime date={branch.lastCommitDate} />
                 </span>
               )}
             </button>

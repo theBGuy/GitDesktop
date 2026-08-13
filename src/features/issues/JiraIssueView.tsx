@@ -21,6 +21,7 @@ import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import type { MarkdownEditorHandle } from "@/components/markdown-editor";
+import { RelativeTime } from "@/components/relative-time";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -80,7 +81,6 @@ import {
   type JiraWorklog,
 } from "@/lib/jira/types";
 import { useUiStore } from "@/lib/stores/ui";
-import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { useDebouncedValue } from "@/lib/use-debounced-value";
 import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
@@ -792,7 +792,7 @@ function JiraCommentItem({
           {comment.author?.label ?? "unknown"}
         </span>
         <span className="text-muted-foreground">
-          {formatRelativeTime(comment.createdAt)}
+          <RelativeTime date={comment.createdAt} />
         </span>
         {edited && (
           <span className="text-muted-foreground italic">(edited)</span>
@@ -975,7 +975,7 @@ function JiraWorklogItem({
           {worklog.timeSpent}
         </span>
         <span className="text-muted-foreground">
-          {formatRelativeTime(worklog.started)}
+          <RelativeTime date={worklog.started} />
         </span>
         {showActions && !editing && (
           <>
@@ -1661,7 +1661,9 @@ export function JiraIssueView({
               name={issue.statusName}
             />
           )}
-          <span>· opened {formatRelativeTime(issue.createdAt)}</span>
+          <span>
+            · opened <RelativeTime date={issue.createdAt} />
+          </span>
         </div>
       </header>
 

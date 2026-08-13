@@ -12,7 +12,9 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { ElapsedTime } from "@/components/elapsed-time";
 import { LogBlock } from "@/components/LogBlock";
+import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -39,7 +41,7 @@ import {
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
-import { formatRelativeTime } from "@/lib/time";
+import { formatDurationBetween } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { DebugJobDialog } from "./DebugJobDialog";
 import { isFailureConclusion, StatusIcon, statusLabel } from "./status";
@@ -50,21 +52,6 @@ import { isFailureConclusion, StatusIcon, statusLabel } from "./status";
 function isLogPending(log: string): boolean {
   const t = log.trim();
   return t.length < 300 && /still in progress|will be available/i.test(t);
-}
-
-/** "1m 12s" elapsed between two ISO timestamps (now if not yet finished). */
-function duration(start: string, end: string): string {
-  if (!start) return "";
-  const s = new Date(start).getTime();
-  const e = end ? new Date(end).getTime() : Date.now();
-  if (Number.isNaN(s) || Number.isNaN(e) || e < s) return "";
-  const sec = Math.round((e - s) / 1000);
-  if (sec < 60) return `${sec}s`;
-  const m = Math.floor(sec / 60);
-  const r = sec % 60;
-  if (m < 60) return r ? `${m}m ${r}s` : `${m}m`;
-  const h = Math.floor(m / 60);
-  return `${h}h ${m % 60}m`;
 }
 
 function JobRow({
@@ -101,7 +88,9 @@ function JobRow({
   // The archived log only exists once the job finishes, so don't fetch while it
   // runs (gh would just return a "still in progress" line).
   const logs = useJobLogs(repoPath, job, open && showLogs && !jobActive);
-  const elapsed = duration(job.startedAt, job.completedAt);
+  const jobRunning = jobActive && !!job.startedAt;
+  const jobSince = new Date(job.startedAt).getTime();
+  const elapsed = formatDurationBetween(job.startedAt, job.completedAt);
 
   // Auto-reveal the (now archived) logs the moment a job we're watching finishes.
   const wasActive = useRef(jobActive);
@@ -137,10 +126,17 @@ function JobRow({
           <span className="min-w-0 flex-1 truncate font-medium">
             {job.name}
           </span>
-          {elapsed && (
-            <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
-              {elapsed}
-            </span>
+          {jobRunning && Number.isFinite(jobSince) ? (
+            <ElapsedTime
+              since={jobSince}
+              className="shrink-0 text-[11px] text-muted-foreground"
+            />
+          ) : (
+            elapsed && (
+              <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
+                {elapsed}
+              </span>
+            )
           )}
         </button>
         {onPlay && (
@@ -177,7 +173,13 @@ function JobRow({
       {open && job.steps.length > 0 && (
         <ul className="pb-1">
           {job.steps.map((step) => {
-            const stepElapsed = duration(step.startedAt, step.completedAt);
+            const stepRunning =
+              step.status === "in_progress" && !!step.startedAt;
+            const stepSince = new Date(step.startedAt).getTime();
+            const stepElapsed = formatDurationBetween(
+              step.startedAt,
+              step.completedAt,
+            );
             // Deep-link to the step's log section on GitHub (its own steps UI).
             const href = job.url ? `${job.url}#step:${step.number}:1` : null;
             const inner = (
@@ -190,10 +192,17 @@ function JobRow({
                 <span className="min-w-0 flex-1 truncate text-muted-foreground">
                   {step.name}
                 </span>
-                {stepElapsed && (
-                  <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
-                    {stepElapsed}
-                  </span>
+                {stepRunning && Number.isFinite(stepSince) ? (
+                  <ElapsedTime
+                    since={stepSince}
+                    className="shrink-0 text-[11px] text-muted-foreground"
+                  />
+                ) : (
+                  stepElapsed && (
+                    <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
+                      {stepElapsed}
+                    </span>
+                  )
                 )}
                 {href && (
                   <ArrowSquareOutIcon className="size-3 shrink-0 text-muted-foreground opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100" />
@@ -453,7 +462,12 @@ export function RunDetailView({
             <p className="mt-0.5 text-xs text-muted-foreground">
               {run.workflowName} · #{run.number} · {run.headBranch} ·{" "}
               {run.event} · {statusLabel(run.status, run.conclusion)}
-              {run.createdAt ? ` · ${formatRelativeTime(run.createdAt)}` : ""}
+              {run.createdAt && (
+                <>
+                  {" · "}
+                  <RelativeTime date={run.createdAt} />
+                </>
+              )}
             </p>
           </div>
         </div>

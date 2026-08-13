@@ -1,5 +1,6 @@
 import { DotsThreeIcon, RobotIcon } from "@phosphor-icons/react";
 import { useState } from "react";
+import { RelativeTime } from "@/components/relative-time";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
@@ -10,7 +11,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Markdown } from "@/components/ui/markdown";
 import { copyText } from "@/lib/clipboard";
-import { formatRelativeTime } from "@/lib/time";
 import { CommentEditor } from "./CommentEditor";
 
 /**
@@ -61,7 +61,7 @@ export function LocalComment({
             </span>
           </>
         )}
-        {formatRelativeTime(comment.createdAt)}
+        <RelativeTime date={comment.createdAt} />
         {hidden && <span className="italic">hidden</span>}
         {!editing && (
           <>

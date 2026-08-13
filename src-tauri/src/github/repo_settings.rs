@@ -14,7 +14,6 @@ use crate::github::runner::{
 /// Whether the signed-in user is an admin on this repo — gates the repo-settings /
 /// webhooks UI. Reads the viewer's `permissions.admin`; no access reads as `false`
 /// rather than erroring. A repo without a GitHub origin remote errors.
-#[tauri::command]
 pub async fn gh_repo_admin(repo_path: String) -> AppResult<bool> {
     // Pin the origin slug: `gh api`'s `{owner}/{repo}` placeholders auto-resolve
     // to the PARENT on a fork with an `upstream` remote, which would probe the

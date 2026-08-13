@@ -1,6 +1,6 @@
 import { useId } from "react";
+import { RelativeTime } from "@/components/relative-time";
 import type { LanguageStat } from "@/lib/git/types";
-import { formatRelativeTime } from "@/lib/time";
 import { cn } from "@/lib/utils";
 
 /** GitHub-linguist-ish colors for the makeup bar; unknowns fall back to gray. */
@@ -71,11 +71,7 @@ export const fmt = (n: number) => n.toLocaleString();
 
 export function DateValue({ date }: { date: string | null }) {
   if (!date) return <span>—</span>;
-  return (
-    <span title={new Date(date).toLocaleString()}>
-      {formatRelativeTime(date)}
-    </span>
-  );
+  return <RelativeTime date={date} />;
 }
 
 export function Stat({

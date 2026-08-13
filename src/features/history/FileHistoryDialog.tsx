@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { CommitAuthorAvatar } from "@/components/commit-author-avatar";
+import { RelativeTime } from "@/components/relative-time";
 import {
   Dialog,
   DialogContent,
@@ -17,7 +18,6 @@ import {
   useFileLog,
 } from "@/lib/git/queries";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
-import { formatRelativeTime } from "@/lib/time";
 import { cn } from "@/lib/utils";
 
 /** Commit history for one file: pick a commit to see the file's diff there. */
@@ -106,7 +106,7 @@ export function FileHistoryDialog({
                       <div className="min-w-0 flex-1">
                         <p className="truncate font-medium">{c.subject}</p>
                         <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
-                          {c.author} · {formatRelativeTime(c.date)}
+                          {c.author} · <RelativeTime date={c.date} />
                         </p>
                       </div>
                     </button>

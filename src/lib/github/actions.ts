@@ -108,10 +108,15 @@ export const forgeCiRunRerun = (
   repoPath: string,
   runId: number,
   failed: boolean,
-) => invoke<void>("forge_ci_run_rerun", { repoPath, runId, failed });
+) =>
+  invoke<void>("forge_ci_run_rerun", {
+    repoPath,
+    runId: String(runId),
+    failed,
+  });
 
 export const forgeCiRunCancel = (repoPath: string, runId: number) =>
-  invoke<void>("forge_ci_run_cancel", { repoPath, runId });
+  invoke<void>("forge_ci_run_cancel", { repoPath, runId: String(runId) });
 
 export const forgeCiRunFailedLogs = (
   repoPath: string,
@@ -146,7 +151,7 @@ export const forgeJobLogs = (
 /** Play (start) a manual GitLab CI job awaiting a manual trigger — GitLab-only,
  *  gated on `implemented.ciJobPlay`; errors on other providers. */
 export const forgeGlCiPlayJob = (repoPath: string, jobId: number) =>
-  invoke<void>("forge_gl_ci_play_job", { repoPath, jobId });
+  invoke<void>("forge_gl_ci_play_job", { repoPath, jobId: String(jobId) });
 
 export const ghWorkflowList = (repoPath: string) =>
   invoke<Workflow[]>("gh_workflow_list", { repoPath });

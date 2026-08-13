@@ -1,6 +1,7 @@
 import { PlusIcon, TrashIcon } from "@phosphor-icons/react";
 import { useId, useState } from "react";
 import { toast } from "sonner";
+import { useRelativeNow } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -177,6 +178,9 @@ function SecretsList({
   const [name, setName] = useState("");
   const [value, setValue] = useState("");
   const [confirming, setConfirming] = useState<string | null>(null);
+  // `meta` is a plain string prop, so the shared clock has to be threaded in by
+  // hand — `<RelativeTime>` can't render there.
+  const now = useRelativeNow();
   const invalid = nameError(name);
   const canAdd = !!name && !!value && !invalid && !set.isPending;
 
@@ -245,7 +249,9 @@ function SecretsList({
             key={s.name}
             name={s.name}
             meta={
-              s.updatedAt ? `Updated ${formatRelativeTime(s.updatedAt)}` : ""
+              s.updatedAt
+                ? `Updated ${formatRelativeTime(s.updatedAt, now)}`
+                : ""
             }
             confirming={confirming === s.name}
             pending={del.isPending}

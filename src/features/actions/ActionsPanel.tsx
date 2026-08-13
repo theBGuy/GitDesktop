@@ -2,6 +2,7 @@ import { ArrowClockwiseIcon, PlayIcon } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useRef, useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import {
   Empty,
@@ -26,7 +27,6 @@ import { useWorkflowRuns } from "@/lib/github/actions";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
-import { formatRelativeTime } from "@/lib/time";
 import { cn } from "@/lib/utils";
 import { RunWorkflowDialog } from "./RunWorkflowDialog";
 import { StatusIcon, statusLabel } from "./status";
@@ -265,9 +265,12 @@ export function ActionsPanel({
                   <p className="mt-0.5 truncate pl-5 text-[11px] text-muted-foreground">
                     {run.workflowName} · {run.headBranch} ·{" "}
                     {statusLabel(run.status, run.conclusion)}
-                    {run.updatedAt
-                      ? ` · ${formatRelativeTime(run.updatedAt)}`
-                      : ""}
+                    {run.updatedAt && (
+                      <>
+                        {" · "}
+                        <RelativeTime date={run.updatedAt} />
+                      </>
+                    )}
                   </p>
                 </button>
               );

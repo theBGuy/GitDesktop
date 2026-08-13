@@ -8,6 +8,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { useRelativeNow } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import { ButtonGroup } from "@/components/ui/button-group";
 import {
@@ -137,15 +138,11 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     fetch: () => doFetch(true),
   });
 
-  // Keep the Fetch tooltip's relative time honest while the window sits idle
-  // (the status poll only re-renders on change). Cheap; only while we have a
-  // timestamp to age.
-  const [, tick] = useState(0);
-  useEffect(() => {
-    if (lastFetchedAt === undefined) return;
-    const id = setInterval(() => tick((n) => n + 1), 60_000);
-    return () => clearInterval(id);
-  }, [lastFetchedAt]);
+  // The Fetch tooltip is a plain attribute string, so the shared clock has to be
+  // threaded in by hand — `<RelativeTime>` can't render there. It also keeps the
+  // time honest while the window sits idle (the status poll only re-renders on
+  // change).
+  const now = useRelativeNow();
 
   // The live branch name, readable after an await: a handler's closure still
   // holds the `head` of the render that created it, which can't tell whether
@@ -158,7 +155,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   const fetchTitle =
     lastFetchedAt === undefined
       ? "Fetch from origin"
-      : `Last fetched ${formatRelativeTime(new Date(lastFetchedAt).toISOString())}`;
+      : `Last fetched ${formatRelativeTime(new Date(lastFetchedAt).toISOString(), now)}`;
 
   // Ahead/behind counts now ride on the Push and Pull buttons themselves (the
   // old standalone badges didn't say which button acted on them). Compute ONE

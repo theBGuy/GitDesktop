@@ -2,6 +2,7 @@ import { UserPlusIcon, XIcon } from "@phosphor-icons/react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
+import { useRelativeNow } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -74,6 +75,9 @@ export function CollaboratorsSection({
   const [confirming, setConfirming] = useState<string | null>(null);
   const [activeCollab, setActiveCollab] = useState(-1);
   const [activeInvite, setActiveInvite] = useState(-1);
+  // `meta` is a plain string prop, so the shared clock has to be threaded in by
+  // hand — `<RelativeTime>` can't render there.
+  const now = useRelativeNow();
 
   const canAdd = validUsername(username.trim()) && !add.isPending;
 
@@ -237,7 +241,7 @@ export function CollaboratorsSection({
                   onFocus={() => setActiveInvite(i)}
                   meta={
                     inv.createdAt
-                      ? `invited ${formatRelativeTime(inv.createdAt)}`
+                      ? `invited ${formatRelativeTime(inv.createdAt, now)}`
                       : "pending"
                   }
                   roleValue={inv.permission}

@@ -13,6 +13,7 @@ import { AnimatePresence, m } from "motion/react";
 import { useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ElapsedTime } from "@/components/elapsed-time";
+import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import {
   Combobox,
@@ -58,7 +59,7 @@ import {
   useReviewRun,
 } from "@/lib/stores/reviews";
 import { useUiStore } from "@/lib/stores/ui";
-import { formatDuration, formatRelativeTime } from "@/lib/time";
+import { formatDuration } from "@/lib/time";
 import { ReviewHistory } from "./ReviewHistory";
 import { ThoughtsDisclosure } from "./ThoughtsDisclosure";
 
@@ -590,11 +591,17 @@ export function PrReviewPanel({
             >
               <SparkleIcon className="size-3 shrink-0" />
               <span className="min-w-0">
-                {ignored
-                  ? `Next ${label} starts fresh, ignoring your previous one.`
-                  : `Next ${label} builds on your last (${formatRelativeTime(
-                      new Date(prior.finishedAt).toISOString(),
-                    )}).`}
+                {ignored ? (
+                  `Next ${label} starts fresh, ignoring your previous one.`
+                ) : (
+                  <>
+                    {`Next ${label} builds on your last (`}
+                    <RelativeTime
+                      date={new Date(prior.finishedAt).toISOString()}
+                    />
+                    {")."}
+                  </>
+                )}
               </span>
               <button
                 type="button"

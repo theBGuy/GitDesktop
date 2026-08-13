@@ -1,7 +1,7 @@
 import type { MouseEvent } from "react";
+import { RelativeTime } from "@/components/relative-time";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
-import { formatRelativeTime } from "@/lib/time";
 import { cn } from "@/lib/utils";
 
 /** A commit row, normalized from either git-log (local) or GraphQL (remote). */
@@ -83,7 +83,7 @@ export function CommitsList({
               </p>
               <p className="mt-0.5 text-[11px] text-muted-foreground">
                 <span className="font-mono">{c.shortSha}</span> · {c.author} ·{" "}
-                {c.date && formatRelativeTime(c.date)}
+                {c.date && <RelativeTime date={c.date} />}
               </p>
             </button>
           ) : (
@@ -96,7 +96,7 @@ export function CommitsList({
               </p>
               <p className="mt-0.5 text-[11px] text-muted-foreground">
                 <span className="font-mono">{c.shortSha}</span> · {c.author} ·{" "}
-                {c.date && formatRelativeTime(c.date)}
+                {c.date && <RelativeTime date={c.date} />}
               </p>
             </div>
           ),

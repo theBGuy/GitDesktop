@@ -1347,7 +1347,8 @@ Actions workflow runs (needs \`gh\` + a GitHub remote). **GitLab pipelines** sho
 
 - The list shows recent runs with live status, refreshing while any run is active. Filter
   by text or scope to the current branch.
-- Click a run to see its **jobs and steps** with status and durations.
+- Click a run to see its **jobs and steps** with status and durations — a job or step
+  that's still running counts its elapsed time up live.
 - **Re-run all jobs**, **Re-run failed jobs**, or **Cancel** an in-progress run.
 - A run GitHub is **holding for approval** — its gate on a first-time contributor's
   fork pull request — says so in the run, and **Approve and run** (it confirms first)
@@ -1364,10 +1365,11 @@ Actions workflow runs (needs \`gh\` + a GitHub remote). **GitLab pipelines** sho
 
 Point the app at a **GitLab** repo and the same tab lists its **pipelines** — newest first,
 filterable, optionally scoped to the current branch — with the header CI badge tracking the
-latest one. Open a pipeline to see its **jobs** (status + durations); expand a job for its
-**log** (copyable from its corner). The pipeline actions work here too: **Cancel** a running pipeline, **Retry** a
-failed or canceled one (GitLab restarts its failed jobs), and **Run pipeline…** starts a
-fresh pipeline on a branch or tag, with optional **CI/CD variables**. A **manual job** —
+latest one. Open a pipeline to see its **jobs** (status + durations, counting up live while
+a job runs); expand a job for its **log** (copyable from its corner). The pipeline actions
+work here too: **Cancel** a running pipeline, **Retry** a failed or canceled one (GitLab
+restarts its failed jobs), and **Run pipeline…** starts a fresh pipeline on a branch or
+tag, with optional **CI/CD variables**. A **manual job** —
 one that waits for a manual trigger — shows a **Run job** button that plays it.
 {{ai}}
 ## Debug with AI

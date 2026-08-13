@@ -1,6 +1,7 @@
 import { CaretDownIcon, PlusIcon } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { RelativeTime } from "@/components/relative-time";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -28,7 +29,6 @@ import {
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
-import { formatRelativeTime } from "@/lib/time";
 import { cn } from "@/lib/utils";
 import { CreateDiscussionDialog } from "./CreateDiscussionDialog";
 
@@ -269,7 +269,7 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
                     <p className="truncate text-[11px] text-muted-foreground">
                       {d.commentCount}{" "}
                       {d.commentCount === 1 ? "comment" : "comments"} ·{" "}
-                      {formatRelativeTime(d.createdAt)}
+                      <RelativeTime date={d.createdAt} />
                       {d.upvoteCount > 0 && (
                         <>
                           {" · "}

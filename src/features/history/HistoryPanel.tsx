@@ -9,6 +9,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { type MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { CommitAuthorAvatar } from "@/components/commit-author-avatar";
+import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import {
   ContextMenu,
@@ -55,7 +56,6 @@ import type { CommitSummary, RewriteStep } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
-import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { EditHistoryDialog } from "./EditHistoryDialog";
@@ -1042,7 +1042,7 @@ function CommitList({
                 <span className="truncate">{commit.author}</span>
                 <span>•</span>
                 <span className="shrink-0">
-                  {formatRelativeTime(commit.date)}
+                  <RelativeTime date={commit.date} />
                 </span>
               </p>
             </div>

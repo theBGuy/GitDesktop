@@ -8,6 +8,7 @@ import {
 } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { SessionExpiryNotice } from "@/features/accounts/SessionExpiryNotice";
@@ -38,7 +39,6 @@ import {
 } from "@/lib/pulls/queries";
 import { useRemoteSlug, useRepoLens } from "@/lib/repo-lens/queries";
 import { useUiStore } from "@/lib/stores/ui";
-import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { CreatePrDialog } from "./CreatePrDialog";
 import { LocalPrContextMenu } from "./LocalPrContextMenu";
@@ -296,7 +296,12 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
               )}
             </p>
             <p className="mt-0.5 truncate pl-4 text-[11px] text-muted-foreground">
-              {pr.createdAt ? `${formatRelativeTime(pr.createdAt)} · ` : ""}
+              {pr.createdAt && (
+                <>
+                  <RelativeTime date={pr.createdAt} />
+                  {" · "}
+                </>
+              )}
               {pr.head} → {pr.base}
               {pr.archived ? " · archived" : ""}
             </p>
@@ -426,7 +431,12 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
               )}
               {" · "}
               {pr.author ? `${displayLogin(pr.author.login)} · ` : ""}
-              {pr.createdAt ? `${formatRelativeTime(pr.createdAt)} · ` : ""}
+              {pr.createdAt && (
+                <>
+                  <RelativeTime date={pr.createdAt} />
+                  {" · "}
+                </>
+              )}
               {pr.headRefName} → {pr.baseRefName}
             </p>
           </>

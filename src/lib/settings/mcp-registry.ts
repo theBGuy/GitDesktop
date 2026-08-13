@@ -135,8 +135,12 @@ export async function searchRegistry(opts: {
 
   const candidates: RegistryCandidate[] = [];
   for (const entry of data.servers ?? []) {
-    const c = toRegistryCandidate(entry.server, entry._meta?.[META_KEY]);
-    if (c) candidates.push(c);
+    try {
+      const c = toRegistryCandidate(entry.server, entry._meta?.[META_KEY]);
+      if (c) candidates.push(c);
+    } catch {
+      // A single hostile/malformed entry must not collapse the whole page.
+    }
   }
   return { candidates, nextCursor: data.metadata?.nextCursor ?? null };
 }

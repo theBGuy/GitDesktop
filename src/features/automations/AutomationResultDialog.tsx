@@ -1,3 +1,4 @@
+import { RelativeTime } from "@/components/relative-time";
 import {
   Dialog,
   DialogContent,
@@ -8,7 +9,6 @@ import {
 import { Markdown } from "@/components/ui/markdown";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useAutomationResults } from "@/lib/automations/results";
-import { formatRelativeTime } from "@/lib/time";
 
 /**
  * Viewer for automation results that have no durable surface (commit
@@ -35,7 +35,12 @@ export function AutomationResultDialog() {
           </DialogTitle>
           <DialogDescription>
             {result?.subject}
-            {result && ` — ${formatRelativeTime(result.createdAt)}`}
+            {result && (
+              <>
+                {" — "}
+                <RelativeTime date={result.createdAt} />
+              </>
+            )}
           </DialogDescription>
         </DialogHeader>
         <ScrollArea className="min-h-0 flex-1">

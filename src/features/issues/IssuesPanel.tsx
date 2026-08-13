@@ -7,6 +7,7 @@ import {
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useRef, useState } from "react";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
+import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import { SessionExpiryNotice } from "@/features/accounts/SessionExpiryNotice";
 import { ConversationFilterPopover } from "@/features/conversations/ConversationFilterPopover";
@@ -41,7 +42,6 @@ import {
 } from "@/lib/repo-lens/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { isAppError } from "@/lib/tauri/invoke";
-import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { CreateIssueDialog } from "./CreateIssueDialog";
 import { CreateJiraIssueDialog } from "./CreateJiraIssueDialog";
@@ -347,7 +347,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
               </span>
             </p>
             <p className="mt-0.5 truncate pl-4 text-[11px] text-muted-foreground">
-              local · {formatRelativeTime(issue.createdAt)}
+              local · <RelativeTime date={issue.createdAt} />
               {issue.archived ? " · archived" : ""}
             </p>
           </>
@@ -435,7 +435,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
             </p>
             <p className="mt-0.5 truncate pl-4 text-[11px] text-muted-foreground">
               #{issue.number} · {issue.author ? `${issue.author.login} · ` : ""}
-              {formatRelativeTime(issue.createdAt)}
+              <RelativeTime date={issue.createdAt} />
             </p>
           </>
         )}
@@ -522,7 +522,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
                       {issue.summary}
                     </p>
                     <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
-                      {issue.key} · {formatRelativeTime(issue.updatedAt)}
+                      {issue.key} · <RelativeTime date={issue.updatedAt} />
                     </p>
                   </>
                 ),

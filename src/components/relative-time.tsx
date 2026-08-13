@@ -36,10 +36,17 @@ function subscribe(listener: () => void) {
 
 const getNow = () => now;
 
+/** The shared 30s clock snapshot, for callers that need the relative string
+ *  itself (a `title`/`aria-label` attribute, or a larger composed string) and so
+ *  can't render `<RelativeTime>`. Pass it to `formatRelativeTime`'s `now`. */
+export function useRelativeNow(): number {
+  return useSyncExternalStore(subscribe, getNow);
+}
+
 /** Relative timestamp with the absolute local date-time on hover.
  *  Callers keep their own `date &&` guards — pass a non-empty ISO string. */
 export function RelativeTime({ date }: { date: string }) {
-  const nowMs = useSyncExternalStore(subscribe, getNow);
+  const nowMs = useRelativeNow();
   const parsed = new Date(date);
   // An unparseable date renders nothing rather than "in NaN years"
   // (formatRelativeTime's unit walk emits the year unit for NaN) — this is a

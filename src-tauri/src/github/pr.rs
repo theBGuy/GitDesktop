@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use tauri::State;
 
 use crate::error::{AppError, AppResult};
 use crate::forge::gitlab::null_to_default;
@@ -52,7 +51,6 @@ fn host_from_url(url: &str) -> Option<String> {
 /// GitHub repo. Drives whether the PR features are offered at all. Host-aware:
 /// resolves the repo's host (github.com or Enterprise) and the active login on
 /// that host.
-#[tauri::command]
 pub async fn gh_status(repo_path: String) -> AppResult<GhStatus> {
     match run_gh_raw(None, &["--version"], GH_TIMEOUT).await {
         Err(AppError::GhNotFound) => {
@@ -348,7 +346,6 @@ pub(crate) fn parse_auth_accounts(report: &str) -> Vec<ParsedAccount> {
 /// Creates a GitHub repository from the local one, wires up `origin`, and
 /// pushes the current branch — GitHub Desktop's "Publish repository". `name`
 /// may be `repo` (under your account) or `owner/repo` (under an org).
-#[tauri::command]
 pub async fn gh_publish_repo(
     repo_path: String,
     name: String,
@@ -401,7 +398,6 @@ pub async fn gh_publish_repo(
 
 /// The repository's web URL (works for github.com and GitHub Enterprise).
 /// Append paths like `/issues/new` for specific pages.
-#[tauri::command]
 pub async fn gh_repo_url(repo_path: String) -> AppResult<String> {
     // Pin the origin slug positionally (`gh repo view <slug>` — the `repo` family
     // has no `-R` flag): a bare `gh repo view` on a fork with an `upstream` remote
@@ -428,7 +424,6 @@ pub async fn gh_repo_url(repo_path: String) -> AppResult<String> {
 /// as "not starred" rather than erroring. Pinned to the origin slug (a bare
 /// `gh api …/{owner}/{repo}` resolves to the PARENT on a fork) so the star
 /// reflects the fork itself.
-#[tauri::command]
 pub async fn gh_repo_star_status(repo_path: String) -> AppResult<bool> {
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
     let endpoint = format!("user/starred/{slug}");
@@ -444,7 +439,6 @@ pub async fn gh_repo_star_status(repo_path: String) -> AppResult<bool> {
 /// Stars (PUT) or unstars (DELETE) this repo for the signed-in user via
 /// `/user/starred/{owner}/{repo}`. Both are idempotent on GitHub's side. Pinned
 /// to the origin slug so a fork stars itself, not its parent.
-#[tauri::command]
 pub async fn gh_repo_set_star(repo_path: String, starred: bool) -> AppResult<()> {
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
     let endpoint = format!("user/starred/{slug}");
@@ -554,7 +548,6 @@ pub struct PrInfo {
 
 /// Submits a review: `action` is "approve", "comment", or "request_changes".
 /// gh requires a body for comment/request-changes (it surfaces the error).
-#[tauri::command]
 pub async fn gh_pr_review(
     repo_path: String,
     number: u64,
@@ -585,7 +578,6 @@ pub async fn gh_pr_review(
 }
 
 /// Adds a standalone comment to the PR conversation.
-#[tauri::command]
 pub async fn gh_pr_comment(
     repo_path: String,
     number: u64,
@@ -641,7 +633,6 @@ pub struct PrMergeOutcome {
 /// but branch cleanup failed, or a stacked merge was handed to a merge QUEUE and
 /// hasn't landed (`queued`), in which case cleanup is deliberately skipped —
 /// deleting the head branch would break the merge the queue still holds.
-#[tauri::command]
 pub async fn gh_pr_merge(
     repo_path: String,
     number: u64,
@@ -982,7 +973,6 @@ async fn gh_delete_remote_head_branch(
     }
 }
 
-#[tauri::command]
 pub async fn gh_pr_close(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     let n = number.to_string();
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
@@ -1398,7 +1388,6 @@ pub(crate) async fn detect_fork_pr_for_branch(
 }
 
 /// Reopens a closed (not merged) pull request.
-#[tauri::command]
 pub async fn gh_pr_reopen(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     let n = number.to_string();
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
@@ -1640,13 +1629,6 @@ pub async fn gh_repo_fork(repo_path: String, contribute_to_parent: bool) -> AppR
     )
     .await?;
     Ok(fork_url)
-}
-
-/// Marks a draft PR ready for review — the one-way Tauri command; delegates to
-/// [`gh_pr_set_ready`] with `ready = true`.
-#[tauri::command]
-pub async fn gh_pr_ready(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
-    gh_pr_set_ready(&repo_path, number, true, lens.as_deref()).await
 }
 
 /// Sets a PR's draft state via `gh pr ready`; `ready = false` appends `--undo`
@@ -2055,7 +2037,6 @@ const PR_LIST_FIELDS: &str = "number,url,title,baseRefName,headRefName,isDraft,s
 /// PRs for the Pull Requests list. `state` is "open" or "closed"; closed
 /// uses the search qualifier so merged PRs are included, matching the
 /// semantics of GitHub's own Closed tab.
-#[tauri::command]
 pub async fn gh_pr_list(
     repo_path: String,
     state: String,
@@ -2358,7 +2339,6 @@ async fn run_gh_api_write(repo_path: &str, args: &[&str]) -> AppResult<String> {
 /// branch because the pull request is part of a stack.") — that explanation rides
 /// `errors[]` in the response body, so this arm reads both streams via
 /// [`gh_api_error_message`] rather than `run_gh`'s stderr-only path.
-#[tauri::command]
 pub async fn gh_pr_edit(
     repo_path: String,
     number: u64,
@@ -2415,7 +2395,6 @@ fn validate_graphql_embed(value: &str, what: &str) -> AppResult<()> {
 
 /// The repository's labels with their GraphQL node ids, for the PR label
 /// picker. (`gh label list --json id` returns empty ids on older gh.)
-#[tauri::command]
 pub async fn gh_repo_labels(repo_path: String, lens: Option<String>) -> AppResult<Vec<RepoLabel>> {
     // Resolve the lens slug: an unpinned `gh repo view` on a fork with an `upstream`
     // remote auto-resolves to the PARENT, so the origin picker would show the
@@ -2539,7 +2518,6 @@ pub struct PrPollInfo {
 /// Lightweight snapshot of the repo's recently-updated PRs for the
 /// notification poller — one GraphQL round trip including the check rollup
 /// (reliable on old gh, unlike `pr list --json statusCheckRollup`).
-#[tauri::command]
 pub async fn gh_pr_poll(repo_path: String) -> AppResult<Vec<PrPollInfo>> {
     // Pin the origin slug: an unpinned `gh repo view` on a fork with an `upstream`
     // remote auto-resolves to the PARENT, so PR notifications + background pr-sync
@@ -2618,7 +2596,6 @@ pub async fn gh_pr_poll(repo_path: String) -> AppResult<Vec<PrPollInfo>> {
 
 /// Adds/removes labels on a PR via GraphQL mutations. `labelable_id` is the
 /// PR's GraphQL node id; the label ids come from `gh_repo_labels`.
-#[tauri::command]
 pub async fn gh_pr_edit_labels(
     repo_path: String,
     labelable_id: String,
@@ -3330,7 +3307,6 @@ async fn gh_repo_merge_settings(repo_path: &str, pr_url: &str) -> AppResult<Repo
 }
 
 /// Full details for one PR's read view.
-#[tauri::command]
 pub async fn gh_pr_view(
     repo_path: String,
     number: u64,
@@ -3790,7 +3766,6 @@ const PR_REACTIONS_QUERY: &str = "query($owner:String!,$name:String!,$number:Int
 /// id). Same decoupled design as `gh_issue_reactions`: `viewerHasReacted` is
 /// GraphQL-only, so this loads in parallel with the PR view and leaves
 /// `gh_pr_view` untouched. Reuses the issue reaction types + mapper.
-#[tauri::command]
 pub async fn gh_pr_reactions(
     repo_path: String,
     number: u64,
@@ -4021,7 +3996,6 @@ pub async fn pr_timeline(
 /// Past 300 files GitHub refuses the `.diff` media type with HTTP 406 `too_large`
 /// and `gh pr diff` fails outright — on that specific failure we reconstruct from
 /// the paginated files API (`gh_pr_diff_from_files`). Any other error propagates raw.
-#[tauri::command]
 pub async fn gh_pr_diff(repo_path: String, number: u64, lens: Option<String>) -> AppResult<String> {
     // Lens slug for the diff; the files-API fallback inherits it via `gh_pr_diff_from_files`.
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
@@ -4935,7 +4909,6 @@ fn external_items_from_thread_nodes(nodes: &[serde_json::Value]) -> Vec<External
 /// narrows them (external-context drops every `reply`; own-context keeps only replies
 /// carrying GitDesktop's footer anchor), so only GitDesktop's own triage dispositions
 /// reach the re-review prompt.
-#[tauri::command]
 pub async fn gh_pr_external_reviews(
     repo_path: String,
     number: u64,
@@ -5377,7 +5350,6 @@ const PRS_FOR_BRANCH_FIELDS: &str =
 /// the owner-prefixed `owner:branch` head form even when the PR exists. We hit REST
 /// instead (`GET repos/<parent>/pulls?head=<fork_owner>:<head>&state=open`), which
 /// matches cross-fork heads; the `owner:` prefix is composed here from origin.
-#[tauri::command]
 pub async fn gh_prs_for_branch(
     repo_path: String,
     head: String,
@@ -5425,32 +5397,10 @@ pub async fn gh_prs_for_branch(
         .map_err(|e| AppError::Gh(format!("could not parse gh pr list: {e}")))
 }
 
-/// Pushes `head` to origin, then opens a PR from `head` into `base`. Returns
-/// the new PR's number and URL.
-#[tauri::command]
-#[allow(clippy::too_many_arguments)]
-pub async fn gh_pr_create(
-    state: State<'_, AppState>,
-    repo_path: String,
-    base: String,
-    head: String,
-    title: String,
-    body: String,
-    draft: bool,
-    labels: Vec<String>,
-    assignees: Vec<String>,
-    lens: Option<String>,
-) -> AppResult<PrRef> {
-    // Shell: deref the managed `State` and delegate, so off-Tauri callers (the MCP
-    // server, via `forge_pr_create_core`) can pass an `AppState` they own.
-    gh_pr_create_core(
-        &state, repo_path, base, head, title, body, draft, labels, assignees, lens,
-    )
-    .await
-}
-
-/// The body of [`gh_pr_create`], taking a plain `&AppState` so it is callable off
-/// the Tauri runtime (the MCP server routes here through `forge_pr_create_core`).
+/// Pushes `head` to origin, then opens a PR from `head` into `base`. Returns the new
+/// PR's number and URL. Takes a plain `&AppState` rather than Tauri's `State` so it is
+/// callable off the Tauri runtime (the MCP server routes here via
+/// `forge_pr_create_core`).
 ///
 /// `lens` selects the target repo:
 /// - `None`/`Some("origin")`: a same-repo PR **on the fork itself**, created with an

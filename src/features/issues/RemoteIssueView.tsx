@@ -10,6 +10,7 @@ import { useEffectEvent, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import type { MarkdownEditorHandle } from "@/components/markdown-editor";
+import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -72,7 +73,6 @@ import {
 import { providerLabel } from "@/lib/git/types";
 import { useRepoLens } from "@/lib/repo-lens/queries";
 import { useUiStore } from "@/lib/stores/ui";
-import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { PlanIssueButton } from "../plan/PlanIssueButton";
 import { SolveIssueButton } from "../sessions/SolveIssueButton";
@@ -673,7 +673,9 @@ export function RemoteIssueView({
           />
           <span>{issue.author || "unknown"}</span>
           <span>•</span>
-          <span>opened {formatRelativeTime(issue.createdAt)}</span>
+          <span>
+            opened <RelativeTime date={issue.createdAt} />
+          </span>
         </div>
       </header>
       <div className="flex min-h-0 flex-1">
@@ -692,7 +694,7 @@ export function RemoteIssueView({
                     {issue.author || "unknown"}
                   </span>
                   <span className="text-muted-foreground">
-                    opened {formatRelativeTime(issue.createdAt)}
+                    opened <RelativeTime date={issue.createdAt} />
                   </span>
                   <span className="flex-1" />
                   <DropdownMenu>

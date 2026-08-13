@@ -2,6 +2,7 @@ import { CopyIcon, DotsThreeVerticalIcon } from "@phosphor-icons/react";
 import { useDeferredValue, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { CommitAuthorAvatar } from "@/components/commit-author-avatar";
+import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -43,7 +44,6 @@ import {
 } from "@/lib/git/queries";
 import { providerLabel } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
-import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
 import { FileRowActions } from "./FileRowActions";
@@ -276,7 +276,9 @@ export function CommitDetailView({
             />
             <span>{commit.author}</span>
             <span>•</span>
-            <span>{formatRelativeTime(commit.date)}</span>
+            <span>
+              <RelativeTime date={commit.date} />
+            </span>
             <span>•</span>
           </span>
           <button

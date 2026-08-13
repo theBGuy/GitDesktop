@@ -13,6 +13,7 @@ import {
   XIcon,
 } from "@phosphor-icons/react";
 import { useState } from "react";
+import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -50,7 +51,6 @@ import {
 } from "@/lib/issues/queries";
 import { useJiraLink, useJiraPermissions } from "@/lib/jira/queries";
 import { useUiStore } from "@/lib/stores/ui";
-import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { PlanIssueButton } from "../plan/PlanIssueButton";
 import { SolveIssueButton } from "../sessions/SolveIssueButton";
@@ -164,7 +164,9 @@ export function LocalIssueView({
           {issue.archived && <Badge variant="secondary">archived</Badge>}
         </div>
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-          <span>local · opened {formatRelativeTime(issue.createdAt)}</span>
+          <span>
+            local · opened <RelativeTime date={issue.createdAt} />
+          </span>
         </div>
         {(issue.labels.length > 0 || isOpen) && (
           <div className="flex flex-wrap items-center gap-1.5">

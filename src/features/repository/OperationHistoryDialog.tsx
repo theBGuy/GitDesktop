@@ -10,6 +10,7 @@ import {
 } from "@phosphor-icons/react";
 import type { ComponentType } from "react";
 import { useState } from "react";
+import { RelativeTime } from "@/components/relative-time";
 import {
   Dialog,
   DialogContent,
@@ -21,7 +22,6 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { useOplogHistory } from "@/lib/git/queries";
 import type { OpLogEntry } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
-import { formatRelativeTime } from "@/lib/time";
 import { cn } from "@/lib/utils";
 
 type IconType = ComponentType<{ className?: string }>;
@@ -197,10 +197,13 @@ function OpRow({
         </span>
       </div>
       <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
-        {formatRelativeTime(entry.startedAt)}
-        {entry.finishedAt
-          ? ` · finished ${formatRelativeTime(entry.finishedAt)}`
-          : ""}
+        <RelativeTime date={entry.startedAt} />
+        {entry.finishedAt && (
+          <>
+            {" · finished "}
+            <RelativeTime date={entry.finishedAt} />
+          </>
+        )}
       </p>
       <p
         className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground"

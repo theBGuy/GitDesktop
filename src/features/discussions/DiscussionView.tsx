@@ -11,6 +11,7 @@ import {
   MarkdownEditor,
   type MarkdownEditorHandle,
 } from "@/components/markdown-editor";
+import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -71,7 +72,6 @@ import {
 import type { PrThreadOut } from "@/lib/git/types";
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { useUiStore } from "@/lib/stores/ui";
-import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 
@@ -473,7 +473,9 @@ export function DiscussionView({
           <AuthorAvatar login={d.author} />
           <span>{d.author || "unknown"}</span>
           <span>•</span>
-          <span>opened {formatRelativeTime(d.createdAt)}</span>
+          <span>
+            opened <RelativeTime date={d.createdAt} />
+          </span>
         </div>
         {/* Keyed on the discussion: the popover seeds a draft on open and commits
             it on close against LIVE props, and this view is never remounted per
@@ -502,7 +504,7 @@ export function DiscussionView({
               <AuthorAvatar login={d.author} />
               <span className="font-medium">{d.author || "unknown"}</span>
               <span className="text-muted-foreground">
-                opened {formatRelativeTime(d.createdAt)}
+                opened <RelativeTime date={d.createdAt} />
               </span>
               <span className="flex-1" />
               <DropdownMenu>

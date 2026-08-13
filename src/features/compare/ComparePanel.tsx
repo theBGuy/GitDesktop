@@ -8,6 +8,7 @@ import {
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import {
   Empty,
@@ -36,7 +37,6 @@ import type { CommitSummary } from "@/lib/git/types";
 import { dispatchAction, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
-import { formatRelativeTime } from "@/lib/time";
 import { cn } from "@/lib/utils";
 
 export function ComparePanel({ repoPath }: { repoPath: string }) {
@@ -382,7 +382,7 @@ function CommitSection({
             </span>
           </p>
           <p className="mt-0.5 truncate pl-4 text-[11px] text-muted-foreground">
-            {commit.author} • {formatRelativeTime(commit.date)}
+            {commit.author} • <RelativeTime date={commit.date} />
           </p>
         </button>
       ))}

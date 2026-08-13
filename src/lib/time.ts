@@ -38,6 +38,25 @@ export function formatDuration(ms: number): string {
   return `${hours}h ${totalMinutes % 60}m`;
 }
 
+/** The span between two ISO timestamps, as `"42s"` / `"3m"` / `"3m 12s"` /
+ *  `"1h 2m"` — the coarse CI-run format (a whole minute drops the seconds,
+ *  unlike `formatDuration`). Returns `""` when either end is missing,
+ *  unparseable, or out of order: an unfinished run has no span to state, and a
+ *  live counter (`<ElapsedTime>`) is the caller's job. */
+export function formatDurationBetween(start?: string, end?: string): string {
+  if (!start || !end) return "";
+  const s = new Date(start).getTime();
+  const e = new Date(end).getTime();
+  if (Number.isNaN(s) || Number.isNaN(e) || e < s) return "";
+  const sec = Math.round((e - s) / 1000);
+  if (sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60);
+  const r = sec % 60;
+  if (m < 60) return r ? `${m}m ${r}s` : `${m}m`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
+
 /** "8 months ago", "2 hours ago", "just now". `now` defaults to the current
  *  time; callers that render many timestamps together (RelativeTime) pass one
  *  shared snapshot so simultaneously-mounted rows never disagree about the same

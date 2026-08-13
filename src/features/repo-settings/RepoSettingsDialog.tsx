@@ -12,6 +12,7 @@ import { AnimatePresence, m, useReducedMotion } from "motion/react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { NavRail, type NavRailGroup } from "@/components/NavRail";
+import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -49,7 +50,6 @@ import {
 } from "@/lib/git/queries";
 import type { HookDelivery, Webhook, WebhookInput } from "@/lib/git/types";
 import { quickTransition } from "@/lib/motion";
-import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { BitbucketBranchRestrictionsSection } from "./BitbucketBranchRestrictionsSection";
@@ -726,7 +726,9 @@ function DeliveryRow({
           </Badge>
         )}
         <span className="ml-auto shrink-0 text-muted-foreground">
-          {delivery.deliveredAt ? formatRelativeTime(delivery.deliveredAt) : ""}
+          {delivery.deliveredAt ? (
+            <RelativeTime date={delivery.deliveredAt} />
+          ) : null}
         </span>
       </button>
 

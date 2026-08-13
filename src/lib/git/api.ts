@@ -1446,9 +1446,6 @@ export const forgePrsForBranch = (
 
 export type PrStateFilter = "open" | "closed";
 
-export const ghPrList = (repoPath: string, state: PrStateFilter) =>
-  invoke<PrInfo[]>("gh_pr_list", { repoPath, state });
-
 /** The CI rollup for a PR-list page, keyed by number (provider-neutral). `prs` carries
  *  each row's number plus head SHA (the Bitbucket arm needs the SHA). `sampleUrl` is any
  *  PR html url from the same page and is load-bearing for forks: it fixes which repo the
@@ -1477,9 +1474,6 @@ export const forgePrListMergeability = (
     lens,
   });
 
-export const ghPrView = (repoPath: string, number: number) =>
-  invoke<PrDetails>("gh_pr_view", { repoPath, number });
-
 /** A PR's activity timeline (force-pushes, label changes, review requests, state
  *  changes, approvals) for the Conversation tab. Provider-neutral — the backend
  *  dispatches per provider (GitHub `gh`, GitLab `glab`, Bitbucket HTTP). */
@@ -1491,8 +1485,8 @@ export const forgePrTimeline = (
 
 // Provider-neutral merge/pull request reads — the backend resolves the repo's provider
 // and dispatches, returning the same neutral `PrInfo`/`PrDetails` shapes. Neutral
-// `forge*` wrappers cover the writes below; the Review menu (`gh_pr_review`) and comment
-// hide/unhide (`gh_pr_minimize_comment`) are the remaining GitHub-only ones.
+// `forge*` wrappers cover the writes below; a few paths stay GitHub-only —
+// comment hide/unhide, update-branch, base-divergence, and PR checkout.
 export const forgePrList = (
   repoPath: string,
   state: PrStateFilter,
@@ -2099,9 +2093,6 @@ export const ghIssueRemoveSubIssue = (
   subId: string,
 ) => invoke<void>("gh_issue_remove_sub_issue", { repoPath, parentId, subId });
 
-export const ghPrDiff = (repoPath: string, number: number) =>
-  invoke<string>("gh_pr_diff", { repoPath, number });
-
 /** Third-party AI-reviewer findings on a PR/MR (Copilot/CodeRabbit/…), behind the
  *  forge abstraction: GitHub delegates unchanged, GitLab maps MR discussions,
  *  Bitbucket returns empty by design. Shape is provider-agnostic. */
@@ -2217,18 +2208,9 @@ export const forgeGitlabReviewTokenSet = (token: string) =>
 export const forgeGitlabReviewTokenClear = () =>
   invoke<void>("forge_gitlab_review_token_clear", {});
 
-export type ReviewAction = "approve" | "comment" | "request_changes";
-
-export const ghPrReview = (
-  repoPath: string,
-  number: number,
-  action: ReviewAction,
-  body: string,
-) => invoke<void>("gh_pr_review", { repoPath, number, action, body });
-
-// MR comment, close/reopen, title/body edit and merge are provider-neutral; full
-// reviews stay GitHub-only (`gh_pr_review`). `asBot` posts as the configured GitLab
-// review-bot identity instead of the signed-in user (other providers ignore it).
+// MR comment, close/reopen, title/body edit and merge are provider-neutral, as are
+// full reviews (see `forgePrReviewSubmit` above). `asBot` posts as the configured
+// GitLab review-bot identity instead of the signed-in user (other providers ignore it).
 export const forgePrComment = (
   repoPath: string,
   number: number,
@@ -2509,7 +2491,7 @@ export const forgeCiRunApprove = (
 ) =>
   invoke<void>("forge_ci_run_approve", {
     repoPath,
-    runId,
+    runId: String(runId),
     lens: lens ?? null,
   });
 

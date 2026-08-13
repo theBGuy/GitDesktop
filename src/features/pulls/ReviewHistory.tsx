@@ -5,6 +5,7 @@ import {
   TrashIcon,
 } from "@phosphor-icons/react";
 import { useState } from "react";
+import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Markdown } from "@/components/ui/markdown";
@@ -17,7 +18,7 @@ import {
   useReviewHistory,
   useUpdateReviewText,
 } from "@/lib/pulls/queries";
-import { formatDuration, formatRelativeTime } from "@/lib/time";
+import { formatDuration } from "@/lib/time";
 import { ThoughtsDisclosure } from "./ThoughtsDisclosure";
 
 /**
@@ -179,9 +180,9 @@ export function ReviewHistory({
                         </>
                       )}
                       <span>
-                        {formatRelativeTime(
-                          new Date(r.finishedAt).toISOString(),
-                        )}
+                        <RelativeTime
+                          date={new Date(r.finishedAt).toISOString()}
+                        />
                       </span>
                     </span>
                   </button>

@@ -1850,8 +1850,9 @@ pub async fn forge_ci_run_view(
     repo_path: String,
     run_id: String,
 ) -> AppResult<crate::github::actions::RunDetail> {
-    // Ids ride the wire as strings (they can exceed 2^53) but providers address
-    // them as u64 — parse once here, keep everything downstream numeric.
+    // Every CI id PARAM rides the wire as a string — JS clients lose integer precision
+    // past 2^53 — while providers address runs/jobs as u64, so parse once here and keep
+    // everything downstream numeric. Response ids stay raw JSON numbers (see actions.rs).
     let run_id: u64 = run_id
         .parse()
         .map_err(|_| AppError::InvalidArgument(format!("Invalid run id: {run_id}")))?;
@@ -1897,7 +1898,10 @@ pub async fn forge_ci_job_logs(repo_path: String, job_id: String) -> AppResult<S
 /// only — its single semantic — so the GitLab arm ignores `failed` (the UI only
 /// offers the retry button there; "re-run all" stays GitHub-only).
 #[tauri::command]
-pub async fn forge_ci_run_rerun(repo_path: String, run_id: u64, failed: bool) -> AppResult<()> {
+pub async fn forge_ci_run_rerun(repo_path: String, run_id: String, failed: bool) -> AppResult<()> {
+    let run_id: u64 = run_id
+        .parse()
+        .map_err(|_| AppError::InvalidArgument(format!("Invalid run id: {run_id}")))?;
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::retry_run(&repo_path, run_id).await,
         // Bitbucket has no rerun-failed-only; a re-run re-triggers the run's branch.
@@ -1912,9 +1916,12 @@ pub async fn forge_ci_run_rerun(repo_path: String, run_id: u64, failed: bool) ->
 #[tauri::command]
 pub async fn forge_ci_run_approve(
     repo_path: String,
-    run_id: u64,
+    run_id: String,
     lens: Option<String>,
 ) -> AppResult<()> {
+    let run_id: u64 = run_id
+        .parse()
+        .map_err(|_| AppError::InvalidArgument(format!("Invalid run id: {run_id}")))?;
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => Err(AppError::InvalidArgument(
             "Approving held runs is GitHub-only — GitDesktop has no run approval for GitLab pipelines.".into(),
@@ -1928,7 +1935,10 @@ pub async fn forge_ci_run_approve(
 
 /// Cancel an in-flight CI run, behind the abstraction.
 #[tauri::command]
-pub async fn forge_ci_run_cancel(repo_path: String, run_id: u64) -> AppResult<()> {
+pub async fn forge_ci_run_cancel(repo_path: String, run_id: String) -> AppResult<()> {
+    let run_id: u64 = run_id
+        .parse()
+        .map_err(|_| AppError::InvalidArgument(format!("Invalid run id: {run_id}")))?;
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::cancel_run(&repo_path, run_id).await,
         Some((Provider::Bitbucket, _)) => bitbucket::cancel_run(&repo_path, run_id).await,
@@ -3164,7 +3174,10 @@ pub async fn forge_gl_pipeline_findings(
 /// Play (start) a manual CI job. GitLab-only — GitHub Actions has no per-job
 /// manual play, so this is `gl_only` rather than a neutral forge dispatch.
 #[tauri::command]
-pub async fn forge_gl_ci_play_job(repo_path: String, job_id: u64) -> AppResult<()> {
+pub async fn forge_gl_ci_play_job(repo_path: String, job_id: String) -> AppResult<()> {
+    let job_id: u64 = job_id
+        .parse()
+        .map_err(|_| AppError::InvalidArgument(format!("Invalid job id: {job_id}")))?;
     gl_only!(repo_path, gitlab::play_job(&repo_path, job_id))
 }
 

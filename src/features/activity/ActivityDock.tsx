@@ -17,6 +17,7 @@ import {
 import { useRef, useState } from "react";
 import { ElapsedTime } from "@/components/elapsed-time";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
+import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import {
   Popover,
@@ -43,7 +44,7 @@ import {
   useReviewTasks,
 } from "@/lib/stores/reviews";
 import { useUiStore } from "@/lib/stores/ui";
-import { formatDuration, formatRelativeTime } from "@/lib/time";
+import { formatDuration } from "@/lib/time";
 import { cn } from "@/lib/utils";
 
 /**
@@ -519,7 +520,7 @@ function NotificationRow({
           </span>
         </span>
         <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
-          {formatRelativeTime(new Date(n.ts).toISOString())}
+          <RelativeTime date={new Date(n.ts).toISOString()} />
         </span>
       </button>
       {n.action && (

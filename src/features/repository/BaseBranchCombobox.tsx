@@ -1,5 +1,6 @@
 import { TreeStructureIcon } from "@phosphor-icons/react";
 import { useMemo } from "react";
+import { RelativeTime } from "@/components/relative-time";
 import {
   Combobox,
   ComboboxCollection,
@@ -19,7 +20,6 @@ import {
   useUserWorktrees,
 } from "@/lib/git/queries";
 import type { Branch } from "@/lib/git/types";
-import { formatRelativeTime } from "@/lib/time";
 
 /** Lower-cased, forward-slashed path for cross-source comparison — git emits
  *  "/", the app stores "\" on Windows (mirrors BranchSwitcher's helper). */
@@ -321,7 +321,7 @@ function BaseBranchRow({
       )}
       {meta?.lastCommitDate && (
         <span className="shrink-0 text-[11px] text-muted-foreground">
-          {formatRelativeTime(meta.lastCommitDate)}
+          <RelativeTime date={meta.lastCommitDate} />
         </span>
       )}
     </ComboboxItem>

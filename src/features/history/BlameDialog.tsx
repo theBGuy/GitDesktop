@@ -2,6 +2,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import hljs from "highlight.js/lib/common";
 import { useState } from "react";
 import { toast } from "sonner";
+import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -20,7 +21,6 @@ import { diffLang } from "@/features/diff/diff-lang";
 import { useBlame } from "@/lib/git/queries";
 import type { BlameLine } from "@/lib/git/types";
 import { useUiStore } from "@/lib/stores/ui";
-import { formatRelativeTime } from "@/lib/time";
 import "@/features/diff/code-highlight.css";
 
 /** `git blame --porcelain` reports uncommitted lines with an all-zero sha
@@ -188,8 +188,8 @@ function BlameLines({
         // inside virtual rows.
         const newCommit =
           vi.index === 0 || lines[vi.index - 1].hash !== line.hash;
-        const when = line.time
-          ? formatRelativeTime(new Date(line.time * 1000).toISOString())
+        const whenIso = line.time
+          ? new Date(line.time * 1000).toISOString()
           : "";
         const short = line.hash.slice(0, 7);
         // Only real commits get the interactive commit reference; uncommitted
@@ -235,7 +235,12 @@ function BlameLines({
                     </p>
                     <p className="text-muted-foreground">
                       {line.author}
-                      {when ? ` · ${when}` : ""}
+                      {whenIso && (
+                        <>
+                          {" · "}
+                          <RelativeTime date={whenIso} />
+                        </>
+                      )}
                     </p>
                     <div className="flex items-center gap-1">
                       <Button variant="ghost" size="xs" onClick={goToCommit}>

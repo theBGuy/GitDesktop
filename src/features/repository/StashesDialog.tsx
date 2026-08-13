@@ -2,6 +2,7 @@ import { TrashIcon } from "@phosphor-icons/react";
 import { useDeferredValue, useEffect, useEffectEvent, useState } from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -29,7 +30,6 @@ import {
   useStashList,
 } from "@/lib/git/queries";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
-import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 
@@ -169,7 +169,7 @@ export function StashesDialog({
                       <p className="mt-0.5 text-[11px] text-muted-foreground">
                         stash@{"{"}
                         {stash.index}
-                        {"}"} · {formatRelativeTime(stash.date)}
+                        {"}"} · <RelativeTime date={stash.date} />
                       </p>
                     </button>
                   ))}
@@ -359,7 +359,7 @@ function RecoverableView({
               >
                 <p className="truncate text-xs font-medium">{o.message}</p>
                 <p className="mt-0.5 text-[11px] text-muted-foreground">
-                  {formatRelativeTime(o.date)} · {o.fileCount} file
+                  <RelativeTime date={o.date} /> · {o.fileCount} file
                   {o.fileCount === 1 ? "" : "s"}
                 </p>
               </button>

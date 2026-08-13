@@ -125,7 +125,6 @@ const ISSUE_LIST_FIELDS: &str =
 
 /// Issues for the Issues list. `state` is "open" or "closed". `gh issue list`
 /// already excludes pull requests, so no extra filtering is needed.
-#[tauri::command]
 pub async fn gh_issue_list(
     repo_path: String,
     state: String,
@@ -263,7 +262,6 @@ const ISSUE_VIEW_FIELDS: &str =
 
 /// Full details for one issue's read view: body, assignees, labels and the
 /// conversation comments (with node ids for editing/hiding).
-#[tauri::command]
 pub async fn gh_issue_view(
     repo_path: String,
     number: u64,
@@ -357,7 +355,6 @@ struct CreatedIssue {
 /// Creates an issue via the REST API so labels/assignees (arrays) and milestone
 /// (by number) go in one call and the response carries the new number + URL
 /// directly. `labels` and `assignees` are applied by name/login (must exist).
-#[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn gh_issue_create(
     repo_path: String,
@@ -413,7 +410,6 @@ pub async fn gh_issue_create(
 }
 
 /// Logins that can be assigned to issues/PRs in this repo (collaborators).
-#[tauri::command]
 pub async fn gh_assignable_users(
     repo_path: String,
     lens: Option<String>,
@@ -432,7 +428,6 @@ pub async fn gh_assignable_users(
 }
 
 /// Open milestones for the milestone picker.
-#[tauri::command]
 pub async fn gh_milestones(repo_path: String, lens: Option<String>) -> AppResult<Vec<Milestone>> {
     // Resolve the lens slug so a fork lists the chosen repo's milestones.
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
@@ -448,7 +443,6 @@ pub async fn gh_milestones(repo_path: String, lens: Option<String>) -> AppResult
 }
 
 /// Replaces an issue's assignees (REST PATCH sends the full desired set).
-#[tauri::command]
 pub async fn gh_issue_set_assignees(
     repo_path: String,
     number: u64,
@@ -470,7 +464,6 @@ pub async fn gh_issue_set_assignees(
 }
 
 /// Sets (or, with `None`, clears) an issue's milestone by milestone number.
-#[tauri::command]
 pub async fn gh_issue_set_milestone(
     repo_path: String,
     number: u64,
@@ -568,7 +561,6 @@ pub async fn gh_issue_set_type(
 }
 
 /// Adds a standalone comment to the issue conversation.
-#[tauri::command]
 pub async fn gh_issue_comment(
     repo_path: String,
     number: u64,
@@ -591,7 +583,6 @@ pub async fn gh_issue_comment(
 
 /// Closes an issue. `reason` is "completed" or "not_planned" (GitHub's two
 /// close reasons); empty defaults to completed.
-#[tauri::command]
 pub async fn gh_issue_close(
     repo_path: String,
     number: u64,
@@ -619,7 +610,6 @@ pub async fn gh_issue_close(
 }
 
 /// Reopens a closed issue.
-#[tauri::command]
 pub async fn gh_issue_reopen(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     let n = number.to_string();
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
@@ -636,7 +626,6 @@ pub async fn gh_issue_reopen(repo_path: String, number: u64, lens: Option<String
 // bug as `gh pr edit`), so title/body edits go through the REST API instead.
 
 /// Updates an issue's title and body via the REST API.
-#[tauri::command]
 pub async fn gh_issue_edit(
     repo_path: String,
     number: u64,
@@ -699,7 +688,6 @@ pub async fn gh_issue_unpin(repo_path: String, number: u64, lens: Option<String>
 
 /// Locks an issue's conversation. `reason`, if given, is one of GitHub's four:
 /// off_topic, resolved, spam, too_heated.
-#[tauri::command]
 pub async fn gh_issue_lock(
     repo_path: String,
     number: u64,
@@ -722,7 +710,6 @@ pub async fn gh_issue_lock(
     Ok(())
 }
 
-#[tauri::command]
 pub async fn gh_issue_unlock(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     let n = number.to_string();
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
@@ -748,7 +735,6 @@ pub struct IssueReactions {
 
 const REACTIONS_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!){ repository(owner:$owner,name:$name){ issue(number:$number){ reactionGroups{ content viewerHasReacted reactors{ totalCount } } comments(first:100){ nodes{ id reactionGroups{ content viewerHasReacted reactors{ totalCount } } } } } } }";
 
-#[tauri::command]
 pub async fn gh_issue_reactions(
     repo_path: String,
     number: u64,
@@ -819,7 +805,6 @@ fn validate_reaction_content(content: &str) -> AppResult<()> {
 
 /// Adds the viewer's reaction to any reactable subject (issue/PR body or
 /// comment) by its GraphQL node id. Generic — reusable for PRs later.
-#[tauri::command]
 pub async fn gh_add_reaction(
     repo_path: String,
     subject_id: String,
@@ -844,7 +829,6 @@ pub async fn gh_add_reaction(
     Ok(())
 }
 
-#[tauri::command]
 pub async fn gh_remove_reaction(
     repo_path: String,
     subject_id: String,
@@ -871,7 +855,6 @@ pub async fn gh_remove_reaction(
 
 /// Transfers an issue to another repository. `destination` is the target
 /// "OWNER/REPO" (or its URL). Returns the transferred issue's new URL.
-#[tauri::command]
 pub async fn gh_issue_transfer(
     repo_path: String,
     number: u64,
@@ -900,7 +883,6 @@ pub async fn gh_issue_transfer(
 
 /// Permanently deletes an issue (requires admin/triage; gh confirms the error
 /// when the user lacks permission). `--yes` skips gh's interactive prompt.
-#[tauri::command]
 pub async fn gh_issue_delete(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     let n = number.to_string();
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;

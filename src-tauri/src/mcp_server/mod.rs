@@ -122,23 +122,16 @@ pub(super) struct NumberArg {
     pub(super) number: u64,
 }
 
-/// A CI run/job id. It rides GitHub/GitLab APIs as an unsigned integer that can
-/// exceed JS's safe-integer range, so clients that thread it through JSON often
-/// carry it as a *string*. `CiId` accepts either form on the wire — a JSON number
-/// or a numeric string — and hands handlers the underlying `u64`. Existing MCP
-/// clients that send a plain number keep working unchanged.
+/// A CI run/job id, accepted on the wire as EITHER a JSON number or a numeric string
+/// so clients past JS's 2^53 safe-integer range keep full precision; number-sending
+/// clients keep working unchanged. Providers address ids as `u64`.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct CiId(pub u64);
 
 impl CiId {
-    /// The id as the string form the forge dispatchers (`forge_ci_*`) now take.
+    /// The id as the string form every `forge_ci_*` command param takes.
     pub(super) fn as_string(self) -> String {
         self.0.to_string()
-    }
-
-    /// The underlying `u64`, for handlers that call forge fns still taking a number.
-    pub(super) fn as_u64(self) -> u64 {
-        self.0
     }
 }
 
@@ -1008,22 +1001,22 @@ mod tests {
         assert!(ensure_key_in_project("NODASH", &link).is_err());
     }
 
-    /// `CiId` accepts a CI run/job id as EITHER a JSON number or a numeric string
-    /// (so existing clients sending numbers keep working, while string-carrying
-    /// clients avoid the 2^53 precision cliff), and rejects non-numeric input.
+    /// `CiId` accepts a CI run/job id as EITHER a JSON number or a numeric string — so
+    /// number-sending clients keep working while string-carrying ones clear the 2^53
+    /// precision cliff — and rejects non-numeric input.
     #[test]
     fn ci_id_accepts_number_or_numeric_string() {
         // A bare number deserializes.
         let from_num: CiId = serde_json::from_value(serde_json::json!(123)).unwrap();
-        assert_eq!(from_num.as_u64(), 123);
+        assert_eq!(from_num.0, 123);
 
         // A numeric string deserializes to the same id.
         let from_str: CiId = serde_json::from_value(serde_json::json!("123")).unwrap();
-        assert_eq!(from_str.as_u64(), 123);
+        assert_eq!(from_str.0, 123);
 
         // Beyond 2^53 survives as a string (the whole point).
         let big: CiId = serde_json::from_value(serde_json::json!("9007199254740993")).unwrap();
-        assert_eq!(big.as_u64(), 9_007_199_254_740_993);
+        assert_eq!(big.0, 9_007_199_254_740_993);
 
         // Non-numeric string is rejected.
         assert!(serde_json::from_value::<CiId>(serde_json::json!("abc")).is_err());
@@ -1038,9 +1031,9 @@ mod tests {
     #[test]
     fn run_id_arg_accepts_number_or_string() {
         let n: RunIdArg = serde_json::from_value(serde_json::json!({ "run_id": 123 })).unwrap();
-        assert_eq!(n.run_id.as_u64(), 123);
+        assert_eq!(n.run_id.0, 123);
         let s: RunIdArg = serde_json::from_value(serde_json::json!({ "run_id": "123" })).unwrap();
-        assert_eq!(s.run_id.as_u64(), 123);
+        assert_eq!(s.run_id.0, 123);
     }
 
     /// The generated JSON Schema for `CiId` must advertise BOTH the integer and the

@@ -19,6 +19,7 @@ import {
 import type { ReactNode } from "react";
 import { useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
+import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -63,7 +64,6 @@ import { useEffectiveBindings } from "@/lib/hotkeys/hotkeys";
 import { useLocalPrs, useUpdateLocalPr } from "@/lib/pulls/queries";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
-import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { LinkedIssuesField } from "./LinkedIssuesField";
@@ -473,7 +473,9 @@ export function LocalPrView({
             <span>→</span>
             <span className="font-mono">{pr.base}</span>
             <span>•</span>
-            <span>local · {formatRelativeTime(pr.createdAt)}</span>
+            <span>
+              local · <RelativeTime date={pr.createdAt} />
+            </span>
           </div>
         </header>
         <ResolveConflictsView repoPath={repoPath} pr={pr} />
@@ -525,7 +527,9 @@ export function LocalPrView({
           <span>→</span>
           <span className="font-mono">{pr.base}</span>
           <span>•</span>
-          <span>local · {formatRelativeTime(pr.createdAt)}</span>
+          <span>
+            local · <RelativeTime date={pr.createdAt} />
+          </span>
         </div>
         {(pr.labels.length > 0 || pr.status === "open") && (
           <div className="flex flex-wrap items-center gap-1.5">

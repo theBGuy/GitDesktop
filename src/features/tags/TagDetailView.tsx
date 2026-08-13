@@ -10,6 +10,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { MarkdownEditor } from "@/components/markdown-editor";
+import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -51,7 +52,6 @@ import {
 import { providerLabel } from "@/lib/git/types";
 import { useConfirm } from "@/lib/stores/confirm";
 import { useUiStore } from "@/lib/stores/ui";
-import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { CreateReleaseDialog } from "./CreateReleaseDialog";
 
@@ -267,7 +267,9 @@ export function TagDetailView({
             {rel.isDraft && <Badge variant="secondary">Draft</Badge>}
             {rel.author && <span>• {rel.author}</span>}
             {rel.publishedAt && (
-              <span>• released {formatRelativeTime(rel.publishedAt)}</span>
+              <span>
+                • released <RelativeTime date={rel.publishedAt} />
+              </span>
             )}
           </div>
         </header>
@@ -640,7 +642,11 @@ export function TagDetailView({
           {tagInfo?.target && (
             <span className="font-mono">{tagInfo.target.slice(0, 7)}</span>
           )}
-          {tagInfo?.date && <span>• {formatRelativeTime(tagInfo.date)}</span>}
+          {tagInfo?.date && (
+            <span>
+              • <RelativeTime date={tagInfo.date} />
+            </span>
+          )}
         </div>
       </header>
       <div className="min-h-0 flex-1 space-y-4 p-4">

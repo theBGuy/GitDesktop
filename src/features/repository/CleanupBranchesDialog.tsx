@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -18,7 +19,6 @@ import { repoKeys, useBranchDivergence } from "@/lib/git/queries";
 import type { Branch } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { errorMessage } from "@/lib/tauri/invoke";
-import { formatRelativeTime } from "@/lib/time";
 import { cn } from "@/lib/utils";
 
 type Mode = "archive" | "delete";
@@ -437,7 +437,7 @@ export function CleanupBranchesDialog({
                         <span className="text-merged">merged</span>
                       ) : null}
                       <span className="tabular-nums text-muted-foreground">
-                        {formatRelativeTime(c.branch.lastCommitDate)}
+                        <RelativeTime date={c.branch.lastCommitDate} />
                       </span>
                     </span>
                   </label>

@@ -69,7 +69,6 @@ const LIST_FIELDS: &str =
     "tagName,name,isDraft,isPrerelease,isLatest,publishedAt";
 
 /// Repository releases, newest first (gh's default order).
-#[tauri::command]
 pub async fn gh_release_list(repo_path: String) -> AppResult<Vec<ReleaseInfo>> {
     // Pin the origin slug: an unpinned `gh release` on a fork with an `upstream`
     // remote auto-resolves to the PARENT, listing the parent's releases. The
@@ -141,7 +140,6 @@ struct RawRelease {
 const VIEW_FIELDS: &str = "tagName,name,body,author,publishedAt,isDraft,isPrerelease,targetCommitish,url,assets";
 
 /// Full details for one release, by its tag.
-#[tauri::command]
 pub async fn gh_release_view(
     repo_path: String,
     tag: String,
@@ -190,7 +188,6 @@ pub async fn gh_release_view(
 /// Creates a release for `tag` (gh creates the tag off `target` if it doesn't
 /// exist). `generate_notes` adds GitHub's auto commit-based notes; an explicit
 /// `notes` body is included too. Returns the new release's URL.
-#[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn gh_release_create(
     repo_path: String,
@@ -234,7 +231,6 @@ pub async fn gh_release_create(
 }
 
 /// Edits a release's title/notes/flags. `draft=false` on a draft publishes it.
-#[tauri::command]
 pub async fn gh_release_edit(
     repo_path: String,
     tag: String,
@@ -343,7 +339,6 @@ pub async fn gh_release_generate_notes(
 }
 
 /// Deletes a release. `cleanup_tag` also deletes the underlying git tag.
-#[tauri::command]
 pub async fn gh_release_delete(
     repo_path: String,
     tag: String,
@@ -360,7 +355,6 @@ pub async fn gh_release_delete(
 }
 
 /// Uploads (clobbering) a local file as a release asset.
-#[tauri::command]
 pub async fn gh_release_upload_asset(
     repo_path: String,
     tag: String,
@@ -388,7 +382,6 @@ pub async fn gh_release_upload_asset(
     Ok(())
 }
 
-#[tauri::command]
 pub async fn gh_release_delete_asset(
     repo_path: String,
     tag: String,
