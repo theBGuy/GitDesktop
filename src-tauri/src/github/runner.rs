@@ -148,16 +148,22 @@ pub async fn run_gh_input(
             AppError::Io(e)
         }
     })?;
-    // Write the body and close stdin so gh reads EOF (body is small — no
-    // deadlock risk from not draining stdout concurrently).
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(input.as_bytes()).await.map_err(AppError::Io)?;
-        stdin.shutdown().await.ok();
-    }
-    let output = tokio::time::timeout(timeout, child.wait_with_output())
+    // The write runs INSIDE the timeout: a stalled stdin write is unbounded, so
+    // outside it a stall hangs the caller forever instead of failing at the
+    // deadline. It still precedes the drain rather than running concurrently the
+    // way the git runner has to — one API body in, one small JSON document back —
+    // and the timeout now bounds the exchange whatever a caller sends.
+    let exchange = async move {
+        // Dropping the handle after the write closes the pipe so gh reads EOF.
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(input.as_bytes()).await.map_err(AppError::Io)?;
+            stdin.shutdown().await.ok();
+        }
+        child.wait_with_output().await.map_err(AppError::Io)
+    };
+    let output = tokio::time::timeout(timeout, exchange)
         .await
-        .map_err(|_| AppError::Timeout(timeout.as_secs()))?
-        .map_err(AppError::Io)?;
+        .map_err(|_| AppError::Timeout(timeout.as_secs()))??;
 
     let out = GhOutput {
         stdout: output.stdout,

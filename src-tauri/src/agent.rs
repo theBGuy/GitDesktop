@@ -8,12 +8,14 @@
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::Notify;
 
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -1828,21 +1830,67 @@ fn kill_process_tree(child: &mut tokio::process::Child) {
     let _ = child.start_kill();
 }
 
+/// Grace for the child to exit after the pump loop ends. On a clean EOF it has
+/// normally exited already, but a grandchild (node worker, MCP server) can keep the
+/// pipes open — without a bound the command never returns, so the frontend never sees
+/// `backendDone` and the run's UI stays stuck past its own timeout.
+const CHILD_EXIT_GRACE: Duration = Duration::from_secs(10);
+/// Second, shorter grace after a tree-kill: the child is being force-killed, so this
+/// only covers reaping it.
+const CHILD_REAP_GRACE: Duration = Duration::from_secs(5);
+
+/// Whether `id` is an acceptable cancel-registry key. Every id is minted by
+/// `crypto.randomUUID()` on the frontend — an RFC 4122 v4 uuid, 36 lowercase
+/// hex-and-dash chars (`src/lib/ai/stream.ts`, `cli-client.ts`, and the plan /
+/// research / sessions stores). The gate is deliberately a superset of that: it only
+/// has to bound the key space, since an unvalidated id would let a cancel seed an
+/// unbounded number of tombstones. Same bound as the forge reconnect registry's.
+fn valid_cancel_id(id: &str) -> bool {
+    (8..=64).contains(&id.len()) && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// RAII cleanup for a registered agent cancel: removes the registry entry on drop, so
+/// every exit path out of `agent_review` / `agent_session` after registration — the
+/// `?` returns of the pre-stream setup included — releases it. Carries the `Notify`
+/// the run waits on, which may already hold a cancel permit.
+struct AgentCancelGuard<'a> {
+    state: &'a AppState,
+    id: String,
+    notify: Arc<Notify>,
+}
+
+impl<'a> AgentCancelGuard<'a> {
+    fn register(state: &'a AppState, id: &str) -> Self {
+        Self {
+            state,
+            id: id.to_string(),
+            notify: state.register_agent_cancel(id),
+        }
+    }
+}
+
+impl Drop for AgentCancelGuard<'_> {
+    fn drop(&mut self) {
+        self.state.clear_agent_cancel(&self.id);
+    }
+}
+
 /// Spawns an agent CLI, streams its stdout as `ReviewEvent`s until a terminal
 /// event / EOF / cancel / timeout, then emits a final `Error` if no terminal
 /// result arrived. Shared by `agent_review` (read-only) and `agent_session`
 /// (write-enabled, run in a worktree). `cwd` is the process working directory,
-/// `cancel_id` keys the cancel registry, and `noun` colors the failure copy.
+/// `cancel` is the caller's registered cancel handle (registered at command entry,
+/// so a cancel racing the setup below is never lost), and `noun` colors the failure
+/// copy.
 #[allow(clippy::too_many_arguments)]
 async fn stream_agent(
-    state: &AppState,
+    cancel: Arc<Notify>,
     kind: AgentKind,
     binary: &Path,
     args: Vec<String>,
     stdin_text: String,
     cwd: &str,
     timeout: Duration,
-    cancel_id: &str,
     noun: &str,
     // Whether a timeout message may point at the "Review timeout" setting — true
     // only for the review flows that setting governs (see `timeout_message`).
@@ -1896,7 +1944,7 @@ async fn stream_agent(
 
     // Drain stderr concurrently; surfaced only if no terminal result arrives.
     let stderr = child.stderr.take();
-    let stderr_task = tokio::spawn(async move {
+    let mut stderr_task = tokio::spawn(async move {
         let mut buf = String::new();
         if let Some(s) = stderr {
             let _ = BufReader::new(s).read_to_string(&mut buf).await;
@@ -1906,8 +1954,6 @@ async fn stream_agent(
 
     let stdout = child.stdout.take().expect("stdout was piped");
     let mut lines = BufReader::new(stdout).lines();
-
-    let cancel = state.register_agent_cancel(cancel_id).await;
 
     let mut saw_result = false;
     let mut last_message = String::new(); // codex: accumulates the final message
@@ -1983,8 +2029,17 @@ async fn stream_agent(
         }
     }
 
-    state.clear_agent_cancel(cancel_id).await;
-    let _ = child.wait().await;
+    // The EOF / read-error breaks reach here with nothing having killed the child, so
+    // both waits below are bounded: a surviving grandchild holding the pipes must cost
+    // a bounded delay, never a hung command. Nothing is killed on the timeout-free
+    // path until this grace actually elapses — a clean EOF normally exits at once.
+    if tokio::time::timeout(CHILD_EXIT_GRACE, child.wait())
+        .await
+        .is_err()
+    {
+        kill_process_tree(&mut child);
+        let _ = tokio::time::timeout(CHILD_REAP_GRACE, child.wait()).await;
+    }
     // A killed `docker/podman run` client doesn't stop the container — force-
     // remove it so a cancelled/timed-out agent isn't left running detached.
     if cancelled || timed_out {
@@ -1992,7 +2047,15 @@ async fn stream_agent(
             let _ = run_capture(runtime, &["rm", "-f", name], DETECT_TIMEOUT).await;
         }
     }
-    let stderr_text = stderr_task.await.unwrap_or_default();
+    let stderr_text = match tokio::time::timeout(CHILD_EXIT_GRACE, &mut stderr_task).await {
+        Ok(joined) => joined.unwrap_or_default(),
+        // The read never ended (something still holds the pipe open) — abandon it and
+        // report with no stderr, which only weakens the no-result message below.
+        Err(_) => {
+            stderr_task.abort();
+            String::new()
+        }
+    };
 
     if cancelled {
         // The frontend tore down its UI on cancel; nothing to emit.
@@ -2050,6 +2113,14 @@ pub async fn agent_review(
     review_id: String,
     on_event: Channel<ReviewEvent>,
 ) -> AppResult<()> {
+    if !valid_cancel_id(&review_id) {
+        return Err(AppError::InvalidArgument("invalid review id".into()));
+    }
+    // Register BEFORE the setup below (binary resolve, MCP config writes): a racing
+    // cancel then lands its permit on this entry — or leaves a tombstone this
+    // register adopts. The guard clears the entry on every exit path.
+    let cancel = AgentCancelGuard::register(&state, &review_id);
+
     let binary = resolve(kind, bin_path.as_deref()).await.ok_or_else(|| {
         AppError::Command(format!(
             "{} CLI not found. Install it or set its path in Settings.",
@@ -2146,14 +2217,13 @@ pub async fn agent_review(
         timeout_secs,
     );
     let result = stream_agent(
-        &state,
+        cancel.notify.clone(),
         kind,
         &binary,
         args,
         stdin_text,
         &repo_path,
         timeout,
-        &review_id,
         "review",
         timeout_configurable.unwrap_or(false),
         None,
@@ -2173,7 +2243,12 @@ pub async fn agent_review_cancel(
     state: tauri::State<'_, AppState>,
     review_id: String,
 ) -> AppResult<()> {
-    state.cancel_agent(&review_id).await;
+    // Validate before touching the registry — same gate as the run commands, so a
+    // malformed id can't seed a tombstone (see `valid_cancel_id`).
+    if !valid_cancel_id(&review_id) {
+        return Err(AppError::InvalidArgument("invalid review id".into()));
+    }
+    state.cancel_agent(&review_id);
     Ok(())
 }
 
@@ -2230,6 +2305,14 @@ pub async fn agent_session(
     mcp_servers: Option<Vec<crate::mcp::McpServerSpec>>,
     on_event: Channel<ReviewEvent>,
 ) -> AppResult<()> {
+    if !valid_cancel_id(&session_id) {
+        return Err(AppError::InvalidArgument("invalid session id".into()));
+    }
+    // Register BEFORE the setup below (the container path runs several runtime
+    // probes): a racing cancel then lands its permit on this entry — or leaves a
+    // tombstone this register adopts. The guard clears the entry on every exit path.
+    let cancel = AgentCancelGuard::register(&state, &session_id);
+
     // Strict: reject an unknown agent rather than silently coercing it.
     let kind = match agent.as_str() {
         "claude" => AgentKind::Claude,
@@ -2560,14 +2643,13 @@ pub async fn agent_session(
             &inner,
         );
         return stream_agent(
-            &state,
+            cancel.notify.clone(),
             kind,
             &runtime,
             args,
             stdin_text,
             &worktree_path,
             SESSION_TIMEOUT,
-            &session_id,
             "session",
             false,
             Some((runtime.clone(), name)),
@@ -2596,14 +2678,13 @@ pub async fn agent_session(
         host_extra_env.push(("OPENCODE_ENABLE_EXA", "1".to_string()));
     }
     stream_agent(
-        &state,
+        cancel.notify.clone(),
         kind,
         &binary,
         inner,
         stdin_text,
         &worktree_path,
         SESSION_TIMEOUT,
-        &session_id,
         "session",
         false,
         None,
@@ -2838,6 +2919,18 @@ mod tests {
     const TEXT_B: &str = r#"{"type":"text","sessionID":"ses_abc","part":{"id":"p2","type":"text","text":"Second."}}"#;
     const FINISH_TOOLS: &str = r#"{"type":"step_finish","sessionID":"ses_abc","part":{"type":"step-finish","reason":"tool-calls"}}"#;
     const FINISH_STOP: &str = r#"{"type":"step_finish","sessionID":"ses_abc","part":{"type":"step-finish","reason":"stop"}}"#;
+
+    #[test]
+    fn cancel_id_gate_accepts_uuids_and_rejects_the_rest() {
+        // What the frontend actually mints (`crypto.randomUUID()`).
+        assert!(valid_cancel_id("3f2a1c7e-9b4d-4a61-8f0c-2d5e7a91b3c4"));
+        // Bounded and charset-limited, so no id can smuggle a path or a huge key.
+        assert!(!valid_cancel_id(""));
+        assert!(!valid_cancel_id("short"));
+        assert!(!valid_cancel_id("../../etc/passwd"));
+        assert!(!valid_cancel_id("has spaces in it"));
+        assert!(!valid_cancel_id(&"a".repeat(65)));
+    }
 
     #[test]
     fn opencode_step_start_yields_native_session_id() {

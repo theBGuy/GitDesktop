@@ -207,31 +207,68 @@ pub async fn run_git_raw_input(
         }
     };
     let run = async {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
         let mut child = cmd.spawn().map_err(spawn_err)?;
         #[cfg(windows)]
         let job = child.raw_handle().and_then(GitJob::arm);
-        if let Some(text) = input {
-            use tokio::io::AsyncWriteExt;
-            // Dropping the handle closes the pipe so git sees EOF.
-            let mut stdin = child.stdin.take().expect("stdin was piped");
-            stdin.write_all(text.as_bytes()).await.map_err(AppError::Io)?;
-        }
-        let result = child.wait_with_output().await;
+
+        // git interleaves reading stdin with writing stdout, so the write and both
+        // drains have to run CONCURRENTLY: writing all of stdin first wedges as soon
+        // as git's output fills its pipe buffer — git stops reading, our write
+        // blocks behind it, and the whole exchange dies on the timeout below.
+        // Local futures rather than `tokio::spawn`, because `input` is borrowed and
+        // a `'static` copy would clone a multi-MB patch on every hunk stage.
+        let stdin_pipe = child.stdin.take();
+        let mut stdout_pipe = child.stdout.take().expect("stdout was piped");
+        let mut stderr_pipe = child.stderr.take().expect("stderr was piped");
+        let write = async move {
+            let (Some(mut pipe), Some(text)) = (stdin_pipe, input) else {
+                return Ok(());
+            };
+            let written = pipe.write_all(text.as_bytes()).await;
+            // Close the pipe the moment the write ends (error path included) so
+            // git sees EOF while the drains still poll — `--stdin` blocks forever
+            // without it; the explicit drop pins that close point across refactors.
+            drop(pipe);
+            written
+        };
+        let drain_stdout = async move {
+            let mut buf = Vec::new();
+            stdout_pipe.read_to_end(&mut buf).await.map(|_| buf)
+        };
+        let drain_stderr = async move {
+            let mut buf = Vec::new();
+            stderr_pipe.read_to_end(&mut buf).await.map(|_| buf)
+        };
+        let (written, stdout, stderr) = tokio::join!(write, drain_stdout, drain_stderr);
+
+        // The child's own verdict outranks a failed stdin write: that write fails
+        // almost exclusively as a broken pipe from git exiting early, and git's
+        // stderr and exit code are what say why. The write error surfaces only when
+        // there is no child result to report instead.
+        let reaped = match (stdout, stderr) {
+            (Ok(out), Ok(err)) => child.wait().await.map(|status| (out, err, status)),
+            (Err(e), _) | (_, Err(e)) => Err(e),
+        };
+        let (stdout, stderr, status) = match reaped {
+            Ok(reaped) => reaped,
+            // Abandoned without a reaped child, so the job stays ARMED (see `disarm`).
+            Err(e) => return Err(AppError::Io(written.err().unwrap_or(e))),
+        };
         #[cfg(windows)]
-        if let (Ok(_), Some(job)) = (&result, job) {
+        if let Some(job) = job {
             job.disarm();
         }
-        result.map_err(AppError::Io)
+        Ok(GitOutput {
+            stdout,
+            stderr: strip_eol_warnings(&String::from_utf8_lossy(&stderr)),
+            code: status.code().unwrap_or(-1),
+        })
     };
-    let output = tokio::time::timeout(timeout, run)
+    tokio::time::timeout(timeout, run)
         .await
-        .map_err(|_| AppError::Timeout(timeout.as_secs()))??;
-
-    Ok(GitOutput {
-        stdout: output.stdout,
-        stderr: strip_eol_warnings(&String::from_utf8_lossy(&output.stderr)),
-        code: output.status.code().unwrap_or(-1),
-    })
+        .map_err(|_| AppError::Timeout(timeout.as_secs()))?
 }
 
 /// With core.autocrlf on, git emits a "LF will be replaced by CRLF the next
@@ -330,6 +367,84 @@ pub async fn run_git_mutating_input(
             run_git_input(Some(repo_path), args, input, timeout).await
         }
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod stdin_tests {
+    use super::*;
+
+    /// Both sides have to clear the point where a write-then-read runner wedges,
+    /// and that point is platform-specific: on unix the stdin write blocks once the
+    /// 64KB pipe buffer fills, while on Windows tokio absorbs the first
+    /// `DEFAULT_MAX_BUF_SIZE` (2 MiB, measured against tokio 1.53) into its
+    /// `Blocking` wrapper before the write can stall at all. 50k paths of 100 bytes
+    /// send ~4.8 MiB and draw ~5.5 MiB back (four NUL-joined tokens per match, 15
+    /// bytes of them fixed), which clears both by a wide margin.
+    const PATH_COUNT: usize = 50_000;
+    const PAD: usize = 80;
+
+    /// Output far larger than the pipe buffer, produced while stdin is still being
+    /// written: the shape that deadlocked a write-then-read runner into a spurious
+    /// timeout. `git_ignored_files` hits it for real — every path it sends matches
+    /// by construction, and `--verbose` answers with four tokens per one sent.
+    #[tokio::test]
+    async fn large_interleaved_stdin_and_output_complete() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-runner-stdin-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo = dir.path().to_string_lossy().into_owned();
+        run_git(Some(&repo), &["init", "-q"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        // `*` in the repo's own `.gitignore` outranks any global excludes the
+        // machine happens to carry, so every path matches this one rule.
+        std::fs::write(dir.path().join(".gitignore"), "*\n").unwrap();
+
+        // One directory, long names: the bytes come from the filename so git has a
+        // single parent to look for nested ignore files in.
+        let pad = "f".repeat(PAD);
+        let paths: Vec<String> = (0..PATH_COUNT)
+            .map(|i| format!("generated/{pad}{i:06}.bin"))
+            .collect();
+        let input: String = paths.iter().map(|p| format!("{p}\0")).collect();
+        assert!(
+            input.len() > 4 * 1024 * 1024,
+            "stdin must outrun tokio's 2 MiB Windows write buffer, got {} bytes",
+            input.len()
+        );
+
+        // The deadlock can only present as a timeout, so any explicit bound keeps
+        // a regression finite; 30s leaves ~10x headroom for slow contended CI
+        // runners (measured ~0.8s idle on a 32-thread dev machine).
+        let out = run_git_raw_input(
+            Some(&repo),
+            &["check-ignore", "--verbose", "-z", "--stdin"],
+            Some(&input),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("check-ignore answers inside the timeout");
+        assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+        assert!(
+            out.stdout.len() > 1024 * 1024,
+            "output must exceed every pipe buffer, got {} bytes",
+            out.stdout.len()
+        );
+
+        // Byte-compared, not lossy-parsed: partial or interleaved drains would
+        // corrupt exactly here. `-z` terminates every token, so the split's last
+        // element is empty.
+        let tokens: Vec<&[u8]> = out.stdout.split(|b| *b == 0).collect();
+        assert_eq!(tokens.len(), PATH_COUNT * 4 + 1, "one record per path sent");
+        assert_eq!(tokens[PATH_COUNT * 4], b"");
+        for (i, path) in paths.iter().enumerate() {
+            assert_eq!(tokens[i * 4], b".gitignore");
+            assert_eq!(tokens[i * 4 + 1], b"1");
+            assert_eq!(tokens[i * 4 + 2], b"*");
+            assert_eq!(tokens[i * 4 + 3], path.as_bytes(), "record {i}");
+        }
     }
 }
 

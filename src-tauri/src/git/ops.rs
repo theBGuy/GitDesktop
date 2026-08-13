@@ -301,10 +301,19 @@ pub async fn git_cherry_pick_onto(
     hashes: Vec<String>,
     target_branch: String,
 ) -> AppResult<CherryPickRangeResult> {
-    use crate::git::runner::run_git;
+    cherry_pick_onto(&state, &repo_path, &hashes, &target_branch).await
+}
 
-    validate_branch_arg(&target_branch)?;
-    for h in &hashes {
+/// Testable core of [`git_cherry_pick_onto`] — takes a plain `&AppState` so the
+/// real-repo tokio tests can drive it (mirrors `rewrite_commits`).
+pub(crate) async fn cherry_pick_onto(
+    state: &AppState,
+    repo_path: &str,
+    hashes: &[String],
+    target_branch: &str,
+) -> AppResult<CherryPickRangeResult> {
+    validate_branch_arg(target_branch)?;
+    for h in hashes {
         validate_hash(h)?;
     }
     if hashes.is_empty() {
@@ -313,14 +322,27 @@ pub async fn git_cherry_pick_onto(
             skipped: 0,
         });
     }
+
+    // Hold the per-repo lock across the WHOLE guard → capture → pick → rollback
+    // sequence, not once per step: the rollback hard-resets `target` to the
+    // `target_tip` captured up here, so a commit another caller in this process
+    // lands in between is silently destroyed by a reset to a tip that predates it
+    // (a separate MCP-server process has its own locks and is NOT covered). `repo_lock` is a `tokio::sync::Mutex` (safe to hold
+    // across `.await`) but non-reentrant — use the lock-free `run_git` below, never
+    // `run_git_mutating`, which would deadlock. The inner steps therefore lose its
+    // one-shot index.lock retry, the same trade-off `git_stash_paths_core` and the
+    // autostash compounds accept.
+    let lock = state.repo_lock(repo_path).await;
+    let guard = lock.lock().await;
+
     // The failure path hard-resets `target` to its prior tip, which would discard
     // uncommitted work when target is the current branch — refuse first.
-    ensure_clean_tree(&repo_path).await?;
+    ensure_clean_tree(repo_path).await?;
 
     // Where we are now, so we can return on failure. A detached HEAD has no
     // branch name, so fall back to restoring its commit directly.
     let original_ref = run_git(
-        Some(&repo_path),
+        Some(repo_path),
         &["rev-parse", "--abbrev-ref", "HEAD"],
         DEFAULT_TIMEOUT,
     )
@@ -330,7 +352,7 @@ pub async fn git_cherry_pick_onto(
     .to_string();
     let detached = original_ref == "HEAD";
     let original_restore = if detached {
-        run_git(Some(&repo_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
+        run_git(Some(repo_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
             .await?
             .stdout_lossy()
             .trim()
@@ -341,8 +363,8 @@ pub async fn git_cherry_pick_onto(
 
     // The target's tip before we touch it, so we can roll back cleanly.
     let target_tip = run_git(
-        Some(&repo_path),
-        &["rev-parse", &target_branch],
+        Some(repo_path),
+        &["rev-parse", target_branch],
         DEFAULT_TIMEOUT,
     )
     .await?
@@ -352,7 +374,9 @@ pub async fn git_cherry_pick_onto(
 
     // Journal a pending entry AFTER the guards + state capture, BEFORE the first
     // mutation. Best-effort: a journal failure returns None and the op proceeds.
-    let original_sha = run_git(Some(&repo_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
+    // Runs under the lock (app-data I/O, not git) because the anchors it records
+    // are only valid while the hold that captured them is unbroken.
+    let original_sha = run_git(Some(repo_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
         .await
         .ok()
         .map(|o| o.stdout_lossy().trim().to_string())
@@ -367,7 +391,7 @@ pub async fn git_cherry_pick_onto(
         original_restore.clone()
     };
     let op_id = crate::oplog::begin(
-        &repo_path,
+        repo_path,
         "cherry_pick_onto",
         &label,
         Some(original_ref_label),
@@ -377,20 +401,23 @@ pub async fn git_cherry_pick_onto(
     .await;
 
     let result: AppResult<CherryPickRangeResult> = async {
-        run_git_mutating(&state, &repo_path, &["switch", &target_branch], DEFAULT_TIMEOUT).await?;
+        run_git(
+            Some(repo_path),
+            &["switch", target_branch],
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
 
         let mut applied = 0usize;
         let mut skipped = 0usize;
-        for hash in &hashes {
-            match run_git_mutating(&state, &repo_path, &["cherry-pick", hash], DEFAULT_TIMEOUT).await
-            {
+        for hash in hashes {
+            match run_git(Some(repo_path), &["cherry-pick", hash], DEFAULT_TIMEOUT).await {
                 Ok(_) => applied += 1,
                 Err(AppError::Git { stderr, .. })
                     if stderr.contains("is now empty") || stderr.contains("--allow-empty") =>
                 {
-                    let _ = run_git_mutating(
-                        &state,
-                        &repo_path,
+                    let _ = run_git(
+                        Some(repo_path),
                         &["cherry-pick", "--skip"],
                         DEFAULT_TIMEOUT,
                     )
@@ -400,16 +427,14 @@ pub async fn git_cherry_pick_onto(
                 Err(AppError::Git { code, stderr }) => {
                     // Roll everything back: abort the in-progress pick, drop the
                     // commits already applied in this batch, and return home.
-                    let _ = run_git_mutating(
-                        &state,
-                        &repo_path,
+                    let _ = run_git(
+                        Some(repo_path),
                         &["cherry-pick", "--abort"],
                         DEFAULT_TIMEOUT,
                     )
                     .await;
-                    let _ = run_git_mutating(
-                        &state,
-                        &repo_path,
+                    let _ = run_git(
+                        Some(repo_path),
                         &["reset", "--hard", &target_tip],
                         DEFAULT_TIMEOUT,
                     )
@@ -419,8 +444,7 @@ pub async fn git_cherry_pick_onto(
                     } else {
                         vec!["switch", &original_restore]
                     };
-                    let _ =
-                        run_git_mutating(&state, &repo_path, &restore_args, DEFAULT_TIMEOUT).await;
+                    let _ = run_git(Some(repo_path), &restore_args, DEFAULT_TIMEOUT).await;
                     let short = &hash[..hash.len().min(7)];
                     return Err(AppError::Git {
                         code,
@@ -437,8 +461,12 @@ pub async fn git_cherry_pick_onto(
     }
     .await;
 
+    // Every git step (including the rollback) is done — release before the
+    // journal's app-data I/O so it doesn't extend the hold.
+    drop(guard);
+
     crate::oplog::finish(
-        &repo_path,
+        repo_path,
         &op_id,
         result.as_ref().err().map(|e| e.to_string()),
     )
@@ -3146,6 +3174,19 @@ pub(crate) async fn rewrite_commits(
         // are all expressible.
     }
 
+    // Hold the per-repo lock across the WHOLE gate → capture → replay → rollback
+    // sequence, not once per step: the rollback hard-resets to the `orig` captured up
+    // here, so a commit another caller in this process lands mid-replay is silently
+    // destroyed (a separate MCP-server process has its own locks and is NOT covered),
+    // and between the `reset --hard base` and the picks the branch sits rewound where
+    // a concurrent read sees a truncated history. `repo_lock` is a `tokio::sync::Mutex` (safe to hold across `.await`)
+    // but non-reentrant — use the lock-free `run_git` below, never
+    // `run_git_mutating`, which would deadlock. The inner steps therefore lose its
+    // one-shot index.lock retry, the same trade-off `git_stash_paths_core` and the
+    // autostash compounds accept.
+    let lock = state.repo_lock(repo_path).await;
+    let guard = lock.lock().await;
+
     // reset --hard would destroy uncommitted work — refuse instead.
     let status = run_git(
         Some(repo_path),
@@ -3196,7 +3237,8 @@ pub(crate) async fn rewrite_commits(
 
     // Journal a pending entry AFTER the guards + `orig` capture, BEFORE the first
     // mutation (`reset --hard`). Best-effort: a journal failure returns None and
-    // the op proceeds unchanged.
+    // the op proceeds unchanged. Runs under the lock (app-data I/O, not git) because
+    // the `orig` anchor it records is only valid while this hold is unbroken.
     let original_ref = run_git(
         Some(repo_path),
         &["rev-parse", "--abbrev-ref", "HEAD"],
@@ -3218,20 +3260,20 @@ pub(crate) async fn rewrite_commits(
     .await;
 
     let op_result: AppResult<()> = async {
-        run_git_mutating(state, repo_path, &["reset", "--hard", base], DEFAULT_TIMEOUT).await?;
+        run_git(Some(repo_path), &["reset", "--hard", base], DEFAULT_TIMEOUT).await?;
         let mut failure: Option<AppError> = None;
         'steps: for step in steps {
             let single_pick = step.hashes.len() == 1 && step.message.is_none();
             if single_pick {
                 let args = ["cherry-pick", step.hashes[0].as_str()];
-                if let Err(e) = run_git_mutating(state, repo_path, &args, DEFAULT_TIMEOUT).await {
+                if let Err(e) = run_git(Some(repo_path), &args, DEFAULT_TIMEOUT).await {
                     failure = Some(e);
                     break 'steps;
                 }
             } else {
                 let mut args = vec!["cherry-pick", "-n"];
                 args.extend(step.hashes.iter().map(String::as_str));
-                if let Err(e) = run_git_mutating(state, repo_path, &args, DEFAULT_TIMEOUT).await {
+                if let Err(e) = run_git(Some(repo_path), &args, DEFAULT_TIMEOUT).await {
                     failure = Some(e);
                     break 'steps;
                 }
@@ -3243,9 +3285,7 @@ pub(crate) async fn rewrite_commits(
                 } else {
                     vec!["commit", "-m", message]
                 };
-                if let Err(e) =
-                    run_git_mutating(state, repo_path, &commit_args, DEFAULT_TIMEOUT).await
-                {
+                if let Err(e) = run_git(Some(repo_path), &commit_args, DEFAULT_TIMEOUT).await {
                     failure = Some(e);
                     break 'steps;
                 }
@@ -3253,16 +3293,13 @@ pub(crate) async fn rewrite_commits(
         }
 
         if let Some(err) = failure {
-            let _ = run_git_mutating(
-                state,
-                repo_path,
+            let _ = run_git(
+                Some(repo_path),
                 &["cherry-pick", "--abort"],
                 DEFAULT_TIMEOUT,
             )
             .await;
-            let _ =
-                run_git_mutating(state, repo_path, &["reset", "--hard", &orig], DEFAULT_TIMEOUT)
-                    .await;
+            let _ = run_git(Some(repo_path), &["reset", "--hard", &orig], DEFAULT_TIMEOUT).await;
             return Err(match err {
                 AppError::Git { code, stderr } => AppError::Git {
                     code,
@@ -3276,6 +3313,10 @@ pub(crate) async fn rewrite_commits(
         Ok(())
     }
     .await;
+
+    // Every git step (including the rollback) is done — release before the
+    // journal's app-data I/O so it doesn't extend the hold.
+    drop(guard);
 
     crate::oplog::finish(
         repo_path,
@@ -3867,6 +3908,130 @@ mod tests {
         let status = git(&repo, &["status", "--porcelain"]).await;
         assert!(status.trim().is_empty(), "tree should be clean: {status}");
 
+    }
+
+    /// Negative control for the compound-lock fix: a rewrite that rolls back must
+    /// not take a concurrent commit down with it. The second task waits until the
+    /// rewrite observably holds the repo lock, then commits the way every other
+    /// mutating command does; tokio's fair mutex queues it behind the whole
+    /// compound. When the lock was taken per STEP instead, that commit landed
+    /// between two cycles and the rollback's `reset --hard orig` destroyed it.
+    /// Multi-threaded flavor deliberately: the concurrent task must genuinely run
+    /// in parallel instead of starving on a current-thread runtime.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_commit_survives_a_rolled_back_rewrite() {
+        let (dir, repo) = setup_repo("interleave").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "v1\n", "two").await;
+        commit_file(&repo, dir.path(), "a.txt", "v2\n", "three").await;
+        let c3 = rev(&repo, "HEAD").await;
+        let orig = rev(&repo, "HEAD").await;
+
+        let state = std::sync::Arc::new(AppState::default());
+        let concurrent = {
+            let state = state.clone();
+            let repo = repo.clone();
+            tokio::spawn(async move {
+                let lock = state.repo_lock(&repo).await;
+                // Bounded wait: if the compound somehow finished first we still
+                // commit, and the assertions below stay meaningful either way.
+                for _ in 0..500 {
+                    if lock.try_lock().is_err() {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                }
+                run_git_mutating(
+                    &state,
+                    &repo,
+                    &["commit", "--allow-empty", "-m", "concurrent"],
+                    DEFAULT_TIMEOUT,
+                )
+                .await
+                .expect("the queued commit must succeed once the compound releases");
+            })
+        };
+
+        // "three"'s patch (v1→v2) can't apply after only "one" replayed, so the
+        // SECOND pick conflicts — the compound has already mutated the branch by
+        // the time it rolls back.
+        let result = rewrite_commits(&state, &repo, &base, &[pick(&c1), pick(&c3)]).await;
+        assert!(result.is_err(), "the second pick must conflict");
+        concurrent.await.expect("concurrent task panicked");
+
+        let log = subjects(&repo).await;
+        assert_eq!(
+            log.first().map(String::as_str),
+            Some("concurrent"),
+            "the concurrent commit must survive the rollback: {log:?}"
+        );
+        assert_eq!(
+            rev(&repo, "HEAD~1").await,
+            orig,
+            "and it must sit directly on the tip the rewrite rolled back to"
+        );
+    }
+
+    #[tokio::test]
+    async fn cherry_pick_onto_copies_commits_to_the_target_branch() {
+        let (dir, repo) = setup_repo("pick-onto").await;
+        git(&repo, &["branch", "target"]).await;
+        git(&repo, &["checkout", "-b", "feature"]).await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "c.txt", "c\n", "two").await;
+        let c2 = rev(&repo, "HEAD").await;
+
+        let state = AppState::default();
+        let out = cherry_pick_onto(&state, &repo, &[c1, c2], "target")
+            .await
+            .unwrap();
+        assert_eq!((out.applied, out.skipped), (2, 0));
+        // Success leaves you ON the target branch, both commits copied in order.
+        assert_eq!(
+            git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]).await.trim(),
+            "target"
+        );
+        assert_eq!(subjects(&repo).await, vec!["two", "one", "base"]);
+        let status = git(&repo, &["status", "--porcelain"]).await;
+        assert!(status.trim().is_empty(), "tree should be clean: {status}");
+    }
+
+    #[tokio::test]
+    async fn cherry_pick_onto_conflict_rolls_back_and_returns_home() {
+        let (dir, repo) = setup_repo("pick-onto-conflict").await;
+        git(&repo, &["branch", "target"]).await;
+        git(&repo, &["checkout", "-b", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "feature\n", "feature edit").await;
+        let c1 = rev(&repo, "HEAD").await;
+        // Diverge target on the same file so the pick can't apply.
+        git(&repo, &["checkout", "target"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "target\n", "target edit").await;
+        let target_tip = rev(&repo, "HEAD").await;
+        git(&repo, &["checkout", "feature"]).await;
+        let feature_tip = rev(&repo, "HEAD").await;
+
+        let state = AppState::default();
+        match cherry_pick_onto(&state, &repo, &[c1], "target").await {
+            Err(AppError::Git { stderr, .. }) => assert!(
+                stderr.contains("rolled back"),
+                "the error must tell the user the target is unchanged: {stderr}"
+            ),
+            Ok(_) => panic!("the conflicting pick must fail"),
+            Err(e) => panic!("expected a Git error, got {e}"),
+        }
+        // Rolled fully back: the target's tip is untouched, no pick is in progress,
+        // and we're back on the branch we started from.
+        assert_eq!(rev(&repo, "target").await, target_tip);
+        assert_eq!(rev(&repo, "HEAD").await, feature_tip);
+        assert_eq!(
+            git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]).await.trim(),
+            "feature"
+        );
+        let status = git(&repo, &["status", "--porcelain"]).await;
+        assert!(status.trim().is_empty(), "tree should be clean: {status}");
     }
 
     #[tokio::test]

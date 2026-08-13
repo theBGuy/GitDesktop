@@ -12,7 +12,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::error::{AppError, AppResult};
-use crate::git::runner::{run_git_mutating, run_git_raw, DEFAULT_TIMEOUT};
+use crate::git::runner::{run_git, run_git_mutating, run_git_raw, DEFAULT_TIMEOUT};
 use crate::state::AppState;
 
 /// Cap on a conflicted file's working-tree size for AI resolution. Past this the
@@ -183,14 +183,23 @@ pub(crate) async fn git_checkout_conflict_side_core(
     // this side for its glob-siblings too, silently resolving conflicts the user
     // never opened.
     let spec = crate::git::pathspec::literal(&path);
-    run_git_mutating(
-        state,
-        &repo_path,
+
+    // Hold the per-repo lock across checkout→add, not once per step: between the two
+    // a concurrent stage or discard can rewrite the working-tree file, and the `add`
+    // would then stage THAT content as the user's chosen side. `repo_lock` is a
+    // non-reentrant `tokio::sync::Mutex`, so use the lock-free `run_git` while
+    // holding it — `run_git_mutating` re-acquires it and deadlocks. The steps lose
+    // its one-shot index.lock retry, the trade-off every compound here accepts.
+    let lock = state.repo_lock(&repo_path).await;
+    let _guard = lock.lock().await;
+
+    run_git(
+        Some(&repo_path),
         &["checkout", flag, "--", &spec],
         DEFAULT_TIMEOUT,
     )
     .await?;
-    run_git_mutating(state, &repo_path, &["add", "--", &spec], DEFAULT_TIMEOUT).await?;
+    run_git(Some(&repo_path), &["add", "--", &spec], DEFAULT_TIMEOUT).await?;
     Ok(())
 }
 

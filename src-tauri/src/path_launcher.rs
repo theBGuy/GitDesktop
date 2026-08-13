@@ -54,17 +54,23 @@ pub fn path_launcher_status() -> AppResult<PathLauncherStatus> {
     status_impl()
 }
 
+/// Installs the launcher off the main thread: on Windows the install
+/// materializes the managed MCP copy first, which is a ~50MB file copy.
 #[tauri::command]
-pub fn path_launcher_install(app: tauri::AppHandle) -> AppResult<PathLauncherStatus> {
+pub async fn path_launcher_install(app: tauri::AppHandle) -> AppResult<PathLauncherStatus> {
     let _version = app.package_info().version.to_string();
-    #[cfg(windows)]
-    {
-        install_impl(&_version)
-    }
-    #[cfg(not(windows))]
-    {
-        install_impl()
-    }
+    tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(windows)]
+        {
+            install_impl(&_version)
+        }
+        #[cfg(not(windows))]
+        {
+            install_impl()
+        }
+    })
+    .await
+    .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?
 }
 
 #[tauri::command]

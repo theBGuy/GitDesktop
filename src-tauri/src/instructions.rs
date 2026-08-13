@@ -206,14 +206,31 @@ pub struct AgentCommand {
 /// with an empty `prompt` (invoked by name, not inlined). Deduped by (kind,
 /// lowercased name): the first dir in priority order wins, so project beats
 /// global and the canonical `.agents` dir beats a vendor mirror (junction).
+///
+/// The walk reads up to eight directories and every file in them, so it runs in
+/// `spawn_blocking` — on the main thread it stalls the first `/` in the composer.
 #[tauri::command]
-pub fn read_agent_commands(
+pub async fn read_agent_commands(
     app: tauri::AppHandle,
     repo_path: String,
     agent: String,
 ) -> AppResult<Vec<AgentCommand>> {
-    let repo = Path::new(&repo_path);
+    // Resolve home HERE: it's the only thing the walk needs the `AppHandle` for,
+    // and keeping it out of the blocking core leaves that core app-state-free.
     let home = app.path().home_dir().ok();
+    tauri::async_runtime::spawn_blocking(move || discover_agent_commands(&repo_path, &agent, home))
+        .await
+        .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))
+}
+
+/// The blocking core of [`read_agent_commands`] — pure filesystem work, no
+/// `AppHandle`.
+fn discover_agent_commands(
+    repo_path: &str,
+    agent: &str,
+    home: Option<PathBuf>,
+) -> Vec<AgentCommand> {
+    let repo = Path::new(repo_path);
     let home = home.as_deref();
 
     let mut seen: HashSet<(String, String)> = HashSet::new();
@@ -221,7 +238,7 @@ pub fn read_agent_commands(
 
     // Commands: a prompt template per `*.md`. We expand the body on the frontend,
     // so execution is provider-agnostic — the dirs are just where each CLI looks.
-    for (dir, scope) in command_dirs(&agent, repo, home) {
+    for (dir, scope) in command_dirs(agent, repo, home) {
         for path in md_files(&dir) {
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
@@ -255,7 +272,7 @@ pub fn read_agent_commands(
 
     // Skills: each is a `<name>/SKILL.md` directory. Surfaced for display + a
     // by-name nudge; the body isn't sent (the CLI already loaded the real skill).
-    for (dir, scope) in skill_dirs(&agent, repo, home) {
+    for (dir, scope) in skill_dirs(agent, repo, home) {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
@@ -297,7 +314,7 @@ pub fn read_agent_commands(
         }
     }
 
-    Ok(out)
+    out
 }
 
 /// Per-agent custom-command directories, project before global (project wins

@@ -297,19 +297,27 @@ pub async fn run_glab_ex(
             AppError::Io(e)
         }
     })?;
-    if let Some(body) = input {
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(body.as_bytes())
-                .await
-                .map_err(AppError::Io)?;
-            stdin.shutdown().await.ok();
+    // The write runs INSIDE the timeout: a stalled stdin write is unbounded, so
+    // outside it a stall hangs the caller forever instead of failing at the
+    // deadline. It still precedes the drain rather than running concurrently the
+    // way the git runner has to — one API body in, one small JSON document back —
+    // and the timeout now bounds the exchange whatever a caller sends.
+    let exchange = async move {
+        if let Some(body) = input {
+            // Dropping the handle after the write closes the pipe so glab reads EOF.
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin
+                    .write_all(body.as_bytes())
+                    .await
+                    .map_err(AppError::Io)?;
+                stdin.shutdown().await.ok();
+            }
         }
-    }
-    let output = tokio::time::timeout(timeout, child.wait_with_output())
+        child.wait_with_output().await.map_err(AppError::Io)
+    };
+    let output = tokio::time::timeout(timeout, exchange)
         .await
-        .map_err(|_| AppError::Timeout(timeout.as_secs()))?
-        .map_err(AppError::Io)?;
+        .map_err(|_| AppError::Timeout(timeout.as_secs()))??;
     let out = GlabOutput {
         stdout: output.stdout,
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),

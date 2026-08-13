@@ -446,13 +446,26 @@ pub(crate) async fn remove_worktree(
         args.push("--force");
     }
     args.push(path);
+
+    // Hold the per-repo lock across remove → prune → `branch -D`, not once per step:
+    // the branch delete is decided from state observed before the removal, so a
+    // concurrent checkout or commit landing in between would be destroyed by a `-D`
+    // that no longer reflects the repo. `repo_lock` is a non-reentrant
+    // `tokio::sync::Mutex`, so every step below uses the lock-free `run_git` —
+    // `run_git_mutating` would re-acquire it and deadlock — accepting the loss of
+    // its one-shot index.lock retry like every other compound here. The
+    // `remove_dir_all` fallback runs under the hold too: releasing around it would
+    // reopen the same window, and it only fires when git's own delete already failed.
+    let lock = state.repo_lock(repo_path).await;
+    let _guard = lock.lock().await;
+
     // `git worktree remove` deletes the directory itself, but its recursive delete
     // mishandles Windows reparse points: a worktree with pnpm-installed deps
     // (`node_modules/*` junctioned into `.pnpm/`) fails with `failed to delete
     // '<path>': Invalid argument`, half-removed. Finish it ourselves —
     // `std::fs::remove_dir_all` deletes reparse points as links (hardened since Rust
     // 1.63) — then `prune` to reconcile git's dangling admin entry.
-    if let Err(git_err) = run_git_mutating(state, repo_path, &args, WORKTREE_OP_TIMEOUT).await {
+    if let Err(git_err) = run_git(Some(repo_path), &args, WORKTREE_OP_TIMEOUT).await {
         // Two measured orderings: git's own FAILED delete still unregisters, so a live
         // registration means a policy refusal (dirty, locked, main) — surface it, since
         // the frontend reads that error to offer the forced retry. A KILLED delete
@@ -484,12 +497,12 @@ pub(crate) async fn remove_worktree(
         }
         // Best-effort reconcile: a prune hiccup must never turn a successful removal
         // into a reported failure.
-        let _ = run_git_mutating(state, repo_path, &["worktree", "prune"], DEFAULT_TIMEOUT).await;
+        let _ = run_git(Some(repo_path), &["worktree", "prune"], DEFAULT_TIMEOUT).await;
     }
     // The branch can only be deleted once it's no longer checked out (i.e. after
     // the worktree is gone). Best-effort: a failure here shouldn't fail removal.
     if let Some(branch) = branch.as_deref().filter(|b| !b.is_empty()) {
-        let _ = run_git_mutating(state, repo_path, &["branch", "-D", branch], DEFAULT_TIMEOUT).await;
+        let _ = run_git(Some(repo_path), &["branch", "-D", branch], DEFAULT_TIMEOUT).await;
     }
     Ok(())
 }
@@ -512,6 +525,16 @@ pub async fn git_worktree_commit_all(
     worktree_path: String,
     message: String,
 ) -> AppResult<Option<String>> {
+    // Hold the worktree's lock across the emptiness check → add → commit → HEAD read,
+    // not once per step: otherwise a concurrent write can land between the check and
+    // the `add -A` (sweeping files this commit never meant to carry), and the HEAD
+    // read can report someone else's commit as this one's. `repo_lock` is a
+    // non-reentrant `tokio::sync::Mutex`, so use the lock-free `run_git` while
+    // holding it — `run_git_mutating` re-acquires it and deadlocks — accepting the
+    // loss of its one-shot index.lock retry like every other compound here.
+    let lock = state.repo_lock(&worktree_path).await;
+    let _guard = lock.lock().await;
+
     let status = run_git(
         Some(&worktree_path),
         &["status", "--porcelain"],
@@ -521,10 +544,9 @@ pub async fn git_worktree_commit_all(
     if status.stdout_lossy().trim().is_empty() {
         return Ok(None);
     }
-    run_git_mutating(&state, &worktree_path, &["add", "-A"], DEFAULT_TIMEOUT).await?;
-    run_git_mutating(
-        &state,
-        &worktree_path,
+    run_git(Some(&worktree_path), &["add", "-A"], DEFAULT_TIMEOUT).await?;
+    run_git(
+        Some(&worktree_path),
         &["commit", "-m", &message],
         DEFAULT_TIMEOUT,
     )
@@ -550,6 +572,16 @@ pub async fn git_worktree_squash(
     base: String,
     message: String,
 ) -> AppResult<bool> {
+    // Hold the worktree's lock across the HEAD check → soft-reset → commit, not once
+    // per step: between the reset and the commit the branch sits rewound with every
+    // turn's changes staged, so a concurrent commit or discard there either loses the
+    // session's work or folds foreign changes into the squash. `repo_lock` is a
+    // non-reentrant `tokio::sync::Mutex`, so use the lock-free `run_git` while
+    // holding it — `run_git_mutating` re-acquires it and deadlocks — accepting the
+    // loss of its one-shot index.lock retry like every other compound here.
+    let lock = state.repo_lock(&worktree_path).await;
+    let _guard = lock.lock().await;
+
     let head = run_git(
         Some(&worktree_path),
         &["rev-parse", "HEAD"],
@@ -559,16 +591,14 @@ pub async fn git_worktree_squash(
     if head.stdout_lossy().trim() == base.trim() {
         return Ok(false);
     }
-    run_git_mutating(
-        &state,
-        &worktree_path,
+    run_git(
+        Some(&worktree_path),
         &["reset", "--soft", &base],
         DEFAULT_TIMEOUT,
     )
     .await?;
-    run_git_mutating(
-        &state,
-        &worktree_path,
+    run_git(
+        Some(&worktree_path),
         &["commit", "-m", &message],
         DEFAULT_TIMEOUT,
     )

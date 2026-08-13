@@ -641,9 +641,7 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
             </div>
           </div>
           {launcherErrorMessage && (
-            <p className="text-xs text-warning">
-              Couldn't prepare the MCP launcher: {launcherErrorMessage}
-            </p>
+            <p className="text-xs text-warning">{launcherErrorMessage}</p>
           )}
           <pre className="overflow-x-auto rounded border bg-muted/40 p-3 font-mono text-[11px] leading-relaxed">
             {snippet}
