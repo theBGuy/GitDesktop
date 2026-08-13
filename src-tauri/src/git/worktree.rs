@@ -447,15 +447,11 @@ pub(crate) async fn remove_worktree(
     }
     args.push(path);
 
-    // Hold the per-repo lock across remove → prune → `branch -D`, not once per step:
-    // the branch delete is decided from state observed before the removal, so a
-    // concurrent checkout or commit landing in between would be destroyed by a `-D`
-    // that no longer reflects the repo. `repo_lock` is a non-reentrant
-    // `tokio::sync::Mutex`, so every step below uses the lock-free `run_git` —
-    // `run_git_mutating` would re-acquire it and deadlock — accepting the loss of
-    // its one-shot index.lock retry like every other compound here. The
-    // `remove_dir_all` fallback runs under the hold too: releasing around it would
-    // reopen the same window, and it only fires when git's own delete already failed.
+    // One hold across remove → prune → `branch -D`: the delete is decided from state
+    // observed before the removal, so a concurrent checkout or commit in between would
+    // be destroyed by a `-D` that no longer reflects the repo. The `remove_dir_all`
+    // fallback stays under it — releasing around it reopens that window. Lock-free
+    // runners only while held (see `run_git_mutating`).
     let lock = state.repo_lock(repo_path).await;
     let _guard = lock.lock().await;
 
@@ -525,18 +521,24 @@ pub async fn git_worktree_commit_all(
     worktree_path: String,
     message: String,
 ) -> AppResult<Option<String>> {
-    // Hold the worktree's lock across the emptiness check → add → commit → HEAD read,
-    // not once per step: otherwise a concurrent write can land between the check and
-    // the `add -A` (sweeping files this commit never meant to carry), and the HEAD
-    // read can report someone else's commit as this one's. `repo_lock` is a
-    // non-reentrant `tokio::sync::Mutex`, so use the lock-free `run_git` while
-    // holding it — `run_git_mutating` re-acquires it and deadlocks — accepting the
-    // loss of its one-shot index.lock retry like every other compound here.
-    let lock = state.repo_lock(&worktree_path).await;
+    worktree_commit_all(&state, &worktree_path, &message).await
+}
+
+/// The body of `git_worktree_commit_all`, callable without a Tauri `State`.
+pub(crate) async fn worktree_commit_all(
+    state: &AppState,
+    worktree_path: &str,
+    message: &str,
+) -> AppResult<Option<String>> {
+    // One hold across the emptiness check → add → commit → HEAD read: otherwise a
+    // concurrent write lands between the check and `add -A` (sweeping files this
+    // commit never meant to carry), and the HEAD read can report someone else's commit
+    // as this one's. Lock-free runners only while held (see `run_git_mutating`).
+    let lock = state.repo_lock(worktree_path).await;
     let _guard = lock.lock().await;
 
     let status = run_git(
-        Some(&worktree_path),
+        Some(worktree_path),
         &["status", "--porcelain"],
         DEFAULT_TIMEOUT,
     )
@@ -544,15 +546,15 @@ pub async fn git_worktree_commit_all(
     if status.stdout_lossy().trim().is_empty() {
         return Ok(None);
     }
-    run_git(Some(&worktree_path), &["add", "-A"], DEFAULT_TIMEOUT).await?;
+    run_git(Some(worktree_path), &["add", "-A"], DEFAULT_TIMEOUT).await?;
     run_git(
-        Some(&worktree_path),
-        &["commit", "-m", &message],
+        Some(worktree_path),
+        &["commit", "-m", message],
         DEFAULT_TIMEOUT,
     )
     .await?;
     let head = run_git(
-        Some(&worktree_path),
+        Some(worktree_path),
         &["rev-parse", "HEAD"],
         DEFAULT_TIMEOUT,
     )
@@ -572,13 +574,10 @@ pub async fn git_worktree_squash(
     base: String,
     message: String,
 ) -> AppResult<bool> {
-    // Hold the worktree's lock across the HEAD check → soft-reset → commit, not once
-    // per step: between the reset and the commit the branch sits rewound with every
-    // turn's changes staged, so a concurrent commit or discard there either loses the
-    // session's work or folds foreign changes into the squash. `repo_lock` is a
-    // non-reentrant `tokio::sync::Mutex`, so use the lock-free `run_git` while
-    // holding it — `run_git_mutating` re-acquires it and deadlocks — accepting the
-    // loss of its one-shot index.lock retry like every other compound here.
+    // One hold across the HEAD check → soft-reset → commit: between the reset and the
+    // commit the branch sits rewound with every turn's changes staged, so a concurrent
+    // commit or discard there either loses the session's work or folds foreign changes
+    // into the squash. Lock-free runners only while held (see `run_git_mutating`).
     let lock = state.repo_lock(&worktree_path).await;
     let _guard = lock.lock().await;
 
@@ -1185,5 +1184,61 @@ prunable gitdir file points to non-existent location
             !registry(&repo_s).await.contains("/gone-wt"),
             "the stale admin entry is gone"
         );
+    }
+
+    /// Sibling of `git::ops`'s rewrite interleave control, for the other compound
+    /// shape: status check → `add -A` → commit → HEAD read. The second task commits
+    /// through the normal mutating path once the turn observably holds the lock, and
+    /// tokio's fair mutex queues it behind the whole turn — so neither side's work is
+    /// lost and the hash handed back is the turn's OWN commit. Per-step locking let
+    /// that commit land mid-sequence, where `add -A` swept it into the turn or the
+    /// HEAD read misreported it as the turn's.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_commit_never_loses_a_worktree_turn() {
+        let (_base, repo_s) = setup_repo("commit-all-race").await;
+        // The turn's output: an untracked file only `add -A` picks up.
+        std::fs::write(std::path::Path::new(&repo_s).join("agent.txt"), "turn\n").unwrap();
+
+        let state = std::sync::Arc::new(AppState::default());
+        let concurrent = {
+            let state = state.clone();
+            let repo = repo_s.clone();
+            tokio::spawn(async move {
+                let lock = state.repo_lock(&repo).await;
+                // Bounded wait: if the turn somehow finished first we still commit,
+                // and the assertions below stay meaningful either way.
+                for _ in 0..500 {
+                    if lock.try_lock().is_err() {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                }
+                run_git_mutating(
+                    &state,
+                    &repo,
+                    &["commit", "--allow-empty", "-m", "concurrent"],
+                    DEFAULT_TIMEOUT,
+                )
+                .await
+                .expect("the queued commit must succeed once the turn releases");
+            })
+        };
+
+        let hash = worktree_commit_all(&state, &repo_s, "session turn")
+            .await
+            .expect("committing a dirty worktree succeeds")
+            .expect("a dirty worktree produces a commit");
+        concurrent.await.expect("concurrent task panicked");
+
+        // The hash handed back names the TURN's commit, never the racing one.
+        let subject = run(&repo_s, &["log", "-1", "--format=%s", &hash]).await;
+        assert_eq!(subject.trim(), "session turn");
+        // Both commits survive, in whichever order they queued.
+        let log = run(&repo_s, &["log", "--format=%s"]).await;
+        assert!(log.contains("concurrent"), "concurrent commit lost: {log}");
+        assert!(log.contains("session turn"), "turn commit lost: {log}");
+        // And the turn's own output rode along in the turn's commit, not a later one.
+        let files = run(&repo_s, &["show", "--name-only", "--format=", &hash]).await;
+        assert!(files.contains("agent.txt"), "turn's output missing: {files}");
     }
 }

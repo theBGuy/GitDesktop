@@ -1830,10 +1830,10 @@ fn kill_process_tree(child: &mut tokio::process::Child) {
     let _ = child.start_kill();
 }
 
-/// Grace for the child to exit after the pump loop ends. On a clean EOF it has
-/// normally exited already, but a grandchild (node worker, MCP server) can keep the
-/// pipes open — without a bound the command never returns, so the frontend never sees
-/// `backendDone` and the run's UI stays stuck past its own timeout.
+/// Bounds each trailing wait once the pump loop ends — first the child's exit, then the
+/// stderr drain's join. On a clean EOF both finish at once, but a grandchild (node
+/// worker, MCP server) can hold the pipes open, and unbounded that means the command
+/// never returns: the frontend never sees `backendDone` and the run's UI stays stuck.
 const CHILD_EXIT_GRACE: Duration = Duration::from_secs(10);
 /// Second, shorter grace after a tree-kill: the child is being force-killed, so this
 /// only covers reaping it.

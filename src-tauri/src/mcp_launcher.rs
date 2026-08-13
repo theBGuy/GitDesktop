@@ -241,6 +241,21 @@ fn copy_into_place(source: &Path, dest: &Path, want: &Marker) -> AppResult<()> {
     Ok(())
 }
 
+/// The single framing every launcher failure wears. Settings renders the
+/// message verbatim (inline, and as the reason the write-config buttons are
+/// disabled) and the Add-to-PATH toast shows the same string, so a bare
+/// `io error: …` there would name nothing the user recognizes. `at` carries the
+/// managed path once it's resolved.
+fn launcher_error(at: Option<&Path>, e: impl std::fmt::Display) -> AppError {
+    match at {
+        Some(dest) => AppError::Command(format!(
+            "Couldn't prepare the MCP launcher at {}: {e}",
+            dest.display()
+        )),
+        None => AppError::Command(format!("Couldn't prepare the MCP launcher: {e}")),
+    }
+}
+
 /// Ensure the managed launcher exists and is fresh for `version`, returning its
 /// absolute path (inactive ⇒ `current_exe()`; fresh ⇒ no writes; stale ⇒ copy).
 ///
@@ -248,20 +263,22 @@ fn copy_into_place(source: &Path, dest: &Path, want: &Marker) -> AppResult<()> {
 /// NEVER falls back to the installed exe's path, which would quietly
 /// reintroduce the file-lock / kill-by-name bugs this exists to fix.
 pub fn ensure(version: &str) -> AppResult<PathBuf> {
-    match resolve()? {
+    match resolve().map_err(|e| launcher_error(None, e))? {
         Resolution::Inactive(exe) => Ok(exe),
         Resolution::Managed(dest) => {
-            let source = current_exe()?;
-            let want = marker_for(&source, version)?;
+            let source = current_exe().map_err(|e| launcher_error(Some(&dest), e))?;
+            let want = marker_for(&source, version).map_err(|e| launcher_error(Some(&dest), e))?;
             if !is_stale(&dest, &want) {
                 return Ok(dest);
             }
             ensure_in_dir(&source, &dest, &want).map_err(|e| {
-                AppError::Command(format!(
-                    "Couldn't prepare the MCP launcher at {}: {e}. If an antivirus \
-                     quarantined it, restore/allow it and retry.",
-                    dest.display()
-                ))
+                // Quarantine explains a failure only here, where the exe is
+                // actually copied and renamed; the steps above just read paths
+                // and metadata.
+                launcher_error(
+                    Some(&dest),
+                    format!("{e}. If an antivirus quarantined it, restore/allow it and retry."),
+                )
             })?;
             Ok(dest)
         }
@@ -323,7 +340,7 @@ pub async fn mcp_launcher_path(app: tauri::AppHandle) -> AppResult<String> {
     let version = app.package_info().version.to_string();
     let path = tauri::async_runtime::spawn_blocking(move || ensure(&version))
         .await
-        .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))??;
+        .map_err(|e| launcher_error(None, e))??;
     Ok(path.to_string_lossy().into_owned())
 }
 
@@ -354,6 +371,25 @@ mod tests {
         assert!(s.contains("\"sourceMtimeMs\""), "expected camelCase: {s}");
         let back: Marker = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(back, m);
+    }
+
+    #[test]
+    fn launcher_errors_always_name_the_launcher() {
+        // Settings renders these verbatim — inline, and as the reason the
+        // write-config buttons are disabled — so a message that doesn't name the
+        // launcher reads as an unattributed IO error.
+        let bare = launcher_error(None, "io error: os error 2").to_string();
+        assert_eq!(
+            bare,
+            "Couldn't prepare the MCP launcher: io error: os error 2"
+        );
+        let dest = Path::new("C:").join("bin").join(LAUNCHER_FILE);
+        let framed = launcher_error(Some(&dest), "io error: os error 2").to_string();
+        assert!(
+            framed.starts_with("Couldn't prepare the MCP launcher at "),
+            "{framed}"
+        );
+        assert!(framed.contains(&dest.display().to_string()), "{framed}");
     }
 
     /// Set up a temp bin dir with a copied launcher + marker and return

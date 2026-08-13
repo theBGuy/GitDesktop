@@ -323,15 +323,10 @@ pub(crate) async fn cherry_pick_onto(
         });
     }
 
-    // Hold the per-repo lock across the WHOLE guard → capture → pick → rollback
-    // sequence, not once per step: the rollback hard-resets `target` to the
-    // `target_tip` captured up here, so a commit another caller in this process
-    // lands in between is silently destroyed by a reset to a tip that predates it
-    // (a separate MCP-server process has its own locks and is NOT covered). `repo_lock` is a `tokio::sync::Mutex` (safe to hold
-    // across `.await`) but non-reentrant — use the lock-free `run_git` below, never
-    // `run_git_mutating`, which would deadlock. The inner steps therefore lose its
-    // one-shot index.lock retry, the same trade-off `git_stash_paths_core` and the
-    // autostash compounds accept.
+    // One hold across guard → capture → pick → rollback: the rollback hard-resets
+    // `target` to the `target_tip` captured up here, so a commit another caller lands
+    // in between would be destroyed by a reset to a tip that predates it. Lock-free
+    // runners only while held (see `run_git_mutating`).
     let lock = state.repo_lock(repo_path).await;
     let guard = lock.lock().await;
 
@@ -3174,16 +3169,11 @@ pub(crate) async fn rewrite_commits(
         // are all expressible.
     }
 
-    // Hold the per-repo lock across the WHOLE gate → capture → replay → rollback
-    // sequence, not once per step: the rollback hard-resets to the `orig` captured up
-    // here, so a commit another caller in this process lands mid-replay is silently
-    // destroyed (a separate MCP-server process has its own locks and is NOT covered),
-    // and between the `reset --hard base` and the picks the branch sits rewound where
-    // a concurrent read sees a truncated history. `repo_lock` is a `tokio::sync::Mutex` (safe to hold across `.await`)
-    // but non-reentrant — use the lock-free `run_git` below, never
-    // `run_git_mutating`, which would deadlock. The inner steps therefore lose its
-    // one-shot index.lock retry, the same trade-off `git_stash_paths_core` and the
-    // autostash compounds accept.
+    // One hold across gate → capture → replay → rollback: the rollback hard-resets to
+    // the `orig` captured up here, so a commit another caller lands mid-replay would be
+    // destroyed, and between `reset --hard base` and the picks the branch sits rewound
+    // where a concurrent read sees a truncated history. Lock-free runners only while
+    // held (see `run_git_mutating`).
     let lock = state.repo_lock(repo_path).await;
     let guard = lock.lock().await;
 

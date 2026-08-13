@@ -184,12 +184,10 @@ pub(crate) async fn git_checkout_conflict_side_core(
     // never opened.
     let spec = crate::git::pathspec::literal(&path);
 
-    // Hold the per-repo lock across checkout→add, not once per step: between the two
-    // a concurrent stage or discard can rewrite the working-tree file, and the `add`
-    // would then stage THAT content as the user's chosen side. `repo_lock` is a
-    // non-reentrant `tokio::sync::Mutex`, so use the lock-free `run_git` while
-    // holding it — `run_git_mutating` re-acquires it and deadlocks. The steps lose
-    // its one-shot index.lock retry, the trade-off every compound here accepts.
+    // One hold across checkout→add: between the two a concurrent stage or discard can
+    // rewrite the working-tree file, and the `add` would then stage THAT content as
+    // the user's chosen side. Lock-free runners only while held (see
+    // `run_git_mutating`).
     let lock = state.repo_lock(&repo_path).await;
     let _guard = lock.lock().await;
 

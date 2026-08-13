@@ -342,6 +342,14 @@ pub(crate) async fn worktree_toplevel(repo_path: &str) -> AppResult<String> {
 
 /// Runs a mutating git command under the per-repo lock, retrying once on
 /// index.lock contention caused by external tools (editors, other clients).
+///
+/// Compound sequences take `repo_lock` themselves, so their guards, anchors and
+/// rollback see one unbroken view — and must NOT call this from inside that hold,
+/// which re-acquires the same non-reentrant mutex and deadlocks. Use the lock-free
+/// runners there (`run_git`, `run_git_raw`, the `_input` pair,
+/// `remote::run_git_with_creds_once`), accepting the loss of the retry above.
+/// Either way the lock serializes callers in THIS process: a separate MCP-server
+/// process has its own and is not covered.
 pub async fn run_git_mutating(
     state: &AppState,
     repo_path: &str,
