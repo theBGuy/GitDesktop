@@ -863,9 +863,10 @@ export interface ForgeRepoAdmin {
 export interface ForgeRepoWriteAccess {
   canPush: boolean | null;
   /** Triage tier and above, which grants labels, assignees, milestones, review
-   *  requests and hiding comments WITHOUT push (GitHub triage; GitLab Reporter)
-   *  — a separate axis, not implied by `canPush`. Pin is write-tier; locking is
-   *  write-tier on GitHub but Reporter (triage) on GitLab. */
+   *  requests, hiding comments and close/reopen WITHOUT push (GitHub triage;
+   *  GitLab Reporter) — a separate axis, not implied by `canPush`. Pin is
+   *  write-tier; locking is write-tier on GitHub but Reporter (triage) on
+   *  GitLab. */
   canTriage: boolean | null;
   role: string | null;
   /** The probed repo identity ("owner/repo") for UI copy. */
