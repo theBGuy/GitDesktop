@@ -4,11 +4,7 @@ import {
   type MarkdownEditorHandle,
 } from "@/components/markdown-editor";
 import { Button } from "@/components/ui/button";
-import { formatBinding } from "@/lib/hotkeys/binding";
-
-/** Platform-correct submit hint (Cmd+Enter on macOS, Ctrl+Enter else) — never a
- *  literal modifier (house platform-mod-key rule). */
-export const SUBMIT_HINT = formatBinding("mod+enter");
+import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 
 /**
  * The bottom "leave a comment" bar every conversation surface ends with. The

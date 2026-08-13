@@ -11,10 +11,9 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { required, useAppForm, withForm } from "@/lib/form";
-import { eventToBinding } from "@/lib/hotkeys/binding";
+import { eventToBinding, SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { useEffectiveBindings } from "@/lib/hotkeys/hotkeys";
 import { toastError } from "@/lib/toast";
-import { SUBMIT_HINT } from "./CommentComposer";
 
 /** Shared form shape so the hook's `useAppForm` and the `withForm` dialog agree. */
 export const editTitleBodyFormOpts = formOptions({

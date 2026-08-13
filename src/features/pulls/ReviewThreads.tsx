@@ -15,7 +15,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Markdown } from "@/components/ui/markdown";
 import { Spinner } from "@/components/ui/spinner";
-import { SUBMIT_HINT } from "@/features/conversations/CommentComposer";
 import { Thread } from "@/features/conversations/Thread";
 import { copyText } from "@/lib/clipboard";
 import type {
@@ -23,6 +22,7 @@ import type {
   ForgeProvider,
   ReviewThreadOut,
 } from "@/lib/git/types";
+import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";

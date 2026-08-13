@@ -1056,6 +1056,18 @@ fn build_list_jql(project_key: &str, state: &str) -> AppResult<String> {
     ))
 }
 
+/// Extract `status.name` from an issue's `fields` — the human status label, or empty
+/// when absent. The one copy of this chain; both issue readers and the post-transition
+/// status read go through it. Pure.
+fn status_name_of(fields: &Value) -> String {
+    fields
+        .get("status")
+        .and_then(|s| s.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
 /// Extract `status.statusCategory.key` from an issue's `fields` — `"new"` /
 /// `"indeterminate"` / `"done"`, or empty when absent. Pure.
 fn status_category_of(fields: &Value) -> String {
@@ -1092,12 +1104,7 @@ fn common_issue_fields(fields: &Value) -> CommonIssueFields {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string(),
-        status_name: fields
-            .get("status")
-            .and_then(|s| s.get("name"))
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
+        status_name: status_name_of(fields),
         issue_type_name: issue_type
             .and_then(|t| t.get("name"))
             .and_then(Value::as_str)
@@ -2153,10 +2160,7 @@ fn is_valid_transition_id(id: &str) -> bool {
 /// Extract `(statusName, statusCategoryKey)` from an `issue?fields=status` response. Pure.
 fn status_of_issue(issue: &Value) -> (String, String) {
     let fields = issue.get("fields").cloned().unwrap_or(Value::Null);
-    // The caller fetches `?fields=status`, so the reader's other fields are
-    // structurally empty here and only the status name is meaningful.
-    let status_name = common_issue_fields(&fields).status_name;
-    (status_name, status_category_of(&fields))
+    (status_name_of(&fields), status_category_of(&fields))
 }
 
 /// Close or reopen a Jira issue via its workflow. `direction` is `"close"` | `"reopen"`.
@@ -3268,6 +3272,54 @@ mod tests {
         let empty = crate::jira_field_maps::SiteFieldMap::default();
         assert!(map_issue_info("s.atlassian.net", &json!({ "fields": {} }), &empty).is_none());
         assert!(map_issue_info("s.atlassian.net", &json!({ "key": "" }), &empty).is_none());
+    }
+
+    #[test]
+    fn common_issue_fields_reads_all_seven_and_degrades_to_empty() {
+        let fields = json!({
+            "summary": "Ship the thing",
+            "status": { "name": "In Review" },
+            "issuetype": { "name": "Bug", "iconUrl": "https://s.example/bug.png" },
+            "priority": { "name": "High" },
+            "created": "2026-08-01T10:00:00.000+0000",
+            "updated": "2026-08-02T11:30:00.000+0000",
+        });
+        let c = common_issue_fields(&fields);
+        assert_eq!(c.summary, "Ship the thing");
+        assert_eq!(c.status_name, "In Review");
+        assert_eq!(c.issue_type_name, "Bug");
+        assert_eq!(c.issue_type_icon_url, "https://s.example/bug.png");
+        assert_eq!(c.priority_name, "High");
+        assert_eq!(c.created_at, "2026-08-01T10:00:00.000+0000");
+        assert_eq!(c.updated_at, "2026-08-02T11:30:00.000+0000");
+
+        // Absent nested objects collapse to "" rather than panicking.
+        let bare = common_issue_fields(&json!({}));
+        assert_eq!(bare.summary, "");
+        assert_eq!(bare.status_name, "");
+        assert_eq!(bare.issue_type_name, "");
+        assert_eq!(bare.issue_type_icon_url, "");
+        assert_eq!(bare.priority_name, "");
+        assert_eq!(bare.created_at, "");
+        assert_eq!(bare.updated_at, "");
+
+        // So do non-object values where an object is expected (a malformed response
+        // must not change the shape the frontend renders).
+        let wrong = common_issue_fields(&json!({
+            "summary": 7,
+            "status": 3,
+            "issuetype": "Bug",
+            "priority": [],
+            "created": false,
+            "updated": null,
+        }));
+        assert_eq!(wrong.summary, "");
+        assert_eq!(wrong.status_name, "");
+        assert_eq!(wrong.issue_type_name, "");
+        assert_eq!(wrong.issue_type_icon_url, "");
+        assert_eq!(wrong.priority_name, "");
+        assert_eq!(wrong.created_at, "");
+        assert_eq!(wrong.updated_at, "");
     }
 
     #[test]

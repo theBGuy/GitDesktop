@@ -4,7 +4,7 @@ import {
   type MarkdownEditorHandle,
 } from "@/components/markdown-editor";
 import { Button } from "@/components/ui/button";
-import { SUBMIT_HINT } from "./CommentComposer";
+import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 
 /**
  * The inline comment editor: a markdown box with Save/Cancel swapped in for a

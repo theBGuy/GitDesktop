@@ -8,6 +8,7 @@ import {
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffectEvent, useRef, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import type { MarkdownEditorHandle } from "@/components/markdown-editor";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -423,29 +424,35 @@ export function RemoteIssueView({
       {canChangeState &&
         (isOpen ? (
           <>
-            <Button
+            <DisabledReasonButton
               variant="outline"
               size="sm"
-              disabled={busy}
+              disabled={busy || writeBlocked}
+              reason={writeReason}
               onClick={() => doClose("completed")}
             >
               Close issue
-            </Button>
-            {/* Close reasons are a GitHub concept; GitLab has none. */}
+            </DisabledReasonButton>
+            {/* Close reasons are a GitHub concept; GitLab has none. The caret is
+                a menu TRIGGER: native `disabled` holds the menu shut, and the
+                hint rides a wrapping span since a disabled Button swallows
+                `title` (house trigger idiom). */}
             {canWrite && (
               <DropdownMenu>
-                <DropdownMenuTrigger
-                  render={
-                    <Button
-                      variant="outline"
-                      size="icon-sm"
-                      aria-label="Other close options"
-                      disabled={busy}
-                    />
-                  }
-                >
-                  <CaretDownIcon />
-                </DropdownMenuTrigger>
+                <span title={writeReason} className="inline-flex">
+                  <DropdownMenuTrigger
+                    render={
+                      <Button
+                        variant="outline"
+                        size="icon-sm"
+                        aria-label="Other close options"
+                        disabled={busy || writeBlocked}
+                      />
+                    }
+                  >
+                    <CaretDownIcon />
+                  </DropdownMenuTrigger>
+                </span>
                 <DropdownMenuContent align="end" className="min-w-52">
                   <DropdownMenuItem onClick={() => doClose("completed")}>
                     Close as completed
@@ -458,10 +465,11 @@ export function RemoteIssueView({
             )}
           </>
         ) : (
-          <Button
+          <DisabledReasonButton
             variant="outline"
             size="sm"
-            disabled={busy}
+            disabled={busy || writeBlocked}
+            reason={writeReason}
             onClick={() =>
               reopenIssue.mutate(number, {
                 onSuccess: () => toast.success(`Reopened #${number}`),
@@ -471,7 +479,7 @@ export function RemoteIssueView({
           >
             <ArrowCounterClockwiseIcon data-icon="inline-start" />
             Reopen
-          </Button>
+          </DisabledReasonButton>
         ))}
     </>
   );

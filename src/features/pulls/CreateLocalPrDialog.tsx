@@ -12,7 +12,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { SUBMIT_HINT } from "@/features/conversations/CommentComposer";
 import { REVIEWER_NOTES_MARKER } from "@/lib/ai/notes-context";
 import { triggerAutomations } from "@/lib/automations/runner";
 import { required, useAppForm } from "@/lib/form";
@@ -23,7 +22,11 @@ import {
   useForgeStatus,
   useRepoStatus,
 } from "@/lib/git/queries";
-import { eventToBinding, formatBinding } from "@/lib/hotkeys/binding";
+import {
+  eventToBinding,
+  formatBinding,
+  SUBMIT_HINT,
+} from "@/lib/hotkeys/binding";
 import { useEffectiveBindings } from "@/lib/hotkeys/hotkeys";
 import { updateLocalPr } from "@/lib/pulls/local";
 import { useCreateLocalPr } from "@/lib/pulls/queries";

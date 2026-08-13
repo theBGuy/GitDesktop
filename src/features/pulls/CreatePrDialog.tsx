@@ -21,7 +21,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
-import { SUBMIT_HINT } from "@/features/conversations/CommentComposer";
 import { LabelChip } from "@/features/conversations/Thread";
 import { AssigneesPopover } from "@/features/issues/IssueMetaPickers";
 import { REVIEWER_NOTES_MARKER } from "@/lib/ai/notes-context";
@@ -45,7 +44,11 @@ import {
   providerLabel,
   type RemoteLens,
 } from "@/lib/git/types";
-import { eventToBinding, formatBinding } from "@/lib/hotkeys/binding";
+import {
+  eventToBinding,
+  formatBinding,
+  SUBMIT_HINT,
+} from "@/lib/hotkeys/binding";
 import { useEffectiveBindings } from "@/lib/hotkeys/hotkeys";
 import { useJiraLink } from "@/lib/jira/queries";
 import {

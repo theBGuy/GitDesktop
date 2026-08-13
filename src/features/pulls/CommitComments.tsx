@@ -4,10 +4,7 @@ import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import { Button } from "@/components/ui/button";
 import { Markdown } from "@/components/ui/markdown";
-import {
-  CommentComposer,
-  SUBMIT_HINT,
-} from "@/features/conversations/CommentComposer";
+import { CommentComposer } from "@/features/conversations/CommentComposer";
 import { DeleteCommentDialog } from "@/features/conversations/DeleteCommentDialog";
 import { Thread } from "@/features/conversations/Thread";
 import type { DiffLineAnchor } from "@/features/diff/DiffSurface";
@@ -23,6 +20,7 @@ import type {
   PrThreadOut,
   RemoteLens,
 } from "@/lib/git/types";
+import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { toastError } from "@/lib/toast";
 
 export type DiffSections = ReturnType<typeof splitUnifiedDiff>;

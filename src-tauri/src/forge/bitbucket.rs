@@ -25,7 +25,8 @@ use crate::error::{AppError, AppResult};
 use crate::forge::encode_query_value;
 use crate::forge::gitlab::null_to_default;
 use crate::forge::http::{
-    self, BbCredentials, BB_HOST, KEY_DISPLAY_NAME, KEY_EMAIL, KEY_TOKEN, KEY_USERNAME,
+    self, BbCredentials, BB_API_BASE, BB_HOST, KEY_DISPLAY_NAME, KEY_EMAIL, KEY_TOKEN,
+    KEY_USERNAME,
 };
 use crate::forge::model::{
     Capabilities, CompletedReviewerOut, ForgeForkResult, ForgeRepo, ForgeRepoList, ForgeSearchList,
@@ -373,11 +374,12 @@ impl<T> Default for BbPage<T> {
 /// silently: no error, no truncation flag, so the caller can't tell.
 const BB_MAX_PAGES: usize = 5;
 
-/// The next page's URL, or `None` when there is no page to follow. An ABSENT and an
-/// EMPTY `next` both mean end-of-pages — an empty string is not a followable URL, and
-/// requesting it would re-GET the API base. Pure (testable).
+/// The next page's URL, or `None` when there is no page to follow. Three cases stop
+/// the walk: an ABSENT `next`, an EMPTY one, and one pointing anywhere but
+/// [`BB_API_BASE`] — the last because every request attaches the user's Basic
+/// credentials, so a server-supplied URL must never carry them off-host. Pure.
 fn next_page_url(next: Option<String>) -> Option<String> {
-    next.filter(|url| !url.is_empty())
+    next.filter(|url| url.starts_with(BB_API_BASE))
 }
 
 /// Follow `next` from `first_url`, returning the raw `values` of every page up to
@@ -7102,11 +7104,18 @@ definitions:
     }
 
     #[test]
-    fn next_page_url_follows_only_a_non_empty_link() {
+    fn next_page_url_follows_only_a_link_on_the_api_base() {
         // No `next` key at all — the last page.
         assert_eq!(next_page_url(None), None);
         // An EMPTY `next` is also end-of-pages; following it would re-GET the API base.
         assert_eq!(next_page_url(Some(String::new())), None);
+        // Off-host: the request would hand this stranger the user's Basic credentials.
+        assert_eq!(
+            next_page_url(Some(
+                "https://evil.example/2.0/user/workspaces?page=2".to_string()
+            )),
+            None
+        );
         let link = "https://api.bitbucket.org/2.0/user/workspaces?page=2";
         assert_eq!(next_page_url(Some(link.to_string())), Some(link.to_string()));
     }

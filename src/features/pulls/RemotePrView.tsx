@@ -2433,10 +2433,11 @@ export function RemotePrView({
               through `gh pr ready [--undo]`. Draft → primary Ready (fires the
               ready-review automation); open → a quieter Convert-to-draft. */}
           {draftPairVisible && pr.isDraft && (
-            <Button
+            <DisabledReasonButton
               variant="outline"
               size="sm"
-              disabled={busy}
+              disabled={busy || writeBlocked}
+              reason={writeReason}
               onClick={() =>
                 setDraft.mutate(
                   { number, draft: false },
@@ -2451,13 +2452,14 @@ export function RemotePrView({
               }
             >
               Ready for review
-            </Button>
+            </DisabledReasonButton>
           )}
           {draftPairVisible && !pr.isDraft && (
-            <Button
+            <DisabledReasonButton
               variant="ghost"
               size="sm"
-              disabled={busy}
+              disabled={busy || writeBlocked}
+              reason={writeReason}
               title="Turn this pull request back into a draft"
               onClick={() =>
                 setDraft.mutate(
@@ -2470,7 +2472,7 @@ export function RemotePrView({
               }
             >
               Convert to draft
-            </Button>
+            </DisabledReasonButton>
           )}
           {/* Auto-merge armed indicator + cancel (GitLab-only) — sits on the left,
               opposite Close/Merge. Not color-alone: icon + words. */}
@@ -2505,10 +2507,11 @@ export function RemotePrView({
           )}
           <span className="flex-1" />
           {canChangeState && (
-            <Button
+            <DisabledReasonButton
               variant="outline"
               size="sm"
-              disabled={busy}
+              disabled={busy || writeBlocked}
+              reason={writeReason}
               onClick={() =>
                 closePr.mutate(number, {
                   onSuccess: () => toast.success(`Closed #${number}`),
@@ -2517,7 +2520,7 @@ export function RemotePrView({
               }
             >
               Close
-            </Button>
+            </DisabledReasonButton>
           )}
           {canMerge && (
             <DropdownMenu>
@@ -2618,10 +2621,11 @@ export function RemotePrView({
       {pr.state === "CLOSED" && canChangeState && provider !== "bitbucket" && (
         <div className="flex items-center gap-2 border-t p-3">
           <span className="flex-1" />
-          <Button
+          <DisabledReasonButton
             variant="outline"
             size="sm"
-            disabled={busy}
+            disabled={busy || writeBlocked}
+            reason={writeReason}
             onClick={() =>
               reopenPr.mutate(number, {
                 onSuccess: () => toast.success(`Reopened #${number}`),
@@ -2631,7 +2635,7 @@ export function RemotePrView({
           >
             <ArrowCounterClockwiseIcon data-icon="inline-start" />
             Reopen
-          </Button>
+          </DisabledReasonButton>
         </div>
       )}
 

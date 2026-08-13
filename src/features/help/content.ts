@@ -740,8 +740,9 @@ exposes no fetchable job logs).
 
 Comments, replies, edits, and descriptions use a Markdown editor with **Write / Preview**
 tabs and a formatting toolbar (bold, italic, headings, quote, code, links, and bulleted
-/ numbered / task lists, with {{key:mod+b}} / {{key:mod+i}} / {{key:mod+k}}). The same
-editor is everywhere you write Markdown — issues, discussions, and release notes.
+/ numbered / task lists, with {{key:mod+b}} / {{key:mod+i}} / {{key:mod+k}}); press
+{{key:mod+enter}} to submit a comment or save an edit. The same editor is everywhere
+you write Markdown — issues, discussions, and release notes.
 
 ## Conflicts with the base branch
 

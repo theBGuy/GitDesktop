@@ -94,6 +94,10 @@ export function formatBinding(binding: string): string {
     .join("+");
 }
 
+/** Platform-correct submit hint (Cmd+Enter on macOS, Ctrl+Enter else) — never a
+ *  literal modifier (house platform-mod-key rule). */
+export const SUBMIT_HINT = formatBinding("mod+enter");
+
 /** Canonical binding tokens whose ARIA (UI Events) key value isn't just a
  *  capitalization — see `KEY_NAMES`, which shortens these on the way in. */
 const ARIA_KEY_NAMES: Record<string, string> = {

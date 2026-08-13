@@ -34,10 +34,7 @@ import { Markdown } from "@/components/ui/markdown";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
-import {
-  CommentComposer,
-  SUBMIT_HINT,
-} from "@/features/conversations/CommentComposer";
+import { CommentComposer } from "@/features/conversations/CommentComposer";
 import { DeleteCommentDialog } from "@/features/conversations/DeleteCommentDialog";
 import { LabelsPopover } from "@/features/conversations/LabelsPopover";
 import { makeQuoteReply } from "@/features/conversations/quoteReply";
@@ -72,6 +69,7 @@ import {
   useUpdateDiscussionComment,
 } from "@/lib/git/queries";
 import type { PrThreadOut } from "@/lib/git/types";
+import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { useUiStore } from "@/lib/stores/ui";
 import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
