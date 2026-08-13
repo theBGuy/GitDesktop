@@ -1833,10 +1833,14 @@ export function RemotePrView({
         {/* The three metadata pickers below are keyed on the entity: each seeds a
             draft on open and commits it on close by diffing against LIVE props, and
             a keyboard PR switch leaves the popover open (no outside press to close
-            it) — so without the key the old PR's draft lands on the new one. */}
+            it) — so without the key the old PR's draft lands on the new one. The
+            keys carry a per-slot prefix because they are SIBLINGS: duplicate keys
+            in one children array make React drop the earlier duplicates' unmount
+            on key change — the old picker's DOM leaks into the sidebar, one stale
+            row per PR switch (reproduced live; the last duplicate reconciles). */}
         {isOpen && canEditLabels ? (
           <LabelsPopover
-            key={entityKey}
+            key={`labels-${entityKey}`}
             repoPath={repoPath}
             enabled
             number={number}
@@ -1859,7 +1863,7 @@ export function RemotePrView({
             read-only chips, like the labels row. */}
         {isOpen && canEditAssignees ? (
           <AssigneesPopover
-            key={entityKey}
+            key={`assignees-${entityKey}`}
             repoPath={repoPath}
             enabled
             value={pr.assignees}
@@ -1895,7 +1899,7 @@ export function RemotePrView({
         {isOpen && canEditReviewers ? (
           <div className="flex flex-wrap items-center gap-1.5">
             <ReviewersPopover
-              key={entityKey}
+              key={`reviewers-${entityKey}`}
               repoPath={repoPath}
               number={number}
               enabled
