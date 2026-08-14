@@ -155,8 +155,10 @@ export function CleanupBranchesDialog({
   // re-render that yields an equal-but-new `candidates` array — a fresh
   // `isProtected` closure, a no-op branch refetch — would otherwise re-run this
   // and silently wipe the user's deselections. Branch names can't contain
-  // newlines (git ref rules), so the join is unambiguous.
-  const candidateNamesKey = candidateNames.join("\n");
+  // newlines (git ref rules), so the join is unambiguous — and it joins a SORTED
+  // copy, because the render order shifts as ages tick on the shared 30s clock
+  // and a pure reorder must not read as a new set.
+  const candidateNamesKey = [...candidateNames].sort().join("\n");
   useEffect(() => {
     if (running) return; // don't clobber a batch mid-flight
     setSelected(

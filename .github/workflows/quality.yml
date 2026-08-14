@@ -2,9 +2,10 @@ name: quality
 
 # Two jobs with deliberately opposite contracts.
 #
-# `guards` runs the mechanical convention checks and is a required status check
-# on master's ruleset — so it carries NO paths filter, because a paths-skipped
-# required check sits stuck "Expected" forever (GitHub required-checks docs).
+# `guards` runs the mechanical convention checks and is meant to be registered
+# as a required status check on master's ruleset once this workflow lands there
+# — so it carries NO paths filter, because a paths-skipped required check sits
+# stuck "Expected" forever (GitHub required-checks docs).
 # The path-unfiltered push:master leg is the backstop re-validating the true
 # merged tree, since a PR green against a stale base merges stale-green.
 #
@@ -69,7 +70,8 @@ jobs:
           cache: pnpm
 
       # continue-on-error here too: an install blip must not fail an advisory
-      # job whose contract is "never gates" — the tool steps just no-op after.
+      # job whose contract is "never gates" — the tool steps then fail under
+      # their own continue-on-error (their error text lands in the summary).
       - name: Install dependencies
         continue-on-error: true
         run: pnpm install --frozen-lockfile
