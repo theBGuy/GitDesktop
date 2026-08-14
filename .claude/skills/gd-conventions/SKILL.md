@@ -67,8 +67,11 @@ auto-load, so pull it in yourself; don't defer it to an after-the-fact review pa
 leave them, don't re-flag them). Never convey meaning by color alone (WCAG AA).
 
 **Keyboard-first.** Every new selectable list gets arrow-key navigation in
-the same change — an invariant, not polish. Destructive paths stay behind
-confirmation.
+the same change (`listKeyboardNav` in `src/lib/list-keyboard-nav.ts`) — an
+invariant, not polish. Destructive paths stay behind confirmation via the
+shared `useConfirm`/`ConfirmDialogHost` primitive (`src/lib/stores/confirm.ts`,
+host in `src/components/confirm-dialog-host.tsx`) — never a bespoke confirm
+dialog.
 
 **Command palette.** Any new tab/surface/action needs an ACTIONS entry in
 `src/lib/hotkeys/registry.ts` + `useHotkeyAction` wiring in the same change
@@ -83,8 +86,17 @@ confirmation.
 - Truncated user/repo content gets a `title` tooltip, added
   only-when-actually-clipped; Base UI Select clips at the POPUP — measure the
   `SelectItem`, not the span.
-- A disabled submit explains why via the field's `warning` hint; disabled
-  menu items carry the reason in `title` (precedent: TagsPanel).
+- Disabled actions explain why via `DisabledReasonButton`
+  (`src/components/disabled-reason-button.tsx`) — reason as tooltip + AT
+  announcement; menu/popover trigger sites keep the reason on a titled span
+  wrapper (its doc comment shows the idiom — a bare `title` on a disabled
+  element never shows). A disabled submit may instead explain via the field's
+  `warning` hint.
+- Per-variant copy/labels/glyphs are `Record` lookups, never ternary chains:
+  an exact union discriminant gets a total `Record` (compiler
+  exhaustiveness); a wide wire string gets `Partial<Record>` + explicit
+  fallback; genuinely mixed-predicate chains stay ternaries (precedents:
+  `PICKER_COPY`, `OP_LABELS`, `KIND_GLYPH`).
 - API-impossible features get an explicit "… on GitHub/GitLab" link item,
   not a silent gap.
 - Never degrade a surface to dodge machinery: no plain `<pre>` where the app
@@ -109,6 +121,18 @@ clickables add `cursor-pointer` at the call site (vendored Button sets none).
 - React Compiler already memoizes call results — don't add `useMemo` for perf
   reflexively (~40% false-positive rate); render reads of mutable module
   state go stale under it.
+- Never read the clock in render — live times ride the shared 30s ticker:
+  `<RelativeTime>` / `<ElapsedTime>`, `useRelativeNow()` for composed
+  strings, `formatDurationBetween` for finished spans
+  (`src/components/relative-time.tsx`, `src/components/elapsed-time.tsx`,
+  `src/lib/time.ts`).
+- Feed/timeline children mixing entity types prefix React keys per slot
+  (`comment-${id}`, `event-${id}`) — bare cross-type ids collide and React
+  keeps the earlier duplicate's DOM alive.
+- Queries with identity axes beyond the repo (entity id, lens, state) keep
+  previous data via `keepPreviousDataForKeyAxes` (`src/lib/git/queries.ts`),
+  and callers gate derived UI on `!isPlaceholderData` — a disabled query
+  still renders its placeholder.
 - Virtualized lists: a variable-height first row races `measureElement` —
   mount the virtualizer in a child gated on data (`docs/list-virtualization.md`).
 - Multi-toggle settings batch behind a Save/Discard bar (draft + dirty), not
@@ -128,14 +152,25 @@ clickables add `cursor-pointer` at the call site (vendored Button sets none).
 - **Untrusted JSON** (CLI output, forge APIs): TS derivers `typeof`/shape-guard
   each field with `try/catch` per item; Rust uses tolerant serde (`Option<T>`,
   null-tolerant defaults) over strict shapes. Grammar-validate command/URL
-  values either side.
+  values either side. Third-party timestamps validate before formatting —
+  `parseableDate` for ISO strings, `validEpochMs` for epoch numbers
+  (`src/lib/time.ts`); never raw `new Date(x)` on forge/CLI data.
 - **Windows spawning:** never pass multi-line argv to `.cmd` shims
   (BatBadBut rejection) — feed multi-line input via stdin.
+- **User input → git refspecs/argv** routes through the existing chokepoints:
+  `validate_ref_name` (git/branches.rs), `validate_tag_name` (git/ops.rs),
+  pushes via `build_push_args` (git/remote.rs) — never construct an inline
+  refspec or re-derive the validation.
+- **Rust tests never read the real settings store** — use the
+  `TEST_STORE_DIR` seam in `app_store.rs` (arm 0 of `store_path`).
 - **Forge gating:** per-action `Implemented` flags. Shared-with-GitHub
   controls gate on `canWrite || forgeFeatureReady` (GitHub must be zero-diff);
   provider-only controls gate on `forgeFeatureReady` alone with the flag
   `false` for GitHub; shared controls with different per-provider ids
-  guard/dispatch on the common key and carry both id pairs.
+  guard/dispatch on the common key and carry both id pairs. Write-access
+  axes: availability decides what RENDERS; permission decides what's ENABLED
+  (disable-with-reason, never hide); triage is its own lower tier — see
+  `src/features/pulls/usePrCapabilities.ts`.
 - A server-constrained field in a shared PATCH rejects the whole request when
   ineligible — model as `Option` + eligibility check; hide/omit when ineligible.
 

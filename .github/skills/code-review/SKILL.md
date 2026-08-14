@@ -92,15 +92,41 @@ and Windows.
   are disabled; icon-only status elements need `role="img"` with a
   self-contained `aria-label` (the label cannot rely on visible descendant
   text, which `role="img"` hides from assistive tech).
+- **Live times**: relative/elapsed times ride the shared 30-second ticker
+  (`<RelativeTime>`, `<ElapsedTime>`, `useRelativeNow` in
+  `src/components/relative-time.tsx` and `src/components/elapsed-time.tsx`) —
+  flag render-time `Date.now()` reads and per-component interval timers.
 - **Rust / IPC contracts**: serde tagged enums using `rename_all` also need
   `rename_all_fields`, or field names silently miss their TypeScript mirrors
   (reads become `undefined`). GraphQL fields without `!` deserialize as
   `Option<T>`. Untrusted JSON (CLI output, forge APIs) is shape-guarded per
   field on the TS side and parsed with tolerant serde on the Rust side.
+  Third-party timestamps go through `parseableDate` / `validEpochMs`
+  (`src/lib/time.ts`) before formatting — flag raw `new Date(x)` on forge or
+  CLI data.
 - **Security hot spots**: user-controlled values reaching git refspecs or
-  argv (refspecs must be fully qualified; reject `*?[:` in ref names);
-  untrusted values passed to `gh api -F` (a leading `@` reads a local file —
-  use `-f` for raw strings); secrets or token-shaped strings in fixtures.
+  argv (refspecs must be fully qualified; reject `*?[:` in ref names) — ref
+  and tag names route through the existing `validate_ref_name` /
+  `validate_tag_name` chokepoints and pushes through `build_push_args`; flag
+  any new inline refspec construction. Untrusted values passed to `gh api -F`
+  (a leading `@` reads a local file — use `-f` for raw strings); secrets or
+  token-shaped strings in fixtures.
+
+## Scoping & state discipline
+
+- Cached or store state keyed by a repo, PR, issue, or session carries the
+  FULL identity — `repoPath` plus entity id plus lens (fork/upstream), not a
+  bare id. Check new query keys and zustand stores for the missing axis; a
+  per-repo zustand store outside the UI store must self-clear on `repoPath`
+  change or it leaks across repo switch.
+- A surface deciding "is the user looking at this" compares `repoPath`, not
+  just a tab or entity id.
+- Streams and async writers capture their destination key at start (or abort
+  on entity/repo switch) — a late result must not land in the newly selected
+  entity's state.
+- Every remote mutation ships its optimistic cache patch: keys derived at
+  mutate time, snapshot/rollback, and `cancelQueries` on every patched key.
+- Hydrate-from-disk paths MERGE into live state, never replace it.
 
 ## Signal standards
 
@@ -111,3 +137,6 @@ and Windows.
 - Do not request tests for changes with no new behavior (renames, reformats,
   reorganizations). There is no frontend test runner in this repo — do not
   request frontend unit tests; Rust logic tests live under `src-tauri/`.
+- New Rust tests touching settings use the `TEST_STORE_DIR` seam in
+  `src-tauri/src/app_store.rs` — a test must never read the developer's real
+  settings store.
