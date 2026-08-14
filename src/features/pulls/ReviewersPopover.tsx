@@ -55,9 +55,9 @@ export function ReviewersPopover({
   onChange: (next: ForgeUserRef[]) => void;
   /** The origin|upstream lens the parent surface resolved (create dialog: "origin"). */
   lens: RemoteLens;
-  /** Set when the viewer lacks the access this picker's action needs — callers
-   *  pass the reason for the matching axis. The trigger stays visible but
-   *  disabled and this text explains why. Absent = editable as before. */
+  /** Set when this picker can't be edited right now — the viewer lacks the access
+   *  its action needs, or the surface is still loading the entity. The trigger
+   *  stays visible but disabled and this text explains why. Absent = editable. */
   disabledReason?: string;
 }) {
   const candidates = useReviewerCandidates(repoPath, number, enabled, lens);

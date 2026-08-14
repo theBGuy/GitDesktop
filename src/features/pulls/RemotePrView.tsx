@@ -560,14 +560,15 @@ export function RemotePrView({
   useHotkeyAction(
     "submit-review",
     () => setSubmitOpen(true),
-    canSubmitReview &&
+    isSelectedPr &&
+      canSubmitReview &&
       details.data?.state === "OPEN" &&
       !details.isPlaceholderData,
   );
   useHotkeyAction(
     "discard-pending-review",
     () => setDiscardConfirmOpen(true),
-    draftCount > 0,
+    isSelectedPr && draftCount > 0,
   );
   // The shared Ready / Convert-to-draft pair: visible when a wired provider
   // (GitLab/Bitbucket) flags `mrDraftToggle`, or on GitHub via `canWrite` (its
@@ -606,7 +607,7 @@ export function RemotePrView({
           onError,
         },
       ),
-    draftPairVisible && !!details.data?.isDraft && !busy,
+    isSelectedPr && draftPairVisible && !!details.data?.isDraft && !busy,
   );
   useHotkeyAction(
     "pr-convert-to-draft",
@@ -618,7 +619,8 @@ export function RemotePrView({
           onError,
         },
       ),
-    draftPairVisible &&
+    isSelectedPr &&
+      draftPairVisible &&
       !details.data?.isDraft &&
       details.data?.state === "OPEN" &&
       !busy,
@@ -1548,11 +1550,14 @@ export function RemotePrView({
   const fileDiffLookup = (path: string): string | undefined =>
     fileSections.get(path);
 
+  // The pane keeps rendering the previous PR's diff through a switch, so its lines
+  // can belong to another PR than the `number` a new thread would be created under.
+  const diffStale = details.isPlaceholderData || prDiff.isPlaceholderData;
   // The inline line-comment composer for the Files tab: only when the provider allows
   // creating a thread, anchored to the selected file (its section prefills a
   // suggestion's code). Absent otherwise ⇒ read-only diff.
   const reviewLineWidget: LineWidget | undefined =
-    canCreateThread && effectivePath
+    canCreateThread && effectivePath && !diffStale
       ? {
           enabled: true,
           render: ({ side, line, fromLine, onClose }) => (

@@ -487,6 +487,7 @@ export function PrReviewPanel({
                   <Button
                     variant="ghost"
                     size="sm"
+                    disabled={stale}
                     onClick={() =>
                       run(mode === "security" ? "general" : "security")
                     }
