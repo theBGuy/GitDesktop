@@ -184,7 +184,9 @@ export function PrActivityFeed({
   canEditOwnThreadComments: boolean;
   canEditOwnComments: boolean;
   canReact: boolean;
-  onQuote: (body: string) => void;
+  /** Absent hides the Quote affordance wherever this feed offers it — the caller
+   *  withholds it while the PR on screen isn't the one a quote would land on. */
+  onQuote?: (body: string) => void;
   onThreadReply: (threadId: string, body: string) => Promise<void>;
   onThreadResolve: (threadId: string, resolved: boolean) => Promise<void>;
   onEditThreadComment: (commentId: string, body: string) => void;
@@ -300,7 +302,7 @@ export function PrActivityFeed({
           <Thread
             thread={r}
             onQuote={
-              canWrite && hasVisibleBody(r.body)
+              onQuote && canWrite && hasVisibleBody(r.body)
                 ? () => onQuote(r.body)
                 : undefined
             }
@@ -348,7 +350,7 @@ export function PrActivityFeed({
         <div key={`comment-${c.id}`} data-comment-id={c.id}>
           <Thread
             thread={c}
-            onQuote={canWrite ? () => onQuote(c.body) : undefined}
+            onQuote={onQuote && canWrite ? () => onQuote(c.body) : undefined}
             onSaveEdit={
               canEditOwnComments && c.viewerDidAuthor
                 ? (body) => onEditComment(c.id, body)

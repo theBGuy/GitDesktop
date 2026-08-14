@@ -1402,10 +1402,14 @@ export function RemotePrView({
         ? `${approval.approvedBy.length} of ${approval.approvalsRequired} approvals`
         : `${approval.approvedBy.length} approval${approval.approvedBy.length === 1 ? "" : "s"}`
       : null;
+  // Every handler that refuses while the rendered PR is the previous one reads
+  // this, so each of their entry points can hold too rather than sit enabled and
+  // do nothing.
+  const detailsStale = details.isPlaceholderData;
   // The metadata pickers seed from the rendered PR and commit the WHOLE set on
   // close, so one opened mid-switch would write the previous PR's members under
   // the new number. Their triggers disable on a reason, so this rides that seam.
-  const pickerReason = details.isPlaceholderData
+  const pickerReason = detailsStale
     ? "Loading this pull request…"
     : triageReason;
 
@@ -1772,6 +1776,7 @@ export function RemotePrView({
             <Button
               variant="outline"
               size="xs"
+              disabled={detailsStale}
               onClick={openEditWithChips}
               title="Edit the title and description"
             >
@@ -1973,14 +1978,20 @@ export function RemotePrView({
           currentNumber={number}
           onSelect={(n) => selectPr({ kind: "remote", id: String(n) })}
           onDissolve={canDissolveStack ? dissolveStack : undefined}
-          dissolving={stackDissolve.isPending}
+          // Busy-shaped hold: `dissolveStack` refuses while the rendered stack is
+          // the previous PR's, so its control can't sit enabled and do nothing.
+          dissolving={stackDissolve.isPending || detailsStale}
         />
         {stackOffer && (
           <StackOffer
             ref={offerRef}
             offer={stackOffer}
             rows={offerRows}
-            pending={stackCreate.isPending || stackAdd.isPending}
+            // Same hold as the dissolve control: `confirmStackOffer` refuses while
+            // the offer's eligibility came from the previous PR.
+            pending={
+              stackCreate.isPending || stackAdd.isPending || detailsStale
+            }
             error={
               stackWriteError ? presentError(stackWriteError).summary : null
             }
@@ -2128,7 +2139,10 @@ export function RemotePrView({
                       >
                         Copy link
                       </DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => quoteReply(pr.body)}>
+                      <DropdownMenuItem
+                        disabled={detailsStale}
+                        onClick={() => quoteReply(pr.body)}
+                      >
                         Quote reply
                       </DropdownMenuItem>
                       <DropdownMenuItem
@@ -2137,7 +2151,10 @@ export function RemotePrView({
                         Copy markdown
                       </DropdownMenuItem>
                       {isOpen && canEdit && (
-                        <DropdownMenuItem onClick={openEditWithChips}>
+                        <DropdownMenuItem
+                          disabled={detailsStale}
+                          onClick={openEditWithChips}
+                        >
                           Edit
                         </DropdownMenuItem>
                       )}
@@ -2186,7 +2203,7 @@ export function RemotePrView({
                 canEditOwnThreadComments={canEditOwnThreadComments}
                 canEditOwnComments={canEditOwnComments}
                 canReact={canReact}
-                onQuote={quoteReply}
+                onQuote={detailsStale ? undefined : quoteReply}
                 onThreadReply={(threadId, body) =>
                   threadReply.mutateAsync({ threadId, body })
                 }
@@ -2213,7 +2230,7 @@ export function RemotePrView({
                     : "Review comments"
                 }
                 isError={reviewThreads.isError}
-                onQuote={quoteReply}
+                onQuote={detailsStale ? undefined : quoteReply}
                 onReply={
                   canThreadReply
                     ? (threadId, body) =>
@@ -2450,7 +2467,7 @@ export function RemotePrView({
             lens={lens}
             number={number}
             lineWidget={reviewLineWidget}
-            onQuote={quoteReply}
+            onQuote={detailsStale ? undefined : quoteReply}
             onReply={
               canThreadReply
                 ? (threadId, body) =>
