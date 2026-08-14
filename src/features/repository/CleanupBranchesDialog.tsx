@@ -3,7 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
-import { RelativeTime } from "@/components/relative-time";
+import { RelativeTime, useRelativeNow } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -72,6 +72,10 @@ export function CleanupBranchesDialog({
   isInWorktree: (name: string) => boolean;
 }) {
   const queryClient = useQueryClient();
+  // Shared 30s clock: the idle-past-the-window classification below must
+  // re-evaluate as time passes, and a render-position `Date.now()` is invisible
+  // to the React Compiler, so a branch crossing the window never becomes stale.
+  const now = useRelativeNow();
   const [mode, setMode] = useState<Mode>("archive");
   const [windowDays, setWindowDays] = useState<number>(60);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -105,7 +109,6 @@ export function CleanupBranchesDialog({
   // Branches eligible for cleanup, before the per-mode exclusions. Never the
   // current or default branch, never the app-internal session branches.
   const stale = useMemo(() => {
-    const now = Date.now();
     const out: Candidate[] = [];
     for (const b of branches) {
       if (
@@ -122,7 +125,7 @@ export function CleanupBranchesDialog({
       if (merged || old) out.push({ branch: b, merged, ageDays, old });
     }
     return out;
-  }, [branches, currentBranch, defaultBranch, mergedSet, windowDays]);
+  }, [branches, currentBranch, defaultBranch, mergedSet, now, windowDays]);
 
   // Mode-specific candidates. Archive hides — already-archived branches are a
   // no-op, so drop them. Delete is permanent — drop rule-protected branches

@@ -1,0 +1,7 @@
+{
+  "path": ["src"],
+  "format": ["typescript", "tsx"],
+  "ignore": ["**/src/components/ui/**", "**/*.d.ts"],
+  "minLines": 40,
+  "reporters": ["console"]
+}

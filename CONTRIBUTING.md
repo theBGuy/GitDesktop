@@ -103,6 +103,30 @@ re-measure (payload sizes, timed runs) may stay and cite their source (a PR or
 run reference is fine there). When you touch a file, trimming its comments to
 this standard in passing is welcome.
 
+### Convention checks
+
+Three dependency-free Node scripts guard convention classes a past audit already
+paid to close once. Run them before pushing:
+
+```sh
+pnpm run checks   # banned patterns · Rust invariants · IPC surface drift
+```
+
+They gate merges as the **blocking** `guards` job in
+[`quality.yml`](.github/workflows/quality.yml), covering banned frontend UI and
+state patterns (hover-revealed row actions, hand-rolled modifier keys,
+`setQueryData(key, undefined)`), the Rust refspec-argv and
+sync-`#[tauri::command]` invariants, and Tauri IPC drift — every registered
+command needs a caller, every `invoke()` a registration.
+
+Each check carries an allowlist, and it ratchets one way. Adding an entry is a
+reviewed change like any other: it needs an inline rationale naming what makes
+that site safe, and it isn't the way to quiet a fresh violation.
+
+`knip` and `jscpd` run in the same workflow's `advisory` job — non-blocking on
+purpose. The job publishes unused-export and duplicate-code reports to the run
+summary for a human to triage, and never fails a build.
+
 ### Changelog
 
 For any **user-facing** change, add a **changelog fragment** — a small Markdown

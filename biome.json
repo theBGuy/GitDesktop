@@ -51,6 +51,23 @@
             "useValidTypeof": "error",
             "useYield": "error"
           },
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "@/lib/settings/api": {
+                    "importNames": ["saveSettings"],
+                    "message": "Use saveSettingsMerged or the useSaveSettings hook — raw saveSettings skips the serialized merge chain."
+                  },
+                  "./api": {
+                    "importNames": ["saveSettings"],
+                    "message": "Use saveSettingsMerged or the useSaveSettings hook — raw saveSettings skips the serialized merge chain."
+                  }
+                }
+              }
+            }
+          },
           "suspicious": {
             "noAsyncPromiseExecutor": "error",
             "noCatchAssign": "error",

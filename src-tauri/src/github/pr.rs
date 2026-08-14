@@ -1971,7 +1971,6 @@ fn stack_write_outcome_from(body: &str, op: &str) -> AppResult<StackWriteOutcome
 /// Group open PRs into a NEW stack (`POST /repos/{slug}/stacks`). `pull_requests`
 /// is BOTTOM→TOP and the server neither sorts nor bridges it: each PR's base ref
 /// must be the previous PR's head ref, and two members are the minimum.
-#[tauri::command]
 pub async fn gh_stack_create(
     repo_path: String,
     pull_requests: Vec<u64>,
@@ -1988,7 +1987,6 @@ pub async fn gh_stack_create(
 /// Append PRs to an existing stack (`POST /repos/{slug}/stacks/{n}/add`). TOP only:
 /// the endpoint has no insert-in-the-middle form, and the same base-ref adjacency
 /// rule as create applies to the joint.
-#[tauri::command]
 pub async fn gh_stack_add(
     repo_path: String,
     stack_number: u64,
@@ -2007,7 +2005,6 @@ pub async fn gh_stack_add(
 /// the endpoint ignores one and always unstacks the WHOLE stack, so naming members
 /// would imply a partial-remove that doesn't exist. The PRs stay open on their
 /// branches — only the grouping goes.
-#[tauri::command]
 pub async fn gh_stack_dissolve(
     repo_path: String,
     stack_number: u64,
@@ -5070,7 +5067,6 @@ async fn gh_thread_comment_replies_topup(
 /// Empty-comment threads are skipped; line falls back to `originalLine`, then 0.
 /// Follows the cursor up to 5 pages (500 threads). A thread with >50 replies is
 /// topped up via [`gh_thread_comment_replies_topup`].
-#[tauri::command]
 pub async fn gh_pr_review_threads(
     repo_path: String,
     number: u64,
@@ -5220,7 +5216,6 @@ pub async fn gh_pr_review_threads(
 /// Replies in an existing review thread, addressed by its GraphQL node id. The id
 /// and body travel as GraphQL variables (never format!-embedded) — the
 /// injection-safe idiom `edit_comment` uses.
-#[tauri::command]
 pub async fn gh_pr_reply_review_thread(
     repo_path: String,
     thread_id: String,
@@ -5248,7 +5243,6 @@ pub async fn gh_pr_reply_review_thread(
 }
 
 /// Resolves or unresolves a review thread by its GraphQL node id.
-#[tauri::command]
 pub async fn gh_pr_resolve_review_thread(
     repo_path: String,
     thread_id: String,

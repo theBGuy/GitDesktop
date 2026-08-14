@@ -1,0 +1,117 @@
+name: quality
+
+# Two jobs with deliberately opposite contracts.
+#
+# `guards` runs the mechanical convention checks and is a required status check
+# on master's ruleset — so it carries NO paths filter, because a paths-skipped
+# required check sits stuck "Expected" forever (GitHub required-checks docs).
+# The path-unfiltered push:master leg is the backstop re-validating the true
+# merged tree, since a PR green against a stale base merges stale-green.
+#
+# `advisory` reports; it never gates. It must not be registered as a required
+# check — see its own header for the contract.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+
+# One in-flight run per ref; a superseded push cancels the stale run instead of
+# stacking a second one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # BLOCKING. The three scripts are Node-stdlib-only by design, so this job
+  # needs no install step and stays a seconds-long gate on every PR.
+  guards:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Node
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 24
+
+      # One step per script so a failure names its own check in the UI.
+      - name: Banned frontend patterns
+        run: node scripts/check-banned-patterns.mjs
+
+      - name: Rust invariants
+        run: node scripts/check-rust-invariants.mjs
+
+      - name: IPC surface drift
+        run: node scripts/check-dead-surface.mjs
+
+  # ADVISORY — informational only, triaged by humans, NEVER a merge gate; do not
+  # register it as a required check. knip exits non-zero today on a known
+  # backlog of dead exports, so both tools run under continue-on-error and
+  # publish to the step summary, where findings are readable from the checks tab
+  # without opening logs.
+  advisory:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6.0.9
+
+      - name: Install Node
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      # continue-on-error here too: an install blip must not fail an advisory
+      # job whose contract is "never gates" — the tool steps just no-op after.
+      - name: Install dependencies
+        continue-on-error: true
+        run: pnpm install --frozen-lockfile
+
+      # jscpd's console reporter colours unconditionally (no TTY check, unlike
+      # knip), so both captures strip SGR sequences — otherwise the summary
+      # renders as escape-code soup. The tool's own exit code is preserved and
+      # absorbed by continue-on-error, so findings show on the step, not the job.
+      - name: Unused files, exports and dependencies (knip)
+        continue-on-error: true
+        run: |
+          log="$RUNNER_TEMP/knip.log"
+          set +e
+          pnpm exec knip --no-progress >"$log" 2>&1
+          status=$?
+          set -e
+          cat "$log"
+          {
+            echo "### knip — unused files, exports, dependencies"
+            echo ""
+            echo '```text'
+            sed -e 's/\x1b\[[0-9;]*m//g' "$log"
+            echo '```'
+            echo ""
+          } >>"$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+      - name: Duplicate code (jscpd)
+        continue-on-error: true
+        run: |
+          log="$RUNNER_TEMP/jscpd.log"
+          set +e
+          pnpm exec jscpd >"$log" 2>&1
+          status=$?
+          set -e
+          cat "$log"
+          {
+            echo "### jscpd — duplicate code"
+            echo ""
+            echo '```text'
+            sed -e 's/\x1b\[[0-9;]*m//g' "$log"
+            echo '```'
+            echo ""
+          } >>"$GITHUB_STEP_SUMMARY"
+          exit "$status"

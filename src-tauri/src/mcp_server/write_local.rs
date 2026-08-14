@@ -354,6 +354,10 @@ fn filter_by_status(
 /// a remote-tracking ref would be a latent trap at merge time.
 async fn verify_branch(repo: &str, branch: &str) -> Result<(), McpError> {
     ensure_not_flag(branch, "branch")?;
+    // Same refspec-metacharacter gate as every other ref-reaching name: the
+    // probe alone would refuse these anyway, but validating keeps this site on
+    // the standard chokepoint instead of a bespoke exception.
+    crate::git::branches::validate_ref_name(branch).map_err(app_err)?;
     let out = run_git_raw(
         Some(repo),
         &[

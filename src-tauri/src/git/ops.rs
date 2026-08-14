@@ -1992,8 +1992,6 @@ pub async fn git_merge_local_pr(
     message: String,
     strategy: String,
 ) -> AppResult<LocalPrMergeOutcome> {
-    validate_branch_arg(&base)?;
-    validate_branch_arg(&head)?;
     let root = worktree_root_dir(&repo_path)?;
     merge_local_pr(&state, &repo_path, &base, &head, &message, &strategy, &root).await
 }
@@ -2013,6 +2011,12 @@ pub(crate) async fn merge_local_pr(
     root: &Path,
 ) -> AppResult<LocalPrMergeOutcome> {
     use crate::git::runner::run_git;
+
+    // `base` reaches `refs/heads/<base>` (finalize_base's update-ref) and `head`
+    // the merge argv, so both take the refspec-metacharacter blocklist, not just
+    // the weaker empty/leading-`-` check. In the core, so every caller is gated.
+    crate::git::branches::validate_ref_name(base)?;
+    crate::git::branches::validate_ref_name(head)?;
 
     let message = if message.trim().is_empty() {
         format!("Merge {head} into {base}")
@@ -2230,7 +2234,9 @@ pub(crate) async fn finish_local_pr_merge(
     worktree_id: &str,
     op_id: Option<String>,
 ) -> AppResult<LocalPrMergeOutcome> {
-    validate_branch_arg(base)?;
+    // Same gate as `merge_local_pr` — this path reaches the identical
+    // `finalize_base` update-ref refspec.
+    crate::git::branches::validate_ref_name(base)?;
 
     // When `base` IS the current branch, `finalize_base` ends in a `merge --ff-only`
     // into the main tree — re-guard clean HERE, since the user may have dirtied it
@@ -4686,6 +4692,31 @@ detached
         assert_eq!(super::repo_hash("C:/Repos/App"), super::repo_hash("c:/repos/app"));
         assert_ne!(super::repo_hash("C:/Repos/App"), super::repo_hash("C:/Repos/Other"));
         assert_eq!(super::repo_hash("C:/Repos/App").len(), 16);
+    }
+
+    /// `base` reaches `refs/heads/<base>` in `finalize_base`'s `update-ref` and
+    /// `head` the merge argv, so both are refused for refspec metacharacters
+    /// before any git runs.
+    #[tokio::test]
+    async fn merge_local_pr_rejects_refspec_metacharacters() {
+        // A real directory that is deliberately NOT a repo: without the guard the
+        // first `rev-parse` fails as `AppError::Git`, so asserting the
+        // `InvalidArgument` variant (not merely `is_err`) is what pins the guard.
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let repo = dir.path().to_string_lossy().into_owned();
+        let root = dir.path().join("root");
+        let state = AppState::default();
+        for bad in ["a*b", "a?b", "a[b", "a:b"] {
+            for (base, head) in [(bad, "feature"), ("main", bad)] {
+                assert!(
+                    matches!(
+                        merge_local_pr(&state, &repo, base, head, "m", "merge", &root).await,
+                        Err(AppError::InvalidArgument(_))
+                    ),
+                    "expected {base:?} -> {head:?} to be refused as an invalid ref name"
+                );
+            }
+        }
     }
 
     /// A clean local-PR merge where `base` is NOT the current branch: the main

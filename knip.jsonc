@@ -1,0 +1,32 @@
+{
+  "$schema": "https://unpkg.com/knip@6.32.1/schema.json",
+  // Advisory: surfaces dead exports and unused dependencies at PR time. Scoped
+  // to the root package only — pnpm-workspace.yaml also declares `site`, which
+  // has its own toolchain. Naming the workspace in `workspaces` does NOT narrow
+  // the run (verified: site/ files were still reported); `ignoreWorkspaces` is
+  // what actually excludes it.
+  "ignoreWorkspaces": ["site"],
+  "workspaces": {
+    ".": {
+      // No `entry`: knip's vite plugin resolves index.html → src/main.tsx
+      // itself, and an explicit copy draws a redundant-entry config hint.
+      "project": ["src/**/*.{ts,tsx}"],
+      // Vendored shadcn/Base UI primitives, never edited here: they ship
+      // unused variants by design and are a false-positive magnet.
+      "ignore": ["src/components/ui/**"]
+    }
+  },
+  // Built empirically from the run — each entry is reachable, just not through
+  // a path the `project` glob above can see. Everything NOT listed here stays
+  // reportable on purpose.
+  "ignoreDependencies": [
+    // These four are CSS `@import`s at the top of src/App.css; `project` is
+    // ts/tsx only, so knip never parses the stylesheet that pulls them in.
+    "@fontsource-variable/jetbrains-mono",
+    "shadcn",
+    "tailwindcss",
+    "tw-animate-css",
+    // Imported solely by src/components/ui/drawer.tsx, which `ignore` excludes.
+    "vaul"
+  ]
+}

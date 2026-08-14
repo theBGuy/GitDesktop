@@ -35,6 +35,7 @@ pnpm exec biome check ./src/           # lint/format CHECK (no mutation)
 cargo test --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 cd site && pnpm build                  # when the marketing site changed
+pnpm run checks                        # guard scripts — blocking in CI (quality.yml)
 ```
 
 Frontend changes run the first pair; Rust changes add the cargo pair. Not

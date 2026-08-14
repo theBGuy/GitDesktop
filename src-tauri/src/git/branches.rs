@@ -8,6 +8,9 @@ use crate::git::runner::{
 use crate::git::types::{Branch, BranchDivergence, RemoteBranch};
 use crate::state::AppState;
 
+/// The shared guard against refspec/argv injection from a user-named ref: every
+/// ref-reaching name routes through here or through `validate_tag_name`. Rev
+/// syntax (`~ ^ @ { }`) is deliberately accepted, for branch start-points.
 pub(crate) fn validate_ref_name(name: &str) -> AppResult<()> {
     if name.is_empty() || name.starts_with('-') {
         return Err(AppError::InvalidArgument(format!(

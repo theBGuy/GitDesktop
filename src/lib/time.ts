@@ -75,15 +75,12 @@ export function formatDurationBetween(start?: string, end?: string): string {
   return `${h}h ${m % 60}m`;
 }
 
-/** "8 months ago", "2 hours ago", "just now". `now` defaults to the current
- *  time; callers that render many timestamps together (RelativeTime) pass one
- *  shared snapshot so simultaneously-mounted rows never disagree about the same
- *  date — and passing it explicitly keeps the React Compiler's memo key aware of
- *  the clock (a bare `Date.now()` read is invisible to it, freezing the output). */
-export function formatRelativeTime(
-  isoDate: string,
-  now: number = Date.now(),
-): string {
+/** "8 months ago", "2 hours ago", "just now". `now` is required: callers pass
+ *  the shared `useRelativeNow()` snapshot so simultaneously-mounted rows never
+ *  disagree about the same date, and so the React Compiler's memo key sees the
+ *  clock (a bare `Date.now()` read is invisible to it, freezing the output).
+ *  A default here would let a caller silently take the frozen path. */
+export function formatRelativeTime(isoDate: string, now: number): string {
   const seconds = (now - new Date(isoDate).getTime()) / 1000;
   // Largest-first: pick the first unit the elapsed time reaches.
   for (let i = 0; i < UNITS.length; i++) {
