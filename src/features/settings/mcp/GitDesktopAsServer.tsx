@@ -93,9 +93,9 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
   );
   // The confirm dialog stays mounted through Base UI's ~100ms exit fade, by
   // which time `confirmTarget` is already null — its contents render from this
-  // retained value or they blank mid-fade. Copy alone reads the retained
-  // value; the open gate, the confirm dispatch, and confirmDisabledReason all
-  // stay on live `confirmTarget`, so a mid-fade click is a no-op.
+  // retained value or they blank mid-fade. Appearance (copy and the button's
+  // disabled reason) reads the retained value; the open gate and the confirm
+  // dispatch stay on live `confirmTarget`, so a mid-fade click is a no-op.
   const [shownTarget, setShownTarget] = useState<InstallTarget | null>(
     confirmTarget,
   );
@@ -157,7 +157,7 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
   // must share that button's gate: `project` follows the shareable-aware entry
   // gate; the global targets always embed the launcher path.
   const confirmDisabledReason =
-    confirmTarget === "project" ? entryDisabledReason : launcherDisabledReason;
+    shownTarget === "project" ? entryDisabledReason : launcherDisabledReason;
 
   // Single source of truth for both Copy and Write — the exact entry that gets
   // merged into .mcp.json under `mcpServers.gitdesktop`.
