@@ -545,7 +545,7 @@ export function CommitLineComposer({
             // fires inside editable targets, so a chord this handler declines to
             // submit would otherwise reach the global action.
             e.preventDefault();
-            if (canPost) submit();
+            if (canPost && !createComment.isPending) submit();
           } else if (e.key === "Escape") {
             // Close only this widget — don't leak Escape to global handlers.
             e.preventDefault();

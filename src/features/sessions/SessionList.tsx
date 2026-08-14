@@ -799,7 +799,7 @@ const TAB_EMPTY_MESSAGE: Record<SessionTab, string> = {
   active: "Nothing active — start a plan or session with New.",
   kept: "No kept sessions yet. Keep a session to file it here.",
   archived:
-    "No archived plans yet. Plans land here once their session is kept.",
+    "No archived plans or research runs yet. Plans land here once their session is kept, research once it's turned into a plan.",
 };
 
 /** Shown when a tab (or a search within it) has no rows, but other rows exist —

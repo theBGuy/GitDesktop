@@ -2562,13 +2562,9 @@ export function RemotePrView({
                 </DropdownMenuTrigger>
               </span>
               <DropdownMenuContent align="end" className="w-56">
-                {/* An unrecognized provider takes GitHub's set, matching the rest of
-                    this view's gh-as-default. Branch-rule gating is GitHub
-                    branch-protection data, so it never applies to GitLab/Bitbucket. */}
-                {(provider
-                  ? PROVIDER_MERGE_STRATEGIES[provider]
-                  : PROVIDER_MERGE_STRATEGIES.github
-                ).map((s) => {
+                {/* Branch-rule gating is GitHub branch-protection data, so it
+                    never applies to GitLab/Bitbucket. */}
+                {PROVIDER_MERGE_STRATEGIES[providerKey].map((s) => {
                   const isGitHub =
                     provider !== "gitlab" &&
                     provider !== "bitbucket" &&

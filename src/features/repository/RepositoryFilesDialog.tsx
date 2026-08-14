@@ -98,11 +98,10 @@ export function RepositoryFilesDialog({
   const [anchorPath, setAnchorPath] = useState<string | null>(null);
   const [pending, setPending] = useState<Pending>(null);
   // The confirm dialog stays mounted through Base UI's ~100ms exit fade, by
-  // which time `pending` is already null — its copy renders from the last
-  // non-null value or it blanks mid-fade.
-  const lastPending = useRef(pending);
-  if (pending) lastPending.current = pending;
-  const shownPending = pending ?? lastPending.current;
+  // which time `pending` is already null — its contents render from this
+  // retained value or they blank mid-fade.
+  const [shownPending, setShownPending] = useState<Pending>(pending);
+  if (pending && pending !== shownPending) setShownPending(pending);
 
   const tracked = useTrackedFiles(repoPath, open && tab === "tracked");
   const ignored = useIgnoredFiles(repoPath, open && tab === "ignored");
@@ -444,18 +443,18 @@ export function RepositoryFilesDialog({
               {shownPending && PENDING_COPY[shownPending.kind].description}
             </DialogDescription>
           </DialogHeader>
-          {pending?.kind === "untrack" && (
+          {shownPending?.kind === "untrack" && (
             <ul className="max-h-40 overflow-auto border p-2 text-xs">
-              {pending.paths.map((p) => (
+              {shownPending.paths.map((p) => (
                 <li key={p} className="truncate font-mono" title={p}>
                   {ignoreLabel(p)}
                 </li>
               ))}
             </ul>
           )}
-          {pending?.kind === "forceAdd" && (
+          {shownPending?.kind === "forceAdd" && (
             <ul className="max-h-40 overflow-auto border p-2 text-xs">
-              {pending.paths.map((p) => (
+              {shownPending.paths.map((p) => (
                 <li key={p} className="truncate font-mono" title={p}>
                   {p}
                   {p.endsWith("/") && (
@@ -467,9 +466,9 @@ export function RepositoryFilesDialog({
               ))}
             </ul>
           )}
-          {pending?.kind === "removeRule" && (
+          {shownPending?.kind === "removeRule" && (
             <ul className="max-h-40 overflow-auto border p-2 text-xs">
-              {pending.rules.map((r) => (
+              {shownPending.rules.map((r) => (
                 <li key={`${r.source}:${r.pattern}`} className="font-mono">
                   {r.pattern}{" "}
                   <span className="font-sans text-muted-foreground">

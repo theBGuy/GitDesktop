@@ -91,6 +91,16 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
   const [confirmTarget, setConfirmTarget] = useState<InstallTarget | null>(
     null,
   );
+  // The confirm dialog stays mounted through Base UI's ~100ms exit fade, by
+  // which time `confirmTarget` is already null — its contents render from this
+  // retained value or they blank mid-fade. Copy alone reads the retained
+  // value; the open gate, the confirm dispatch, and confirmDisabledReason all
+  // stay on live `confirmTarget`, so a mid-fade click is a no-op.
+  const [shownTarget, setShownTarget] = useState<InstallTarget | null>(
+    confirmTarget,
+  );
+  if (confirmTarget && confirmTarget !== shownTarget)
+    setShownTarget(confirmTarget);
   // Which global client is mid-removal — parallel to `busyTarget` (which tracks
   // installs) so per-row Install/Reinstall/Remove disable each other.
   const [removingClient, setRemovingClient] = useState<
@@ -749,7 +759,7 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
               <DialogHeader>
                 <DialogTitle>Replace existing entry?</DialogTitle>
                 <DialogDescription>
-                  {confirmTarget && REPLACE_PROMPTS[confirmTarget]}
+                  {shownTarget && REPLACE_PROMPTS[shownTarget]}
                 </DialogDescription>
               </DialogHeader>
               <DialogFooter>

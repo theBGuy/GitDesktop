@@ -64,6 +64,14 @@ export function StashesDialog({
   const drop = useStashDrop(repoPath);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [confirmDrop, setConfirmDrop] = useState<number | null>(null);
+  // The drop confirm stays mounted through Base UI's ~100ms exit fade, by which
+  // time `confirmDrop` is already null — its contents render from this retained
+  // value or they blank mid-fade. The open gate and the drop dispatch stay live,
+  // so a mid-fade click is a no-op. Compared against null, not truthiness:
+  // stash@{0} is a valid index.
+  const [shownDrop, setShownDrop] = useState<number | null>(confirmDrop);
+  if (confirmDrop !== null && confirmDrop !== shownDrop)
+    setShownDrop(confirmDrop);
   const [view, setView] = useState<StashesView>(initialView);
 
   // The dialog can be opened straight to either view; seed `view` from the
@@ -229,7 +237,7 @@ export function StashesDialog({
               <DialogTitle>Drop this stash?</DialogTitle>
               <DialogDescription>
                 Permanently deletes stash@{"{"}
-                {confirmDrop}
+                {shownDrop}
                 {"}"} and the changes it holds. This cannot be undone.
               </DialogDescription>
             </DialogHeader>

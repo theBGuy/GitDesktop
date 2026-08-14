@@ -46,8 +46,15 @@ export function TaskRunConfirm() {
     setArgs(pending.task.args);
   }, [pending]);
 
-  const replacing = pending?.reason === "replace";
-  const task = pending?.task ?? null;
+  // The dialog stays mounted through Base UI's ~100ms exit fade, by which time
+  // `pending` is already null — its contents render from this retained value or
+  // they blank mid-fade ("Run “undefined”?"). The open gate, the seeding effect
+  // above and the store dispatches stay live, so a mid-fade click is a no-op.
+  const [shownPending, setShownPending] = useState(pending);
+  if (pending && pending !== shownPending) setShownPending(pending);
+
+  const replacing = shownPending?.reason === "replace";
+  const task = shownPending?.task ?? null;
   const interpreter = task
     ? (INTERPRETER_LABELS[task.interpreter] ?? task.interpreter)
     : "";

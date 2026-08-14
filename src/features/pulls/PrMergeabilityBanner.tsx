@@ -1,8 +1,8 @@
 import {
   CaretDownIcon,
   ClockIcon,
-  type Icon,
   InfoIcon,
+  type Icon as PhosphorIcon,
   SparkleIcon,
   WarningIcon,
 } from "@phosphor-icons/react";
@@ -41,7 +41,7 @@ export type PrMergeabilityArm =
   | null;
 
 /** Words carry the meaning; the icon and tone only reinforce it. */
-const ARM_ICON: Record<Exclude<PrMergeabilityArm, null>, Icon> = {
+const ARM_ICON: Record<Exclude<PrMergeabilityArm, null>, PhosphorIcon> = {
   conflicting: WarningIcon,
   predicted: WarningIcon,
   checking: ClockIcon,

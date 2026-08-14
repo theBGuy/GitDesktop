@@ -4,7 +4,7 @@ import {
   LightningIcon,
   WarningIcon,
 } from "@phosphor-icons/react";
-import { useEffect, useEffectEvent, useId, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -83,11 +83,10 @@ export function BranchMergePickerDialog({
 }) {
   const [pickerBranch, setPickerBranch] = useState("");
   // The dialog stays mounted through Base UI's ~100ms exit fade, by which time
-  // `mode` is already null — its copy renders from the last non-null value or
-  // it blanks mid-fade.
-  const lastMode = useRef(mode);
-  if (mode) lastMode.current = mode;
-  const shownMode = mode ?? lastMode.current;
+  // `mode` is already null — its contents render from this retained value or
+  // they blank mid-fade.
+  const [shownMode, setShownMode] = useState<PickerMode | null>(mode);
+  if (mode && mode !== shownMode) setShownMode(mode);
   const branchSelectId = useId();
   const conflictSelectId = useId();
   // Advanced merge options (merge mode only).
@@ -218,7 +217,7 @@ export function BranchMergePickerDialog({
             </SelectContent>
           </Select>
         </div>
-        {mode === "merge" && (
+        {shownMode === "merge" && (
           <div className="space-y-3">
             <div className="min-h-5 text-xs">{renderMergePreview()}</div>
             <label className="flex cursor-pointer items-center gap-2 text-xs">
