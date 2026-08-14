@@ -1556,7 +1556,7 @@ export function RemotePrView({
 
   // The pane keeps rendering the previous PR's diff through a switch, so its lines
   // can belong to another PR than the `number` a new thread would be created under.
-  const diffStale = details.isPlaceholderData || prDiff.isPlaceholderData;
+  const diffStale = detailsStale || prDiff.isPlaceholderData;
   // The inline line-comment composer for the Files tab: only when the provider allows
   // creating a thread, anchored to the selected file (its section prefills a
   // suggestion's code). Absent otherwise ⇒ read-only diff.
@@ -1978,20 +1978,20 @@ export function RemotePrView({
           currentNumber={number}
           onSelect={(n) => selectPr({ kind: "remote", id: String(n) })}
           onDissolve={canDissolveStack ? dissolveStack : undefined}
-          // Busy-shaped hold: `dissolveStack` refuses while the rendered stack is
-          // the previous PR's, so its control can't sit enabled and do nothing.
-          dissolving={stackDissolve.isPending || detailsStale}
+          dissolving={stackDissolve.isPending}
+          // `dissolveStack` refuses while the rendered stack is the previous PR's,
+          // so hold its control — without the spinner a real write would show.
+          disabled={detailsStale}
         />
         {stackOffer && (
           <StackOffer
             ref={offerRef}
             offer={stackOffer}
             rows={offerRows}
+            pending={stackCreate.isPending || stackAdd.isPending}
             // Same hold as the dissolve control: `confirmStackOffer` refuses while
-            // the offer's eligibility came from the previous PR.
-            pending={
-              stackCreate.isPending || stackAdd.isPending || detailsStale
-            }
+            // the offer's eligibility came from the previous PR. Cancel stays live.
+            disabled={detailsStale}
             error={
               stackWriteError ? presentError(stackWriteError).summary : null
             }
@@ -2029,14 +2029,14 @@ export function RemotePrView({
         busy={
           mergeRemotePr.isPending ||
           abortRemotePrResolve.isPending ||
-          details.isPlaceholderData
+          detailsStale
         }
         conflictFiles={predictedFiles}
         behindBy={behindBy}
         updateBlockedReason={updateBlockedReason}
         // Busy-shaped, not a reason: `runUpdateBranch` refuses through the switch
         // window, and a sub-second hold needs no explaining text.
-        updateBusy={updateBranch.isPending || details.isPlaceholderData}
+        updateBusy={updateBranch.isPending || detailsStale}
         onResolve={() => runResolve(false)}
         onResolveWithAi={() => runResolve(true)}
         onDiscard={() => void discardResolve()}
@@ -2082,8 +2082,8 @@ export function RemotePrView({
           // Both hold through a switch: the context above is seeded from the
           // rendered PR, so a run would persist — and a post would publish — the
           // previous PR's content under this one.
-          posting={comment.isPending || details.isPlaceholderData}
-          stale={details.isPlaceholderData}
+          posting={comment.isPending || detailsStale}
+          stale={detailsStale}
           // The panel posts its AI review as a comment and passes `asBot: true`,
           // forwarded to the mutation so GitLab attributes it to the review-bot
           // identity (other providers ignore the flag).
@@ -2139,12 +2139,14 @@ export function RemotePrView({
                       >
                         Copy link
                       </DropdownMenuItem>
-                      <DropdownMenuItem
-                        disabled={detailsStale}
-                        onClick={() => quoteReply(pr.body)}
-                      >
-                        Quote reply
-                      </DropdownMenuItem>
+                      {/* Absent, not disabled, while the description belongs to
+                          the previous PR — the same shape the thread menus take
+                          when their `onQuote` is withheld. */}
+                      {!detailsStale && (
+                        <DropdownMenuItem onClick={() => quoteReply(pr.body)}>
+                          Quote reply
+                        </DropdownMenuItem>
+                      )}
                       <DropdownMenuItem
                         onClick={() => copyText(pr.body, "Markdown copied")}
                       >

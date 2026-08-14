@@ -144,6 +144,7 @@ export function StackSection({
   onSelect,
   onDissolve,
   dissolving,
+  disabled,
 }: {
   stack: PrStackInfo | null | undefined;
   members: PrStackMember[] | undefined;
@@ -155,6 +156,9 @@ export function StackSection({
    *  the caller owns the eligibility (native stack, open, writable). */
   onDissolve?: () => void;
   dissolving?: boolean;
+  /** Holds the Dissolve action without claiming a write is running — the caller
+   *  sets it while its own handler would refuse (e.g. a PR switch in flight). */
+  disabled?: boolean;
 }) {
   if (!stack) return null;
   const rows = byPosition(members ?? []);
@@ -172,6 +176,7 @@ export function StackSection({
           label={`Stack · ${stack.position} of ${Math.max(stack.size, stack.position)}`}
           onDissolve={onDissolve}
           dissolving={dissolving}
+          disabled={disabled}
         />
         <p className="mt-1.5 text-xs text-muted-foreground">
           Couldn't load the stack's members.
@@ -197,6 +202,7 @@ export function StackSection({
         label={`Stack · ${stack.position} of ${Math.max(rows.length, stack.position)}`}
         onDissolve={onDissolve}
         dissolving={dissolving}
+        disabled={disabled}
       />
       {/* Capped like the checks rollup so a deep stack can't push the tab row
           out of the header; arrow-nav scrolls the active row into view. */}
@@ -252,10 +258,12 @@ function StackHeader({
   label,
   onDissolve,
   dissolving,
+  disabled,
 }: {
   label: string;
   onDissolve?: () => void;
   dissolving?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <div className="flex items-center gap-2">
@@ -267,7 +275,7 @@ function StackHeader({
           variant="ghost"
           size="xs"
           className="shrink-0 cursor-pointer text-muted-foreground hover:text-destructive focus-visible:text-destructive"
-          disabled={dissolving}
+          disabled={dissolving || disabled}
           onClick={onDissolve}
         >
           {dissolving && <Spinner data-icon="inline-start" />}
@@ -304,6 +312,7 @@ export function StackOffer({
   error,
   onConfirm,
   onCancel,
+  disabled,
   ref,
 }: {
   offer: StackOfferKind;
@@ -316,6 +325,9 @@ export function StackOffer({
   onConfirm: () => void;
   /** Collapses the preview; the caller also clears any error with it. */
   onCancel: () => void;
+  /** Holds Confirm without claiming a write is running — the caller sets it while
+   *  its own handler would refuse. Cancel stays live: it only dismisses. */
+  disabled?: boolean;
   ref?: Ref<StackOfferHandle>;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -429,7 +441,7 @@ export function StackOffer({
           ref={confirmRef}
           size="xs"
           className="cursor-pointer"
-          disabled={pending}
+          disabled={pending || disabled}
           onClick={onConfirm}
         >
           {pending && <Spinner data-icon="inline-start" />}
