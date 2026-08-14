@@ -212,6 +212,9 @@ function toThread(c: CommitCommentOut): PrThreadOut {
  * the selected file — so the labelled group here lists every anchored comment that
  * isn't visible inline (another file, or unresolvable to a new-side line), so none
  * is ever silently dropped.
+ *
+ * It owns its pane sizing: a bottom pane capped at 45% of its flex-column parent,
+ * so a caller drops it in as a sibling rather than wrapping it.
  */
 export function CommitComments({
   repoPath,

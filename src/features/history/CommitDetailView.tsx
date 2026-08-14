@@ -134,11 +134,14 @@ export function CommitDetailView({
   // Both commit queries keep serving the PREVIOUS commit while the selected one
   // loads, so everything derived from them is that commit's until it lands.
   const stale = details.isPlaceholderData || files.isPlaceholderData;
+  // The diff query outlasts that window with the previous FILE's diff, so the
+  // rendered lines can belong to another file or commit than `hash`+`deferredPath`.
+  const diffStale = stale || diff.isPlaceholderData;
   const lineWidget = useMemo<LineWidget | undefined>(() => {
     if (!commentsEnabled || !deferredPath) return undefined;
     // A line click while stale would address `hash` — the newly selected commit —
     // with a path and line read off the previous one's diff.
-    if (stale) return undefined;
+    if (diffStale) return undefined;
     // On GitHub the composer recovers its `position` from the FORGE diff; until
     // that fetch succeeds `remoteSections` is empty, so every line would open the
     // composer disabled with "This line isn't in the commit's diff for this file"
@@ -170,7 +173,7 @@ export function CommitDetailView({
     };
   }, [
     commentsEnabled,
-    stale,
+    diffStale,
     deferredPath,
     repoPath,
     hash,

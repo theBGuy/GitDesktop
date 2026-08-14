@@ -690,7 +690,10 @@ export function RemotePrView({
   const stackWriteError = stackCreate.error ?? stackAdd.error ?? null;
 
   function confirmStackOffer() {
-    if (!stackOffer) return;
+    // `offerEnabled` reads the rendered PR's stack state, so during a switch the
+    // offer can be computed under the previous PR's eligibility — refuse rather
+    // than write a stack on that basis.
+    if (!stackOffer || details.isPlaceholderData) return;
     if (stackOffer.kind === "create") {
       stackCreate.mutate(stackOffer.members, {
         onSuccess: (outcome) =>
@@ -753,7 +756,9 @@ export function RemotePrView({
 
   async function dissolveStack() {
     const info = details.data?.stack;
-    if (!info || dissolveStackNumber === null) return;
+    // The confirm names this stack's id and size, both read off the rendered PR.
+    if (!info || dissolveStackNumber === null || details.isPlaceholderData)
+      return;
     const count = details.data?.stackMembers.length || info.size;
     const ok = await useConfirm.getState().ask({
       title: `Dissolve stack #${info.id}?`,
@@ -844,7 +849,7 @@ export function RemotePrView({
    *  and just pushes when there are none. `withAi` hands the conflicts the backend
    *  just reported straight to the AI walk, so the takeover opens already working. */
   function runResolve(withAi: boolean) {
-    if (resolve) return;
+    if (details.isPlaceholderData || resolve) return;
     const info = details.data;
     if (!info) return;
     // Always route through the backend, even when `findResolve` reports a worktree: it
@@ -913,11 +918,13 @@ export function RemotePrView({
    *  rewrites the head's history and force-pushes it — on a fork that branch is the
    *  contributor's — so it asks first. */
   async function runUpdateBranch(rebase: boolean) {
+    if (details.isPlaceholderData) return;
     const base = details.data?.baseRefName;
     if (!base) return;
     // The one refusal rule, shared by the button, the menu item, the palette and
     // any future caller — no UI gate is the only thing between a viewer who may
-    // not push (or a second click) and the mutation.
+    // not push (or a second click) and the mutation. It derives from the rendered
+    // PR, the previous one during a switch — hence the placeholder refusal above.
     if (updateBlockedReason !== undefined || updateBranch.isPending) return;
     if (rebase) {
       const ok = await useConfirm.getState().ask({
@@ -1054,8 +1061,13 @@ export function RemotePrView({
 
   // Deferred into the handler: calling makeQuoteReply(ref) during render made the
   // React Compiler bail out of this whole component (refs-in-render rule).
-  const quoteReply = (body: string) =>
+  const quoteReply = (body: string) => {
+    // Every quotable body — the description and each rendered comment — belongs to
+    // the PR on screen, which mid-switch is the previous one, while the draft it
+    // would land in is keyed to the new one.
+    if (details.isPlaceholderData) return;
     makeQuoteReply({ composerRef, setBody: compose.set })(body);
+  };
 
   // GitLab + Bitbucket approve/unapprove — one toggle keyed on whether the viewer
   // approved. GitLab's `user_can_approve` is unreliable on Free (false even when
@@ -1388,6 +1400,12 @@ export function RemotePrView({
         ? `${approval.approvedBy.length} of ${approval.approvalsRequired} approvals`
         : `${approval.approvedBy.length} approval${approval.approvedBy.length === 1 ? "" : "s"}`
       : null;
+  // The metadata pickers seed from the rendered PR and commit the WHOLE set on
+  // close, so one opened mid-switch would write the previous PR's members under
+  // the new number. Their triggers disable on a reason, so this rides that seam.
+  const pickerReason = details.isPlaceholderData
+    ? "Loading this pull request…"
+    : triageReason;
 
   if (details.isPending) {
     return (
@@ -1429,6 +1447,9 @@ export function RemotePrView({
   // because TS doesn't carry the outer `!pr` guard into these hoisted closures.
   const prForGen = pr;
   function openEditWithChips() {
+    // Every seed below is read off the rendered PR, which is the previous one
+    // during a switch — an edit opened then would carry its title and body.
+    if (details.isPlaceholderData) return;
     // Seed the base picker from the PR as it stands, so a re-open never carries
     // a previous session's unsaved pick.
     setEditBase(prForGen.baseRefName);
@@ -1801,7 +1822,7 @@ export function RemotePrView({
             labelableId={pr.id}
             labels={pr.labels}
             lens={lens}
-            disabledReason={triageReason}
+            disabledReason={pickerReason}
           />
         ) : (
           pr.labels.length > 0 && (
@@ -1822,7 +1843,7 @@ export function RemotePrView({
             value={pr.assignees}
             commitOnClose
             lens={lens}
-            disabledReason={triageReason}
+            disabledReason={pickerReason}
             onChange={(next) =>
               setAssignees.mutate(
                 { number, assignees: next },
@@ -1858,7 +1879,7 @@ export function RemotePrView({
               enabled
               value={humanReviewers}
               lens={lens}
-              disabledReason={triageReason}
+              disabledReason={pickerReason}
               onChange={(next) =>
                 setReviewers.mutate(
                   { number, reviewers: next },
@@ -1989,11 +2010,17 @@ export function RemotePrView({
         provider={provider}
         forkBlocked={!!pr.crossRepository}
         hasResolveWorktree={resolveWorktree !== null}
-        busy={mergeRemotePr.isPending || abortRemotePrResolve.isPending}
+        busy={
+          mergeRemotePr.isPending ||
+          abortRemotePrResolve.isPending ||
+          details.isPlaceholderData
+        }
         conflictFiles={predictedFiles}
         behindBy={behindBy}
         updateBlockedReason={updateBlockedReason}
-        updateBusy={updateBranch.isPending}
+        // Busy-shaped, not a reason: `runUpdateBranch` refuses through the switch
+        // window, and a sub-second hold needs no explaining text.
+        updateBusy={updateBranch.isPending || details.isPlaceholderData}
         onResolve={() => runResolve(false)}
         onResolveWithAi={() => runResolve(true)}
         onDiscard={() => void discardResolve()}
@@ -2036,7 +2063,11 @@ export function RemotePrView({
                   })),
                 })),
           }}
-          posting={comment.isPending}
+          // Both hold through a switch: the context above is seeded from the
+          // rendered PR, so a run would persist — and a post would publish — the
+          // previous PR's content under this one.
+          posting={comment.isPending || details.isPlaceholderData}
+          stale={details.isPlaceholderData}
           // The panel posts its AI review as a comment and passes `asBot: true`,
           // forwarded to the mutation so GitLab attributes it to the review-bot
           // identity (other providers ignore the flag).

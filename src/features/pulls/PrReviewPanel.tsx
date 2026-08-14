@@ -83,6 +83,7 @@ export function PrReviewPanel({
   prNoun = "PR",
   onPost,
   posting,
+  stale = false,
 }: {
   context: ReviewContext;
   /** Whether this PR is a GitHub PR or a local-only one. */
@@ -94,6 +95,9 @@ export function PrReviewPanel({
   prNoun?: string;
   onPost?: (body: string, opts?: { asBot?: boolean }) => void | Promise<void>;
   posting?: boolean;
+  /** The caller is still rendering a previously selected PR, so `context` describes
+   *  that one while the run would persist under this `prRef` — holds the run. */
+  stale?: boolean;
 }) {
   const settings = useSettings();
   const repoName = useUiStore((s) => s.repoName) ?? "";
@@ -266,6 +270,7 @@ export function PrReviewPanel({
   }
 
   function run(mode: ReviewMode) {
+    if (stale) return;
     // An explicit in-panel pick wins for BOTH buttons; untouched, a security
     // audit uses the dedicated `securityReviewAi` when configured, and every
     // other mode uses the global review model.
@@ -504,13 +509,18 @@ export function PrReviewPanel({
                 exit={{ opacity: 0, scale: 0.96 }}
                 transition={quickTransition}
               >
-                <Button size="sm" onClick={() => run("general")}>
+                <Button
+                  size="sm"
+                  disabled={stale}
+                  onClick={() => run("general")}
+                >
                   <SparkleIcon data-icon="inline-start" />
                   Review
                 </Button>
                 <Button
                   variant="outline"
                   size="sm"
+                  disabled={stale}
                   onClick={() => run("security")}
                 >
                   <ShieldCheckIcon data-icon="inline-start" />

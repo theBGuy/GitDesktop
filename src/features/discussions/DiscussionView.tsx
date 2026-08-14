@@ -235,9 +235,9 @@ export function DiscussionView({
     return <DiffPlaceholder message="Could not load this discussion" />;
   }
 
-  // Placeholder details are the previous discussion's, so actions addressing the
-  // DISCUSSION (composer, reply box, mark-as-answer) hold until it's on screen;
-  // per-comment actions stay live — a comment id names what the user saw.
+  // Placeholder details are the previous discussion's: `busy` holds the composer,
+  // reply box and mark-as-answer. Lock/close, delete, upvote/reactions and labels
+  // also read `d.id` and stay live — pre-existing exposure, tracked separately.
   const busy =
     addComment.isPending ||
     markAnswer.isPending ||
