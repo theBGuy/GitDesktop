@@ -6,6 +6,7 @@ import {
   XCircleIcon,
 } from "@phosphor-icons/react";
 import { RelativeTime } from "@/components/relative-time";
+import { parseableDate } from "@/lib/time";
 import { cn } from "@/lib/utils";
 
 /** The lifecycle events a local PR emits — no CI/remote activity, just the
@@ -72,7 +73,7 @@ export function LocalPrLifecycleRow({
       </div>
       <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-1.5 py-0.5 text-muted-foreground">
         <span className="min-w-0">{label}</span>
-        {date && (
+        {date && parseableDate(date) && (
           <span className="shrink-0 text-muted-foreground/80">
             · <RelativeTime date={date} />
           </span>

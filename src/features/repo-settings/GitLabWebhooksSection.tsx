@@ -26,6 +26,7 @@ import {
   useGlUpdateHook,
 } from "@/lib/git/queries";
 import type { GitLabHook, GitLabHookDelivery } from "@/lib/git/types";
+import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { AsyncListBody, DeliveryPayload, InlineConfirm } from "./parts";
 
@@ -120,7 +121,7 @@ export function GitLabWebhooksSection({
                 </p>
                 <p className="mt-0.5 text-muted-foreground">
                   {eventsSummary(h.events)}
-                  {h.createdAt && (
+                  {parseableDate(h.createdAt) && (
                     <>
                       {" · added "}
                       <RelativeTime date={h.createdAt} />
@@ -409,6 +410,8 @@ function DeliveryRow({
   const ok =
     delivery.responseStatus.startsWith("2") ||
     delivery.responseStatus.startsWith("3");
+  const showDeliveryTime =
+    !!delivery.createdAt && parseableDate(delivery.createdAt);
   return (
     <div className="rounded-md border text-xs">
       <div className="flex items-center gap-2 p-2">
@@ -423,8 +426,11 @@ function DeliveryRow({
           </Badge>
           <span className="truncate font-mono">{delivery.trigger}</span>
           <span className="ml-auto shrink-0 text-muted-foreground">
-            {delivery.duration > 0 ? `${delivery.duration.toFixed(2)}s · ` : ""}
-            {delivery.createdAt ? (
+            {/* The "·" belongs to the pair, not to the duration — it renders
+                only when both sides do, so neither one alone leaves it hanging. */}
+            {delivery.duration > 0 ? `${delivery.duration.toFixed(2)}s` : ""}
+            {delivery.duration > 0 && showDeliveryTime ? " · " : ""}
+            {showDeliveryTime ? (
               <RelativeTime date={delivery.createdAt} />
             ) : null}
           </span>

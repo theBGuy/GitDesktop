@@ -25,7 +25,7 @@ import {
 } from "@/lib/git/queries";
 import type { RepoRole } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
-import { formatRelativeTime } from "@/lib/time";
+import { formatRelativeTime, parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { AsyncListBody, InlineConfirm } from "./parts";
@@ -240,7 +240,7 @@ export function CollaboratorsSection({
                   active={i === activeInvite}
                   onFocus={() => setActiveInvite(i)}
                   meta={
-                    inv.createdAt
+                    inv.createdAt && parseableDate(inv.createdAt)
                       ? `invited ${formatRelativeTime(inv.createdAt, now)}`
                       : "pending"
                   }

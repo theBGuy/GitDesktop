@@ -39,6 +39,7 @@ import {
 } from "@/lib/pulls/queries";
 import { useRemoteSlug, useRepoLens } from "@/lib/repo-lens/queries";
 import { useUiStore } from "@/lib/stores/ui";
+import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { CreatePrDialog } from "./CreatePrDialog";
 import { LocalPrContextMenu } from "./LocalPrContextMenu";
@@ -296,7 +297,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
               )}
             </p>
             <p className="mt-0.5 truncate pl-4 text-[11px] text-muted-foreground">
-              {pr.createdAt && (
+              {parseableDate(pr.createdAt) && (
                 <>
                   <RelativeTime date={pr.createdAt} />
                   {" · "}
@@ -431,7 +432,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
               )}
               {" · "}
               {pr.author ? `${displayLogin(pr.author.login)} · ` : ""}
-              {pr.createdAt && (
+              {parseableDate(pr.createdAt) && (
                 <>
                   <RelativeTime date={pr.createdAt} />
                   {" · "}

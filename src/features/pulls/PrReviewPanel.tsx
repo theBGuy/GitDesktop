@@ -59,7 +59,7 @@ import {
   useReviewRun,
 } from "@/lib/stores/reviews";
 import { useUiStore } from "@/lib/stores/ui";
-import { formatDuration } from "@/lib/time";
+import { formatDuration, validEpochMs } from "@/lib/time";
 import { ReviewHistory } from "./ReviewHistory";
 import { ThoughtsDisclosure } from "./ThoughtsDisclosure";
 
@@ -593,7 +593,7 @@ export function PrReviewPanel({
               <span className="min-w-0">
                 {ignored ? (
                   `Next ${label} starts fresh, ignoring your previous one.`
-                ) : (
+                ) : validEpochMs(prior.finishedAt) ? (
                   <>
                     {`Next ${label} builds on your last (`}
                     <RelativeTime
@@ -601,6 +601,10 @@ export function PrReviewPanel({
                     />
                     {")."}
                   </>
+                ) : (
+                  // A corrupt persisted stamp would throw in `toISOString` —
+                  // drop the parenthetical, never the sentence.
+                  `Next ${label} builds on your last.`
                 )}
               </span>
               <button

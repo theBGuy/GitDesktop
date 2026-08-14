@@ -1368,9 +1368,9 @@ filterable, optionally scoped to the current branch — with the header CI badge
 latest one. Open a pipeline to see its **jobs** (status + durations, counting up live while
 a job runs); expand a job for its **log** (copyable from its corner). The pipeline actions
 work here too: **Cancel** a running pipeline, **Retry** a failed or canceled one (GitLab
-restarts its failed jobs), and **Run pipeline…** starts a fresh pipeline on a branch or
-tag, with optional **CI/CD variables**. A **manual job** —
-one that waits for a manual trigger — shows a **Run job** button that plays it.
+restarts its failed jobs), and **Run pipeline…** starts a fresh pipeline on a branch or tag,
+with optional **CI/CD variables**. A **manual job** — one that waits for a manual trigger —
+shows a **Run job** button that plays it.
 {{ai}}
 ## Debug with AI
 

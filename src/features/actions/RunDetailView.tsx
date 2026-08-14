@@ -12,7 +12,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
-import { ElapsedTime } from "@/components/elapsed-time";
+import { RunDuration } from "@/components/elapsed-time";
 import { LogBlock } from "@/components/LogBlock";
 import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
@@ -41,7 +41,7 @@ import {
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
-import { formatDurationBetween } from "@/lib/time";
+import { formatDurationBetween, parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { DebugJobDialog } from "./DebugJobDialog";
 import { isFailureConclusion, StatusIcon, statusLabel } from "./status";
@@ -126,18 +126,12 @@ function JobRow({
           <span className="min-w-0 flex-1 truncate font-medium">
             {job.name}
           </span>
-          {jobRunning && Number.isFinite(jobSince) ? (
-            <ElapsedTime
-              since={jobSince}
-              className="shrink-0 text-[11px] text-muted-foreground"
-            />
-          ) : (
-            elapsed && (
-              <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
-                {elapsed}
-              </span>
-            )
-          )}
+          <RunDuration
+            running={jobRunning}
+            since={jobSince}
+            elapsed={elapsed}
+            className="shrink-0 text-[11px] text-muted-foreground"
+          />
         </button>
         {onPlay && (
           <DisabledReasonButton
@@ -192,18 +186,12 @@ function JobRow({
                 <span className="min-w-0 flex-1 truncate text-muted-foreground">
                   {step.name}
                 </span>
-                {stepRunning && Number.isFinite(stepSince) ? (
-                  <ElapsedTime
-                    since={stepSince}
-                    className="shrink-0 text-[11px] text-muted-foreground"
-                  />
-                ) : (
-                  stepElapsed && (
-                    <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
-                      {stepElapsed}
-                    </span>
-                  )
-                )}
+                <RunDuration
+                  running={stepRunning}
+                  since={stepSince}
+                  elapsed={stepElapsed}
+                  className="shrink-0 text-[11px] text-muted-foreground"
+                />
                 {href && (
                   <ArrowSquareOutIcon className="size-3 shrink-0 text-muted-foreground opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100" />
                 )}
@@ -462,7 +450,7 @@ export function RunDetailView({
             <p className="mt-0.5 text-xs text-muted-foreground">
               {run.workflowName} · #{run.number} · {run.headBranch} ·{" "}
               {run.event} · {statusLabel(run.status, run.conclusion)}
-              {run.createdAt && (
+              {parseableDate(run.createdAt) && (
                 <>
                   {" · "}
                   <RelativeTime date={run.createdAt} />

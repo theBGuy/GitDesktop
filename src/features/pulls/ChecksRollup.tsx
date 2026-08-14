@@ -20,7 +20,7 @@ import {
   useState,
 } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
-import { ElapsedTime } from "@/components/elapsed-time";
+import { RunDuration } from "@/components/elapsed-time";
 import { LogBlock } from "@/components/LogBlock";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
@@ -267,18 +267,12 @@ function RunSteps({ job }: { job: RunJob }) {
             >
               {step.name}
             </span>
-            {running && Number.isFinite(since) ? (
-              <ElapsedTime
-                since={since}
-                className="shrink-0 text-muted-foreground"
-              />
-            ) : (
-              elapsed && (
-                <span className="shrink-0 text-muted-foreground tabular-nums">
-                  {elapsed}
-                </span>
-              )
-            )}
+            <RunDuration
+              running={running}
+              since={since}
+              elapsed={elapsed}
+              className="shrink-0 text-muted-foreground"
+            />
           </div>
         );
       })}
@@ -370,18 +364,12 @@ function CheckRow({
           · {stepPeek}
         </span>
       )}
-      {runningSince !== null && Number.isFinite(runningSince) ? (
-        <ElapsedTime
-          since={runningSince}
-          className="shrink-0 text-[11px] text-muted-foreground"
-        />
-      ) : (
-        elapsed && (
-          <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
-            {elapsed}
-          </span>
-        )
-      )}
+      <RunDuration
+        running={runningSince !== null}
+        since={runningSince}
+        elapsed={elapsed}
+        className="shrink-0 text-[11px] text-muted-foreground"
+      />
     </>
   );
 

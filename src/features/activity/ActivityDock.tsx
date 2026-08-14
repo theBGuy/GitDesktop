@@ -44,7 +44,7 @@ import {
   useReviewTasks,
 } from "@/lib/stores/reviews";
 import { useUiStore } from "@/lib/stores/ui";
-import { formatDuration } from "@/lib/time";
+import { formatDuration, validEpochMs } from "@/lib/time";
 import { cn } from "@/lib/utils";
 
 /**
@@ -519,9 +519,14 @@ function NotificationRow({
             )}
           </span>
         </span>
-        <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
-          <RelativeTime date={new Date(n.ts).toISOString()} />
-        </span>
+        {/* A stamp read back from notifications.json only had to be a `number`
+            to hydrate, and `toISOString` throws outside Date's range — which
+            here would take down the whole dock. Drop the cell, keep the row. */}
+        {validEpochMs(n.ts) && (
+          <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
+            <RelativeTime date={new Date(n.ts).toISOString()} />
+          </span>
+        )}
       </button>
       {n.action && (
         <Button

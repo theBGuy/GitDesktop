@@ -52,6 +52,7 @@ import {
 import { providerLabel } from "@/lib/git/types";
 import { useConfirm } from "@/lib/stores/confirm";
 import { useUiStore } from "@/lib/stores/ui";
+import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { CreateReleaseDialog } from "./CreateReleaseDialog";
 
@@ -266,7 +267,7 @@ export function TagDetailView({
             {rel.isPrerelease && <Badge variant="secondary">Pre-release</Badge>}
             {rel.isDraft && <Badge variant="secondary">Draft</Badge>}
             {rel.author && <span>• {rel.author}</span>}
-            {rel.publishedAt && (
+            {parseableDate(rel.publishedAt) && (
               <span>
                 • released <RelativeTime date={rel.publishedAt} />
               </span>
@@ -642,7 +643,7 @@ export function TagDetailView({
           {tagInfo?.target && (
             <span className="font-mono">{tagInfo.target.slice(0, 7)}</span>
           )}
-          {tagInfo?.date && (
+          {tagInfo?.date && parseableDate(tagInfo.date) && (
             <span>
               • <RelativeTime date={tagInfo.date} />
             </span>

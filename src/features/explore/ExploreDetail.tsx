@@ -32,6 +32,7 @@ import {
   providerLabel,
 } from "@/lib/git/types";
 import { useConfirm } from "@/lib/stores/confirm";
+import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import type { ExploreCloneTarget } from "./ExploreCloneDialog";
 import { starParts } from "./explore-utils";
@@ -198,7 +199,7 @@ function ExploreDetailBody({
             </span>
           )}
           {repo.language && <span>{repo.language}</span>}
-          {repo.updatedAt && (
+          {repo.updatedAt && parseableDate(repo.updatedAt) && (
             <span>
               updated <RelativeTime date={repo.updatedAt} />
             </span>

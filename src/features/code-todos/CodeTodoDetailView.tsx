@@ -18,6 +18,7 @@ import {
   useTodoScanInvalidate,
 } from "@/lib/git/queries";
 import type { BlameLine } from "@/lib/git/types";
+import { validEpochMs } from "@/lib/time";
 import { cn } from "@/lib/utils";
 import { MarkerChip } from "./MarkerChip";
 import { basename } from "./markers";
@@ -160,7 +161,7 @@ export function CodeTodoDetailView({
         {todoLine && isRealCommit(todoLine.hash) && (
           <p className="mt-2 text-xs text-muted-foreground">
             Added by {todoLine.author}
-            {todoLine.time ? (
+            {todoLine.time && validEpochMs(todoLine.time * 1000) ? (
               <>
                 {" · "}
                 <RelativeTime

@@ -38,6 +38,24 @@ export function formatDuration(ms: number): string {
   return `${hours}h ${totalMinutes % 60}m`;
 }
 
+/** Whether `formatRelativeTime` can read this date. String-context callers must
+ *  check it themselves — they compose the result into a larger string, so they
+ *  get no benefit from `<RelativeTime>`'s own guard against "in NaN years".
+ *  Deliberately string-only: `new Date(null)` is epoch-0, so a widened
+ *  nullable predicate would call null "parseable" — nullable callers keep
+ *  their `x && parseableDate(x)` prefix. */
+export function parseableDate(iso: string): boolean {
+  return !Number.isNaN(new Date(iso).getTime());
+}
+
+/** Whether an epoch-ms number is inside `Date`'s representable range, so
+ *  `new Date(t).toISOString()` won't throw. Range, not finiteness, is the real
+ *  gate: `JSON.parse("1e999")` mints `Infinity`, and an oversized finite like
+ *  `1e20` clears `Number.isFinite` yet still throws past the ±8.64e15 bound. */
+export function validEpochMs(t: number): boolean {
+  return Number.isFinite(t) && Math.abs(t) <= 8.64e15;
+}
+
 /** The span between two ISO timestamps, as `"42s"` / `"3m"` / `"3m 12s"` /
  *  `"1h 2m"` — the coarse CI-run format (a whole minute drops the seconds,
  *  unlike `formatDuration`). Returns `""` when either end is missing,

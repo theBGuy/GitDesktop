@@ -15,6 +15,7 @@ import type {
   PrTimelineEvent,
   ReviewThreadOut,
 } from "@/lib/git/types";
+import { parseableDate } from "@/lib/time";
 import {
   coalesceCommitRuns,
   PushedCommitsRow,
@@ -263,7 +264,7 @@ export function PrActivityFeed({
                   View thread
                 </button>
               )}
-              {r.date && (
+              {parseableDate(r.date) && (
                 <span className="shrink-0 text-muted-foreground/80">
                   · <RelativeTime date={r.date} />
                 </span>

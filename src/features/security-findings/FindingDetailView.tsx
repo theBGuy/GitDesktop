@@ -33,6 +33,7 @@ import {
   useGitLabFindings,
 } from "@/lib/gitlab/security-findings";
 import { useUiStore } from "@/lib/stores/ui";
+import { parseableDate } from "@/lib/time";
 import {
   CodeScanningChip,
   CqChip,
@@ -391,17 +392,17 @@ function AdvisoryDetail({ advisory }: { advisory: RepoAdvisoryOut }) {
           ) : null}
           {/* Dates that don't exist are omitted outright — a withdrawn-at of
               "never" would read as a claim the advisory stands. */}
-          {advisory.publishedAt ? (
+          {advisory.publishedAt && parseableDate(advisory.publishedAt) ? (
             <Row label="Published">
               <RelativeTime date={advisory.publishedAt} />
             </Row>
           ) : null}
-          {advisory.updatedAt ? (
+          {advisory.updatedAt && parseableDate(advisory.updatedAt) ? (
             <Row label="Updated">
               <RelativeTime date={advisory.updatedAt} />
             </Row>
           ) : null}
-          {advisory.withdrawnAt ? (
+          {advisory.withdrawnAt && parseableDate(advisory.withdrawnAt) ? (
             <Row label="Withdrawn">
               <RelativeTime date={advisory.withdrawnAt} />
             </Row>

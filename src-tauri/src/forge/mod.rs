@@ -1844,18 +1844,23 @@ pub async fn forge_ci_run_list(
     }
 }
 
+/// Parse a CI run/job id out of its wire form; `kind` names it in the error
+/// ("run" / "job"). Every CI id PARAM rides the wire as a string — JS clients lose
+/// integer precision past 2^53 — while the provider arms that take a numeric id
+/// address it as u64 (Bitbucket job logs ride a separate UUID path). Response ids
+/// stay raw JSON numbers (see actions.rs).
+fn parse_ci_id(kind: &str, raw: &str) -> AppResult<u64> {
+    raw.parse()
+        .map_err(|_| AppError::InvalidArgument(format!("Invalid {kind} id: {raw}")))
+}
+
 /// One CI run with its jobs, behind the abstraction.
 #[tauri::command]
 pub async fn forge_ci_run_view(
     repo_path: String,
     run_id: String,
 ) -> AppResult<crate::github::actions::RunDetail> {
-    // Every CI id PARAM rides the wire as a string — JS clients lose integer precision
-    // past 2^53 — while providers address runs/jobs as u64, so parse once here and keep
-    // everything downstream numeric. Response ids stay raw JSON numbers (see actions.rs).
-    let run_id: u64 = run_id
-        .parse()
-        .map_err(|_| AppError::InvalidArgument(format!("Invalid run id: {run_id}")))?;
+    let run_id = parse_ci_id("run", &run_id)?;
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::view_run(&repo_path, run_id).await,
         Some((Provider::Bitbucket, _)) => bitbucket::view_run(&repo_path, run_id).await,
@@ -1866,9 +1871,7 @@ pub async fn forge_ci_run_view(
 /// The failed jobs' logs for one CI run, behind the abstraction.
 #[tauri::command]
 pub async fn forge_ci_run_failed_logs(repo_path: String, run_id: String) -> AppResult<String> {
-    let run_id: u64 = run_id
-        .parse()
-        .map_err(|_| AppError::InvalidArgument(format!("Invalid run id: {run_id}")))?;
+    let run_id = parse_ci_id("run", &run_id)?;
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::run_failed_logs(&repo_path, run_id).await,
         Some((Provider::Bitbucket, _)) => bitbucket::run_failed_logs(&repo_path, run_id).await,
@@ -1879,9 +1882,7 @@ pub async fn forge_ci_run_failed_logs(repo_path: String, run_id: String) -> AppR
 /// One CI job's log, behind the abstraction.
 #[tauri::command]
 pub async fn forge_ci_job_logs(repo_path: String, job_id: String) -> AppResult<String> {
-    let job_id: u64 = job_id
-        .parse()
-        .map_err(|_| AppError::InvalidArgument(format!("Invalid job id: {job_id}")))?;
+    let job_id = parse_ci_id("job", &job_id)?;
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::job_logs(&repo_path, job_id).await,
         // Bitbucket steps are addressed by braced UUID, not a numeric id — the
@@ -1899,9 +1900,7 @@ pub async fn forge_ci_job_logs(repo_path: String, job_id: String) -> AppResult<S
 /// offers the retry button there; "re-run all" stays GitHub-only).
 #[tauri::command]
 pub async fn forge_ci_run_rerun(repo_path: String, run_id: String, failed: bool) -> AppResult<()> {
-    let run_id: u64 = run_id
-        .parse()
-        .map_err(|_| AppError::InvalidArgument(format!("Invalid run id: {run_id}")))?;
+    let run_id = parse_ci_id("run", &run_id)?;
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::retry_run(&repo_path, run_id).await,
         // Bitbucket has no rerun-failed-only; a re-run re-triggers the run's branch.
@@ -1919,9 +1918,7 @@ pub async fn forge_ci_run_approve(
     run_id: String,
     lens: Option<String>,
 ) -> AppResult<()> {
-    let run_id: u64 = run_id
-        .parse()
-        .map_err(|_| AppError::InvalidArgument(format!("Invalid run id: {run_id}")))?;
+    let run_id = parse_ci_id("run", &run_id)?;
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => Err(AppError::InvalidArgument(
             "Approving held runs is GitHub-only — GitDesktop has no run approval for GitLab pipelines.".into(),
@@ -1936,9 +1933,7 @@ pub async fn forge_ci_run_approve(
 /// Cancel an in-flight CI run, behind the abstraction.
 #[tauri::command]
 pub async fn forge_ci_run_cancel(repo_path: String, run_id: String) -> AppResult<()> {
-    let run_id: u64 = run_id
-        .parse()
-        .map_err(|_| AppError::InvalidArgument(format!("Invalid run id: {run_id}")))?;
+    let run_id = parse_ci_id("run", &run_id)?;
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::cancel_run(&repo_path, run_id).await,
         Some((Provider::Bitbucket, _)) => bitbucket::cancel_run(&repo_path, run_id).await,
@@ -3175,9 +3170,7 @@ pub async fn forge_gl_pipeline_findings(
 /// manual play, so this is `gl_only` rather than a neutral forge dispatch.
 #[tauri::command]
 pub async fn forge_gl_ci_play_job(repo_path: String, job_id: String) -> AppResult<()> {
-    let job_id: u64 = job_id
-        .parse()
-        .map_err(|_| AppError::InvalidArgument(format!("Invalid job id: {job_id}")))?;
+    let job_id = parse_ci_id("job", &job_id)?;
     gl_only!(repo_path, gitlab::play_job(&repo_path, job_id))
 }
 
@@ -4232,6 +4225,28 @@ mod tests {
                 "repo": "o/r",
                 "unknownReason": "HTTP 404",
             })
+        );
+    }
+
+    #[test]
+    fn parse_ci_id_pins_the_observable_error_text() {
+        // These strings cross the IPC boundary to the UI, so they are behavior, not
+        // diagnostics: the seven CI command sites — `forge_ci_*` plus
+        // `forge_gl_ci_play_job` — must keep emitting them verbatim.
+        let msg = |kind, raw| match parse_ci_id(kind, raw).unwrap_err() {
+            AppError::InvalidArgument(s) => s,
+            other => panic!("expected InvalidArgument, got {other}"),
+        };
+        assert_eq!(msg("run", "abc"), "Invalid run id: abc");
+        assert_eq!(msg("job", "not-a-number"), "Invalid job id: not-a-number");
+        // Empty and negative both fail the u64 parse, and the raw input echoes back as-is.
+        assert_eq!(msg("run", ""), "Invalid run id: ");
+        assert_eq!(msg("job", "-1"), "Invalid job id: -1");
+        // 2^53 + 1 — not representable as an f64, so a JSON-number param would round it
+        // to 2^53. Surviving intact is the reason the params ride the wire as strings.
+        assert_eq!(
+            parse_ci_id("run", "9007199254740993").unwrap(),
+            9_007_199_254_740_993
         );
     }
 }

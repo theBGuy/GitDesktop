@@ -23,7 +23,7 @@ import {
   useVariables,
 } from "@/lib/git/queries";
 import type { SecretApp } from "@/lib/git/types";
-import { formatRelativeTime } from "@/lib/time";
+import { formatRelativeTime, parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { AsyncListBody, InlineConfirm } from "./parts";
@@ -249,7 +249,7 @@ function SecretsList({
             key={s.name}
             name={s.name}
             meta={
-              s.updatedAt
+              s.updatedAt && parseableDate(s.updatedAt)
                 ? `Updated ${formatRelativeTime(s.updatedAt, now)}`
                 : ""
             }

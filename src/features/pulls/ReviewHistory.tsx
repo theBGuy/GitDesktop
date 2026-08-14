@@ -18,7 +18,7 @@ import {
   useReviewHistory,
   useUpdateReviewText,
 } from "@/lib/pulls/queries";
-import { formatDuration } from "@/lib/time";
+import { formatDuration, validEpochMs } from "@/lib/time";
 import { ThoughtsDisclosure } from "./ThoughtsDisclosure";
 
 /**
@@ -142,9 +142,13 @@ export function ReviewHistory({
             // positive span. Note: records saved before the runtime-display
             // change stamped `startedAt` at enqueue (queue wait included);
             // newer ones stamp at run start — historical durations mix the two.
+            // `validEpochMs`, not `typeof === "number"`: this shares the
+            // timestamp's gate so that duration present ⇒ `finishedAt` renders,
+            // and the "·" below can never dangle. Only that direction holds —
+            // a valid stamp with no positive span shows the time alone.
             const duration =
-              typeof r.startedAt === "number" &&
-              typeof r.finishedAt === "number" &&
+              validEpochMs(r.startedAt) &&
+              validEpochMs(r.finishedAt) &&
               r.finishedAt - r.startedAt > 0
                 ? formatDuration(r.finishedAt - r.startedAt)
                 : null;
@@ -179,11 +183,13 @@ export function ReviewHistory({
                           <span aria-hidden>·</span>
                         </>
                       )}
-                      <span>
-                        <RelativeTime
-                          date={new Date(r.finishedAt).toISOString()}
-                        />
-                      </span>
+                      {validEpochMs(r.finishedAt) && (
+                        <span>
+                          <RelativeTime
+                            date={new Date(r.finishedAt).toISOString()}
+                          />
+                        </span>
+                      )}
                     </span>
                   </button>
                   <button

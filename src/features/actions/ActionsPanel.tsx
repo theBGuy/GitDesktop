@@ -27,6 +27,7 @@ import { useWorkflowRuns } from "@/lib/github/actions";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
+import { parseableDate } from "@/lib/time";
 import { cn } from "@/lib/utils";
 import { RunWorkflowDialog } from "./RunWorkflowDialog";
 import { StatusIcon, statusLabel } from "./status";
@@ -265,7 +266,7 @@ export function ActionsPanel({
                   <p className="mt-0.5 truncate pl-5 text-[11px] text-muted-foreground">
                     {run.workflowName} · {run.headBranch} ·{" "}
                     {statusLabel(run.status, run.conclusion)}
-                    {run.updatedAt && (
+                    {parseableDate(run.updatedAt) && (
                       <>
                         {" · "}
                         <RelativeTime date={run.updatedAt} />

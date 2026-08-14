@@ -5,6 +5,7 @@ import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import { useReviewNote } from "@/lib/review-notes/queries";
 import { deleteReviewNote } from "@/lib/review-notes/store";
+import { parseableDate } from "@/lib/time";
 
 /** The subset of a `form.AppField` child this field needs: the bound
  *  `MarkdownField` component plus enough of the field api to read the current
@@ -141,8 +142,15 @@ export function ReviewerNotesField({
           />
           {seededAt && (
             <div className="flex items-center justify-between gap-2 text-muted-foreground">
+              {/* The span stays so `justify-between` keeps Clear on the right;
+                  only the phrase depends on a readable stamp — "saved" with no
+                  time reads as truncated. */}
               <span>
-                Prefilled from a note saved <RelativeTime date={seededAt} />
+                {parseableDate(seededAt) && (
+                  <>
+                    Prefilled from a note saved <RelativeTime date={seededAt} />
+                  </>
+                )}
               </span>
               <Button type="button" variant="ghost" size="xs" onClick={clear}>
                 Clear

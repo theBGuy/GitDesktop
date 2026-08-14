@@ -55,3 +55,25 @@ export function ElapsedTime({
     </span>
   );
 }
+
+/** A CI row's time cell: live counter while the row runs, fixed span once it
+ *  finishes, nothing when there's no time to show. `running` is the caller's
+ *  own predicate — only it knows which payload is authoritative — and a
+ *  non-finite `since` falls through to the static span rather than "0s". */
+export function RunDuration({
+  running,
+  since,
+  elapsed,
+  className,
+}: {
+  running: boolean;
+  since: number | null;
+  elapsed: string;
+  className?: string;
+}) {
+  if (running && since !== null && Number.isFinite(since)) {
+    return <ElapsedTime since={since} className={className} />;
+  }
+  if (!elapsed) return null;
+  return <span className={cn("tabular-nums", className)}>{elapsed}</span>;
+}

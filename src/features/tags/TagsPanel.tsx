@@ -36,6 +36,7 @@ import type { ReleaseInfo } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
+import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { CreateReleaseDialog } from "./CreateReleaseDialog";
@@ -233,7 +234,11 @@ export function TagsPanel({ repoPath }: { repoPath: string }) {
                   </p>
                   <p className="mt-0.5 truncate pl-4 text-[11px] text-muted-foreground">
                     {row.release ? "release · " : "tag · "}
-                    {row.date ? <RelativeTime date={row.date} /> : "—"}
+                    {parseableDate(row.date) ? (
+                      <RelativeTime date={row.date} />
+                    ) : (
+                      "—"
+                    )}
                   </p>
                 </button>
               );

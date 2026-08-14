@@ -23,6 +23,7 @@ import { RelativeTime } from "@/components/relative-time";
 import type { CommitRow } from "@/features/conversations/CommitsList";
 import type { PrTimelineEvent } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { parseableDate } from "@/lib/time";
 import { cn } from "@/lib/utils";
 
 /** A merged timeline entry: the keys the feed sorts by, plus EITHER a ready
@@ -225,7 +226,7 @@ export function TimelineEventRow({ event }: { event: PrTimelineEvent }) {
         <span className="min-w-0 truncate" onMouseEnter={clipTitle(label)}>
           {label}
         </span>
-        {event.date && (
+        {parseableDate(event.date) && (
           <span className="shrink-0 text-muted-foreground/80">
             · <RelativeTime date={event.date} />
           </span>
@@ -300,7 +301,7 @@ export function PushedCommitsRow({
             )}
             pushed {n} commit{n === 1 ? "" : "s"}
           </button>
-          {headerDate && (
+          {headerDate && parseableDate(headerDate) && (
             <span className="shrink-0 text-muted-foreground/80">
               · <RelativeTime date={headerDate} />
             </span>
@@ -330,7 +331,7 @@ export function PushedCommitsRow({
                     <span className="shrink-0 font-mono text-[11px] text-primary underline-offset-2 group-hover:underline">
                       {c.shortSha}
                     </span>
-                    {c.date && (
+                    {c.date && parseableDate(c.date) && (
                       <span className="shrink-0 text-[11px] text-muted-foreground/80">
                         · <RelativeTime date={c.date} />
                       </span>
@@ -349,7 +350,7 @@ export function PushedCommitsRow({
                     <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
                       {c.shortSha}
                     </span>
-                    {c.date && (
+                    {c.date && parseableDate(c.date) && (
                       <span className="shrink-0 text-[11px] text-muted-foreground/80">
                         · <RelativeTime date={c.date} />
                       </span>

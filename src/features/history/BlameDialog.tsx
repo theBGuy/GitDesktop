@@ -21,6 +21,7 @@ import { diffLang } from "@/features/diff/diff-lang";
 import { useBlame } from "@/lib/git/queries";
 import type { BlameLine } from "@/lib/git/types";
 import { useUiStore } from "@/lib/stores/ui";
+import { validEpochMs } from "@/lib/time";
 import "@/features/diff/code-highlight.css";
 
 /** `git blame --porcelain` reports uncommitted lines with an all-zero sha
@@ -188,9 +189,10 @@ function BlameLines({
         // inside virtual rows.
         const newCommit =
           vi.index === 0 || lines[vi.index - 1].hash !== line.hash;
-        const whenIso = line.time
-          ? new Date(line.time * 1000).toISOString()
-          : "";
+        const whenIso =
+          line.time && validEpochMs(line.time * 1000)
+            ? new Date(line.time * 1000).toISOString()
+            : "";
         const short = line.hash.slice(0, 7);
         // Only real commits get the interactive commit reference; uncommitted
         // (all-zero sha) rows and continuation rows keep the plain gutter cell.

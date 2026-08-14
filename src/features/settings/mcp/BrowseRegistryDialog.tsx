@@ -41,7 +41,7 @@ import {
   searchRegistry,
   uniqueServerName,
 } from "@/lib/settings/mcp-registry";
-import { formatRelativeTime } from "@/lib/time";
+import { formatRelativeTime, parseableDate } from "@/lib/time";
 import { useDebouncedValue } from "@/lib/use-debounced-value";
 import { useLatestRef } from "@/lib/use-latest-ref";
 
@@ -476,9 +476,10 @@ export function BrowseRegistryDialog({
                                 stat
                                   ? `${compactNumber.format(stat.forks)} forks`
                                   : null,
-                                stat?.pushedAt
+                                stat?.pushedAt && parseableDate(stat.pushedAt)
                                   ? `updated ${formatRelativeTime(stat.pushedAt, now)}`
-                                  : c.publishedAt
+                                  : c.publishedAt &&
+                                      parseableDate(c.publishedAt)
                                     ? `published ${formatRelativeTime(c.publishedAt, now)}`
                                     : null,
                                 stat?.archived ? "archived" : null,

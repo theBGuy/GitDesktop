@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import { formatRelativeTime } from "@/lib/time";
+import { formatRelativeTime, parseableDate } from "@/lib/time";
 
 // All mounted timestamps compute from ONE shared snapshot, refreshed every 30s.
 // Mutual consistency is the point — two rows mounted at different moments must
@@ -43,15 +43,18 @@ export function useRelativeNow(): number {
   return useSyncExternalStore(subscribe, getNow);
 }
 
-/** Relative timestamp with the absolute local date-time on hover.
- *  Callers keep their own `date &&` guards — pass a non-empty ISO string. */
+/** Relative timestamp with the absolute local date-time on hover. An
+ *  unparseable date renders nothing, so this is safe to mount unguarded — but a
+ *  caller that co-renders a literal (a separator, a label, a parenthetical)
+ *  must gate BOTH on `parseableDate(date)`, or the literal is left dangling
+ *  beside nothing. Nullable dates prefix a truthiness test: `new Date(null)` is
+ *  epoch 0, which `parseableDate` accepts. */
 export function RelativeTime({ date }: { date: string }) {
   const nowMs = useRelativeNow();
   const parsed = new Date(date);
-  // An unparseable date renders nothing rather than "in NaN years"
-  // (formatRelativeTime's unit walk emits the year unit for NaN) — this is a
-  // shared primitive, so don't lean on callers' `date &&` guards alone.
-  if (Number.isNaN(parsed.getTime())) return null;
+  // "in NaN years" is what formatRelativeTime's unit walk emits for an
+  // unparseable date — its year unit matches NaN.
+  if (!parseableDate(date)) return null;
   return (
     <time dateTime={date} title={parsed.toLocaleString()}>
       {formatRelativeTime(date, nowMs)}

@@ -22,6 +22,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { useOplogHistory } from "@/lib/git/queries";
 import type { OpLogEntry } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { parseableDate } from "@/lib/time";
 import { cn } from "@/lib/utils";
 
 type IconType = ComponentType<{ className?: string }>;
@@ -198,7 +199,7 @@ function OpRow({
       </div>
       <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
         <RelativeTime date={entry.startedAt} />
-        {entry.finishedAt && (
+        {entry.finishedAt && parseableDate(entry.finishedAt) && (
           <>
             {" · finished "}
             <RelativeTime date={entry.finishedAt} />
