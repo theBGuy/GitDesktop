@@ -222,6 +222,8 @@ export function CommitComments({
   selectedPath,
   onSelectFile,
   lens,
+  stale = false,
+  enabled = true,
 }: {
   repoPath: string;
   sha: string;
@@ -238,8 +240,15 @@ export function CommitComments({
   /** Which repo the commit's comments live on: "origin" (the History surface, or
    *  a non-fork) or the parent under the upstream lens (PR-commit context). */
   lens: RemoteLens;
+  /** The parent is still showing the PREVIOUS commit's content (placeholder data)
+   *  while `sha` already names the new one — pass it so writes hold. */
+  stale?: boolean;
+  /** Whether this commit takes comments at all. False renders nothing, but the
+   *  component STAYS MOUNTED so per-commit drafts survive a commit that doesn't
+   *  (yet) support them; the read is disabled with it. */
+  enabled?: boolean;
 }) {
-  const comments = useCommitComments(repoPath, sha, lens);
+  const comments = useCommitComments(repoPath, enabled ? sha : null, lens);
   const createComment = useCreateCommitComment(repoPath, lens);
   const editComment = useEditCommitComment(repoPath, lens);
   const deleteComment = useDeleteCommitComment(repoPath, lens);
@@ -275,12 +284,17 @@ export function CommitComments({
       .filter(({ path, line }) => !(path === selectedPath && line != null));
   }, [anchored, diffSections, selectedPath]);
 
+  // Parents serve the previous commit's content as placeholder while arrowing
+  // through history, so hold writes until the shown commit is the addressed one.
   const busy =
-    createComment.isPending || editComment.isPending || deleteComment.isPending;
+    createComment.isPending ||
+    editComment.isPending ||
+    deleteComment.isPending ||
+    stale;
 
   function submit() {
     const text = draft.value.trim();
-    if (!text) return;
+    if (!text || stale) return;
     // Clear the draft immediately (perceived-speed win); the hook appends the
     // synthetic comment optimistically. On error restore the draft, but only if
     // that commit's composer is still empty so newly-typed text is never clobbered.
@@ -308,8 +322,12 @@ export function CommitComments({
     );
   }
 
+  // After every hook: an unsupported commit renders nothing, but the mounted
+  // component keeps this surface's per-commit drafts alive across it.
+  if (!enabled) return null;
+
   return (
-    <div className="flex min-h-0 flex-col">
+    <div className="flex max-h-[45%] min-h-0 shrink-0 flex-col border-t">
       <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-3">
         {comments.isError ? (
           <p className="text-xs text-destructive">

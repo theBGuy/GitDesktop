@@ -552,13 +552,17 @@ export function RemotePrView({
   const providerKey: ForgeProvider = provider ?? "github";
 
   // Palette-only PR actions — mounted here so they live only while a remote PR is
-  // open.
+  // open. Every one whose enablement reads `details.data` also gates on
+  // `!details.isPlaceholderData`: during a switch that data is the previous PR's,
+  // so the command would offer (and act on) a PR the user never opened.
   const draftCount = drafts.data?.length ?? 0;
   const [discardConfirmOpen, setDiscardConfirmOpen] = useState(false);
   useHotkeyAction(
     "submit-review",
     () => setSubmitOpen(true),
-    canSubmitReview && details.data?.state === "OPEN",
+    canSubmitReview &&
+      details.data?.state === "OPEN" &&
+      !details.isPlaceholderData,
   );
   useHotkeyAction(
     "discard-pending-review",
@@ -572,8 +576,10 @@ export function RemotePrView({
   const draftPairVisible = canToggleDraft || (isGitHubProvider && canWrite);
   // One in-flight PR mutation at a time: every footer/state control and its palette
   // twin disables while any of these runs. Declared above the palette wiring so both
-  // share the exact same gate.
+  // share the exact same gate. Placeholder details are the previously shown PR's and
+  // the footer's verbs derive from them, so the same gate holds through a switch.
   const busy =
+    details.isPlaceholderData ||
     comment.isPending ||
     mergePr.isPending ||
     closePr.isPending ||
@@ -639,12 +645,12 @@ export function RemotePrView({
   useHotkeyAction(
     "pr-stack-next",
     () => goToStackNeighbor(1),
-    isSelectedPr && !!stackNeighbor(1),
+    isSelectedPr && !details.isPlaceholderData && !!stackNeighbor(1),
   );
   useHotkeyAction(
     "pr-stack-previous",
     () => goToStackNeighbor(-1),
-    isSelectedPr && !!stackNeighbor(-1),
+    isSelectedPr && !details.isPlaceholderData && !!stackNeighbor(-1),
   );
 
   // Stack writes are GitHub-only, and the chain that would be stacked is read
@@ -765,17 +771,20 @@ export function RemotePrView({
   useHotkeyAction(
     "pr-stack-create",
     () => offerRef.current?.expand(),
-    isSelectedPr && stackOffer?.kind === "create",
+    isSelectedPr && !details.isPlaceholderData && stackOffer?.kind === "create",
   );
   useHotkeyAction(
     "pr-stack-add",
     () => offerRef.current?.expand(),
-    isSelectedPr && stackOffer?.kind === "add",
+    isSelectedPr && !details.isPlaceholderData && stackOffer?.kind === "add",
   );
   useHotkeyAction(
     "pr-stack-dissolve",
     () => void dissolveStack(),
-    isSelectedPr && canDissolveStack && !stackDissolve.isPending,
+    isSelectedPr &&
+      !details.isPlaceholderData &&
+      canDissolveStack &&
+      !stackDissolve.isPending,
   );
 
   // Server truth first; the local preview only fills the gap where the forge has none.
@@ -894,6 +903,7 @@ export function RemotePrView({
     "pr-resolve-conflicts",
     () => runResolve(false),
     isSelectedPr &&
+      !details.isPlaceholderData &&
       (canResolveConflicts || resolveWorktree !== null) &&
       !resolve &&
       !mergeRemotePr.isPending,
@@ -929,7 +939,7 @@ export function RemotePrView({
   useHotkeyAction(
     "pr-update-branch",
     () => void runUpdateBranch(false),
-    isSelectedPr && canUpdateBranch,
+    isSelectedPr && !details.isPlaceholderData && canUpdateBranch,
   );
 
   const compose = useKeyedEntityState(entityKey, "");
@@ -1054,6 +1064,7 @@ export function RemotePrView({
   // otherwise the label lags a full approve-POST + refetch. Success invalidation
   // reconciles; errors roll back.
   async function toggleApproval() {
+    if (details.isPlaceholderData) return;
     const approved = approvals.data?.viewerHasApproved ?? false;
     const action = approved ? unapprovePr : approvePr;
     // Must mirror usePrApprovals' key exactly — its lens segment is always the
@@ -1103,6 +1114,7 @@ export function RemotePrView({
   // optimistic flip as the approve toggle — the state lives in the separate
   // approvals query.
   async function requestChanges() {
+    if (details.isPlaceholderData) return;
     const requested = approvals.data?.viewerRequestedChanges ?? false;
     // Already requested on GitLab: the button is a focusable state indicator
     // (its title says how to clear); a re-click must not fire the Premium-only
@@ -1155,7 +1167,7 @@ export function RemotePrView({
 
   function submitComment() {
     const body = compose.value.trim();
-    if (!body) return;
+    if (!body || details.isPlaceholderData) return;
     // Clear the draft immediately (the perceived-speed win) and append the
     // synthetic comment optimistically; on error restore the draft, but only if
     // that PR's composer is still empty so we never clobber newly-typed text.

@@ -287,13 +287,18 @@ export function RemoteIssueView({
   }
 
   const isOpen = issue.state === "OPEN";
+  // The rendered issue is the previous one during a switch, so the composer-row
+  // actions hold until the selected issue is on screen.
   const busy =
-    comment.isPending || closeIssue.isPending || reopenIssue.isPending;
+    comment.isPending ||
+    closeIssue.isPending ||
+    reopenIssue.isPending ||
+    details.isPlaceholderData;
   const comments = issue.comments.filter((c) => hasVisibleBody(c.body));
 
   function submitComment() {
     const body = compose.value.trim();
-    if (!body) return;
+    if (!body || details.isPlaceholderData) return;
     // Clear the draft immediately (the perceived-speed win) and append the
     // synthetic comment optimistically; on error restore the draft, but only if
     // that issue's composer is still empty so we never clobber newly-typed text.

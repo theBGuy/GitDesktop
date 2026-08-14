@@ -235,8 +235,9 @@ export function DiscussionView({
     return <DiffPlaceholder message="Could not load this discussion" />;
   }
 
-  // Placeholder details are the PREVIOUSLY shown discussion's, so every write
-  // during the switch window would target that one — gate them all on it.
+  // Placeholder details are the previous discussion's, so actions addressing the
+  // DISCUSSION (composer, reply box, mark-as-answer) hold until it's on screen;
+  // per-comment actions stay live — a comment id names what the user saw.
   const busy =
     addComment.isPending ||
     markAnswer.isPending ||
@@ -711,9 +712,7 @@ export function DiscussionView({
                         <Button
                           size="xs"
                           variant="ghost"
-                          onClick={() =>
-                            reply.set((prev) => ({ ...prev, targetId: null }))
-                          }
+                          onClick={() => reply.set(EMPTY_REPLY)}
                         >
                           Cancel
                         </Button>

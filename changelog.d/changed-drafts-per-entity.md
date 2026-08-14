@@ -1,2 +1,3 @@
-- Comment drafts now stick to the discussion, pull request, issue, or commit
-  they were written on — switch away and come back without losing typed text.
+- The comment box now keeps a separate draft for each discussion, pull request,
+  issue, and commit you're working in, so you can switch between them and pick
+  up where you left off.

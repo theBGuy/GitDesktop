@@ -1534,7 +1534,7 @@ export function JiraIssueView({
 
   function submitComment() {
     const body = compose.value.trim();
-    if (!body) return;
+    if (!body || details.isPlaceholderData) return;
     // Clear the draft immediately (perceived speed); restore it on error, but only
     // if that issue's composer is still empty so we never clobber newly-typed text.
     const submittedFor = issueIdentity;
@@ -1713,7 +1713,9 @@ export function JiraIssueView({
               onSubmit={submitComment}
               onClear={() => compose.set("")}
               submitLabel="Comment"
-              busy={comment.isPending}
+              // A placeholder issue is the previously selected one, so submitting
+              // would comment on it; typing stays live through the window.
+              busy={comment.isPending || details.isPlaceholderData}
               disabled={comment.isPending}
             />
           )}

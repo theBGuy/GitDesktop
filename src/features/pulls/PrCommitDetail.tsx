@@ -270,18 +270,16 @@ export function PrCommitDetail({
                 <DiffPlaceholder message="No file changes in this commit" />
               )}
             </div>
-            <div className="max-h-[45%] shrink-0 border-t">
-              <CommitComments
-                repoPath={repoPath}
-                sha={commit.oid}
-                canComment={canCommentCommits}
-                remoteLabel={remoteLabel}
-                diffSections={sections}
-                selectedPath={effectivePath}
-                onSelectFile={setSelectedPath}
-                lens={lens}
-              />
-            </div>
+            <CommitComments
+              repoPath={repoPath}
+              sha={commit.oid}
+              canComment={canCommentCommits}
+              remoteLabel={remoteLabel}
+              diffSections={sections}
+              selectedPath={effectivePath}
+              onSelectFile={setSelectedPath}
+              lens={lens}
+            />
           </main>
         </div>
       )}

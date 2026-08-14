@@ -1,8 +1,10 @@
-// Per-entity draft state, keyed by an entity identity: a settle callback holds
-// the key captured at submit, so a late mutation can only ever touch its own
-// entity's entry. Every write is a functional update, so a captured setter can't
-// go stale. Entries matching `isEmpty` are pruned rather than stored, so a long
-// session can't accumulate blank drafts.
+// Per-entity draft state keyed by entity identity: a settle callback holds the
+// key captured at submit, so a late mutation can only touch its own entity's
+// entry. Every write is a functional update, so a captured setter can't go
+// stale, and entries matching `isEmpty` are pruned so blank drafts can't pile
+// up. Unless a custom `isEmpty` is passed, `empty` must be a primitive or a
+// stable module-level constant: the default is Object.is against it, so a
+// per-render literal never prunes and re-identifies `value` every render.
 import { useState } from "react";
 
 function without<T>(map: Record<string, T>, key: string): Record<string, T> {

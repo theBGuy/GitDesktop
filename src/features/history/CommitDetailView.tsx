@@ -131,8 +131,14 @@ export function CommitDetailView({
     providerKey === "github" ? remoteSections : undefined,
     commentsEnabled ? deferredPath : null,
   );
+  // Both commit queries keep serving the PREVIOUS commit while the selected one
+  // loads, so everything derived from them is that commit's until it lands.
+  const stale = details.isPlaceholderData || files.isPlaceholderData;
   const lineWidget = useMemo<LineWidget | undefined>(() => {
     if (!commentsEnabled || !deferredPath) return undefined;
+    // A line click while stale would address `hash` — the newly selected commit —
+    // with a path and line read off the previous one's diff.
+    if (stale) return undefined;
     // On GitHub the composer recovers its `position` from the FORGE diff; until
     // that fetch succeeds `remoteSections` is empty, so every line would open the
     // composer disabled with "This line isn't in the commit's diff for this file"
@@ -164,6 +170,7 @@ export function CommitDetailView({
     };
   }, [
     commentsEnabled,
+    stale,
     deferredPath,
     repoPath,
     hash,
@@ -200,11 +207,9 @@ export function CommitDetailView({
   const commit = details.data;
   const totalAdded = files.data.reduce((sum, f) => sum + f.added, 0);
   const totalDeleted = files.data.reduce((sum, f) => sum + f.deleted, 0);
-  // Everything derived from these two queries is the PREVIOUS commit's until the
-  // selected one lands; fade it so the pane never passes stale content off as
-  // current. The ⋯ actions act on the `hash` prop, so they stay solid.
-  const staleDim =
-    (details.isPlaceholderData || files.isPlaceholderData) && "opacity-80";
+  // Fade the stale content so the pane never passes it off as current. The ⋯
+  // actions act on the `hash` prop, so they stay solid.
+  const staleDim = stale && "opacity-80";
   // The diff pane keeps serving the previous file's diff for longer than the rest
   // (its query stays on placeholder data through the gated window above), so it
   // fades on its own state. Never nested inside another dim — 0.8² reads as
@@ -441,20 +446,21 @@ export function CommitDetailView({
         </main>
       </div>
 
-      {commentsEnabled ? (
-        <div className="max-h-[45%] shrink-0 border-t">
-          <CommitComments
-            repoPath={repoPath}
-            sha={hash}
-            canComment={canCommentCommits}
-            remoteLabel={remoteLabel}
-            diffSections={providerKey === "github" ? remoteSections : undefined}
-            selectedPath={deferredPath}
-            onSelectFile={selectFileFromComments}
-            lens="origin"
-          />
-        </div>
-      ) : gate && onRemote.data === false ? (
+      {/* Mounted for every commit, rendering only where comments are supported:
+          arrowing through history must not tear down its per-commit drafts. */}
+      <CommitComments
+        enabled={commentsEnabled}
+        repoPath={repoPath}
+        sha={hash}
+        canComment={canCommentCommits}
+        remoteLabel={remoteLabel}
+        diffSections={providerKey === "github" ? remoteSections : undefined}
+        selectedPath={deferredPath}
+        onSelectFile={selectFileFromComments}
+        lens="origin"
+        stale={stale}
+      />
+      {gate && onRemote.data === false ? (
         // The forge query RESOLVED false — this commit isn't pushed yet. Shown
         // only after resolution (never while pending), so there's no flash for a
         // commit that is on the remote.
