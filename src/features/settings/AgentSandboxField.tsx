@@ -257,25 +257,21 @@ function StatusLine({
   );
 }
 
+type Tone = "ok" | "warn" | "muted";
+
+/** Tone → semantic token. Success uses the app's green (matching the provider
+ *  "Connected" line); warnings stay full-contrast; informational lines are muted. */
+const TONE_CLASS: Record<Tone, string> = {
+  ok: "text-success",
+  warn: "text-foreground",
+  muted: "text-muted-foreground",
+};
+
 /** A status line: icon + text (never color alone). */
-function Row({
-  tone,
-  children,
-}: {
-  tone: "ok" | "warn" | "muted";
-  children: React.ReactNode;
-}) {
+function Row({ tone, children }: { tone: Tone; children: React.ReactNode }) {
   const Icon = tone === "ok" ? CheckCircleIcon : WarningCircleIcon;
-  // Success uses the app's green (matching the provider "Connected" line);
-  // warnings stay full-contrast; informational lines are muted.
-  const toneClass =
-    tone === "ok"
-      ? "text-success"
-      : tone === "warn"
-        ? "text-foreground"
-        : "text-muted-foreground";
   return (
-    <p className={`flex items-center gap-1.5 text-[11px] ${toneClass}`}>
+    <p className={`flex items-center gap-1.5 text-[11px] ${TONE_CLASS[tone]}`}>
       {tone !== "muted" && (
         <Icon weight="fill" className="size-3.5 shrink-0" aria-hidden />
       )}

@@ -12,6 +12,7 @@ import { splitUnifiedDiff } from "@/lib/git/diff-split";
 import { useCommitComments, usePrCommitDiff } from "@/lib/git/queries";
 import type { PrCommitOut, RemoteLens } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { parseableDate } from "@/lib/time";
 import { cn } from "@/lib/utils";
 import {
   CommitComments,
@@ -176,8 +177,16 @@ export function PrCommitDetail({
             {commit.author.slice(0, 1)}
           </span>
           <span>{commit.author}</span>
-          <span>•</span>
-          <span>{commit.date && <RelativeTime date={commit.date} />}</span>
+          {/* Separator and date are one unit: an unparseable date renders
+              nothing, and a lone bullet would dangle beside it. */}
+          {parseableDate(commit.date) && (
+            <>
+              <span>•</span>
+              <span>
+                <RelativeTime date={commit.date} />
+              </span>
+            </>
+          )}
           <span>•</span>
           <button
             type="button"

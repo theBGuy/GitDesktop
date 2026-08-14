@@ -173,6 +173,7 @@ import {
 } from "./PrMergeabilityBanner";
 import { PrReviewPanel } from "./PrReviewPanel";
 import { PrTasksChip, PrTasksSection } from "./PrTasksSection";
+import type { PrSection } from "./pr-section";
 import {
   MergePrDialog,
   MrTimeTracking,
@@ -206,8 +207,6 @@ import {
 } from "./useLinkedIssueChips";
 import { usePrCapabilities } from "./usePrCapabilities";
 
-type Section = "conversation" | "commits" | "files" | "review";
-
 /** The git remote a lens resolves to, mirroring the backend's own mapping
  *  (github/mod.rs:73 `lens_remote`). Exhaustive on purpose: a widened `RemoteLens`
  *  must fail the build here rather than silently fall back to `origin` and quietly
@@ -232,20 +231,43 @@ const MERGE_LABEL: Record<MergeStrategy, string> = {
   fast_forward: "Fast-forward",
 };
 
+/** Each strategy's server-side repo setting. Bitbucket's fast_forward has no
+ *  GitHub server toggle, so it reads `null` (unknown). */
+const SERVER_MERGE_FLAG: Record<
+  MergeStrategy,
+  (pr: PrDetails) => boolean | null
+> = {
+  merge: (pr) => pr.mergeCommitAllowed,
+  squash: (pr) => pr.squashMergeAllowed,
+  rebase: (pr) => pr.rebaseMergeAllowed,
+  fast_forward: () => null,
+};
+
+/** Which merge strategies a provider offers. GitLab has no per-MR rebase-merge
+ *  (that's the project's merge_method setting); fast-forward is Bitbucket's. */
+const PROVIDER_MERGE_STRATEGIES: Record<
+  ForgeProvider,
+  readonly MergeStrategy[]
+> = {
+  github: ["merge", "squash", "rebase"],
+  gitlab: ["merge", "squash"],
+  bitbucket: ["merge", "squash", "fast_forward"],
+};
+
+/** Tab labels for this view's sections, function-valued because three of the four
+ *  carry a live count. */
+const SECTION_LABEL: Record<PrSection, (pr: PrDetails) => string> = {
+  conversation: (pr) => `Conversation (${pr.comments.length})`,
+  commits: (pr) => `Commits (${pr.commits.length})`,
+  files: (pr) => `Files (${pr.files.length})`,
+  review: () => "Review",
+};
+
 /** Whether a GitHub merge method is disabled by the repo's server-side merge
  *  settings. Only an explicit `false` gates — `null`/`undefined` means unknown
- *  (fetch failed, or a non-GitHub provider) and never disables. Bitbucket's
- *  fast_forward has no GitHub server toggle, so it's never server-disabled here. */
+ *  (fetch failed, or a non-GitHub provider) and never disables. */
 function isServerMergeDisabled(pr: PrDetails, s: MergeStrategy): boolean {
-  const flag =
-    s === "merge"
-      ? pr.mergeCommitAllowed
-      : s === "squash"
-        ? pr.squashMergeAllowed
-        : s === "rebase"
-          ? pr.rebaseMergeAllowed
-          : null;
-  return flag === false;
+  return SERVER_MERGE_FLAG[s](pr) === false;
 }
 
 export function RemotePrView({
@@ -440,7 +462,7 @@ export function RemotePrView({
     details.data?.id ?? "",
     { target: "mr", number },
   );
-  const [section, setSection] = useState<Section>("conversation");
+  const [section, setSection] = useState<PrSection>("conversation");
   // A review thread the user asked to jump to (timeline "View thread"). Handed to
   // whichever ReviewThreadList owns it; that list reveals the (possibly
   // resolved/collapsed) thread and clears this via onRevealed.
@@ -470,7 +492,7 @@ export function RemotePrView({
   // diff (forge-neutral) and a way to post the result as a comment, so it
   // follows canComment, which covers GitLab MRs too (canWrite implies
   // canComment for GitHub).
-  const availableSections = useMemo<Section[]>(
+  const availableSections = useMemo<PrSection[]>(
     () =>
       aiEnabled && canComment
         ? ["conversation", "commits", "files", "review"]
@@ -1764,14 +1786,12 @@ export function RemotePrView({
           <span className="text-success">+{pr.additions}</span>
           <span className="text-destructive">-{pr.deletions}</span>
         </div>
-        {/* The three metadata pickers below are keyed on the entity: each seeds a
-            draft on open and commits it on close by diffing against LIVE props, and
-            a keyboard PR switch leaves the popover open (no outside press to close
-            it) — so without the key the old PR's draft lands on the new one. The
-            keys carry a per-slot prefix because they are SIBLINGS: duplicate keys
-            in one children array make React drop the earlier duplicates' unmount
-            on key change — the old picker's DOM leaks into the sidebar, one stale
-            row per PR switch (reproduced live; the last duplicate reconciles). */}
+        {/* Entity-keyed pickers: each seeds a draft on open, commits it on
+            close against LIVE props, and a keyboard PR switch leaves the popover
+            open; unkeyed, the old draft lands on the new PR. Labels/assignees
+            prefix keys as SIBLINGS: duplicate keys in one children array make
+            React drop the earlier duplicates' unmount, leaking stale rows.
+            Reviewers' prefix is consistency: own wrapper div. */}
         {isOpen && canEditLabels ? (
           <LabelsPopover
             key={`labels-${entityKey}`}
@@ -1958,13 +1978,7 @@ export function RemotePrView({
               aria-pressed={section === s}
               onClick={() => setSection(s)}
             >
-              {s === "conversation"
-                ? `Conversation (${pr.comments.length})`
-                : s === "commits"
-                  ? `Commits (${pr.commits.length})`
-                  : s === "files"
-                    ? `Files (${pr.files.length})`
-                    : "Review"}
+              {SECTION_LABEL[s](pr)}
             </Button>
           ))}
         </div>
@@ -2548,15 +2562,12 @@ export function RemotePrView({
                 </DropdownMenuTrigger>
               </span>
               <DropdownMenuContent align="end" className="w-56">
-                {/* GitLab has no per-MR rebase-merge (that's the project's merge_method
-                    setting), so it gets only merge + squash. Bitbucket offers
-                    merge + squash + fast-forward. Branch-rule gating is GitHub
+                {/* An unrecognized provider takes GitHub's set, matching the rest of
+                    this view's gh-as-default. Branch-rule gating is GitHub
                     branch-protection data, so it never applies to GitLab/Bitbucket. */}
-                {(provider === "gitlab"
-                  ? (["merge", "squash"] as const)
-                  : provider === "bitbucket"
-                    ? (["merge", "squash", "fast_forward"] as const)
-                    : (["merge", "squash", "rebase"] as const)
+                {(provider
+                  ? PROVIDER_MERGE_STRATEGIES[provider]
+                  : PROVIDER_MERGE_STRATEGIES.github
                 ).map((s) => {
                   const isGitHub =
                     provider !== "gitlab" &&

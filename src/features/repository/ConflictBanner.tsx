@@ -19,12 +19,20 @@ import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 
-const OP_LABELS: Record<RepoOp, { banner: string; cont: string }> = {
-  merge: { banner: "Merge in progress", cont: "Finish merge" },
-  rebase: { banner: "Rebase in progress", cont: "Continue rebase" },
+const OP_LABELS: Record<
+  RepoOp,
+  { banner: string; cont: string; verb: string }
+> = {
+  merge: { banner: "Merge in progress", cont: "Finish merge", verb: "Merging" },
+  rebase: {
+    banner: "Rebase in progress",
+    cont: "Continue rebase",
+    verb: "Rebasing",
+  },
   "cherry-pick": {
     banner: "Cherry-pick in progress",
     cont: "Continue cherry-pick",
+    verb: "Cherry-picking",
   },
 };
 
@@ -63,13 +71,7 @@ export function ConflictBanner({
 
   const busy = abortOp.isPending || continueOp.isPending;
   const onError = (e: unknown) => toastError(e);
-  const opVerb = op
-    ? op === "merge"
-      ? "Merging"
-      : op === "rebase"
-        ? "Rebasing"
-        : "Cherry-picking"
-    : null;
+  const opVerb = op ? OP_LABELS[op].verb : null;
   const conflictText =
     conflictedCount > 0
       ? `${conflictedCount} conflict${conflictedCount === 1 ? "" : "s"}`

@@ -2,6 +2,7 @@ import type { MouseEvent } from "react";
 import { RelativeTime } from "@/components/relative-time";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { parseableDate } from "@/lib/time";
 import { cn } from "@/lib/utils";
 
 /** A commit row, normalized from either git-log (local) or GraphQL (remote). */
@@ -82,8 +83,13 @@ export function CommitsList({
                 {c.subject}
               </p>
               <p className="mt-0.5 text-[11px] text-muted-foreground">
-                <span className="font-mono">{c.shortSha}</span> · {c.author} ·{" "}
-                {c.date && <RelativeTime date={c.date} />}
+                <span className="font-mono">{c.shortSha}</span> · {c.author}
+                {c.date && parseableDate(c.date) && (
+                  <>
+                    {" "}
+                    · <RelativeTime date={c.date} />
+                  </>
+                )}
               </p>
             </button>
           ) : (
@@ -95,8 +101,13 @@ export function CommitsList({
                 {c.subject}
               </p>
               <p className="mt-0.5 text-[11px] text-muted-foreground">
-                <span className="font-mono">{c.shortSha}</span> · {c.author} ·{" "}
-                {c.date && <RelativeTime date={c.date} />}
+                <span className="font-mono">{c.shortSha}</span> · {c.author}
+                {c.date && parseableDate(c.date) && (
+                  <>
+                    {" "}
+                    · <RelativeTime date={c.date} />
+                  </>
+                )}
               </p>
             </div>
           ),

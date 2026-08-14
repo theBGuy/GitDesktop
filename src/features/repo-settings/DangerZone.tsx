@@ -156,6 +156,121 @@ function Row({
 
 const OWNER_HINT = "Needs the Owner role on GitLab";
 
+/** Every per-provider string in the danger zone, grouped by the action that
+ *  shows it, so one provider's whole voice is read and edited in one place.
+ *  Two groups are unreachable for Bitbucket — the transfer dialog (its row
+ *  links out first) and the "Internal" note (hidden for Bitbucket) — and carry
+ *  what the GitHub arm produced for it. */
+const DANGER_COPY: Record<
+  ForgeProvider,
+  {
+    rename: { desc: string; toast: (name: string) => string };
+    forkDesc: string;
+    visibility: {
+      dialogDesc: string;
+      toast: (target: string) => string;
+      internalNote: string;
+    };
+    transfer: {
+      desc: string;
+      dialogTitle: string;
+      dialogDesc: string;
+      toast: string;
+      ownerLabel: string;
+      ownerPlaceholder: string;
+    };
+    delete: { dialogDesc: string; toast: string };
+  }
+> = {
+  github: {
+    rename: {
+      desc: "Old links and clones keep working.",
+      toast: (name) => `Renamed to ${name} — links redirect`,
+    },
+    forkDesc:
+      "Permanently detaches this repository from its fork network on GitHub — this cannot be undone. GitHub requires the fork be public, under 1 GB, and have no child forks. Your code and history are kept; issues, PRs, stars, and watchers are lost.",
+    visibility: {
+      dialogDesc:
+        "Changing visibility erases this repo's stars and watchers. Making it public exposes all code and history; making it private detaches existing forks, unpublishes Pages, and disables push rulesets.",
+      toast: (target) => `Repository is now ${target}`,
+      internalNote:
+        "“Internal” requires the organization to belong to an enterprise.",
+    },
+    transfer: {
+      desc: "Move this repository to another user or organization.",
+      dialogTitle: "Transfer repository",
+      dialogDesc:
+        "Transferring moves the repo (and its issues, PRs, stars, and settings) to the new owner. Transferring to a personal account requires them to accept; you'll lose admin access here.",
+      toast: "Transfer requested",
+      ownerLabel: "New owner (user or organization)",
+      ownerPlaceholder: "username-or-org",
+    },
+    delete: {
+      dialogDesc:
+        "This permanently deletes the GitHub repository — its issues, pull requests, wiki, releases, and settings. Your local clone and its files are kept; the dangling 'origin' remote is removed so you can publish the repo again. This cannot be undone.",
+      toast: "Repository deleted on GitHub",
+    },
+  },
+  gitlab: {
+    rename: {
+      desc: "Renames the name and path; old paths redirect.",
+      toast: (name) => `Renamed to ${name} — links redirect`,
+    },
+    forkDesc:
+      "Removes the fork relationship on GitLab. Open merge requests to the parent are closed — they stay closed even if the relationship is later re-established via the GitLab API. Your code and history are kept. Requires the Owner role.",
+    visibility: {
+      dialogDesc:
+        "Making a project public exposes all code, issues, and history; making it private hides it from everyone without access and unlinks existing forks.",
+      toast: (target) => `Project is now ${target}`,
+      internalNote:
+        "“Internal” is limited to self-managed GitLab (gitlab.com disallows it for new projects).",
+    },
+    transfer: {
+      desc: "Move this project to another group or user namespace.",
+      dialogTitle: "Transfer project",
+      dialogDesc:
+        "Transferring moves the project (and its issues, merge requests, and settings) to the new namespace — a group you own or maintain. The project URL changes; old paths redirect.",
+      toast: "Project transferred",
+      ownerLabel: "New namespace (group path or username)",
+      ownerPlaceholder: "group/subgroup or username",
+    },
+    delete: {
+      dialogDesc:
+        "This permanently deletes the GitLab project — its issues, merge requests, wiki, releases, and settings. gitlab.com may delay the deletion briefly (the project is scheduled for removal). Your local clone and its files are kept; the dangling 'origin' remote is removed so you can publish the repo again.",
+      toast: "Project deleted on GitLab",
+    },
+  },
+  bitbucket: {
+    rename: {
+      desc: "Renaming changes the repository URL; GitDesktop will update your local 'origin' remote automatically.",
+      toast: (name) => `Renamed to ${name} — origin remote updated`,
+    },
+    forkDesc:
+      "Bitbucket has no API for this — detach on bitbucket.org under Repository settings → Repository details → Manage repository → Detach fork. A one-time action that cannot be undone. Existing pull requests to the parent stay viewable; new ones can't be created.",
+    visibility: {
+      dialogDesc:
+        "Making a repository public exposes all code and history to anyone; making it private restricts it to people with access.",
+      toast: (target) => `Repository is now ${target}`,
+      internalNote:
+        "“Internal” requires the organization to belong to an enterprise.",
+    },
+    transfer: {
+      desc: "Move this repository to another user or organization.",
+      dialogTitle: "Transfer repository",
+      dialogDesc:
+        "Transferring moves the repo (and its issues, PRs, stars, and settings) to the new owner. Transferring to a personal account requires them to accept; you'll lose admin access here.",
+      toast: "Transfer requested",
+      ownerLabel: "New owner (user or organization)",
+      ownerPlaceholder: "username-or-org",
+    },
+    delete: {
+      dialogDesc:
+        "This immediately and permanently deletes the Bitbucket repository — its pull requests, pipelines, and settings. Your local clone and its files are kept; the dangling 'origin' remote is removed so you can publish the repo again. This cannot be undone.",
+      toast: "Repository deleted on Bitbucket",
+    },
+  },
+};
+
 /** A danger-zone trigger whose disabled state still explains itself. `className`
  *  stays the row's layout hook (it lands on the wrapper, as it always has). */
 function DangerButton({
@@ -179,17 +294,17 @@ function DangerButton({
 function RenameAction({
   repoPath,
   info,
-  isGitLab,
-  isBitbucket,
+  provider,
 }: {
   repoPath: string;
   info: DangerInfo;
-  isGitLab: boolean;
-  isBitbucket: boolean;
+  provider: ForgeProvider;
 }) {
   const rename = useRenameRepo(repoPath);
   const current = info.currentName;
   const [name, setName] = useState(current);
+  const isGitLab = provider === "gitlab";
+  const copy = DANGER_COPY[provider].rename;
   // GitLab paths must start alphanumeric; GitHub/Bitbucket allow a leading
   // `.`/`_`/`-` (".github" is a standard repo name) — the check branches so
   // they keep their fuller grammar.
@@ -201,13 +316,7 @@ function RenameAction({
   return (
     <Row
       title={isGitLab ? "Rename project" : "Rename repository"}
-      desc={
-        isGitLab
-          ? "Renames the name and path; old paths redirect."
-          : isBitbucket
-            ? "Renaming changes the repository URL; GitDesktop will update your local 'origin' remote automatically."
-            : "Old links and clones keep working."
-      }
+      desc={copy.desc}
     >
       <div className="flex shrink-0 items-center gap-2">
         <Input
@@ -223,12 +332,7 @@ function RenameAction({
           disabled={!valid || !changed || rename.isPending}
           onClick={() =>
             rename.mutate(name.trim(), {
-              onSuccess: () =>
-                toast.success(
-                  isBitbucket
-                    ? `Renamed to ${name.trim()} — origin remote updated`
-                    : `Renamed to ${name.trim()} — links redirect`,
-                ),
+              onSuccess: () => toast.success(copy.toast(name.trim())),
               onError: toastError,
             })
           }
@@ -400,8 +504,6 @@ function LeaveForkNetworkAction({
 
   if (record?.isFork !== true) return null;
 
-  const isGitLab = provider === "gitlab";
-  const isBitbucket = provider === "bitbucket";
   // The provider's own label, for the re-check toasts.
   const label = providerLabel(provider);
 
@@ -449,65 +551,66 @@ function LeaveForkNetworkAction({
     }
   };
 
-  const desc = isGitLab
-    ? "Removes the fork relationship on GitLab. Open merge requests to the parent are closed — they stay closed even if the relationship is later re-established via the GitLab API. Your code and history are kept. Requires the Owner role."
-    : isBitbucket
-      ? "Bitbucket has no API for this — detach on bitbucket.org under Repository settings → Repository details → Manage repository → Detach fork. A one-time action that cannot be undone. Existing pull requests to the parent stay viewable; new ones can't be created."
-      : "Permanently detaches this repository from its fork network on GitHub — this cannot be undone. GitHub requires the fork be public, under 1 GB, and have no child forks. Your code and history are kept; issues, PRs, stars, and watchers are lost.";
+  // The provider's own way out of the network: GitLab detaches in-app behind an
+  // inline confirm, the others link out to the page that owns the action.
+  const forkAction: Record<ForgeProvider, () => ReactNode> = {
+    github: () => (
+      <Button
+        variant="destructive"
+        size="sm"
+        onClick={() => openUrl(`https://${ghHost}/${fullName}/settings`)}
+      >
+        Leave on GitHub…
+      </Button>
+    ),
+    gitlab: () =>
+      confirming ? (
+        <InlineConfirm
+          actLabel="Remove"
+          pending={removeFork.isPending}
+          onCancel={() => setConfirming(false)}
+          onAct={() =>
+            removeFork.mutate(undefined, {
+              onSuccess: () => {
+                toast.success("Fork relationship removed");
+                setConfirming(false);
+                // Re-probe to flip the persisted badge; the row unmounts
+                // itself once `isFork` reads false.
+                reprobe();
+              },
+              onError: toastError,
+            })
+          }
+        />
+      ) : (
+        <DangerButton
+          variant="destructive"
+          disabled={!isOwner}
+          hint={isOwner ? undefined : OWNER_HINT}
+          onClick={() => setConfirming(true)}
+        >
+          Remove fork relationship
+        </DangerButton>
+      ),
+    bitbucket: () => (
+      <Button
+        variant="destructive"
+        size="sm"
+        onClick={() => openUrl(`https://${bbHost}/${fullName}/admin`)}
+      >
+        Detach on Bitbucket…
+      </Button>
+    ),
+  };
 
   return (
     <>
       <div className="border-t" />
-      <Row title="Leave fork network" desc={desc}>
+      <Row title="Leave fork network" desc={DANGER_COPY[provider].forkDesc}>
         {/* Stacked so the description keeps its width — two side-by-side
             buttons squeezed the copy into a tall, narrow column. */}
         <div className="flex shrink-0 flex-col gap-2">
-          {isGitLab ? (
-            confirming ? (
-              <InlineConfirm
-                actLabel="Remove"
-                pending={removeFork.isPending}
-                onCancel={() => setConfirming(false)}
-                onAct={() =>
-                  removeFork.mutate(undefined, {
-                    onSuccess: () => {
-                      toast.success("Fork relationship removed");
-                      setConfirming(false);
-                      // Re-probe to flip the persisted badge; the row unmounts
-                      // itself once `isFork` reads false.
-                      reprobe();
-                    },
-                    onError: toastError,
-                  })
-                }
-              />
-            ) : (
-              <DangerButton
-                variant="destructive"
-                disabled={!isOwner}
-                hint={isOwner ? undefined : OWNER_HINT}
-                onClick={() => setConfirming(true)}
-              >
-                Remove fork relationship
-              </DangerButton>
-            )
-          ) : isBitbucket ? (
-            <Button
-              variant="destructive"
-              size="sm"
-              onClick={() => openUrl(`https://${bbHost}/${fullName}/admin`)}
-            >
-              Detach on Bitbucket…
-            </Button>
-          ) : (
-            <Button
-              variant="destructive"
-              size="sm"
-              onClick={() => openUrl(`https://${ghHost}/${fullName}/settings`)}
-            >
-              Leave on GitHub…
-            </Button>
-          )}
+          {forkAction[provider]()}
           <Button
             variant="outline"
             size="sm"
@@ -530,19 +633,20 @@ const BB_VISIBILITIES = ["public", "private"];
 function VisibilityAction({
   repoPath,
   info,
-  isGitLab,
-  isBitbucket,
+  provider,
   isOwner,
 }: {
   repoPath: string;
   info: DangerInfo;
-  isGitLab: boolean;
-  isBitbucket: boolean;
+  provider: ForgeProvider;
   isOwner: boolean;
 }) {
   const setVisibility = useSetVisibility(repoPath);
   const [open, setOpen] = useState(false);
   const [target, setTarget] = useState(info.visibility || "public");
+  const isGitLab = provider === "gitlab";
+  const isBitbucket = provider === "bitbucket";
+  const copy = DANGER_COPY[provider].visibility;
   const visibilities = isBitbucket ? BB_VISIBILITIES : VISIBILITIES;
 
   return (
@@ -567,13 +671,7 @@ function VisibilityAction({
         open={open}
         onOpenChange={setOpen}
         title="Change visibility"
-        description={
-          isGitLab
-            ? "Making a project public exposes all code, issues, and history; making it private hides it from everyone without access and unlinks existing forks."
-            : isBitbucket
-              ? "Making a repository public exposes all code and history to anyone; making it private restricts it to people with access."
-              : "Changing visibility erases this repo's stars and watchers. Making it public exposes all code and history; making it private detaches existing forks, unpublishes Pages, and disables push rulesets."
-        }
+        description={copy.dialogDesc}
         confirmPhrase={info.fullName}
         confirmLabel="Change visibility"
         disabled={target === info.visibility}
@@ -581,9 +679,7 @@ function VisibilityAction({
         onConfirm={() =>
           setVisibility.mutate(target, {
             onSuccess: () => {
-              toast.success(
-                `${isGitLab ? "Project" : "Repository"} is now ${target}`,
-              );
+              toast.success(copy.toast(target));
               setOpen(false);
             },
             onError: toastError,
@@ -608,9 +704,7 @@ function VisibilityAction({
           </Select>
           {!isBitbucket && (
             <p className="text-[11px] text-muted-foreground">
-              {isGitLab
-                ? "“Internal” is limited to self-managed GitLab (gitlab.com disallows it for new projects)."
-                : "“Internal” requires the organization to belong to an enterprise."}
+              {copy.internalNote}
             </p>
           )}
         </div>
@@ -622,23 +716,22 @@ function VisibilityAction({
 function TransferAction({
   repoPath,
   info,
-  isGitLab,
-  isBitbucket,
+  provider,
   isOwner,
 }: {
   repoPath: string;
   info: DangerInfo;
-  isGitLab: boolean;
-  isBitbucket: boolean;
+  provider: ForgeProvider;
   isOwner: boolean;
 }) {
   const transfer = useTransferRepo(repoPath);
   const [open, setOpen] = useState(false);
   const [newOwner, setNewOwner] = useState("");
+  const copy = DANGER_COPY[provider].transfer;
 
   // Bitbucket's REST API can't transfer a repo — send the user to the web
   // admin page instead of offering a form that would only error.
-  if (isBitbucket) {
+  if (provider === "bitbucket") {
     return (
       <Row
         title="Transfer ownership"
@@ -657,14 +750,7 @@ function TransferAction({
   }
 
   return (
-    <Row
-      title="Transfer ownership"
-      desc={
-        isGitLab
-          ? "Move this project to another group or user namespace."
-          : "Move this repository to another user or organization."
-      }
-    >
+    <Row title="Transfer ownership" desc={copy.desc}>
       <DangerButton
         variant="outline"
         disabled={!isOwner}
@@ -676,12 +762,8 @@ function TransferAction({
       <DangerDialog
         open={open}
         onOpenChange={setOpen}
-        title={isGitLab ? "Transfer project" : "Transfer repository"}
-        description={
-          isGitLab
-            ? "Transferring moves the project (and its issues, merge requests, and settings) to the new namespace — a group you own or maintain. The project URL changes; old paths redirect."
-            : "Transferring moves the repo (and its issues, PRs, stars, and settings) to the new owner. Transferring to a personal account requires them to accept; you'll lose admin access here."
-        }
+        title={copy.dialogTitle}
+        description={copy.dialogDesc}
         confirmPhrase={info.fullName}
         confirmLabel="Transfer"
         disabled={!newOwner.trim()}
@@ -691,9 +773,7 @@ function TransferAction({
             { newOwner: newOwner.trim(), newName: null },
             {
               onSuccess: () => {
-                toast.success(
-                  isGitLab ? "Project transferred" : "Transfer requested",
-                );
+                toast.success(copy.toast);
                 setOpen(false);
               },
               onError: toastError,
@@ -703,17 +783,13 @@ function TransferAction({
       >
         <div className="space-y-1.5">
           <Label htmlFor="transfer-owner" className="text-xs">
-            {isGitLab
-              ? "New namespace (group path or username)"
-              : "New owner (user or organization)"}
+            {copy.ownerLabel}
           </Label>
           <Input
             id="transfer-owner"
             value={newOwner}
             onChange={(e) => setNewOwner(e.target.value)}
-            placeholder={
-              isGitLab ? "group/subgroup or username" : "username-or-org"
-            }
+            placeholder={copy.ownerPlaceholder}
             autoComplete="off"
             spellCheck={false}
           />
@@ -726,32 +802,28 @@ function TransferAction({
 function DeleteAction({
   repoPath,
   info,
-  isGitLab,
-  isBitbucket,
+  provider,
   isOwner,
   onRepoDeleted,
 }: {
   repoPath: string;
   info: DangerInfo;
-  isGitLab: boolean;
-  isBitbucket: boolean;
+  provider: ForgeProvider;
   isOwner: boolean;
   onRepoDeleted: () => void;
 }) {
   const del = useDeleteRepo(repoPath);
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
+  const isGitLab = provider === "gitlab";
+  const isBitbucket = provider === "bitbucket";
+  const copy = DANGER_COPY[provider].delete;
   const noun = isGitLab ? "project" : "repository";
-  const providerName = isGitLab
-    ? "GitLab"
-    : isBitbucket
-      ? "Bitbucket"
-      : "GitHub";
 
   return (
     <Row
       title={`Delete this ${noun}`}
-      desc={`Permanently remove the ${noun} on ${providerName}.`}
+      desc={`Permanently remove the ${noun} on ${providerLabel(provider)}.`}
     >
       <DangerButton
         variant="destructive"
@@ -765,22 +837,14 @@ function DeleteAction({
         open={open}
         onOpenChange={setOpen}
         title={`Delete ${noun}`}
-        description={
-          isGitLab
-            ? "This permanently deletes the GitLab project — its issues, merge requests, wiki, releases, and settings. gitlab.com may delay the deletion briefly (the project is scheduled for removal). Your local clone and its files are kept; the dangling 'origin' remote is removed so you can publish the repo again."
-            : isBitbucket
-              ? "This immediately and permanently deletes the Bitbucket repository — its pull requests, pipelines, and settings. Your local clone and its files are kept; the dangling 'origin' remote is removed so you can publish the repo again. This cannot be undone."
-              : "This permanently deletes the GitHub repository — its issues, pull requests, wiki, releases, and settings. Your local clone and its files are kept; the dangling 'origin' remote is removed so you can publish the repo again. This cannot be undone."
-        }
+        description={copy.dialogDesc}
         confirmPhrase={info.fullName}
         confirmLabel="Delete forever"
         pending={del.isPending}
         onConfirm={() =>
           del.mutate(undefined, {
             onSuccess: () => {
-              toast.success(
-                `${isGitLab ? "Project" : "Repository"} deleted on ${providerName}`,
-              );
+              toast.success(copy.toast);
               setOpen(false);
               // The remote is gone — re-probe the repo's hosted panels so they
               // stop showing stale data, and close the settings dialog (it only
@@ -829,27 +893,11 @@ export function DangerZone({
   // it's cached. GitHub admin implies owner, so it doesn't need the probe.
   const admin = useRepoAdmin(repoPath, open && (isGitLab || isBitbucket));
 
-  const info: DangerInfo | null = isGitLab
-    ? gl.data
-      ? {
-          fullName: gl.data.fullName,
-          currentName: gl.data.path,
-          archived: gl.data.archived,
-          visibility: gl.data.visibility,
-          webUrl: "",
-        }
-      : null
-    : isBitbucket
-      ? bb.data
-        ? {
-            fullName: bb.data.fullName,
-            currentName: bb.data.slug,
-            archived: false,
-            visibility: bb.data.isPrivate ? "private" : "public",
-            webUrl: bb.data.webUrl,
-          }
-        : null
-      : gh.data
+  // Each provider's settings read, normalized to the neutral shape; null until
+  // the active provider's query has data.
+  const infoFor: Record<ForgeProvider, () => DangerInfo | null> = {
+    github: () =>
+      gh.data
         ? {
             fullName: gh.data.fullName,
             currentName: gh.data.fullName.split("/").pop() ?? "",
@@ -857,7 +905,29 @@ export function DangerZone({
             visibility: gh.data.visibility,
             webUrl: "",
           }
-        : null;
+        : null,
+    gitlab: () =>
+      gl.data
+        ? {
+            fullName: gl.data.fullName,
+            currentName: gl.data.path,
+            archived: gl.data.archived,
+            visibility: gl.data.visibility,
+            webUrl: "",
+          }
+        : null,
+    bitbucket: () =>
+      bb.data
+        ? {
+            fullName: bb.data.fullName,
+            currentName: bb.data.slug,
+            archived: false,
+            visibility: bb.data.isPrivate ? "private" : "public",
+            webUrl: bb.data.webUrl,
+          }
+        : null,
+  };
+  const info = infoFor[provider]();
   if (!info) return null;
   // GitHub admin implies owner; GitLab and Bitbucket both gate the owner-only
   // lifecycle powers on the probe's `admin` flag (owner == admin for Bitbucket).
@@ -867,12 +937,7 @@ export function DangerZone({
   return (
     <div className="space-y-3 rounded-md border border-destructive/40 p-3">
       <h3 className="text-xs font-semibold text-destructive">Danger zone</h3>
-      <RenameAction
-        repoPath={repoPath}
-        info={info}
-        isGitLab={isGitLab}
-        isBitbucket={isBitbucket}
-      />
+      <RenameAction repoPath={repoPath} info={info} provider={provider} />
       {/* Local detach — any provider, whenever an `upstream` remote exists. */}
       <RemoveUpstreamAction repoPath={repoPath} />
       {/* Leave-fork-network — every provider, gated on persisted fork
@@ -903,24 +968,21 @@ export function DangerZone({
       <VisibilityAction
         repoPath={repoPath}
         info={info}
-        isGitLab={isGitLab}
-        isBitbucket={isBitbucket}
+        provider={provider}
         isOwner={isOwner}
       />
       <div className="border-t" />
       <TransferAction
         repoPath={repoPath}
         info={info}
-        isGitLab={isGitLab}
-        isBitbucket={isBitbucket}
+        provider={provider}
         isOwner={isOwner}
       />
       <div className="border-t" />
       <DeleteAction
         repoPath={repoPath}
         info={info}
-        isGitLab={isGitLab}
-        isBitbucket={isBitbucket}
+        provider={provider}
         isOwner={isOwner}
         onRepoDeleted={onRepoDeleted}
       />

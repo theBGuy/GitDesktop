@@ -33,6 +33,14 @@ export interface JiraMentionChip {
   source: "extraction" | "ai" | "manual";
 }
 
+/** The state clause in a chip's accessible name. An unrecognized state (a
+ *  just-picked issue seeds "" until the probe resolves) says nothing — no "Open
+ *  issue." lie and no dangling sentence. */
+const STATE_SENTENCE: Partial<Record<string, string>> = {
+  OPEN: "Open issue. ",
+  CLOSED: "Closed issue. ",
+};
+
 /** Props for the native (GitHub/GitLab) issue-link cluster. `variant` is optional
  *  (absent ⇒ native), so existing call sites compile unchanged. */
 interface NativeFieldProps {
@@ -187,15 +195,7 @@ function NativeLinkedIssuesField({
                 chip.aiSuggestedClose && chip.keyword === "relates"
                   ? `AI suggests this pull request closes #${chip.number} — click to switch to Closes.`
                   : undefined;
-              // State word omitted while unresolved (a just-picked closed issue
-              // seeds state "" until the probe resolves) — no "Open issue." lie
-              // and no dangling sentence.
-              const stateSentence =
-                chip.state === "CLOSED"
-                  ? "Closed issue. "
-                  : chip.state === "OPEN"
-                    ? "Open issue. "
-                    : "";
+              const stateSentence = STATE_SENTENCE[chip.state] ?? "";
               const switchTo =
                 chip.keyword === "closes" ? "Relates to" : "Closes";
               return (

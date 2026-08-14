@@ -73,6 +73,7 @@ import {
 import { providerLabel } from "@/lib/git/types";
 import { useRepoLens } from "@/lib/repo-lens/queries";
 import { useUiStore } from "@/lib/stores/ui";
+import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { PlanIssueButton } from "../plan/PlanIssueButton";
 import { SolveIssueButton } from "../sessions/SolveIssueButton";
@@ -672,10 +673,14 @@ export function RemoteIssueView({
             avatarUrl={issue.authorAvatarUrl}
           />
           <span>{issue.author || "unknown"}</span>
-          <span>•</span>
-          <span>
-            opened <RelativeTime date={issue.createdAt} />
-          </span>
+          {parseableDate(issue.createdAt) && (
+            <>
+              <span>•</span>
+              <span>
+                opened <RelativeTime date={issue.createdAt} />
+              </span>
+            </>
+          )}
         </div>
       </header>
       <div className="flex min-h-0 flex-1">
@@ -693,9 +698,11 @@ export function RemoteIssueView({
                   <span className="font-medium">
                     {issue.author || "unknown"}
                   </span>
-                  <span className="text-muted-foreground">
-                    opened <RelativeTime date={issue.createdAt} />
-                  </span>
+                  {parseableDate(issue.createdAt) && (
+                    <span className="text-muted-foreground">
+                      opened <RelativeTime date={issue.createdAt} />
+                    </span>
+                  )}
                   <span className="flex-1" />
                   <DropdownMenu>
                     <DropdownMenuTrigger

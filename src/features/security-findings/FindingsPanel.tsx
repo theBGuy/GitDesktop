@@ -68,6 +68,7 @@ import {
   type SelectedFinding,
   useUiStore,
 } from "@/lib/stores/ui";
+import { parseableDate } from "@/lib/time";
 import { cn } from "@/lib/utils";
 import {
   CodeScanningChip,
@@ -635,8 +636,13 @@ function PipelineProvenance({ data }: { data: GlFindingsOut }) {
           </span>
         ) : null}{" "}
         · <span className="font-mono">{pipeline.ref}</span> @{" "}
-        <span className="font-mono">{pipeline.sha.slice(0, 8)}</span> ·{" "}
-        <RelativeTime date={when} />
+        <span className="font-mono">{pipeline.sha.slice(0, 8)}</span>
+        {parseableDate(when) && (
+          <>
+            {" · "}
+            <RelativeTime date={when} />
+          </>
+        )}
       </p>
       {pipeline.webUrl ? (
         <Button

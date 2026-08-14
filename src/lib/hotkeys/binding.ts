@@ -21,6 +21,18 @@ export const isMac =
 export const isWindows =
   typeof navigator !== "undefined" && /win/i.test(navigator.platform);
 
+/** The host OS as a closed enum, so per-platform copy (labels, path examples)
+ *  can be a total lookup the compiler checks instead of a boolean ternary. */
+export type Platform = "windows" | "mac" | "linux";
+
+/** Derived from the detectors above, never hardcoded (house platform rule).
+ *  "linux" is the residual arm, so an unknown/absent navigator lands there. */
+export const platform: Platform = isWindows
+  ? "windows"
+  : isMac
+    ? "mac"
+    : "linux";
+
 /**
  * The word for the secondary (context-menu) click, derived from the platform.
  * "right-click" is wrong for swapped-button (left-handed) mice, Mac trackpads,

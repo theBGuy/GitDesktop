@@ -14,16 +14,18 @@ import {
 } from "@/components/ui/select";
 import { withForm } from "@/lib/form";
 import { detectEditors } from "@/lib/git/api";
-import { isMac, isWindows } from "@/lib/hotkeys/binding";
+import { isWindows, type Platform, platform } from "@/lib/hotkeys/binding";
 import { settingsFormOpts } from "./settings-form";
 
 const CUSTOM = "__custom__";
 const NONE = "__none__";
-const CUSTOM_PLACEHOLDER = isWindows
-  ? "C:\\path\\to\\editor.exe"
-  : isMac
-    ? "/Applications/Visual Studio Code.app"
-    : "/usr/bin/code";
+// The example path follows the platform's own convention for where programs live.
+const CUSTOM_PLACEHOLDERS: Record<Platform, string> = {
+  windows: "C:\\path\\to\\editor.exe",
+  mac: "/Applications/Visual Studio Code.app",
+  linux: "/usr/bin/code",
+};
+const CUSTOM_PLACEHOLDER = CUSTOM_PLACEHOLDERS[platform];
 
 export const EditorSection = withForm({
   ...settingsFormOpts,

@@ -124,18 +124,22 @@ function rulesetToDraft(rs: RulesetFull): Draft {
   };
 }
 
+/** The ref-name include list each scope sends: the two fixed scopes are
+ *  GitHub's own tokens; "custom" qualifies bare patterns as branch refs. */
+const REF_INCLUDES: Record<Draft["refScope"], (d: Draft) => string[]> = {
+  default: () => ["~DEFAULT_BRANCH"],
+  all: () => ["~ALL"],
+  custom: (d) =>
+    splitLines(d.customPatterns).map((p) =>
+      p.startsWith("refs/") ? p : `refs/heads/${p}`,
+    ),
+};
+
 function draftToBody(
   d: Draft,
   original?: RulesetFull,
 ): Record<string, unknown> {
-  const include =
-    d.refScope === "default"
-      ? ["~DEFAULT_BRANCH"]
-      : d.refScope === "all"
-        ? ["~ALL"]
-        : splitLines(d.customPatterns).map((p) =>
-            p.startsWith("refs/") ? p : `refs/heads/${p}`,
-          );
+  const include = REF_INCLUDES[d.refScope](d);
   const rules: Record<string, unknown>[] = [];
   if (d.requirePr) {
     rules.push({

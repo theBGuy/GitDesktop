@@ -1,5 +1,5 @@
 import { guardedFetch } from "./guarded-fetch";
-import type { AiSettings } from "./types";
+import type { AiProviderId, AiSettings } from "./types";
 
 /** How much diff + prior-discussion context an AI review sends, scaled to the
  *  reviewing model's context window. `"auto"` probes the window (live for
@@ -145,12 +145,14 @@ export async function resolveBudgetProfile(
   if (size === "medium") return scaledProfile(1);
   if (size === "large") return scaledProfile(4);
 
-  const baseUrl =
-    ai.provider === "ollama"
-      ? ai.ollamaBaseUrl
-      : ai.provider === "openai-compatible"
-        ? ai.openaiCompatibleBaseUrl
-        : "";
+  // Only these two providers have a user-set endpoint that can change which
+  // model answers. Partial, not total: the persisted provider string isn't
+  // trusted as closed at runtime (see resolveAutoProfile's default arm).
+  const baseUrls: Partial<Record<AiProviderId, string>> = {
+    ollama: ai.ollamaBaseUrl,
+    "openai-compatible": ai.openaiCompatibleBaseUrl,
+  };
+  const baseUrl = baseUrls[ai.provider] ?? "";
   const cacheKey = `${ai.provider}#${ai.model}#${baseUrl}`;
   const cached = profileCache.get(cacheKey);
   if (cached) return cached;

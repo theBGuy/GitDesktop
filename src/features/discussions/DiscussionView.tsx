@@ -72,6 +72,7 @@ import {
 import type { PrThreadOut } from "@/lib/git/types";
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { useUiStore } from "@/lib/stores/ui";
+import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 
@@ -472,10 +473,14 @@ export function DiscussionView({
           )}
           <AuthorAvatar login={d.author} />
           <span>{d.author || "unknown"}</span>
-          <span>•</span>
-          <span>
-            opened <RelativeTime date={d.createdAt} />
-          </span>
+          {parseableDate(d.createdAt) && (
+            <>
+              <span>•</span>
+              <span>
+                opened <RelativeTime date={d.createdAt} />
+              </span>
+            </>
+          )}
         </div>
         {/* Keyed on the discussion: the popover seeds a draft on open and commits
             it on close against LIVE props, and this view is never remounted per
@@ -503,9 +508,11 @@ export function DiscussionView({
             <p className="flex items-center gap-2 text-xs">
               <AuthorAvatar login={d.author} />
               <span className="font-medium">{d.author || "unknown"}</span>
-              <span className="text-muted-foreground">
-                opened <RelativeTime date={d.createdAt} />
-              </span>
+              {parseableDate(d.createdAt) && (
+                <span className="text-muted-foreground">
+                  opened <RelativeTime date={d.createdAt} />
+                </span>
+              )}
               <span className="flex-1" />
               <DropdownMenu>
                 <DropdownMenuTrigger
@@ -667,14 +674,13 @@ export function DiscussionView({
                         value={replyBody}
                         onChange={setReplyBody}
                         onKeyDown={(e) => {
-                          if (
-                            (e.ctrlKey || e.metaKey) &&
-                            e.key === "Enter" &&
-                            replyBody.trim() &&
-                            !busy
-                          ) {
+                          if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+                            // preventDefault unconditionally: `commit` is bound to
+                            // mod+enter and fires inside editable targets, so a chord
+                            // this handler declines to submit would otherwise reach
+                            // the global action.
                             e.preventDefault();
-                            submitReply(c.id);
+                            if (replyBody.trim() && !busy) submitReply(c.id);
                           }
                         }}
                         rows={2}

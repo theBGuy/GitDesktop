@@ -29,6 +29,7 @@ import {
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
+import { parseableDate } from "@/lib/time";
 import { cn } from "@/lib/utils";
 import { CreateDiscussionDialog } from "./CreateDiscussionDialog";
 
@@ -268,8 +269,13 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
                     </p>
                     <p className="truncate text-[11px] text-muted-foreground">
                       {d.commentCount}{" "}
-                      {d.commentCount === 1 ? "comment" : "comments"} ·{" "}
-                      <RelativeTime date={d.createdAt} />
+                      {d.commentCount === 1 ? "comment" : "comments"}
+                      {parseableDate(d.createdAt) && (
+                        <>
+                          {" · "}
+                          <RelativeTime date={d.createdAt} />
+                        </>
+                      )}
                       {d.upvoteCount > 0 && (
                         <>
                           {" · "}

@@ -6006,25 +6006,24 @@ export function useEditPrLabels(repo: string, lens: RemoteLens) {
     onSettled: (_d, _e, args) => {
       // Issue/MR narrow keys carry the lens they were read under; discussions are
       // not lens-scoped (GitHub Discussions have no fork lens) — keyed as before.
-      const keys =
-        args.kind === "issue"
-          ? [
-              ["repo", repo, "issue-list", lens],
-              ["repo", repo, "issue", lens, args.number],
-            ]
-          : args.kind === "mr"
-            ? [
-                ["repo", repo, "pr", lens, args.number],
-                ["repo", repo, "pr-list", lens],
-              ]
-            : args.kind === "discussion"
-              ? [
-                  ["repo", repo, "discussion", args.number],
-                  ["repo", repo, "discussion-list"],
-                ]
-              : [repoKeys.all(repo)];
+      const keysByKind: Record<typeof args.kind, (n: number) => QueryKey[]> = {
+        issue: (n) => [
+          ["repo", repo, "issue-list", lens],
+          ["repo", repo, "issue", lens, n],
+        ],
+        mr: (n) => [
+          ["repo", repo, "pr", lens, n],
+          ["repo", repo, "pr-list", lens],
+        ],
+        discussion: (n) => [
+          ["repo", repo, "discussion", n],
+          ["repo", repo, "discussion-list"],
+        ],
+      };
       return void Promise.all(
-        keys.map((queryKey) => queryClient.invalidateQueries({ queryKey })),
+        keysByKind[args.kind](args.number).map((queryKey) =>
+          queryClient.invalidateQueries({ queryKey }),
+        ),
       );
     },
   });

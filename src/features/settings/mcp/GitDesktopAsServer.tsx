@@ -32,6 +32,16 @@ import { toastError } from "@/lib/toast";
  *  `.mcp.json`, or a client's global (all-projects) user config. */
 type InstallTarget = "project" | "claude" | "copilot";
 
+/** The replace-confirm prompt per target — each names the config the existing
+ *  `gitdesktop` entry would be overwritten in. */
+const REPLACE_PROMPTS: Record<InstallTarget, string> = {
+  project:
+    "This repo's .mcp.json already has a gitdesktop entry. Replace it with the configuration shown?",
+  claude:
+    "Claude Code's user config already has a gitdesktop server. Replace it?",
+  copilot: "Copilot's user config already has a gitdesktop server. Replace it?",
+};
+
 /** The four `--allow-*` permission flags, in ladder order, mapped to their
  *  human tier label. Drives both the installed-tier readout and the drift
  *  comparison — every other arg (`mcp`, `--repo`, its value, unknown flags) is
@@ -739,9 +749,7 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
               <DialogHeader>
                 <DialogTitle>Replace existing entry?</DialogTitle>
                 <DialogDescription>
-                  {confirmTarget === "project"
-                    ? "This repo's .mcp.json already has a gitdesktop entry. Replace it with the configuration shown?"
-                    : `${confirmTarget === "claude" ? "Claude Code" : "Copilot"}'s user config already has a gitdesktop server. Replace it?`}
+                  {confirmTarget && REPLACE_PROMPTS[confirmTarget]}
                 </DialogDescription>
               </DialogHeader>
               <DialogFooter>

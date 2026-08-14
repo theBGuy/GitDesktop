@@ -76,6 +76,7 @@ import {
   sortTimeline,
   type TimelineEntry,
 } from "./PrTimeline";
+import type { PrSection } from "./pr-section";
 import { ResolveConflictsView } from "./ResolveConflictsView";
 import {
   useCancelOnIdentityChange,
@@ -87,7 +88,29 @@ import {
   useLinkedIssueChips,
 } from "./useLinkedIssueChips";
 
-type Section = "conversation" | "commits" | "files" | "review";
+/** The verb a completed merge reports, per strategy. */
+const MERGED_VERB: Record<MergeStrategy, string> = {
+  merge: "Merged",
+  squash: "Squashed and merged",
+  rebase: "Rebased and merged",
+  fast_forward: "Merged",
+};
+
+/** Tab labels for this view's sections. `files` is undefined until the branch-diff
+ *  read lands, and the tab then shows no count rather than a wrong one. */
+const SECTION_LABEL: Record<
+  PrSection,
+  (counts: {
+    comments: number;
+    commits: number;
+    files: number | undefined;
+  }) => string
+> = {
+  conversation: (c) => `Conversation (${c.comments})`,
+  commits: (c) => `Commits (${c.commits})`,
+  files: (c) => `Files${c.files === undefined ? "" : ` (${c.files})`}`,
+  review: () => "Review",
+};
 
 export function LocalPrView({
   repoPath,
@@ -106,7 +129,7 @@ export function LocalPrView({
   const selectedPr = useUiStore((s) => s.selectedPr);
   const pendingPrSection = useUiStore((s) => s.pendingPrSection);
   const setPendingPrSection = useUiStore((s) => s.setPendingPrSection);
-  const [section, setSection] = useState<Section>("conversation");
+  const [section, setSection] = useState<PrSection>("conversation");
   // Commits-tab drill-in: the selected commit's hash, or null for the list.
   // Reset when the viewed PR changes (below).
   const [selectedCommitHash, setSelectedCommitHash] = useState<string | null>(
@@ -116,7 +139,7 @@ export function LocalPrView({
   // The sub-tabs the strip renders — every writer of `section` gates on this, so
   // no path can select a tab that isn't there. A local PR has no forge, so the
   // Review tab rides the AI setting alone (no capability axis to consult).
-  const availableSections = useMemo<Section[]>(
+  const availableSections = useMemo<PrSection[]>(
     () =>
       aiEnabled
         ? ["conversation", "commits", "files", "review"]
@@ -349,13 +372,9 @@ export function LocalPrView({
                 mergedAt: new Date().toISOString(),
               }),
             });
-            const verb =
-              strategy === "squash"
-                ? "Squashed and merged"
-                : strategy === "rebase"
-                  ? "Rebased and merged"
-                  : "Merged";
-            toast.success(`${verb} ${pr.head} into ${pr.base}`);
+            toast.success(
+              `${MERGED_VERB[strategy]} ${pr.head} into ${pr.base}`,
+            );
             return;
           }
           // Conflicts: the merge is paused in an isolated worktree (the user's
@@ -611,13 +630,11 @@ export function LocalPrView({
               aria-pressed={section === s}
               onClick={() => setSection(s)}
             >
-              {s === "conversation"
-                ? `Conversation (${pr.comments.length})`
-                : s === "commits"
-                  ? `Commits (${ahead.length})`
-                  : s === "files"
-                    ? `Files${fileCount === undefined ? "" : ` (${fileCount})`}`
-                    : "Review"}
+              {SECTION_LABEL[s]({
+                comments: pr.comments.length,
+                commits: ahead.length,
+                files: fileCount,
+              })}
             </Button>
           ))}
         </div>

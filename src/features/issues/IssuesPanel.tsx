@@ -24,7 +24,7 @@ import {
   useIssueList,
   usePrefetchIssue,
 } from "@/lib/git/queries";
-import { providerLabel } from "@/lib/git/types";
+import { type ForgeProvider, providerLabel } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useLocalIssues } from "@/lib/issues/queries";
 import {
@@ -42,11 +42,21 @@ import {
 } from "@/lib/repo-lens/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { isAppError } from "@/lib/tauri/invoke";
+import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { CreateIssueDialog } from "./CreateIssueDialog";
 import { CreateJiraIssueDialog } from "./CreateJiraIssueDialog";
 import { CreateLocalIssueDialog } from "./CreateLocalIssueDialog";
 import { RepoJiraDialog } from "./RepoJiraDialog";
+
+/** Where the "New" menu's forge item creates the issue. An unrecognized or
+ *  absent provider routes through gh, so GitHub is the fallback (mirrors
+ *  `providerLabel`). */
+const NEW_ISSUE_LABEL: Record<ForgeProvider, string> = {
+  github: "Issue on GitHub…",
+  gitlab: "Issue on GitLab…",
+  bitbucket: "Issue on Bitbucket…",
+};
 
 /** Bitbucket has retired its native issue tracker (deleted platform-wide
  *  2026-08-20); issues moved to Jira. When the repo has no Jira link yet, invite
@@ -286,11 +296,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
         onStateFilter={onStateFilter}
         lensControl={<RepoLensSwitcher repoPath={repoPath} />}
         newMenu={{
-          ghLabel: isBitbucket
-            ? "Issue on Bitbucket…"
-            : isGitLab
-              ? "Issue on GitLab…"
-              : "Issue on GitHub…",
+          ghLabel: NEW_ISSUE_LABEL[provider ?? "github"],
           // Issues disabled on the repo (a fork's default) also blocks creation, even
           // when the forge is otherwise ready — gate it with the reason so "New" isn't
           // a button that can only fail.
@@ -434,8 +440,14 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
               </span>
             </p>
             <p className="mt-0.5 truncate pl-4 text-[11px] text-muted-foreground">
-              #{issue.number} · {issue.author ? `${issue.author.login} · ` : ""}
-              <RelativeTime date={issue.createdAt} />
+              #{issue.number}
+              {issue.author ? ` · ${issue.author.login}` : ""}
+              {parseableDate(issue.createdAt) && (
+                <>
+                  {" · "}
+                  <RelativeTime date={issue.createdAt} />
+                </>
+              )}
             </p>
           </>
         )}
@@ -522,7 +534,13 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
                       {issue.summary}
                     </p>
                     <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
-                      {issue.key} · <RelativeTime date={issue.updatedAt} />
+                      {issue.key}
+                      {parseableDate(issue.updatedAt) && (
+                        <>
+                          {" · "}
+                          <RelativeTime date={issue.updatedAt} />
+                        </>
+                      )}
                     </p>
                   </>
                 ),

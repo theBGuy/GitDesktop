@@ -1,10 +1,12 @@
 import {
   CaretDownIcon,
   ClockIcon,
+  type Icon,
   InfoIcon,
   SparkleIcon,
   WarningIcon,
 } from "@phosphor-icons/react";
+import type { ReactNode } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import {
@@ -37,6 +39,57 @@ export type PrMergeabilityArm =
   | "resume"
   | "behind"
   | null;
+
+/** Words carry the meaning; the icon and tone only reinforce it. */
+const ARM_ICON: Record<Exclude<PrMergeabilityArm, null>, Icon> = {
+  conflicting: WarningIcon,
+  predicted: WarningIcon,
+  checking: ClockIcon,
+  unknown: ClockIcon,
+  resume: InfoIcon,
+  behind: InfoIcon,
+};
+
+/** The line each arm says. */
+const ARM_MESSAGE: Record<
+  Exclude<PrMergeabilityArm, null>,
+  (ctx: {
+    base: string;
+    provider: ForgeProvider | null | undefined;
+    behindBy: number;
+  }) => ReactNode
+> = {
+  conflicting: ({ base, provider }) => (
+    <>
+      {"This pull request has conflicts with "}
+      <span className="font-mono">{base}</span>
+      {"."}
+      {/* GitHub runs no pull_request checks on a conflicting PR, so an
+          empty checks list there means "never ran", not "passed". */}
+      {provider === "github" ? " Checks won't run until they're resolved." : ""}
+    </>
+  ),
+  predicted: ({ base }) => (
+    <>
+      {"Merging into "}
+      <span className="font-mono">{base}</span>
+      {/* Names the staleness: the prediction runs on remote-tracking refs
+          and never fetches, so it can only be as fresh as the last fetch. */}
+      {" is predicted to conflict (checked locally from your last fetch)."}
+    </>
+  ),
+  checking: () => "Checking mergeability…",
+  unknown: () => "Couldn't determine mergeability.",
+  resume: () =>
+    "An unfinished conflict resolution exists for this pull request.",
+  behind: ({ base, behindBy }) => (
+    <>
+      {`This branch is ${behindBy} commit${behindBy === 1 ? "" : "s"} behind `}
+      <span className="font-mono">{base}</span>
+      {"."}
+    </>
+  ),
+};
 
 /**
  * One calm status strip above a remote PR's body: whether it merges into its base,
@@ -117,13 +170,7 @@ export function PrMergeabilityBanner({
       )}
     </ul>
   );
-  // Words carry the meaning; the icon and tone only reinforce it.
-  const Icon =
-    arm === "checking" || arm === "unknown"
-      ? ClockIcon
-      : arm === "resume" || arm === "behind"
-        ? InfoIcon
-        : WarningIcon;
+  const Icon = ARM_ICON[arm];
   const updateDisabled = updateBusy || updateBlockedReason !== undefined;
 
   return (
@@ -136,40 +183,7 @@ export function PrMergeabilityBanner({
       >
         <Icon className="size-3.5 shrink-0" />
         <span className="min-w-0">
-          {arm === "conflicting" ? (
-            <>
-              {"This pull request has conflicts with "}
-              <span className="font-mono">{base}</span>
-              {"."}
-              {/* GitHub runs no pull_request checks on a conflicting PR, so an
-                  empty checks list there means "never ran", not "passed". */}
-              {provider === "github"
-                ? " Checks won't run until they're resolved."
-                : ""}
-            </>
-          ) : arm === "predicted" ? (
-            <>
-              {"Merging into "}
-              <span className="font-mono">{base}</span>
-              {/* Names the staleness: the prediction runs on remote-tracking refs
-                  and never fetches, so it can only be as fresh as the last fetch. */}
-              {
-                " is predicted to conflict (checked locally from your last fetch)."
-              }
-            </>
-          ) : arm === "checking" ? (
-            "Checking mergeability…"
-          ) : arm === "unknown" ? (
-            "Couldn't determine mergeability."
-          ) : arm === "behind" ? (
-            <>
-              {`This branch is ${behindBy} commit${behindBy === 1 ? "" : "s"} behind `}
-              <span className="font-mono">{base}</span>
-              {"."}
-            </>
-          ) : (
-            "An unfinished conflict resolution exists for this pull request."
-          )}
+          {ARM_MESSAGE[arm]({ base, provider, behindBy })}
         </span>
       </span>
 

@@ -32,7 +32,7 @@ import {
   secureFindingId,
   useGitLabFindings,
 } from "@/lib/gitlab/security-findings";
-import { useUiStore } from "@/lib/stores/ui";
+import { type SelectedFinding, useUiStore } from "@/lib/stores/ui";
 import { parseableDate } from "@/lib/time";
 import {
   CodeScanningChip,
@@ -239,9 +239,11 @@ function AlertDetail({ alert }: { alert: DependabotAlertOut }) {
               </span>
             </Row>
           ) : null}
-          <Row label="Opened">
-            <RelativeTime date={alert.createdAt} />
-          </Row>
+          {parseableDate(alert.createdAt) ? (
+            <Row label="Opened">
+              <RelativeTime date={alert.createdAt} />
+            </Row>
+          ) : null}
         </>
       }
     >
@@ -316,9 +318,11 @@ function CodeScanningDetail({ alert }: { alert: CodeScanningAlertOut }) {
           ) : null}
           {/* No State row: the fetch pins state=open, so it could only ever
               read "open". */}
-          <Row label="Opened">
-            <RelativeTime date={alert.createdAt} />
-          </Row>
+          {parseableDate(alert.createdAt) ? (
+            <Row label="Opened">
+              <RelativeTime date={alert.createdAt} />
+            </Row>
+          ) : null}
         </>
       }
     >
@@ -353,9 +357,11 @@ function SecretScanningDetail({ alert }: { alert: SecretScanningAlertOut }) {
           {alert.publiclyLeaked === true ? (
             <Row label="Publicly leaked">Yes</Row>
           ) : null}
-          <Row label="Opened">
-            <RelativeTime date={alert.createdAt} />
-          </Row>
+          {parseableDate(alert.createdAt) ? (
+            <Row label="Opened">
+              <RelativeTime date={alert.createdAt} />
+            </Row>
+          ) : null}
         </>
       }
     >
@@ -623,17 +629,19 @@ export function FindingDetailView({
   );
 
   // Only the selected finding's own category decides the pending/error state —
-  // a sibling category failing must not blank a finding that loaded fine.
-  const query =
-    selectedFinding?.type === "glFinding"
-      ? gl
-      : selectedFinding?.type === "advisory"
-        ? advisories
-        : selectedFinding?.type === "codeScanning"
-          ? codeScanning
-          : selectedFinding?.type === "secretScanning"
-            ? secrets
-            : alerts;
+  // a sibling category failing must not blank a finding that loaded fine. Typed
+  // to what's read here, since the five categories carry different data shapes.
+  const queryByType: Record<
+    SelectedFinding["type"],
+    { isPending: boolean; isError: boolean }
+  > = {
+    alert: alerts,
+    codeScanning,
+    secretScanning: secrets,
+    advisory: advisories,
+    glFinding: gl,
+  };
+  const query = selectedFinding ? queryByType[selectedFinding.type] : alerts;
 
   // Gated on `enabled`: a disabled query stays `isPending` forever, so an
   // ungated skeleton would spin here if the repo lost the capability mid-session.

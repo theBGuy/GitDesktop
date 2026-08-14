@@ -49,6 +49,37 @@ type Pending =
   | { kind: "removeRule"; rules: { source: string; pattern: string }[] }
   | null;
 
+/** How many items the action names — paths for the file actions, rules for the
+ *  .gitignore one. */
+const pendingCount = (p: NonNullable<Pending>) =>
+  p.kind === "removeRule" ? p.rules.length : p.paths.length;
+
+/** The confirm dialog's whole voice per action, so its title, warning and
+ *  button can never end up describing different ones. */
+const PENDING_COPY: Record<
+  NonNullable<Pending>["kind"],
+  { title: (n: number) => string; description: string; confirm: string }
+> = {
+  untrack: {
+    title: (n) => `Untrack ${n} ${n === 1 ? "file" : "files"}?`,
+    description:
+      "These files stay on disk, but git stops tracking them. Each gets an anchored rule added to .gitignore so it isn't re-added. To undo, remove the rule from the Ignored tab and re-add the file.",
+    confirm: "Untrack",
+  },
+  forceAdd: {
+    title: (n) => `Force-add ${n} ${n === 1 ? "item" : "items"}?`,
+    description:
+      "These start being tracked despite .gitignore. A directory (trailing “/”) tracks all of its currently-ignored contents — review the list before confirming:",
+    confirm: "Force-add",
+  },
+  removeRule: {
+    title: (n) => `Remove ${n} .gitignore rule${n === 1 ? "" : "s"}?`,
+    description:
+      "Removing a rule un-ignores every file it matched across the repo — not just the ones you selected. These lines are deleted from their .gitignore files:",
+    confirm: "Remove",
+  },
+};
+
 export function RepositoryFilesDialog({
   repoPath,
   open,
@@ -66,6 +97,12 @@ export function RepositoryFilesDialog({
   const [activePath, setActivePath] = useState<string | null>(null);
   const [anchorPath, setAnchorPath] = useState<string | null>(null);
   const [pending, setPending] = useState<Pending>(null);
+  // The confirm dialog stays mounted through Base UI's ~100ms exit fade, by
+  // which time `pending` is already null — its copy renders from the last
+  // non-null value or it blanks mid-fade.
+  const lastPending = useRef(pending);
+  if (pending) lastPending.current = pending;
+  const shownPending = pending ?? lastPending.current;
 
   const tracked = useTrackedFiles(repoPath, open && tab === "tracked");
   const ignored = useIgnoredFiles(repoPath, open && tab === "ignored");
@@ -398,18 +435,13 @@ export function RepositoryFilesDialog({
         <DialogContent finalFocus={() => filterRef.current}>
           <DialogHeader>
             <DialogTitle>
-              {pending?.kind === "untrack"
-                ? `Untrack ${pending.paths.length} ${pending.paths.length === 1 ? "file" : "files"}?`
-                : pending?.kind === "forceAdd"
-                  ? `Force-add ${pending.paths.length} ${pending.paths.length === 1 ? "item" : "items"}?`
-                  : `Remove ${pending?.kind === "removeRule" ? pending.rules.length : 0} .gitignore rule${pending?.kind === "removeRule" && pending.rules.length === 1 ? "" : "s"}?`}
+              {shownPending &&
+                PENDING_COPY[shownPending.kind].title(
+                  pendingCount(shownPending),
+                )}
             </DialogTitle>
             <DialogDescription>
-              {pending?.kind === "untrack"
-                ? "These files stay on disk, but git stops tracking them. Each gets an anchored rule added to .gitignore so it isn't re-added. To undo, remove the rule from the Ignored tab and re-add the file."
-                : pending?.kind === "forceAdd"
-                  ? "These start being tracked despite .gitignore. A directory (trailing “/”) tracks all of its currently-ignored contents — review the list before confirming:"
-                  : "Removing a rule un-ignores every file it matched across the repo — not just the ones you selected. These lines are deleted from their .gitignore files:"}
+              {shownPending && PENDING_COPY[shownPending.kind].description}
             </DialogDescription>
           </DialogHeader>
           {pending?.kind === "untrack" && (
@@ -461,11 +493,7 @@ export function RepositoryFilesDialog({
                   runRemoveRules(pending.rules);
               }}
             >
-              {pending?.kind === "untrack"
-                ? "Untrack"
-                : pending?.kind === "forceAdd"
-                  ? "Force-add"
-                  : "Remove"}
+              {shownPending && PENDING_COPY[shownPending.kind].confirm}
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -14,7 +14,7 @@ import {
 } from "@/components/ui/select";
 import { withForm } from "@/lib/form";
 import { detectTerminals } from "@/lib/git/api";
-import { isMac, isWindows } from "@/lib/hotkeys/binding";
+import { isWindows, type Platform, platform } from "@/lib/hotkeys/binding";
 import { settingsFormOpts } from "./settings-form";
 
 const DEFAULT = "__default__";
@@ -22,22 +22,27 @@ const CUSTOM = "__custom__";
 const CUSTOM_COMMAND = "__custom_command__";
 
 // The default terminal is platform-specific, so its label can't be hardcoded.
-const DEFAULT_LABEL = isWindows
-  ? "Default (Command Prompt)"
-  : isMac
-    ? "Default (Terminal)"
-    : "Default terminal";
-const CUSTOM_PLACEHOLDER = isWindows
-  ? "C:\\path\\to\\terminal.exe"
-  : isMac
-    ? "/Applications/iTerm.app"
-    : "/usr/bin/alacritty";
+const DEFAULT_LABELS: Record<Platform, string> = {
+  windows: "Default (Command Prompt)",
+  mac: "Default (Terminal)",
+  linux: "Default terminal",
+};
+const DEFAULT_LABEL = DEFAULT_LABELS[platform];
+
+const CUSTOM_PLACEHOLDERS: Record<Platform, string> = {
+  windows: "C:\\path\\to\\terminal.exe",
+  mac: "/Applications/iTerm.app",
+  linux: "/usr/bin/alacritty",
+};
+const CUSTOM_PLACEHOLDER = CUSTOM_PLACEHOLDERS[platform];
+
 // A representative shell-free command per platform, showing the {path} token.
-const CUSTOM_COMMAND_PLACEHOLDER = isWindows
-  ? "wt -d {path}"
-  : isMac
-    ? "wezterm start --cwd {path}"
-    : "tmux new-window -c {path}";
+const CUSTOM_COMMAND_PLACEHOLDERS: Record<Platform, string> = {
+  windows: "wt -d {path}",
+  mac: "wezterm start --cwd {path}",
+  linux: "tmux new-window -c {path}",
+};
+const CUSTOM_COMMAND_PLACEHOLDER = CUSTOM_COMMAND_PLACEHOLDERS[platform];
 
 export const TerminalSection = withForm({
   ...settingsFormOpts,

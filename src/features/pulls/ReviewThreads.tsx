@@ -745,14 +745,13 @@ export function ReviewThreadCard({
                   value={replyBody}
                   onChange={setReplyBody}
                   onKeyDown={(e) => {
-                    if (
-                      (e.ctrlKey || e.metaKey) &&
-                      e.key === "Enter" &&
-                      replyBody.trim() &&
-                      !replyPending
-                    ) {
+                    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+                      // preventDefault unconditionally: `commit` is bound to
+                      // mod+enter and fires inside editable targets, so a chord
+                      // this handler declines to submit would otherwise reach
+                      // the global action.
                       e.preventDefault();
-                      submitReply();
+                      if (replyBody.trim() && !replyPending) submitReply();
                     }
                   }}
                   rows={2}

@@ -16,9 +16,10 @@ export interface PrAudit {
   label: string;
 }
 
-// Most actionable / authoritative state wins when a branch has several PRs —
-// mirrors BranchSwitcher's PR_RANK so the two surfaces never disagree.
-const RANK: Record<PrAuditState, number> = {
+/** Most actionable / authoritative state wins when a branch has several PRs.
+ *  Both PR surfaces — the audit chips and BranchSwitcher's branch badges — rank
+ *  from this one table. */
+export const PR_RANK: Record<PrAuditState, number> = {
   open: 3,
   draft: 3,
   merged: 2,
@@ -88,7 +89,8 @@ export function usePrAuditByBranch(
     const map = new Map<string, PrAudit>();
     const consider = (branch: string, cand: PrAudit) => {
       const cur = map.get(branch);
-      if (!cur || RANK[cand.state] > RANK[cur.state]) map.set(branch, cand);
+      if (!cur || PR_RANK[cand.state] > PR_RANK[cur.state])
+        map.set(branch, cand);
     };
     // Remote PRs first, so they win ties against a local PR of equal state.
     for (const pr of [...(openPrs.data ?? []), ...(closedPrs.data ?? [])]) {

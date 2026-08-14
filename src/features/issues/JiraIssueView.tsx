@@ -81,6 +81,7 @@ import {
   type JiraWorklog,
 } from "@/lib/jira/types";
 import { useUiStore } from "@/lib/stores/ui";
+import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { useDebouncedValue } from "@/lib/use-debounced-value";
 import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
@@ -1661,9 +1662,11 @@ export function JiraIssueView({
               name={issue.statusName}
             />
           )}
-          <span>
-            · opened <RelativeTime date={issue.createdAt} />
-          </span>
+          {parseableDate(issue.createdAt) && (
+            <span>
+              · opened <RelativeTime date={issue.createdAt} />
+            </span>
+          )}
         </div>
       </header>
 

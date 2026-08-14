@@ -586,12 +586,22 @@ export function SessionList({ repoPath }: { repoPath: string }) {
     ],
     [research, plans, sessions],
   );
+  // One table per kind for "is this the selected row?" and "open it" — the
+  // roving tab stop and the keyboard nav read the same entry, so they can't
+  // drift apart.
+  const navKind: Record<
+    NavRow["kind"],
+    { isActive: (id: string) => boolean; activate: (id: string) => void }
+  > = {
+    research: {
+      isActive: (id) => id === activeResearchId,
+      activate: selectResearch,
+    },
+    plan: { isActive: (id) => id === activePlanId, activate: selectPlan },
+    session: { isActive: (id) => id === activeId, activate: selectSession },
+  };
   const activeIndex = navItems.findIndex((it) =>
-    it.kind === "research"
-      ? it.id === activeResearchId
-      : it.kind === "plan"
-        ? it.id === activePlanId
-        : it.id === activeId,
+    navKind[it.kind].isActive(it.id),
   );
   // When nothing in this list is selected, the first row is the roving tab stop.
   const rovingIndex = activeIndex === -1 ? 0 : activeIndex;
@@ -599,12 +609,7 @@ export function SessionList({ repoPath }: { repoPath: string }) {
     items: navItems,
     activeIndex,
     rowKey: (it) => it.id,
-    onActivate: (it) =>
-      it.kind === "research"
-        ? selectResearch(it.id)
-        : it.kind === "plan"
-          ? selectPlan(it.id)
-          : selectSession(it.id),
+    onActivate: (it) => navKind[it.kind].activate(it.id),
   });
 
   const nothingSelected =
@@ -788,16 +793,21 @@ function EmptyState({ onNew }: { onNew: () => void }) {
   );
 }
 
+/** What an otherwise-empty tab says about itself — each names how rows land
+ *  there. */
+const TAB_EMPTY_MESSAGE: Record<SessionTab, string> = {
+  active: "Nothing active — start a plan or session with New.",
+  kept: "No kept sessions yet. Keep a session to file it here.",
+  archived:
+    "No archived plans yet. Plans land here once their session is kept.",
+};
+
 /** Shown when a tab (or a search within it) has no rows, but other rows exist —
  *  so the full empty state with its New button would be misleading. */
 function ListEmpty({ tab, hasQuery }: { tab: SessionTab; hasQuery: boolean }) {
   const message = hasQuery
     ? "Nothing matches your search."
-    : tab === "kept"
-      ? "No kept sessions yet. Keep a session to file it here."
-      : tab === "archived"
-        ? "No archived plans yet. Plans land here once their session is kept."
-        : "Nothing active — start a plan or session with New.";
+    : TAB_EMPTY_MESSAGE[tab];
   return (
     <div className="flex min-h-0 flex-1 items-center justify-center p-6 text-center">
       <p className="text-[11px] leading-relaxed text-muted-foreground">

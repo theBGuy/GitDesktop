@@ -17,6 +17,7 @@ import {
 } from "@/lib/git/queries";
 import type {
   CommitCommentOut,
+  ForgeProvider,
   PrThreadOut,
   RemoteLens,
 } from "@/lib/git/types";
@@ -428,6 +429,18 @@ export function CommitComments({
   );
 }
 
+/** What a dragged range collapses to, per provider. Only GitLab commit discussions
+ *  carry a real range; GitHub/Bitbucket commit comments are single-line APIs
+ *  anchored at the END line, so they disclose the collapse rather than let it pass
+ *  silently. */
+const RANGE_HINT: Record<ForgeProvider, (line: number) => string | null> = {
+  github: (line) =>
+    `GitHub commit comments anchor to a single line — this posts on line ${line}.`,
+  bitbucket: (line) =>
+    `Bitbucket commit comments anchor to a single line — this posts on line ${line}.`,
+  gitlab: () => null,
+};
+
 /**
  * The inline composer in a commit-diff line-widget slot: a compact MarkdownEditor +
  * Comment that creates a line-anchored commit comment. Commit comments anchor to
@@ -484,16 +497,7 @@ export function CommitLineComposer({
         : null;
   const canPost = disabledReason === null;
 
-  // Only GitLab commit discussions carry a real range; GitHub/Bitbucket commit
-  // comments are single-line APIs anchored at the END line — disclosed below so a
-  // dragged range never silently collapses without saying so.
-  const rangeHint = !isRange
-    ? null
-    : provider === "github"
-      ? `GitHub commit comments anchor to a single line — this posts on line ${line}.`
-      : provider === "bitbucket"
-        ? `Bitbucket commit comments anchor to a single line — this posts on line ${line}.`
-        : null;
+  const rangeHint = isRange ? RANGE_HINT[provider](line) : null;
 
   function submit() {
     const text = body.trim();
@@ -536,9 +540,12 @@ export function CommitLineComposer({
         value={body}
         onChange={setBody}
         onKeyDown={(e) => {
-          if ((e.ctrlKey || e.metaKey) && e.key === "Enter" && canPost) {
+          if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+            // preventDefault unconditionally: `commit` is bound to mod+enter and
+            // fires inside editable targets, so a chord this handler declines to
+            // submit would otherwise reach the global action.
             e.preventDefault();
-            submit();
+            if (canPost) submit();
           } else if (e.key === "Escape") {
             // Close only this widget — don't leak Escape to global handlers.
             e.preventDefault();

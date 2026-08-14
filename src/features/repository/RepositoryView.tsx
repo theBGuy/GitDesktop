@@ -72,7 +72,11 @@ import { useLensGate, useSetRepoLens } from "@/lib/repo-lens/queries";
 import { useScripts } from "@/lib/scripts/queries";
 import { useAiEnabled, useRepoAlias } from "@/lib/settings/queries";
 import { useTaskRunStore } from "@/lib/stores/taskRun";
-import { type RepoTab, useUiStore } from "@/lib/stores/ui";
+import {
+  type RepoTab,
+  type SelectedFinding,
+  useUiStore,
+} from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
 import { ChangesPanel } from "./ChangesPanel";
 import { InsightsPanel } from "./insights/InsightsPanel";
@@ -134,6 +138,27 @@ const SECONDARY_TABS: { tab: RepoTab; label: string; ai?: boolean }[] = [
   { tab: "tasks", label: "Tasks" },
   { tab: "insights", label: "Insights" },
 ];
+
+// Remount key per finding variant: the category number sequences overlap, so
+// the type tag has to be part of the key or two same-numbered findings would
+// share one mounted detail pane.
+const FINDING_KEY: {
+  [K in SelectedFinding["type"]]: (
+    f: Extract<SelectedFinding, { type: K }>,
+  ) => string;
+} = {
+  alert: (f) => `a${f.number}`,
+  codeScanning: (f) => `c${f.number}`,
+  secretScanning: (f) => `s${f.number}`,
+  glFinding: (f) => `gl:${f.category}:${f.id}`,
+  advisory: (f) => `g${f.ghsaId}`,
+};
+
+// TS reduces the indexed union of entries to an uncallable intersection, so the
+// correlation the map already encodes is asserted once, here.
+function findingKey(f: SelectedFinding): string {
+  return (FINDING_KEY[f.type] as (finding: SelectedFinding) => string)(f);
+}
 
 export function RepositoryView() {
   const repoPath = useUiStore((s) => s.repoPath);
@@ -590,17 +615,7 @@ export function RepositoryView() {
           <Activity mode={mode("findings")}>
             {selectedFinding ? (
               <FindingDetailView
-                key={
-                  selectedFinding.type === "alert"
-                    ? `a${selectedFinding.number}`
-                    : selectedFinding.type === "codeScanning"
-                      ? `c${selectedFinding.number}`
-                      : selectedFinding.type === "secretScanning"
-                        ? `s${selectedFinding.number}`
-                        : selectedFinding.type === "glFinding"
-                          ? `gl:${selectedFinding.category}:${selectedFinding.id}`
-                          : `g${selectedFinding.ghsaId}`
-                }
+                key={findingKey(selectedFinding)}
                 repoPath={repoPath}
                 active={repoTab === "findings"}
               />

@@ -68,7 +68,13 @@ import { listUserWorktrees, type UserWorktree } from "@/lib/git/worktree";
 import { secondaryClickLabel } from "@/lib/hotkeys/binding";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
-import { LOCAL_AUDIT_STATE, REMOTE_AUDIT_STATE } from "@/lib/pulls/audit";
+import {
+  LOCAL_AUDIT_STATE,
+  PR_AUDIT_TONE,
+  PR_RANK,
+  type PrAuditState,
+  REMOTE_AUDIT_STATE,
+} from "@/lib/pulls/audit";
 import { useLocalPrs } from "@/lib/pulls/queries";
 import { useSetRepoLens } from "@/lib/repo-lens/queries";
 import {
@@ -114,32 +120,16 @@ const baseName = (p: string) => p.split(/[/\\]/).filter(Boolean).pop() ?? p;
 const secondaryClickCapitalized =
   secondaryClickLabel.charAt(0).toUpperCase() + secondaryClickLabel.slice(1);
 
-type PrState = "open" | "draft" | "merged" | "closed";
-
 interface BranchPr {
-  state: PrState;
+  state: PrAuditState;
   /** "#123" for a remote PR, "local" for a local-only one. */
   label: string;
   select: SelectedPr;
 }
 
-// When a branch has several PRs, the most actionable state wins.
-const PR_RANK: Record<PrState, number> = {
-  open: 3,
-  draft: 3,
-  merged: 2,
-  closed: 1,
-};
-
-// GitHub's PR-state palette, via the app's semantic color tokens.
-const PR_TONE: Record<PrState, string> = {
-  open: "text-success",
-  draft: "text-muted-foreground",
-  merged: "text-merged",
-  closed: "text-destructive",
-};
-
-const PR_STATE_LABEL: Record<PrState, string> = {
+/** Sentence-initial state words for the badge's own hint — the audit chip's
+ *  labels lead with "PR", which reads wrong mid-sentence here. */
+const PR_STATE_LABEL: Record<PrAuditState, string> = {
   open: "Open",
   draft: "Draft",
   merged: "Merged",
@@ -351,7 +341,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       // loses its badge too: accepted over-hide, since by name alone the two
       // cases are indistinguishable.
       if (pr.crossRepository) continue;
-      const state: PrState =
+      const state: PrAuditState =
         pr.isDraft && pr.state === "OPEN"
           ? "draft"
           : (REMOTE_AUDIT_STATE[pr.state] ?? "open");
@@ -362,7 +352,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       });
     }
     for (const pr of localPrs.data ?? []) {
-      const state: PrState = LOCAL_AUDIT_STATE[pr.status];
+      const state: PrAuditState = LOCAL_AUDIT_STATE[pr.status];
       consider(pr.head, {
         state,
         label: "local",
@@ -1212,7 +1202,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                       }
                       className={cn(
                         "flex shrink-0 cursor-pointer items-center gap-0.5 text-[11px] tabular-nums hover:underline",
-                        PR_TONE[pr.state],
+                        PR_AUDIT_TONE[pr.state],
                       )}
                       onClick={(e) => {
                         e.stopPropagation();

@@ -21,7 +21,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { AgentKind } from "@/lib/ai/agent";
+import { type AgentKind, isAgentKind } from "@/lib/ai/agent";
 import { MODEL_SUGGESTIONS } from "@/lib/ai/providers";
 import type { McpServer } from "@/lib/settings/api";
 import { useUiStore } from "@/lib/stores/ui";
@@ -515,17 +515,7 @@ export function AgentPicker({
   return (
     <Select
       value={value}
-      onValueChange={(v) =>
-        onChange(
-          v === "copilot"
-            ? "copilot"
-            : v === "codex"
-              ? "codex"
-              : v === "opencode"
-                ? "opencode"
-                : "claude",
-        )
-      }
+      onValueChange={(v) => onChange(isAgentKind(v) ? v : "claude")}
     >
       <SelectTrigger
         size="sm"

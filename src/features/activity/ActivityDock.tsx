@@ -570,6 +570,17 @@ const TONE_CLASS: Record<NotificationTone, string> = {
   neutral: "text-muted-foreground",
 };
 
+/** Fallback glyph for kinds `KIND_GLYPH` doesn't name — the tone is then the
+ *  only signal the mark can carry. */
+const TONE_ICON: Record<NotificationTone, typeof CheckCircleIcon> = {
+  success: CheckCircleIcon,
+  warning: WarningCircleIcon,
+  danger: XCircleIcon,
+  info: CheckCircleIcon,
+  merged: CheckCircleIcon,
+  neutral: CheckCircleIcon,
+};
+
 /** Glyph per event kind; kinds not listed fall back to a tone-appropriate mark
  *  (e.g. `ci-run`, whose success/failure lives in the tone). */
 const KIND_GLYPH: Record<string, typeof CheckCircleIcon> = {
@@ -591,12 +602,5 @@ const KIND_GLYPH: Record<string, typeof CheckCircleIcon> = {
 };
 
 function glyphFor(n: AppNotification): typeof CheckCircleIcon {
-  return (
-    KIND_GLYPH[n.kind] ??
-    (n.tone === "danger"
-      ? XCircleIcon
-      : n.tone === "warning"
-        ? WarningCircleIcon
-        : CheckCircleIcon)
-  );
+  return KIND_GLYPH[n.kind] ?? TONE_ICON[n.tone];
 }
