@@ -4,6 +4,7 @@ import {
   useForgeStatus,
   usePrList,
 } from "@/lib/git/queries";
+import type { LocalPrStatus } from "./local";
 import { useLocalPrs } from "./queries";
 
 /** PR lifecycle states — the same vocabulary the branch picker badges use. */
@@ -38,6 +39,22 @@ export const PR_AUDIT_LABEL: Record<PrAuditState, string> = {
   draft: "PR draft",
   merged: "Merged",
   closed: "PR closed",
+};
+
+// Wire → audit-state vocabularies, shared with BranchSwitcher's branch badges so
+// the two surfaces can't drift. LOCAL is total over LocalPrStatus so TS keeps
+// it exhaustive; REMOTE indexes the forge's untyped wire string, so an unknown
+// state falls back to "open" at the lookup site.
+export const LOCAL_AUDIT_STATE: Record<LocalPrStatus, PrAuditState> = {
+  open: "open",
+  merged: "merged",
+  closed: "closed",
+};
+
+export const REMOTE_AUDIT_STATE: Partial<Record<string, PrAuditState>> = {
+  OPEN: "open",
+  MERGED: "merged",
+  CLOSED: "closed",
 };
 
 /**
@@ -81,21 +98,14 @@ export function usePrAuditByBranch(
       const state: PrAuditState =
         pr.isDraft && pr.state === "OPEN"
           ? "draft"
-          : pr.state === "MERGED"
-            ? "merged"
-            : pr.state === "CLOSED"
-              ? "closed"
-              : "open";
+          : (REMOTE_AUDIT_STATE[pr.state] ?? "open");
       consider(pr.headRefName, { state, label: `#${pr.number}` });
     }
     for (const pr of localPrs.data ?? []) {
-      const state: PrAuditState =
-        pr.status === "merged"
-          ? "merged"
-          : pr.status === "closed"
-            ? "closed"
-            : "open";
-      consider(pr.head, { state, label: "local" });
+      consider(pr.head, {
+        state: LOCAL_AUDIT_STATE[pr.status],
+        label: "local",
+      });
     }
     return map;
   }, [openPrs.data, closedPrs.data, localPrs.data]);

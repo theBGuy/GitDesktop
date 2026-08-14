@@ -45,6 +45,7 @@ import {
   isHostAllowed,
   normalizeHost,
 } from "@/lib/ai/allowed-hosts";
+import { LOGIN_COMMAND } from "@/lib/ai/cli-client";
 import { createAiClient } from "@/lib/ai/client";
 import type { ReviewContextSize } from "@/lib/ai/context-budget";
 import { useAvailableModels } from "@/lib/ai/models";
@@ -250,15 +251,7 @@ function CliProviderConfig({
           <span className="flex items-center gap-1 text-warning">
             <XCircleIcon className="size-4 shrink-0" />
             Found{version} but not signed in — run{" "}
-            <code className="font-mono">
-              {kind === "copilot"
-                ? "copilot login"
-                : kind === "codex"
-                  ? "codex login"
-                  : kind === "opencode"
-                    ? "opencode auth login"
-                    : "claude login"}
-            </code>
+            <code className="font-mono">{LOGIN_COMMAND[kind ?? "claude"]}</code>
             .
           </span>
         ) : info?.found ? (

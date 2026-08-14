@@ -35,6 +35,7 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { detectAgentCli, providerKind } from "@/lib/ai/agent";
+import { LOGIN_COMMAND } from "@/lib/ai/cli-client";
 import { buildAiCommentBody } from "@/lib/ai/comment-branding";
 import { useAvailableModels } from "@/lib/ai/models";
 import {
@@ -422,16 +423,8 @@ export function PrReviewPanel({
           cliDetect.data.authed === "notAuthed" && (
             <p className="text-xs text-warning">
               {PROVIDER_LABELS[provider]} is installed but not signed in — run{" "}
-              <code className="font-mono">
-                {cliKind === "copilot"
-                  ? "copilot login"
-                  : cliKind === "codex"
-                    ? "codex login"
-                    : cliKind === "opencode"
-                      ? "opencode auth login"
-                      : "claude login"}
-              </code>{" "}
-              in a terminal.
+              <code className="font-mono">{LOGIN_COMMAND[cliKind]}</code> in a
+              terminal.
             </p>
           )}
         {providerDiffers && secNeedsKey && !secKeyPreview.data && (
@@ -455,16 +448,7 @@ export function PrReviewPanel({
           secCliDetect.data.authed === "notAuthed" && (
             <p className="text-xs text-warning">
               {PROVIDER_LABELS[secProvider]} is installed but not signed in —
-              run{" "}
-              <code className="font-mono">
-                {secCliKind === "copilot"
-                  ? "copilot login"
-                  : secCliKind === "codex"
-                    ? "codex login"
-                    : secCliKind === "opencode"
-                      ? "opencode auth login"
-                      : "claude login"}
-              </code>{" "}
+              run <code className="font-mono">{LOGIN_COMMAND[secCliKind]}</code>{" "}
               in a terminal to run a security audit.
             </p>
           )}

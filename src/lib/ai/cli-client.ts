@@ -10,9 +10,9 @@ import { PROVIDER_LABELS } from "./providers";
 import { terminalErrorMessage } from "./terminal-error";
 import type { AiClient, AiSettings, AiStreamRequest } from "./types";
 
-/** The `<CLI> login` command each agent uses to authenticate — mirrors the
- *  mapping AiProviderSection renders in its "not signed in" hint. */
-const LOGIN_COMMAND = {
+/** The `<CLI> login` command each agent uses to authenticate — the one source
+ *  every "not signed in" hint reads from, so the surfaces can't drift. */
+export const LOGIN_COMMAND = {
   claude: "claude login",
   codex: "codex login",
   copilot: "copilot login",
