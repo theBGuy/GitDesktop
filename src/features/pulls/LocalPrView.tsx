@@ -187,7 +187,7 @@ export function LocalPrView({
     setCommentHidden,
     addLabel,
     removeLabel,
-  } = useLocalConversation(pr, (mutate) => {
+  } = useLocalConversation(id, pr, (mutate) => {
     if (pr) update.mutate({ id: pr.id, mutate });
   });
   const [promoteOpen, setPromoteOpen] = useState(false);
@@ -210,13 +210,13 @@ export function LocalPrView({
       });
     },
   });
-  // A different PR must never inherit this one's drill-in, unsent drafts, or open
-  // delete/promote/edit dialogs — a render-time state adjustment, not an effect.
+  // A different PR must never inherit this one's drill-in, half-typed label, or
+  // open delete/promote/edit dialogs — a render-time state adjustment, not an
+  // effect.
   const [lastId, setLastId] = useState(id);
   if (id !== lastId) {
     setLastId(id);
     setSelectedCommitHash(null);
-    setComment("");
     setLabelInput("");
     setDeletingCommentId(null);
     setPromoteOpen(false);

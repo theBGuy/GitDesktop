@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import type { MarkdownEditorHandle } from "@/components/markdown-editor";
+import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
 import { makeQuoteReply } from "./quoteReply";
 
 /** A comment on a local (offline) PR or issue. */
@@ -29,13 +30,18 @@ export interface LocalConvEntity {
  * guards on it.
  *
  * `openEdit`/`editForm` stay at the call site (they need the per-view title);
- * this hook owns only conversation/label/composer state.
+ * this hook owns only conversation/label/composer state. The comment draft is
+ * keyed on `id` — the same identity the views reset on — so each entity keeps
+ * its own unsent text while the view stays mounted.
  */
 export function useLocalConversation<T extends LocalConvEntity>(
+  id: string,
   entity: T | undefined,
   apply: (mutate: (cur: T) => T) => void,
 ) {
-  const [comment, setComment] = useState("");
+  const draft = useKeyedEntityState(id, "");
+  const comment = draft.value;
+  const setComment = draft.set;
   const [labelInput, setLabelInput] = useState("");
   const [deletingCommentId, setDeletingCommentId] = useState<string | null>(
     null,

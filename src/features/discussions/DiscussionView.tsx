@@ -5,7 +5,7 @@ import {
   DotsThreeIcon,
 } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffectEvent, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   MarkdownEditor,
@@ -74,6 +74,7 @@ import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { useUiStore } from "@/lib/stores/ui";
 import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
+import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
 import { cn } from "@/lib/utils";
 
 /** A discussion comment/reply shares the conversation shape minus review state. */
@@ -118,6 +119,11 @@ const CLOSE_REASONS: [string, DiscussionCloseReason][] = [
   ["Outdated", "OUTDATED"],
   ["Duplicate", "DUPLICATE"],
 ];
+
+/** Which comment the reply box is open under, and the text typed into it —
+ *  one value so both travel together per discussion. */
+type ReplyDraft = { targetId: string | null; body: string };
+const EMPTY_REPLY: ReplyDraft = { targetId: null, body: "" };
 
 function UpvoteButton({
   count,
@@ -187,39 +193,31 @@ export function DiscussionView({
   const setPendingIssueDraft = useUiStore((s) => s.setPendingIssueDraft);
   const selectDiscussion = useUiStore((s) => s.selectDiscussion);
 
-  const [composeBody, setComposeBody] = useState("");
   const composerRef = useRef<MarkdownEditorHandle>(null);
-  const [replyingTo, setReplyingTo] = useState<string | null>(null);
-  const [replyBody, setReplyBody] = useState("");
   const [deletingCommentId, setDeletingCommentId] = useState<string | null>(
     null,
   );
   const [deletingDiscussion, setDeletingDiscussion] = useState(false);
-  // A different discussion must never inherit this one's unsent drafts, reply
-  // target, or delete confirm — render-time, not an effect. The repo is part of
-  // the identity because discussion numbers repeat across repos.
+  // The repo is part of the identity because discussion numbers repeat across
+  // repos.
   const discussionIdentity = `${repoPath}#${number}`;
+  const compose = useKeyedEntityState(discussionIdentity, "");
+  const reply = useKeyedEntityState(
+    discussionIdentity,
+    EMPTY_REPLY,
+    (v) => v.targetId === null && v.body === "",
+  );
+  // A different discussion must never inherit this one's delete confirm — a
+  // render-time state adjustment, not an effect.
   const [lastIdentity, setLastIdentity] = useState(discussionIdentity);
   if (discussionIdentity !== lastIdentity) {
+    // Reply drafts reset on switch, unlike the compose draft: the reply box
+    // autoFocuses, so a restored one would steal focus and scroll on return.
+    reply.clearFor(lastIdentity);
     setLastIdentity(discussionIdentity);
-    setComposeBody("");
-    setReplyingTo(null);
-    setReplyBody("");
     setDeletingCommentId(null);
     setDeletingDiscussion(false);
   }
-  // Both submits clear their composer only once the mutation resolves, which can
-  // be after a switch — an effect event reads the LIVE identity so a late success
-  // can't wipe text the user has since typed against another discussion.
-  const clearComposeIfSame = useEffectEvent((submittedFor: string) => {
-    if (submittedFor !== discussionIdentity) return;
-    setComposeBody("");
-  });
-  const clearReplyIfSame = useEffectEvent((submittedFor: string) => {
-    if (submittedFor !== discussionIdentity) return;
-    setReplyBody("");
-    setReplyingTo(null);
-  });
 
   const onError = (e: unknown) => toastError(e);
   const d = details.data;
@@ -237,25 +235,34 @@ export function DiscussionView({
     return <DiffPlaceholder message="Could not load this discussion" />;
   }
 
+  // Placeholder details are the PREVIOUSLY shown discussion's, so every write
+  // during the switch window would target that one — gate them all on it.
   const busy =
-    addComment.isPending || markAnswer.isPending || deleteComment.isPending;
+    addComment.isPending ||
+    markAnswer.isPending ||
+    deleteComment.isPending ||
+    details.isPlaceholderData;
 
   function submitComment() {
-    if (!d || !composeBody.trim()) return;
+    if (!d || details.isPlaceholderData || !compose.value.trim()) return;
     const submittedFor = discussionIdentity;
     addComment.mutate(
-      { discussionId: d.id, body: composeBody.trim() },
-      { onSuccess: () => clearComposeIfSame(submittedFor), onError },
+      { discussionId: d.id, body: compose.value.trim() },
+      { onSuccess: () => compose.clearFor(submittedFor), onError },
     );
   }
 
   function submitReply(commentId: string) {
-    if (!d || !replyBody.trim()) return;
+    if (!d || details.isPlaceholderData || !reply.value.body.trim()) return;
     const submittedFor = discussionIdentity;
     addComment.mutate(
-      { discussionId: d.id, body: replyBody.trim(), replyToId: commentId },
       {
-        onSuccess: () => clearReplyIfSame(submittedFor),
+        discussionId: d.id,
+        body: reply.value.body.trim(),
+        replyToId: commentId,
+      },
+      {
+        onSuccess: () => reply.clearFor(submittedFor),
         onError,
       },
     );
@@ -264,7 +271,7 @@ export function DiscussionView({
   // Deferred into the handler: calling makeQuoteReply(ref) during render made the
   // React Compiler bail out of this whole component (refs-in-render rule).
   const quoteReply = (body: string) =>
-    makeQuoteReply({ composerRef, setBody: setComposeBody })(body);
+    makeQuoteReply({ composerRef, setBody: compose.set })(body);
 
   function saveCommentEdit(commentId: string, body: string) {
     updateComment.mutate(
@@ -615,10 +622,12 @@ export function DiscussionView({
                   size="xs"
                   variant="ghost"
                   disabled={busy}
-                  onClick={() => {
-                    setReplyBody("");
-                    setReplyingTo(replyingTo === c.id ? null : c.id);
-                  }}
+                  onClick={() =>
+                    reply.set((prev) => ({
+                      targetId: prev.targetId === c.id ? null : c.id,
+                      body: "",
+                    }))
+                  }
                 >
                   Reply
                 </Button>
@@ -634,7 +643,7 @@ export function DiscussionView({
                   </Button>
                 )}
               </div>
-              {(c.replies.length > 0 || replyingTo === c.id) && (
+              {(c.replies.length > 0 || reply.value.targetId === c.id) && (
                 <div className="space-y-3 border-l pl-4">
                   {c.replies.map((r) => (
                     <Thread
@@ -665,14 +674,16 @@ export function DiscussionView({
                       }
                     />
                   ))}
-                  {replyingTo === c.id && (
+                  {reply.value.targetId === c.id && (
                     <div className="space-y-2">
                       <MarkdownEditor
                         autoFocus
                         aria-label="Write a reply"
                         placeholder="Write a reply…"
-                        value={replyBody}
-                        onChange={setReplyBody}
+                        value={reply.value.body}
+                        onChange={(v) =>
+                          reply.set((prev) => ({ ...prev, body: v }))
+                        }
                         onKeyDown={(e) => {
                           if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
                             // preventDefault unconditionally: `commit` is bound to
@@ -680,7 +691,8 @@ export function DiscussionView({
                             // this handler declines to submit would otherwise reach
                             // the global action.
                             e.preventDefault();
-                            if (replyBody.trim() && !busy) submitReply(c.id);
+                            if (reply.value.body.trim() && !busy)
+                              submitReply(c.id);
                           }
                         }}
                         rows={2}
@@ -690,7 +702,7 @@ export function DiscussionView({
                         <Button
                           size="xs"
                           variant="outline"
-                          disabled={!replyBody.trim() || busy}
+                          disabled={!reply.value.body.trim() || busy}
                           onClick={() => submitReply(c.id)}
                           title={SUBMIT_HINT}
                         >
@@ -699,7 +711,9 @@ export function DiscussionView({
                         <Button
                           size="xs"
                           variant="ghost"
-                          onClick={() => setReplyingTo(null)}
+                          onClick={() =>
+                            reply.set((prev) => ({ ...prev, targetId: null }))
+                          }
                         >
                           Cancel
                         </Button>
@@ -717,10 +731,10 @@ export function DiscussionView({
       </ScrollArea>
       <CommentComposer
         ref={composerRef}
-        value={composeBody}
-        onChange={setComposeBody}
+        value={compose.value}
+        onChange={compose.set}
         onSubmit={submitComment}
-        onClear={() => setComposeBody("")}
+        onClear={() => compose.set("")}
         submitLabel="Comment"
         ariaLabel="Add to the discussion"
         placeholder="Add to the discussion…"

@@ -1,4 +1,4 @@
-import { useEffectEvent, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { MarkdownEditor } from "@/components/markdown-editor";
@@ -23,6 +23,7 @@ import type {
 } from "@/lib/git/types";
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { toastError } from "@/lib/toast";
+import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
 
 export type DiffSections = ReturnType<typeof splitUnifiedDiff>;
 
@@ -243,25 +244,18 @@ export function CommitComments({
   const editComment = useEditCommitComment(repoPath, lens);
   const deleteComment = useDeleteCommitComment(repoPath, lens);
 
-  const [body, setBody] = useState("");
   const [deletingId, setDeletingId] = useState<string | null>(null);
-  // Neither call site keys this component on the commit, so a different commit
-  // must never inherit the previous one's draft or pending delete confirm — a
-  // render-time state adjustment, not an effect. Identity is the same triple the
-  // comments are read and written under.
+  // Identity is the same triple the comments are read and written under.
   const commitIdentity = `${repoPath}#${lens}#${sha}`;
+  const draft = useKeyedEntityState(commitIdentity, "");
+  // Neither call site keys this component on the commit, so a different commit
+  // must never inherit the previous one's pending delete confirm — a render-time
+  // state adjustment, not an effect.
   const [lastIdentity, setLastIdentity] = useState(commitIdentity);
   if (commitIdentity !== lastIdentity) {
     setLastIdentity(commitIdentity);
-    setBody("");
     setDeletingId(null);
   }
-  // The restore below can land after the user moved to another commit; an effect
-  // event reads the LIVE identity so a late rejection can't resurrect text there.
-  const restoreDraft = useEffectEvent((submittedFor: string, text: string) => {
-    if (submittedFor !== commitIdentity) return;
-    setBody((cur) => (cur.trim() ? cur : text));
-  });
 
   const list = comments.data ?? [];
   const whole = list.filter((c) => c.path == null);
@@ -285,19 +279,19 @@ export function CommitComments({
     createComment.isPending || editComment.isPending || deleteComment.isPending;
 
   function submit() {
-    const text = body.trim();
+    const text = draft.value.trim();
     if (!text) return;
     // Clear the draft immediately (perceived-speed win); the hook appends the
     // synthetic comment optimistically. On error restore the draft, but only if
-    // the composer is still empty so newly-typed text is never clobbered.
+    // that commit's composer is still empty so newly-typed text is never clobbered.
     const submittedFor = commitIdentity;
-    setBody("");
+    draft.set("");
     createComment.mutate(
       { sha, body: text },
       {
         onSuccess: () => toast.success("Comment added"),
         onError: (e) => {
-          restoreDraft(submittedFor, text);
+          draft.setFor(submittedFor, (prev) => (prev.trim() ? prev : text));
           toastError(e);
         },
       },
@@ -396,8 +390,8 @@ export function CommitComments({
         <CommentComposer
           ariaLabel="Comment on this commit"
           placeholder="Leave a comment…"
-          value={body}
-          onChange={setBody}
+          value={draft.value}
+          onChange={draft.set}
           onSubmit={submit}
           submitLabel="Comment"
           busy={busy}

@@ -6,7 +6,7 @@ import {
   PencilSimpleIcon,
 } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffectEvent, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import type { MarkdownEditorHandle } from "@/components/markdown-editor";
@@ -75,6 +75,7 @@ import { useRepoLens } from "@/lib/repo-lens/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
+import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
 import { PlanIssueButton } from "../plan/PlanIssueButton";
 import { SolveIssueButton } from "../sessions/SolveIssueButton";
 import { IssueSubIssues } from "./IssueRelations";
@@ -209,7 +210,6 @@ export function RemoteIssueView({
     { target: "issue", number },
   );
 
-  const [composeBody, setComposeBody] = useState("");
   const composerRef = useRef<MarkdownEditorHandle>(null);
   const [deletingCommentId, setDeletingCommentId] = useState<string | null>(
     null,
@@ -223,28 +223,22 @@ export function RemoteIssueView({
     },
     successToast: "Issue updated",
   });
-  // A different issue must never inherit this one's unsent draft or open
-  // delete/transfer/edit dialogs — a render-time state adjustment, not an effect.
-  // The lens is part of the identity: it can collapse to "origin" without a
-  // remount (upstream remote goes away), leaving the number pointing at another repo.
-  // The same identity keys the sidebar below, remounting its own per-issue drafts.
+  // A different issue must never inherit this one's open delete/transfer/edit
+  // dialogs — a render-time state adjustment, not an effect. The lens is part of
+  // the identity: it can collapse to "origin" without a remount (upstream remote
+  // goes away), leaving the number pointing at another repo. The same identity
+  // keys the sidebar below, remounting its own per-issue drafts.
   const issueIdentity = `${repoPath}#${lens}#${number}`;
+  const compose = useKeyedEntityState(issueIdentity, "");
   const [lastIdentity, setLastIdentity] = useState(issueIdentity);
   if (issueIdentity !== lastIdentity) {
     setLastIdentity(issueIdentity);
-    setComposeBody("");
     setDeletingCommentId(null);
     setDeleteOpen(false);
     setTransferOpen(false);
     setTransferDest("");
     edit.setOpen(false);
   }
-  // The restore below can land after the user switched issues; an effect event
-  // reads the LIVE identity so a late rejection can't resurrect text elsewhere.
-  const restoreDraft = useEffectEvent((submittedFor: string, body: string) => {
-    if (submittedFor !== issueIdentity) return;
-    setComposeBody((cur) => (cur.trim() ? cur : body));
-  });
   // Destination suggestions come from the viewer's repos on the SAME provider
   // as this repo; each query only fires while its dialog variant is open. The
   // GitLab list is repo-scoped so it targets the repo's own (possibly
@@ -298,18 +292,18 @@ export function RemoteIssueView({
   const comments = issue.comments.filter((c) => hasVisibleBody(c.body));
 
   function submitComment() {
-    const body = composeBody.trim();
+    const body = compose.value.trim();
     if (!body) return;
     // Clear the draft immediately (the perceived-speed win) and append the
     // synthetic comment optimistically; on error restore the draft, but only if
-    // the composer is still empty so we never clobber newly-typed text.
+    // that issue's composer is still empty so we never clobber newly-typed text.
     const submittedFor = issueIdentity;
-    setComposeBody("");
+    compose.set("");
     comment.mutate(
       { number, body, author: forge.data?.login ?? "You" },
       {
         onError: (e) => {
-          restoreDraft(submittedFor, body);
+          compose.setFor(submittedFor, (prev) => (prev.trim() ? prev : body));
           onError(e);
         },
       },
@@ -319,7 +313,7 @@ export function RemoteIssueView({
   // Deferred into the handler: calling makeQuoteReply(ref) during render made the
   // React Compiler bail out of this whole component (refs-in-render rule).
   const quoteReply = (body: string) =>
-    makeQuoteReply({ composerRef, setBody: setComposeBody })(body);
+    makeQuoteReply({ composerRef, setBody: compose.set })(body);
 
   function doClose(reason: "completed" | "not_planned") {
     closeIssue.mutate(
@@ -828,8 +822,8 @@ export function RemoteIssueView({
               ref={composerRef}
               ariaLabel="Leave a comment"
               placeholder="Leave a comment…"
-              value={composeBody}
-              onChange={setComposeBody}
+              value={compose.value}
+              onChange={compose.set}
               onSubmit={submitComment}
               submitLabel="Comment"
               busy={busy}
@@ -837,12 +831,12 @@ export function RemoteIssueView({
               // close/reopen arm follows it, and the shared Clear is `ml-auto`.
               actions={
                 <>
-                  {composeBody.trim() && (
+                  {compose.value.trim() && (
                     <Button
                       variant="ghost"
                       size="sm"
                       disabled={busy}
-                      onClick={() => setComposeBody("")}
+                      onClick={() => compose.set("")}
                       title="Discard this draft (e.g. a quote reply)"
                     >
                       Clear

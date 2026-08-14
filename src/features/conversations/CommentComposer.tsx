@@ -7,11 +7,11 @@ import { Button } from "@/components/ui/button";
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 
 /**
- * The bottom "leave a comment" bar every conversation surface ends with. The
- * draft lives in CALLER state — each view clears it when the entity it shows
- * changes, which a composer-owned draft would silently break — so this is a
- * fully controlled component. Per-surface extras (Approve, Close, Review…) ride
- * the `actions` slot rather than growing the prop list.
+ * The bottom "leave a comment" bar every conversation surface ends with. Fully
+ * controlled: the draft lives in CALLER state, keyed there per entity so a
+ * switch retains it, which a composer-owned draft could not do. Per-surface
+ * extras (Approve, Close, Review…) ride the `actions` slot rather than growing
+ * the prop list.
  */
 export function CommentComposer({
   ref,

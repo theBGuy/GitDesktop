@@ -161,6 +161,7 @@ import { useConfirm } from "@/lib/stores/confirm";
 import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
+import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
 import { cn } from "@/lib/utils";
 import { ChecksRollup } from "./ChecksRollup";
 import { LinkedIssuesField } from "./LinkedIssuesField";
@@ -931,18 +932,7 @@ export function RemotePrView({
     isSelectedPr && canUpdateBranch,
   );
 
-  const [composeBody, setComposeBody] = useState("");
-  // Both land after a mutation settles, by which time the user may have switched
-  // PRs — an effect event reads the LIVE identity, so a late settle can never
-  // resurrect text on, or blank the draft of, whatever PR is on screen now.
-  const restoreDraft = useEffectEvent((submittedFor: string, body: string) => {
-    if (submittedFor !== entityKey) return;
-    setComposeBody((cur) => (cur.trim() ? cur : body));
-  });
-  const clearDraft = useEffectEvent((submittedFor: string) => {
-    if (submittedFor !== entityKey) return;
-    setComposeBody("");
-  });
+  const compose = useKeyedEntityState(entityKey, "");
   const [deletingCommentId, setDeletingCommentId] = useState<string | null>(
     null,
   );
@@ -1055,7 +1045,7 @@ export function RemotePrView({
   // Deferred into the handler: calling makeQuoteReply(ref) during render made the
   // React Compiler bail out of this whole component (refs-in-render rule).
   const quoteReply = (body: string) =>
-    makeQuoteReply({ composerRef, setBody: setComposeBody })(body);
+    makeQuoteReply({ composerRef, setBody: compose.set })(body);
 
   // GitLab + Bitbucket approve/unapprove — one toggle keyed on whether the viewer
   // approved. GitLab's `user_can_approve` is unreliable on Free (false even when
@@ -1147,15 +1137,13 @@ export function RemotePrView({
       });
       return;
     }
-    // Guard the deferred clear like submitComment's restore: after a PR
-    // switch it would wipe text just typed on the newly shown PR.
     const submittedFor = entityKey;
     requestChangesPr.mutate(
-      { number, body: composeBody.trim() },
+      { number, body: compose.value.trim() },
       {
         onSuccess: () => {
           toast.success("Requested changes");
-          clearDraft(submittedFor);
+          compose.clearFor(submittedFor);
         },
         onError: (e) => {
           if (prev) queryClient.setQueryData(key, prev);
@@ -1166,19 +1154,19 @@ export function RemotePrView({
   }
 
   function submitComment() {
-    const body = composeBody.trim();
+    const body = compose.value.trim();
     if (!body) return;
     // Clear the draft immediately (the perceived-speed win) and append the
     // synthetic comment optimistically; on error restore the draft, but only if
-    // the composer is still empty so we never clobber newly-typed text.
+    // that PR's composer is still empty so we never clobber newly-typed text.
     const submittedFor = entityKey;
-    setComposeBody("");
+    compose.set("");
     comment.mutate(
       { number, body, author: forge.data?.login ?? "You" },
       {
         onSuccess: () => toast.success("Comment added"),
         onError: (e) => {
-          restoreDraft(submittedFor, body);
+          compose.setFor(submittedFor, (prev) => (prev.trim() ? prev : body));
           onError(e);
         },
       },
@@ -1312,10 +1300,9 @@ export function RemotePrView({
     setSelectedPath(null);
     setSelectedCommitOid(null);
     // Everything below is bound to the PR it was opened on — the conflict-resolution
-    // takeover, the dialogs and confirmations, the unsent draft — so a different PR
-    // must inherit none of it.
+    // takeover, the dialogs and confirmations — so a different PR must inherit
+    // none of it.
     setResolve(null);
-    setComposeBody("");
     setDeletingCommentId(null);
     setDeletingThreadCommentId(null);
     setSubmitOpen(false);
@@ -2223,10 +2210,10 @@ export function RemotePrView({
           {canComment && (
             <CommentComposer
               ref={composerRef}
-              value={composeBody}
-              onChange={setComposeBody}
+              value={compose.value}
+              onChange={compose.set}
               onSubmit={submitComment}
-              onClear={() => setComposeBody("")}
+              onClear={() => compose.set("")}
               submitLabel="Comment"
               ariaLabel="Leave a comment"
               placeholder="Leave a comment…"
@@ -2332,7 +2319,7 @@ export function RemotePrView({
                           ? canUnrequestChanges
                             ? "Revoke your change request"
                             : "You've requested changes — approve, or remove yourself as a reviewer on GitLab, to clear"
-                          : composeBody.trim()
+                          : compose.value.trim()
                             ? "Request changes, posting your draft as a comment"
                             : `Request changes on this ${prNoun} (adds you as a reviewer)`
                       }

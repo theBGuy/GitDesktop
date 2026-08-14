@@ -92,7 +92,7 @@ export function LocalIssueView({
     setCommentHidden,
     addLabel,
     removeLabel,
-  } = useLocalConversation(issue, (mutate) => {
+  } = useLocalConversation(id, issue, (mutate) => {
     if (issue) update.mutate({ id: issue.id, mutate });
   });
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -106,12 +106,11 @@ export function LocalIssueView({
       });
     },
   });
-  // A different issue must never inherit this one's unsent drafts or open
+  // A different issue must never inherit this one's half-typed label or open
   // confirm/promote/edit dialogs — a render-time state adjustment, not an effect.
   const [lastId, setLastId] = useState(id);
   if (id !== lastId) {
     setLastId(id);
-    setComment("");
     setLabelInput("");
     setDeletingCommentId(null);
     setConfirmDelete(false);
