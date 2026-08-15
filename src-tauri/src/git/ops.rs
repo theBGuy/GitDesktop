@@ -4701,7 +4701,7 @@ detached
     /// sharper half: `rev-parse` RESOLVES them, so `feature~1` would pass an
     /// existence probe and merge an ancestor, then fail at `refs/heads/main~1`.
     #[tokio::test]
-    async fn merge_local_pr_rejects_refspec_metacharacters() {
+    async fn merge_local_pr_rejects_metacharacters_and_rev_expressions() {
         // A real directory that is deliberately NOT a repo: without the guard the
         // first `rev-parse` fails as `AppError::Git`, so asserting the
         // `InvalidArgument` variant (not merely `is_err`) is what pins the guard.
