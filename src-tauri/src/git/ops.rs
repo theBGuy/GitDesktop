@@ -110,8 +110,9 @@ pub(crate) async fn has_unmerged(repo: &str) -> AppResult<bool> {
 }
 
 /// Whether the repo is left mid-op. Reuses [`op_state`]'s detection so this gate
-/// and the conflict banner can't drift apart. Fail-closed: an `Err` reads as
-/// in-progress, so an unreadable repo is never stashed over.
+/// and the conflict banner can't drift apart. Best-effort, not fail-closed: the
+/// probes swallow read failures into absent, so the `Err` arm is defensive
+/// should [`op_state`] ever gain a fallible read.
 pub(crate) async fn op_in_progress(repo: &str) -> bool {
     match op_state(repo).await {
         Ok(state) => state.merging || state.rebasing || state.cherry_picking,
@@ -122,8 +123,8 @@ pub(crate) async fn op_in_progress(repo: &str) -> bool {
 /// Refuses to stash mid-operation: `git stash push` can't write an unmerged
 /// index, and stashing a merge/rebase/cherry-pick that is only staged-resolved
 /// sweeps the resolution out of the operation git is still holding state for.
-/// An unreadable repo refuses too (fail-closed via [`op_in_progress`]), and a
-/// rebase paused at an `edit` step is refused as well, matching autostash. Only
+/// The mid-op detection is best-effort (see [`op_in_progress`]), and a rebase
+/// paused at an `edit` step is refused as well, matching autostash. Only
 /// lock-free runners, so callers may hold the repo lock across it.
 pub(crate) async fn refuse_mid_op(repo: &str) -> AppResult<()> {
     if has_unmerged(repo).await? {

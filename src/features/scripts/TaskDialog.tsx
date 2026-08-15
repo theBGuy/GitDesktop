@@ -629,7 +629,17 @@ export function TaskDialog({
         </label>
 
         <div className="flex items-center gap-2">
-          <Button size="sm" onClick={save} disabled={!canSave}>
+          <Button
+            size="sm"
+            // The label rides the retained task, so the dispatch carries the
+            // liveness: after close `save()` would write under an unmatched id
+            // and still toast "Saved".
+            onClick={() => {
+              if (task === null) return;
+              save();
+            }}
+            disabled={!canSave}
+          >
             {shownEditing ? "Save" : "Create task"}
           </Button>
           <Button size="sm" variant="ghost" onClick={() => onOpenChange(false)}>

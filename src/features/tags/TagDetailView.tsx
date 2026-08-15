@@ -652,9 +652,10 @@ export function TagDetailView({
               <Button variant="outline" onClick={() => setDeleteOpen(false)}>
                 Cancel
               </Button>
-              <Button
+              <DisabledReasonButton
                 variant="destructive"
-                disabled={deleteRelease.isPending}
+                disabled={deleteRelease.isPending || relStale}
+                reason={blockReason}
                 onClick={() =>
                   deleteRelease.mutate(
                     { tag, cleanupTag },
@@ -676,7 +677,7 @@ export function TagDetailView({
                   <Spinner data-icon="inline-start" />
                 )}
                 Delete
-              </Button>
+              </DisabledReasonButton>
             </DialogFooter>
           </DialogContent>
         </Dialog>

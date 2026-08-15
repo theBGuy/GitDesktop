@@ -9,6 +9,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { useRetained } from "@/lib/use-retained";
 
 /**
  * Prompt shown when switching branches with uncommitted changes: bring the
@@ -36,6 +37,7 @@ export function SwitchWithChangesDialog({
   onBringChanges: () => void;
   onStashAndSwitch: () => void;
 }) {
+  const shownTarget = useRetained(target);
   return (
     <Dialog
       open={target !== null}
@@ -47,12 +49,12 @@ export function SwitchWithChangesDialog({
         <DialogHeader>
           <DialogTitle>You have changes in progress</DialogTitle>
           <DialogDescription>
-            Bring your uncommitted changes along to {target?.name}, or stash
-            them so {currentLabel} stays as you left it.{" "}
+            Bring your uncommitted changes along to {shownTarget?.name}, or
+            stash them so {currentLabel} stays as you left it.{" "}
             {reapply ? (
               <>
-                Stashed changes are put back on {target?.name} once the switch
-                lands.
+                Stashed changes are put back on {shownTarget?.name} once the
+                switch lands.
               </>
             ) : (
               '"Pop latest stash" restores stashed changes later.'
