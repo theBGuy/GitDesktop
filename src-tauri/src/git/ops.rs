@@ -4710,7 +4710,7 @@ detached
         let root = dir.path().join("root");
         let state = AppState::default();
         for bad in [
-            "a*b", "a?b", "a[b", "a:b", "feature~1", "main^", "HEAD@{1}", "main..other",
+            "a*b", "a?b", "a[b", "a:b", "feature~1", "main^", "HEAD@{1}", "main..other", "@",
         ] {
             for (base, head) in [(bad, "feature"), ("main", bad)] {
                 assert!(

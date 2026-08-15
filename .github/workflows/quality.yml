@@ -45,8 +45,8 @@ jobs:
           node-version: 24
 
       # One step per script so a failure names its own check in the UI. The same
-      # three run locally via package.json's `checks` alias — a fourth guard is
-      # added in BOTH places.
+      # three scripts plus the self-tests below run locally via package.json's
+      # `checks` alias — a new guard is added in BOTH places.
       - name: Banned frontend patterns
         run: node scripts/check-banned-patterns.mjs
 

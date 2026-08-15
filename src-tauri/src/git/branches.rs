@@ -37,10 +37,11 @@ pub(crate) fn validate_ref_name(name: &str) -> AppResult<()> {
 
 /// The stricter gate for inputs that must name a BRANCH and nothing else: it adds
 /// a rejection of rev-expression syntax, which `rev-parse` would otherwise resolve
-/// (`feature~1` exists under `refs/heads/` as the branch's parent commit).
+/// (`feature~1` exists under `refs/heads/` as the branch's parent commit), and of
+/// bare `@`, git's HEAD shorthand in the rev positions these names reach.
 pub(crate) fn validate_branch_name(name: &str) -> AppResult<()> {
     validate_ref_name(name)?;
-    if name.contains(['~', '^']) || name.contains("..") || name.contains("@{") {
+    if name == "@" || name.contains(['~', '^']) || name.contains("..") || name.contains("@{") {
         return Err(AppError::InvalidArgument(format!(
             "invalid branch name: {name}"
         )));
@@ -955,7 +956,7 @@ mod tests {
         // The whole point of the stricter gate: `~`/`^` shapes RESOLVE under
         // `rev-parse --verify refs/heads/…`, so an existence probe alone passes
         // them and the caller proceeds against an ancestor commit.
-        for bad in ["feature~1", "main^", "HEAD@{1}", "main..other", "a^{commit}"] {
+        for bad in ["feature~1", "main^", "HEAD@{1}", "main..other", "a^{commit}", "@"] {
             assert!(validate_ref_name(bad).is_ok(), "ref gate accepts {bad:?}");
             assert!(
                 validate_branch_name(bad).is_err(),

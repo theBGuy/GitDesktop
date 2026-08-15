@@ -1,8 +1,9 @@
 // Negative controls for the three guard scanners. Their worst failure mode is
 // silent fail-open — a pattern that stops matching still prints "OK" — so every
 // predicate keeps a fixture that MUST hit and a fixture that must not. The
-// scripts export their predicates and gate their CLI body on `import.meta.main`,
-// so importing them here runs no scan and touches no disk.
+// scripts export their predicates and gate their CLI body on a main-module path
+// check (`process.argv[1]` vs `import.meta.url` — portable to Node 20, unlike
+// `import.meta.main`), so importing them here runs no scan and touches no disk.
 //
 // Node's stdlib test runner and node: imports only, no dev dependency, so the
 // CI `guards` job runs `node --test "scripts/*.test.mjs"` with no install step.

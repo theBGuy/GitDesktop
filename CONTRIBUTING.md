@@ -109,7 +109,7 @@ Three dependency-free Node scripts guard convention classes a past audit already
 paid to close once. Run them before pushing:
 
 ```sh
-pnpm run checks   # banned patterns · Rust invariants · IPC surface drift
+pnpm run checks   # banned patterns · Rust invariants · IPC surface drift · guard self-tests
 ```
 
 They gate merges as the **blocking** `guards` job in
