@@ -293,7 +293,7 @@ export function PrReviewPanel({
   }
 
   async function post() {
-    if (!onPost || !text.trim() || posting) return;
+    if (!onPost || !text.trim() || posting || stale) return;
     // A failed OR cancelled run keeps whatever streamed before it stopped, and that
     // partial text stays postable — publishing an unfinished review is consequential,
     // so confirm first, naming which way the run ended.
@@ -541,7 +541,12 @@ export function PrReviewPanel({
             </Button>
           )}
           {onPost && text.trim() && !generating && (
-            <Button variant="ghost" size="sm" disabled={posting} onClick={post}>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={posting || stale}
+              onClick={post}
+            >
               {posting && <Spinner data-icon="inline-start" />}
               Post as comment
             </Button>

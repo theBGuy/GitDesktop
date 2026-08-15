@@ -2079,10 +2079,10 @@ export function RemotePrView({
                   })),
                 })),
           }}
-          // Both hold through a switch: the context above is seeded from the
-          // rendered PR, so a run would persist — and a post would publish — the
-          // previous PR's content under this one.
-          posting={comment.isPending || detailsStale}
+          posting={comment.isPending}
+          // The context above is seeded from the rendered PR, so through a switch
+          // `stale` holds both the run and the post — without the spinner that
+          // `posting` shows for a real one.
           stale={detailsStale}
           // The panel posts its AI review as a comment and passes `asBot: true`,
           // forwarded to the mutation so GitLab attributes it to the review-bot

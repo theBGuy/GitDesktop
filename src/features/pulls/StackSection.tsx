@@ -325,8 +325,10 @@ export function StackOffer({
   onConfirm: () => void;
   /** Collapses the preview; the caller also clears any error with it. */
   onCancel: () => void;
-  /** Holds Confirm without claiming a write is running — the caller sets it while
-   *  its own handler would refuse. Cancel stays live: it only dismisses. */
+  /** Holds Confirm and the collapsed expand button without claiming a write is
+   *  running — the caller sets it while its own handler would refuse. Expanding
+   *  has to hold too: it focuses Confirm, which is disabled here. Cancel stays
+   *  live: it only dismisses. */
   disabled?: boolean;
   ref?: Ref<StackOfferHandle>;
 }) {
@@ -375,6 +377,7 @@ export function StackOffer({
           variant="outline"
           size="xs"
           className="shrink-0 cursor-pointer"
+          disabled={disabled}
           onClick={() => setExpanded(true)}
         >
           {offer.kind === "create" ? "Create stack" : "Add to stack"}

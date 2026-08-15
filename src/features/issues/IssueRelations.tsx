@@ -66,9 +66,10 @@ export function RelatedRow({
   onOpen: (n: number) => void;
   onRemove: () => void;
   pending?: boolean;
-  /** Set when the viewer lacks the access this row's remove needs — callers pass
-   *  the reason for the matching axis (sub-issues are write, dependency and
-   *  related-issue links are triage). The button stays visible but disabled. */
+  /** Set when this row's remove can't be used right now — the viewer lacks the
+   *  access it needs (sub-issues are write, dependency and related-issue links
+   *  are triage), or the surface is still loading the entity. The button stays
+   *  visible but disabled. */
   removeDisabledReason?: string;
 }) {
   return (
@@ -211,7 +212,8 @@ export function IssueSubIssues({
   number: number;
   /** The origin|upstream lens the parent issue view resolved. */
   lens: RemoteLens;
-  /** Set when the viewer may not write to the repo: the add + remove
+  /** Set when these edits can't be used right now — the viewer may not write to
+   *  the repo, or the surface is still loading the entity: the add + remove
    *  affordances stay visible but disabled, with this text as their hint. The
    *  parent breadcrumb and the checklist itself are reads and stay live. */
   disabledReason?: string;

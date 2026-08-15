@@ -849,7 +849,9 @@ function JiraCommentItem({
           onSubmit={saveEdit}
           onCancel={() => setEditing(false)}
           canSubmit={
-            draft.trim().length > 0 && draft.trim() !== comment.bodyMd.trim()
+            draft.trim().length > 0 &&
+            draft.trim() !== comment.bodyMd.trim() &&
+            !stale
           }
           pending={edit.isPending}
           textareaClassName="max-h-48 min-h-16 resize-y"
