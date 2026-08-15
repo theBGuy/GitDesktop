@@ -1628,6 +1628,9 @@ export function RemotePrView({
   // overlaps (its completed reviewers have already left `pr.reviewers`).
   const completedLogins = new Set(completedReviewers.map((c) => c.login));
   function saveCommentEdit(commentId: string, body: string) {
+    // The comment id is the rendered PR's while the write addresses `number` —
+    // GitLab routes by both, so a mismatched pair edits nothing it showed.
+    if (detailsStale) return;
     editComment.mutate(
       { number, commentId, body },
       {
@@ -1638,6 +1641,8 @@ export function RemotePrView({
   }
 
   function saveThreadCommentEdit(commentId: string, body: string) {
+    // Same pairing as saveCommentEdit, on the review-thread side.
+    if (detailsStale) return;
     editReviewComment.mutate(
       { number, commentId, body },
       {
@@ -2212,10 +2217,20 @@ export function RemotePrView({
                 onThreadResolve={(threadId, resolved) =>
                   threadResolve.mutateAsync({ threadId, resolved })
                 }
-                onEditThreadComment={saveThreadCommentEdit}
-                onDeleteThreadComment={setDeletingThreadCommentId}
-                onEditComment={saveCommentEdit}
-                onDeleteComment={setDeletingCommentId}
+                // All four pair a rendered comment id with `number`, so they're
+                // withheld through a switch; `editHeld` covers an editor already
+                // open when it began.
+                onEditThreadComment={
+                  detailsStale ? undefined : saveThreadCommentEdit
+                }
+                onDeleteThreadComment={
+                  detailsStale ? undefined : setDeletingThreadCommentId
+                }
+                onEditComment={detailsStale ? undefined : saveCommentEdit}
+                onDeleteComment={
+                  detailsStale ? undefined : setDeletingCommentId
+                }
+                editHeld={detailsStale}
                 onHideComment={hideComment}
                 onUnhideComment={unhideComment}
                 onToggleReaction={toggleReaction}
@@ -2246,13 +2261,16 @@ export function RemotePrView({
                     : undefined
                 }
                 onEditComment={
-                  canEditOwnThreadComments ? saveThreadCommentEdit : undefined
+                  canEditOwnThreadComments && !detailsStale
+                    ? saveThreadCommentEdit
+                    : undefined
                 }
                 onDeleteComment={
-                  canEditOwnThreadComments
+                  canEditOwnThreadComments && !detailsStale
                     ? setDeletingThreadCommentId
                     : undefined
                 }
+                editHeld={detailsStale}
                 provider={providerKey}
                 apply={suggestionApply}
                 fileDiffLookup={fileDiffLookup}

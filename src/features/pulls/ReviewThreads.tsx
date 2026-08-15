@@ -56,6 +56,10 @@ interface ThreadCallbacks {
   /** Present when the viewer may delete their own thread comments; opens the
    *  delete confirmation. Wired only for a comment the viewer wrote. */
   onDeleteComment?: (commentId: string) => void;
+  /** Holds an ALREADY-OPEN comment editor's Save — withholding `onEditComment`
+   *  only drops the menu entry, so a caller whose threads went stale sets this
+   *  too. Threaded straight through to every card's Thread. */
+  editHeld?: boolean;
 }
 
 /** The anchor label: "Lines a–b" for a range, "Line b" for a single line, "" at
@@ -506,6 +510,7 @@ export function ReviewThreadCard({
   onReply,
   onResolve,
   onEditComment,
+  editHeld,
   onDeleteComment,
   compact = false,
   onRowFocus,
@@ -702,6 +707,7 @@ export function ReviewThreadCard({
                     ? (body) => onEditComment(c.id, body)
                     : undefined
                 }
+                editHeld={editHeld}
                 onDelete={
                   onDeleteComment && c.viewerDidAuthor
                     ? () => onDeleteComment(c.id)
@@ -851,6 +857,7 @@ export function ReviewThreadList({
   onResolve,
   onEditComment,
   onDeleteComment,
+  editHeld,
   provider = "github",
   apply,
   fileDiffLookup,
@@ -1020,6 +1027,7 @@ export function ReviewThreadList({
                   onResolve={onResolve}
                   onEditComment={onEditComment}
                   onDeleteComment={onDeleteComment}
+                  editHeld={editHeld}
                   provider={provider}
                   apply={apply}
                   fileDiffLookup={fileDiffLookup}
@@ -1051,6 +1059,7 @@ export function ReviewThreadList({
                         onResolve={onResolve}
                         onEditComment={onEditComment}
                         onDeleteComment={onDeleteComment}
+                        editHeld={editHeld}
                         provider={provider}
                         apply={apply}
                         fileDiffLookup={fileDiffLookup}
@@ -1085,6 +1094,7 @@ export function ReviewThreadsBlock({
   onResolve,
   onEditComment,
   onDeleteComment,
+  editHeld,
   provider = "github",
   apply,
   fileDiffLookup,
@@ -1135,6 +1145,7 @@ export function ReviewThreadsBlock({
         onResolve={onResolve}
         onEditComment={onEditComment}
         onDeleteComment={onDeleteComment}
+        editHeld={editHeld}
         provider={provider}
         apply={apply}
         fileDiffLookup={fileDiffLookup}

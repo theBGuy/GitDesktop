@@ -159,6 +159,7 @@ export function PrActivityFeed({
   onDeleteThreadComment,
   onEditComment,
   onDeleteComment,
+  editHeld,
   onHideComment,
   onUnhideComment,
   onToggleReaction,
@@ -189,10 +190,18 @@ export function PrActivityFeed({
   onQuote?: (body: string) => void;
   onThreadReply: (threadId: string, body: string) => Promise<void>;
   onThreadResolve: (threadId: string, resolved: boolean) => Promise<void>;
-  onEditThreadComment: (commentId: string, body: string) => void;
-  onDeleteThreadComment: (commentId: string) => void;
-  onEditComment: (commentId: string, body: string) => void;
-  onDeleteComment: (commentId: string) => void;
+  /** Absent hides the thread-comment edit affordance — the caller withholds it
+   *  while the PR on screen isn't the one the write would address. */
+  onEditThreadComment?: (commentId: string, body: string) => void;
+  /** Absent hides the thread-comment delete affordance (same reason). */
+  onDeleteThreadComment?: (commentId: string) => void;
+  /** Absent hides the conversation-comment edit affordance (same reason). */
+  onEditComment?: (commentId: string, body: string) => void;
+  /** Absent hides the conversation-comment delete affordance (same reason). */
+  onDeleteComment?: (commentId: string) => void;
+  /** Holds an ALREADY-OPEN comment editor's Save: withholding the callbacks only
+   *  drops the menu entries, so a stale caller sets this too. */
+  editHeld?: boolean;
   onHideComment: (commentId: string, classifier: MinimizeReason) => void;
   onUnhideComment: (commentId: string) => void;
   onToggleReaction: (
@@ -326,6 +335,7 @@ export function PrActivityFeed({
                 onDeleteComment={
                   canEditOwnThreadComments ? onDeleteThreadComment : undefined
                 }
+                editHeld={editHeld}
                 provider={providerKey}
                 apply={suggestionApply}
                 fileDiffLookup={fileDiffLookup}
@@ -352,12 +362,13 @@ export function PrActivityFeed({
             thread={c}
             onQuote={onQuote && canWrite ? () => onQuote(c.body) : undefined}
             onSaveEdit={
-              canEditOwnComments && c.viewerDidAuthor
+              onEditComment && canEditOwnComments && c.viewerDidAuthor
                 ? (body) => onEditComment(c.id, body)
                 : undefined
             }
+            editHeld={editHeld}
             onDelete={
-              canEditOwnComments && c.viewerDidAuthor
+              onDeleteComment && canEditOwnComments && c.viewerDidAuthor
                 ? () => onDeleteComment(c.id)
                 : undefined
             }
