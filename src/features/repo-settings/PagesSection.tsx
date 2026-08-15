@@ -29,8 +29,9 @@ import { InlineConfirm } from "./parts";
 
 const PATHS = ["/", "/docs"];
 
-/** Trigger labels for the source select — without them Base UI shows the raw
- *  value ("workflow"). The branch/path selects label each option as itself. */
+/** Labels for the source select — without them Base UI shows the raw value
+ *  ("workflow") in the trigger; the popup renders from this map too, so the two
+ *  can never drift. The branch/path selects label each option as itself. */
 const MODE_ITEMS: Record<string, string> = {
   branch: "Deploy from a branch",
   workflow: "GitHub Actions",
@@ -107,8 +108,11 @@ function PagesDisabled({ repoPath }: { repoPath: string }) {
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="branch">Deploy from a branch</SelectItem>
-            <SelectItem value="workflow">GitHub Actions</SelectItem>
+            {Object.entries(MODE_ITEMS).map(([m, label]) => (
+              <SelectItem key={m} value={m}>
+                {label}
+              </SelectItem>
+            ))}
           </SelectContent>
         </Select>
       </div>

@@ -1,12 +1,17 @@
 import { errorMessage } from "@/lib/tauri/invoke";
 
 /** The human-readable reason out of a provider error payload, whether it nests under
- *  `error` as an object (OpenAI, Google), sits bare on `message`, or is a plain string
- *  under `error` (Ollama's native `/api`), array-wrapped (Google) or not. One reader
- *  for both call sites below: the parsed response body and the raw in-stream payload
- *  carry the same shapes, so they must accept the same set. */
+ *  `error` as an object (OpenAI, Google), sits bare on `message`, is a plain string
+ *  under `error` (Ollama's native `/api`), or IS the whole payload — a bare JSON
+ *  string is valid JSON — array-wrapped (Google) or not. One reader for both call
+ *  sites below: the parsed response body and the raw in-stream payload carry the
+ *  same shapes, so they must accept the same set. */
 function errorTextOf(value: unknown): string | null {
-  const entry = (Array.isArray(value) ? value[0] : value) as {
+  const candidate = Array.isArray(value) ? value[0] : value;
+  // A runtime string has to be caught before the property reads: the assertion
+  // below is compile-time only, so a bare string would fall through them as null.
+  if (typeof candidate === "string") return candidate.trim() ? candidate : null;
+  const entry = candidate as {
     error?: { message?: unknown } | string;
     message?: unknown;
   } | null;

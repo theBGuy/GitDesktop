@@ -48,11 +48,8 @@ import {
   useResearchStore,
 } from "./store";
 
-const INTENTS: { value: ResearchDepth; label: string }[] = [
-  { value: "brainstorm", label: "Brainstorm" },
-  { value: "deep", label: "Deep research" },
-];
-
+/** Labels for the research intent — the Select's trigger and popup and the
+ *  switched-to notice all read this one map, so they can never drift. */
 const INTENT_LABEL: Record<ResearchDepth, string> = {
   brainstorm: "Brainstorm",
   deep: "Deep research",
@@ -173,7 +170,13 @@ function IntentPicker({
     <Select
       items={INTENT_LABEL}
       value={value}
-      onValueChange={(v) => onChange(v === "deep" ? "deep" : "brainstorm")}
+      // The popup publishes every INTENT_LABEL key, so accept only keys that are
+      // still in it — collapsing an unknown value to "brainstorm" would let a
+      // future depth render an option that silently selects a different one.
+      onValueChange={(v) => {
+        if (typeof v === "string" && v in INTENT_LABEL)
+          onChange(v as ResearchDepth);
+      }}
     >
       <SelectTrigger
         size="sm"
@@ -186,9 +189,9 @@ function IntentPicker({
       {/* Size to content so "Deep research" isn't clipped at the narrow trigger
           width when "Brainstorm" is the selected (shorter) value. */}
       <SelectContent className="w-fit">
-        {INTENTS.map((o) => (
-          <SelectItem key={o.value} value={o.value}>
-            {o.label}
+        {Object.entries(INTENT_LABEL).map(([depth, label]) => (
+          <SelectItem key={depth} value={depth}>
+            {label}
           </SelectItem>
         ))}
       </SelectContent>

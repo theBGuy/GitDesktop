@@ -40,7 +40,7 @@ const ENFORCEMENT_ITEMS: Record<string, string> = Object.fromEntries(
   ENFORCEMENTS.map((e) => [e.value, e.label]),
 );
 
-/** Trigger labels for the ref-scope select. */
+/** Labels for the ref-scope select — trigger and popup both render from here. */
 const REF_SCOPE_ITEMS: Record<string, string> = {
   default: "Default branch",
   all: "All branches",
@@ -461,9 +461,11 @@ function RulesetForm({
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="default">Default branch</SelectItem>
-            <SelectItem value="all">All branches</SelectItem>
-            <SelectItem value="custom">Custom patterns…</SelectItem>
+            {Object.entries(REF_SCOPE_ITEMS).map(([scope, label]) => (
+              <SelectItem key={scope} value={scope}>
+                {label}
+              </SelectItem>
+            ))}
           </SelectContent>
         </Select>
         {d.refScope === "custom" && (

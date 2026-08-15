@@ -117,7 +117,6 @@ function ModelPicker({
   );
   const catalog = availableModels.data;
   const models = catalog?.models ?? [];
-  const needsKey = PROVIDERS_REQUIRING_KEY.includes(value.provider);
   const isCli = isCliProvider(value.provider);
   const modelMemory = useRef<Partial<Record<AiProviderId, string>>>({});
   // Only a failed fetch carries unbounded provider prose, so it alone is clamped and
@@ -125,8 +124,8 @@ function ModelPicker({
   const failureReason =
     catalog?.cause === "failed" ? catalog.reason : undefined;
   // Each fallback route reads differently to a user, and the predicates are
-  // heterogeneous (query state, then cause, then whether a key is saved) — a
-  // saved-but-rejected key must never be told to save a key.
+  // heterogeneous (provider kind, then query state, then the catalog's own
+  // cause) — a saved-but-rejected key must never be told to save a key.
   const hint = ((): string => {
     switch (true) {
       case isCli:
@@ -141,7 +140,7 @@ function ModelPicker({
         return "Suggestions only — the provider returned no models";
       case catalog?.cause === "no-base":
         return "Suggestions only — set a base URL to load the live list";
-      case needsKey && !keyPreview.data:
+      case catalog?.cause === "no-key":
         return "Suggestions only — save an API key to load the live list";
       default:
         return "Suggestions only — provider list unavailable";
@@ -299,6 +298,9 @@ function CliProviderConfig({
   );
 }
 
+/** Labels for the OpenAI-compatible preset select — the presets plus the manual
+ *  "Custom…" escape. Trigger and popup both render from here, so the two can
+ *  never drift. */
 const PRESET_ITEMS: Record<string, string> = {
   ...Object.fromEntries(OPENAI_COMPATIBLE_PRESETS.map((p) => [p.id, p.label])),
   custom: "Custom…",
@@ -416,12 +418,11 @@ function OpenAiCompatibleConfig({
             <SelectValue placeholder="Custom" />
           </SelectTrigger>
           <SelectContent>
-            {OPENAI_COMPATIBLE_PRESETS.map((p) => (
-              <SelectItem key={p.id} value={p.id}>
-                {p.label}
+            {Object.entries(PRESET_ITEMS).map(([id, label]) => (
+              <SelectItem key={id} value={id}>
+                {label}
               </SelectItem>
             ))}
-            <SelectItem value="custom">Custom…</SelectItem>
           </SelectContent>
         </Select>
       </div>

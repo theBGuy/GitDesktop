@@ -67,6 +67,7 @@ export function RunWorkflowDialog({
     dispatchable.map((w) => [String(w.id), w.name]),
   );
   // value → label map so the closed trigger shows "Default" for "", not a blank.
+  // The popup renders from it too, so the two can never drift.
   const pipelineItems: Record<string, string> = {
     "": "Default",
     ...Object.fromEntries(pipelineNames.map((n) => [n, n])),
@@ -199,10 +200,9 @@ export function RunWorkflowDialog({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="">Default</SelectItem>
-                  {pipelineNames.map((name) => (
+                  {Object.entries(pipelineItems).map(([name, label]) => (
                     <SelectItem key={name} value={name}>
-                      {name}
+                      {label}
                     </SelectItem>
                   ))}
                 </SelectContent>

@@ -60,6 +60,15 @@ const PICKER_COPY: Record<
   },
 };
 
+/** Labels for the on-conflict select — without them Base UI shows the raw value
+ *  ("theirs") in the trigger; the popup renders from this map too, so the two
+ *  can never drift. */
+const CONFLICT_STRATEGY_ITEMS: Record<MergeConflictStrategy, string> = {
+  none: "Stop and let me resolve",
+  ours: "Prefer current branch",
+  theirs: "Prefer incoming branch",
+};
+
 /**
  * The merge / squash / rebase picker. Open when `mode` is set (null = closed).
  * Owns the selected branch, the advanced merge options (merge mode only), and
@@ -229,11 +238,7 @@ export function BranchMergePickerDialog({
                 On conflict
               </Label>
               <Select
-                items={{
-                  none: "Stop and let me resolve",
-                  ours: "Prefer current branch",
-                  theirs: "Prefer incoming branch",
-                }}
+                items={CONFLICT_STRATEGY_ITEMS}
                 value={mergeStrategy}
                 onValueChange={(v) =>
                   v && setMergeStrategy(v as MergeConflictStrategy)
@@ -243,9 +248,13 @@ export function BranchMergePickerDialog({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="none">Stop and let me resolve</SelectItem>
-                  <SelectItem value="ours">Prefer current branch</SelectItem>
-                  <SelectItem value="theirs">Prefer incoming branch</SelectItem>
+                  {Object.entries(CONFLICT_STRATEGY_ITEMS).map(
+                    ([strategy, label]) => (
+                      <SelectItem key={strategy} value={strategy}>
+                        {label}
+                      </SelectItem>
+                    ),
+                  )}
                 </SelectContent>
               </Select>
               {mergeStrategy !== "none" &&

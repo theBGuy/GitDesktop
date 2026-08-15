@@ -500,13 +500,12 @@ pub(crate) async fn cherry_pick_onto_with_pick_timeout(
             // didn't happen. The abort is not one of them: `reset --hard` clears
             // the pick state on its own, so a failed abort with a good reset still
             // leaves nothing in progress.
-            let _abort_ok = run_git(
+            let _ = run_git(
                 Some(repo_path),
                 &["cherry-pick", "--abort"],
                 DEFAULT_TIMEOUT,
             )
-            .await
-            .is_ok();
+            .await;
             let reset_ok = if switched {
                 run_git(
                     Some(repo_path),
@@ -527,6 +526,19 @@ pub(crate) async fn cherry_pick_onto_with_pick_timeout(
                 .await
                 .is_ok();
             let rolled_back = reset_ok && restore_ok;
+            // The remedy has to match the damage: a failed reset can leave this
+            // run's commits on `target`, while a good reset with a failed
+            // return-switch leaves the branch correct and only HEAD misplaced —
+            // telling that user to `--abort` names a no-op.
+            let recovery = if reset_ok {
+                format!(
+                    "the rollback restored {target_branch}, but you are still checked out on it — switch back to {original_restore}."
+                )
+            } else {
+                format!(
+                    "the automatic rollback also failed, so {target_branch} may still carry the commits applied so far (its tip before this run was {target_tip}); run git cherry-pick --abort if a pick is still in progress, or git reset --hard {target_tip} on {target_branch} to restore it."
+                )
+            };
             let short = &hash[..hash.len().min(7)];
             return Err(match err {
                 AppError::Git { code, stderr } if rolled_back => AppError::Git {
@@ -538,7 +550,7 @@ pub(crate) async fn cherry_pick_onto_with_pick_timeout(
                 AppError::Git { code, stderr } => AppError::Git {
                     code,
                     stderr: format!(
-                        "Cherry-pick hit conflicts on {short}; the automatic rollback also failed, so the repository may still be mid-cherry-pick on {target_branch} — run git cherry-pick --abort to recover.\n{stderr}"
+                        "Cherry-pick hit conflicts on {short}; {recovery}\n{stderr}"
                     ),
                 },
                 other if rolled_back => other,
@@ -547,7 +559,7 @@ pub(crate) async fn cherry_pick_onto_with_pick_timeout(
                 // `Command` carrying the whole explanation beats a scheme where
                 // which variant survives depends on the failure class.
                 other => AppError::Command(format!(
-                    "Cherry-pick of {short} failed; the automatic rollback also failed, so the repository may still be mid-cherry-pick on {target_branch} — run git cherry-pick --abort to recover.\n{other}"
+                    "Cherry-pick of {short} failed; {recovery}\n{other}"
                 )),
             });
         }
