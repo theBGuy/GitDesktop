@@ -5,7 +5,7 @@ import { errorMessage } from "@/lib/tauri/invoke";
  *  under `error` (Ollama's native `/api`), array-wrapped (Google) or not. One reader
  *  for both call sites below: the parsed response body and the raw in-stream payload
  *  carry the same shapes, so they must accept the same set. */
-export function errorTextOf(value: unknown): string | null {
+function errorTextOf(value: unknown): string | null {
   const entry = (Array.isArray(value) ? value[0] : value) as {
     error?: { message?: unknown } | string;
     message?: unknown;

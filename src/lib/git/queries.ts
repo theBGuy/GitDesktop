@@ -186,7 +186,7 @@ const commitAftermathKeys = (repo: string) =>
     ["repo", repo, "file-log"],
     ["repo", repo, "blame"],
     ["repo", repo, "file-b64", "HEAD"],
-    ["repo", repo, "op-state"],
+    repoKeys.opState(repo),
     ["repo", repo, "conflict-file"],
     ["repo", repo, "merge-preview"],
     ["repo", repo, "conflict-preview"],

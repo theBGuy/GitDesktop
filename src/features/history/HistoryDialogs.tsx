@@ -231,7 +231,7 @@ export function CherryPickOntoDialog({
               ? `Copies these ${shownHashes.length} commits onto the chosen branch and switches to it. `
               : "Copies this commit onto the chosen branch and switches to it. "}
             They stay on {currentBranch ?? "this branch"} too. Commits already
-            present are skipped; a conflict rolls the whole thing back.
+            present are skipped; any failure rolls the batch back automatically.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-2">

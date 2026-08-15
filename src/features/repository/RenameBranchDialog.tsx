@@ -122,6 +122,18 @@ export function RenameBranchDialog({
     if (target !== null) seedOnOpen(target);
   }, [target]);
 
+  // Generations are bound to the target they were started for: the rename
+  // hotkey stays live over the open dialog, so `target` can swap mid-stream and
+  // a suggestion for the old branch would otherwise land in a form that is now
+  // renaming a different one. `cancel` is stable (a no-dep `useCallback` in
+  // `useAiStream`), so this re-runs only on a target change. Closing cancels
+  // here as well as in `closeDialog` — aborting twice is a no-op.
+  const cancelGenerate = branchNameGen.cancel;
+  useEffect(() => {
+    if (target === null) return;
+    return () => cancelGenerate();
+  }, [target, cancelGenerate]);
+
   return (
     <Dialog
       open={target !== null}

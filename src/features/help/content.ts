@@ -556,7 +556,8 @@ test, or review several branches at once without stashing or switching.
   out in the main workspace. The worktree must be clean first; any uncommitted work in the
   main workspace is stashed so the checkout can't be blocked (restore it with *Pop latest
   stash*), and promoting is blocked while the main workspace has a merge, rebase or
-  cherry-pick in progress. Works even on the worktree you're currently in.
+  cherry-pick in progress, or unresolved conflicts. Works even on the worktree you're
+  currently in.
 - **Repair links** (footer) re-connects worktrees if you moved or renamed the repository
   folder in your file manager, which otherwise breaks the path each worktree records.
 

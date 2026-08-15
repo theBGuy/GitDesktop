@@ -72,7 +72,8 @@ export function ModelPicker({
   models: string[];
 }) {
   // Base UI renders the raw value in the trigger unless the labels are passed as
-  // `items`. Derived per render because the model set varies by agent.
+  // `items`. Derived per render because the model set varies by agent, and the
+  // popup below renders from it too so the two can never drift.
   const items = useMemo(
     () => ({
       [DEFAULT_MODEL]: "Default model",
@@ -98,10 +99,9 @@ export function ModelPicker({
           `w-(--anchor-width)` popup clips long ids (e.g. `opencode/…`). Let it
           size to its content instead, capped so it can't run off-screen. */}
       <SelectContent className="w-fit max-w-sm">
-        <SelectItem value={DEFAULT_MODEL}>Default model</SelectItem>
-        {models.map((m) => (
-          <SelectItem key={m} value={m}>
-            {m}
+        {Object.entries(items).map(([model, label]) => (
+          <SelectItem key={model} value={model}>
+            {label}
           </SelectItem>
         ))}
       </SelectContent>
@@ -117,8 +117,9 @@ const EFFORT_LEVELS = [
   { value: "xhigh", label: "Max" },
 ] as const;
 
-/** Trigger labels for the effort Select — without them Base UI shows the raw
- *  stored value ("xhigh"). Same `items` contract as the settings selects. */
+/** Labels for the effort Select — without them Base UI shows the raw stored
+ *  value ("xhigh") in the trigger. Same `items` contract as the settings selects,
+ *  and the popup renders from it too so the two can never drift. */
 const EFFORT_ITEMS: Record<string, string> = {
   [DEFAULT_EFFORT]: "Default",
   ...Object.fromEntries(EFFORT_LEVELS.map((l) => [l.value, l.label])),
@@ -149,10 +150,9 @@ export function EffortPicker({
         <SelectValue />
       </SelectTrigger>
       <SelectContent>
-        <SelectItem value={DEFAULT_EFFORT}>Default</SelectItem>
-        {EFFORT_LEVELS.map((l) => (
-          <SelectItem key={l.value} value={l.value}>
-            {l.label}
+        {Object.entries(EFFORT_ITEMS).map(([level, label]) => (
+          <SelectItem key={level} value={level}>
+            {label}
           </SelectItem>
         ))}
       </SelectContent>

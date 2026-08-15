@@ -162,6 +162,13 @@ function PromoteBody({
       mOpState.data?.rebasing ||
       mOpState.data?.cherryPicking,
   );
+  // `refuse_mid_op` refuses on unmerged index entries too, and that arm has no
+  // marker file behind it: a conflicted squash-merge leaves the conflicts with
+  // `op_state` all-false, so mirroring only the marker arm would let the stash
+  // refuse past the point of no return.
+  const mainConflicted = (mStatus.data?.entries ?? []).some(
+    (e) => e.staged === "conflicted" || e.unstaged === "conflicted",
+  );
   // A failed status read must NOT read as "clean": with `data` undefined the
   // dirty checks silently become false, which would enable Promote with unknown
   // tree state and could skip the main-WIP stash before the checkout.
@@ -173,6 +180,7 @@ function PromoteBody({
     statusError ||
     worktreeDirty ||
     mainMidOp ||
+    mainConflicted ||
     worktree.isLocked ||
     !worktree.branch;
 
@@ -284,6 +292,11 @@ function PromoteBody({
         <p className="text-xs text-warning">
           The main workspace has a merge, rebase or cherry-pick in progress —
           finish or abort it first.
+        </p>
+      ) : mainConflicted ? (
+        <p className="text-xs text-warning">
+          The main workspace has unresolved conflicts — resolve or abort them
+          first.
         </p>
       ) : worktree.isLocked ? (
         <p className="text-xs text-warning">

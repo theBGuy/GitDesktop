@@ -1808,7 +1808,7 @@ export function buildReleaseNotesPrompt(input: {
   commits: string[];
   /** GitHub's auto-generated changelog (PR titles, authors, links). Preferred source. */
   changelog?: string;
-  repoInstructions?: string | null;
+  repoInstructions: string | null;
   globalInstructions: string;
 }): { system: string; prompt: string } {
   // Only GitHub supplies the auto-changelog; the bare-commit path uses the neutral variant.

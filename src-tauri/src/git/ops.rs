@@ -468,7 +468,8 @@ pub(crate) async fn cherry_pick_onto_with_pick_timeout(
         let mut applied = 0usize;
         let mut skipped = 0usize;
         // Every pick failure class — conflict, timeout, IO — leaves through the one
-        // rollback funnel below, so none of them can exit with HEAD on `target`.
+        // rollback funnel below, so none of them exits with HEAD on `target` unless
+        // the rollback itself fails, which the error then says.
         let mut failure: Option<(String, AppError)> = None;
         'picks: for hash in hashes {
             match run_git(Some(repo_path), &["cherry-pick", hash], pick_timeout).await {
@@ -493,36 +494,61 @@ pub(crate) async fn cherry_pick_onto_with_pick_timeout(
 
         if let Some((hash, err)) = failure {
             // Roll everything back: abort the in-progress pick, drop the commits
-            // already applied in this batch, and return home.
-            let _ = run_git(
+            // already applied in this batch, and return home. Every attempt stays
+            // best-effort, but the two that decide whether the repo actually came
+            // home are captured — the error below must not promise a rollback that
+            // didn't happen. The abort is not one of them: `reset --hard` clears
+            // the pick state on its own, so a failed abort with a good reset still
+            // leaves nothing in progress.
+            let _abort_ok = run_git(
                 Some(repo_path),
                 &["cherry-pick", "--abort"],
                 DEFAULT_TIMEOUT,
             )
-            .await;
-            if switched {
-                let _ = run_git(
+            .await
+            .is_ok();
+            let reset_ok = if switched {
+                run_git(
                     Some(repo_path),
                     &["reset", "--hard", &target_tip],
                     DEFAULT_TIMEOUT,
                 )
-                .await;
-            }
+                .await
+                .is_ok()
+            } else {
+                true
+            };
             let restore_args: Vec<&str> = if detached {
                 vec!["switch", "--detach", &original_restore]
             } else {
                 vec!["switch", &original_restore]
             };
-            let _ = run_git(Some(repo_path), &restore_args, DEFAULT_TIMEOUT).await;
+            let restore_ok = run_git(Some(repo_path), &restore_args, DEFAULT_TIMEOUT)
+                .await
+                .is_ok();
+            let rolled_back = reset_ok && restore_ok;
             let short = &hash[..hash.len().min(7)];
             return Err(match err {
-                AppError::Git { code, stderr } => AppError::Git {
+                AppError::Git { code, stderr } if rolled_back => AppError::Git {
                     code,
                     stderr: format!(
                         "Cherry-pick hit conflicts on {short} and was rolled back; {target_branch} is unchanged.\n{stderr}"
                     ),
                 },
-                other => other,
+                AppError::Git { code, stderr } => AppError::Git {
+                    code,
+                    stderr: format!(
+                        "Cherry-pick hit conflicts on {short}; the automatic rollback also failed, so the repository may still be mid-cherry-pick on {target_branch} — run git cherry-pick --abort to recover.\n{stderr}"
+                    ),
+                },
+                other if rolled_back => other,
+                // Timeout carries only a u64 and GitNotFound carries nothing, so a
+                // variant-preserving wrap isn't available for every arm — one
+                // `Command` carrying the whole explanation beats a scheme where
+                // which variant survives depends on the failure class.
+                other => AppError::Command(format!(
+                    "Cherry-pick of {short} failed; the automatic rollback also failed, so the repository may still be mid-cherry-pick on {target_branch} — run git cherry-pick --abort to recover.\n{other}"
+                )),
             });
         }
 
