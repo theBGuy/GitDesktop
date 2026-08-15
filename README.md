@@ -915,7 +915,7 @@ from OS code signing.
 
 ## Development
 
-Prereqs: Rust toolchain, Node 20+, pnpm.
+Prereqs: Rust toolchain, Node 24+, pnpm.
 
 ```sh
 pnpm install

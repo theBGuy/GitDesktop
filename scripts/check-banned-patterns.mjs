@@ -259,6 +259,37 @@ function walk(dir, out = []) {
   return out;
 }
 
+const STALE_FIX =
+  "stale allowlist entry — nothing in this file trips the check any more " +
+  "(fixed, renamed, deleted, or excluded by appliesTo); remove the entry " +
+  "(an exception left behind pre-authorizes whatever the file grows next)";
+
+/** One check over `files`: violations from files NOT on the allowlist, plus the
+ *  allowlist entries that produced no hit at all. Allowlisted files are SCANNED
+ *  rather than skipped — a ratchet that can only loosen is not a ratchet, so an
+ *  entry whose site is gone is itself a finding. An entry naming a file the
+ *  check doesn't apply to, or that no longer exists, reads stale for the same
+ *  reason: nothing justifies it any more. */
+export function runCheck(check, files, views) {
+  const scanned = files.filter((f) => check.appliesTo(f));
+  const violations = [];
+  const seen = new Set();
+  for (const file of scanned) {
+    const lines = check.scan(views.get(file)).sort((a, b) => a - b);
+    if (lines.length === 0) continue;
+    if (check.allowlist.includes(file)) {
+      seen.add(file);
+      continue;
+    }
+    for (const line of lines) violations.push(`${file}:${line}`);
+  }
+  return {
+    scanned,
+    violations,
+    stale: check.allowlist.filter((f) => !seen.has(f)),
+  };
+}
+
 function main() {
   const files = walk(SRC);
   const views = new Map(
@@ -267,24 +298,28 @@ function main() {
   let failed = false;
 
   for (const check of CHECKS) {
-    const scanned = files.filter((f) => check.appliesTo(f));
-    const violations = [];
-    for (const file of scanned) {
-      if (check.allowlist.includes(file)) continue;
-      for (const line of check.scan(views.get(file)).sort((a, b) => a - b)) {
-        violations.push(`${file}:${line}`);
-      }
-    }
-    if (violations.length === 0) {
+    const { scanned, violations, stale } = runCheck(check, files, views);
+    if (violations.length === 0 && stale.length === 0) {
       process.stdout.write(
         `${check.name}: OK (${scanned.length} files scanned)\n`,
       );
       continue;
     }
     failed = true;
-    process.stderr.write(`${check.name}: ${violations.length} violation(s)\n`);
-    for (const v of violations) process.stderr.write(`  ${v}\n`);
-    process.stderr.write(`  → ${check.message}\n`);
+    if (violations.length > 0) {
+      process.stderr.write(
+        `${check.name}: ${violations.length} violation(s)\n`,
+      );
+      for (const v of violations) process.stderr.write(`  ${v}\n`);
+      process.stderr.write(`  → ${check.message}\n`);
+    }
+    if (stale.length > 0) {
+      process.stderr.write(
+        `${check.name}: ${stale.length} stale allowlist entry(s)\n`,
+      );
+      for (const f of stale) process.stderr.write(`  ${f}\n`);
+      process.stderr.write(`  → ${STALE_FIX}\n`);
+    }
   }
 
   // Not `process.exit`: it can truncate a pending pipe write, losing the very
@@ -292,10 +327,11 @@ function main() {
   process.exitCode = failed ? 1 : 0;
 }
 
-// Main-module detection by PATH comparison, not `import.meta.main`: that is
-// node 24.2+ only, and this repo documents a node 20 floor (CONTRIBUTING.md,
-// README) with no engines pin — on an older runtime the gate would read
-// `if (undefined)` and the script would exit 0 having scanned nothing.
+// Main-module detection by PATH comparison, not `import.meta.main`: this form
+// works on any node, while `import.meta.main` only exists from 24.2 — a cliff
+// the documented floor should not have to track, and one that fails SILENTLY
+// (the gate reads `if (undefined)` and the script exits 0 having scanned
+// nothing — the fail-open this whole file exists to prevent).
 if (
   process.argv[1] &&
   resolve(process.argv[1]) === fileURLToPath(import.meta.url)

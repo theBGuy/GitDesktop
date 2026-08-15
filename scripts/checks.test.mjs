@@ -2,21 +2,32 @@
 // silent fail-open — a pattern that stops matching still prints "OK" — so every
 // predicate keeps a fixture that MUST hit and a fixture that must not. The
 // scripts export their predicates and gate their CLI body on a main-module path
-// check (`process.argv[1]` vs `import.meta.url` — portable to Node 20, unlike
-// `import.meta.main`), so importing them here runs no scan and touches no disk.
+// check (`process.argv[1]` vs `import.meta.url` — portable across node versions,
+// unlike `import.meta.main`), so importing them here runs no scan, touches no
+// disk, and cannot silently no-op on a runtime older than the gate.
 //
 // Node's stdlib test runner and node: imports only, no dev dependency, so the
 // CI `guards` job runs `node --test "scripts/*.test.mjs"` with no install step.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { CHECKS, stripComments, view } from "./check-banned-patterns.mjs";
-import { parseInvoked, parseRegistered } from "./check-dead-surface.mjs";
+import {
+  CHECKS,
+  runCheck,
+  stripComments,
+  view,
+} from "./check-banned-patterns.mjs";
+import {
+  parseInvoked,
+  parseRegistered,
+  staleAllowlistEntries as staleCommandEntries,
+} from "./check-dead-surface.mjs";
 import {
   checkRefspecTemplates,
   checkSecretArgv,
   checkSyncCommands,
   enclosingFn,
+  staleAllowlistEntries,
 } from "./check-rust-invariants.mjs";
 
 // ------------------------------------------------------- check-banned-patterns
@@ -150,6 +161,53 @@ test("setQueryData-noop does not reach across a `;` statement boundary", () => {
     "logger.debug(label, undefined);",
   ].join("\n");
   assert.deepEqual(setQueryData(source), []);
+});
+
+test("an allowlist entry whose file no longer has the pattern is stale", () => {
+  // Allowlisted files are scanned, not skipped: a live entry suppresses its hit
+  // and stays; an entry with nothing left to suppress is reported so the ratchet
+  // can only tighten.
+  const check = {
+    name: "fixture",
+    appliesTo: () => true,
+    scan: CHECKS.find((c) => c.name === "hover-reveal").scan,
+    allowlist: ["still-reveals.tsx", "now-clean.tsx", "since-deleted.tsx"],
+    message: "fixture message",
+  };
+  const files = ["still-reveals.tsx", "now-clean.tsx", "fresh.tsx"];
+  const views = new Map([
+    [
+      "still-reveals.tsx",
+      view('const c = "opacity-0 group-hover:opacity-100";'),
+    ],
+    ["now-clean.tsx", view('const c = "flex items-center gap-2";')],
+    ["fresh.tsx", view('const c = "invisible group-hover:visible";')],
+  ]);
+
+  const { violations, stale } = runCheck(check, files, views);
+  // The allowlisted hit is suppressed; the unlisted one is not.
+  assert.deepEqual(violations, ["fresh.tsx:1"]);
+  // Clean-now and no-longer-present entries both surface; the live one does not.
+  assert.deepEqual(stale, ["now-clean.tsx", "since-deleted.tsx"]);
+});
+
+test("a rust allowlist record no hit maps to is stale, matched as (file, fn)", () => {
+  const list = [
+    { file: "git/ops.rs", fn: "live_one", rationale: "x" },
+    { file: "git/ops.rs", fn: "site_removed", rationale: "x" },
+    // Same fn name, different file: the pair must match, not either half.
+    { file: "git/remote.rs", fn: "live_one", rationale: "x" },
+  ];
+  const hits = [
+    { file: "git/ops.rs", fn: "live_one", allowlisted: true },
+    { file: "git/ops.rs", fn: "unlisted", allowlisted: false },
+  ];
+  assert.deepEqual(
+    staleAllowlistEntries(list, hits).map((e) => `${e.file}::${e.fn}`),
+    ["git/ops.rs::site_removed", "git/remote.rs::live_one"],
+  );
+  // An empty allowlist (SECRET_ARGV_ALLOWLIST today) is a no-op, not a failure.
+  assert.deepEqual(staleAllowlistEntries([], hits), []);
 });
 
 test("stripComments blanks comments but not comment-shaped strings", () => {
@@ -311,6 +369,19 @@ test("a commented-out invoke does not read as a live call", () => {
     "git_open_url",
     "git_status",
   ]);
+});
+
+test("an allowlist entry naming an unregistered command is stale", () => {
+  const registered = new Set(["git_status", "git_commit"]);
+  // The two directions that keep this a ratchet: a registered-but-uninvoked
+  // command is what an entry is FOR, so it stays; one the handler list no longer
+  // registers has nothing left to suppress.
+  assert.deepEqual(
+    staleCommandEntries(["git_commit", "git_retired_command"], registered),
+    ["git_retired_command"],
+  );
+  // The empty allowlist (today's tree) is a no-op, not a failure.
+  assert.deepEqual(staleCommandEntries([], registered), []);
 });
 
 test("invoke matching survives nested generics and wrapped calls", () => {

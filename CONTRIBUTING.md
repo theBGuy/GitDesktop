@@ -24,7 +24,7 @@ expected to respect its Design Principles.
 ## Prerequisites
 
 - **Rust** toolchain (stable) — <https://rustup.rs>
-- **Node 20+**
+- **Node 24+**
 - **pnpm** (`corepack enable` will use the version pinned in `package.json`)
 - Tauri's platform build dependencies — see the
   [Tauri prerequisites guide](https://v2.tauri.app/start/prerequisites/).
@@ -112,16 +112,18 @@ paid to close once. Run them before pushing:
 pnpm run checks   # banned patterns · Rust invariants · IPC surface drift · guard self-tests
 ```
 
-They gate merges as the **blocking** `guards` job in
-[`quality.yml`](.github/workflows/quality.yml), covering banned frontend UI and
-state patterns (hover-revealed row actions, hand-rolled modifier keys,
-`setQueryData(key, undefined)`), the Rust refspec-argv and
-sync-`#[tauri::command]` invariants, and Tauri IPC drift — every registered
-command needs a caller, every `invoke()` a registration.
+They run as the `guards` job in [`quality.yml`](.github/workflows/quality.yml),
+which is meant to be registered as a required check on master once it lands
+there. The checks cover banned frontend UI and state patterns (hover-revealed
+row actions, hand-rolled modifier keys, `setQueryData(key, undefined)`), the
+Rust refspec-argv and sync-`#[tauri::command]` invariants, and Tauri IPC drift —
+every registered command needs a caller, every `invoke()` a registration.
 
 Each check carries an allowlist, and it ratchets one way. Adding an entry is a
 reviewed change like any other: it needs an inline rationale naming what makes
-that site safe, and it isn't the way to quiet a fresh violation.
+that site safe, and it isn't the way to quiet a fresh violation. The ratchet is
+enforced, not just documented — an entry whose site is gone fails the gate as a
+stale allowlist entry, so the PR that removes the site removes its entry too.
 
 `knip` and `jscpd` run in the same workflow's `advisory` job — non-blocking on
 purpose. The job publishes unused-export and duplicate-code reports to the run

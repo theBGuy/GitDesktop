@@ -5677,12 +5677,31 @@ detached
         let root = root_holder.path().join("root");
         let state = AppState::default();
 
-        for (base, head) in [("ma*in", "feature"), ("main", "fea:ture"), ("main", "*")] {
+        // Metacharacters and rev expressions alike: on this path the names are
+        // interpolated into `+refs/heads/{head}:refs/remotes/{remote}/{head}`,
+        // whose refname rules reject all of them before anything resolves. The
+        // gate is defense-in-depth, and buys an early error naming the bad
+        // branch where the ungated path fails later as an opaque invalid-refspec
+        // fetch error. (Resolution is the LOCAL path's hazard.)
+        for (base, head) in [
+            ("ma*in", "feature"),
+            ("main", "fea:ture"),
+            ("main", "*"),
+            ("feature~1", "feature"),
+            ("main", "feature~1"),
+            ("main^", "feature"),
+            ("main", "HEAD@{1}"),
+            ("main..other", "feature"),
+            ("main", "@"),
+        ] {
             let err = merge_remote_pr(&state, &repo, 5, base, head, None, None, &root)
                 .await
                 .unwrap_err();
+            // The MESSAGE, not just the variant: this clone has no remotes, so
+            // `resolve_pr_remote` also fails as `InvalidArgument` — a variant-only
+            // assertion passes with the name gate removed entirely.
             assert!(
-                matches!(err, AppError::InvalidArgument(_)),
+                matches!(&err, AppError::InvalidArgument(m) if m.contains("invalid branch name")),
                 "{base}/{head} got: {err:?}"
             );
         }

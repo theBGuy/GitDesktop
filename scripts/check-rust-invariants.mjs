@@ -212,6 +212,16 @@ export function enclosingFn(lines, lineIdx) {
 const allowed = (list, file, fn) =>
   list.some((e) => e.file === file && e.fn === fn);
 
+/** Allowlist records no hit mapped to. Their site is gone, so the entry is
+ *  stale — and the RATCHET RULE above is only a ratchet if a leftover entry is
+ *  a finding: left in place it silently pre-authorizes whatever that function
+ *  grows next. */
+export function staleAllowlistEntries(list, hits) {
+  return list.filter(
+    (e) => !hits.some((h) => h.file === e.file && h.fn === e.fn),
+  );
+}
+
 // -------------------------------------------------------------------- checks
 
 // `format!(` through to its template, tolerating a newline before the literal
@@ -271,6 +281,10 @@ export function checkSecretArgv(file, _src, lines, hits) {
 }
 
 const COMMAND_ATTR_RE = /^\s*#\[tauri::command/;
+const STALE_FIX =
+  "stale allowlist entry — nothing in this function trips the check any more " +
+  "(fixed, renamed, deleted, or moved to another file/fn); remove the entry " +
+  "(RATCHET RULE: the lists only shrink)";
 const SYNC_COMMAND_FIX =
   "sync #[tauri::command]s run on the main thread (gd-conventions Rust) — " +
   "make it async (spawn_blocking for IO), or allowlist with rationale";
@@ -314,9 +328,24 @@ export function checkSyncCommands(file, _src, lines, hits) {
 
 function main() {
   const CHECKS = [
-    { name: "A. refspec templates", run: checkRefspecTemplates, hits: [] },
-    { name: "B. secret-shaped argv", run: checkSecretArgv, hits: [] },
-    { name: "C. sync #[tauri::command]", run: checkSyncCommands, hits: [] },
+    {
+      name: "A. refspec templates",
+      run: checkRefspecTemplates,
+      allowlist: REFSPEC_ALLOWLIST,
+      hits: [],
+    },
+    {
+      name: "B. secret-shaped argv",
+      run: checkSecretArgv,
+      allowlist: SECRET_ARGV_ALLOWLIST,
+      hits: [],
+    },
+    {
+      name: "C. sync #[tauri::command]",
+      run: checkSyncCommands,
+      allowlist: SYNC_COMMAND_ALLOWLIST,
+      hits: [],
+    },
   ];
 
   const files = rustFiles(SRC);
@@ -333,7 +362,8 @@ function main() {
   for (const check of CHECKS) {
     const violations = check.hits.filter((h) => !h.allowlisted);
     const allowlisted = check.hits.length - violations.length;
-    if (violations.length === 0) {
+    const stale = staleAllowlistEntries(check.allowlist, check.hits);
+    if (violations.length === 0 && stale.length === 0) {
       process.stdout.write(
         `${check.name}: OK (${files.length} files, ${allowlisted} allowlisted)\n`,
       );
@@ -341,11 +371,15 @@ function main() {
     }
     failed = true;
     process.stderr.write(
-      `${check.name}: FAIL (${files.length} files, ${violations.length} violation(s), ${allowlisted} allowlisted)\n`,
+      `${check.name}: FAIL (${files.length} files, ${violations.length} violation(s), ${allowlisted} allowlisted, ${stale.length} stale)\n`,
     );
     for (const v of violations) {
       process.stderr.write(`  src-tauri/src/${v.file}:${v.line}  fn ${v.fn}\n`);
       process.stderr.write(`    ${v.fix}\n`);
+    }
+    for (const e of stale) {
+      process.stderr.write(`  src-tauri/src/${e.file}  fn ${e.fn}\n`);
+      process.stderr.write(`    ${STALE_FIX}\n`);
     }
   }
 
@@ -354,10 +388,11 @@ function main() {
   process.exitCode = failed ? 1 : 0;
 }
 
-// Main-module detection by PATH comparison, not `import.meta.main`: that is
-// node 24.2+ only, and this repo documents a node 20 floor (CONTRIBUTING.md,
-// README) with no engines pin — on an older runtime the gate would read
-// `if (undefined)` and the script would exit 0 having scanned nothing.
+// Main-module detection by PATH comparison, not `import.meta.main`: this form
+// works on any node, while `import.meta.main` only exists from 24.2 — a cliff
+// the documented floor should not have to track, and one that fails SILENTLY
+// (the gate reads `if (undefined)` and the script exits 0 having scanned
+// nothing — the fail-open this whole file exists to prevent).
 if (
   process.argv[1] &&
   resolve(process.argv[1]) === fileURLToPath(import.meta.url)

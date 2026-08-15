@@ -112,6 +112,20 @@ function readInvoked() {
 const difference = (a, b) => [...a].filter((name) => !b.has(name)).sort();
 const list = (names) => names.map((name) => `  ${name}`).join("\n");
 
+const STALE_FIX =
+  "stale allowlist entry — this command is no longer registered; remove the " +
+  "entry (an exception left behind pre-authorizes whatever is registered " +
+  "under that name next)";
+
+/** Allowlist entries naming a command the handler list no longer registers.
+ *  The suppression they bought is gone, so the entry is itself a finding — a
+ *  ratchet that can only loosen is not a ratchet. An entry whose command IS
+ *  registered but uninvoked is doing exactly its job and stays: the dead-surface
+ *  hit it suppresses is the reason it exists. */
+export function staleAllowlistEntries(allowlist, registered) {
+  return allowlist.filter((name) => !registered.has(name)).sort();
+}
+
 function main() {
   const registered = readRegistered();
   const invoked = readInvoked();
@@ -121,6 +135,7 @@ function main() {
     (name) => !allowed.has(name),
   );
   const missing = difference(invoked, registered);
+  const stale = staleAllowlistEntries(ALLOWLIST, registered);
 
   const handlerPath = relative(root, LIB_RS).split(sep).join("/");
   process.stdout.write(
@@ -128,7 +143,7 @@ function main() {
       `${invoked.size} command(s) invoked from src/\n`,
   );
 
-  if (dead.length === 0 && missing.length === 0) {
+  if (dead.length === 0 && missing.length === 0 && stale.length === 0) {
     process.stdout.write("IPC surface is in sync — no drift.\n");
     return;
   }
@@ -150,15 +165,23 @@ function main() {
     );
   }
 
+  if (stale.length > 0) {
+    process.stderr.write(
+      `\n${stale.length} stale allowlist entry(s):\n${list(stale)}\n` +
+        `\n${STALE_FIX}\n`,
+    );
+  }
+
   // Not `process.exit`: it can truncate a pending pipe write, losing the very
   // drift lists the failure is about on a CI runner.
   process.exitCode = 1;
 }
 
-// Main-module detection by PATH comparison, not `import.meta.main`: that is
-// node 24.2+ only, and this repo documents a node 20 floor (CONTRIBUTING.md,
-// README) with no engines pin — on an older runtime the gate would read
-// `if (undefined)` and the script would exit 0 having scanned nothing.
+// Main-module detection by PATH comparison, not `import.meta.main`: this form
+// works on any node, while `import.meta.main` only exists from 24.2 — a cliff
+// the documented floor should not have to track, and one that fails SILENTLY
+// (the gate reads `if (undefined)` and the script exits 0 having scanned
+// nothing — the fail-open this whole file exists to prevent).
 if (
   process.argv[1] &&
   resolve(process.argv[1]) === fileURLToPath(import.meta.url)
