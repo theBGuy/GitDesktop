@@ -411,7 +411,14 @@ export async function loadSettings(): Promise<AppSettings> {
   };
 }
 
-export async function saveSettings(settings: AppSettings): Promise<void> {
+/**
+ * Module-private on purpose: a raw save skips the serialized merge chain below,
+ * so every write rides one of this module's `serializedRecentRepoWrite` writers
+ * (or the `useSaveSettings` hook above them). Un-exported makes that
+ * compiler-enforced; the biome `noRestrictedImports` entry stays as the backstop
+ * if it is ever re-exported.
+ */
+async function saveSettings(settings: AppSettings): Promise<void> {
   const store = await getStore();
   await store.set("settings", settings);
 }

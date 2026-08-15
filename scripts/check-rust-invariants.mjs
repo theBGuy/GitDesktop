@@ -21,7 +21,7 @@
 //
 // Run: node scripts/check-rust-invariants.mjs
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SRC = join(
@@ -50,24 +50,25 @@ const REFSPEC_ALLOWLIST = [
   {
     file: "git/branches.rs",
     fn: "git_branch_merge_states",
-    rationale: "validates each pair's head/base with validate_ref_name inline",
+    rationale:
+      "validates each pair's head/base with validate_branch_name inline",
   },
   {
     file: "git/ops.rs",
     fn: "finalize_base",
     rationale:
-      "private helper; both callers (merge_local_pr, finish_local_pr_merge) validate base with validate_ref_name",
+      "private helper; both callers (merge_local_pr, finish_local_pr_merge) validate base with validate_branch_name",
   },
   {
     file: "git/ops.rs",
     fn: "push_pr_head",
     rationale:
-      "private helper; both callers (merge_remote_pr, finish_remote_pr_resolve) validate head with validate_ref_name",
+      "private helper; both callers (merge_remote_pr, finish_remote_pr_resolve) validate head with validate_branch_name",
   },
   {
     file: "git/ops.rs",
     fn: "merge_remote_pr",
-    rationale: "validates base and head with validate_ref_name at fn entry",
+    rationale: "validates base and head with validate_branch_name at fn entry",
   },
   {
     file: "git/ops.rs",
@@ -120,7 +121,8 @@ const REFSPEC_ALLOWLIST = [
   {
     file: "mcp_server/write_local.rs",
     fn: "verify_branch",
-    rationale: "validates via validate_ref_name at fn entry",
+    rationale:
+      "validates via validate_branch_name at fn entry (rev-expression syntax rejected before the probe)",
   },
 ];
 
@@ -190,9 +192,16 @@ function rustFiles(dir, out = []) {
 // Attribution is textual: the nearest preceding signature. A match inside a
 // closure or a nested block is therefore reported against the function that
 // encloses it, which is exactly the granularity the allowlists key on.
-const FN_RE = /^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)/;
+// Every qualifier a signature can carry must be here, in any order `const`,
+// `async` and `unsafe` legally combine: a signature the pattern misses is
+// silently attributed to the PRECEDING function instead (five `const fn`s in
+// forge/model.rs were invisible to the narrower `(?:async\s+)?` form).
+// The ABI string is optional because a bare `extern fn` is legal and defaults
+// to "C".
+export const FN_RE =
+  /^\s*(?:pub(?:\([^)]*\))?\s+)?(?:(?:const|async|unsafe)\s+)*(?:extern(?:\s+"[^"]*")?\s+)?fn\s+(\w+)/;
 
-function enclosingFn(lines, lineIdx) {
+export function enclosingFn(lines, lineIdx) {
   for (let i = lineIdx; i >= 0; i--) {
     const m = FN_RE.exec(lines[i]);
     if (m) return m[1];
@@ -213,7 +222,7 @@ const REFSPEC_FIX =
   "names reaching a refspec route through validate_ref_name/validate_tag_name " +
   "(gd-conventions Security hot spots) — validate, or allowlist with rationale";
 
-function checkRefspecTemplates(file, src, lines, hits) {
+export function checkRefspecTemplates(file, src, lines, hits) {
   FORMAT_RE.lastIndex = 0;
   for (let m = FORMAT_RE.exec(src); m; m = FORMAT_RE.exec(src)) {
     if (!REFSPEC_MARKERS.some((marker) => m[1].includes(marker))) continue;
@@ -240,7 +249,7 @@ const SECRET_KEY_RE = /token|secret|passw|credential|api[_-]?key/i;
 const SECRET_ARGV_FIX =
   "secrets never ride argv — send them via run_gh_input / json_body_args stdin bodies";
 
-function checkSecretArgv(file, _src, lines, hits) {
+export function checkSecretArgv(file, _src, lines, hits) {
   for (let i = 0; i < lines.length; i++) {
     if (!ARGV_FLAG_RE.test(lines[i])) continue;
     const window = lines.slice(i, i + 3).join("\n");
@@ -266,7 +275,7 @@ const SYNC_COMMAND_FIX =
   "sync #[tauri::command]s run on the main thread (gd-conventions Rust) — " +
   "make it async (spawn_blocking for IO), or allowlist with rationale";
 
-function checkSyncCommands(file, _src, lines, hits) {
+export function checkSyncCommands(file, _src, lines, hits) {
   for (let i = 0; i < lines.length; i++) {
     if (!COMMAND_ATTR_RE.test(lines[i])) continue;
     // Skip the attributes, cfg gates and doc comments between the marker and
@@ -303,40 +312,55 @@ function checkSyncCommands(file, _src, lines, hits) {
 
 // ---------------------------------------------------------------------- main
 
-const CHECKS = [
-  { name: "A. refspec templates", run: checkRefspecTemplates, hits: [] },
-  { name: "B. secret-shaped argv", run: checkSecretArgv, hits: [] },
-  { name: "C. sync #[tauri::command]", run: checkSyncCommands, hits: [] },
-];
+function main() {
+  const CHECKS = [
+    { name: "A. refspec templates", run: checkRefspecTemplates, hits: [] },
+    { name: "B. secret-shaped argv", run: checkSecretArgv, hits: [] },
+    { name: "C. sync #[tauri::command]", run: checkSyncCommands, hits: [] },
+  ];
 
-const files = rustFiles(SRC);
-for (const path of files) {
-  // Normalise CRLF: on Windows a git checkout materialises these files with
-  // CRLF, and a trailing `\r` would leak into every reported line.
-  const src = readFileSync(path, "utf8").replace(/\r\n/g, "\n");
-  const lines = src.split("\n");
-  const rel = relative(SRC, path).replace(/\\/g, "/");
-  for (const check of CHECKS) check.run(rel, src, lines, check.hits);
-}
+  const files = rustFiles(SRC);
+  for (const path of files) {
+    // Normalise CRLF: on Windows a git checkout materialises these files with
+    // CRLF, and a trailing `\r` would leak into every reported line.
+    const src = readFileSync(path, "utf8").replace(/\r\n/g, "\n");
+    const lines = src.split("\n");
+    const rel = relative(SRC, path).replace(/\\/g, "/");
+    for (const check of CHECKS) check.run(rel, src, lines, check.hits);
+  }
 
-let failed = false;
-for (const check of CHECKS) {
-  const violations = check.hits.filter((h) => !h.allowlisted);
-  const allowlisted = check.hits.length - violations.length;
-  if (violations.length === 0) {
-    process.stdout.write(
-      `${check.name}: OK (${files.length} files, ${allowlisted} allowlisted)\n`,
+  let failed = false;
+  for (const check of CHECKS) {
+    const violations = check.hits.filter((h) => !h.allowlisted);
+    const allowlisted = check.hits.length - violations.length;
+    if (violations.length === 0) {
+      process.stdout.write(
+        `${check.name}: OK (${files.length} files, ${allowlisted} allowlisted)\n`,
+      );
+      continue;
+    }
+    failed = true;
+    process.stderr.write(
+      `${check.name}: FAIL (${files.length} files, ${violations.length} violation(s), ${allowlisted} allowlisted)\n`,
     );
-    continue;
+    for (const v of violations) {
+      process.stderr.write(`  src-tauri/src/${v.file}:${v.line}  fn ${v.fn}\n`);
+      process.stderr.write(`    ${v.fix}\n`);
+    }
   }
-  failed = true;
-  process.stdout.write(
-    `${check.name}: FAIL (${files.length} files, ${violations.length} violation(s), ${allowlisted} allowlisted)\n`,
-  );
-  for (const v of violations) {
-    process.stdout.write(`  src-tauri/src/${v.file}:${v.line}  fn ${v.fn}\n`);
-    process.stdout.write(`    ${v.fix}\n`);
-  }
+
+  // Not `process.exit`: it can truncate a pending pipe write, losing the very
+  // violation list the failure is about on a CI runner.
+  process.exitCode = failed ? 1 : 0;
 }
 
-process.exit(failed ? 1 : 0);
+// Main-module detection by PATH comparison, not `import.meta.main`: that is
+// node 24.2+ only, and this repo documents a node 20 floor (CONTRIBUTING.md,
+// README) with no engines pin — on an older runtime the gate would read
+// `if (undefined)` and the script would exit 0 having scanned nothing.
+if (
+  process.argv[1] &&
+  resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  main();
+}

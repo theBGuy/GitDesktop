@@ -33,14 +33,20 @@ jobs:
   guards:
     runs-on: ubuntu-latest
     steps:
+      # Nothing here uses the git credential after checkout, so it is not left
+      # in .git/config for later steps to reach.
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Install Node
         uses: actions/setup-node@v7.0.0
         with:
           node-version: 24
 
-      # One step per script so a failure names its own check in the UI.
+      # One step per script so a failure names its own check in the UI. The same
+      # three run locally via package.json's `checks` alias — a fourth guard is
+      # added in BOTH places.
       - name: Banned frontend patterns
         run: node scripts/check-banned-patterns.mjs
 
@@ -49,6 +55,15 @@ jobs:
 
       - name: IPC surface drift
         run: node scripts/check-dead-surface.mjs
+
+      # Negative controls for the scanners themselves — their worst failure is a
+      # silent fail-open, so the fixtures that prove each predicate still fires
+      # run in CI. The test file is stdlib-only (node:test, node:assert), so this
+      # job still needs no install step. The argument is a QUOTED glob, not the
+      # `scripts` directory: node 24's runner resolves a bare directory path as
+      # an entry module and dies with MODULE_NOT_FOUND.
+      - name: Guard self-tests
+        run: node --test "scripts/*.test.mjs"
 
   # ADVISORY — informational only, triaged by humans, NEVER a merge gate; do not
   # register it as a required check. knip exits non-zero today on a known
@@ -59,11 +74,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
+      # continue-on-error from the first setup step on: an action outage must
+      # not redden a job whose contract is "never gates".
       - name: Install pnpm
+        continue-on-error: true
         uses: pnpm/action-setup@v6.0.9
 
       - name: Install Node
+        continue-on-error: true
         uses: actions/setup-node@v7.0.0
         with:
           node-version: 24

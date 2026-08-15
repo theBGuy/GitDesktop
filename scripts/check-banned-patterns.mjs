@@ -1,9 +1,12 @@
+#!/usr/bin/env node
 // Mechanical guards for convention classes that a 6-wave audit already paid to
 // close once — each check exists so its class cannot silently re-open one PR at
 // a time. Node built-ins only (no deps): CI runs this with bare `node`.
 //
 // Adding a check is one CHECKS entry. An allowlist entry is a deliberate,
 // rationale-carrying exception — never a way to quiet a fresh violation.
+// The predicates are exported and pinned by scripts/checks.test.mjs; the CLI
+// body below runs only when this file is the entry point.
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,16 +22,23 @@ const PAIR_GAP = 160;
 
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+/** A Tailwind class name as a standalone token. Without the boundary guards a
+ *  raw-substring match for `hidden` also fires on `overflow-hidden`, pairing
+ *  layout utilities with an unrelated `group-hover:` class. */
+const token = (s) => `(?<![\\w-])${escapeRe(s)}(?![\\w-])`;
+
 /**
  * Comment text blanked out, line structure preserved — a documented example of
  * a banned pattern is not a use of it. String literals are tracked just far
  * enough that `https://` and a quoted `/*` don't read as comment starts.
- * Residual gaps, all zero-instance today: regex literals aren't parsed, quote
- * state resets per line, and JSX text isn't distinguished from code, so a `//`
- * inside a regex literal, a multi-line template, or JSX prose blanks the rest
- * of that line. Deliberately not a parser.
+ * Residual gaps, all zero-instance today: regex literals aren't parsed and JSX
+ * text isn't distinguished from code, so a `//` inside a regex literal or JSX
+ * prose blanks the rest of that line. Quote state resets at each line, but
+ * block-comment state deliberately PERSISTS across lines — so a `/*` appearing
+ * inside a multi-line template literal or JSX prose blanks everything up to the
+ * next block-comment close, potentially the rest of the file. Not a parser.
  */
-function stripComments(lines) {
+export function stripComments(lines) {
   const out = [];
   let inBlock = false;
   for (const line of lines) {
@@ -75,7 +85,7 @@ function stripComments(lines) {
 /** A file's scannable view: comment-stripped lines, plus those lines joined
  *  into one string with each line's start offset — so a match that spans a
  *  wrapped expression still reports a real line number. */
-function view(source) {
+export function view(source) {
   const lines = stripComments(source.split(/\r?\n/));
   const starts = [];
   let offset = 0;
@@ -107,14 +117,10 @@ const perLine =
   ({ lines }) =>
     lines.flatMap((line, i) => (re.test(line) ? [i + 1] : []));
 
-/** Scanner: `a` and `b` within PAIR_GAP of each other in either order, wrapped
- *  lines included. Reports the line the match starts on. */
-const nearPair = (a, b) => {
-  const [x, y] = [escapeRe(a), escapeRe(b)];
-  const re = new RegExp(
-    `${x}[\\s\\S]{0,${PAIR_GAP}}?${y}|${y}[\\s\\S]{0,${PAIR_GAP}}?${x}`,
-    "g",
-  );
+/** Scanner: every match of a `g` regex against the whitespace-normalized whole
+ *  file, so a match spanning a wrapped expression still counts. Reports the line
+ *  the match starts on. */
+const perFile = (re) => {
   return ({ text, starts }) => {
     const hits = new Set();
     for (const m of text.matchAll(re)) hits.add(lineAt(starts, m.index));
@@ -122,11 +128,72 @@ const nearPair = (a, b) => {
   };
 };
 
-const CHECKS = [
+/** Scanner: `a` and `b` within PAIR_GAP of each other in either order, wrapped
+ *  lines included. Reports the line the match starts on. */
+const nearPair = (a, b) => {
+  const [x, y] = [token(a), token(b)];
+  const re = new RegExp(
+    `${x}[\\s\\S]{0,${PAIR_GAP}}?${y}|${y}[\\s\\S]{0,${PAIR_GAP}}?${x}`,
+    "g",
+  );
+  return perFile(re);
+};
+
+/** Scanner: the union of several `nearPair`s — one check, one allowlist, every
+ *  Tailwind spelling of the same idiom. */
+const anyPair = (pairs) => {
+  const scans = pairs.map(([a, b]) => nearPair(a, b));
+  return (v) => [...new Set(scans.flatMap((scan) => scan(v)))];
+};
+
+// The same hover-reveal in each of its Tailwind spellings: the hiding utility
+// paired with the `group-hover:` class that undoes it. `inline` and
+// `inline-flex` are separate entries because the token boundary guard stops
+// `group-hover:inline` from matching inside `group-hover:inline-flex`.
+// The `hidden` arm is the noisy one: `hidden` is common standalone (responsive
+// layout) in a way `opacity-0` is not, so two SIBLING elements within PAIR_GAP
+// can pair by accident. That failure is loud — a named file and line — and the
+// allowlist is its remedy, so it is preferred over missing the real idiom.
+const HOVER_REVEAL_PAIRS = [
+  ["opacity-0", "group-hover:opacity-100"],
+  ["invisible", "group-hover:visible"],
+  ["hidden", "group-hover:block"],
+  ["hidden", "group-hover:flex"],
+  ["hidden", "group-hover:inline"],
+  ["hidden", "group-hover:inline-flex"],
+];
+
+// `undefined` as the LAST argument of a `setQueryData` call. Two traps:
+//   1. The call wraps — the updater lands on its own line — so this runs over
+//      the whitespace-normalized whole-file view, not per line.
+//   2. Type arguments nest: `setQueryData<Record<string, Foo>>(…)`. A
+//      `<[^>]*>` generic group stops at the INNER `>` and then fails on the
+//      leftover `>`; `<[^(]*?>` is lazy and bounded by the call's own paren
+//      (the same trap check-dead-surface.mjs documents for `invoke`).
+// The argument run is greedy so a key expression containing commas still
+// resolves to the call's LAST argument, but `;`-free and length-bounded so the
+// whole-file view can't pair one call's paren with a distant `, undefined)`.
+// Both halves of that bound are approximations, in opposite directions:
+//   - a `;` INSIDE a string key (`["a;b", repo]`) ends the run early and the
+//     call is missed — the only fail-open here, zero instances today;
+//   - `;` is not the only statement boundary, so JSX props or object members
+//     within the 200-char window can still pair one call's `(` with another
+//     expression's `, undefined)` — a loud false positive, not a miss.
+// 200 chars is ~7x headroom: across the 57 call sites under src/, the longest
+// first argument measures 27 chars (PR #208 review round 1).
+const SET_QUERY_DATA_RE =
+  /setQueryData\s*(?:<[^(]*?>)?\s*\([^;]{0,200},\s*undefined\s*[),]/g;
+
+// Vendored shadcn/Base UI primitives are off-limits to edit (CLAUDE.md), so a
+// hit inside them could only ever be silenced by an allowlist entry, never
+// fixed. Their CALL SITES — the app code that composes them — stay scanned.
+const notVendoredUi = (file) => !file.startsWith("src/components/ui/");
+
+export const CHECKS = [
   {
     name: "hover-reveal",
-    appliesTo: () => true,
-    scan: nearPair("opacity-0", "group-hover:opacity-100"),
+    appliesTo: notVendoredUi,
+    scan: anyPair(HOVER_REVEAL_PAIRS),
     allowlist: [
       // Documented product decision: the file row's inline actions.
       "src/features/repository/FileRow.tsx",
@@ -140,7 +207,8 @@ const CHECKS = [
     name: "hand-rolled-mod-key",
     // The hotkeys layer IS the platform-modifier helper, so it reads the raw
     // event flags by definition.
-    appliesTo: (file) => !file.startsWith("src/lib/hotkeys/"),
+    appliesTo: (file) =>
+      !file.startsWith("src/lib/hotkeys/") && notVendoredUi(file),
     // Each flag independently: a lone `e.metaKey` is the class in its worst
     // form (a hardcoded platform modifier), and a wrapped pair must not read as
     // clean either.
@@ -169,11 +237,9 @@ const CHECKS = [
   },
   {
     name: "setQueryData-noop",
+    // Not a UI idiom — it applies wherever the cache is written, vendored or not.
     appliesTo: () => true,
-    // Greedy `.*` so a key expression containing commas still resolves to the
-    // LAST argument. Line-scoped: an `undefined` wrapped onto its own line in a
-    // multi-line call is not caught.
-    scan: perLine(/setQueryData\s*(?:<[^>]*>)?\s*\(.*,\s*undefined\s*[),]/),
+    scan: perFile(SET_QUERY_DATA_RE),
     allowlist: [],
     message:
       "setQueryData(key, undefined) is a silent no-op in TanStack v5 — snapshot and restore the previous value instead",
@@ -193,29 +259,46 @@ function walk(dir, out = []) {
   return out;
 }
 
-const files = walk(SRC);
-const views = new Map(
-  files.map((f) => [f, view(readFileSync(join(ROOT, f), "utf8"))]),
-);
-let failed = false;
+function main() {
+  const files = walk(SRC);
+  const views = new Map(
+    files.map((f) => [f, view(readFileSync(join(ROOT, f), "utf8"))]),
+  );
+  let failed = false;
 
-for (const check of CHECKS) {
-  const scanned = files.filter((f) => check.appliesTo(f));
-  const violations = [];
-  for (const file of scanned) {
-    if (check.allowlist.includes(file)) continue;
-    for (const line of check.scan(views.get(file)).sort((a, b) => a - b)) {
-      violations.push(`${file}:${line}`);
+  for (const check of CHECKS) {
+    const scanned = files.filter((f) => check.appliesTo(f));
+    const violations = [];
+    for (const file of scanned) {
+      if (check.allowlist.includes(file)) continue;
+      for (const line of check.scan(views.get(file)).sort((a, b) => a - b)) {
+        violations.push(`${file}:${line}`);
+      }
     }
+    if (violations.length === 0) {
+      process.stdout.write(
+        `${check.name}: OK (${scanned.length} files scanned)\n`,
+      );
+      continue;
+    }
+    failed = true;
+    process.stderr.write(`${check.name}: ${violations.length} violation(s)\n`);
+    for (const v of violations) process.stderr.write(`  ${v}\n`);
+    process.stderr.write(`  → ${check.message}\n`);
   }
-  if (violations.length === 0) {
-    console.log(`${check.name}: OK (${scanned.length} files scanned)`);
-    continue;
-  }
-  failed = true;
-  console.error(`${check.name}: ${violations.length} violation(s)`);
-  for (const v of violations) console.error(`  ${v}`);
-  console.error(`  → ${check.message}`);
+
+  // Not `process.exit`: it can truncate a pending pipe write, losing the very
+  // violation list the failure is about on a CI runner.
+  process.exitCode = failed ? 1 : 0;
 }
 
-process.exit(failed ? 1 : 0);
+// Main-module detection by PATH comparison, not `import.meta.main`: that is
+// node 24.2+ only, and this repo documents a node 20 floor (CONTRIBUTING.md,
+// README) with no engines pin — on an older runtime the gate would read
+// `if (undefined)` and the script would exit 0 having scanned nothing.
+if (
+  process.argv[1] &&
+  resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  main();
+}
