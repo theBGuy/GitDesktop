@@ -692,7 +692,7 @@ function VisibilityAction({
           </Label>
           <Select value={target} onValueChange={(v) => v && setTarget(v)}>
             <SelectTrigger id="visibility-target" className="w-40">
-              <SelectValue />
+              <SelectValue className="capitalize" />
             </SelectTrigger>
             <SelectContent>
               {visibilities.map((v) => (

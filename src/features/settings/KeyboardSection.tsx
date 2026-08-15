@@ -79,7 +79,7 @@ export const KeyboardSection = withForm({
       if (!binding) return; // bare modifier — keep waiting
       if (!isBindableCombo(binding)) {
         setNote(
-          "Shortcuts need a modifier (Ctrl or Alt) or a function key, so they can't collide with typing.",
+          `Shortcuts need a modifier (${formatBinding("mod")} or ${formatBinding("alt")}) or a function key, so they can't collide with typing.`,
         );
         return;
       }

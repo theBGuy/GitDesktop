@@ -187,6 +187,40 @@
   --destructive: oklch(0.7 0.155 22);
 }
 
+/* Shiki diff/JSON token colors. The Shiki theme (features/diff/shiki-theme.ts)
+   emits these var() references as each token's inline `color:`, so a theme
+   toggle re-colors already-tokenized spans by cascade — nothing re-tokenizes.
+   Kept as raw hex (not the OKLCH ramp above), and as its own block so the
+   OKLCH ramp stays a single readable unit: it's the GitHub syntax palette,
+   each theme tuned to stay readable on its own add/del line backgrounds
+   (the dark one against `#18271f` / `#23191c`) where stock editor themes
+   wash out. */
+:root {
+  --gd-syn-fg: #1f2328;
+  --gd-syn-comment: #6e7781;
+  --gd-syn-keyword: #cf222e;
+  --gd-syn-string: #0a3069;
+  --gd-syn-number: #0550ae;
+  --gd-syn-variable: #953800;
+  --gd-syn-func: #8250df;
+  --gd-syn-type: #116329;
+  --gd-syn-tag: #116329;
+  --gd-syn-attr: #0550ae;
+}
+
+.dark {
+  --gd-syn-fg: #e6edf3;
+  --gd-syn-comment: #8b949e;
+  --gd-syn-keyword: #ff7b72;
+  --gd-syn-string: #a5d6ff;
+  --gd-syn-number: #79c0ff;
+  --gd-syn-variable: #ffa657;
+  --gd-syn-func: #d2a8ff;
+  --gd-syn-type: #7ee787;
+  --gd-syn-tag: #7ee787;
+  --gd-syn-attr: #79c0ff;
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

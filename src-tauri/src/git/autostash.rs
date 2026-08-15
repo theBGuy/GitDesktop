@@ -783,6 +783,135 @@ mod tests {
         assert_marker(&refusal(&clone, &["pull", "--rebase"]).await, REBASE_STAGED);
     }
 
+    /// The conflict summary in `src/lib/error-summary.ts` keys off the ANCHORED
+    /// shapes of these lines, so a git release that reworded one would silently
+    /// change how conflicts present. Markers 1-2 guard live toast classification;
+    /// markers 3-4 ride stdout, which `AppError::Git` does not carry today —
+    /// guarded here against the day it does.
+    #[tokio::test]
+    async fn conflict_output_still_matches_the_anchored_frontend_markers() {
+        // Mirrors of the four CONFLICT_MARKERS regexes, in plain string ops.
+        // Splitting on a bare CR as well as LF mirrors ECMAScript `/m`, which ends
+        // a line at either; git has been observed joining its `Rebasing (n/m)`
+        // progress to the diagnostic that follows with one.
+        fn lines(text: &str) -> std::str::Split<'_, [char; 2]> {
+            text.split(['\n', '\r'])
+        }
+        fn could_not_apply(text: &str) -> bool {
+            lines(text).any(|line| {
+                let rest = line.strip_prefix("error: ").unwrap_or(line);
+                rest.starts_with("could not apply ") || rest.starts_with("Could not apply ")
+            })
+        }
+        fn resolve_all_conflicts(text: &str) -> bool {
+            lines(text).any(|line| {
+                line.strip_prefix("error: ")
+                    .or_else(|| line.strip_prefix("hint: "))
+                    .is_some_and(|rest| rest.starts_with("Resolve all conflicts"))
+            })
+        }
+        fn conflict_paren(text: &str) -> bool {
+            lines(text).any(|line| line.starts_with("CONFLICT ("))
+        }
+        fn needs_merge(text: &str) -> bool {
+            lines(text).any(|line| line.trim_end().ends_with(": needs merge"))
+        }
+        // Mirrors SUBJECT_ECHO_LINE + OP_ADVICE (error-summary.ts): the paused op
+        // is read from `git <op> --continue` advice ONLY — never an `--abort`
+        // remedy, and never the line that echoes the commit subject.
+        fn is_subject_echo(line: &str) -> bool {
+            let rest = line.strip_prefix("error: ").unwrap_or(line);
+            [
+                "could not apply ",
+                "Could not apply ",
+                "could not revert ",
+                "Could not revert ",
+            ]
+            .iter()
+            .any(|prefix| rest.starts_with(prefix))
+        }
+        fn advises_continue(text: &str, op: &str) -> bool {
+            let advice = format!("git {op} --continue");
+            lines(text).any(|line| !is_subject_echo(line) && line.contains(&advice))
+        }
+        fn assert_shape(matched: bool, shape: &str, output: &str) {
+            assert!(
+                matched,
+                "git no longer emits a line shaped {shape:?} — the frontend classifier is now \
+                 blind to this conflict. Actual output:\n{output}"
+            );
+        }
+
+        let (dir, repo) = setup_repo("conflict-markers").await;
+        git(&repo, &["switch", "-c", "feat"]).await;
+        write(dir.path(), "a.txt", "theirs\n");
+        // The subject names a DIFFERENT op on purpose: git echoes it onto the
+        // `could not apply` line, where only the anchor keeps it from classifying.
+        commit_all(&repo, "rebase the parser").await;
+        git(&repo, &["switch", "main"]).await;
+        write(dir.path(), "a.txt", "mine\n");
+        commit_all(&repo, "local change").await;
+
+        let cherry = run_git_raw(Some(&repo), &["cherry-pick", "feat"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_ne!(cherry.code, 0, "expected the cherry-pick to conflict");
+        assert_shape(
+            could_not_apply(&cherry.stderr),
+            "error: could not apply <sha>…",
+            &cherry.stderr,
+        );
+        assert_shape(
+            conflict_paren(&cherry.stdout_lossy()),
+            "CONFLICT (…",
+            &cherry.stdout_lossy(),
+        );
+        assert!(
+            advises_continue(&cherry.stderr, "cherry-pick"),
+            "git no longer advises `git cherry-pick --continue` outside the subject-echo line — \
+             the frontend would name every paused cherry-pick \"Operation\". Actual stderr:\n{}",
+            cherry.stderr
+        );
+        git(&repo, &["cherry-pick", "--abort"]).await;
+
+        let rebase = run_git_raw(Some(&repo), &["rebase", "feat"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_ne!(rebase.code, 0, "expected the rebase to conflict");
+        assert_shape(
+            resolve_all_conflicts(&rebase.stderr),
+            "hint: Resolve all conflicts…",
+            &rebase.stderr,
+        );
+        assert_shape(
+            could_not_apply(&rebase.stderr),
+            "Could not apply <sha>…",
+            &rebase.stderr,
+        );
+        assert!(
+            advises_continue(&rebase.stderr, "rebase"),
+            "git no longer advises `git rebase --continue` outside the subject-echo line — \
+             the frontend would name every paused rebase \"Operation\". Actual stderr:\n{}",
+            rebase.stderr
+        );
+
+        // Continuing without resolving reports on STDOUT (`core.editor` is pinned
+        // so a future git that got past the check can't block on an editor).
+        let cont = run_git_raw(
+            Some(&repo),
+            &["-c", "core.editor=true", "rebase", "--continue"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_ne!(cont.code, 0, "expected --continue to refuse unmerged files");
+        assert_shape(
+            needs_merge(&cont.stdout_lossy()),
+            "<path>: needs merge",
+            &cont.stdout_lossy(),
+        );
+    }
+
     #[test]
     fn outcome_serializes_to_the_pinned_wire_shape() {
         // The frontend branches on these exact strings; `rename_all` alone does NOT

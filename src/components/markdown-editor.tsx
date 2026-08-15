@@ -24,6 +24,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Markdown } from "@/components/ui/markdown";
 import { Textarea } from "@/components/ui/textarea";
+import { formatBinding } from "@/lib/hotkeys/binding";
 import { cn } from "@/lib/utils";
 
 export interface MarkdownEditorHandle {
@@ -142,6 +143,8 @@ const TOOLBAR_GROUPS: {
   label: string;
   icon: Icon;
   action: FormatAction;
+  /** Canonical binding string (see @/lib/hotkeys/binding) — the labels format
+   *  it per platform, so it must never be a literal modifier. */
   shortcut?: string;
 }[][] = [
   [
@@ -158,14 +161,14 @@ const TOOLBAR_GROUPS: {
       label: "Bold",
       icon: TextBIcon,
       action: BOLD,
-      shortcut: "Ctrl+B",
+      shortcut: "mod+b",
     },
     {
       id: "italic",
       label: "Italic",
       icon: TextItalicIcon,
       action: ITALIC,
-      shortcut: "Ctrl+I",
+      shortcut: "mod+i",
     },
   ],
   [
@@ -186,7 +189,7 @@ const TOOLBAR_GROUPS: {
       label: "Link",
       icon: LinkIcon,
       action: LINK,
-      shortcut: "Ctrl+K",
+      shortcut: "mod+k",
     },
   ],
   [
@@ -430,6 +433,7 @@ export function MarkdownEditor({
               )}
               {group.map((btn) => {
                 const Glyph = btn.icon;
+                const hint = btn.shortcut && formatBinding(btn.shortcut);
                 return (
                   <Button
                     key={btn.id}
@@ -437,16 +441,8 @@ export function MarkdownEditor({
                     variant="ghost"
                     size="icon-xs"
                     disabled={disabled}
-                    aria-label={
-                      btn.shortcut
-                        ? `${btn.label} (${btn.shortcut})`
-                        : btn.label
-                    }
-                    title={
-                      btn.shortcut
-                        ? `${btn.label} · ${btn.shortcut}`
-                        : btn.label
-                    }
+                    aria-label={hint ? `${btn.label} (${hint})` : btn.label}
+                    title={hint ? `${btn.label} · ${hint}` : btn.label}
                     // Keep the textarea focused/selected when clicking a button.
                     onMouseDown={(e) => e.preventDefault()}
                     onClick={() => runAction(btn.action)}

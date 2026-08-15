@@ -70,7 +70,6 @@ interface WorkerHighlightArgs {
   filePath: string;
   text: string;
   lang: string | null;
-  isDark: boolean;
   content: { old: string | null; new: string | null } | null;
   tmGrammar: object | null;
 }
@@ -89,7 +88,7 @@ function signatureOf(args: WorkerHighlightArgs): string {
   // budget), so the extra hashing is negligible. Empty-string forms when null.
   const old = args.content?.old ?? "";
   const nw = args.content?.new ?? "";
-  return `${args.filePath}|${args.lang}|${args.isDark}|${args.text.length}|${djb2(args.text)}|${old.length}|${djb2(old)}|${nw.length}|${djb2(nw)}`;
+  return `${args.filePath}|${args.lang}|${args.text.length}|${djb2(args.text)}|${old.length}|${djb2(old)}|${nw.length}|${djb2(nw)}`;
 }
 
 /**
@@ -116,8 +115,10 @@ export function useWorkerHighlight(
   // Post the request for `sig` off the render path. An effect event reads the
   // LATEST `args`/`result` without making them reactive — the effect below
   // re-fires only when the signature (which digests every request-shaping
-  // input: path / lang / isDark / text + content hashes) or engagement changes,
-  // never on unrelated arg identity churn. Returns the request id for the
+  // input: path / lang / text + content hashes) or engagement changes, never on
+  // unrelated arg identity churn. The app theme is deliberately absent — token
+  // colors are CSS variables, so a toggle must NOT re-request (that cost a full
+  // rebuild through an unhighlighted flash). Returns the request id for the
   // effect's cleanup to disarm, or null when nothing was posted (result
   // already in hand, or the worker is unavailable → interim paint).
   const postRequest = useEffectEvent((sig: string): number | null => {
@@ -133,7 +134,6 @@ export function useWorkerHighlight(
       filePath: args.filePath,
       // `engaged` (checked by the caller) already gated on lang being non-null.
       lang: args.lang as string,
-      isDark: args.isDark,
       hunkText: args.text,
       content: args.content,
       tmGrammar: args.tmGrammar,

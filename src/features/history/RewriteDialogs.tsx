@@ -97,7 +97,7 @@ export function useGenerateSquashMessage(
 /**
  * Confirms a squash of selected unpushed commits: edit the combined commit
  * message, then the rewrite engine replays `base..HEAD` with the run
- * collapsed into one commit. Conflicts roll back untouched.
+ * collapsed into one commit. A conflict rolls it back.
  */
 export function SquashDialog({
   repoPath,

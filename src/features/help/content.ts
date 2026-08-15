@@ -381,8 +381,8 @@ selection to compare a range.
   (merge into the commit below, combining messages), **fixup** (merge in, keeping the
   message), **edit** (pause to amend its changes), or **drop** (remove it) — plus **↑/↓** to
   reorder.{{ai}} Reword can regenerate a message with AI.{{/ai}} A "Result" count shows what
-  you'll end up with. With no **edit**, it applies all at once and rolls back untouched if
-  anything conflicts. If you choose **edit**, it starts a rebase that **pauses** at that commit —
+  you'll end up with. With no **edit**, it applies all at once — a conflict rolls it back.
+  If you choose **edit**, it starts a rebase that **pauses** at that commit —
   amend it in the **Changes** tab (stage and commit/amend as usual), then **Continue** from the
   banner there. A quick **Squash N commits…** is also on the context menu when you select
   adjacent commits.

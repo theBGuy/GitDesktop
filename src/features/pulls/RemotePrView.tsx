@@ -658,15 +658,16 @@ export function RemotePrView({
   // Stack writes are GitHub-only, and the chain that would be stacked is read
   // off the OPEN PR list. Keep this gate strict: it's a second list fetch, and
   // an already-stacked PR (or one whose stack probe failed, where a null stack
-  // means "unknown") has nothing to offer. A FORK PR still pays for that fetch
-  // (plus its stacks join) before `detectStackOffer` refuses it — PrDetails
-  // carries no cross-repository marker, so the gate can't see it from here.
+  // means "unknown") has nothing to offer. A fork PR is refused here, ahead of
+  // that fetch and its stacks join; `detectStackOffer` keeps its own row-level
+  // fork filter (stack-chains.ts) for the other members of the list.
   const offerEnabled =
     providerKey === "github" &&
     details.data?.state === "OPEN" &&
     canEdit &&
     !details.data?.stack &&
-    !(details.data?.stackUnknown ?? false);
+    !(details.data?.stackUnknown ?? false) &&
+    !details.data?.crossRepository;
   const offerList = usePrList(
     repoPath,
     offerEnabled,
@@ -1406,12 +1407,14 @@ export function RemotePrView({
   // this, so each of their entry points can hold too rather than sit enabled and
   // do nothing.
   const detailsStale = details.isPlaceholderData;
+  // What a control that holds through the switch says, in one wording. It ranks
+  // BELOW any permission or read-error reason wherever both hold: those never
+  // lift on their own and are the ones still true once the switch lands.
+  const staleReason = detailsStale ? "Loading this pull request…" : undefined;
   // The metadata pickers seed from the rendered PR and commit the WHOLE set on
   // close, so one opened mid-switch would write the previous PR's members under
   // the new number. Their triggers disable on a reason, so this rides that seam.
-  const pickerReason = detailsStale
-    ? "Loading this pull request…"
-    : triageReason;
+  const pickerReason = triageReason ?? staleReason;
 
   if (details.isPending) {
     return (
@@ -1718,9 +1721,12 @@ export function RemotePrView({
     mergeGuardMissing ||
     allMergeMethodsBlocked;
   // Permission outranks the availability hints: a viewer who can't push can't
-  // act on any of them.
+  // act on any of them. The wait outranks them in turn — every hint below reads
+  // the RENDERED pr, which through a switch is the previous one, so each would
+  // describe a pull request the viewer didn't pick.
   const mergeReason =
     writeReason ??
+    staleReason ??
     (pr.isDraft
       ? `Mark the ${prNoun} ready before merging`
       : mergeGuardMissing
@@ -1778,16 +1784,19 @@ export function RemotePrView({
               </Button>
             ))}
           {isOpen && canEdit && (
-            <Button
+            // A natively-disabled Button swallows its own `title`, so the wait
+            // needs the reason prop to reach the viewer at all.
+            <DisabledReasonButton
               variant="outline"
               size="xs"
               disabled={detailsStale}
+              reason={staleReason}
               onClick={openEditWithChips}
               title="Edit the title and description"
             >
               <PencilSimpleIcon data-icon="inline-start" />
               Edit
-            </Button>
+            </DisabledReasonButton>
           )}
           <Button
             variant="outline"
@@ -2157,11 +2166,11 @@ export function RemotePrView({
                       >
                         Copy markdown
                       </DropdownMenuItem>
-                      {isOpen && canEdit && (
-                        <DropdownMenuItem
-                          disabled={detailsStale}
-                          onClick={openEditWithChips}
-                        >
+                      {/* Absent for the same reason as Quote reply, and because
+                          a disabled item drops pointer events — no hint could
+                          reach the viewer to explain it. */}
+                      {isOpen && canEdit && !detailsStale && (
+                        <DropdownMenuItem onClick={openEditWithChips}>
                           Edit
                         </DropdownMenuItem>
                       )}
@@ -2317,9 +2326,7 @@ export function RemotePrView({
                       // `busy` folds in the placeholder window, where the review
                       // would open against the previously rendered PR. The pending
                       // arms carry no reason here, as on the neighbours.
-                      reason={
-                        detailsStale ? "Loading this pull request…" : null
-                      }
+                      reason={staleReason}
                       onClick={() => setSubmitOpen(true)}
                       title="Submit a review (verdict, summary, and any pending comments)"
                     >
@@ -2342,7 +2349,7 @@ export function RemotePrView({
                         reason={
                           approvals.isError
                             ? "Couldn't load approval state"
-                            : null
+                            : staleReason
                         }
                         // Unknown state is announced as unknown: a failed read
                         // must not claim "not pressed" while the reason says the
@@ -2396,7 +2403,9 @@ export function RemotePrView({
                         busy || approvals.isPending || approvals.isError
                       }
                       reason={
-                        approvals.isError ? "Couldn't load review state" : null
+                        approvals.isError
+                          ? "Couldn't load review state"
+                          : staleReason
                       }
                       // Unknown state is announced as unknown (same as approve).
                       aria-pressed={
@@ -2531,7 +2540,7 @@ export function RemotePrView({
               variant="outline"
               size="sm"
               disabled={busy || writeBlocked}
-              reason={writeReason}
+              reason={writeReason ?? staleReason}
               onClick={() =>
                 setDraft.mutate(
                   { number, draft: false },
@@ -2553,7 +2562,7 @@ export function RemotePrView({
               variant="ghost"
               size="sm"
               disabled={busy || writeBlocked}
-              reason={writeReason}
+              reason={writeReason ?? staleReason}
               title="Turn this pull request back into a draft"
               onClick={() =>
                 setDraft.mutate(
@@ -2587,7 +2596,7 @@ export function RemotePrView({
                 variant="outline"
                 size="sm"
                 disabled={busy || writeBlocked}
-                reason={writeReason}
+                reason={writeReason ?? staleReason}
                 onClick={() =>
                   cancelAutoMerge.mutate(number, {
                     onSuccess: () => toast.success("Auto-merge canceled"),
@@ -2605,7 +2614,7 @@ export function RemotePrView({
               variant="outline"
               size="sm"
               disabled={busy || triageBlocked}
-              reason={triageReason}
+              reason={triageReason ?? staleReason}
               onClick={() =>
                 closePr.mutate(number, {
                   onSuccess: () => toast.success(`Closed #${number}`),
@@ -2712,7 +2721,7 @@ export function RemotePrView({
             variant="outline"
             size="sm"
             disabled={busy || triageBlocked}
-            reason={triageReason}
+            reason={triageReason ?? staleReason}
             onClick={() =>
               reopenPr.mutate(number, {
                 onSuccess: () => toast.success(`Reopened #${number}`),

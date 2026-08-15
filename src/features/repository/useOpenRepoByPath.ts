@@ -20,8 +20,10 @@ import { toastError } from "@/lib/toast";
 
 /**
  * Opens a repository by path: validates it, records it in recents, and switches
- * the app to it. A path that's no longer a git repo offers a toast to **Locate…**
- * the folder's new home (moved on disk) or **Remove** the stale row.
+ * the app to it. A `source: "recent"` path that's no longer a git repo offers a
+ * toast to **Locate…** the folder's new home (moved on disk) or **Remove** the
+ * stale row; a `source: "picker"` one is a folder the user just chose rather
+ * than a recents row to repair, so it only reports that it isn't a repository.
  * Callers: the shared recents list, macOS File → Open Recent, and the folder
  * picker in {@link usePickAndOpenRepo}.
  */
@@ -112,17 +114,23 @@ export function useOpenRepoByPath() {
         await recordOpenAndTrack(info, source);
       } catch (e) {
         if (isAppError(e) && e.kind === "notARepo") {
-          toast.error(`${path} is no longer a git repository.`, {
-            duration: 10_000,
-            action: {
-              label: "Locate…",
-              onClick: () => void locateAndReopen(path),
-            },
-            cancel: {
-              label: "Remove",
-              onClick: () => removeRecent.mutate(path),
-            },
-          });
+          if (source === "picker") {
+            // The user is acting on a folder they just picked, not on a recents
+            // row, so the row-repair actions (Locate/Remove) don't apply here.
+            toast.error(`${path} is not a git repository.`);
+          } else {
+            toast.error(`${path} is no longer a git repository.`, {
+              duration: 10_000,
+              action: {
+                label: "Locate…",
+                onClick: () => void locateAndReopen(path),
+              },
+              cancel: {
+                label: "Remove",
+                onClick: () => removeRecent.mutate(path),
+              },
+            });
+          }
         } else {
           toastError(e);
         }

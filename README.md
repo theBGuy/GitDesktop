@@ -181,7 +181,7 @@ click to jump to it in History.
 
 - **Interactive rebase** ⭐: an *Edit history* editor to reword, squash,
   fixup, drop, or reorder unpushed commits behind an atomic replay engine
-  (any conflict rolls back untouched), or **edit** a commit to pause and
+  (a conflict rolls it back), or **edit** a commit to pause and
   amend its contents in a real, resumable rebase (GitHub Desktop offers
   neither). Cherry-pick onto the current or another branch, too.
 - **Recover lost work** ⭐: a stash browser whose scan (via `git fsck`) finds
@@ -496,7 +496,7 @@ stands in for them.
 
 ### Insights
 
-A repository-graphs tab (Ctrl/Cmd-9): commit activity, code frequency
+A repository-graphs tab (`Ctrl`/`⌘`+`9`): commit activity, code frequency
 (additions vs. deletions), contributor churn, and a commit punch card, all
 computed **locally from your clone**, so they work offline, on private
 repos, with no token or rate limit, and without GitHub's 10k-commit chart
@@ -770,13 +770,13 @@ review via its subscription login. The full list is under
 ### Around the app
 
 - **Markdown everywhere you write**: Write/Preview tabs and a formatting
-  toolbar (with Ctrl+B / I / K) on every comment, reply, and release-notes
-  field, rendered to match GitHub's own styling: task lists, heading
+  toolbar (`Ctrl`/`⌘`+`B / I / K`) on every comment, reply, and
+  release-notes field, rendered to match GitHub's own styling: task lists, heading
   hierarchy, and syntax-highlighted code in ~190 languages (light and
   dark).
 - **Keyboard-first**: rebindable shortcuts with GitHub-Desktop-compatible
-  defaults, a generated cheat sheet (Ctrl+/), a command palette (Ctrl+K),
-  and arrow-key navigation everywhere.
+  defaults, a generated cheat sheet (`Ctrl`/`⌘`+`/`), a command palette
+  (`Ctrl`/`⌘`+`K`), and arrow-key navigation everywhere.
 - **Themes**: System, Light, Dark, and a softer **Slate** (a cool, lifted
   blue-gray) that eases eye strain; switch in **Settings → Appearance** or
   cycle from the command palette.

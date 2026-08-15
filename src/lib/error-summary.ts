@@ -61,15 +61,42 @@ function firstMeaningfulLine(message: string): string {
   return stripToolPrefix(nonEmpty ?? message).trim() || message.trim();
 }
 
-/** Conflict-family markers (lowercase — matched case-insensitively, since git
- *  emits both `error: could not apply …` and `Could not apply <sha>…`). When any
- *  appears we translate to a single calm line (the ConflictBanner already owns
- *  the durable surface); the raw text still flows to fullText untouched. */
+/** Conflict-family markers: anchored to git's own diagnostic line shapes and
+ *  matched case-sensitively against the raw text, because git echoes commit
+ *  subjects and file paths into the same blob, so an unanchored match would
+ *  collapse ANY failure into the conflict summary — a commit titled "resolve
+ *  all conflicts" is enough to do it.
+ *  `m` is required: the Rust layer prepends app prose above git's output. A
+ *  match translates to one calm line (the ConflictBanner already owns the
+ *  durable surface); the raw text still flows to fullText untouched.
+ *
+ *  Paired with the Rust canary
+ *  `conflict_output_still_matches_the_anchored_frontend_markers` (autostash.rs),
+ *  which re-runs real conflicts and asserts these shapes still hold. */
 const CONFLICT_MARKERS = [
-  "could not apply",
-  "resolve all conflicts",
-  "conflict (",
-  "needs merge",
+  // git emits both `error: could not apply …` and a bare `Could not apply
+  // <sha>…` tail line (rebase).
+  /^(?:error: )?[Cc]ould not apply /m,
+  /^(?:error: |hint: )Resolve all conflicts/m,
+  // Git's own line is always uppercase; a path named "conflict (old)" is not.
+  /^CONFLICT \(/m,
+  // END-anchored on purpose: the PATH holds the line start here, so anchoring
+  // this one to `^` would destroy the true positive.
+  /: needs merge\s*$/m,
+];
+
+/** Verdict literals from the Rust rollback funnels, and the frontend half of
+ *  that contract: a rolled-back or rollback-failed operation is NOT paused — no
+ *  banner owns it, and "resolve the conflicts, then continue" is wrong advice in
+ *  both states — yet those messages append git's raw output, which the conflict
+ *  markers below would match. Read from the FIRST line only, since an unanchored
+ *  literal is the same user-content hazard those markers are anchored against.
+ *  `git/ops.rs` leads every such message with exactly one of these and its tests
+ *  pin that placement (first line, ≤90 bytes) — keep the two in step. */
+const ROLLBACK_VERDICTS = [
+  "was rolled back",
+  "rollback also failed",
+  "rollback restored",
 ];
 
 /** Markers for git's refuse-to-clobber-your-working-tree family — the errors a
@@ -114,18 +141,32 @@ export function isDirtyTreeRefusal(e: unknown): boolean {
   return DIRTY_TREE_MARKERS.some((m) => lower.includes(m));
 }
 
-/** The paused operation named in the text, capitalized for the summary. */
+/** Lines that echo a commit subject behind a real diagnostic prefix: the op word
+ *  in `could not apply <sha>… rebase the parser` is user text, not git's. */
+const SUBJECT_ECHO_LINE = /^(?:error: )?[Cc]ould not (?:apply|revert) /;
+
+/** git names the paused operation in its own continue-advice, which a bare
+ *  subject mentioning an op word does not carry. `--continue` ONLY: our own
+ *  recovery prose tells users to run `git cherry-pick --abort`, and an abort
+ *  remedy inside another operation's message must not name the op. */
+const OP_ADVICE = /\bgit (rebase|merge|cherry-pick|revert) --continue\b/;
+
+/** The paused operation, capitalized for the summary. Read only from git's
+ *  advice lines — never the whole blob — so a cherry-pick of a commit titled
+ *  "rebase the parser" still reads "Cherry-pick". The split mirrors the markers'
+ *  `m` flag, which ends a line at a bare CR too — git has been observed joining
+ *  its `Rebasing (n/m)` progress to the diagnostic after it with one. */
 function conflictOp(text: string): string {
-  const lower = text.toLowerCase();
-  const found = ["rebase", "merge", "cherry-pick", "revert"]
-    .map((op) => ({ op, at: lower.indexOf(op) }))
-    .filter((m) => m.at !== -1)
-    .sort((a, b) => a.at - b.at)[0];
-  if (!found) return "Operation";
-  const { op } = found;
-  return op === "cherry-pick"
-    ? "Cherry-pick"
-    : op.charAt(0).toUpperCase() + op.slice(1);
+  for (const line of text.split(/\r\n|[\n\r]/)) {
+    if (SUBJECT_ECHO_LINE.test(line)) continue;
+    const op = OP_ADVICE.exec(line)?.[1];
+    if (op) {
+      return op === "cherry-pick"
+        ? "Cherry-pick"
+        : op.charAt(0).toUpperCase() + op.slice(1);
+    }
+  }
+  return "Operation";
 }
 
 /** Count of non-empty lines in a string. */
@@ -148,8 +189,15 @@ export function presentError(e: unknown): ErrorPresentation {
       stderr && !message.includes(stderr) ? `${message}\n\n${stderr}` : message;
 
     const combined = `${message}\n${stderr}`;
-    const combinedLower = combined.toLowerCase();
-    const isConflict = CONFLICT_MARKERS.some((m) => combinedLower.includes(m));
+    // git's `could not apply <sha>… <subject>` echo IS line one of a conflict,
+    // so the verdict anchor has to reject that shape too — ops.rs pins that a
+    // real verdict line never fronts git's own conflict output.
+    const [verdictLine] = combined.split(/\r\n|[\n\r]/, 1);
+    const rolledBack =
+      !SUBJECT_ECHO_LINE.test(verdictLine) &&
+      ROLLBACK_VERDICTS.some((v) => verdictLine.includes(v));
+    const isConflict =
+      !rolledBack && CONFLICT_MARKERS.some((m) => m.test(combined));
     const label = KIND_LABELS[e.kind];
     const summary = isConflict
       ? `${conflictOp(combined)} paused — resolve the conflicts, then continue.`

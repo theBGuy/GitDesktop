@@ -89,7 +89,6 @@ async function handle(req: HighlightWorkRequest): Promise<WorkerAsts | null> {
     },
     hunks: [req.hunkText],
   });
-  file.initTheme(req.isDark ? "dark" : "light");
   file.initRaw();
 
   // Wrap the real Shiki highlighter so we CAPTURE each side's AST as initSyntax
@@ -99,7 +98,7 @@ async function handle(req: HighlightWorkRequest): Promise<WorkerAsts | null> {
   // The worker inherits the highlighter's own 15_000 reconstructed-line cap
   // (`shikiDiffHighlighter` sets it), mirroring the renderer; lifting that
   // ceiling belongs to the diff-virtualization epic.
-  const inner = shikiDiffHighlighter(req.isDark);
+  const inner = shikiDiffHighlighter();
   const sides: HighlightAst[] = [];
   const seen = new Set<number>();
   const capturing = {

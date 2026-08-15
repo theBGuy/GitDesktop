@@ -33,7 +33,6 @@ export interface HighlightWorkRequest {
   filePath: string;
   /** Already resolved on the main thread via `diffLang`. */
   lang: string;
-  isDark: boolean;
   hunkText: string;
   content: { old: string | null; new: string | null } | null;
   /** A custom language's raw tmLanguage JSON, when that's what routed to Shiki. */

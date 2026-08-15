@@ -14,7 +14,7 @@ import jsonGrammar from "@shikijs/langs/json";
 import type { LanguageRegistration } from "@shikijs/types";
 import type { CustomLanguage } from "@/lib/settings/api";
 import { gapIsolatedAst } from "./gap-isolation";
-import { gdDark, gdLight } from "./shiki-theme";
+import { gdDiff } from "./shiki-theme";
 
 /**
  * A TextMate highlighter for the diff, backed by Shiki with the pure-JS regex
@@ -31,7 +31,7 @@ const loaded = new Set<string>();
 function getCore(): HighlighterCore {
   if (!core) {
     core = createHighlighterCoreSync({
-      themes: [gdDark, gdLight],
+      themes: [gdDiff],
       langs: [],
       // forgiving: skip Oniguruma patterns the JS engine can't convert rather
       // than throwing, so a quirky grammar still highlights the rest.
@@ -159,6 +159,8 @@ let jsonLoaded = false;
  * payloads). Reuses the diff's Shiki core + theme, but loads `json` outside
  * `BUILTIN_LANGS` so it never re-routes `.json` diffs (those stay highlight.js).
  * Returns lines of `{content, color}` tokens, or null if it can't tokenize.
+ * Each `color` is a `var(--gd-syn-*)` reference, so the caller's inline style
+ * follows the app theme without re-tokenizing.
  */
 export function highlightJson(code: string): CodeToken[][] | null {
   if (!jsonLoaded) {
@@ -171,10 +173,7 @@ export function highlightJson(code: string): CodeToken[][] | null {
   }
   try {
     return getCore()
-      .codeToTokensBase(code, {
-        lang: "json",
-        theme: isDarkMode() ? "gd-diff-dark" : "gd-diff-light",
-      })
+      .codeToTokensBase(code, { lang: "json", theme: gdDiff.name })
       .map((line) =>
         line.map((t) => ({ content: t.content, color: t.color ?? "" })),
       );
@@ -195,38 +194,18 @@ function styleFor(color: string | undefined, fontStyle: number | undefined) {
   return parts.join(";");
 }
 
-/**
- * The app's *rendered* theme, read from the `.dark` class main.tsx toggles on
- * `<html>`. We can't trust the `theme` arg @git-diff-view threads to `getAST`:
- * it comes from `DiffFile.theme`, which still defaults to `"light"` when
- * `createDiffFile` runs `initSyntax` — and the view's later dark re-sync uses
- * the *default* highlighter, not ours, so a stale light tokenization would
- * stick (light token colors on the dark diff background = unreadable).
- *
- * `typeof document` guards the DOM sniff so this module is importable in a Web
- * Worker (no `document`) — the worker highlight path always threads an explicit
- * `isDarkOverride`, so the sniff is never actually reached there.
- */
-function isDarkMode(override?: boolean): boolean {
-  if (override !== undefined) return override;
-  if (typeof document === "undefined") return false;
-  return document.documentElement.classList.contains("dark");
-}
-
 // An empty tree for inputs we can't tokenize; the renderer treats it as "no
 // highlighting" and falls back to plain text, same as a missing AST.
 const EMPTY_AST: DiffAST = { type: "root", children: [] };
 
 // Flat hast (the same shape highlight.js produces): token spans separated by
 // "\n" text nodes. The renderer applies each span's `properties.style` directly.
-function buildHast(
-  raw: string,
-  lang: string,
-  isDarkOverride?: boolean,
-): DiffAST {
+// The `theme` arg @git-diff-view threads to `getAST` is ignored: token colors
+// are CSS variables, so one tokenization serves both app themes.
+function buildHast(raw: string, lang: string): DiffAST {
   const lines = getCore().codeToTokensBase(raw, {
     lang,
-    theme: isDarkMode(isDarkOverride) ? "gd-diff-dark" : "gd-diff-light",
+    theme: gdDiff.name,
   });
   const children: DiffAST["children"] = [];
   lines.forEach((line, i) => {
@@ -258,12 +237,7 @@ export const SYNTAX_LINE_CAP = 15_000;
  * style-based spans (the renderer applies `properties.style` directly). AST
  * post-processing is reused from the default highlighter's exported `processAST`.
  */
-export function shikiDiffHighlighter(
-  // When set, forces the token theme instead of sniffing the `.dark` class —
-  // required off the main thread (the highlight worker has no `document`), and
-  // used there to render against the app's current theme.
-  isDarkOverride?: boolean,
-): DiffFileHighlighter {
+export function shikiDiffHighlighter(): DiffFileHighlighter {
   return {
     name: "shiki",
     type: "style",
@@ -274,9 +248,7 @@ export function shikiDiffHighlighter(
     getAST: (raw, _fileName, lang) => {
       if (!lang || !loaded.has(lang)) return EMPTY_AST;
       try {
-        return gapIsolatedAst(raw, (segment) =>
-          buildHast(segment, lang, isDarkOverride),
-        );
+        return gapIsolatedAst(raw, (segment) => buildHast(segment, lang));
       } catch {
         return EMPTY_AST;
       }

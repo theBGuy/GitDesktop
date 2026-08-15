@@ -344,7 +344,7 @@ function DependabotDialog({
           </Label>
           <Select value={interval} onValueChange={(v) => v && setInterval(v)}>
             <SelectTrigger id="dependabot-interval" className="w-40">
-              <SelectValue />
+              <SelectValue className="capitalize" />
             </SelectTrigger>
             <SelectContent>
               {INTERVALS.map((i) => (

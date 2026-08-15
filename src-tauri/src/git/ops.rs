@@ -330,9 +330,10 @@ pub struct CherryPickRangeResult {
 
 /// Copies the given commits (oldest-first) onto `target_branch`, then leaves
 /// you on that branch. Commits whose changes already exist there are skipped
-/// rather than erroring. If any commit conflicts, the whole operation is
-/// rolled back — the target branch is reset to its prior tip and you return to
-/// where you started — so the repo is never left mid-conflict.
+/// rather than erroring. If any pick fails — conflict, timeout, unreadable
+/// repo — the batch is rolled back: the target branch is reset to its prior tip
+/// and you return to where you started. Each rollback step is best-effort; when
+/// one fails the returned error names what was left behind and how to recover.
 #[tauri::command]
 pub async fn git_cherry_pick_onto(
     state: State<'_, AppState>,
@@ -351,20 +352,30 @@ pub(crate) async fn cherry_pick_onto(
     hashes: &[String],
     target_branch: &str,
 ) -> AppResult<CherryPickRangeResult> {
-    cherry_pick_onto_with_pick_timeout(state, repo_path, hashes, target_branch, DEFAULT_TIMEOUT)
-        .await
+    cherry_pick_onto_with_timeouts(
+        state,
+        repo_path,
+        hashes,
+        target_branch,
+        DEFAULT_TIMEOUT,
+        DEFAULT_TIMEOUT,
+    )
+    .await
 }
 
-/// [`cherry_pick_onto`] with the per-pick timeout injectable. `pick_timeout` bounds
-/// ONLY the `cherry-pick` calls in the loop — the setup reads, the switch and the
-/// rollback keep `DEFAULT_TIMEOUT`, so a tiny value exercises the failure funnel
+/// [`cherry_pick_onto`] with the git timeouts injectable. `pick_timeout` bounds ONLY
+/// the `cherry-pick` calls in the loop (not the empty-pick `--skip` beside them);
+/// `rollback_timeout` only the funnel's `reset --hard target_tip` and the restore
+/// `switch`. The setup reads, the initial switch, that `--skip` and the best-effort
+/// abort keep `DEFAULT_TIMEOUT`, so a tiny value exercises one failure arm at a time
 /// instead of aborting before the first mutation.
-pub(crate) async fn cherry_pick_onto_with_pick_timeout(
+pub(crate) async fn cherry_pick_onto_with_timeouts(
     state: &AppState,
     repo_path: &str,
     hashes: &[String],
     target_branch: &str,
     pick_timeout: std::time::Duration,
+    rollback_timeout: std::time::Duration,
 ) -> AppResult<CherryPickRangeResult> {
     validate_branch_arg(target_branch)?;
     for h in hashes {
@@ -510,7 +521,7 @@ pub(crate) async fn cherry_pick_onto_with_pick_timeout(
                 run_git(
                     Some(repo_path),
                     &["reset", "--hard", &target_tip],
-                    DEFAULT_TIMEOUT,
+                    rollback_timeout,
                 )
                 .await
                 .is_ok()
@@ -522,7 +533,7 @@ pub(crate) async fn cherry_pick_onto_with_pick_timeout(
             } else {
                 vec!["switch", &original_restore]
             };
-            let restore_ok = run_git(Some(repo_path), &restore_args, DEFAULT_TIMEOUT)
+            let restore_ok = run_git(Some(repo_path), &restore_args, rollback_timeout)
                 .await
                 .is_ok();
             let rolled_back = reset_ok && restore_ok;
@@ -530,21 +541,25 @@ pub(crate) async fn cherry_pick_onto_with_pick_timeout(
             // run's commits on `target`, while a good reset with a failed
             // return-switch leaves the branch correct and only HEAD misplaced —
             // telling that user to `--abort` names a no-op.
+            // Every verdict leads with one short line naming the outcome, details
+            // and remedies below it, git's own output last: the frontend collapses
+            // a message whose first line is git conflict output into "operation
+            // paused", which is the one thing these arms are not.
             let recovery = if reset_ok {
                 // `original_restore` is a bare SHA on the detached path, and plain
                 // `git switch <sha>` refuses it — the remedy has to be runnable.
                 if detached {
                     format!(
-                        "the rollback restored {target_branch}, but you are still checked out on it — switch back with git switch --detach {original_restore}."
+                        "The cherry-pick failed; the rollback restored {target_branch}.\nYou are still checked out on it — switch back with git switch --detach {original_restore}."
                     )
                 } else {
                     format!(
-                        "the rollback restored {target_branch}, but you are still checked out on it — switch back to {original_restore}."
+                        "The cherry-pick failed; the rollback restored {target_branch}.\nYou are still checked out on it — switch back to {original_restore}."
                     )
                 }
             } else {
                 format!(
-                    "the automatic rollback also failed, so {target_branch} may still carry the commits applied so far (its tip before this run was {target_tip}); run git cherry-pick --abort if a pick is still in progress, or git reset --hard {target_tip} on {target_branch} to restore it."
+                    "The cherry-pick failed and its automatic rollback also failed.\n{target_branch} may still carry the commits applied so far; its tip before this run was {target_tip}.\nRun git cherry-pick --abort if a pick is still in progress, or git reset --hard {target_tip} on {target_branch} to restore it."
                 )
             };
             let short = &hash[..hash.len().min(7)];
@@ -552,14 +567,12 @@ pub(crate) async fn cherry_pick_onto_with_pick_timeout(
                 AppError::Git { code, stderr } if rolled_back => AppError::Git {
                     code,
                     stderr: format!(
-                        "Cherry-pick hit conflicts on {short} and was rolled back; {target_branch} is unchanged.\n{stderr}"
+                        "The cherry-pick was rolled back — {target_branch} is unchanged.\nPick {short} failed, usually a conflict; nothing from this batch was kept.\n{stderr}"
                     ),
                 },
                 AppError::Git { code, stderr } => AppError::Git {
                     code,
-                    stderr: format!(
-                        "Cherry-pick hit conflicts on {short}; {recovery}\n{stderr}"
-                    ),
+                    stderr: format!("{recovery}\nThe failing pick was {short}.\n{stderr}"),
                 },
                 other if rolled_back => other,
                 // Timeout carries only a u64 and GitNotFound carries nothing, so a
@@ -567,7 +580,7 @@ pub(crate) async fn cherry_pick_onto_with_pick_timeout(
                 // `Command` carrying the whole explanation beats a scheme where
                 // which variant survives depends on the failure class.
                 other => AppError::Command(format!(
-                    "Cherry-pick of {short} failed; {recovery}\n{other}"
+                    "{recovery}\nThe failing pick was {short}.\n{other}"
                 )),
             });
         }
@@ -3260,8 +3273,10 @@ pub async fn git_conflict_preview(
 /// hash + no message = **pick**; one hash + message = **reword**; many hashes +
 /// message = **squash**; many hashes + no message = **fixup** (reuses the leader
 /// commit's message and authorship via `commit -C`). Omitting a commit **drops** it.
-/// Refuses on a dirty tree or merge commits in range; any conflict rolls everything
-/// back untouched.
+/// Refuses on a dirty tree or merge commits in range. If any step fails — a conflict,
+/// a squash that leaves nothing to commit, a timeout — the branch is rolled back to
+/// its pre-run tip. The rollback is best-effort; when it fails the returned
+/// error names what was left behind and how to recover.
 #[tauri::command]
 pub async fn git_rewrite_commits(
     state: State<'_, AppState>,
@@ -3277,6 +3292,30 @@ pub(crate) async fn rewrite_commits(
     repo_path: &str,
     base: &str,
     steps: &[RewriteStep],
+) -> AppResult<()> {
+    rewrite_commits_with_timeouts(
+        state,
+        repo_path,
+        base,
+        steps,
+        DEFAULT_TIMEOUT,
+        DEFAULT_TIMEOUT,
+    )
+    .await
+}
+
+/// [`rewrite_commits`] with the git timeouts injectable. `pick_timeout` bounds ONLY
+/// the replay loop's `cherry-pick` calls; `rollback_timeout` only the funnel's
+/// `reset --hard orig`. The guards, the initial rewind onto `base`, the multi-hash
+/// step's `commit` and the best-effort abort keep `DEFAULT_TIMEOUT`, so a tiny value
+/// exercises one failure arm at a time instead of aborting before the first mutation.
+pub(crate) async fn rewrite_commits_with_timeouts(
+    state: &AppState,
+    repo_path: &str,
+    base: &str,
+    steps: &[RewriteStep],
+    pick_timeout: std::time::Duration,
+    rollback_timeout: std::time::Duration,
 ) -> AppResult<()> {
     validate_hash(base)?;
     if steps.is_empty() {
@@ -3375,54 +3414,93 @@ pub(crate) async fn rewrite_commits(
     .await;
 
     let op_result: AppResult<()> = async {
-        run_git(Some(repo_path), &["reset", "--hard", base], DEFAULT_TIMEOUT).await?;
-        let mut failure: Option<AppError> = None;
-        'steps: for step in steps {
-            let single_pick = step.hashes.len() == 1 && step.message.is_none();
-            if single_pick {
-                let args = ["cherry-pick", step.hashes[0].as_str()];
-                if let Err(e) = run_git(Some(repo_path), &args, DEFAULT_TIMEOUT).await {
-                    failure = Some(e);
-                    break 'steps;
-                }
-            } else {
-                let mut args = vec!["cherry-pick", "-n"];
-                args.extend(step.hashes.iter().map(String::as_str));
-                if let Err(e) = run_git(Some(repo_path), &args, DEFAULT_TIMEOUT).await {
-                    failure = Some(e);
-                    break 'steps;
-                }
-                let message = step.message.as_deref().map(str::trim).unwrap_or("");
-                // With a message → squash/reword. Without → fixup: reuse the first
-                // (leader) commit's message and authorship.
-                let commit_args: Vec<&str> = if message.is_empty() {
-                    vec!["commit", "-C", step.hashes[0].as_str()]
+        // Every failure class — the initial rewind, a conflict, a timeout — leaves
+        // through the one rollback funnel below, so none of them strands the branch
+        // rewound at `base` unless the rollback itself fails, which the error says.
+        let mut failure: Option<AppError> =
+            run_git(Some(repo_path), &["reset", "--hard", base], DEFAULT_TIMEOUT)
+                .await
+                .err();
+        if failure.is_none() {
+            'steps: for step in steps {
+                let single_pick = step.hashes.len() == 1 && step.message.is_none();
+                if single_pick {
+                    let args = ["cherry-pick", step.hashes[0].as_str()];
+                    if let Err(e) = run_git(Some(repo_path), &args, pick_timeout).await {
+                        failure = Some(e);
+                        break 'steps;
+                    }
                 } else {
-                    vec!["commit", "-m", message]
-                };
-                if let Err(e) = run_git(Some(repo_path), &commit_args, DEFAULT_TIMEOUT).await {
-                    failure = Some(e);
-                    break 'steps;
+                    let mut args = vec!["cherry-pick", "-n"];
+                    args.extend(step.hashes.iter().map(String::as_str));
+                    if let Err(e) = run_git(Some(repo_path), &args, pick_timeout).await {
+                        failure = Some(e);
+                        break 'steps;
+                    }
+                    let message = step.message.as_deref().map(str::trim).unwrap_or("");
+                    // With a message → squash/reword. Without → fixup: reuse the first
+                    // (leader) commit's message and authorship.
+                    let commit_args: Vec<&str> = if message.is_empty() {
+                        vec!["commit", "-C", step.hashes[0].as_str()]
+                    } else {
+                        vec!["commit", "-m", message]
+                    };
+                    if let Err(e) = run_git(Some(repo_path), &commit_args, DEFAULT_TIMEOUT).await {
+                        failure = Some(e);
+                        break 'steps;
+                    }
                 }
             }
         }
 
         if let Some(err) = failure {
+            // Roll back: abort any in-progress pick, then return the branch to its
+            // pre-run tip. The abort stays best-effort and outside the verdict —
+            // `reset --hard` clears the unmerged index and CHERRY_PICK_HEAD, so a
+            // failed abort with a good reset blocks no later git work (a multi-hash
+            // step's `.git/sequencer` survives the reset but refuses nothing; only
+            // `--abort` clears it, which is why the recovery text names it). The
+            // reset itself is captured: the error must not promise a rollback that
+            // didn't happen.
             let _ = run_git(
                 Some(repo_path),
                 &["cherry-pick", "--abort"],
                 DEFAULT_TIMEOUT,
             )
             .await;
-            let _ = run_git(Some(repo_path), &["reset", "--hard", &orig], DEFAULT_TIMEOUT).await;
+            // The replay never leaves the branch, so there is no return-switch to
+            // verify: this one reset is the whole rollback verdict.
+            let reset_ok = run_git(
+                Some(repo_path),
+                &["reset", "--hard", &orig],
+                rollback_timeout,
+            )
+            .await
+            .is_ok();
+            // Every verdict leads with one short line naming the outcome, details
+            // and remedies below it, git's own output last: the frontend collapses
+            // a message whose first line is git conflict output into "operation
+            // paused", which is the one thing these arms are not.
+            let recovery = format!(
+                "The rewrite failed and its automatic rollback also failed.\nYour branch may be left partly rewritten; its tip before this run was {orig}.\nRun git cherry-pick --abort if a pick is still in progress, or git reset --hard {orig} to restore it."
+            );
             return Err(match err {
-                AppError::Git { code, stderr } => AppError::Git {
+                AppError::Git { code, stderr } if reset_ok => AppError::Git {
                     code,
                     stderr: format!(
-                        "The rewrite couldn't be applied (usually a conflict, or a squash/fixup that left nothing to commit) and was rolled back; your branch is unchanged.\n{stderr}"
+                        "The rewrite couldn't be applied and was rolled back — your branch is unchanged.\nUsually a conflict, or a squash/fixup that left nothing to commit.\n{stderr}"
                     ),
                 },
-                other => other,
+                AppError::Git { code, stderr } => AppError::Git {
+                    code,
+                    stderr: format!("{recovery}\n{stderr}"),
+                },
+                other if reset_ok => other,
+                // Timeout carries only a u64 and GitNotFound carries nothing, so a
+                // variant-preserving wrap isn't available for every arm — one
+                // `Command` carrying the whole explanation beats a scheme where
+                // which variant survives depends on the failure class.
+                other => AppError::Command(format!("{recovery}\n{other}")),
             });
         }
         Ok(())
@@ -3904,6 +3982,42 @@ mod tests {
             .collect()
     }
 
+    /// The three literals the frontend keys its rollback verdicts on, and the
+    /// shape it reads them in: a short leading line carrying exactly one of them,
+    /// with git's own conflict output pushed below. Without that the message is
+    /// collapsed into "operation paused" — the one state these arms are never in.
+    fn assert_verdict_shape(message: &str, literal: &str) {
+        const LITERALS: [&str; 3] = [
+            "was rolled back",
+            "rollback also failed",
+            "rollback restored",
+        ];
+        let first = message.lines().next().unwrap_or_default();
+        assert!(
+            first.contains(literal),
+            "the verdict must lead the message: {message}"
+        );
+        assert!(
+            first.len() <= 90,
+            "the verdict line must stay short ({} bytes): {first}",
+            first.len()
+        );
+        assert!(
+            !first.contains("could not apply") && !first.contains("CONFLICT ("),
+            "git's own conflict output must not front the message: {message}"
+        );
+        let hits: Vec<&str> = LITERALS
+            .iter()
+            .copied()
+            .filter(|l| message.contains(l))
+            .collect();
+        assert_eq!(
+            hits,
+            vec![literal],
+            "a verdict carries exactly one contract literal: {message}"
+        );
+    }
+
     fn pick(hash: &str) -> RewriteStep {
         RewriteStep {
             hashes: vec![hash.to_string()],
@@ -4018,11 +4132,137 @@ mod tests {
         let state = AppState::default();
         // "two"'s patch (v1→v2) can't apply onto v0 — conflict, then rollback.
         let result = rewrite_commits(&state, &repo, &base, &[pick(&c2), pick(&c1)]).await;
-        assert!(result.is_err());
+        match result {
+            Err(AppError::Git { ref stderr, .. }) => {
+                // The negative control rides in `assert_verdict_shape`'s
+                // exactly-one check: the failed-rollback recovery text must never
+                // leak onto the path that did come home.
+                assert_verdict_shape(stderr, "was rolled back");
+                assert!(
+                    stderr.contains("your branch is unchanged"),
+                    "a completed rollback must say so: {stderr}"
+                );
+            }
+            Ok(()) => panic!("the conflicting rewrite must fail"),
+            Err(e) => panic!("expected a Git error, got {e:?}"),
+        }
         assert_eq!(rev(&repo, "HEAD").await, orig);
         let status = git(&repo, &["status", "--porcelain"]).await;
         assert!(status.trim().is_empty(), "tree should be clean: {status}");
 
+    }
+
+    /// The rollback must run for every failure class, not just a conflict — a
+    /// killed pick otherwise leaves the branch rewound onto `base`.
+    #[tokio::test]
+    async fn rewrite_rolls_back_when_a_step_fails_non_git() {
+        let (dir, repo) = setup_repo("rewrite-nongit").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        let orig = c1.clone();
+
+        let state = AppState::default();
+        // A 1ms budget kills the pick itself, so the loop sees AppError::Timeout —
+        // the non-Git arm, which passes through untouched once the rollback lands.
+        match rewrite_commits_with_timeouts(
+            &state,
+            &repo,
+            &base,
+            &[pick(&c1)],
+            std::time::Duration::from_millis(1),
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        {
+            Err(AppError::Timeout(_)) => {}
+            Ok(()) => panic!("the killed pick must fail"),
+            Err(e) => panic!("expected the non-Git arm, got {e:?}"),
+        }
+        assert_eq!(
+            rev(&repo, "HEAD").await,
+            orig,
+            "a killed step must leave the branch at its pre-run tip"
+        );
+        assert!(!op_state(&repo).await.unwrap().cherry_picking);
+        let status = git(&repo, &["status", "--porcelain"]).await;
+        assert!(status.trim().is_empty(), "tree should be clean: {status}");
+    }
+
+    /// When the rollback itself fails the branch really is left rewritten, so the
+    /// error has to name the pre-run tip and both remedies — asserted against the
+    /// destruction it warns about, not just the wording.
+    #[tokio::test]
+    async fn rewrite_failed_rollback_names_the_pre_run_tip_and_remedies() {
+        let (dir, repo) = setup_repo("rewrite-rollback-fail").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "v1\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "v2\n", "two").await;
+        let c2 = rev(&repo, "HEAD").await;
+        let orig = c2.clone();
+
+        let state = AppState::default();
+        // "two"'s patch (v1→v2) can't apply onto v0 — a real conflict — while the
+        // 1ms rollback budget kills `reset --hard orig`, so the branch stays rewound.
+        match rewrite_commits_with_timeouts(
+            &state,
+            &repo,
+            &base,
+            &[pick(&c2), pick(&c1)],
+            DEFAULT_TIMEOUT,
+            std::time::Duration::from_millis(1),
+        )
+        .await
+        {
+            Err(AppError::Git { stderr, .. }) => {
+                assert_verdict_shape(&stderr, "rollback also failed");
+                assert!(stderr.contains(&orig), "must name the pre-run tip: {stderr}");
+                assert!(
+                    stderr.contains("cherry-pick --abort") && stderr.contains("reset --hard"),
+                    "must name both remedies: {stderr}"
+                );
+            }
+            Ok(()) => panic!("the conflicting rewrite must fail"),
+            Err(e) => panic!("expected a Git error, got {e:?}"),
+        }
+        // The damage the message warns about, measured: the branch is left where the
+        // failed rollback abandoned it, carrying only part of its history.
+        assert_ne!(rev(&repo, "HEAD").await, orig);
+        assert_eq!(subjects(&repo).await, vec!["base"]);
+        // The abort keeps DEFAULT_TIMEOUT, so nothing is left mid-pick either way.
+        assert!(!op_state(&repo).await.unwrap().cherry_picking);
+    }
+
+    /// A non-Git failure whose rollback also fails can't pass through untouched —
+    /// the remedies would be lost with it.
+    #[tokio::test]
+    async fn rewrite_non_git_failure_with_failed_rollback_still_names_the_remedies() {
+        let (dir, repo) = setup_repo("rewrite-nongit-rollback-fail").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        let orig = c1.clone();
+
+        let state = AppState::default();
+        let ms = std::time::Duration::from_millis(1);
+        match rewrite_commits_with_timeouts(&state, &repo, &base, &[pick(&c1)], ms, ms).await {
+            Err(AppError::Command(msg)) => {
+                assert_verdict_shape(&msg, "rollback also failed");
+                assert!(msg.contains(&orig), "must name the pre-run tip: {msg}");
+                assert!(
+                    msg.contains("cherry-pick --abort") && msg.contains("reset --hard"),
+                    "must name both remedies: {msg}"
+                );
+            }
+            Ok(()) => panic!("the killed pick must fail"),
+            Err(e) => panic!("expected the collapsed Command arm, got {e:?}"),
+        }
+        assert_ne!(
+            rev(&repo, "HEAD").await,
+            orig,
+            "the failed rollback really does leave the branch rewound"
+        );
     }
 
     /// Negative control for the compound-lock fix: a rewrite that rolls back must
@@ -4130,10 +4370,13 @@ mod tests {
 
         let state = AppState::default();
         match cherry_pick_onto(&state, &repo, &[c1], "target").await {
-            Err(AppError::Git { stderr, .. }) => assert!(
-                stderr.contains("rolled back"),
-                "the error must tell the user the target is unchanged: {stderr}"
-            ),
+            Err(AppError::Git { stderr, .. }) => {
+                assert_verdict_shape(&stderr, "was rolled back");
+                assert!(
+                    stderr.contains("target is unchanged"),
+                    "the error must tell the user the target is unchanged: {stderr}"
+                );
+            }
             Ok(_) => panic!("the conflicting pick must fail"),
             Err(e) => panic!("expected a Git error, got {e}"),
         }
@@ -4164,12 +4407,13 @@ mod tests {
         let state = AppState::default();
         // A 1ms budget kills the pick itself, so the loop sees AppError::Timeout —
         // the non-Git arm. Everything else (switch, rollback) keeps the real timeout.
-        match cherry_pick_onto_with_pick_timeout(
+        match cherry_pick_onto_with_timeouts(
             &state,
             &repo,
             &[c1],
             "target",
             std::time::Duration::from_millis(1),
+            DEFAULT_TIMEOUT,
         )
         .await
         {
@@ -4189,6 +4433,101 @@ mod tests {
         assert!(!op_state(&repo).await.unwrap().cherry_picking);
         let status = git(&repo, &["status", "--porcelain"]).await;
         assert!(status.trim().is_empty(), "tree should be clean: {status}");
+    }
+
+    /// A rollback that fails really does leave the batch's commits on the target,
+    /// so the error has to name its prior tip and both remedies — asserted against
+    /// the destruction it warns about, not just the wording.
+    #[tokio::test]
+    async fn cherry_pick_onto_failed_rollback_names_the_pre_run_tip_and_remedies() {
+        let (dir, repo) = setup_repo("pick-onto-rollback-fail").await;
+        git(&repo, &["branch", "target"]).await;
+        git(&repo, &["checkout", "-b", "feature"]).await;
+        // First pick applies cleanly; the second touches the file target diverged on.
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "feature\n", "feature edit").await;
+        let c2 = rev(&repo, "HEAD").await;
+        git(&repo, &["checkout", "target"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "target\n", "target edit").await;
+        let target_tip = rev(&repo, "HEAD").await;
+        git(&repo, &["checkout", "feature"]).await;
+
+        let state = AppState::default();
+        // The 1ms rollback budget kills `reset --hard target_tip` and the restore
+        // switch, so the first pick's commit survives on target.
+        match cherry_pick_onto_with_timeouts(
+            &state,
+            &repo,
+            &[c1, c2],
+            "target",
+            DEFAULT_TIMEOUT,
+            std::time::Duration::from_millis(1),
+        )
+        .await
+        {
+            Err(AppError::Git { stderr, .. }) => {
+                assert_verdict_shape(&stderr, "rollback also failed");
+                assert!(
+                    stderr.contains(&target_tip),
+                    "must name the target's prior tip: {stderr}"
+                );
+                assert!(
+                    stderr.contains("cherry-pick --abort") && stderr.contains("reset --hard"),
+                    "must name both remedies: {stderr}"
+                );
+            }
+            Ok(_) => panic!("the conflicting pick must fail"),
+            Err(e) => panic!("expected a Git error, got {e:?}"),
+        }
+        // The damage the message warns about, measured.
+        assert_ne!(
+            rev(&repo, "target").await,
+            target_tip,
+            "the failed reset really does leave this batch's commit on target"
+        );
+        assert_eq!(
+            git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]).await.trim(),
+            "target",
+            "and the failed restore switch really does leave you there"
+        );
+        // The abort keeps DEFAULT_TIMEOUT, so nothing is left mid-pick either way.
+        assert!(!op_state(&repo).await.unwrap().cherry_picking);
+    }
+
+    /// A non-Git failure whose rollback also fails can't pass through untouched —
+    /// the remedies would be lost with it.
+    #[tokio::test]
+    async fn cherry_pick_onto_non_git_failure_with_failed_rollback_names_the_remedies() {
+        let (dir, repo) = setup_repo("pick-onto-nongit-rollback-fail").await;
+        git(&repo, &["branch", "target"]).await;
+        git(&repo, &["checkout", "-b", "feature"]).await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        let target_tip = rev(&repo, "target").await;
+
+        let state = AppState::default();
+        let ms = std::time::Duration::from_millis(1);
+        match cherry_pick_onto_with_timeouts(&state, &repo, &[c1], "target", ms, ms).await {
+            Err(AppError::Command(msg)) => {
+                assert_verdict_shape(&msg, "rollback also failed");
+                assert!(
+                    msg.contains(&target_tip),
+                    "must name the target's prior tip: {msg}"
+                );
+                assert!(
+                    msg.contains("cherry-pick --abort") && msg.contains("reset --hard"),
+                    "must name both remedies: {msg}"
+                );
+            }
+            Ok(_) => panic!("the killed pick must fail"),
+            Err(e) => panic!("expected the collapsed Command arm, got {e:?}"),
+        }
+        assert_eq!(
+            git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]).await.trim(),
+            "target",
+            "the failed restore switch really does leave you on the target"
+        );
     }
 
     #[tokio::test]

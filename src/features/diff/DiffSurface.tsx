@@ -501,8 +501,6 @@ export function useShikiRouting({
   grammarState: Record<string, "ready" | "failed">;
   workerAsts: WorkerAsts | null;
 } {
-  const isDark = useIsDark();
-
   // Built-in Shiki grammars load lazily (off the startup bundle). Hold the paint
   // until the load settles rather than rebuild on arrival (highlight pop-in).
   // Track "ready" OR "failed" so a failed import still releases the gate — a
@@ -577,7 +575,6 @@ export function useShikiRouting({
     filePath,
     text,
     lang: lang ?? null,
-    isDark,
     content,
     tmGrammar,
   });

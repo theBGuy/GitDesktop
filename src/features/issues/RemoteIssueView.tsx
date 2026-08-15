@@ -291,6 +291,10 @@ export function RemoteIssueView({
   // already the new one, so everything that seeds a dialog from it, or reads a
   // verb off it, holds until the selected issue is on screen.
   const detailsStale = details.isPlaceholderData;
+  // What a control that holds through the switch says, in one wording. It ranks
+  // BELOW any permission reason wherever both hold: that one never lifts on its
+  // own and is the one still true once the new issue is on screen.
+  const staleReason = detailsStale ? "Loading this issue…" : undefined;
   const busy =
     comment.isPending ||
     closeIssue.isPending ||
@@ -444,7 +448,7 @@ export function RemoteIssueView({
               variant="outline"
               size="sm"
               disabled={busy || triageBlocked}
-              reason={triageReason}
+              reason={triageReason ?? staleReason}
               onClick={() => doClose("completed")}
             >
               Close issue
@@ -455,7 +459,10 @@ export function RemoteIssueView({
                 `title` (house trigger idiom). */}
             {canWrite && (
               <DropdownMenu>
-                <span title={triageReason} className="inline-flex">
+                <span
+                  title={triageReason ?? staleReason}
+                  className="inline-flex"
+                >
                   <DropdownMenuTrigger
                     render={
                       <Button
@@ -485,7 +492,7 @@ export function RemoteIssueView({
             variant="outline"
             size="sm"
             disabled={busy || triageBlocked}
-            reason={triageReason}
+            reason={triageReason ?? staleReason}
             onClick={() =>
               reopenIssue.mutate(number, {
                 onSuccess: () => toast.success(`Reopened #${number}`),
@@ -526,16 +533,19 @@ export function RemoteIssueView({
             </>
           )}
           {isOpen && canEdit && (
-            <Button
+            // A natively-disabled Button swallows its own `title`, so the wait
+            // needs the reason prop to reach the viewer at all.
+            <DisabledReasonButton
               variant="outline"
               size="xs"
               disabled={detailsStale}
+              reason={staleReason}
               onClick={openIssueEdit}
               title="Edit the title and description"
             >
               <PencilSimpleIcon data-icon="inline-start" />
               Edit
-            </Button>
+            </DisabledReasonButton>
           )}
           <Button
             variant="outline"
@@ -549,23 +559,31 @@ export function RemoteIssueView({
           </Button>
           {(canLock || canDuplicate || canTransfer || canDelete) && (
             <DropdownMenu>
-              <DropdownMenuTrigger
-                render={
-                  <Button
-                    variant="outline"
-                    size="xs"
-                    aria-label="More actions"
-                  />
-                }
-              >
-                <DotsThreeIcon className="size-4" weight="bold" />
-              </DropdownMenuTrigger>
+              {/* Every item but Transfer is withheld while the rendered issue is
+                  the previous one, so hold the menu shut rather than open a near-
+                  empty popup; the reason rides a wrapping span since a disabled
+                  Button swallows `title` (house trigger idiom). */}
+              <span title={staleReason} className="inline-flex">
+                <DropdownMenuTrigger
+                  render={
+                    <Button
+                      variant="outline"
+                      size="xs"
+                      aria-label="More actions"
+                      disabled={detailsStale}
+                    />
+                  }
+                >
+                  <DotsThreeIcon className="size-4" weight="bold" />
+                </DropdownMenuTrigger>
+              </span>
               <DropdownMenuContent align="end" className="min-w-52">
-                {canWrite && (
+                {/* Absent while a placeholder is served: the verb comes from the
+                    rendered issue's pin state while the write addresses
+                    `number`, and a disabled item can't say why it's held. */}
+                {canWrite && !detailsStale && (
                   <DropdownMenuItem
-                    // The verb comes from the rendered issue's pin state while the
-                    // write addresses `number` — hold rather than flip the wrong way.
-                    disabled={writeBlocked || detailsStale}
+                    disabled={writeBlocked}
                     onClick={() =>
                       pinIssue.mutate(
                         { number, pinned: !issue.isPinned },
@@ -650,7 +668,11 @@ export function RemoteIssueView({
                       </DropdownMenuSubContent>
                     </DropdownMenuSub>
                   ))}
-                {(canWrite || canLock) && <DropdownMenuSeparator />}
+                {/* Both items above it are absent while stale, so the rule would
+                    otherwise open the menu with nothing over it. */}
+                {(canWrite || canLock) && !detailsStale && (
+                  <DropdownMenuSeparator />
+                )}
                 {/* Absent while a placeholder is served: the draft it seeds is the
                     rendered issue's, which isn't the one you selected. */}
                 {canDuplicate && !detailsStale && (
@@ -670,12 +692,13 @@ export function RemoteIssueView({
                     {itemSuffix}
                   </DropdownMenuItem>
                 )}
-                {canDelete && (
+                {/* Absent while a placeholder is served: the confirm names the
+                    rendered issue's title while the delete addresses `number`,
+                    and a disabled item can't say why it's held. */}
+                {canDelete && !detailsStale && (
                   <DropdownMenuItem
                     variant="destructive"
-                    // The confirm names the rendered issue's title while the delete
-                    // addresses `number` — hold the open rather than mismatch them.
-                    disabled={writeBlocked || detailsStale}
+                    disabled={writeBlocked}
                     onClick={() => setDeleteOpen(true)}
                   >
                     Delete issue…{itemSuffix}
@@ -770,11 +793,12 @@ export function RemoteIssueView({
                       >
                         Copy markdown
                       </DropdownMenuItem>
-                      {isOpen && canEdit && (
-                        <DropdownMenuItem
-                          disabled={detailsStale}
-                          onClick={openIssueEdit}
-                        >
+                      {/* Absent, not disabled, while the description belongs to
+                          the previous issue: the dialog seeds from it, and a
+                          disabled item drops pointer events so no hint could
+                          reach the viewer to explain it. */}
+                      {isOpen && canEdit && !detailsStale && (
+                        <DropdownMenuItem onClick={openIssueEdit}>
                           Edit
                         </DropdownMenuItem>
                       )}
@@ -808,10 +832,10 @@ export function RemoteIssueView({
                   number={number}
                   lens={lens}
                   // The writes take the rendered issue's id while the list is
-                  // fetched for `number` — hold them until the two agree.
-                  disabledReason={
-                    detailsStale ? "Loading this issue…" : writeReason
-                  }
+                  // fetched for `number` — hold them until the two agree. A
+                  // viewer who can't write hears that first instead: their reason
+                  // is the one still true once the switch lands.
+                  disabledReason={writeReason ?? staleReason}
                 />
               )}
               {comments.map((c) => (
@@ -921,7 +945,10 @@ export function RemoteIssueView({
           canLinkIssues={canLinkIssues}
           remoteLabel={remoteLabel}
           lens={lens}
-          pickerDisabledReason={triageReason}
+          // The remount clears the rail's drafts, but `issue` is still the
+          // placeholder through a switch and every picker seeds from it, so they
+          // hold until details are fresh — triage first, since it outlasts the wait.
+          pickerDisabledReason={triageReason ?? staleReason}
           writeItemReason={writeItemReason}
         />
       </div>
