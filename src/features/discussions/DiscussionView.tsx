@@ -236,16 +236,18 @@ export function DiscussionView({
   }
 
   // Placeholder details are the previous discussion's: `busy` holds the composer,
-  // reply box and mark-as-answer. Lock/close, delete, upvote/reactions and labels
-  // also read `d.id` and stay live — pre-existing exposure, tracked separately.
+  // reply box and mark-as-answer, and the seeding actions below read this too.
+  // Lock/close, delete, upvote/reactions and labels also read `d.id` and stay
+  // live — pre-existing exposure, tracked separately.
+  const detailsStale = details.isPlaceholderData;
   const busy =
     addComment.isPending ||
     markAnswer.isPending ||
     deleteComment.isPending ||
-    details.isPlaceholderData;
+    detailsStale;
 
   function submitComment() {
-    if (!d || details.isPlaceholderData || !compose.value.trim()) return;
+    if (!d || detailsStale || !compose.value.trim()) return;
     const submittedFor = discussionIdentity;
     addComment.mutate(
       { discussionId: d.id, body: compose.value.trim() },
@@ -254,7 +256,7 @@ export function DiscussionView({
   }
 
   function submitReply(commentId: string) {
-    if (!d || details.isPlaceholderData || !reply.value.body.trim()) return;
+    if (!d || detailsStale || !reply.value.body.trim()) return;
     const submittedFor = discussionIdentity;
     addComment.mutate(
       {
@@ -275,7 +277,7 @@ export function DiscussionView({
     // Every quotable body — the discussion's and each rendered comment's — belongs
     // to the discussion on screen, which mid-switch is the previous one, while the
     // draft it would land in is keyed to the new one.
-    if (details.isPlaceholderData) return;
+    if (detailsStale) return;
     makeQuoteReply({ composerRef, setBody: compose.set })(body);
   };
 
@@ -320,7 +322,9 @@ export function DiscussionView({
   }
 
   function referenceInNewIssue() {
-    if (!d) return;
+    // The draft is seeded entirely from the rendered discussion, which mid-switch
+    // is the previous one — the new issue would open against it.
+    if (!d || detailsStale) return;
     setPendingIssueDraft({
       title: d.title,
       body: `Referenced from discussion [#${d.number}](${d.url}).`,
@@ -393,9 +397,11 @@ export function DiscussionView({
               <DropdownMenuItem onClick={() => copyText(d.url, "Link copied")}>
                 Copy link
               </DropdownMenuItem>
-              <DropdownMenuItem onClick={referenceInNewIssue}>
-                Create issue from discussion
-              </DropdownMenuItem>
+              {!detailsStale && (
+                <DropdownMenuItem onClick={referenceInNewIssue}>
+                  Create issue from discussion
+                </DropdownMenuItem>
+              )}
               {/* Pin and transfer aren't in GitHub's public API (GraphQL or
                   CLI) — open the discussion on GitHub where the web UI has them. */}
               <DropdownMenuItem onClick={() => openUrl(d.url)}>
@@ -549,7 +555,7 @@ export function DiscussionView({
                   {/* Absent, not disabled, while the body belongs to the previous
                       discussion — the same shape the comment menus take when their
                       `onQuote` is withheld. */}
-                  {hasVisibleBody(d.body) && !details.isPlaceholderData && (
+                  {hasVisibleBody(d.body) && !detailsStale && (
                     <DropdownMenuItem onClick={() => quoteReply(d.body)}>
                       Quote reply
                     </DropdownMenuItem>
@@ -595,11 +601,7 @@ export function DiscussionView({
                 )}
                 <Thread
                   thread={toThread(c)}
-                  onQuote={
-                    details.isPlaceholderData
-                      ? undefined
-                      : () => quoteReply(c.body)
-                  }
+                  onQuote={detailsStale ? undefined : () => quoteReply(c.body)}
                   onSaveEdit={
                     c.viewerDidAuthor
                       ? (body) => saveCommentEdit(c.id, body)
@@ -663,9 +665,7 @@ export function DiscussionView({
                       key={r.id}
                       thread={toThread(r)}
                       onQuote={
-                        details.isPlaceholderData
-                          ? undefined
-                          : () => quoteReply(r.body)
+                        detailsStale ? undefined : () => quoteReply(r.body)
                       }
                       onSaveEdit={
                         r.viewerDidAuthor

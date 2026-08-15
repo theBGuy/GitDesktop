@@ -722,6 +722,7 @@ function JiraCommentItem({
   canDeleteOwn,
   canEditAll,
   canDeleteAll,
+  stale = false,
 }: {
   repoPath: string;
   /** `null` during the link-pending window (a cached detail can still render
@@ -739,6 +740,10 @@ function JiraCommentItem({
   canEditAll: boolean;
   /** Delete ANYONE's comment — project admins (DELETE_ALL_COMMENTS). */
   canDeleteAll: boolean;
+  /** The caller is rendering a previously selected issue, so this comment's id
+   *  belongs to that one while the writes address the current `issueKey` — the
+   *  menu is absent and the editor's save holds until they agree. */
+  stale?: boolean;
 }) {
   const edit = useJiraCommentEdit(repoPath, link);
   const del = useJiraCommentDelete(repoPath, link);
@@ -751,8 +756,9 @@ function JiraCommentItem({
   const canEdit = (isOwn && canEditOwn) || canEditAll;
   const canDelete = (isOwn && canDeleteOwn) || canDeleteAll;
   // Edit/delete require a live link (the mutations key on its site). During the
-  // link-pending window the menu is simply absent — the comment still renders.
-  const showMenu = link !== null && (canEdit || canDelete);
+  // link-pending window — and while the caller's issue is stale — the menu is
+  // simply absent; the comment still renders.
+  const showMenu = link !== null && !stale && (canEdit || canDelete);
   const edited =
     comment.updatedAt != null && comment.updatedAt !== comment.createdAt;
 
@@ -763,6 +769,9 @@ function JiraCommentItem({
 
   function saveEdit() {
     const body = draft.trim();
+    // An editor opened before the switch would pair this comment's id with the
+    // newly selected `issueKey`, which Jira routes as a 404.
+    if (stale) return;
     edit.mutate(
       { issueKey, commentId: comment.id, bodyMd: body },
       {
@@ -773,6 +782,7 @@ function JiraCommentItem({
   }
 
   function doDelete() {
+    if (stale) return;
     del.mutate(
       { issueKey, commentId: comment.id },
       {
@@ -884,6 +894,7 @@ function JiraWorklogItem({
   canDeleteOwn,
   canEditAll,
   canDeleteAll,
+  stale = false,
 }: {
   repoPath: string;
   /** `null` during the link-pending window — the read-only row always renders;
@@ -900,6 +911,10 @@ function JiraWorklogItem({
   canEditAll: boolean;
   /** Delete ANYONE's worklog — project admins (DELETE_ALL_WORKLOGS). */
   canDeleteAll: boolean;
+  /** The caller is rendering a previously selected issue, so this entry's id
+   *  belongs to that one while the writes address the current `issueKey` — the
+   *  actions are absent and the editor's save holds until they agree. */
+  stale?: boolean;
 }) {
   const update = useJiraUpdateWorklog(repoPath, link);
   const del = useJiraDeleteWorklog(repoPath, link);
@@ -913,8 +928,9 @@ function JiraWorklogItem({
   const canEdit = (isOwn && canEditOwn) || canEditAll;
   const canDelete = (isOwn && canDeleteOwn) || canDeleteAll;
   // Edit/delete require a live link (the mutations key on its site). During the
-  // link-pending window the actions are simply absent — the row still renders.
-  const showActions = link !== null && (canEdit || canDelete);
+  // link-pending window — and while the caller's issue is stale — the actions are
+  // simply absent; the row still renders.
+  const showActions = link !== null && !stale && (canEdit || canDelete);
   const hadNote = worklog.commentMd.trim().length > 0;
 
   const durationTrimmed = durationDraft.trim();
@@ -923,7 +939,10 @@ function JiraWorklogItem({
   // Blocked: the user cleared a note that previously existed. Jira can't remove a
   // note once set — explain rather than silently drop or 400.
   const noteRemoved = hadNote && noteChanged && noteDraft.trim().length === 0;
-  const canSaveEdit = durationValid && !noteRemoved && !update.isPending;
+  // An editor opened before the switch would pair this entry's id with the newly
+  // selected `issueKey`, which Jira routes as a 404.
+  const canSaveEdit =
+    durationValid && !noteRemoved && !update.isPending && !stale;
 
   function beginEdit() {
     setDurationDraft(worklog.timeSpent);
@@ -953,6 +972,7 @@ function JiraWorklogItem({
   }
 
   function doDelete() {
+    if (stale) return;
     del.mutate(
       { issueKey, worklogId: worklog.id },
       {
@@ -1122,6 +1142,7 @@ export function JiraTimeTrackingSection({
   canDeleteOwnWorklogs,
   canEditAllWorklogs,
   canDeleteAllWorklogs,
+  stale = false,
 }: {
   repoPath: string;
   link: JiraLink | null;
@@ -1137,6 +1158,10 @@ export function JiraTimeTrackingSection({
   canDeleteOwnWorklogs: boolean;
   canEditAllWorklogs: boolean;
   canDeleteAllWorklogs: boolean;
+  /** The caller is rendering a previously selected issue: its worklog ids don't
+   *  belong to `issueKey`, so the per-entry edit/delete actions hold. Logging new
+   *  work and the estimate editors address `issueKey` alone and stay live. */
+  stale?: boolean;
 }) {
   const logWork = useJiraLogWork(repoPath, link);
   const setOriginal = useJiraSetOriginalEstimate(repoPath, link);
@@ -1332,6 +1357,7 @@ export function JiraTimeTrackingSection({
               canDeleteOwn={canDeleteOwnWorklogs}
               canEditAll={canEditAllWorklogs}
               canDeleteAll={canDeleteAllWorklogs}
+              stale={stale}
             />
           ))}
           {worklogsTotal > worklogs.length && (
@@ -1530,11 +1556,12 @@ export function JiraIssueView({
   const browseUrl = link.data
     ? `https://${link.data.siteHost}/browse/${issueKey}`
     : issue.url;
-  const staleDim = details.isPlaceholderData && "opacity-80";
+  const detailsStale = details.isPlaceholderData;
+  const staleDim = detailsStale && "opacity-80";
 
   function submitComment() {
     const body = compose.value.trim();
-    if (!body || details.isPlaceholderData) return;
+    if (!body || detailsStale) return;
     // Clear the draft immediately (perceived speed); restore it on error, but only
     // if that issue's composer is still empty so we never clobber newly-typed text.
     const submittedFor = issueIdentity;
@@ -1589,7 +1616,7 @@ export function JiraIssueView({
               LOADED issue's status, so a click during that window would fire the
               wrong transition against the issue you actually selected. */}
           {canTransition &&
-            !details.isPlaceholderData &&
+            !detailsStale &&
             (isDone ? (
               <Button
                 variant="outline"
@@ -1641,7 +1668,10 @@ export function JiraIssueView({
               issueKey={issueKey}
               category={issue.statusCategory}
               name={issue.statusName}
-              busy={busy}
+              // The menu marks its current row by matching the rendered status,
+              // which mid-switch is the previous issue's — hold it shut until the
+              // selected issue is on screen. Its targets are already key-addressed.
+              busy={busy || detailsStale}
               transitionTo={transitionTo}
             />
           ) : (
@@ -1693,6 +1723,7 @@ export function JiraIssueView({
                   canDeleteOwn={canDeleteOwnComments}
                   canEditAll={canEditAllComments}
                   canDeleteAll={canDeleteAllComments}
+                  stale={detailsStale}
                 />
               ))}
               {issue.comments.length === 0 && (
@@ -1715,7 +1746,7 @@ export function JiraIssueView({
               submitLabel="Comment"
               // A placeholder issue is the previously selected one, so submitting
               // would comment on it; typing stays live through the window.
-              busy={comment.isPending || details.isPlaceholderData}
+              busy={comment.isPending || detailsStale}
               disabled={comment.isPending}
             />
           )}
@@ -1740,6 +1771,7 @@ export function JiraIssueView({
           canDeleteOwnWorklogs={canDeleteOwnWorklogs}
           canEditAllWorklogs={canEditAllWorklogs}
           canDeleteAllWorklogs={canDeleteAllWorklogs}
+          stale={detailsStale}
         />
       </div>
     </div>

@@ -40,6 +40,7 @@ export function JiraIssueSidebar({
   canDeleteOwnWorklogs,
   canEditAllWorklogs,
   canDeleteAllWorklogs,
+  stale = false,
   className,
 }: {
   repoPath: string;
@@ -56,6 +57,10 @@ export function JiraIssueSidebar({
   canDeleteOwnWorklogs: boolean;
   canEditAllWorklogs: boolean;
   canDeleteAllWorklogs: boolean;
+  /** `issue` is a previously selected one the caller is still rendering, so rows
+   *  carrying ITS ids (the worklog entries) hold their write actions; everything
+   *  addressed by `issueKey` alone stays live. */
+  stale?: boolean;
   /** Merged into the rail's own classes — the caller owns the placeholder fade,
    *  since it holds the query whose data these rows render. */
   className?: string;
@@ -304,6 +309,7 @@ export function JiraIssueSidebar({
           canDeleteOwnWorklogs={canDeleteOwnWorklogs}
           canEditAllWorklogs={canEditAllWorklogs}
           canDeleteAllWorklogs={canDeleteAllWorklogs}
+          stale={stale}
         />
       )}
     </aside>

@@ -287,18 +287,20 @@ export function RemoteIssueView({
   }
 
   const isOpen = issue.state === "OPEN";
-  // The rendered issue is the previous one during a switch, so the composer-row
-  // actions hold until the selected issue is on screen.
+  // The rendered issue is the previous one during a switch while `number` is
+  // already the new one, so everything that seeds a dialog from it, or reads a
+  // verb off it, holds until the selected issue is on screen.
+  const detailsStale = details.isPlaceholderData;
   const busy =
     comment.isPending ||
     closeIssue.isPending ||
     reopenIssue.isPending ||
-    details.isPlaceholderData;
+    detailsStale;
   const comments = issue.comments.filter((c) => hasVisibleBody(c.body));
 
   function submitComment() {
     const body = compose.value.trim();
-    if (!body || details.isPlaceholderData) return;
+    if (!body || detailsStale) return;
     // Clear the draft immediately (the perceived-speed win) and append the
     // synthetic comment optimistically; on error restore the draft, but only if
     // that issue's composer is still empty so we never clobber newly-typed text.
@@ -321,7 +323,7 @@ export function RemoteIssueView({
     // Every quotable body — the issue's and each rendered comment's — belongs to
     // the issue on screen, which mid-switch is the previous one, while the draft
     // it would land in is keyed to the new one.
-    if (details.isPlaceholderData) return;
+    if (detailsStale) return;
     makeQuoteReply({ composerRef, setBody: compose.set })(body);
   };
 
@@ -333,6 +335,9 @@ export function RemoteIssueView({
   }
 
   function saveCommentEdit(commentId: string, body: string) {
+    // The comment id is the rendered issue's while the write addresses `number`
+    // — GitLab routes by both, so a mismatched pair 404s.
+    if (detailsStale) return;
     editComment.mutate(
       { number, commentId, body },
       { onSuccess: () => toast.success("Comment updated"), onError },
@@ -357,10 +362,16 @@ export function RemoteIssueView({
     toggleReactionMutation.mutate({ subjectId, content, active }, { onError });
   }
 
+  /** Opens the title/body editor seeded from the issue as it stands. */
+  function openIssueEdit() {
+    if (!issue || detailsStale) return;
+    edit.openEdit({ title: issue.title, body: issue.body });
+  }
+
   // Seeds + opens the GitHub create dialog (IssuesPanel consumes the draft).
   // Labels carry over since they're from this same repo.
   function duplicateIssue() {
-    if (!issue) return;
+    if (!issue || detailsStale) return;
     setPendingIssueDraft({
       title: issue.title,
       body: issue.body,
@@ -500,21 +511,26 @@ export function RemoteIssueView({
             </span>
           </h2>
           <span className="flex-1" />
-          <PlanIssueButton title={issue.title} body={issue.body} />
-          {isOpen && (
-            <SolveIssueButton
-              repoPath={repoPath}
-              title={issue.title}
-              body={issue.body}
-            />
+          {/* Both seed an AI run from the rendered issue, so they're absent while
+              that issue isn't the one you selected. */}
+          {!detailsStale && (
+            <>
+              <PlanIssueButton title={issue.title} body={issue.body} />
+              {isOpen && (
+                <SolveIssueButton
+                  repoPath={repoPath}
+                  title={issue.title}
+                  body={issue.body}
+                />
+              )}
+            </>
           )}
           {isOpen && canEdit && (
             <Button
               variant="outline"
               size="xs"
-              onClick={() =>
-                edit.openEdit({ title: issue.title, body: issue.body })
-              }
+              disabled={detailsStale}
+              onClick={openIssueEdit}
               title="Edit the title and description"
             >
               <PencilSimpleIcon data-icon="inline-start" />
@@ -547,7 +563,9 @@ export function RemoteIssueView({
               <DropdownMenuContent align="end" className="min-w-52">
                 {canWrite && (
                   <DropdownMenuItem
-                    disabled={writeBlocked}
+                    // The verb comes from the rendered issue's pin state while the
+                    // write addresses `number` — hold rather than flip the wrong way.
+                    disabled={writeBlocked || detailsStale}
                     onClick={() =>
                       pinIssue.mutate(
                         { number, pinned: !issue.isPinned },
@@ -565,7 +583,11 @@ export function RemoteIssueView({
                     {itemSuffix}
                   </DropdownMenuItem>
                 )}
+                {/* Absent while a placeholder is served: which affordance renders
+                    comes from the LOADED issue's lock state, so a click during that
+                    window would lock or unlock the issue you actually selected. */}
                 {canLock &&
+                  !detailsStale &&
                   (issue.locked ? (
                     <DropdownMenuItem
                       disabled={lockBlocked}
@@ -629,7 +651,9 @@ export function RemoteIssueView({
                     </DropdownMenuSub>
                   ))}
                 {(canWrite || canLock) && <DropdownMenuSeparator />}
-                {canDuplicate && (
+                {/* Absent while a placeholder is served: the draft it seeds is the
+                    rendered issue's, which isn't the one you selected. */}
+                {canDuplicate && !detailsStale && (
                   <DropdownMenuItem onClick={duplicateIssue}>
                     Duplicate issue
                   </DropdownMenuItem>
@@ -649,7 +673,9 @@ export function RemoteIssueView({
                 {canDelete && (
                   <DropdownMenuItem
                     variant="destructive"
-                    disabled={writeBlocked}
+                    // The confirm names the rendered issue's title while the delete
+                    // addresses `number` — hold the open rather than mismatch them.
+                    disabled={writeBlocked || detailsStale}
                     onClick={() => setDeleteOpen(true)}
                   >
                     Delete issue…{itemSuffix}
@@ -732,7 +758,7 @@ export function RemoteIssueView({
                           when their `onQuote` is withheld. */}
                       {canWrite &&
                         hasVisibleBody(issue.body) &&
-                        !details.isPlaceholderData && (
+                        !detailsStale && (
                           <DropdownMenuItem
                             onClick={() => quoteReply(issue.body)}
                           >
@@ -746,12 +772,8 @@ export function RemoteIssueView({
                       </DropdownMenuItem>
                       {isOpen && canEdit && (
                         <DropdownMenuItem
-                          onClick={() =>
-                            edit.openEdit({
-                              title: issue.title,
-                              body: issue.body,
-                            })
-                          }
+                          disabled={detailsStale}
+                          onClick={openIssueEdit}
                         >
                           Edit
                         </DropdownMenuItem>
@@ -777,11 +799,19 @@ export function RemoteIssueView({
               </div>
               {canWrite && (
                 <IssueSubIssues
+                  // Remounts per issue like the sidebar: its add/create state is
+                  // local, and a dialog left open across a switch would re-point
+                  // its parent id as the placeholder resolves.
+                  key={issueIdentity}
                   repoPath={repoPath}
                   issueId={issue.id}
                   number={number}
                   lens={lens}
-                  disabledReason={writeReason}
+                  // The writes take the rendered issue's id while the list is
+                  // fetched for `number` — hold them until the two agree.
+                  disabledReason={
+                    detailsStale ? "Loading this issue…" : writeReason
+                  }
                 />
               )}
               {comments.map((c) => (
@@ -789,17 +819,17 @@ export function RemoteIssueView({
                   key={c.id}
                   thread={c}
                   onQuote={
-                    canWrite && !details.isPlaceholderData
+                    canWrite && !detailsStale
                       ? () => quoteReply(c.body)
                       : undefined
                   }
                   onSaveEdit={
-                    canEditOwnComments && c.viewerDidAuthor
+                    canEditOwnComments && c.viewerDidAuthor && !detailsStale
                       ? (body) => saveCommentEdit(c.id, body)
                       : undefined
                   }
                   onDelete={
-                    canEditOwnComments && c.viewerDidAuthor
+                    canEditOwnComments && c.viewerDidAuthor && !detailsStale
                       ? () => setDeletingCommentId(c.id)
                       : undefined
                   }
