@@ -89,7 +89,7 @@ const CONFLICT_MARKERS = [
  *  that contract: a rolled-back or rollback-failed operation is NOT paused — no
  *  banner owns it, and "resolve the conflicts, then continue" is wrong advice in
  *  both states — yet those messages append git's raw output, which the conflict
- *  markers below would match. Read from the FIRST line only, since an unanchored
+ *  markers above would match. Read from the FIRST line only, since an unanchored
  *  literal is the same user-content hazard those markers are anchored against.
  *  `git/ops.rs` leads every such message with exactly one of these and its tests
  *  pin that placement (first line, ≤90 bytes) — keep the two in step. */

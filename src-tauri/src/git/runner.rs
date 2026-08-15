@@ -173,6 +173,12 @@ pub async fn run_git_raw_input(
     input: Option<&str>,
     timeout: Duration,
 ) -> AppResult<GitOutput> {
+    // A zero budget refuses before spawning — no production caller passes one (they
+    // all use a *_TIMEOUT constant), and it makes the tests' `Duration::ZERO` seam
+    // deterministic: a nonzero expired budget loses the race to a fast child (Linux).
+    if timeout.is_zero() {
+        return Err(AppError::Timeout(0));
+    }
     let git = git_bin().await?;
     let mut cmd = Command::new(&git);
     // Also covers the credential helpers git spawns in turn.

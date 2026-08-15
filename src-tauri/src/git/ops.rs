@@ -367,8 +367,8 @@ pub(crate) async fn cherry_pick_onto(
 /// the `cherry-pick` calls in the loop (not the empty-pick `--skip` beside them);
 /// `rollback_timeout` only the funnel's `reset --hard target_tip` and the restore
 /// `switch`. The setup reads, the initial switch, that `--skip` and the best-effort
-/// abort keep `DEFAULT_TIMEOUT`, so a tiny value exercises one failure arm at a time
-/// instead of aborting before the first mutation.
+/// abort keep `DEFAULT_TIMEOUT`, so a zero value exercises one failure arm at a time
+/// instead of failing before the first mutation.
 pub(crate) async fn cherry_pick_onto_with_timeouts(
     state: &AppState,
     repo_path: &str,
@@ -3307,8 +3307,8 @@ pub(crate) async fn rewrite_commits(
 /// [`rewrite_commits`] with the git timeouts injectable. `pick_timeout` bounds ONLY
 /// the replay loop's `cherry-pick` calls; `rollback_timeout` only the funnel's
 /// `reset --hard orig`. The guards, the initial rewind onto `base`, the multi-hash
-/// step's `commit` and the best-effort abort keep `DEFAULT_TIMEOUT`, so a tiny value
-/// exercises one failure arm at a time instead of aborting before the first mutation.
+/// step's `commit` and the best-effort abort keep `DEFAULT_TIMEOUT`, so a zero value
+/// exercises one failure arm at a time instead of failing before the first mutation.
 pub(crate) async fn rewrite_commits_with_timeouts(
     state: &AppState,
     repo_path: &str,
@@ -3996,27 +3996,36 @@ mod tests {
             .collect()
     }
 
-    /// The injected budget for every "git was killed" test: a deadline that has
-    /// already expired when the call starts. `run_git`'s inner future spawns the
-    /// child and awaits its pipes, so it cannot COMPLETE on its first poll (a
-    /// spawn failure can — that arm returns its own error, not a timeout) and
-    /// the expired deadline always wins. Any nonzero budget instead races how
-    /// fast git runs — 1ms lost that race on CI's Linux runners.
-    const ALREADY_ELAPSED: std::time::Duration = std::time::Duration::ZERO;
+    /// The injected budget for every "git failed" test. `run_git` refuses a zero
+    /// budget before it spawns anything, so these tests rest on a contract rather
+    /// than on scheduling: any nonzero budget — even one that already expired —
+    /// races how fast git runs, which is how 1ms passed here and failed on CI's
+    /// Linux runners.
+    const NO_BUDGET: std::time::Duration = std::time::Duration::ZERO;
 
-    /// Pins the premise the killed-git tests rest on: an expired budget reports a
-    /// timeout however fast the command is. Loops because a probabilistic
-    /// regression here would otherwise surface as unrelated flakes elsewhere.
+    /// Pins the runner's zero-budget contract, both halves: a timeout is reported,
+    /// and git never runs (a `git init` under it leaves no repository behind). A
+    /// red here means the guard in `run_git_raw_input` is gone and every killed-git
+    /// test below is silently racing the child again.
     #[tokio::test]
-    async fn an_expired_budget_always_reports_a_timeout() {
-        let (_dir, repo) = setup_repo("expired-budget").await;
+    async fn a_zero_budget_times_out_without_running_git() {
+        let (dir, repo) = setup_repo("zero-budget").await;
         for i in 0..10 {
-            match run_git(Some(&repo), &["rev-parse", "HEAD"], ALREADY_ELAPSED).await {
+            match run_git(Some(&repo), &["rev-parse", "HEAD"], NO_BUDGET).await {
                 Err(AppError::Timeout(_)) => {}
                 Ok(_) => panic!("iteration {i} ran to completion instead of timing out"),
                 Err(e) => panic!("iteration {i} failed for another reason: {e:?}"),
             }
         }
+        // The side-effect half: a refused call cannot have spawned git.
+        let untouched = dir.path().join("untouched");
+        std::fs::create_dir(&untouched).unwrap();
+        let path = untouched.to_string_lossy().into_owned();
+        assert!(run_git(Some(&path), &["init"], NO_BUDGET).await.is_err());
+        assert!(
+            !untouched.join(".git").exists(),
+            "a zero budget must refuse before spawning, not kill a running git"
+        );
     }
 
     /// The three literals the frontend keys its rollback verdicts on, and the
@@ -4200,14 +4209,15 @@ mod tests {
         let orig = c1.clone();
 
         let state = AppState::default();
-        // An expired budget kills the pick itself, so the loop sees AppError::Timeout
-        // — the non-Git arm, which passes through untouched once the rollback lands.
+        // A zero budget fails the pick without running it, so the loop sees
+        // AppError::Timeout — the non-Git arm, which passes through untouched once the
+        // rollback lands.
         match rewrite_commits_with_timeouts(
             &state,
             &repo,
             &base,
             &[pick(&c1)],
-            ALREADY_ELAPSED,
+            NO_BUDGET,
             DEFAULT_TIMEOUT,
         )
         .await
@@ -4240,15 +4250,15 @@ mod tests {
         let orig = c2.clone();
 
         let state = AppState::default();
-        // "two"'s patch (v1→v2) can't apply onto v0 — a real conflict — while the
-        // expired rollback budget kills `reset --hard orig`.
+        // "two"'s patch (v1→v2) can't apply onto v0 — a real conflict — while the zero
+        // rollback budget fails `reset --hard orig` without running it.
         match rewrite_commits_with_timeouts(
             &state,
             &repo,
             &base,
             &[pick(&c2), pick(&c1)],
             DEFAULT_TIMEOUT,
-            ALREADY_ELAPSED,
+            NO_BUDGET,
         )
         .await
         {
@@ -4263,9 +4273,14 @@ mod tests {
             Ok(()) => panic!("the conflicting rewrite must fail"),
             Err(e) => panic!("expected a Git error, got {e:?}"),
         }
-        // No assertion on where the branch ended up: killing `reset --hard` races
-        // git actually finishing it, which is exactly why the message says the
-        // branch *may* be left partly rewritten. The contract is the report.
+        // The rollback provably never ran (a zero budget refuses before spawning), so
+        // the damage is deterministic; a production timeout races it, hence the hedge.
+        assert_ne!(
+            rev(&repo, "HEAD").await,
+            orig,
+            "the failed rollback leaves the branch where the replay abandoned it"
+        );
+        assert_eq!(subjects(&repo).await, vec!["base"]);
         // The abort keeps DEFAULT_TIMEOUT, so nothing is left mid-pick either way.
         assert!(!op_state(&repo).await.unwrap().cherry_picking);
     }
@@ -4338,8 +4353,8 @@ mod tests {
             &repo,
             &base,
             &[pick(&c1)],
-            ALREADY_ELAPSED,
-            ALREADY_ELAPSED,
+            NO_BUDGET,
+            NO_BUDGET,
         )
         .await
         {
@@ -4354,9 +4369,13 @@ mod tests {
             Ok(()) => panic!("the killed pick must fail"),
             Err(e) => panic!("expected the collapsed Command arm, got {e:?}"),
         }
-        // Where the branch ended up is a race between the kill and git finishing
-        // the reset, which is why the message hedges; the deterministic contract is
-        // that the failure is reported with the tip and both remedies.
+        // The rollback provably never ran (a zero budget refuses before spawning), so
+        // the rewound branch is deterministic; a production timeout races it.
+        assert_ne!(
+            rev(&repo, "HEAD").await,
+            orig,
+            "the failed rollback leaves the branch rewound onto base"
+        );
     }
 
     /// Negative control for the compound-lock fix: a rewrite that rolls back must
@@ -4499,15 +4518,15 @@ mod tests {
         let target_tip = rev(&repo, "target").await;
 
         let state = AppState::default();
-        // An expired budget kills the pick itself, so the loop sees AppError::Timeout
-        // — the non-Git arm. Everything else (switch, rollback) keeps the real
-        // timeout, so the state below is the completed rollback's, not a race.
+        // A zero budget fails the pick without running it, so the loop sees
+        // AppError::Timeout — the non-Git arm. Everything else (switch, rollback) keeps
+        // the real timeout, so the state below is the completed rollback's.
         match cherry_pick_onto_with_timeouts(
             &state,
             &repo,
             &[c1],
             "target",
-            ALREADY_ELAPSED,
+            NO_BUDGET,
             DEFAULT_TIMEOUT,
         )
         .await
@@ -4548,16 +4567,16 @@ mod tests {
         git(&repo, &["checkout", "feature"]).await;
 
         let state = AppState::default();
-        // The expired rollback budget kills `reset --hard target_tip` and the
-        // restore switch; the picks themselves keep the real timeout, so the
-        // second one is a genuine conflict.
+        // The zero rollback budget fails `reset --hard target_tip` and the restore
+        // switch without running either; the picks themselves keep the real timeout,
+        // so the second one is a genuine conflict.
         match cherry_pick_onto_with_timeouts(
             &state,
             &repo,
             &[c1, c2],
             "target",
             DEFAULT_TIMEOUT,
-            ALREADY_ELAPSED,
+            NO_BUDGET,
         )
         .await
         {
@@ -4575,9 +4594,18 @@ mod tests {
             Ok(_) => panic!("the conflicting pick must fail"),
             Err(e) => panic!("expected a Git error, got {e:?}"),
         }
-        // No assertion on the target's tip or where HEAD landed: killing the reset
-        // and the switch races git actually finishing them, which is why the
-        // message says the target *may* still carry the commits applied so far.
+        // Neither rollback step ran (a zero budget refuses before spawning), so the
+        // damage is deterministic; a production timeout races it, hence the hedge.
+        assert_ne!(
+            rev(&repo, "target").await,
+            target_tip,
+            "the failed reset leaves this batch's first commit on target"
+        );
+        assert_eq!(
+            git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]).await.trim(),
+            "target",
+            "and the failed restore switch leaves you there"
+        );
         // The abort keeps DEFAULT_TIMEOUT, so nothing is left mid-pick either way.
         assert!(!op_state(&repo).await.unwrap().cherry_picking);
     }
@@ -4599,8 +4627,8 @@ mod tests {
             &repo,
             &[c1],
             "target",
-            ALREADY_ELAPSED,
-            ALREADY_ELAPSED,
+            NO_BUDGET,
+            NO_BUDGET,
         )
         .await
         {
@@ -4618,9 +4646,13 @@ mod tests {
             Ok(_) => panic!("the killed pick must fail"),
             Err(e) => panic!("expected the collapsed Command arm, got {e:?}"),
         }
-        // No assertion on where HEAD landed: killing the restore switch races git
-        // actually completing it. The deterministic contract is the reported
-        // failure naming the target's prior tip and both remedies.
+        // The restore switch provably never ran (a zero budget refuses before
+        // spawning); a production timeout races it, which is why the message hedges.
+        assert_eq!(
+            git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]).await.trim(),
+            "target",
+            "the failed restore switch leaves you on the target"
+        );
     }
 
     #[tokio::test]

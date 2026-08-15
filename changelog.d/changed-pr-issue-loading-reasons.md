@@ -2,4 +2,5 @@
   you picked is still loading — **Review…**, merge, approve, request changes,
   close, reopen, the draft toggle, sub-issues and the metadata pickers all say
   so — and a missing write or triage permission is named ahead of the loading
-  note.
+  note. Reaction and upvote buttons hold the same way — in discussions too —
+  until the one you picked is on screen.
