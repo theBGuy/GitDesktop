@@ -531,9 +531,17 @@ pub(crate) async fn cherry_pick_onto_with_pick_timeout(
             // return-switch leaves the branch correct and only HEAD misplaced —
             // telling that user to `--abort` names a no-op.
             let recovery = if reset_ok {
-                format!(
-                    "the rollback restored {target_branch}, but you are still checked out on it — switch back to {original_restore}."
-                )
+                // `original_restore` is a bare SHA on the detached path, and plain
+                // `git switch <sha>` refuses it — the remedy has to be runnable.
+                if detached {
+                    format!(
+                        "the rollback restored {target_branch}, but you are still checked out on it — switch back with git switch --detach {original_restore}."
+                    )
+                } else {
+                    format!(
+                        "the rollback restored {target_branch}, but you are still checked out on it — switch back to {original_restore}."
+                    )
+                }
             } else {
                 format!(
                     "the automatic rollback also failed, so {target_branch} may still carry the commits applied so far (its tip before this run was {target_tip}); run git cherry-pick --abort if a pick is still in progress, or git reset --hard {target_tip} on {target_branch} to restore it."
