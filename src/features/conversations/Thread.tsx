@@ -90,6 +90,7 @@ export function Thread({
   thread,
   onQuote,
   onSaveEdit,
+  editHeld = false,
   onDelete,
   onHide,
   onUnhide,
@@ -112,6 +113,11 @@ export function Thread({
   copyMarkdown?: string;
   /** Present when the viewer may edit this comment; saves the new body. */
   onSaveEdit?: (body: string) => void;
+  /** Holds an ALREADY-OPEN editor's Save without claiming a write is running —
+   *  withholding `onSaveEdit` only removes the menu's Edit entry, so an editor
+   *  opened before the caller went stale would otherwise save into nothing and
+   *  close, discarding the text. */
+  editHeld?: boolean;
   /** Present when the viewer may delete this comment. */
   onDelete?: () => void;
   /** Hide (minimize) the comment with a reason. */
@@ -249,8 +255,13 @@ export function Thread({
           ariaLabel="Edit comment"
           value={draft}
           onChange={setDraft}
-          canSubmit={!!draft.trim() && draft.trim() !== thread.body.trim()}
+          canSubmit={
+            !!draft.trim() && draft.trim() !== thread.body.trim() && !editHeld
+          }
           onSubmit={() => {
+            // Return BEFORE closing: a held save must keep the draft on screen
+            // rather than swallow it.
+            if (editHeld) return;
             onSaveEdit?.(draft.trim());
             setEditing(false);
           }}

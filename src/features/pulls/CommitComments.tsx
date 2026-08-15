@@ -316,6 +316,9 @@ export function CommitComments({
   }
 
   function saveEdit(commentId: string, next: string) {
+    // The comment id is the previous commit's while the write addresses `sha`,
+    // so a mismatched pair would edit against a commit that never showed it.
+    if (stale) return;
     editComment.mutate(
       { sha, commentId, body: next },
       {
@@ -343,10 +346,17 @@ export function CommitComments({
                 key={c.id}
                 thread={toThread(c)}
                 onSaveEdit={
-                  c.viewerDidAuthor ? (next) => saveEdit(c.id, next) : undefined
+                  c.viewerDidAuthor && !stale
+                    ? (next) => saveEdit(c.id, next)
+                    : undefined
                 }
+                // Withholding the handler only drops the menu entry; an editor
+                // already open when the commit changed needs its Save held too.
+                editHeld={stale}
                 onDelete={
-                  c.viewerDidAuthor ? () => setDeletingId(c.id) : undefined
+                  c.viewerDidAuthor && !stale
+                    ? () => setDeletingId(c.id)
+                    : undefined
                 }
               />
             ))}
@@ -382,12 +392,13 @@ export function CommitComments({
                       <Thread
                         thread={toThread(c)}
                         onSaveEdit={
-                          c.viewerDidAuthor
+                          c.viewerDidAuthor && !stale
                             ? (next) => saveEdit(c.id, next)
                             : undefined
                         }
+                        editHeld={stale}
                         onDelete={
-                          c.viewerDidAuthor
+                          c.viewerDidAuthor && !stale
                             ? () => setDeletingId(c.id)
                             : undefined
                         }

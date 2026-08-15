@@ -828,6 +828,9 @@ export function RemoteIssueView({
                       ? (body) => saveCommentEdit(c.id, body)
                       : undefined
                   }
+                  // Withholding the handler only drops the menu entry; an editor
+                  // already open when the switch began needs its Save held too.
+                  editHeld={detailsStale}
                   onDelete={
                     canEditOwnComments && c.viewerDidAuthor && !detailsStale
                       ? () => setDeletingCommentId(c.id)
