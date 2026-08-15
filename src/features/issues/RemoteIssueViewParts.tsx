@@ -178,9 +178,10 @@ export function IssueSidebar({
   remoteLabel: string;
   /** The origin|upstream lens the parent issue view resolved. */
   lens: RemoteLens;
-  /** Set when the viewer lacks the tier these pickers need (TRIAGE, not push):
-   *  they stay visible but disabled, with this text explaining why. Absent =
-   *  editable as before. */
+  /** Set when these pickers can't be edited right now — the viewer lacks the tier
+   *  they need (TRIAGE, not push), or the rail is still loading the selected
+   *  issue. They stay visible but disabled, with this text explaining why.
+   *  Absent = editable as before. */
   pickerDisabledReason?: string;
   /** The compact WRITE-axis reason for the rail's one push-tier affordance
    *  (Development → create a linked branch), which triage doesn't cover. */
@@ -411,7 +412,8 @@ export function DueDateRow({
   open: boolean;
   pending: boolean;
   onChange: (date: string | null) => void;
-  /** Set when the viewer lacks the tier this row needs: the input and Clear stay
+  /** Set when this row can't be edited right now — the viewer lacks the tier it
+   *  needs, or the surface is still loading the entity. The input and Clear stay
    *  visible but disabled, with this text as their hint. */
   disabledReason?: string;
 }) {
@@ -479,7 +481,8 @@ function ConfidentialRow({
   value: boolean;
   pending: boolean;
   onChange: (confidential: boolean) => void;
-  /** Set when the viewer lacks the tier this row needs: the switch stays visible
+  /** Set when this row can't be edited right now — the viewer lacks the tier it
+   *  needs, or the surface is still loading the entity. The switch stays visible
    *  but disabled, with this text as its hint. */
   disabledReason?: string;
 }) {
@@ -542,9 +545,11 @@ export function TimeTrackingControls({
   onAddSpent: (duration: string | null) => void;
   /** Disambiguates the input ids when two instances mount (issue rail + MR). */
   idPrefix: string;
-  /** Set when the viewer lacks the tier the edits need: the inputs and their
-   *  Clear/Reset buttons disable, with this text as the group's hint. The
-   *  summary above them is a read and stays live. */
+  /** Set when these edits can't be used right now — the viewer lacks the tier they
+   *  need, and on the issue rail also while that issue is still loading (the MR
+   *  popover passes the permission axis alone). The inputs and their Clear/Reset
+   *  buttons disable, with this text as the group's hint. The summary above them
+   *  is a read and stays live. */
   disabledReason?: string;
 }) {
   const estimate = stats?.timeEstimate ?? 0;
@@ -691,7 +696,8 @@ function IssueTimeTrackingSection({
   repoPath: string;
   number: number;
   editable: boolean;
-  /** Set when the viewer lacks the tier the editing controls need — the summary
+  /** Set when the editing controls can't be used right now — the viewer lacks the
+   *  tier they need, or the rail is still loading the selected issue. The summary
    *  is a read and stays live. */
   disabledReason?: string;
 }) {
@@ -734,7 +740,8 @@ function IssueLinksSection({
   editable: boolean;
   /** The parent issue's lens (GitLab-only section, so always "origin"). */
   lens: RemoteLens;
-  /** Set when the viewer lacks the tier link edits need: Add and the per-row
+  /** Set when link edits can't be used right now — the viewer lacks the tier they
+   *  need, or the rail is still loading the selected issue. Add and the per-row
    *  removes disable, with this text as their hint. The list stays live. */
   disabledReason?: string;
 }) {

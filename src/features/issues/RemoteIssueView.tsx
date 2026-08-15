@@ -363,6 +363,11 @@ export function RemoteIssueView({
   }
 
   function toggleReaction(subjectId: string, content: string, active: boolean) {
+    // The subject is the rendered issue's body or one of its comments, while the
+    // write and its optimistic patch address `number` — GitLab routes by both, so
+    // a mismatched pair awards the wrong note or 404s. The bars disable on the
+    // same flag; this arm is the belt-and-braces behind them.
+    if (detailsStale) return;
     toggleReactionMutation.mutate({ subjectId, content, active }, { onError });
   }
 
@@ -813,12 +818,17 @@ export function RemoteIssueView({
                   </p>
                 )}
                 {canReact && (
-                  <ReactionBar
-                    reactions={reactions.data?.body ?? []}
-                    onToggle={(content, active) =>
-                      toggleReaction(issue.id, content, active)
-                    }
-                  />
+                  // The counts are a read and stay; only the toggles hold. A
+                  // disabled button swallows `title`, so the wait rides the span.
+                  <span title={staleReason} className="inline-flex">
+                    <ReactionBar
+                      reactions={reactions.data?.body ?? []}
+                      disabled={detailsStale}
+                      onToggle={(content, active) =>
+                        toggleReaction(issue.id, content, active)
+                      }
+                    />
+                  </span>
                 )}
               </div>
               {canWrite && (
@@ -880,6 +890,7 @@ export function RemoteIssueView({
                           toggleReaction(c.id, content, active)
                       : undefined
                   }
+                  reactionsHeld={detailsStale}
                 />
               ))}
               {comments.length === 0 && (

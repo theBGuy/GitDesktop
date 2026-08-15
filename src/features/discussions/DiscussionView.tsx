@@ -236,10 +236,13 @@ export function DiscussionView({
   }
 
   // Placeholder details are the previous discussion's: `busy` holds the composer,
-  // reply box and mark-as-answer, and the seeding actions below read this too.
-  // Lock/close, delete, upvote/reactions and labels also read `d.id` and stay
-  // live — pre-existing exposure, tracked separately.
+  // reply box and mark-as-answer, the seeding actions below read this too, and the
+  // upvote/reaction toggles hold on it — their optimistic patch would land the
+  // rendered discussion's subject under the selected one's cache key. Lock/close,
+  // delete and labels also read `d.id` and stay live — tracked separately.
   const detailsStale = details.isPlaceholderData;
+  // Matches the wording the PR and issue views use for the same wait.
+  const staleReason = detailsStale ? "Loading this discussion…" : undefined;
   const busy =
     addComment.isPending ||
     markAnswer.isPending ||
@@ -313,11 +316,16 @@ export function DiscussionView({
     );
   }
 
+  // Both subjects come off the rendered discussion while the optimistic patch
+  // writes the SELECTED one's cache entry, so both hold through a switch. The
+  // controls disable too; these arms are the belt-and-braces behind them.
   function toggleUpvote(subjectId: string, upvoted: boolean) {
+    if (detailsStale) return;
     toggleUpvoteMutation.mutate({ subjectId, up: !upvoted }, { onError });
   }
 
   function toggleReaction(subjectId: string, content: string, active: boolean) {
+    if (detailsStale) return;
     toggleReactionMutation.mutate({ subjectId, content, active }, { onError });
   }
 
@@ -575,15 +583,21 @@ export function DiscussionView({
                 No description provided.
               </p>
             )}
-            <div className="flex flex-wrap items-center gap-2 pt-1">
+            {/* The counts are a read and stay; the toggles hold through a switch.
+                Disabled buttons swallow `title`, so the wait rides this row. */}
+            <div
+              title={staleReason}
+              className="flex flex-wrap items-center gap-2 pt-1"
+            >
               <UpvoteButton
                 count={d.upvoteCount}
                 active={d.viewerHasUpvoted}
-                disabled={toggleUpvoteMutation.isPending}
+                disabled={toggleUpvoteMutation.isPending || detailsStale}
                 onClick={() => toggleUpvote(d.id, d.viewerHasUpvoted)}
               />
               <ReactionBar
                 reactions={reactions.data?.body ?? []}
+                disabled={detailsStale}
                 onToggle={(content, active) =>
                   toggleReaction(d.id, content, active)
                 }
@@ -624,13 +638,17 @@ export function DiscussionView({
                   onToggleReaction={(content, active) =>
                     toggleReaction(c.id, content, active)
                   }
+                  reactionsHeld={detailsStale}
                 />
               </div>
-              <div className="flex flex-wrap items-center gap-2">
+              <div
+                title={staleReason}
+                className="flex flex-wrap items-center gap-2"
+              >
                 <UpvoteButton
                   count={c.upvoteCount}
                   active={c.viewerHasUpvoted}
-                  disabled={toggleUpvoteMutation.isPending}
+                  disabled={toggleUpvoteMutation.isPending || detailsStale}
                   onClick={() => toggleUpvote(c.id, c.viewerHasUpvoted)}
                 />
                 <Button
@@ -689,6 +707,7 @@ export function DiscussionView({
                       onToggleReaction={(content, active) =>
                         toggleReaction(r.id, content, active)
                       }
+                      reactionsHeld={detailsStale}
                     />
                   ))}
                   {reply.value.targetId === c.id && (

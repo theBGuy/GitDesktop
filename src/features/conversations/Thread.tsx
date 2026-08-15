@@ -96,6 +96,7 @@ export function Thread({
   onUnhide,
   reactions,
   onToggleReaction,
+  reactionsHeld = false,
   renderBody,
   copyMarkdown,
   disabledReason,
@@ -133,6 +134,10 @@ export function Thread({
   reactions?: Reaction[];
   /** Present to enable the reaction bar; toggles the viewer's reaction. */
   onToggleReaction?: (content: string, active: boolean) => void;
+  /** Holds the reaction toggles while the caller's entity is the previous one:
+   *  the chips stay visible (a read) but can't fire a write whose subject id and
+   *  target entity would disagree. Same posture as `editHeld`. */
+  reactionsHeld?: boolean;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
@@ -296,7 +301,11 @@ export function Thread({
         </>
       )}
       {onToggleReaction && !editing && (
-        <ReactionBar reactions={reactions ?? []} onToggle={onToggleReaction} />
+        <ReactionBar
+          reactions={reactions ?? []}
+          disabled={reactionsHeld}
+          onToggle={onToggleReaction}
+        />
       )}
     </div>
   );

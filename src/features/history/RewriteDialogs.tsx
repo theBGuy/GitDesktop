@@ -160,7 +160,7 @@ export function SquashDialog({
             <DialogTitle>Squash {count} commits?</DialogTitle>
             <DialogDescription>
               Combines the selected commits into one. This rewrites local
-              history; if replaying hits a conflict, nothing is changed.
+              history; a conflict rolls it back.
             </DialogDescription>
           </DialogHeader>
           <form.AppField

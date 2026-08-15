@@ -181,9 +181,9 @@ click to jump to it in History.
 
 - **Interactive rebase** ⭐: an *Edit history* editor to reword, squash,
   fixup, drop, or reorder unpushed commits behind an atomic replay engine
-  (a conflict rolls it back), or **edit** a commit to pause and
-  amend its contents in a real, resumable rebase (GitHub Desktop offers
-  neither). Cherry-pick onto the current or another branch, too.
+  (a conflict rolls it back), or **edit** a commit to pause and amend its
+  contents in a real, resumable rebase (GitHub Desktop offers neither).
+  Cherry-pick onto the current or another branch, too.
 - **Recover lost work** ⭐: a stash browser whose scan (via `git fsck`) finds
   orphaned and dangling stashes, uncommitted work a `git stash` saved but
   that fell out of `git stash list` (dropped, or abandoned by an interrupted
@@ -771,9 +771,9 @@ review via its subscription login. The full list is under
 
 - **Markdown everywhere you write**: Write/Preview tabs and a formatting
   toolbar (`Ctrl`/`⌘`+`B / I / K`) on every comment, reply, and
-  release-notes field, rendered to match GitHub's own styling: task lists, heading
-  hierarchy, and syntax-highlighted code in ~190 languages (light and
-  dark).
+  release-notes field, rendered to match GitHub's own styling: task lists,
+  heading hierarchy, and syntax-highlighted code in ~190 languages (light
+  and dark).
 - **Keyboard-first**: rebindable shortcuts with GitHub-Desktop-compatible
   defaults, a generated cheat sheet (`Ctrl`/`⌘`+`/`), a command palette
   (`Ctrl`/`⌘`+`K`), and arrow-key navigation everywhere.

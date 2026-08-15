@@ -3421,6 +3421,10 @@ pub(crate) async fn rewrite_commits_with_timeouts(
             run_git(Some(repo_path), &["reset", "--hard", base], DEFAULT_TIMEOUT)
                 .await
                 .err();
+        // A rewind that failed never reached the replay, so the detail lines
+        // below have to describe THAT state: no pick ran (the user copy hedges
+        // the branch position — a killed reset can still have moved it).
+        let rewound = failure.is_none();
         if failure.is_none() {
             'steps: for step in steps {
                 let single_pick = step.hashes.len() == 1 && step.message.is_none();
@@ -3481,14 +3485,24 @@ pub(crate) async fn rewrite_commits_with_timeouts(
             // and remedies below it, git's own output last: the frontend collapses
             // a message whose first line is git conflict output into "operation
             // paused", which is the one thing these arms are not.
+            let cause = if rewound {
+                "Usually a conflict, or a squash/fixup that left nothing to commit."
+            } else {
+                "The rewind onto the base commit failed, so nothing was replayed."
+            };
+            let damage = if rewound {
+                format!("Your branch may be left partly rewritten; its tip before this run was {orig}.")
+            } else {
+                format!("Your branch should still be at its original tip {orig}.")
+            };
             let recovery = format!(
-                "The rewrite failed and its automatic rollback also failed.\nYour branch may be left partly rewritten; its tip before this run was {orig}.\nRun git cherry-pick --abort if a pick is still in progress, or git reset --hard {orig} to restore it."
+                "The rewrite failed and its automatic rollback also failed.\n{damage}\nRun git cherry-pick --abort if a pick is still in progress, or git reset --hard {orig} to restore it."
             );
             return Err(match err {
                 AppError::Git { code, stderr } if reset_ok => AppError::Git {
                     code,
                     stderr: format!(
-                        "The rewrite couldn't be applied and was rolled back — your branch is unchanged.\nUsually a conflict, or a squash/fixup that left nothing to commit.\n{stderr}"
+                        "The rewrite couldn't be applied and was rolled back — your branch is unchanged.\n{cause}\n{stderr}"
                     ),
                 },
                 AppError::Git { code, stderr } => AppError::Git {
@@ -3982,6 +3996,29 @@ mod tests {
             .collect()
     }
 
+    /// The injected budget for every "git was killed" test: a deadline that has
+    /// already expired when the call starts. `run_git`'s inner future spawns the
+    /// child and awaits its pipes, so it cannot COMPLETE on its first poll (a
+    /// spawn failure can — that arm returns its own error, not a timeout) and
+    /// the expired deadline always wins. Any nonzero budget instead races how
+    /// fast git runs — 1ms lost that race on CI's Linux runners.
+    const ALREADY_ELAPSED: std::time::Duration = std::time::Duration::ZERO;
+
+    /// Pins the premise the killed-git tests rest on: an expired budget reports a
+    /// timeout however fast the command is. Loops because a probabilistic
+    /// regression here would otherwise surface as unrelated flakes elsewhere.
+    #[tokio::test]
+    async fn an_expired_budget_always_reports_a_timeout() {
+        let (_dir, repo) = setup_repo("expired-budget").await;
+        for i in 0..10 {
+            match run_git(Some(&repo), &["rev-parse", "HEAD"], ALREADY_ELAPSED).await {
+                Err(AppError::Timeout(_)) => {}
+                Ok(_) => panic!("iteration {i} ran to completion instead of timing out"),
+                Err(e) => panic!("iteration {i} failed for another reason: {e:?}"),
+            }
+        }
+    }
+
     /// The three literals the frontend keys its rollback verdicts on, and the
     /// shape it reads them in: a short leading line carrying exactly one of them,
     /// with git's own conflict output pushed below. Without that the message is
@@ -4163,14 +4200,14 @@ mod tests {
         let orig = c1.clone();
 
         let state = AppState::default();
-        // A 1ms budget kills the pick itself, so the loop sees AppError::Timeout —
-        // the non-Git arm, which passes through untouched once the rollback lands.
+        // An expired budget kills the pick itself, so the loop sees AppError::Timeout
+        // — the non-Git arm, which passes through untouched once the rollback lands.
         match rewrite_commits_with_timeouts(
             &state,
             &repo,
             &base,
             &[pick(&c1)],
-            std::time::Duration::from_millis(1),
+            ALREADY_ELAPSED,
             DEFAULT_TIMEOUT,
         )
         .await
@@ -4204,14 +4241,14 @@ mod tests {
 
         let state = AppState::default();
         // "two"'s patch (v1→v2) can't apply onto v0 — a real conflict — while the
-        // 1ms rollback budget kills `reset --hard orig`, so the branch stays rewound.
+        // expired rollback budget kills `reset --hard orig`.
         match rewrite_commits_with_timeouts(
             &state,
             &repo,
             &base,
             &[pick(&c2), pick(&c1)],
             DEFAULT_TIMEOUT,
-            std::time::Duration::from_millis(1),
+            ALREADY_ELAPSED,
         )
         .await
         {
@@ -4226,12 +4263,63 @@ mod tests {
             Ok(()) => panic!("the conflicting rewrite must fail"),
             Err(e) => panic!("expected a Git error, got {e:?}"),
         }
-        // The damage the message warns about, measured: the branch is left where the
-        // failed rollback abandoned it, carrying only part of its history.
-        assert_ne!(rev(&repo, "HEAD").await, orig);
-        assert_eq!(subjects(&repo).await, vec!["base"]);
+        // No assertion on where the branch ended up: killing `reset --hard` races
+        // git actually finishing it, which is exactly why the message says the
+        // branch *may* be left partly rewritten. The contract is the report.
         // The abort keeps DEFAULT_TIMEOUT, so nothing is left mid-pick either way.
         assert!(!op_state(&repo).await.unwrap().cherry_picking);
+    }
+
+    /// A rewrite that dies on the initial rewind never replayed anything, so its
+    /// error must not borrow the replay's detail text: no conflict to blame, and a
+    /// branch that never left its tip can't be "partly rewritten".
+    #[tokio::test]
+    async fn rewrite_rewind_failure_reports_a_branch_that_never_moved() {
+        let (dir, repo) = setup_repo("rewrite-rewind-fail").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        let orig = c1.clone();
+
+        // A held index.lock fails every `reset --hard` — the rewind and the
+        // rollback alike — with no kill race in play, while the read-only guards
+        // above still pass (the runner runs git with GIT_OPTIONAL_LOCKS=0).
+        let lock = std::path::Path::new(&repo).join(".git/index.lock");
+        std::fs::write(&lock, "").unwrap();
+        let state = AppState::default();
+        let result = rewrite_commits(&state, &repo, &base, &[pick(&c1)]).await;
+        // Released before the assertions so a failure can't leave the fixture
+        // locked for teardown.
+        std::fs::remove_file(&lock).unwrap();
+
+        match result {
+            Err(AppError::Git { stderr, .. }) => {
+                assert_verdict_shape(&stderr, "rollback also failed");
+                assert!(
+                    stderr.contains(&format!("should still be at its original tip {orig}")),
+                    "a rewind that never moved HEAD must be described as such: {stderr}"
+                );
+                assert!(
+                    !stderr.contains("partly rewritten") && !stderr.contains("Usually a conflict"),
+                    "the replay's detail text must not leak onto the rewind path: {stderr}"
+                );
+                assert!(
+                    stderr.contains("reset --hard"),
+                    "must still name the remedy: {stderr}"
+                );
+            }
+            Ok(()) => panic!("the locked rewind must fail"),
+            Err(e) => panic!("expected a Git error, got {e:?}"),
+        }
+        // Deterministic, unlike the killed-git arms: no git process ever got the
+        // lock, so nothing can have moved.
+        assert_eq!(
+            rev(&repo, "HEAD").await,
+            orig,
+            "the failed rewind must leave the branch exactly where it was"
+        );
+        let status = git(&repo, &["status", "--porcelain"]).await;
+        assert!(status.trim().is_empty(), "tree should be clean: {status}");
     }
 
     /// A non-Git failure whose rollback also fails can't pass through untouched —
@@ -4245,8 +4333,16 @@ mod tests {
         let orig = c1.clone();
 
         let state = AppState::default();
-        let ms = std::time::Duration::from_millis(1);
-        match rewrite_commits_with_timeouts(&state, &repo, &base, &[pick(&c1)], ms, ms).await {
+        match rewrite_commits_with_timeouts(
+            &state,
+            &repo,
+            &base,
+            &[pick(&c1)],
+            ALREADY_ELAPSED,
+            ALREADY_ELAPSED,
+        )
+        .await
+        {
             Err(AppError::Command(msg)) => {
                 assert_verdict_shape(&msg, "rollback also failed");
                 assert!(msg.contains(&orig), "must name the pre-run tip: {msg}");
@@ -4258,11 +4354,9 @@ mod tests {
             Ok(()) => panic!("the killed pick must fail"),
             Err(e) => panic!("expected the collapsed Command arm, got {e:?}"),
         }
-        assert_ne!(
-            rev(&repo, "HEAD").await,
-            orig,
-            "the failed rollback really does leave the branch rewound"
-        );
+        // Where the branch ended up is a race between the kill and git finishing
+        // the reset, which is why the message hedges; the deterministic contract is
+        // that the failure is reported with the tip and both remedies.
     }
 
     /// Negative control for the compound-lock fix: a rewrite that rolls back must
@@ -4405,14 +4499,15 @@ mod tests {
         let target_tip = rev(&repo, "target").await;
 
         let state = AppState::default();
-        // A 1ms budget kills the pick itself, so the loop sees AppError::Timeout —
-        // the non-Git arm. Everything else (switch, rollback) keeps the real timeout.
+        // An expired budget kills the pick itself, so the loop sees AppError::Timeout
+        // — the non-Git arm. Everything else (switch, rollback) keeps the real
+        // timeout, so the state below is the completed rollback's, not a race.
         match cherry_pick_onto_with_timeouts(
             &state,
             &repo,
             &[c1],
             "target",
-            std::time::Duration::from_millis(1),
+            ALREADY_ELAPSED,
             DEFAULT_TIMEOUT,
         )
         .await
@@ -4435,9 +4530,8 @@ mod tests {
         assert!(status.trim().is_empty(), "tree should be clean: {status}");
     }
 
-    /// A rollback that fails really does leave the batch's commits on the target,
-    /// so the error has to name its prior tip and both remedies — asserted against
-    /// the destruction it warns about, not just the wording.
+    /// A rollback that fails can leave the batch's commits on the target, so the
+    /// error has to name its prior tip and both remedies.
     #[tokio::test]
     async fn cherry_pick_onto_failed_rollback_names_the_pre_run_tip_and_remedies() {
         let (dir, repo) = setup_repo("pick-onto-rollback-fail").await;
@@ -4454,15 +4548,16 @@ mod tests {
         git(&repo, &["checkout", "feature"]).await;
 
         let state = AppState::default();
-        // The 1ms rollback budget kills `reset --hard target_tip` and the restore
-        // switch, so the first pick's commit survives on target.
+        // The expired rollback budget kills `reset --hard target_tip` and the
+        // restore switch; the picks themselves keep the real timeout, so the
+        // second one is a genuine conflict.
         match cherry_pick_onto_with_timeouts(
             &state,
             &repo,
             &[c1, c2],
             "target",
             DEFAULT_TIMEOUT,
-            std::time::Duration::from_millis(1),
+            ALREADY_ELAPSED,
         )
         .await
         {
@@ -4480,17 +4575,9 @@ mod tests {
             Ok(_) => panic!("the conflicting pick must fail"),
             Err(e) => panic!("expected a Git error, got {e:?}"),
         }
-        // The damage the message warns about, measured.
-        assert_ne!(
-            rev(&repo, "target").await,
-            target_tip,
-            "the failed reset really does leave this batch's commit on target"
-        );
-        assert_eq!(
-            git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]).await.trim(),
-            "target",
-            "and the failed restore switch really does leave you there"
-        );
+        // No assertion on the target's tip or where HEAD landed: killing the reset
+        // and the switch races git actually finishing them, which is why the
+        // message says the target *may* still carry the commits applied so far.
         // The abort keeps DEFAULT_TIMEOUT, so nothing is left mid-pick either way.
         assert!(!op_state(&repo).await.unwrap().cherry_picking);
     }
@@ -4507,8 +4594,16 @@ mod tests {
         let target_tip = rev(&repo, "target").await;
 
         let state = AppState::default();
-        let ms = std::time::Duration::from_millis(1);
-        match cherry_pick_onto_with_timeouts(&state, &repo, &[c1], "target", ms, ms).await {
+        match cherry_pick_onto_with_timeouts(
+            &state,
+            &repo,
+            &[c1],
+            "target",
+            ALREADY_ELAPSED,
+            ALREADY_ELAPSED,
+        )
+        .await
+        {
             Err(AppError::Command(msg)) => {
                 assert_verdict_shape(&msg, "rollback also failed");
                 assert!(
@@ -4523,11 +4618,9 @@ mod tests {
             Ok(_) => panic!("the killed pick must fail"),
             Err(e) => panic!("expected the collapsed Command arm, got {e:?}"),
         }
-        assert_eq!(
-            git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]).await.trim(),
-            "target",
-            "the failed restore switch really does leave you on the target"
-        );
+        // No assertion on where HEAD landed: killing the restore switch races git
+        // actually completing it. The deterministic contract is the reported
+        // failure naming the target's prior tip and both remedies.
     }
 
     #[tokio::test]

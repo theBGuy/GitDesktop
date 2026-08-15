@@ -660,9 +660,12 @@ export function RemotePrView({
   // an already-stacked PR (or one whose stack probe failed, where a null stack
   // means "unknown") has nothing to offer. A fork PR is refused here, ahead of
   // that fetch and its stacks join; `detectStackOffer` keeps its own row-level
-  // fork filter (stack-chains.ts) for the other members of the list.
+  // fork filter (stack-chains.ts) for the other members of the list. Every term
+  // below reads `details`, so the offer waits for the SELECTED PR's — under the
+  // placeholder it would decide eligibility from the previous one.
   const offerEnabled =
     providerKey === "github" &&
+    !details.isPlaceholderData &&
     details.data?.state === "OPEN" &&
     canEdit &&
     !details.data?.stack &&
@@ -693,9 +696,8 @@ export function RemotePrView({
   const stackWriteError = stackCreate.error ?? stackAdd.error ?? null;
 
   function confirmStackOffer() {
-    // `offerEnabled` reads the rendered PR's stack state, so during a switch the
-    // offer can be computed under the previous PR's eligibility — refuse rather
-    // than write a stack on that basis.
+    // `offerEnabled` withholds the offer entirely until details are the selected
+    // PR's, so the placeholder arm here is insurance against a looser gate later.
     if (!stackOffer || details.isPlaceholderData) return;
     if (stackOffer.kind === "create") {
       stackCreate.mutate(stackOffer.members, {
@@ -1656,6 +1658,11 @@ export function RemotePrView({
   }
 
   function toggleReaction(subjectId: string, content: string, active: boolean) {
+    // The subject is the rendered PR's body or one of its comments, while the
+    // write and its optimistic patch address `number` — GitLab routes by both, so
+    // a mismatched pair awards the wrong note or 404s. The bars disable on the
+    // same flag; this arm is the belt-and-braces behind them.
+    if (detailsStale) return;
     toggleReactionMutation.mutate({ subjectId, content, active }, { onError });
   }
 
@@ -1963,6 +1970,9 @@ export function RemotePrView({
             repoPath={repoPath}
             number={number}
             open={isOpen}
+            // No stale arm, unlike the pickers beside it: the stats query carries
+            // no placeholder and the write payload is what the viewer typed, both
+            // keyed by `number` — only `open` above reads the rendered MR's state.
             disabledReason={triageReason}
           />
         )}
@@ -2003,8 +2013,8 @@ export function RemotePrView({
             offer={stackOffer}
             rows={offerRows}
             pending={stackCreate.isPending || stackAdd.isPending}
-            // Same hold as the dissolve control: `confirmStackOffer` refuses while
-            // the offer's eligibility came from the previous PR. Cancel stays live.
+            // Unreachable while stale — no offer exists then — so this is the
+            // rendered twin of `confirmStackOffer`'s insurance arm, not a live gate.
             disabled={detailsStale}
             error={
               stackWriteError ? presentError(stackWriteError).summary : null
@@ -2178,12 +2188,17 @@ export function RemotePrView({
                   </DropdownMenu>
                 </div>
                 {canReact && (
-                  <ReactionBar
-                    reactions={reactions.data?.body ?? []}
-                    onToggle={(content, active) =>
-                      toggleReaction(pr.id, content, active)
-                    }
-                  />
+                  // The counts are a read and stay; only the toggles hold. A
+                  // disabled button swallows `title`, so the wait rides the span.
+                  <span title={staleReason} className="inline-flex">
+                    <ReactionBar
+                      reactions={reactions.data?.body ?? []}
+                      disabled={detailsStale}
+                      onToggle={(content, active) =>
+                        toggleReaction(pr.id, content, active)
+                      }
+                    />
+                  </span>
                 )}
               </div>
               {/* Bitbucket-only PR tasks checklist, between the description and the
@@ -2243,6 +2258,7 @@ export function RemotePrView({
                 onHideComment={hideComment}
                 onUnhideComment={unhideComment}
                 onToggleReaction={toggleReaction}
+                reactionsHeld={detailsStale}
               />
               {/* Residual review threads — those NOT shown inline under a review
                   above: all threads on GitLab/Bitbucket (no reviewId), plus

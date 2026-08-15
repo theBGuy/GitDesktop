@@ -206,8 +206,8 @@ export function EditHistoryDialog({
           <DialogTitle>Edit history</DialogTitle>
           <DialogDescription>
             Reshape your unpushed commits — reword, squash, fixup, drop, or
-            reorder. Newest on top. This rewrites local history; if replaying
-            hits a conflict, nothing is changed.
+            reorder. Newest on top. This rewrites local history; a conflict
+            rolls it back.
           </DialogDescription>
         </DialogHeader>
 

@@ -163,6 +163,7 @@ export function PrActivityFeed({
   onHideComment,
   onUnhideComment,
   onToggleReaction,
+  reactionsHeld = false,
 }: {
   pr: PrDetails;
   timeline: PrTimelineEvent[] | undefined;
@@ -209,6 +210,9 @@ export function PrActivityFeed({
     content: string,
     active: boolean,
   ) => void;
+  /** Holds the comment reaction toggles: their subject ids come from the rendered
+   *  PR, while the write addresses the selected one. The counts stay visible. */
+  reactionsHeld?: boolean;
 }) {
   const {
     renderedReviews,
@@ -383,6 +387,7 @@ export function PrActivityFeed({
                 : undefined
             }
             disabledReason={disabledReason}
+            reactionsHeld={reactionsHeld}
             reactions={canReact ? reactions?.comments[c.id] : undefined}
             onToggleReaction={
               canReact
