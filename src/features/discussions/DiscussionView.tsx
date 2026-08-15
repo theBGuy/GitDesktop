@@ -271,8 +271,13 @@ export function DiscussionView({
 
   // Deferred into the handler: calling makeQuoteReply(ref) during render made the
   // React Compiler bail out of this whole component (refs-in-render rule).
-  const quoteReply = (body: string) =>
+  const quoteReply = (body: string) => {
+    // Every quotable body — the discussion's and each rendered comment's — belongs
+    // to the discussion on screen, which mid-switch is the previous one, while the
+    // draft it would land in is keyed to the new one.
+    if (details.isPlaceholderData) return;
     makeQuoteReply({ composerRef, setBody: compose.set })(body);
+  };
 
   function saveCommentEdit(commentId: string, body: string) {
     updateComment.mutate(
@@ -541,7 +546,10 @@ export function DiscussionView({
                   >
                     Copy link
                   </DropdownMenuItem>
-                  {hasVisibleBody(d.body) && (
+                  {/* Absent, not disabled, while the body belongs to the previous
+                      discussion — the same shape the comment menus take when their
+                      `onQuote` is withheld. */}
+                  {hasVisibleBody(d.body) && !details.isPlaceholderData && (
                     <DropdownMenuItem onClick={() => quoteReply(d.body)}>
                       Quote reply
                     </DropdownMenuItem>
@@ -587,7 +595,11 @@ export function DiscussionView({
                 )}
                 <Thread
                   thread={toThread(c)}
-                  onQuote={() => quoteReply(c.body)}
+                  onQuote={
+                    details.isPlaceholderData
+                      ? undefined
+                      : () => quoteReply(c.body)
+                  }
                   onSaveEdit={
                     c.viewerDidAuthor
                       ? (body) => saveCommentEdit(c.id, body)
@@ -650,7 +662,11 @@ export function DiscussionView({
                     <Thread
                       key={r.id}
                       thread={toThread(r)}
-                      onQuote={() => quoteReply(r.body)}
+                      onQuote={
+                        details.isPlaceholderData
+                          ? undefined
+                          : () => quoteReply(r.body)
+                      }
                       onSaveEdit={
                         r.viewerDidAuthor
                           ? (body) => saveCommentEdit(r.id, body)

@@ -1455,7 +1455,7 @@ export function RemotePrView({
   function openEditWithChips() {
     // Every seed below is read off the rendered PR, which is the previous one
     // during a switch — an edit opened then would carry its title and body.
-    if (details.isPlaceholderData) return;
+    if (detailsStale) return;
     // Seed the base picker from the PR as it stands, so a re-open never carries
     // a previous session's unsaved pick.
     setEditBase(prForGen.baseRefName);

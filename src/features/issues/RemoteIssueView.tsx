@@ -317,8 +317,13 @@ export function RemoteIssueView({
 
   // Deferred into the handler: calling makeQuoteReply(ref) during render made the
   // React Compiler bail out of this whole component (refs-in-render rule).
-  const quoteReply = (body: string) =>
+  const quoteReply = (body: string) => {
+    // Every quotable body — the issue's and each rendered comment's — belongs to
+    // the issue on screen, which mid-switch is the previous one, while the draft
+    // it would land in is keyed to the new one.
+    if (details.isPlaceholderData) return;
     makeQuoteReply({ composerRef, setBody: compose.set })(body);
+  };
 
   function doClose(reason: "completed" | "not_planned") {
     closeIssue.mutate(
@@ -722,13 +727,18 @@ export function RemoteIssueView({
                       >
                         Copy link
                       </DropdownMenuItem>
-                      {canWrite && hasVisibleBody(issue.body) && (
-                        <DropdownMenuItem
-                          onClick={() => quoteReply(issue.body)}
-                        >
-                          Quote reply
-                        </DropdownMenuItem>
-                      )}
+                      {/* Absent, not disabled, while the body belongs to the
+                          previous issue — the same shape the comment menus take
+                          when their `onQuote` is withheld. */}
+                      {canWrite &&
+                        hasVisibleBody(issue.body) &&
+                        !details.isPlaceholderData && (
+                          <DropdownMenuItem
+                            onClick={() => quoteReply(issue.body)}
+                          >
+                            Quote reply
+                          </DropdownMenuItem>
+                        )}
                       <DropdownMenuItem
                         onClick={() => copyText(issue.body, "Markdown copied")}
                       >
@@ -778,7 +788,11 @@ export function RemoteIssueView({
                 <Thread
                   key={c.id}
                   thread={c}
-                  onQuote={canWrite ? () => quoteReply(c.body) : undefined}
+                  onQuote={
+                    canWrite && !details.isPlaceholderData
+                      ? () => quoteReply(c.body)
+                      : undefined
+                  }
                   onSaveEdit={
                     canEditOwnComments && c.viewerDidAuthor
                       ? (body) => saveCommentEdit(c.id, body)
