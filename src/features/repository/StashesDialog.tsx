@@ -31,6 +31,7 @@ import {
 } from "@/lib/git/queries";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { toastError } from "@/lib/toast";
+import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
 
 /** Which source the left list is drawn from. */
@@ -64,14 +65,9 @@ export function StashesDialog({
   const drop = useStashDrop(repoPath);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [confirmDrop, setConfirmDrop] = useState<number | null>(null);
-  // The drop confirm stays mounted through Base UI's ~100ms exit fade, by which
-  // time `confirmDrop` is already null — its contents render from this retained
-  // value or they blank mid-fade. The open gate and the drop dispatch stay live,
-  // so a mid-fade click is a no-op. Compared against null, not truthiness:
-  // stash@{0} is a valid index.
-  const [shownDrop, setShownDrop] = useState<number | null>(confirmDrop);
-  if (confirmDrop !== null && confirmDrop !== shownDrop)
-    setShownDrop(confirmDrop);
+  // The hook's nullish retain condition is load-bearing here rather than a
+  // truthiness one: stash@{0} is a valid index.
+  const shownDrop = useRetained(confirmDrop);
   const [view, setView] = useState<StashesView>(initialView);
 
   // The dialog can be opened straight to either view; seed `view` from the

@@ -54,10 +54,7 @@ export function DraftCommentCard({
     if (!canSave) return;
     updateDraft.mutate(
       { id: draft.id, body: next },
-      {
-        onError: (e) => toastError(e),
-        onSuccess: () => setEditing(false),
-      },
+      { onSuccess: () => setEditing(false) },
     );
   }
 
@@ -119,7 +116,6 @@ export function DraftCommentCard({
         pending={removeDraft.isPending}
         onConfirm={() =>
           removeDraft.mutate(draft.id, {
-            onError: (e) => toastError(e),
             onSuccess: () => setConfirmDelete(false),
           })
         }

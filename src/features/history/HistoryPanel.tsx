@@ -57,6 +57,7 @@ import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
+import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
 import { EditHistoryDialog } from "./EditHistoryDialog";
 import {
@@ -95,6 +96,9 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   const [resetHash, setResetHash] = useState<string | null>(null);
   const [branchHash, setBranchHash] = useState<string | null>(null);
   const [tagHash, setTagHash] = useState<string | null>(null);
+  // Both dialogs' descriptions are built at their call sites below.
+  const shownBranchHash = useRetained(branchHash);
+  const shownTagHash = useRetained(tagHash);
   // Multi-/range-selection for "cherry-pick to branch". Kept separate from the
   // ui store's focused commit (which drives the diff panel).
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -872,7 +876,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         open={branchHash !== null}
         onClose={() => setBranchHash(null)}
         title="Create branch from commit"
-        description={`Creates a branch starting at ${branchHash?.slice(0, 7) ?? ""} and switches to it.`}
+        description={`Creates a branch starting at ${shownBranchHash?.slice(0, 7) ?? ""} and switches to it.`}
         fieldLabel="Branch name"
         placeholder="feature/from-commit"
         submitLabel="Create branch"
@@ -883,7 +887,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         open={tagHash !== null}
         onClose={() => setTagHash(null)}
         title="Create tag"
-        description={`Tags commit ${tagHash?.slice(0, 7) ?? ""}.`}
+        description={`Tags commit ${shownTagHash?.slice(0, 7) ?? ""}.`}
         fieldLabel="Tag name"
         placeholder="v1.0.0"
         submitLabel="Create tag"

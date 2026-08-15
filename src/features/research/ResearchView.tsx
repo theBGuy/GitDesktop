@@ -171,6 +171,7 @@ function IntentPicker({
 }) {
   return (
     <Select
+      items={INTENT_LABEL}
       value={value}
       onValueChange={(v) => onChange(v === "deep" ? "deep" : "brainstorm")}
     >

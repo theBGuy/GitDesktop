@@ -159,12 +159,16 @@ function CommitMessageSelect({
   const opts = options.some((o) => o.value === value)
     ? options
     : [{ value, label: `${title} / ${message}` }, ...options];
+  // Trigger labels, built per render because `opts` carries the synthesized
+  // current pair — without them Base UI shows the raw "title/message" value.
+  const items = Object.fromEntries(opts.map((o) => [o.value, o.label]));
   return (
     <div className="space-y-1.5">
       <Label htmlFor={id} className={disabled ? "text-muted-foreground" : ""}>
         {label}
       </Label>
       <Select
+        items={items}
         value={value}
         disabled={disabled}
         onValueChange={(v) => {

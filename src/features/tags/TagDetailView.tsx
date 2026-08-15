@@ -54,6 +54,7 @@ import { useConfirm } from "@/lib/stores/confirm";
 import { useUiStore } from "@/lib/stores/ui";
 import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
+import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
 import { CreateReleaseDialog } from "./CreateReleaseDialog";
 
 export function TagDetailView({
@@ -118,6 +119,32 @@ export function TagDetailView({
   const tagInfo = tagList.data?.find((t) => t.name === tag);
   const isLatest =
     (releaseList.data ?? []).find((r) => r.tagName === tag)?.isLatest ?? false;
+  // A tag switch keeps the PREVIOUS tag's release painted (the query's placeholder
+  // frees the tag key axis), so every release write holds until the two agree —
+  // this is the only gate that covers it: with placeholder data present the query
+  // reads as success (never `isLoading`), and a disabled query still serves it.
+  const relStale = release.isPlaceholderData;
+  const staleDim = relStale && "opacity-80";
+  // Why the rendered release can't be acted on at all — it gates DOWNLOAD too,
+  // which a read-only viewer is otherwise free to use. Not-ready outranks stale
+  // and never resolves on its own: a not-ready forge disables the query, which
+  // goes on serving placeholder data, so "loading" would be a wait with no end.
+  // Wording mirrors TagsPanel's release affordance.
+  const readReason = (() => {
+    switch (true) {
+      case !ghReady:
+        return isGitLab
+          ? "Sign in with the GitLab CLI (glab) to manage this release."
+          : "Connect this repository to GitHub or GitLab to manage this release.";
+      case relStale:
+        return "Loading this tag's release…";
+      default:
+        return null;
+    }
+  })();
+  // Writes take the read-only viewer's reason ahead of those: theirs never lifts
+  // either, and it's the one that still applies once the release is current.
+  const blockReason = writeBlocked ? writeReason : readReason;
 
   if (release.isLoading) {
     return (
@@ -139,6 +166,9 @@ export function TagDetailView({
   }
 
   async function onDownload(assetName: string) {
+    // Fresh `tag`, placeholder-derived name: two releases sharing an asset name
+    // would silently fetch the wrong file.
+    if (relStale) return;
     const dir = await openDialog({ directory: true });
     if (typeof dir !== "string") return;
     downloadAsset.mutate(
@@ -150,6 +180,9 @@ export function TagDetailView({
   // Shared by both provider arms, which differ in what is actually lost: GitHub's
   // uploaded binary is gone for good, while a GitLab asset link can be re-added.
   async function onDeleteAsset(assetName: string, kind: "asset" | "link") {
+    // The name comes off the rendered release, which is the previous tag's
+    // during a switch — refuse before the confirm can name the wrong asset.
+    if (relStale) return;
     const ok = await useConfirm.getState().ask({
       title: `Delete ${assetName}?`,
       body:
@@ -180,10 +213,14 @@ export function TagDetailView({
     const savePending = editRelease.isPending || syncUpdaterNotes.isPending;
     const saveLatched = syncArmed && savePending;
     return (
-      <div className="flex h-full flex-col">
+      <div className="flex h-full flex-col" aria-busy={Boolean(staleDim)}>
         <header className="space-y-2 border-b px-4 py-3">
           <div className="flex items-start gap-2">
-            <h2 className="text-sm font-medium">{rel.name || rel.tagName}</h2>
+            <h2
+              className={cn("text-sm font-medium", PLACEHOLDER_FADE, staleDim)}
+            >
+              {rel.name || rel.tagName}
+            </h2>
             <span className="flex-1" />
             {/* Publish only ever shows on GitHub (GitLab has no drafts). */}
             {canManage && (
@@ -192,9 +229,12 @@ export function TagDetailView({
                   <DisabledReasonButton
                     variant="outline"
                     size="xs"
-                    disabled={editRelease.isPending || writeBlocked}
-                    reason={writeReason}
-                    onClick={() =>
+                    disabled={editRelease.isPending || writeBlocked || relStale}
+                    reason={blockReason}
+                    onClick={() => {
+                      // `prerelease` rides the rendered release's flag, so a stale
+                      // one would really flip the new release's state on the forge.
+                      if (relStale) return;
                       editRelease.mutate(
                         {
                           tag,
@@ -212,8 +252,8 @@ export function TagDetailView({
                           onSuccess: () => toast.success("Published"),
                           onError,
                         },
-                      )
-                    }
+                      );
+                    }}
                   >
                     Publish
                   </DisabledReasonButton>
@@ -221,9 +261,12 @@ export function TagDetailView({
                 <DisabledReasonButton
                   variant="outline"
                   size="xs"
-                  disabled={writeBlocked}
-                  reason={writeReason}
+                  disabled={writeBlocked || relStale}
+                  reason={blockReason}
                   onClick={() => {
+                    // The seed outlives the stale window — a dialog opened here
+                    // would still save the previous release's text once it closes.
+                    if (relStale) return;
                     setEditTitle(rel.name);
                     setEditNotes(rel.body);
                     setEditPrerelease(rel.isPrerelease);
@@ -238,8 +281,8 @@ export function TagDetailView({
                 <DisabledReasonButton
                   variant="outline"
                   size="xs"
-                  disabled={writeBlocked}
-                  reason={writeReason}
+                  disabled={writeBlocked || relStale}
+                  reason={blockReason}
                   onClick={() => {
                     setCleanupTag(false);
                     setDeleteOpen(true);
@@ -261,7 +304,13 @@ export function TagDetailView({
               </Button>
             )}
           </div>
-          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          <div
+            className={cn(
+              "flex flex-wrap items-center gap-2 text-xs text-muted-foreground",
+              PLACEHOLDER_FADE,
+              staleDim,
+            )}
+          >
             <span className="font-mono">{rel.tagName}</span>
             {isLatest && <Badge variant="default">Latest</Badge>}
             {rel.isPrerelease && <Badge variant="secondary">Pre-release</Badge>}
@@ -277,7 +326,7 @@ export function TagDetailView({
         {/* overflow-hidden contains the content's natural height (vendored Root is
             `relative`-only) so long release notes can't leak a window scrollbar. */}
         <ScrollArea className="min-h-0 flex-1 overflow-hidden">
-          <div className="space-y-4 p-4">
+          <div className={cn("space-y-4 p-4", PLACEHOLDER_FADE, staleDim)}>
             {rel.body.trim() ? (
               <Markdown>{rel.body}</Markdown>
             ) : (
@@ -297,8 +346,8 @@ export function TagDetailView({
                   <DisabledReasonButton
                     variant="ghost"
                     size="xs"
-                    disabled={uploadAsset.isPending || writeBlocked}
-                    reason={writeReason}
+                    disabled={uploadAsset.isPending || writeBlocked || relStale}
+                    reason={blockReason}
                     onClick={onUpload}
                   >
                     {uploadAsset.isPending ? (
@@ -328,20 +377,24 @@ export function TagDetailView({
                         <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
                           {formatBytes(a.size)} · {a.downloadCount} ↓
                         </span>
-                        <Button
+                        <DisabledReasonButton
                           variant="ghost"
                           size="icon-xs"
                           aria-label={`Download ${a.name}`}
+                          disabled={relStale}
+                          reason={readReason}
                           onClick={() => onDownload(a.name)}
                         >
                           <DownloadSimpleIcon />
-                        </Button>
+                        </DisabledReasonButton>
                         <DisabledReasonButton
                           variant="ghost"
                           size="icon-xs"
                           aria-label={`Delete ${a.name}`}
-                          disabled={deleteAsset.isPending || writeBlocked}
-                          reason={writeReason}
+                          disabled={
+                            deleteAsset.isPending || writeBlocked || relStale
+                          }
+                          reason={blockReason}
                           className="text-muted-foreground"
                           onClick={() => onDeleteAsset(a.name, "asset")}
                         >
@@ -369,8 +422,10 @@ export function TagDetailView({
                             variant="ghost"
                             size="icon-xs"
                             aria-label={`Delete ${a.name}`}
-                            disabled={deleteAsset.isPending || writeBlocked}
-                            reason={writeReason}
+                            disabled={
+                              deleteAsset.isPending || writeBlocked || relStale
+                            }
+                            reason={blockReason}
                             className="text-muted-foreground"
                             onClick={() => onDeleteAsset(a.name, "link")}
                           >
@@ -399,6 +454,9 @@ export function TagDetailView({
               className="flex min-h-0 flex-1 flex-col gap-4"
               onSubmit={(e) => {
                 e.preventDefault();
+                // `draft`/`latest` below are read off the rendered release at
+                // submit time, so a switch behind the open dialog holds the save.
+                if (relStale) return;
                 // Empty notes leave the body untouched (the edit skips `--notes`),
                 // so there's nothing to carry into the manifest either.
                 const syncManifest =
@@ -464,7 +522,7 @@ export function TagDetailView({
               <DialogHeader>
                 <DialogTitle>Edit release</DialogTitle>
                 <DialogDescription>
-                  Updates {rel.tagName} on {remoteLabel}.
+                  Updates {tag} on {remoteLabel}.
                 </DialogDescription>
               </DialogHeader>
               {/* Fields scroll; header and submit footer stay pinned. */}
@@ -558,10 +616,16 @@ export function TagDetailView({
                 >
                   Cancel
                 </Button>
-                <Button type="submit" disabled={savePending}>
+                {/* An in-flight save says so with the spinner, so only the
+                    held arms carry a reason. */}
+                <DisabledReasonButton
+                  type="submit"
+                  disabled={savePending || relStale}
+                  reason={savePending ? null : blockReason}
+                >
                   {savePending && <Spinner data-icon="inline-start" />}
                   Save
-                </Button>
+                </DisabledReasonButton>
               </DialogFooter>
             </form>
           </DialogContent>
@@ -570,7 +634,9 @@ export function TagDetailView({
         <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Delete release {rel.tagName}?</DialogTitle>
+              {/* Labelled from the `tag` PROP, which is also what the delete
+                  targets — the rendered release can be the previous tag's. */}
+              <DialogTitle>Delete release {tag}?</DialogTitle>
               <DialogDescription>
                 Removes the {remoteLabel} release. This cannot be undone.
               </DialogDescription>
@@ -580,8 +646,7 @@ export function TagDetailView({
                 checked={cleanupTag}
                 onCheckedChange={(c) => setCleanupTag(c === true)}
               />
-              Also delete the <span className="font-mono">{rel.tagName}</span>{" "}
-              tag
+              Also delete the <span className="font-mono">{tag}</span> tag
             </label>
             <DialogFooter>
               <Button variant="outline" onClick={() => setDeleteOpen(false)}>

@@ -85,6 +85,7 @@ import {
 } from "@/lib/settings/queries";
 import { type SelectedPr, useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
+import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
 import {
   BranchMergePickerDialog,
@@ -199,6 +200,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   const [createOpen, setCreateOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  const shownDeleteTarget = useRetained(deleteTarget);
   // The worktree a branch row offers to remove (resolved from `userWorktrees`).
   const [removeWorktreeTarget, setRemoveWorktreeTarget] =
     useState<UserWorktree | null>(null);
@@ -207,6 +209,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     remote: string;
     name: string;
   } | null>(null);
+  const shownRemoteDeleteTarget = useRetained(remoteDeleteTarget);
   const [discardAllOpen, setDiscardAllOpen] = useState(false);
   const [stashAllOpen, setStashAllOpen] = useState(false);
   const [stashPopOpen, setStashPopOpen] = useState(false);
@@ -247,6 +250,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     name: string;
     path: string;
   } | null>(null);
+  const shownWorktreeSwitchTarget = useRetained(worktreeSwitchTarget);
   // The worktree pending a "Promote to main workspace" confirm — set by the
   // palette action and the Worktrees-section row menu (the Worktrees dialog
   // hosts its own promote flow).
@@ -2034,9 +2038,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         title="Delete branch?"
         body={
           <>
-            Deletes {deleteTarget} locally, including commits that exist only on
-            it.
-            {deleteTarget === currentName &&
+            Deletes {shownDeleteTarget} locally, including commits that exist
+            only on it.
+            {shownDeleteTarget === currentName &&
               " You'll be switched to another branch first."}
           </>
         }
@@ -2050,18 +2054,21 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         open={remoteDeleteTarget !== null}
         onCancel={() => setRemoteDeleteTarget(null)}
         title={
-          remoteDeleteTarget
-            ? `Delete branch on ${remoteDeleteTarget.remote}?`
+          shownRemoteDeleteTarget
+            ? `Delete branch on ${shownRemoteDeleteTarget.remote}?`
             : "Delete branch on remote?"
         }
         body={
-          remoteDeleteTarget ? (
+          shownRemoteDeleteTarget ? (
             <>
               Deletes{" "}
-              <span className="font-mono">{remoteDeleteTarget.name}</span> from{" "}
-              <span className="font-mono">{remoteDeleteTarget.remote}</span> for
-              everyone using that remote. This is a server-side delete and can't
-              be undone from the app.
+              <span className="font-mono">{shownRemoteDeleteTarget.name}</span>{" "}
+              from{" "}
+              <span className="font-mono">
+                {shownRemoteDeleteTarget.remote}
+              </span>{" "}
+              for everyone using that remote. This is a server-side delete and
+              can't be undone from the app.
             </>
           ) : null
         }
@@ -2110,8 +2117,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         title="Open worktree?"
         body={
           <>
-            <span className="font-mono">{worktreeSwitchTarget?.name}</span> is
-            checked out in another worktree. A branch can only be in one
+            <span className="font-mono">{shownWorktreeSwitchTarget?.name}</span>{" "}
+            is checked out in another worktree. A branch can only be in one
             worktree at a time, so open that worktree instead of switching here.
           </>
         }

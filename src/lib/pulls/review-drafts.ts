@@ -7,6 +7,7 @@ import {
 } from "@/lib/git/repo-identity";
 import type { RemoteLens } from "@/lib/git/types";
 import { storeName } from "@/lib/test-mode";
+import { toastError } from "@/lib/toast";
 
 /** One pending draft comment in a not-yet-submitted batch review. `id` is a local
  *  uuid (these drafts never leave the client until the review is submitted). */
@@ -234,6 +235,10 @@ export function useUpdateReviewDraft(
   return useMutation({
     mutationFn: (args: { id: string; body: string }) =>
       updateDraft(repo, lens, number, args.id, args.body),
+    // Mutation-level so the failure still reports after the card unmounts: the
+    // draft cards are keyed per draft id, so switching PR replaces them all and
+    // mutate-scoped callbacks stop firing once the observer loses its listeners.
+    onError: (e) => toastError(e),
     onSettled: () =>
       void queryClient.invalidateQueries({
         queryKey: reviewDraftsKey(repo, lens, number),
@@ -249,6 +254,8 @@ export function useRemoveReviewDraft(
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => removeDraft(repo, lens, number, id),
+    // Mutation-level: see useUpdateReviewDraft.
+    onError: (e) => toastError(e),
     onSettled: () =>
       void queryClient.invalidateQueries({
         queryKey: reviewDraftsKey(repo, lens, number),

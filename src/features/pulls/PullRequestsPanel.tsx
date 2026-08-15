@@ -41,6 +41,7 @@ import { useRemoteSlug, useRepoLens } from "@/lib/repo-lens/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
+import { useRetained } from "@/lib/use-retained";
 import { CreatePrDialog } from "./CreatePrDialog";
 import { LocalPrContextMenu } from "./LocalPrContextMenu";
 import { useReconcileLocalPrs } from "./useReconcileLocalPrs";
@@ -174,6 +175,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
       ? (localPrs.data ?? []).find((p) => p.id === selectedPr.id)
       : undefined;
   const [confirmDeleteSelected, setConfirmDeleteSelected] = useState(false);
+  const shownSelectedLocalPr = useRetained(selectedLocalPr);
 
   useHotkeyAction(
     "pr-archive",
@@ -459,12 +461,12 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
           onCancel={() => setConfirmDeleteSelected(false)}
           title="Delete this local pull request?"
           body={
-            selectedLocalPr ? (
+            shownSelectedLocalPr ? (
               <>
-                Permanently deletes "{selectedLocalPr.title}"
-                {selectedLocalPr.comments.length > 0
-                  ? ` and its ${selectedLocalPr.comments.length} comment${
-                      selectedLocalPr.comments.length === 1 ? "" : "s"
+                Permanently deletes "{shownSelectedLocalPr.title}"
+                {shownSelectedLocalPr.comments.length > 0
+                  ? ` and its ${shownSelectedLocalPr.comments.length} comment${
+                      shownSelectedLocalPr.comments.length === 1 ? "" : "s"
                     }`
                   : ""}
                 . The branches are not affected. This cannot be undone.

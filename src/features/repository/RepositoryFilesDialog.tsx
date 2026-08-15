@@ -30,6 +30,7 @@ import {
 import type { IgnoredFile } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { toastError } from "@/lib/toast";
+import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
 
 type Tab = "tracked" | "ignored";
@@ -97,11 +98,7 @@ export function RepositoryFilesDialog({
   const [activePath, setActivePath] = useState<string | null>(null);
   const [anchorPath, setAnchorPath] = useState<string | null>(null);
   const [pending, setPending] = useState<Pending>(null);
-  // The confirm dialog stays mounted through Base UI's ~100ms exit fade, by
-  // which time `pending` is already null — its contents render from this
-  // retained value or they blank mid-fade.
-  const [shownPending, setShownPending] = useState<Pending>(pending);
-  if (pending && pending !== shownPending) setShownPending(pending);
+  const shownPending = useRetained(pending);
 
   const tracked = useTrackedFiles(repoPath, open && tab === "tracked");
   const ignored = useIgnoredFiles(repoPath, open && tab === "ignored");

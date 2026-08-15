@@ -29,6 +29,13 @@ import { InlineConfirm } from "./parts";
 
 const PATHS = ["/", "/docs"];
 
+/** Trigger labels for the source select — without them Base UI shows the raw
+ *  value ("workflow"). The branch/path selects label each option as itself. */
+const MODE_ITEMS: Record<string, string> = {
+  branch: "Deploy from a branch",
+  workflow: "GitHub Actions",
+};
+
 export function PagesSection({
   repoPath,
   open,
@@ -92,6 +99,7 @@ function PagesDisabled({ repoPath }: { repoPath: string }) {
       <div className="space-y-1.5">
         <Label htmlFor="pages-mode">Source</Label>
         <Select
+          items={MODE_ITEMS}
           value={mode}
           onValueChange={(v) => v && setMode(v as "branch" | "workflow")}
         >

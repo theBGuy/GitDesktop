@@ -67,6 +67,7 @@ import { settingsKeys, useSecretPreview } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
+import { cn } from "@/lib/utils";
 import { AgentSandboxField } from "./AgentSandboxField";
 import { HostAllowNote } from "./HostAllowNote";
 import { settingsFormOpts } from "./settings-form";
@@ -114,10 +115,38 @@ function ModelPicker({
     Boolean(keyPreview.data),
     allowedHosts,
   );
-  const models = availableModels.data?.models ?? [];
+  const catalog = availableModels.data;
+  const models = catalog?.models ?? [];
   const needsKey = PROVIDERS_REQUIRING_KEY.includes(value.provider);
   const isCli = isCliProvider(value.provider);
   const modelMemory = useRef<Partial<Record<AiProviderId, string>>>({});
+  // Only a failed fetch carries unbounded provider prose, so it alone is clamped and
+  // given a tooltip; every other line is short enough to render whole.
+  const failureReason =
+    catalog?.cause === "failed" ? catalog.reason : undefined;
+  // Each fallback route reads differently to a user, and the predicates are
+  // heterogeneous (query state, then cause, then whether a key is saved) — a
+  // saved-but-rejected key must never be told to save a key.
+  const hint = ((): string => {
+    switch (true) {
+      case isCli:
+        return "Model passed to the CLI — leave blank for its default";
+      case availableModels.isPending:
+        return "Loading models…";
+      case catalog?.live === true:
+        return `${models.length} models from ${PROVIDER_LABELS[value.provider]}`;
+      case failureReason !== undefined:
+        return `Suggestions only — couldn't load the live list: ${failureReason}`;
+      case catalog?.cause === "empty":
+        return "Suggestions only — the provider returned no models";
+      case catalog?.cause === "no-base":
+        return "Suggestions only — set a base URL to load the live list";
+      case needsKey && !keyPreview.data:
+        return "Suggestions only — save an API key to load the live list";
+      default:
+        return "Suggestions only — provider list unavailable";
+    }
+  })();
 
   function switchProvider(provider: AiProviderId) {
     modelMemory.current[value.provider] = value.model;
@@ -184,16 +213,14 @@ function ModelPicker({
             </ComboboxList>
           </ComboboxContent>
         </Combobox>
-        <p className="text-xs text-muted-foreground">
-          {isCli
-            ? "Model passed to the CLI — leave blank for its default"
-            : availableModels.isPending
-              ? "Loading models…"
-              : availableModels.data?.live
-                ? `${models.length} models from ${PROVIDER_LABELS[value.provider]}`
-                : needsKey
-                  ? "Suggestions only — save an API key to load the live list"
-                  : "Suggestions only — provider list unavailable"}
+        <p
+          className={cn(
+            "text-xs text-muted-foreground",
+            failureReason !== undefined && "line-clamp-2",
+          )}
+          title={failureReason !== undefined ? hint : undefined}
+        >
+          {hint}
         </p>
       </div>
     </div>
@@ -695,6 +722,10 @@ export const AiProviderSection = withForm({
           queryClient.invalidateQueries({
             queryKey: settingsKeys.secret(provider),
           });
+          // The models query keys on a BOOLEAN "a key is saved", which doesn't move
+          // when a bad key is replaced — without this the picker keeps serving the
+          // failed fetch's suggestions for the rest of its 5-minute staleTime.
+          queryClient.invalidateQueries({ queryKey: ["models"] });
           toast.success(
             `${PROVIDER_LABELS[provider]} key saved to OS keychain`,
           );
@@ -723,6 +754,7 @@ export const AiProviderSection = withForm({
         queryClient.invalidateQueries({
           queryKey: settingsKeys.secret(provider),
         });
+        queryClient.invalidateQueries({ queryKey: ["models"] });
         setConfirmClear(false);
         discardTestResult();
         toast.success("Key removed");

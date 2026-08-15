@@ -2310,15 +2310,21 @@ export function RemotePrView({
                       rides `canWrite` via canSubmitReview; GitLab/Bitbucket enable it
                       through the forge flag. */}
                   {isOpen && canSubmitReview && (
-                    <Button
+                    <DisabledReasonButton
                       variant="outline"
                       size="sm"
                       disabled={busy}
+                      // `busy` folds in the placeholder window, where the review
+                      // would open against the previously rendered PR. The pending
+                      // arms carry no reason here, as on the neighbours.
+                      reason={
+                        detailsStale ? "Loading this pull request…" : null
+                      }
                       onClick={() => setSubmitOpen(true)}
                       title="Submit a review (verdict, summary, and any pending comments)"
                     >
                       Review…
-                    </Button>
+                    </DisabledReasonButton>
                   )}
                   {isOpen && canApprove && (
                     <>

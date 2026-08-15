@@ -36,6 +36,11 @@ type AgentId = "claude" | "codex" | "opencode" | "copilot";
 
 /** Node base-image versions offered (current LTS first). */
 const NODE_VERSIONS = ["24", "22", "20"];
+/** Trigger labels — without them Base UI shows the raw version, dropping the
+ *  "(LTS)" note the popup carries. */
+const NODE_VERSION_ITEMS: Record<string, string> = Object.fromEntries(
+  NODE_VERSIONS.map((v) => [v, v === "24" ? `${v} (LTS)` : v]),
+);
 /** Container-capable agents installed into the managed image. */
 const IMAGE_AGENTS: { id: AgentId; label: string }[] = [
   { id: "claude", label: "Claude Code" },
@@ -122,6 +127,7 @@ export function AgentSandboxField({
             <label className="flex items-center gap-1.5">
               <span className="text-muted-foreground">Node version</span>
               <Select
+                items={NODE_VERSION_ITEMS}
                 value={nodeVersion}
                 onValueChange={(v) => v && onNodeVersion(v)}
               >
@@ -135,7 +141,7 @@ export function AgentSandboxField({
                 <SelectContent>
                   {NODE_VERSIONS.map((v) => (
                     <SelectItem key={v} value={v}>
-                      {v === "24" ? `${v} (LTS)` : v}
+                      {NODE_VERSION_ITEMS[v]}
                     </SelectItem>
                   ))}
                 </SelectContent>

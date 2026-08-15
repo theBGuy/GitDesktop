@@ -336,6 +336,7 @@ export function PrReviewPanel({
           onPointerDownCapture={() => setModelsWanted(true)}
         >
           <Select
+            items={PROVIDER_LABELS}
             value={provider}
             onValueChange={(v) => {
               if (!v || !reviewAi) return;

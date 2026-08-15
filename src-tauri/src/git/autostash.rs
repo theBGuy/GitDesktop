@@ -63,43 +63,6 @@ async fn autostash_pop(repo: &str) -> AppResult<GitOutput> {
     run_git_raw(Some(repo), &["stash", "pop"], DEFAULT_TIMEOUT).await
 }
 
-/// Non-empty `git ls-files --unmerged` — the conflicted entries the changes list
-/// shows.
-async fn has_unmerged(repo: &str) -> AppResult<bool> {
-    let out = run_git(Some(repo), &["ls-files", "--unmerged"], DEFAULT_TIMEOUT).await?;
-    Ok(!out.stdout_lossy().trim().is_empty())
-}
-
-/// Refuses mid-operation: `git stash push` can't write an unmerged index, and
-/// stashing a merge/rebase/cherry-pick that is only staged-resolved would destroy
-/// work git is still holding state for. Mirrors `git_stash_paths_core`'s guard,
-/// widened past unmerged entries because a fully staged resolve has none.
-async fn refuse_mid_op(repo: &str) -> AppResult<()> {
-    if has_unmerged(repo).await? {
-        return Err(AppError::InvalidArgument(
-            "Can't stash while a conflict is in progress — resolve the conflicts first.".into(),
-        ));
-    }
-    if op_in_progress(repo).await {
-        return Err(AppError::InvalidArgument(
-            "Can't stash while a merge, rebase or cherry-pick is in progress — finish or abort it first."
-                .into(),
-        ));
-    }
-    Ok(())
-}
-
-/// Whether the repo is left mid-op. Reuses `git_op_state`'s detection so this gate
-/// and the conflict banner can't drift apart. Best-effort: the underlying probes
-/// swallow read failures into "absent", so an unreadable state reads as no-op; the
-/// `Err` arm keeps the stash should `op_state` ever gain a fallible read.
-async fn op_in_progress(repo: &str) -> bool {
-    match crate::git::ops::op_state(repo).await {
-        Ok(state) => state.merging || state.rebasing || state.cherry_picking,
-        Err(_) => true,
-    }
-}
-
 /// Failure text for an outcome payload. git splits its reporting across both
 /// streams — a conflicted merge and a conflicted `stash pop` write everything to
 /// stdout and leave stderr EMPTY (measured, git 2.51.1) — so stdout backfills.
@@ -148,7 +111,7 @@ async fn settle(
     if let Some(stderr) = failure {
         // Popping onto an in-progress merge/rebase would tangle the stash with
         // conflicts the user still has to resolve — keep it instead.
-        if op_in_progress(repo).await {
+        if crate::git::ops::op_in_progress(repo).await {
             return Ok(AutostashOutcome::OpFailedStashKept {
                 stderr,
                 in_progress: true,
@@ -178,7 +141,7 @@ async fn settle(
         // git aborts some pops without merging at all (an untracked file already in
         // the way), leaving nothing for the user to resolve; an unreadable index
         // answers the same way.
-        conflicted: has_unmerged(repo).await.unwrap_or(false),
+        conflicted: crate::git::ops::has_unmerged(repo).await.unwrap_or(false),
     })
 }
 
@@ -211,7 +174,7 @@ pub(crate) async fn git_pull_autostash_core(
 
     let lock = state.repo_lock(&repo_path).await;
     let _guard = lock.lock().await;
-    refuse_mid_op(&repo_path).await?;
+    crate::git::ops::refuse_mid_op(&repo_path).await?;
 
     let stashed = autostash_push(&repo_path).await?;
     let op = run_git_with_creds_once(&repo_path, &cred, &["pull", flag], NETWORK_TIMEOUT).await;
@@ -238,7 +201,7 @@ pub(crate) async fn git_merge_autostash_core(
 
     let lock = state.repo_lock(&repo_path).await;
     let _guard = lock.lock().await;
-    refuse_mid_op(&repo_path).await?;
+    crate::git::ops::refuse_mid_op(&repo_path).await?;
 
     let stashed = autostash_push(&repo_path).await?;
     let op = run_git_raw(
@@ -279,7 +242,7 @@ pub(crate) async fn git_switch_autostash_core(
 
     let lock = state.repo_lock(&repo_path).await;
     let _guard = lock.lock().await;
-    refuse_mid_op(&repo_path).await?;
+    crate::git::ops::refuse_mid_op(&repo_path).await?;
 
     let stashed = autostash_push(&repo_path).await?;
     let args: Vec<&str> = match &tracking {

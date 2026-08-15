@@ -1808,6 +1808,7 @@ export function buildReleaseNotesPrompt(input: {
   commits: string[];
   /** GitHub's auto-generated changelog (PR titles, authors, links). Preferred source. */
   changelog?: string;
+  repoInstructions?: string | null;
   globalInstructions: string;
 }): { system: string; prompt: string } {
   // Only GitHub supplies the auto-changelog; the bare-commit path uses the neutral variant.
@@ -1816,6 +1817,9 @@ export function buildReleaseNotesPrompt(input: {
       ? RELEASE_NOTES_SYSTEM
       : RELEASE_NOTES_SYSTEM_COMMITS,
   ];
+  if (input.repoInstructions) {
+    systemParts.push(`## Project instructions\n${input.repoInstructions}`);
+  }
   if (input.globalInstructions.trim()) {
     systemParts.push(
       `## User instructions\n${input.globalInstructions.trim()}`,

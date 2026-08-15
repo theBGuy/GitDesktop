@@ -27,6 +27,7 @@ import { Spinner } from "@/components/ui/spinner";
 import type { MergeConflictStrategy } from "@/lib/git/api";
 import { useMergePreview } from "@/lib/git/queries";
 import type { Branch } from "@/lib/git/types";
+import { useRetained } from "@/lib/use-retained";
 
 export type PickerMode = "merge" | "squash" | "rebase";
 
@@ -82,11 +83,7 @@ export function BranchMergePickerDialog({
   currentLabel: string;
 }) {
   const [pickerBranch, setPickerBranch] = useState("");
-  // The dialog stays mounted through Base UI's ~100ms exit fade, by which time
-  // `mode` is already null — its contents render from this retained value or
-  // they blank mid-fade.
-  const [shownMode, setShownMode] = useState<PickerMode | null>(mode);
-  if (mode && mode !== shownMode) setShownMode(mode);
+  const shownMode = useRetained(mode);
   const branchSelectId = useId();
   const conflictSelectId = useId();
   // Advanced merge options (merge mode only).

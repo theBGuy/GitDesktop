@@ -36,6 +36,16 @@ const APPS: { value: SecretApp; label: string }[] = [
 
 const REPO_SCOPE = "$repo";
 
+/** Trigger labels for the store select — without them Base UI shows the raw
+ *  value ("codespaces"). */
+const APP_ITEMS: Record<string, string> = Object.fromEntries(
+  APPS.map((a) => [a.value, a.label]),
+);
+
+/** Trigger label for the scope sentinel. Environment names label as themselves,
+ *  which is what an unmapped value already renders. */
+const SCOPE_ITEMS: Record<string, string> = { [REPO_SCOPE]: "Repository" };
+
 /** GitHub's rule: letters/digits/underscore, not starting with a digit, and not
  *  starting with GITHUB_. */
 function nameError(name: string): string | null {
@@ -95,6 +105,7 @@ export function SecretsSection({
               Store
             </Label>
             <Select
+              items={APP_ITEMS}
               value={app}
               onValueChange={(v) => v && setApp(v as SecretApp)}
             >
@@ -120,6 +131,7 @@ export function SecretsSection({
             Scope
           </Label>
           <Select
+            items={SCOPE_ITEMS}
             value={env ?? REPO_SCOPE}
             onValueChange={(v) => v && setScope(v)}
             disabled={!envAllowed}

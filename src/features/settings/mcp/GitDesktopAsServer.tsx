@@ -27,6 +27,7 @@ import {
   pathLauncherStatus,
 } from "@/lib/git/api";
 import { toastError } from "@/lib/toast";
+import { useRetained } from "@/lib/use-retained";
 
 /** Where a one-click install writes the `gitdesktop` entry: this repo's
  *  `.mcp.json`, or a client's global (all-projects) user config. */
@@ -91,16 +92,9 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
   const [confirmTarget, setConfirmTarget] = useState<InstallTarget | null>(
     null,
   );
-  // The confirm dialog stays mounted through Base UI's ~100ms exit fade, by
-  // which time `confirmTarget` is already null — its contents render from this
-  // retained value or they blank mid-fade. Appearance (copy and the button's
-  // disabled reason) reads the retained value; the open gate and the confirm
-  // dispatch stay on live `confirmTarget`, so a mid-fade click is a no-op.
-  const [shownTarget, setShownTarget] = useState<InstallTarget | null>(
-    confirmTarget,
-  );
-  if (confirmTarget && confirmTarget !== shownTarget)
-    setShownTarget(confirmTarget);
+  // Appearance — the copy AND the button's disabled reason — reads the retained
+  // target; the open gate and the confirm dispatch stay on live `confirmTarget`.
+  const shownTarget = useRetained(confirmTarget);
   // Which global client is mid-removal — parallel to `busyTarget` (which tracks
   // installs) so per-row Install/Reinstall/Remove disable each other.
   const [removingClient, setRemovingClient] = useState<

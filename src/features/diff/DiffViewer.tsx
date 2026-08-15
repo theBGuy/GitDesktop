@@ -45,6 +45,7 @@ import { useEffectiveSyntax } from "@/lib/syntax/queries";
 import { toastError } from "@/lib/toast";
 import { useIsDark } from "@/lib/use-is-dark";
 import { useLatestRef } from "@/lib/use-latest-ref";
+import { useRetained } from "@/lib/use-retained";
 import {
   DIFF_MAX_LINE_CHARS,
   DIFF_MEGA_LINE_CHARS,
@@ -164,6 +165,8 @@ function WorkingTreeDiff({
     // confirm wording changes from "revert to last committed" to "remove".
     newFile?: boolean;
   } | null>(null);
+  // Declared with the hooks above the `!hunkMode` early return below.
+  const shownDiscard = useRetained(discard);
   // The drag-selected lines to stage/unstage/discard — file-wide, since the
   // single whole-file view lets a selection span multiple hunks.
   const [selection, setSelection] = useState<SelectedLine[] | null>(null);
@@ -407,14 +410,16 @@ function WorkingTreeDiff({
           <DialogHeader>
             <DialogTitle>Discard changes?</DialogTitle>
             <DialogDescription>
-              {discard?.newFile ? (
+              {shownDiscard?.newFile ? (
                 <>
-                  Removes <span className="font-mono">{discard?.label}</span>{" "}
-                  from {file.path}. This cannot be undone.
+                  Removes{" "}
+                  <span className="font-mono">{shownDiscard?.label}</span> from{" "}
+                  {file.path}. This cannot be undone.
                 </>
               ) : (
                 <>
-                  Reverts <span className="font-mono">{discard?.label}</span> in{" "}
+                  Reverts{" "}
+                  <span className="font-mono">{shownDiscard?.label}</span> in{" "}
                   {file.path} to the last committed version. This cannot be
                   undone.
                 </>

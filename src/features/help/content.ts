@@ -493,7 +493,9 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
 
 **Stash all changes** ({{kbd:stash-all}}) sets your working changes aside; **View
 stashes** lists them to apply, pop, or drop, and **Pop latest stash** restores the most
-recent.
+recent. Setting changes aside is refused while conflicts are still unresolved, or while a
+merge, rebase or cherry-pick is in progress — finish or abort it first, so a resolution
+you've already staged can't be swept out of the operation.
 
 **Recover lost work** (in the branch ⋮ menu, or the command palette) opens the
 **Recoverable** tab in the stashes dialog. It scans your repository (with \`git fsck\`) for
@@ -553,7 +555,8 @@ test, or review several branches at once without stashing or switching.
   removes the worktree (a branch can't be checked out in two at once) and checks that branch
   out in the main workspace. The worktree must be clean first; any uncommitted work in the
   main workspace is stashed so the checkout can't be blocked (restore it with *Pop latest
-  stash*). Works even on the worktree you're currently in.
+  stash*), and promoting is blocked while the main workspace has a merge, rebase or
+  cherry-pick in progress. Works even on the worktree you're currently in.
 - **Repair links** (footer) re-connects worktrees if you moved or renamed the repository
   folder in your file manager, which otherwise breaks the path each worktree records.
 

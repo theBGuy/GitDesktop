@@ -38,8 +38,17 @@ export function PerRepoStateControl({
 }) {
   const override = pickForRepo(server.repoOverrides, repoKeys);
   const baseline = server.enabled ? "On" : "Optional";
+  // Trigger labels, built here because the inherited option names the baseline;
+  // without them Base UI shows the raw value ("optional").
+  const items: Record<string, string> = {
+    default: `Default · ${baseline}`,
+    on: "On",
+    optional: "Optional",
+    off: "Off",
+  };
   return (
     <Select
+      items={items}
       value={override ?? "default"}
       disabled={disabled}
       onValueChange={(v) =>

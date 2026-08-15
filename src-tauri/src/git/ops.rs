@@ -102,6 +102,44 @@ pub(crate) async fn op_state(repo_path: &str) -> AppResult<RepoOpState> {
     })
 }
 
+/// Non-empty `git ls-files --unmerged` — the conflicted entries the changes list
+/// shows.
+pub(crate) async fn has_unmerged(repo: &str) -> AppResult<bool> {
+    let out = run_git(Some(repo), &["ls-files", "--unmerged"], DEFAULT_TIMEOUT).await?;
+    Ok(!out.stdout_lossy().trim().is_empty())
+}
+
+/// Whether the repo is left mid-op. Reuses [`op_state`]'s detection so this gate
+/// and the conflict banner can't drift apart. Fail-closed: an `Err` reads as
+/// in-progress, so an unreadable repo is never stashed over.
+pub(crate) async fn op_in_progress(repo: &str) -> bool {
+    match op_state(repo).await {
+        Ok(state) => state.merging || state.rebasing || state.cherry_picking,
+        Err(_) => true,
+    }
+}
+
+/// Refuses to stash mid-operation: `git stash push` can't write an unmerged
+/// index, and stashing a merge/rebase/cherry-pick that is only staged-resolved
+/// sweeps the resolution out of the operation git is still holding state for.
+/// An unreadable repo refuses too (fail-closed via [`op_in_progress`]), and a
+/// rebase paused at an `edit` step is refused as well, matching autostash. Only
+/// lock-free runners, so callers may hold the repo lock across it.
+pub(crate) async fn refuse_mid_op(repo: &str) -> AppResult<()> {
+    if has_unmerged(repo).await? {
+        return Err(AppError::InvalidArgument(
+            "Can't stash while a conflict is in progress — resolve the conflicts first.".into(),
+        ));
+    }
+    if op_in_progress(repo).await {
+        return Err(AppError::InvalidArgument(
+            "Can't stash while a merge, rebase or cherry-pick is in progress — finish or abort it first."
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_op(op: &str) -> AppResult<()> {
     match op {
         "merge" | "rebase" | "cherry-pick" => Ok(()),
@@ -312,6 +350,21 @@ pub(crate) async fn cherry_pick_onto(
     hashes: &[String],
     target_branch: &str,
 ) -> AppResult<CherryPickRangeResult> {
+    cherry_pick_onto_with_pick_timeout(state, repo_path, hashes, target_branch, DEFAULT_TIMEOUT)
+        .await
+}
+
+/// [`cherry_pick_onto`] with the per-pick timeout injectable. `pick_timeout` bounds
+/// ONLY the `cherry-pick` calls in the loop — the setup reads, the switch and the
+/// rollback keep `DEFAULT_TIMEOUT`, so a tiny value exercises the failure funnel
+/// instead of aborting before the first mutation.
+pub(crate) async fn cherry_pick_onto_with_pick_timeout(
+    state: &AppState,
+    repo_path: &str,
+    hashes: &[String],
+    target_branch: &str,
+    pick_timeout: std::time::Duration,
+) -> AppResult<CherryPickRangeResult> {
     validate_branch_arg(target_branch)?;
     for h in hashes {
         validate_hash(h)?;
@@ -396,17 +449,28 @@ pub(crate) async fn cherry_pick_onto(
     .await;
 
     let result: AppResult<CherryPickRangeResult> = async {
-        run_git(
+        // `reset --hard target_tip` in the funnel below is valid ONLY with HEAD on
+        // `target`: on the user's original branch it would rewind THAT branch to the
+        // target's tip. Defensive — the only path into the funnel has already
+        // switched — so any future early exit inherits the guarantee.
+        let switched = match run_git(
             Some(repo_path),
             &["switch", target_branch],
             DEFAULT_TIMEOUT,
         )
-        .await?;
+        .await
+        {
+            Ok(_) => true,
+            Err(e) => return Err(e),
+        };
 
         let mut applied = 0usize;
         let mut skipped = 0usize;
-        for hash in hashes {
-            match run_git(Some(repo_path), &["cherry-pick", hash], DEFAULT_TIMEOUT).await {
+        // Every pick failure class — conflict, timeout, IO — leaves through the one
+        // rollback funnel below, so none of them can exit with HEAD on `target`.
+        let mut failure: Option<(String, AppError)> = None;
+        'picks: for hash in hashes {
+            match run_git(Some(repo_path), &["cherry-pick", hash], pick_timeout).await {
                 Ok(_) => applied += 1,
                 Err(AppError::Git { stderr, .. })
                     if stderr.contains("is now empty") || stderr.contains("--allow-empty") =>
@@ -419,37 +483,46 @@ pub(crate) async fn cherry_pick_onto(
                     .await;
                     skipped += 1;
                 }
-                Err(AppError::Git { code, stderr }) => {
-                    // Roll everything back: abort the in-progress pick, drop the
-                    // commits already applied in this batch, and return home.
-                    let _ = run_git(
-                        Some(repo_path),
-                        &["cherry-pick", "--abort"],
-                        DEFAULT_TIMEOUT,
-                    )
-                    .await;
-                    let _ = run_git(
-                        Some(repo_path),
-                        &["reset", "--hard", &target_tip],
-                        DEFAULT_TIMEOUT,
-                    )
-                    .await;
-                    let restore_args: Vec<&str> = if detached {
-                        vec!["switch", "--detach", &original_restore]
-                    } else {
-                        vec!["switch", &original_restore]
-                    };
-                    let _ = run_git(Some(repo_path), &restore_args, DEFAULT_TIMEOUT).await;
-                    let short = &hash[..hash.len().min(7)];
-                    return Err(AppError::Git {
-                        code,
-                        stderr: format!(
-                            "Cherry-pick hit conflicts on {short} and was rolled back; {target_branch} is unchanged.\n{stderr}"
-                        ),
-                    });
+                Err(e) => {
+                    failure = Some((hash.clone(), e));
+                    break 'picks;
                 }
-                Err(e) => return Err(e),
             }
+        }
+
+        if let Some((hash, err)) = failure {
+            // Roll everything back: abort the in-progress pick, drop the commits
+            // already applied in this batch, and return home.
+            let _ = run_git(
+                Some(repo_path),
+                &["cherry-pick", "--abort"],
+                DEFAULT_TIMEOUT,
+            )
+            .await;
+            if switched {
+                let _ = run_git(
+                    Some(repo_path),
+                    &["reset", "--hard", &target_tip],
+                    DEFAULT_TIMEOUT,
+                )
+                .await;
+            }
+            let restore_args: Vec<&str> = if detached {
+                vec!["switch", "--detach", &original_restore]
+            } else {
+                vec!["switch", &original_restore]
+            };
+            let _ = run_git(Some(repo_path), &restore_args, DEFAULT_TIMEOUT).await;
+            let short = &hash[..hash.len().min(7)];
+            return Err(match err {
+                AppError::Git { code, stderr } => AppError::Git {
+                    code,
+                    stderr: format!(
+                        "Cherry-pick hit conflicts on {short} and was rolled back; {target_branch} is unchanged.\n{stderr}"
+                    ),
+                },
+                other => other,
+            });
         }
 
         Ok(CherryPickRangeResult { applied, skipped })
@@ -533,9 +606,16 @@ pub async fn git_stash_all(state: State<'_, AppState>, repo_path: String) -> App
 }
 
 pub(crate) async fn git_stash_all_core(state: &AppState, repo_path: String) -> AppResult<()> {
-    run_git_mutating(
-        state,
-        &repo_path,
+    // Guard and stash under ONE hold, so no merge/rebase/cherry-pick can start
+    // between the check and the push. That means the lock-free `run_git` for the
+    // push itself — `run_git_mutating` re-acquires this non-reentrant lock and
+    // deadlocks — trading away its one-shot index.lock retry (as autostash does).
+    let lock = state.repo_lock(&repo_path).await;
+    let _guard = lock.lock().await;
+    refuse_mid_op(&repo_path).await?;
+
+    run_git(
+        Some(&repo_path),
         &["stash", "push", "--include-untracked"],
         DEFAULT_TIMEOUT,
     )
@@ -644,21 +724,12 @@ pub(crate) async fn git_stash_paths_core(
     let lock = state.repo_lock(&repo_path).await;
     let _guard = lock.lock().await;
 
-    // Refuse during a merge (unmerged index): a native `git stash push` can't write
-    // the index mid-conflict, and the selective slow path can't snapshot it either
-    // (`git write-tree` fails on unmerged entries). Guarding both paths here is what
-    // keeps us from leaving a partial mutation or a stash.
-    let unmerged = run_git(
-        Some(&repo_path),
-        &["ls-files", "--unmerged"],
-        DEFAULT_TIMEOUT,
-    )
-    .await?;
-    if !unmerged.stdout_lossy().trim().is_empty() {
-        return Err(AppError::InvalidArgument(
-            "Can't stash while a conflict is in progress — resolve the conflicts first.".into(),
-        ));
-    }
+    // Refuse mid-operation, before any mutation: an unmerged index blocks both a
+    // native `git stash push` and the slow path's `write-tree` snapshot, and a
+    // merge/rebase/cherry-pick that is only staged-resolved has no unmerged entries
+    // yet a stash covering the resolved paths sweeps the resolution out of the
+    // operation git is still holding state for.
+    refuse_mid_op(&repo_path).await?;
 
     // Enumerate EVERY path staged vs HEAD, NUL-safe. `--no-renames` decomposes a
     // staged rename into delete+add so the subtraction sees stable per-path names
@@ -727,9 +798,9 @@ pub(crate) async fn git_stash_paths_core(
 
     // Snapshot the full index so the unselected files' exact staged blobs can be
     // restored afterward. A `write-tree` failure aborts pre-mutation and propagates
-    // RAW: the `ls-files --unmerged` guard above already reported the merge case, so
-    // a failure reaching here is something else (corruption/permissions) and must
-    // not be mislabeled as a merge.
+    // RAW: the mid-op guard above already reported the merge case, so a failure
+    // reaching here is something else (corruption/permissions) and must not be
+    // mislabeled as a merge.
     let full_tree = run_git(Some(&repo_path), &["write-tree"], DEFAULT_TIMEOUT)
         .await?
         .stdout_lossy()
@@ -4024,6 +4095,48 @@ mod tests {
         assert!(status.trim().is_empty(), "tree should be clean: {status}");
     }
 
+    /// The rollback must run for every failure class, not just a conflict — a
+    /// killed pick otherwise leaves HEAD on the target mid-cherry-pick.
+    #[tokio::test]
+    async fn cherry_pick_onto_rolls_back_when_a_pick_fails_non_git() {
+        let (dir, repo) = setup_repo("pick-onto-nongit").await;
+        git(&repo, &["branch", "target"]).await;
+        git(&repo, &["checkout", "-b", "feature"]).await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        let feature_tip = c1.clone();
+        let target_tip = rev(&repo, "target").await;
+
+        let state = AppState::default();
+        // A 1ms budget kills the pick itself, so the loop sees AppError::Timeout —
+        // the non-Git arm. Everything else (switch, rollback) keeps the real timeout.
+        match cherry_pick_onto_with_pick_timeout(
+            &state,
+            &repo,
+            &[c1],
+            "target",
+            std::time::Duration::from_millis(1),
+        )
+        .await
+        {
+            Err(AppError::Timeout(_)) => {}
+            Ok(_) => panic!("the killed pick must fail"),
+            Err(e) => panic!("expected the non-Git arm, got {e:?}"),
+        }
+        assert_eq!(
+            git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+                .await
+                .trim(),
+            "feature",
+            "a failed pick must leave you on the branch you started from"
+        );
+        assert_eq!(rev(&repo, "HEAD").await, feature_tip);
+        assert_eq!(rev(&repo, "target").await, target_tip);
+        assert!(!op_state(&repo).await.unwrap().cherry_picking);
+        let status = git(&repo, &["status", "--porcelain"]).await;
+        assert!(status.trim().is_empty(), "tree should be clean: {status}");
+    }
+
     #[tokio::test]
     async fn rebase_edit_refuses_a_concurrent_op() {
         let (dir, repo) = setup_repo("reentry").await;
@@ -6116,6 +6229,226 @@ detached
         assert!(matches!(err, AppError::InvalidArgument(_)), "got {err:?}");
         // No stash created.
         assert_eq!(stash_count(&repo).await, 0);
+    }
+
+    // --- mid-operation stash guard ------------------------------------------
+    //
+    // The destructive state is a merge/rebase/cherry-pick whose conflicts are
+    // RESOLVED AND STAGED: `ls-files --unmerged` reads empty while the op marker
+    // stands, and a stash there sweeps both the resolution and the marker away.
+
+    async fn head_branch(repo: &str) -> String {
+        git(repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string()
+    }
+
+    /// A staged-resolved operation leaves no unmerged entries — the half of the
+    /// guard that cannot see it.
+    async fn nothing_unmerged(repo: &str) -> bool {
+        git(repo, &["ls-files", "--unmerged"])
+            .await
+            .trim()
+            .is_empty()
+    }
+
+    /// Two branches editing `x` divergently, merged, then resolved and staged —
+    /// MERGE_HEAD present, no unmerged entries.
+    async fn staged_resolved_merge(marker: &str) -> (tempfile::TempDir, String) {
+        let (dir, repo) = setup_repo(marker).await;
+        commit_file(&repo, dir.path(), "x", "base\n", "add x").await;
+        let base = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "other"]).await;
+        commit_file(&repo, dir.path(), "x", "other\n", "other edit").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "x", "main\n", "main edit").await;
+        // run_git_raw: a conflicting merge exits non-zero.
+        let merge = run_git_raw(Some(&repo), &["merge", "other"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_ne!(merge.code, 0, "merge should conflict");
+        std::fs::write(dir.path().join("x"), "resolved\n").unwrap();
+        git(&repo, &["add", "x"]).await;
+        (dir, repo)
+    }
+
+    #[tokio::test]
+    async fn stash_all_refuses_a_staged_but_uncommitted_merge() {
+        let (_dir, repo) = staged_resolved_merge("stash-all-staged-merge").await;
+        // Pins the exact gap: nothing unmerged is left, only the op marker.
+        assert!(nothing_unmerged(&repo).await);
+        assert!(op_state(&repo).await.unwrap().merging);
+
+        let state = AppState::default();
+        let err = git_stash_all_core(&state, repo.clone()).await.unwrap_err();
+        assert!(matches!(err, AppError::InvalidArgument(_)), "got {err:?}");
+        assert_eq!(stash_count(&repo).await, 0);
+        assert!(
+            op_state(&repo).await.unwrap().merging,
+            "the merge must still be in progress"
+        );
+        assert_eq!(nlf(git(&repo, &["show", ":x"]).await), "resolved\n");
+    }
+
+    /// A `--no-commit` merge never conflicts at all, so an unmerged-entry check can
+    /// never see it — and stashing it drops the merged-in file entirely.
+    #[tokio::test]
+    async fn stash_all_refuses_a_no_commit_merge() {
+        let (dir, repo) = setup_repo("stash-all-no-commit-merge").await;
+        commit_file(&repo, dir.path(), "x", "base\n", "add x").await;
+        let base = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "other"]).await;
+        commit_file(&repo, dir.path(), "y", "other\n", "add y").await;
+        git(&repo, &["switch", &base]).await;
+        git(&repo, &["merge", "--no-commit", "--no-ff", "other"]).await;
+        assert!(nothing_unmerged(&repo).await);
+        assert!(op_state(&repo).await.unwrap().merging);
+
+        let state = AppState::default();
+        let err = git_stash_all_core(&state, repo.clone()).await.unwrap_err();
+        assert!(matches!(err, AppError::InvalidArgument(_)), "got {err:?}");
+        assert_eq!(stash_count(&repo).await, 0);
+        assert!(op_state(&repo).await.unwrap().merging);
+        assert_eq!(nlf(git(&repo, &["show", ":y"]).await), "other\n");
+    }
+
+    /// The costliest arm: stashing here leaves the rebase running, and the later
+    /// `rebase --continue` drops the replayed commit from history outright.
+    #[tokio::test]
+    async fn stash_all_refuses_a_paused_rebase_with_a_staged_resolution() {
+        let (dir, repo) = setup_repo("stash-all-rebase").await;
+        commit_file(&repo, dir.path(), "x", "base\n", "add x").await;
+        let base = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "x", "feature\n", "feature edit").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "x", "main\n", "main edit").await;
+        git(&repo, &["switch", "feature"]).await;
+        let rebase = run_git_raw(Some(&repo), &["rebase", &base], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_ne!(rebase.code, 0, "rebase should conflict");
+        std::fs::write(dir.path().join("x"), "resolved\n").unwrap();
+        git(&repo, &["add", "x"]).await;
+        assert!(nothing_unmerged(&repo).await);
+        assert!(op_state(&repo).await.unwrap().rebasing);
+
+        let state = AppState::default();
+        let err = git_stash_all_core(&state, repo.clone()).await.unwrap_err();
+        assert!(matches!(err, AppError::InvalidArgument(_)), "got {err:?}");
+        assert_eq!(stash_count(&repo).await, 0);
+        assert!(
+            op_state(&repo).await.unwrap().rebasing,
+            "the paused rebase must survive"
+        );
+        assert_eq!(nlf(git(&repo, &["show", ":x"]).await), "resolved\n");
+    }
+
+    #[tokio::test]
+    async fn stash_all_refuses_a_staged_cherry_pick() {
+        let (dir, repo) = setup_repo("stash-all-cherry-pick").await;
+        commit_file(&repo, dir.path(), "x", "base\n", "add x").await;
+        let base = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "other"]).await;
+        commit_file(&repo, dir.path(), "x", "other\n", "other edit").await;
+        let pick_sha = rev(&repo, "HEAD").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "x", "main\n", "main edit").await;
+        let picked = run_git_raw(Some(&repo), &["cherry-pick", &pick_sha], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_ne!(picked.code, 0, "cherry-pick should conflict");
+        std::fs::write(dir.path().join("x"), "resolved\n").unwrap();
+        git(&repo, &["add", "x"]).await;
+        assert!(nothing_unmerged(&repo).await);
+        assert!(op_state(&repo).await.unwrap().cherry_picking);
+
+        let state = AppState::default();
+        let err = git_stash_all_core(&state, repo.clone()).await.unwrap_err();
+        assert!(matches!(err, AppError::InvalidArgument(_)), "got {err:?}");
+        assert_eq!(stash_count(&repo).await, 0);
+        assert!(
+            op_state(&repo).await.unwrap().cherry_picking,
+            "the cherry-pick must still be in progress"
+        );
+        assert_eq!(nlf(git(&repo, &["show", ":x"]).await), "resolved\n");
+    }
+
+    /// The selective path destroys only when the selection COVERS the resolved
+    /// path, so that is what this selects (an unrelated path is measurably safe).
+    #[tokio::test]
+    async fn refuses_selective_stash_during_a_staged_merge() {
+        let (_dir, repo) = staged_resolved_merge("stash-paths-staged-merge").await;
+        assert!(nothing_unmerged(&repo).await);
+
+        let state = AppState::default();
+        let err = git_stash_paths_core(&state, repo.clone(), vec!["x".into()])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::InvalidArgument(_)), "got {err:?}");
+        assert_eq!(stash_count(&repo).await, 0);
+        assert!(op_state(&repo).await.unwrap().merging);
+        assert_eq!(nlf(git(&repo, &["show", ":x"]).await), "resolved\n");
+    }
+
+    /// Both refusal sentences are user-visible copy (the toast prints them
+    /// verbatim), and each arm has its own: conflicts to resolve vs. an operation
+    /// to finish or abort.
+    #[tokio::test]
+    async fn mid_op_refusal_names_the_arm_it_caught() {
+        // Unmerged arm: a conflicting merge, nothing resolved yet.
+        let (dir, repo) = setup_repo("stash-guard-wording").await;
+        commit_file(&repo, dir.path(), "x", "base\n", "add x").await;
+        let base = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "other"]).await;
+        commit_file(&repo, dir.path(), "x", "other\n", "other edit").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "x", "main\n", "main edit").await;
+        run_git_raw(Some(&repo), &["merge", "other"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        fn message(err: AppError) -> String {
+            match err {
+                AppError::InvalidArgument(msg) => msg,
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+        }
+
+        let state = AppState::default();
+        let err = git_stash_all_core(&state, repo.clone()).await.unwrap_err();
+        assert_eq!(
+            message(err),
+            "Can't stash while a conflict is in progress — resolve the conflicts first."
+        );
+
+        // Op-state arm: the same merge, resolved and staged.
+        let (_dir, repo) = staged_resolved_merge("stash-guard-wording-staged").await;
+        let err = git_stash_all_core(&state, repo.clone()).await.unwrap_err();
+        assert_eq!(
+            message(err),
+            "Can't stash while a merge, rebase or cherry-pick is in progress — finish or abort it first."
+        );
+    }
+
+    /// Over-refusal check: with no operation in flight, stash-all still puts both
+    /// tracked and untracked work away.
+    #[tokio::test]
+    async fn stash_all_succeeds_on_a_plain_dirty_tree() {
+        let (dir, repo) = setup_repo("stash-all-dirty").await;
+        commit_file(&repo, dir.path(), "A", "a0\n", "add A").await;
+        std::fs::write(dir.path().join("A"), "a1\n").unwrap();
+        std::fs::write(dir.path().join("U"), "u\n").unwrap();
+
+        let state = AppState::default();
+        git_stash_all_core(&state, repo.clone()).await.unwrap();
+
+        assert_eq!(stash_count(&repo).await, 1);
+        assert_eq!(
+            nlf(std::fs::read_to_string(dir.path().join("A")).unwrap()),
+            "a0\n"
+        );
+        assert!(!dir.path().join("U").exists(), "untracked work was stashed");
     }
 
     #[tokio::test]

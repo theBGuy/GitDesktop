@@ -6,7 +6,7 @@ import {
   UsersThreeIcon,
   WarningCircleIcon,
 } from "@phosphor-icons/react";
-import { type ReactNode, useId, useRef } from "react";
+import { type ReactNode, useId, useMemo, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -71,8 +71,19 @@ export function ModelPicker({
   onChange: (m: string) => void;
   models: string[];
 }) {
+  // Base UI renders the raw value in the trigger unless the labels are passed as
+  // `items`. Derived per render because the model set varies by agent.
+  const items = useMemo(
+    () => ({
+      [DEFAULT_MODEL]: "Default model",
+      ...Object.fromEntries(models.map((m) => [m, m])),
+    }),
+    [models],
+  );
+
   return (
     <Select
+      items={items}
       value={value || DEFAULT_MODEL}
       onValueChange={(v) => onChange(v === DEFAULT_MODEL ? "" : String(v))}
     >
@@ -106,6 +117,13 @@ const EFFORT_LEVELS = [
   { value: "xhigh", label: "Max" },
 ] as const;
 
+/** Trigger labels for the effort Select — without them Base UI shows the raw
+ *  stored value ("xhigh"). Same `items` contract as the settings selects. */
+const EFFORT_ITEMS: Record<string, string> = {
+  [DEFAULT_EFFORT]: "Default",
+  ...Object.fromEntries(EFFORT_LEVELS.map((l) => [l.value, l.label])),
+};
+
 /** Reasoning/effort level for the next turn. Mapped per-CLI in Rust (Codex
  *  `model_reasoning_effort`, Copilot `--effort`, Claude a thinking keyword). The
  *  gauge icon marks it as effort so the collapsed value isn't mistaken for a model. */
@@ -118,6 +136,7 @@ export function EffortPicker({
 }) {
   return (
     <Select
+      items={EFFORT_ITEMS}
       value={value || DEFAULT_EFFORT}
       onValueChange={(v) => onChange(v === DEFAULT_EFFORT ? "" : String(v))}
     >
@@ -501,6 +520,16 @@ export function ComposerOptions({
   );
 }
 
+/** Trigger + popup labels for the agent Select. Deliberately not AGENT_LABELS:
+ *  this picker spells Copilot out ("GitHub Copilot") where the compact list-row
+ *  label doesn't. One source so the trigger can never drift from the popup. */
+const AGENT_PICKER_ITEMS: Record<AgentKind, string> = {
+  claude: "Claude",
+  codex: "Codex",
+  copilot: "GitHub Copilot",
+  opencode: "opencode",
+};
+
 /** Picks the CLI for a NEW session (fixed once it starts). Every agent runs either
  *  way — host (worktree-confined; Codex adds its own OS-enforced sandbox) or
  *  container, provided that agent is baked into the image. Only Codex's MCP support
@@ -514,6 +543,7 @@ export function AgentPicker({
 }) {
   return (
     <Select
+      items={AGENT_PICKER_ITEMS}
       value={value}
       onValueChange={(v) => onChange(isAgentKind(v) ? v : "claude")}
     >
@@ -525,10 +555,11 @@ export function AgentPicker({
         <SelectValue />
       </SelectTrigger>
       <SelectContent>
-        <SelectItem value="claude">Claude</SelectItem>
-        <SelectItem value="codex">Codex</SelectItem>
-        <SelectItem value="copilot">GitHub Copilot</SelectItem>
-        <SelectItem value="opencode">opencode</SelectItem>
+        {Object.entries(AGENT_PICKER_ITEMS).map(([kind, label]) => (
+          <SelectItem key={kind} value={kind}>
+            {label}
+          </SelectItem>
+        ))}
       </SelectContent>
     </Select>
   );

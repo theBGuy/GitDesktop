@@ -6,8 +6,8 @@ import {
   type ToolSet,
 } from "ai";
 import { getSecret } from "@/lib/git/api";
-import { errorMessage } from "@/lib/tauri/invoke";
 import { probeOllamaWindowTokens } from "./context-budget";
+import { providerErrorMessage } from "./provider-error";
 import { isCliProvider, PROVIDERS_REQUIRING_KEY } from "./providers";
 import { httpToolStatusLine } from "./review-tools";
 import type { AiClient, AiSettings, AiStreamRequest } from "./types";
@@ -17,55 +17,6 @@ export class MissingApiKeyError extends Error {
     super(`No API key saved for ${provider}. Add one in Settings.`);
     this.name = "MissingApiKeyError";
   }
-}
-
-/** The human-readable reason out of a provider error payload, whether it nests under
- *  `error` as an object (OpenAI, Google), sits bare on `message`, or is a plain string
- *  under `error` (Ollama's native `/api`), array-wrapped (Google) or not. One reader
- *  for both call sites below: the parsed response body and the raw in-stream payload
- *  carry the same shapes, so they must accept the same set. */
-function errorTextOf(value: unknown): string | null {
-  const entry = (Array.isArray(value) ? value[0] : value) as {
-    error?: { message?: unknown } | string;
-    message?: unknown;
-  } | null;
-  const nested = entry?.error;
-  const message =
-    typeof nested === "string" ? nested : (nested?.message ?? entry?.message);
-  return typeof message === "string" && message.trim() ? message : null;
-}
-
-/**
- * The provider's own explanation for a failed call, falling back to the generic
- * message. Three constraints shape it: a body the SDK's error schema can't parse
- * leaves `APICallError.message` as the bare HTTP reason phrase with the cause unread
- * in `responseBody` (Google's is array-wrapped, so a rejected key reads "Bad Request"
- * rather than "Invalid Auth key."); a retry moves that body onto `RetryError.lastError`,
- * and `isRetryable` covers 429/5xx — the quota case; and an in-stream error part is the
- * provider's already-parsed payload rather than an Error.
- */
-function providerErrorMessage(e: unknown): string {
-  const unwrapped = ((e as { lastError?: unknown } | null)?.lastError ?? e) as {
-    responseBody?: unknown;
-  } | null;
-  const body = unwrapped?.responseBody;
-  if (typeof body === "string" && body.trim()) {
-    try {
-      const fromBody = errorTextOf(JSON.parse(body));
-      if (fromBody) return fromBody;
-    } catch {
-      // Not JSON — the generic message is the best we have.
-    }
-  }
-  // An Error's own `message` is what the generic fallback already returns; only a raw
-  // payload object needs reading here.
-  if (!(unwrapped instanceof Error)) {
-    const fromPayload = errorTextOf(unwrapped);
-    if (fromPayload) return fromPayload;
-  }
-  // Deliberately the wrapper, not `unwrapped`: a retry's message embeds the last
-  // error's text and adds the attempt count, which is worth keeping.
-  return errorMessage(e);
 }
 
 /**

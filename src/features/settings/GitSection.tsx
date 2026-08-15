@@ -37,6 +37,12 @@ const AUTOCRLF_OPTIONS = [
   { value: "false", label: "False — no conversion either way" },
 ] as const;
 
+/** Trigger labels — without them Base UI shows the raw config value ("input")
+ *  instead of the explanatory option text. */
+const AUTOCRLF_ITEMS: Record<string, string> = Object.fromEntries(
+  AUTOCRLF_OPTIONS.map((o) => [o.value, o.label]),
+);
+
 /**
  * Global git identity (config --global user.name/email). Lives in gitconfig,
  * not app settings, so it applies immediately with its own Save — same
@@ -220,6 +226,7 @@ export function LineEndingsSection() {
         </p>
       </div>
       <Select
+        items={AUTOCRLF_ITEMS}
         value={value}
         onValueChange={change}
         disabled={autocrlf.isPending || setAutocrlf.isPending}

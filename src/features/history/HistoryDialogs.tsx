@@ -28,6 +28,7 @@ import {
 } from "@/lib/git/queries";
 import { refNameWarning } from "@/lib/git/ref-name";
 import { toastError } from "@/lib/toast";
+import { useRetained } from "@/lib/use-retained";
 
 const onError = (e: unknown) => toastError(e);
 
@@ -47,6 +48,7 @@ export function DeleteTagDialog({
   onClose: () => void;
 }) {
   const deleteTag = useDeleteTag(repoPath);
+  const shownName = useRetained(name);
   return (
     <Dialog
       open={name !== null}
@@ -56,7 +58,7 @@ export function DeleteTagDialog({
     >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Delete tag {name}?</DialogTitle>
+          <DialogTitle>Delete tag {shownName}?</DialogTitle>
           <DialogDescription>
             Removes the tag from this repository. The commit it points at is not
             affected.
@@ -115,6 +117,7 @@ export function ResetCommitDialog({
   onClose: () => void;
 }) {
   const resetMutation = useResetToCommit(repoPath);
+  const shownHash = useRetained(hash);
   return (
     <Dialog
       open={hash !== null}
@@ -126,9 +129,10 @@ export function ResetCommitDialog({
         <DialogHeader>
           <DialogTitle>Reset to commit?</DialogTitle>
           <DialogDescription>
-            Moves the current branch to {hash?.slice(0, 7)}. Changes from later
-            commits stay in your working tree as uncommitted changes (mixed
-            reset). Commits that were only on this branch will be orphaned.
+            Moves the current branch to {shownHash?.slice(0, 7)}. Changes from
+            later commits stay in your working tree as uncommitted changes
+            (mixed reset). Commits that were only on this branch will be
+            orphaned.
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
@@ -184,6 +188,7 @@ export function CherryPickOntoDialog({
 }) {
   const cherryPickOnto = useCherryPickOnto(repoPath);
   const destId = useId();
+  const shownHashes = useRetained(hashes);
   function run() {
     if (!hashes || !branch) return;
     const target = branch;
@@ -222,8 +227,8 @@ export function CherryPickOntoDialog({
         <DialogHeader>
           <DialogTitle>Cherry-pick to branch</DialogTitle>
           <DialogDescription>
-            {hashes && hashes.length > 1
-              ? `Copies these ${hashes.length} commits onto the chosen branch and switches to it. `
+            {shownHashes && shownHashes.length > 1
+              ? `Copies these ${shownHashes.length} commits onto the chosen branch and switches to it. `
               : "Copies this commit onto the chosen branch and switches to it. "}
             They stay on {currentBranch ?? "this branch"} too. Commits already
             present are skipped; a conflict rolls the whole thing back.

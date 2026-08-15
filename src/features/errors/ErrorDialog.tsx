@@ -10,6 +10,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useErrorDialog } from "@/lib/stores/error-dialog";
+import { useRetained } from "@/lib/use-retained";
 
 /**
  * The full-text viewer for a long error. Opened from an error toast's "Details"
@@ -20,6 +21,7 @@ import { useErrorDialog } from "@/lib/stores/error-dialog";
 export function ErrorDialog() {
   const presentation = useErrorDialog((s) => s.presentation);
   const close = useErrorDialog((s) => s.close);
+  const shownPresentation = useRetained(presentation);
   const [copied, setCopied] = useState(false);
   // Hold the copy-feedback timer so handleClose can cancel it — otherwise a
   // Copy → Close → reopen → Copy sequence lets the first dialog's orphaned
@@ -39,7 +41,8 @@ export function ErrorDialog() {
     }
   }, [presentation]);
 
-  const fullText = presentation?.fullText ?? "";
+  // Copy must hand over exactly what the pane shows, so both read the snapshot.
+  const fullText = shownPresentation?.fullText ?? "";
 
   // Controlled Base UI dialogs don't fire onOpenChange when `open` flips via the
   // prop, so the Close button clears `copied` itself — otherwise a Copy → Close
@@ -77,11 +80,11 @@ export function ErrorDialog() {
         <DialogHeader>
           <div className="flex items-center gap-2">
             <DialogTitle className="min-w-0 wrap-break-word">
-              {presentation?.summary}
+              {shownPresentation?.summary}
             </DialogTitle>
-            {presentation?.label && (
+            {shownPresentation?.label && (
               <Badge variant="secondary" className="shrink-0">
-                {presentation.label}
+                {shownPresentation.label}
               </Badge>
             )}
           </div>

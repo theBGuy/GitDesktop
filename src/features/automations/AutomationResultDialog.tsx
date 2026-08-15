@@ -10,6 +10,7 @@ import { Markdown } from "@/components/ui/markdown";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useAutomationResults } from "@/lib/automations/results";
 import { parseableDate } from "@/lib/time";
+import { useRetained } from "@/lib/use-retained";
 
 /**
  * Viewer for automation results that have no durable surface (commit
@@ -21,6 +22,7 @@ export function AutomationResultDialog() {
   const result = useAutomationResults((s) =>
     s.results.find((r) => r.id === s.openId),
   );
+  const shownResult = useRetained(result);
 
   return (
     <Dialog
@@ -32,20 +34,20 @@ export function AutomationResultDialog() {
       <DialogContent className="flex max-h-[80vh] flex-col sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>
-            AI {result?.mode === "security" ? "security audit" : "review"}
+            AI {shownResult?.mode === "security" ? "security audit" : "review"}
           </DialogTitle>
           <DialogDescription>
-            {result?.subject}
-            {result && parseableDate(result.createdAt) && (
+            {shownResult?.subject}
+            {shownResult && parseableDate(shownResult.createdAt) && (
               <>
                 {" — "}
-                <RelativeTime date={result.createdAt} />
+                <RelativeTime date={shownResult.createdAt} />
               </>
             )}
           </DialogDescription>
         </DialogHeader>
         <ScrollArea className="min-h-0 flex-1">
-          {result && <Markdown>{result.text}</Markdown>}
+          {shownResult && <Markdown>{shownResult.text}</Markdown>}
         </ScrollArea>
       </DialogContent>
     </Dialog>

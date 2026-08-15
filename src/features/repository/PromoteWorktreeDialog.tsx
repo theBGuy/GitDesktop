@@ -13,6 +13,7 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import {
   gitCheckoutBranch,
+  gitOpState,
   gitStashAll,
   gitStatus,
   validateRepo,
@@ -137,23 +138,41 @@ function PromoteBody({
     queryFn: () => gitStatus(mainPath as string),
     enabled: Boolean(mainPath),
   });
+  // Main's in-progress merge/rebase/cherry-pick: the backend refuses to stash over
+  // one, and the stash here runs AFTER the worktree is removed — so it has to be a
+  // precondition, not an error past the point of no return. Inline rather than via
+  // `useOpState` (which takes no `enabled`) because mainPath resolves a tick later
+  // from the worktree list; the shared key keeps one cache entry either way.
+  const mOpState = useQuery({
+    queryKey: repoKeys.opState(mainPath ?? "__pending__"),
+    queryFn: () => gitOpState(mainPath as string),
+    enabled: Boolean(mainPath),
+  });
 
   const checking =
     worktrees.isPending ||
     wStatus.isPending ||
-    (Boolean(mainPath) && mStatus.isPending);
+    (Boolean(mainPath) && (mStatus.isPending || mOpState.isPending));
   const noMain = !worktrees.isPending && !mainPath;
   const worktreeDirty = (wStatus.data?.entries.length ?? 0) > 0;
   const mainDirty = (mStatus.data?.entries.length ?? 0) > 0;
   const mainBranch = mStatus.data?.branch?.name ?? "the default branch";
+  const mainMidOp = Boolean(
+    mOpState.data?.merging ||
+      mOpState.data?.rebasing ||
+      mOpState.data?.cherryPicking,
+  );
   // A failed status read must NOT read as "clean": with `data` undefined the
   // dirty checks silently become false, which would enable Promote with unknown
   // tree state and could skip the main-WIP stash before the checkout.
-  const statusError = wStatus.isError || (Boolean(mainPath) && mStatus.isError);
+  const statusError =
+    wStatus.isError ||
+    (Boolean(mainPath) && (mStatus.isError || mOpState.isError));
   const blocked =
     noMain ||
     statusError ||
     worktreeDirty ||
+    mainMidOp ||
     worktree.isLocked ||
     !worktree.branch;
 
@@ -260,6 +279,11 @@ function PromoteBody({
         <p className="text-xs text-warning">
           This worktree has uncommitted changes. Commit or stash them before
           promoting.
+        </p>
+      ) : mainMidOp ? (
+        <p className="text-xs text-warning">
+          The main workspace has a merge, rebase or cherry-pick in progress —
+          finish or abort it first.
         </p>
       ) : worktree.isLocked ? (
         <p className="text-xs text-warning">

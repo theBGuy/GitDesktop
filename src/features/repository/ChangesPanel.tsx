@@ -54,6 +54,7 @@ import {
 import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
+import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
 import { ChangesContextMenuItems, type MenuTarget } from "./ChangesContextMenu";
 import { ChangesEmptyState } from "./ChangesEmptyState";
@@ -155,6 +156,9 @@ export function ChangesPanel({ repoPath }: { repoPath: string }) {
   // is the whole working tree (from the section-header menu).
   const [discardScope, setDiscardScope] = useState<ChangeActionScope>(null);
   const [stashScope, setStashScope] = useState<ChangeActionScope>(null);
+  // Each confirm's title/body/label is derived from its scope further down.
+  const shownDiscardScope = useRetained(discardScope);
+  const shownStashScope = useRetained(stashScope);
   // Multi-selection for bulk stash/discard, keyed like the rendered rows
   // ("staged:path" / "unstaged:path"). `selectedFile` stays the active row
   // whose diff is shown; `anchorKey` is the pivot for shift-range selection.
@@ -701,16 +705,16 @@ export function ChangesPanel({ repoPath }: { repoPath: string }) {
   // Confirm-dialog copy, derived from each action's scope (a single file, a
   // multi-selection, or the whole tree).
   const discardFiles =
-    discardScope?.kind === "files" ? discardScope.entries : [];
+    shownDiscardScope?.kind === "files" ? shownDiscardScope.entries : [];
   const discardOne = discardFiles.length === 1 ? discardFiles[0] : null;
   const discardTitle =
-    discardScope?.kind === "all"
+    shownDiscardScope?.kind === "all"
       ? "Discard all changes?"
       : discardOne
         ? "Discard changes?"
         : `Discard ${discardFiles.length} changes?`;
   const discardBody =
-    discardScope?.kind === "all"
+    shownDiscardScope?.kind === "all"
       ? "All uncommitted changes are discarded: tracked files reset to the last commit, untracked files move to the recycle bin."
       : discardOne
         ? discardOne.unstaged === "untracked"
@@ -718,16 +722,17 @@ export function ChangesPanel({ repoPath }: { repoPath: string }) {
           : `Unstaged changes to ${discardOne.path} will be restored to the last committed version. This cannot be undone.`
         : `Changes to ${discardFiles.length} files will be discarded — tracked files are restored and untracked files moved to the recycle bin. This cannot be undone.`;
 
-  const stashFiles = stashScope?.kind === "files" ? stashScope.entries : [];
+  const stashFiles =
+    shownStashScope?.kind === "files" ? shownStashScope.entries : [];
   const stashOne = stashFiles.length === 1 ? stashFiles[0] : null;
   const stashTitle =
-    stashScope?.kind === "all"
+    shownStashScope?.kind === "all"
       ? "Stash all changes?"
       : stashOne
         ? "Stash change?"
         : `Stash ${stashFiles.length} changes?`;
   const stashBody =
-    stashScope?.kind === "all"
+    shownStashScope?.kind === "all"
       ? 'Sets your working tree back to the last commit and saves all uncommitted changes — including untracked files — to the stash. "Pop latest stash" restores them.'
       : stashOne
         ? `${stashOne.path} is saved to the stash and removed from your working tree. "Pop latest stash" restores it.`
@@ -1045,7 +1050,9 @@ export function ChangesPanel({ repoPath }: { repoPath: string }) {
         onCancel={() => setDiscardScope(null)}
         title={discardTitle}
         body={discardBody}
-        confirmLabel={discardScope?.kind === "all" ? "Discard all" : "Discard"}
+        confirmLabel={
+          shownDiscardScope?.kind === "all" ? "Discard all" : "Discard"
+        }
         confirmVariant="destructive"
         pending={discardPaths.isPending || discardAll.isPending}
         onConfirm={confirmDiscard}
@@ -1056,7 +1063,7 @@ export function ChangesPanel({ repoPath }: { repoPath: string }) {
         onCancel={() => setStashScope(null)}
         title={stashTitle}
         body={stashBody}
-        confirmLabel={stashScope?.kind === "all" ? "Stash all" : "Stash"}
+        confirmLabel={shownStashScope?.kind === "all" ? "Stash all" : "Stash"}
         pending={stashPaths.isPending || stashAll.isPending}
         onConfirm={confirmStash}
       />

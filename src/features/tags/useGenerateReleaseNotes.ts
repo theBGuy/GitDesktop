@@ -6,6 +6,7 @@ import {
   ghReleaseGenerateNotes,
   gitCompareBranches,
   gitRecentCommits,
+  readRepoInstructions,
 } from "@/lib/git/api";
 
 /**
@@ -87,16 +88,18 @@ export function useGenerateReleaseNotes(repoPath: string) {
     }) => {
       const buffer = await run(
         async (settings) => {
-          const { changelog, subjects } = await gatherReleaseSource(
-            repoPath,
-            opts,
-          );
+          const [source, repoInstructions] = await Promise.all([
+            gatherReleaseSource(repoPath, opts),
+            readRepoInstructions(repoPath),
+          ]);
+          const { changelog, subjects } = source;
 
           return buildReleaseNotesPrompt({
             repoName: opts.repoName,
             version: opts.tag,
             commits: subjects,
             changelog,
+            repoInstructions,
             globalInstructions: settings.globalInstructions,
           });
         },

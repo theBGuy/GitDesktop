@@ -126,6 +126,7 @@ export function keepPreviousDataForKeyAxes(
 export const repoKeys = {
   all: (repo: string) => ["repo", repo] as const,
   status: (repo: string) => ["repo", repo, "status"] as const,
+  opState: (repo: string) => ["repo", repo, "op-state"] as const,
   branches: (repo: string) => ["repo", repo, "branches"] as const,
   diff: (repo: string, file: string, staged: boolean) =>
     ["repo", repo, "diff", file, staged] as const,
@@ -2654,13 +2655,16 @@ export function useAccountsHealth() {
 
 /** Refresh everything a successful reconnect can change: the accounts-health list,
  *  every repo's forge-status (a dead session flips a repo back to ready) and
- *  forge-session-health, plus the gh-accounts list (which account is active). Call
- *  from a reconnect's `finished: ok` handler. */
+ *  forge-session-health, the gh-accounts list (which account is active), and the
+ *  gh token scopes (a reconnect can grant new ones). Call from a reconnect's
+ *  `finished: ok` handler. */
 export function useInvalidateAfterReconnect() {
   const queryClient = useQueryClient();
   return useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ["accounts-health"] });
     queryClient.invalidateQueries({ queryKey: ["gh-accounts"] });
+    // Partial key: covers every host variant of useGhScopes' key.
+    queryClient.invalidateQueries({ queryKey: ["gh", "token-scopes"] });
     queryClient.invalidateQueries({
       predicate: (q) =>
         q.queryKey[0] === "repo" &&
@@ -3114,7 +3118,7 @@ export function useRemoveRemote(repo: string) {
 
 export function useOpState(repo: string) {
   return useQuery({
-    queryKey: ["repo", repo, "op-state"] as const,
+    queryKey: repoKeys.opState(repo),
     queryFn: () => api.gitOpState(repo),
   });
 }

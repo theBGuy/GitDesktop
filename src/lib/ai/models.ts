@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { getSecret } from "@/lib/git/api";
 import { guardedFetch } from "./guarded-fetch";
+import { providerErrorMessage } from "./provider-error";
 import {
   GOOGLE_AI_STUDIO_BASE_URL,
   MODEL_SUGGESTIONS,
@@ -29,6 +30,16 @@ export interface AvailableModels {
   models: string[];
   /** false when these are static fallback suggestions, not a provider list. */
   live: boolean;
+  /** The provider's own explanation, set only for `cause: "failed"` — the other
+   *  fallback routes have nothing provider-specific to say. Unbounded provider
+   *  prose: clamp it wherever it renders. */
+  reason?: string;
+  /** Which fallback route produced these suggestions. The four are not
+   *  interchangeable to a user: no key saved yet, no base URL configured, the
+   *  request failed, or the provider listed nothing. A CLI provider has no live
+   *  catalog at all and lands on `empty`, so any consumer branching on `cause`
+   *  must handle the CLI case ahead of it. */
+  cause?: "no-key" | "no-base" | "failed" | "empty";
 }
 
 /** OpenAI's /v1/models mixes in embeddings, audio, images… keep chat models. */
@@ -52,10 +63,20 @@ function googleChatModels(data: { id: string }[]): string[] {
     .sort();
 }
 
+/** Returned instead of a list when a key-requiring provider has no saved key: no
+ *  request was made, so the UI must not blame a failed one. A local sentinel rather
+ *  than client.ts's MissingApiKeyError — importing that module would pull its eager
+ *  `ai` SDK core into every graph this hook renders in. */
+const MISSING_KEY = Symbol("missing-key");
+
+/** The twin of {@link MISSING_KEY} for an openai-compatible provider with a key but
+ *  no base URL: also a no-request state, but the user has a different thing to fix. */
+const MISSING_BASE_URL = Symbol("missing-base-url");
+
 async function fetchProviderModels(
   settings: AiSettings,
   allowedHosts?: readonly string[],
-): Promise<string[]> {
+): Promise<string[] | typeof MISSING_KEY | typeof MISSING_BASE_URL> {
   // The live model list hits the same hosts as inference (incl. a custom Ollama /
   // OpenAI-compatible base URL), so it goes through the same host allowlist — the
   // unsaved draft list (`allowedHosts`) when called from Settings, else the saved
@@ -64,14 +85,22 @@ async function fetchProviderModels(
   const fetchJson = async (url: string, headers?: Record<string, string>) => {
     const res = await aiFetch(url, { headers });
     if (!res.ok) {
-      throw new Error(`${url} returned ${res.status}`);
+      // The body carries the provider's own explanation (Google's rejected-key 400
+      // is array-wrapped under `error.message`). `responseBody` is the field the AI
+      // SDK sets, so providerErrorMessage reads this throw and a failed inference
+      // call alike.
+      const body = await res.text().catch(() => "");
+      throw Object.assign(new Error(`${url} returned ${res.status}`), {
+        responseBody: body,
+        status: res.status,
+      });
     }
     return res.json();
   };
   switch (settings.provider) {
     case "openai": {
       const key = await getSecret("openai");
-      if (!key) return [];
+      if (!key) return MISSING_KEY;
       const json = await fetchJson("https://api.openai.com/v1/models", {
         Authorization: `Bearer ${key}`,
       });
@@ -82,7 +111,7 @@ async function fetchProviderModels(
     }
     case "anthropic": {
       const key = await getSecret("anthropic");
-      if (!key) return [];
+      if (!key) return MISSING_KEY;
       const json = await fetchJson(
         "https://api.anthropic.com/v1/models?limit=100",
         {
@@ -94,7 +123,7 @@ async function fetchProviderModels(
     }
     case "google": {
       const key = await getSecret("google");
-      if (!key) return [];
+      if (!key) return MISSING_KEY;
       const json = await fetchJson(`${GOOGLE_AI_STUDIO_BASE_URL}/models`, {
         Authorization: `Bearer ${key}`,
       });
@@ -103,7 +132,9 @@ async function fetchProviderModels(
     case "openai-compatible": {
       const key = await getSecret("openai-compatible");
       const base = settings.openaiCompatibleBaseUrl.replace(/\/$/, "");
-      if (!key || !base) return [];
+      // Key first: with neither saved, saving a key is the step that comes first.
+      if (!key) return MISSING_KEY;
+      if (!base) return MISSING_BASE_URL;
       // OpenAI-compatible catalog endpoint on the configured base URL.
       const json = await fetchJson(`${base}/models`, {
         Authorization: `Bearer ${key}`,
@@ -129,7 +160,7 @@ async function fetchProviderModels(
     }
     case "ollama-cloud": {
       const key = await getSecret("ollama-cloud");
-      if (!key) return [];
+      if (!key) return MISSING_KEY;
       // OpenAI-compatible catalog endpoint on the cloud host.
       const json = await fetchJson(`${OLLAMA_CLOUD_HOST}/v1/models`, {
         Authorization: `Bearer ${key}`,
@@ -167,14 +198,37 @@ export function useAvailableModels(
     ] as const,
     queryFn: async (): Promise<AvailableModels> => {
       try {
-        const models = await fetchProviderModels(settings, allowedHosts);
-        if (models.length > 0) {
-          return { models, live: true };
+        const result = await fetchProviderModels(settings, allowedHosts);
+        if (result === MISSING_KEY) {
+          return {
+            models: fallbackModels(settings),
+            live: false,
+            cause: "no-key",
+          };
         }
-      } catch {
-        // fall through to suggestions
+        if (result === MISSING_BASE_URL) {
+          return {
+            models: fallbackModels(settings),
+            live: false,
+            cause: "no-base",
+          };
+        }
+        if (result.length > 0) {
+          return { models: result, live: true };
+        }
+        return {
+          models: fallbackModels(settings),
+          live: false,
+          cause: "empty",
+        };
+      } catch (e) {
+        return {
+          models: fallbackModels(settings),
+          live: false,
+          reason: providerErrorMessage(e),
+          cause: "failed",
+        };
       }
-      return { models: fallbackModels(settings), live: false };
     },
     enabled: opts?.enabled ?? true,
     staleTime: 5 * 60 * 1000,

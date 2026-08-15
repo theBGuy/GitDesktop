@@ -12,6 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { INTERPRETERS } from "@/lib/scripts/types";
 import { useTaskRunStore } from "@/lib/stores/taskRun";
+import { useRetained } from "@/lib/use-retained";
 
 const INTERPRETER_LABELS: Record<string, string> = Object.fromEntries(
   INTERPRETERS.map((i) => [i.id, i.label]),
@@ -46,12 +47,8 @@ export function TaskRunConfirm() {
     setArgs(pending.task.args);
   }, [pending]);
 
-  // The dialog stays mounted through Base UI's ~100ms exit fade, by which time
-  // `pending` is already null — its contents render from this retained value or
-  // they blank mid-fade ("Run “undefined”?"). The open gate, the seeding effect
-  // above and the store dispatches stay live, so a mid-fade click is a no-op.
-  const [shownPending, setShownPending] = useState(pending);
-  if (pending && pending !== shownPending) setShownPending(pending);
+  // The seeding effect above stays on live `pending`.
+  const shownPending = useRetained(pending);
 
   const replacing = shownPending?.reason === "replace";
   const task = shownPending?.task ?? null;

@@ -38,6 +38,12 @@ const ROLES: { value: RepoRole; label: string }[] = [
   { value: "admin", label: "Admin" },
 ];
 
+/** Trigger labels for the role selects — without them Base UI shows the raw
+ *  role ("maintain"). Covers every role, including ones a narrowed picker omits. */
+const ROLE_ITEMS: Record<string, string> = Object.fromEntries(
+  ROLES.map((r) => [r.value, r.label]),
+);
+
 function validUsername(u: string): boolean {
   return /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(u);
 }
@@ -112,6 +118,7 @@ export function CollaboratorsSection({
             }}
           />
           <Select
+            items={ROLE_ITEMS}
             value={role}
             onValueChange={(v) => v && setRole(v as RepoRole)}
           >
@@ -349,6 +356,7 @@ function PersonRow({
       ) : (
         <>
           <Select
+            items={ROLE_ITEMS}
             value={roleValue}
             disabled={roleDisabled}
             onValueChange={(v) => v && onRole(v as RepoRole)}

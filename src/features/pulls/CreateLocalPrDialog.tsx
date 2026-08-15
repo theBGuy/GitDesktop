@@ -34,6 +34,7 @@ import { deleteReviewNote } from "@/lib/review-notes/store";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
+import { useRetained } from "@/lib/use-retained";
 import { LinkedIssuesField } from "./LinkedIssuesField";
 import { ReviewerNotesField } from "./ReviewerNotesField";
 import { useBranchPickerOptions } from "./useBranchPickerOptions";
@@ -76,14 +77,19 @@ export function CreateLocalPrDialog({
   const queryClient = useQueryClient();
 
   const currentName = status.data?.branch?.name ?? null;
+  // Retained on `open`, not on the values: an unseeded next open must resync to
+  // undefined (before the seed effect runs) instead of leaving the previous
+  // open's archived branch listed and selectable in both pickers.
+  const shownDefaultHead = useRetained(defaultHead, open);
+  const shownDefaultBase = useRetained(defaultBase, open);
   // Branch options with per-branch worktree chips; drops the app-internal
   // `gd/session/*` branches (a local PR must never target one) and archived
   // branches, matching BranchSwitcher. `keep` retains the seeded defaults even
   // if archived, so the head/base defaults stay selectable.
   const { names, items, annotations } = useBranchPickerOptions(repoPath, open, [
     currentName,
-    defaultHead,
-    defaultBase,
+    shownDefaultHead,
+    shownDefaultBase,
     defaultBranch.data,
   ]);
 

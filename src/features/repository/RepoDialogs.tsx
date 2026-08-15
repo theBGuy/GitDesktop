@@ -18,6 +18,7 @@ import { type RecentRepo, repoDisplayName } from "@/lib/settings/api";
 import { useRemoveRecentRepo, useSetRepoAlias } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
+import { useRetained } from "@/lib/use-retained";
 
 /** OS-accurate name for the system trash: "Recycle Bin" on Windows, else "Trash". */
 const trashName = isWindows ? "Recycle Bin" : "Trash";
@@ -114,7 +115,8 @@ export function RemoveRepoDialog({
   const openRepo = useUiStore((s) => s.openRepo);
   const [moveToTrash, setMoveToTrash] = useState(false);
   const [busy, setBusy] = useState(false);
-  const display = repo ? repoDisplayName(repo) : "";
+  const shownRepo = useRetained(repo);
+  const display = shownRepo ? repoDisplayName(shownRepo) : "";
 
   async function confirm() {
     if (!repo) return;
@@ -168,8 +170,8 @@ export function RemoveRepoDialog({
           <DialogTitle>Remove {display}?</DialogTitle>
           <DialogDescription>
             Removes the repository from GitDesktop. The folder at{" "}
-            <span className="font-mono">{repo?.path}</span> is kept unless you
-            also move it to the {trashName}.
+            <span className="font-mono">{shownRepo?.path}</span> is kept unless
+            you also move it to the {trashName}.
           </DialogDescription>
         </DialogHeader>
         <label className="flex cursor-pointer items-center gap-2 text-xs">
