@@ -122,8 +122,9 @@ every registered command needs a caller, every `invoke()` a registration.
 Each check carries an allowlist, and it ratchets one way. Adding an entry is a
 reviewed change like any other: it needs an inline rationale naming what makes
 that site safe, and it isn't the way to quiet a fresh violation. The ratchet is
-enforced, not just documented — an entry whose site is gone fails the gate as a
-stale allowlist entry, so the PR that removes the site removes its entry too.
+enforced, not just documented — an entry that no longer suppresses anything
+(its site gone, or its command back in live use) fails the gate as a stale
+allowlist entry, so the PR that removes the site removes its entry too.
 
 `knip` and `jscpd` run in the same workflow's `advisory` job — non-blocking on
 purpose. The job publishes unused-export and duplicate-code reports to the run

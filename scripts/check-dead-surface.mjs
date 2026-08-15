@@ -113,17 +113,21 @@ const difference = (a, b) => [...a].filter((name) => !b.has(name)).sort();
 const list = (names) => names.map((name) => `  ${name}`).join("\n");
 
 const STALE_FIX =
-  "stale allowlist entry — this command is no longer registered; remove the " +
-  "entry (an exception left behind pre-authorizes whatever is registered " +
-  "under that name next)";
+  "stale allowlist entry — it suppresses nothing: the command is no longer " +
+  "registered, or it has a live caller in src/ and so never reaches the " +
+  "dead-surface list; remove the entry (an exception left behind " +
+  "pre-authorizes whatever takes that name next)";
 
-/** Allowlist entries naming a command the handler list no longer registers.
- *  The suppression they bought is gone, so the entry is itself a finding — a
- *  ratchet that can only loosen is not a ratchet. An entry whose command IS
- *  registered but uninvoked is doing exactly its job and stays: the dead-surface
- *  hit it suppresses is the reason it exists. */
-export function staleAllowlistEntries(allowlist, registered) {
-  return allowlist.filter((name) => !registered.has(name)).sort();
+/** Allowlist entries that suppress nothing, in either of its two shapes: the
+ *  command is no longer registered, or it IS invoked from src/ and so never
+ *  reaches the `dead` filter the entry exists to quiet. Both leave a standing
+ *  exception with nothing behind it — and a ratchet that can only loosen is not
+ *  a ratchet. Registered-but-uninvoked is the one live shape: that entry is
+ *  doing exactly its job and stays. */
+export function staleAllowlistEntries(allowlist, registered, invoked) {
+  return allowlist
+    .filter((name) => !registered.has(name) || invoked.has(name))
+    .sort();
 }
 
 function main() {
@@ -135,7 +139,7 @@ function main() {
     (name) => !allowed.has(name),
   );
   const missing = difference(invoked, registered);
-  const stale = staleAllowlistEntries(ALLOWLIST, registered);
+  const stale = staleAllowlistEntries(ALLOWLIST, registered, invoked);
 
   const handlerPath = relative(root, LIB_RS).split(sep).join("/");
   process.stdout.write(

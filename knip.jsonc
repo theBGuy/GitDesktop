@@ -1,5 +1,5 @@
 {
-  "$schema": "https://unpkg.com/knip@6.32.1/schema.json",
+  "$schema": "https://unpkg.com/knip@6/schema.json",
   // Advisory: surfaces dead exports and unused dependencies at PR time. Scoped
   // to the root package only — pnpm-workspace.yaml also declares `site`, which
   // has its own toolchain. Naming the workspace in `workspaces` does NOT narrow

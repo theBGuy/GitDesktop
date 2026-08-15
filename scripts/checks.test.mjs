@@ -371,17 +371,23 @@ test("a commented-out invoke does not read as a live call", () => {
   ]);
 });
 
-test("an allowlist entry naming an unregistered command is stale", () => {
-  const registered = new Set(["git_status", "git_commit"]);
-  // The two directions that keep this a ratchet: a registered-but-uninvoked
-  // command is what an entry is FOR, so it stays; one the handler list no longer
-  // registers has nothing left to suppress.
+test("an allowlist entry that suppresses nothing is stale, in both shapes", () => {
+  const registered = new Set(["git_status", "git_commit", "git_menu_only"]);
+  const invoked = new Set(["git_status"]);
+  // Only registered-but-uninvoked (`git_menu_only`) is what an entry is FOR, so
+  // it stays. The other two shapes both suppress nothing: a command the handler
+  // list no longer registers, and one with a live caller — which never reaches
+  // the `dead` filter, so its entry quiets a hit that cannot happen.
   assert.deepEqual(
-    staleCommandEntries(["git_commit", "git_retired_command"], registered),
-    ["git_retired_command"],
+    staleCommandEntries(
+      ["git_menu_only", "git_status", "git_retired_command"],
+      registered,
+      invoked,
+    ),
+    ["git_retired_command", "git_status"],
   );
   // The empty allowlist (today's tree) is a no-op, not a failure.
-  assert.deepEqual(staleCommandEntries([], registered), []);
+  assert.deepEqual(staleCommandEntries([], registered, invoked), []);
 });
 
 test("invoke matching survives nested generics and wrapped calls", () => {
