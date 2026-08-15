@@ -25,6 +25,8 @@ interface Props {
   feed?: boolean;
   /** Breadcrumb trail below Home, for the JSON-LD BreadcrumbList. */
   breadcrumbs?: { name: string; path: string }[];
+  /** Person JSON-LD node for the page's subject — forwarded to Head. */
+  person?: { name: string; sameAs?: string[] };
   /** Highlights the matching spoke link. */
   active?: "integrations" | "ai" | "features" | "blog";
   /** Posts hide the view toggle — see the comment above the toggle markup. */
@@ -45,6 +47,7 @@ const {
   canonical,
   feed,
   breadcrumbs,
+  person,
   active,
   showViewToggle = true,
 } = Astro.props;
@@ -161,6 +164,7 @@ const toggleScript = `
       canonical={canonical}
       feed={feed}
       breadcrumbs={breadcrumbs}
+      person={person}
     />
     <script is:inline set:html={modeScript}></script>
     <script is:inline set:html={revealScript}></script>
@@ -280,6 +284,7 @@ const toggleScript = `
           <a href={`${base}blog/`} class="transition-colors hover:text-ink">Blog</a>
           <a href={repo} class="transition-colors hover:text-ink">GitHub</a>
           <a href={`${base}changelog/`} class="transition-colors hover:text-ink">Changelog</a>
+          <a href={`${base}about/`} class="transition-colors hover:text-ink">About</a>
           <a href={`${base}privacy/`} class="transition-colors hover:text-ink">Privacy</a>
           <a href={`${base}terms/`} class="transition-colors hover:text-ink">Terms</a>
         </div>

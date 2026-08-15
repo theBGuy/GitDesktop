@@ -1,0 +1,241 @@
+---
+// The E-E-A-T surface: who makes GitDesktop, why it exists, and the public
+// record behind it. Every capability claim reuses a surface that already
+// states it (brand.ts, the ai/compare pages, privacy/terms) — this page
+// mints none. The Launch Llama badge is self-hosted (public/badges/) so the
+// privacy page's no-third-party-fetch claim stays true; its anchor href is
+// the listing requirement and must stay exactly as issued.
+import SiteLayout from "../layouts/SiteLayout.astro";
+import { getPosts, postUrl } from "../lib/posts";
+
+// Resolved from the collection so renaming the essay fails the build here
+// instead of silently 404ing the "Why I built this" link (same guard as the
+// homepage's copy of this link).
+const founderEssay = (await getPosts()).find(
+  (p) => p.id === "the-whole-loop-one-window",
+);
+if (!founderEssay) {
+  throw new Error(
+    'About-page link target missing: no blog post with id "the-whole-loop-one-window".',
+  );
+}
+
+const base = import.meta.env.BASE_URL;
+const repo = "https://github.com/theBGuy/GitDesktop";
+const profile = "https://github.com/theBGuy";
+const download = `${base}download/`;
+
+const principles = [
+  {
+    term: "Local-first",
+    note: "Your code never reaches us, and the app works without any account.",
+  },
+  {
+    term: "Open source",
+    note: "Apache-2.0, developed in public on GitHub.",
+  },
+  {
+    term: "Keyboard-first",
+    note: "Built to be driven without the mouse: a command palette and rebindable shortcuts.",
+  },
+  {
+    term: "No vendor account",
+    note: "Sign in only to the forges you use: GitHub via gh, GitLab via glab, Bitbucket with an API token.",
+  },
+  {
+    term: "Optional AI",
+    note: "Your own models or keyless CLIs, keys in your OS keychain, and one switch hides every AI surface.",
+  },
+  {
+    term: "Careful with your work",
+    note: "Signed releases and auto-updates; discards are recoverable and pushes use --force-with-lease.",
+  },
+];
+
+const record = [
+  {
+    label: "Changelog",
+    href: `${base}changelog/`,
+    note: "every release's changes, the same notes the app shows when it updates",
+  },
+  {
+    label: "GitHub Releases",
+    href: `${repo}/releases`,
+    note: "the builds and their signatures",
+  },
+  {
+    label: "Privacy",
+    href: `${base}privacy/`,
+    note: "what the site and app collect, and what they never touch",
+  },
+  {
+    label: "Terms",
+    href: `${base}terms/`,
+    note: "Apache-2.0 software, provided as-is",
+  },
+];
+---
+
+<SiteLayout
+  title="About GitDesktop — who makes it and how"
+  description="Who builds GitDesktop, why it exists, and the record behind it: open source under Apache-2.0, local-first, with optional AI you can hide."
+  ogTitle="About GitDesktop"
+  breadcrumbs={[{ name: "About", path: "/about/" }]}
+  person={{ name: "theBGuy", sameAs: [profile] }}
+>
+  <!-- Hero -->
+  <section class="border-b border-line">
+    <div class="mx-auto max-w-6xl px-5 py-16 md:py-24">
+      <p data-reveal class="text-sm text-faint"><span class="text-add" aria-hidden="true">//</span> about</p>
+      <h1
+        data-reveal
+        style="transition-delay:60ms"
+        class="mt-5 max-w-[24ch] text-[clamp(2rem,5vw,3.25rem)] font-semibold tracking-tight"
+      >
+        Who makes GitDesktop, and why.
+      </h1>
+      <p
+        data-reveal
+        style="transition-delay:120ms"
+        class="mt-6 max-w-[58ch] text-base leading-relaxed text-body sm:text-lg"
+      >
+        GitDesktop is built by one person, in the open.
+      </p>
+    </div>
+  </section>
+
+  <!-- Why it exists -->
+  <section class="border-b border-line">
+    <div class="mx-auto max-w-6xl px-5 py-16 md:py-20">
+      <div data-reveal class="max-w-2xl">
+        <h2 class="text-2xl tracking-[-0.02em] sm:text-3xl">Why it exists</h2>
+        <p class="mt-6 max-w-[62ch] leading-relaxed text-body">
+          GitDesktop began with a question that kept coming back: why does
+          everything past the commit mean leaving the Git client? Creating a
+          pull request, reviewing changes, managing branches, using AI. Each
+          one meant leaving. The answer became a five-word design constraint.
+          <span class="text-ink">The whole loop, one window.</span>
+        </p>
+        <p class="mt-6 text-sm">
+          <a
+            href={postUrl(founderEssay)}
+            class="text-mint underline-offset-4 hover:underline">Why I built this →</a
+          >
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Who makes it -->
+  <section class="border-b border-line bg-surface/30">
+    <div class="mx-auto max-w-6xl px-5 py-16 md:py-20">
+      <div data-reveal class="max-w-2xl">
+        <h2 class="text-2xl tracking-[-0.02em] sm:text-3xl">Who makes it</h2>
+        <p class="mt-6 max-w-[62ch] leading-relaxed text-body">
+          I'm <span class="text-ink">theBGuy</span>. I make developer tools.
+          For the past few years I've been a founding or lead engineer at
+          early-stage startups, and along the way I've contributed to Biome,
+          the toolchain this codebase lints with.
+        </p>
+        <p class="mt-4 max-w-[62ch] leading-relaxed text-body">
+          GitDesktop (Rust, Tauri, React) is my biggest solo project, and I
+          build it with itself: every change I write is reviewed in the app
+          before it merges.
+        </p>
+        <p class="mt-6 max-w-[62ch] text-sm leading-relaxed text-muted">
+          Find me on
+          <a href={profile} class="text-mint underline-offset-4 hover:underline">GitHub</a>,
+          or email
+          <a href="mailto:thebguy.github@gmail.com" class="text-mint underline-offset-4 hover:underline">thebguy.github@gmail.com</a>.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- How it's built -->
+  <section class="border-b border-line">
+    <div class="mx-auto max-w-6xl px-5 py-16 md:py-20">
+      <h2 data-reveal class="text-2xl tracking-[-0.02em] sm:text-3xl">How it's built</h2>
+      <dl data-reveal style="transition-delay:80ms" class="mt-10 border-t border-line">
+        {
+          principles.map((p) => (
+            <div class="grid gap-x-8 gap-y-1 border-b border-line py-4 sm:grid-cols-[1fr_2.2fr]">
+              <dt class="text-ink">{p.term}</dt>
+              <dd class="text-sm leading-relaxed text-muted">{p.note}</dd>
+            </div>
+          ))
+        }
+      </dl>
+    </div>
+  </section>
+
+  <!-- The record -->
+  <section class="border-b border-line bg-surface/30">
+    <div class="mx-auto max-w-6xl px-5 py-16 md:py-20">
+      <div data-reveal class="max-w-2xl">
+        <h2 class="text-2xl tracking-[-0.02em] sm:text-3xl">The record</h2>
+        <p class="mt-6 max-w-[62ch] leading-relaxed text-body">
+          The project's paper trail is public:
+        </p>
+        <ul class="mt-6 space-y-3">
+          {
+            record.map((r) => (
+              <li class="flex items-start gap-2.5 leading-relaxed text-body">
+                <span class="mt-px select-none text-add" aria-hidden="true">+</span>
+                <span>
+                  <a href={r.href} class="text-ink underline decoration-line-2 underline-offset-4 transition-colors hover:decoration-mint">{r.label}</a><span class="text-muted"> — {r.note}.</span>
+                </span>
+              </li>
+            ))
+          }
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- Around the web -->
+  <section class="border-b border-line">
+    <div class="mx-auto max-w-6xl px-5 py-16 md:py-20">
+      <div data-reveal class="max-w-2xl">
+        <h2 class="text-2xl tracking-[-0.02em] sm:text-3xl">Where it lives</h2>
+        <p class="mt-6 max-w-[62ch] leading-relaxed text-body">
+          The <a href={repo} class="text-ink underline decoration-line-2 underline-offset-4 transition-colors hover:decoration-mint">repository</a>,
+          its issues, and its discussions live on GitHub.
+        </p>
+        <p class="mt-6">
+          <a href="https://tools.launchllama.co?utm_source=badge&utm_medium=referral" target="_blank" rel="noopener noreferrer">
+            <img
+              src={`${base}badges/launch-llama.png`}
+              alt="As seen on Launch Llama Newsletter"
+              width="200"
+              height="50"
+              loading="lazy"
+            />
+          </a>
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Close -->
+  <section class="relative overflow-hidden">
+    <div class="grid-bg pointer-events-none absolute inset-0 opacity-60"></div>
+    <div class="relative mx-auto max-w-6xl px-5 py-16 text-center md:py-20">
+      <h2 data-reveal class="text-balance text-2xl tracking-tight sm:text-3xl">
+        The rest is in the app.
+      </h2>
+      <p data-reveal style="transition-delay:80ms" class="mx-auto mt-5 max-w-[48ch] leading-relaxed text-body">
+        Free, open source, and local — built by the person who answers the
+        issues.
+      </p>
+      <div data-reveal style="transition-delay:140ms" class="mt-8 flex flex-wrap items-center justify-center gap-3">
+        <a href={download} class="rounded-lg bg-mint px-6 py-3 font-medium text-mint-ink transition-opacity hover:opacity-90">
+          Download GitDesktop
+        </a>
+        <a href={repo} class="rounded-lg border border-line-2 px-6 py-3 font-medium text-ink transition-colors hover:bg-surface">
+          View on GitHub
+        </a>
+      </div>
+    </div>
+  </section>
+</SiteLayout>

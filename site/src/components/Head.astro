@@ -29,6 +29,8 @@ interface Props {
   feed?: boolean;
   /** Trail below Home, e.g. [{ name: "Blog", path: "/blog/" }]. */
   breadcrumbs?: { name: string; path: string }[];
+  /** Adds a Person JSON-LD node naming the page's subject (the about page). */
+  person?: { name: string; sameAs?: string[] };
 }
 
 const {
@@ -45,6 +47,7 @@ const {
   canonical,
   feed = false,
   breadcrumbs,
+  person,
 } = Astro.props;
 
 const base = import.meta.env.BASE_URL;
@@ -115,6 +118,17 @@ if (breadcrumbs && breadcrumbs.length > 0) {
         item: new URL(withBase(crumb.path), site).href,
       })),
     ],
+  });
+}
+
+if (person) {
+  graph.push({
+    "@type": "Person",
+    "@id": new URL("#person", canonicalUrl).href,
+    name: person.name,
+    url: canonicalUrl,
+    mainEntityOfPage: canonicalUrl,
+    ...(person.sameAs && person.sameAs.length > 0 && { sameAs: person.sameAs }),
   });
 }
 
