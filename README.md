@@ -256,15 +256,18 @@ PR (comments and all) in one click.
   stay the single editor for the ref block.
 - **Conflicts with the base**: an in-flow strip under a PR's header when it
   won't merge cleanly (**GitHub** and **GitLab** report it themselves;
-  **Bitbucket** gets a local prediction), plus a **Conflicts** chip on open
-  GitHub/GitLab rows in the list. **Resolve conflicts** merges the base into
-  the PR's head in a **hidden, isolated worktree** (your branch and working
-  tree untouched), hands you the conflicted files in the in-app conflict
-  editor, and **Finish & push** updates the PR's head branch, **never
-  force-pushed**: a head that moved meanwhile refuses the push and keeps
-  your work. **Discard** drops the worktree and nothing else, and an
-  unfinished resolution is offered back as **Continue resolving**. Fork PRs
-  are excluded, since their head lives in another repository.
+  **Bitbucket** falls back to a local prediction, named as such). A GitHub or
+  GitLab answer that can't be read names the forge it couldn't reach, offers
+  **Retry**, and falls back to that same prediction meanwhile. Plus a
+  **Conflicts** chip on open GitHub/GitLab rows in the list. **Resolve
+  conflicts** merges the base into the PR's head in a **hidden, isolated
+  worktree** (your branch and working tree untouched), hands you the
+  conflicted files in the in-app conflict editor, and **Finish & push**
+  updates the PR's head branch, **never force-pushed**: a head that moved
+  meanwhile refuses the push and keeps your work. **Discard** drops the
+  worktree and nothing else, and an unfinished resolution is offered back as
+  **Continue resolving**. Fork PRs are excluded, since their head lives in
+  another repository.
 - **Local PR merges**: a merge **pre-shows conflicts** and lets you resolve
   them in the in-app editor, in an isolated worktree that never touches your
   working tree, then **Finish** or **Abort**.
@@ -343,13 +346,14 @@ PR (comments and all) in one click.
 - **Maintaining a fork's PR** (GitHub): a pull request that's fallen
   **behind its base** says so under its header, and **Update branch** brings
   it up to date — a merge by default, or **Update with rebase…** behind a
-  confirmation, since that rewrites the contributor's branch. A workflow run
-  GitHub is **holding for approval** — its gate on a first-time
-  contributor — carries **Approve and run** on the run itself and in the
-  PR's checks list. And publishing a local branch that already holds an open
-  fork PR's commits offers to push them to the **contributor's fork branch**
-  instead of leaving a stray copy on `origin`, wherever the PR allows edits
-  from maintainers.
+  confirmation, since that rewrites the contributor's branch. GitHub runs that
+  update as a background job, and the strip holds on it until a fresh
+  comparison shows the branch caught up. A workflow run GitHub is **holding
+  for approval** — its gate on a first-time contributor — carries **Approve
+  and run** on the run itself and in the PR's checks list. And publishing a
+  local branch that already holds an open fork PR's commits offers to push
+  them to the **contributor's fork branch** instead of leaving a stray copy
+  on `origin`, wherever the PR allows edits from maintainers.
 - **Record management**: a local PR's context menu in the list (or the
   command palette) can **Archive / Unarchive** or **Delete** it. Delete
   confirms; the branches are untouched.

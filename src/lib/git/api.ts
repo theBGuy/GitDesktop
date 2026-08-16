@@ -2451,7 +2451,8 @@ export const forgePrReopen = (
 ) => invoke<void>("forge_pr_reopen", { repoPath, number, lens });
 
 /** Merge (or `rebase`) the base branch into a PR's head — GitHub's
- *  "Update branch". Synchronous: the call resolves once GitHub has decided. */
+ *  "Update branch". Queued, not synchronous: GitHub answers 202 Accepted and runs
+ *  the update afterwards, so resolving means accepted, not that the head has moved. */
 export const ghPrUpdateBranch = (
   repoPath: string,
   number: number,

@@ -27,6 +27,7 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { displayLogin } from "@/lib/git/bot-login";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import type { PrSection } from "@/lib/pulls/pr-section";
 import {
   type AppNotification,
   clearAllNotifications,
@@ -160,7 +161,7 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
   const tasks = useReviewTasks();
   const notifs = useNotifications();
   const repoPath = useUiStore((s) => s.repoPath);
-  const openPrReview = useUiStore((s) => s.openPrReview);
+  const openPr = useUiStore((s) => s.openPr);
   const openRun = useUiStore((s) => s.openRun);
   const openAgentTab = useUiStore((s) => s.openAgentTab);
   const [focusedId, setFocusedId] = useState<string | null>(null);
@@ -181,11 +182,12 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
     markNotificationRead(n.id);
     const t = n.target;
     if (t?.type === "pr") {
-      openPrReview({
+      openPr({
         kind: t.kind,
         repoPath: n.repoPath,
         repoName: n.repoName,
         ref: t.ref,
+        section: KIND_SECTION[n.kind] ?? null,
       });
     } else if (t?.type === "run") {
       openRun({ repoPath: n.repoPath, repoName: n.repoName, runId: t.runId });
@@ -588,6 +590,27 @@ const KIND_GLYPH: Record<string, typeof CheckCircleIcon> = {
   "agent-done": SparkleIcon,
   "research-done": MagnifyingGlassIcon,
   "plan-done": ListChecksIcon,
+};
+
+/** PR sub-tab a notification's click-through lands on, per event kind. Kinds not
+ *  listed get no override (the user's current tab stands) — deliberate for the
+ *  checks family, whose rollup renders in the PR header above the tab strip and
+ *  is therefore already on screen from every section. A `review-failed` from an
+ *  *automation* still points at Review even though the panel shows idle: those
+ *  runs use a separate `auto:<n>` key namespace, but Review is where the Run
+ *  button lives. Keyed by plain string — a hydrated row can carry a kind from an
+ *  older build. */
+const KIND_SECTION: Record<string, PrSection> = {
+  "review-ready": "review",
+  "review-failed": "review",
+  "pr-opened": "conversation",
+  "pr-merged": "conversation",
+  "pr-closed": "conversation",
+  "pr-approved": "conversation",
+  "pr-changes-requested": "conversation",
+  "pr-review": "conversation",
+  "pr-comment": "conversation",
+  "review-requested": "conversation",
 };
 
 /** Fallback glyph for kinds `KIND_GLYPH` doesn't name — the tone is then the

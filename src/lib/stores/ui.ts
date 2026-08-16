@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { CommitAuthor, RepoInfo } from "@/lib/git/types";
+import type { PrSection } from "@/lib/pulls/pr-section";
 import { startViewTransition } from "@/lib/view-transition";
 
 export type AppView = "welcome" | "repo" | "settings" | "help" | "explore";
@@ -136,7 +137,7 @@ const EMPTY_COMMIT_DRAFT: CommitDraft = {
 };
 
 /** Selections cleared when a navigation switches to a *different* repo — the
- *  same set openRepo / openPrReview reset, hoisted so the run/agent navigations
+ *  same set openRepo / openPr reset, hoisted so the run/agent navigations
  *  stay in lockstep. Staying in the same repo keeps the user's other selections. */
 const CROSS_REPO_RESET: Partial<UiState> = {
   compareBranch: null,
@@ -209,10 +210,10 @@ interface UiState {
   compareBranch: string | null;
   /** Selected PR on the Pull Requests tab. */
   selectedPr: SelectedPr | null;
-  /** PR sub-tab to land on when the Pulls view next opens a PR — set by the
-   *  activity dock's "View" so a finished review opens straight to it;
-   *  consumed and cleared by the PR detail views. */
-  pendingPrSection: "review" | null;
+  /** PR sub-tab to land on when the Pulls view next opens a PR — set from a
+   *  notification row's click-through so the event's own tab opens; null asks
+   *  for no switch. Consumed and cleared by the PR detail views. */
+  pendingPrSection: PrSection | null;
   /** Selected issue on the Issues tab. */
   selectedIssue: SelectedIssue | null;
   /** Selected discussion (by number) on the Discussions tab. */
@@ -278,17 +279,19 @@ interface UiState {
 
   openRepo: (info: RepoInfo) => void;
   closeRepo: () => void;
-  /** Open a repo (if not already open) and land on a PR's AI-review sub-tab —
-   *  used by the activity dock's "View". One atomic update so the landing
-   *  target survives openRepo's own reset. */
-  openPrReview: (target: {
+  /** Open a repo (if not already open) and select a PR — used by a notification
+   *  row's click-through. `section` is the sub-tab to land on, or null to leave
+   *  whichever tab the user is on. One atomic update so the landing target
+   *  survives openRepo's own reset. */
+  openPr: (target: {
     kind: "remote" | "local";
     repoPath: string;
     repoName: string;
     ref: string;
+    section: PrSection | null;
   }) => void;
   /** Open a repo (if not already) and land on a workflow run in the Actions tab —
-   *  used by a notification's click-through. Atomic, like openPrReview. */
+   *  used by a notification's click-through. Atomic, like openPr. */
   openRun: (target: {
     repoPath: string;
     repoName: string;
@@ -321,7 +324,7 @@ interface UiState {
   setRepoTab: (tab: RepoTab) => void;
   setCompareBranch: (branch: string | null) => void;
   selectPr: (pr: SelectedPr | null) => void;
-  setPendingPrSection: (section: "review" | null) => void;
+  setPendingPrSection: (section: PrSection | null) => void;
   selectIssue: (issue: SelectedIssue | null) => void;
   selectDiscussion: (discussion: { number: number } | null) => void;
   setPendingIssueDraft: (
@@ -474,7 +477,7 @@ export const useUiStore = create<UiState>()((set, get) => {
           ...CROSS_REPO_RESET,
         }),
       ),
-    openPrReview: (target) =>
+    openPr: (target) =>
       startViewTransition(() => {
         const switchingRepo = get().repoPath !== target.repoPath;
         set({
@@ -488,7 +491,7 @@ export const useUiStore = create<UiState>()((set, get) => {
           // The explicit PR keys come AFTER the spread so it can't null them.
           ...(switchingRepo ? CROSS_REPO_RESET : {}),
           selectedPr: { kind: target.kind, id: target.ref },
-          pendingPrSection: "review",
+          pendingPrSection: target.section,
         });
       }),
     openRun: (target) =>

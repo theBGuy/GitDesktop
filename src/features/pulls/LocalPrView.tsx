@@ -146,15 +146,16 @@ export function LocalPrView({
         : ["conversation", "commits", "files"],
     [aiEnabled],
   );
-  // The activity dock's "View" lands here via a pending hint; switch to the
-  // review sub-tab once if it's available, then clear the hint either way — an
+  // A notification's click-through lands here via a pending hint; switch to the
+  // hinted sub-tab once if it's available, then clear the hint either way — an
   // unusable hint must not survive to fire against a later PR. Guarded on this
   // being the *selected* PR so a still-mounted lagging view (deferredPr) can't
   // swallow the hint first.
   useEffect(() => {
     const isSelected = selectedPr?.kind === "local" && selectedPr.id === id;
-    if (pendingPrSection === "review" && isSelected) {
-      if (availableSections.includes("review")) setSection("review");
+    if (pendingPrSection !== null && isSelected) {
+      if (availableSections.includes(pendingPrSection))
+        setSection(pendingPrSection);
       setPendingPrSection(null);
     }
   }, [

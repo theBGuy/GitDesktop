@@ -65,7 +65,7 @@ export interface ReviewContext {
   }>;
 }
 
-/** Identifies the PR a review belongs to — also the dock's "View" target. */
+/** Identifies the PR a review belongs to — also where its notification row navigates. */
 export interface ReviewTarget {
   kind: "remote" | "local";
   repoPath: string;
@@ -101,7 +101,7 @@ export interface ReviewEntry {
   local: boolean;
   /** PR title — the activity dock's row label. */
   title: string;
-  /** Where the run came from — drives the dock's "View" navigation. */
+  /** Where the run came from — drives its notification row's click-through. */
   target: ReviewTarget;
   /** Monotonic start order — drives newest-first display and FIFO queue
    *  position exactly (a timestamp can collide within a millisecond). */

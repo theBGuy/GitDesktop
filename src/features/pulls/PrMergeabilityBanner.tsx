@@ -16,7 +16,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Spinner } from "@/components/ui/spinner";
-import type { ForgeProvider } from "@/lib/git/types";
+import { type ForgeProvider, providerLabel } from "@/lib/git/types";
 import { useAiEnabled, useReviewConfigured } from "@/lib/settings/queries";
 import { cn } from "@/lib/utils";
 
@@ -28,26 +28,34 @@ const FORK_BLOCKED_REASON =
 /** How many conflicting paths get their own row before the rest collapse to a count. */
 const MAX_FILE_ROWS = 5;
 
-/** Which line the banner shows. `predicted` is the local fallback when the forge answers
- *  but has no mergeability to give (Bitbucket) — not when the read itself failed;
- *  `unknown` is a `checking` poll that gave up. */
+/** Which line the banner shows. `predicted` is the local fallback wherever the forge has
+ *  no mergeability to give — Bitbucket by design, or a read that failed; `unknown` is a
+ *  `checking` poll that gave up, `unreachable` a read that never landed at all, and
+ *  `updating` the forge's queued update-branch job still running. */
 export type PrMergeabilityArm =
   | "conflicting"
   | "predicted"
   | "checking"
   | "unknown"
+  | "unreachable"
   | "resume"
   | "behind"
+  | "updating"
   | null;
 
 /** Words carry the meaning; the icon and tone only reinforce it. */
-const ARM_ICON: Record<Exclude<PrMergeabilityArm, null>, PhosphorIcon> = {
+const ARM_ICON: Record<
+  Exclude<PrMergeabilityArm, null>,
+  PhosphorIcon | typeof Spinner
+> = {
   conflicting: WarningIcon,
   predicted: WarningIcon,
   checking: ClockIcon,
   unknown: ClockIcon,
+  unreachable: ClockIcon,
   resume: InfoIcon,
   behind: InfoIcon,
+  updating: Spinner,
 };
 
 /** The line each arm says. */
@@ -57,6 +65,8 @@ const ARM_MESSAGE: Record<
     base: string;
     provider: ForgeProvider | null | undefined;
     behindBy: number;
+    predictedClean: boolean;
+    forgeUnreachable: boolean;
   }) => ReactNode
 > = {
   conflicting: ({ base, provider }) => (
@@ -69,9 +79,13 @@ const ARM_MESSAGE: Record<
       {provider === "github" ? " Checks won't run until they're resolved." : ""}
     </>
   ),
-  predicted: ({ base }) => (
+  // The qualifier only rides along when the forge answer never landed; where the forge
+  // simply has none to give (Bitbucket) there is nothing that failed to say.
+  predicted: ({ base, provider, forgeUnreachable }) => (
     <>
-      {"Merging into "}
+      {forgeUnreachable
+        ? `Couldn't reach ${providerLabel(provider)} to check mergeability. Merging into `
+        : "Merging into "}
       <span className="font-mono">{base}</span>
       {/* Names the staleness: the prediction runs on remote-tracking refs
           and never fetches, so it can only be as fresh as the last fetch. */}
@@ -80,6 +94,27 @@ const ARM_MESSAGE: Record<
   ),
   checking: () => "Checking mergeability…",
   unknown: () => "Couldn't determine mergeability.",
+  // The local prediction needs no network, so a clean one is a real answer even with
+  // the forge unreachable — and the only one this arm can stand behind.
+  unreachable: ({ base, provider, predictedClean }) => (
+    <>
+      {`Couldn't reach ${providerLabel(provider)} to check mergeability.`}
+      {predictedClean ? (
+        <>
+          {" No conflicts with "}
+          <span className="font-mono">{base}</span>
+          {" in your last fetch."}
+        </>
+      ) : null}
+    </>
+  ),
+  updating: ({ base, provider }) => (
+    <>
+      {`${providerLabel(provider)} is updating this branch from `}
+      <span className="font-mono">{base}</span>
+      {"…"}
+    </>
+  ),
   resume: () =>
     "An unfinished conflict resolution exists for this pull request.",
   behind: ({ base, behindBy }) => (
@@ -105,9 +140,12 @@ export function PrMergeabilityBanner({
   hasResolveWorktree,
   busy,
   conflictFiles,
+  predictedClean,
+  forgeUnreachable,
   behindBy,
   updateBlockedReason,
   updateBusy,
+  updateSubmitting,
   onResolve,
   onResolveWithAi,
   onDiscard,
@@ -125,11 +163,20 @@ export function PrMergeabilityBanner({
   busy: boolean;
   /** Predicted conflicting paths; empty when the prediction is clean or unavailable. */
   conflictFiles: string[];
+  /** The local prediction came back CLEAN — false also covers unknown and not-run, so
+   *  it is the only form the `unreachable` arm may make a claim from. */
+  predictedClean: boolean;
+  /** The forge answer never landed, as opposed to a forge that has none to give. Adds
+   *  the couldn't-reach qualifier and a Retry to the arms driven by the prediction. */
+  forgeUnreachable: boolean;
   /** Commits the base is ahead of the head — only read on the `behind` arm. */
   behindBy: number;
   /** Why updating the branch is refused, if it is; undefined = allowed. */
   updateBlockedReason: string | undefined;
   updateBusy: boolean;
+  /** The update call itself is in flight — the slice of `updateBusy` before the forge
+   *  has even accepted the job. */
+  updateSubmitting: boolean;
   onResolve: () => void;
   onResolveWithAi: () => void;
   onDiscard: () => void;
@@ -172,6 +219,22 @@ export function PrMergeabilityBanner({
   );
   const Icon = ARM_ICON[arm];
   const updateDisabled = updateBusy || updateBlockedReason !== undefined;
+  // The busy hold now spans the forge's whole queued update, so a silent disabled
+  // control would leave the user waiting on nothing they can read. Each cause gets its
+  // own words: the queued job, the call that hasn't been accepted yet, and the
+  // PR-switch window are three different waits.
+  const updateBusyReason = (() => {
+    switch (true) {
+      case arm === "updating":
+        return `${providerLabel(provider)} is still updating this branch.`;
+      case updateSubmitting:
+        return "Submitting the update…";
+      default:
+        return "Loading this pull request…";
+    }
+  })();
+  const updateDisabledReason =
+    updateBlockedReason ?? (updateBusy ? updateBusyReason : undefined);
 
   return (
     <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b px-3 py-1.5 text-xs">
@@ -181,14 +244,35 @@ export function PrMergeabilityBanner({
           conflicting ? "text-warning" : "text-muted-foreground",
         )}
       >
-        <Icon className="size-3.5 shrink-0" />
+        {/* Decorative throughout — the sentence carries the meaning, and the `updating`
+            arm's spinner would otherwise announce a bare "Loading" beside it. */}
+        <Icon aria-hidden className="size-3.5 shrink-0" />
         <span className="min-w-0">
-          {ARM_MESSAGE[arm]({ base, provider, behindBy })}
+          {ARM_MESSAGE[arm]({
+            base,
+            provider,
+            behindBy,
+            predictedClean,
+            forgeUnreachable,
+          })}
         </span>
       </span>
 
       {(conflicting || arm === "resume") && (
         <div className="flex items-center gap-1.5">
+          {/* Only where a read FAILED — a forge with no mergeability to give (Bitbucket)
+              answers without an HTTP call, so a Retry there would be a dead button.
+              First in the row: the real answer outranks acting on a prediction. */}
+          {arm === "predicted" && forgeUnreachable && (
+            <Button
+              variant="ghost"
+              size="xs"
+              disabled={retryBusy}
+              onClick={onRetry}
+            >
+              Retry
+            </Button>
+          )}
           {/* Discard rides along wherever a worktree exists, not just the resume
               arm: a paused resolve keeps the server answer "conflicting", so the
               way out has to be reachable from that arm too. */}
@@ -226,23 +310,27 @@ export function PrMergeabilityBanner({
         </div>
       )}
 
-      {arm === "behind" && (
+      {(arm === "behind" || arm === "updating") && (
         <div className="flex items-center gap-1.5">
           <DisabledReasonButton
             variant="ghost"
             size="xs"
             disabled={updateDisabled}
-            reason={updateBlockedReason}
+            reason={updateDisabledReason}
             onClick={onUpdateBranch}
           >
-            {updateBusy && <Spinner data-icon="inline-start" />}
+            {/* The `updating` arm already spins in the sentence — one progress mark
+                per strip, so the button only carries the momentary holds. */}
+            {updateBusy && arm !== "updating" && (
+              <Spinner data-icon="inline-start" />
+            )}
             Update branch
           </DisabledReasonButton>
           {/* A span-wrapped `render` would swallow the caret's disabled state — the
               vendored Button's `pointer-events-none` routes the click to the span,
               which IS the trigger — so a refused update renders no trigger at all. */}
           {updateDisabled ? (
-            <span className="inline-flex" title={updateBlockedReason}>
+            <span className="inline-flex" title={updateDisabledReason}>
               <Button
                 variant="ghost"
                 size="icon-xs"
@@ -278,7 +366,7 @@ export function PrMergeabilityBanner({
         </div>
       )}
 
-      {arm === "unknown" && (
+      {(arm === "unknown" || arm === "unreachable") && (
         <div className="flex items-center gap-1.5">
           <Button
             variant="ghost"

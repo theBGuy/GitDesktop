@@ -756,11 +756,14 @@ header says so, naming the base branch. Whenever GitDesktop can work out **which
 clash**, it lists them right under that sentence — up to five paths, then *and N more*
 (hover it for the rest). **GitHub** and **GitLab** answer that question themselves; while
 a forge is still working it out the strip reads **Checking mergeability…**, and if the
-answer never arrives, **Retry** asks again. On **GitHub** a conflicting pull request also
-runs no checks until the conflicts are resolved, and the strip says so — an empty checks
-list there means *never ran*, not *passed*. In the list, **GitHub** and **GitLab** rows
-carry a **Conflicts** chip (icon plus the word) on open pull requests, so you can spot a
-blocked one without opening it.
+answer never arrives, **Retry** asks again. When the answer can't be read at all, the
+strip names the forge it couldn't reach, offers that same **Retry**, and falls back to
+the local prediction below — so a clash visible from your last fetch is still named, and
+still resolvable. On **GitHub** a conflicting pull request also runs no checks until the
+conflicts are resolved, and the strip says so — an empty checks list there means *never
+ran*, not *passed*. In the list, **GitHub** and **GitLab** rows carry a **Conflicts**
+chip (icon plus the word) on open pull requests, so you can spot a blocked one without
+opening it.
 
 **Resolve conflicts** settles it right here. GitDesktop merges the base branch into the
 pull request's **head** branch in an **isolated worktree** — your own branch and working
@@ -790,16 +793,20 @@ too — no default shortcut, so give it one in **Settings → Keyboard**.
 
 When an open pull request merges cleanly but its base has moved on since, that same
 strip reads **This branch is N commits behind \`main\`**, and **Update branch** brings
-the head up to date on the forge — a merge of the base into it. The caret beside the
-button offers **Update with rebase…** instead, which rewrites the pull request
-branch's history and force-pushes it, so it asks you to confirm first: on a pull
-request from a fork, that branch is the contributor's. Both controls are disabled with
-the reason on hover when you don't have push access, or when a fork's author left
-GitHub's *Allow edits by maintainers* off. This reads GitHub's own comparison of the
-two branches, so it's **GitHub** only, and the line yields to anything more pressing —
-a conflict, or an unfinished resolution. **Update pull request branch** is in the
-command palette ({{kbd:command-palette}}) too — no default shortcut, so give it one in
-**Settings → Keyboard**.
+the head up to date on the forge — a merge of the base into it. GitHub runs that update
+as a background job, so the strip switches to **GitHub is updating this branch from
+\`main\`…** — controls disabled, the reason on hover — and holds there until a fresh
+comparison shows the head caught up, which is when the confirmation arrives. If GitHub
+is still working by the time GitDesktop stops watching, the line returns to the behind
+count and says as much. The caret beside the button offers **Update with rebase…**
+instead, which rewrites the pull request branch's history and force-pushes it, so it
+asks you to confirm first: on a pull request from a fork, that branch is the
+contributor's. Both controls are disabled with the reason on hover when you don't have
+push access, or when a fork's author left GitHub's *Allow edits by maintainers* off.
+This reads GitHub's own comparison of the two branches, so it's **GitHub** only, and the
+line yields to anything more pressing — a conflict, or an unfinished resolution.
+**Update pull request branch** is in the command palette ({{kbd:command-palette}}) too —
+no default shortcut, so give it one in **Settings → Keyboard**.
 
 ## Maintaining a pull request from a fork
 
@@ -1039,7 +1046,9 @@ Bitbucket exposes no fetchable job logs, so these don't peek inline the way GitH
 and GitLab pipeline jobs do. Bitbucket publishes no mergeability field either, so a
 conflict here is **predicted locally** — GitDesktop merges your fetched copies of the two
 branches in memory and labels the strip as a local prediction — and **Resolve conflicts**
-then works just as it does elsewhere (see *Conflicts with the base branch* above).
+then works just as it does elsewhere (see *Conflicts with the base branch* above). That
+same local prediction stands in anywhere the forge answer is missing, including a GitHub
+or GitLab read that couldn't get through.
 
 ## Local PRs
 
@@ -2117,9 +2126,11 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   Whatever you enable here also lands in the header's **Activity & notifications** bell — a
   persistent, click-to-open history (it survives a restart) so a finished review or a PR
   update is never a missed moment. Open it from the command palette
-  ({{kbd:command-palette}} → *Activity & notifications*), click an entry to jump to it,
-  arrow-key through the list, and clear items or mark all read.{{ai}} A review still
-  running shows a live **elapsed timer** so you can see how long it's taken. When an
+  ({{kbd:command-palette}} → *Activity & notifications*), click an entry to jump
+  to it, arrow-key through the list, and clear items or mark all read. A
+  pull-request entry opens that PR on the tab its event happened on, so a new
+  comment or approval lands on **Conversation**.{{ai}} A review still running shows
+  a live **elapsed timer** so you can see how long it's taken. When an
   **automated** review or security audit is cancelled or fails, it stays in the popover
   under a **Stopped** group with **Re-run** (re-fires exactly that run's mode) and
   **Dismiss** — a stopped row notes how long it ran before it stopped — and a failed

@@ -1086,7 +1086,9 @@ const MERGEABILITY_POLL_LIMIT = 6;
  *  re-polls on the bounded ladder above, and `polling` lets the banner tell "still
  *  climbing" from "gave up". The ladder counts per MOUNT and per PR rather than off the
  *  cache entry's cumulative `dataUpdateCount`, which would leave a PR that once hit the
- *  ceiling unable to poll again all session; `retry` restarts it by hand. */
+ *  ceiling unable to poll again all session; `retry` restarts it by hand. `isError`
+ *  with no `data` is the read that never landed at all — unreachable rather than
+ *  undecided, which the banner answers with the local prediction instead. */
 export function usePrMergeability(
   repo: string,
   number: number | null,
@@ -1151,36 +1153,126 @@ export function usePrMergeability(
     isFetching: query.isFetching,
     /** Still climbing the ladder, so "checking" is an honest thing to show. */
     polling: checking && pollsUsed < MERGEABILITY_POLL_LIMIT,
+    /** The last read failed. Only meaningful paired with `data`: without one the forge
+     *  was never reached for this PR; with one, a settled answer survives the failure. */
+    isError: query.isError,
+    error: query.error,
     /** Restart the ladder and read again — the gave-up banner's Retry. */
     retry,
   };
 }
 
-/** The key `usePrBaseDivergence` reads. Update-branch relies on the repo-wide
- *  prefix invalidation, which covers this key; nothing invalidates it
- *  individually today. */
+/** The divergence key's repo+PR prefix, deliberately lens-free so one invalidation
+ *  covers both lenses. A SIBLING of the PR subtree rather than a child, so
+ *  `["repo", repo, "pr", …]` does not prefix-cover it — update-branch has to name it. */
+export const prBaseDivergencePrefix = (repo: string, number: number) =>
+  ["repo", repo, "pr-base-divergence", number] as const;
+
+/** The full key `usePrBaseDivergence` reads — the prefix plus its lens axis. */
 const prBaseDivergenceKey = (
   repo: string,
   number: number,
   lens: RemoteLens | undefined,
-) => ["repo", repo, "pr-base-divergence", number, lens ?? "origin"] as const;
+) => [...prBaseDivergencePrefix(repo, number), lens ?? "origin"] as const;
+
+/** How many reads the post-update ladder gets before it concedes. Each rung costs TWO
+ *  gh calls (the PR view, then the compare), so the budget is tighter per second than
+ *  the mergeability ladder's; ~16s covers the usual update job without leaving a
+ *  spinner up forever on one that never lands. */
+const DIVERGENCE_UPDATE_POLL_LIMIT = 8;
 
 /** How far a PR's head is ahead of / behind its base — the "Update branch"
  *  affordance's driver. `retry: false` keeps a repo without the permission (or a
- *  non-GitHub one) from a retry storm; consumers treat an error as "unknown". */
+ *  non-GitHub one) from a retry storm; consumers treat an error as "unknown".
+ *  GitHub runs update-branch as a queued job, so `awaitUpdate` arms a bounded poll
+ *  and `updating` stays true until a read OBSERVES the head caught up — the only
+ *  honest completion signal there is. */
 export function usePrBaseDivergence(
   repo: string,
   number: number | null,
   lens: RemoteLens | undefined,
   enabled: boolean,
 ) {
-  return useQuery({
+  // Same ref/state split as the mergeability ladder: `refetchInterval` runs outside
+  // render, and a render-time read of mutable state goes stale once the React Compiler
+  // memoizes it. The mirror carries the IDENTITY it was armed for rather than a bare
+  // boolean, so a PR or lens change retires it in the same render — an effect-cleared
+  // flag paints the old PR's line onto the new one for a frame first.
+  const awaiting = useRef(false);
+  const polls = useRef(0);
+  const ladderFor = useRef("");
+  const seen = useRef({ ok: 0, failed: 0 });
+  const [latch, setLatch] = useState<string | null>(null);
+  const identity = [repo, number, lens].join("|");
+  const query = useQuery({
     queryKey: prBaseDivergenceKey(repo, number ?? 0, lens),
     queryFn: () => api.ghPrBaseDivergence(repo, number ?? 0, lens ?? "origin"),
     enabled: enabled && number !== null,
     staleTime: 60_000,
     retry: false,
+    refetchInterval: (q) =>
+      awaiting.current &&
+      (q.state.data?.behindBy ?? 0) > 0 &&
+      polls.current < DIVERGENCE_UPDATE_POLL_LIMIT
+        ? 2_000
+        : false,
+    refetchIntervalInBackground: false,
   });
+
+  const behind = (query.data?.behindBy ?? 0) > 0;
+  const updatedAt = query.dataUpdatedAt;
+  const failedAt = query.errorUpdatedAt;
+  // One rung per COMPLETED read that still shows the head behind — a success or a
+  // failure alike. The query is `retry: false`, so counting failures is the only thing
+  // bounding a forge that has started refusing: the cached `behindBy` would otherwise
+  // keep the latch armed and poll forever. Timestamps guard against an unrelated
+  // re-render spending a rung; a PR or lens change is a different question entirely,
+  // so it clears the latch rather than inheriting it.
+  useEffect(() => {
+    if (ladderFor.current !== identity) {
+      ladderFor.current = identity;
+      awaiting.current = false;
+      polls.current = 0;
+      seen.current = { ok: 0, failed: 0 };
+      // The mirror already reads false against the new identity; dropping the stale
+      // string keeps a switch BACK to that PR from re-arming it.
+      setLatch(null);
+    }
+    const advanced =
+      updatedAt > seen.current.ok || failedAt > seen.current.failed;
+    seen.current = { ok: updatedAt, failed: failedAt };
+    if (advanced && awaiting.current && behind) polls.current += 1;
+    if (
+      awaiting.current &&
+      (!behind || polls.current >= DIVERGENCE_UPDATE_POLL_LIMIT)
+    ) {
+      awaiting.current = false;
+      setLatch(null);
+    }
+  }, [identity, behind, updatedAt, failedAt]);
+
+  const refetch = query.refetch;
+  const awaitUpdate = useCallback(() => {
+    // A stale closure (the view moved to another PR mid-submit) must not arm the
+    // shared refs against the new key — the mount effect keeps ladderFor current.
+    if (ladderFor.current !== identity) return;
+    awaiting.current = true;
+    polls.current = 0;
+    setLatch(identity);
+    void refetch();
+  }, [refetch, identity]);
+
+  return {
+    data: query.data,
+    isFetching: query.isFetching,
+    /** An update was asked for and the head has not been seen caught up yet. Clears on
+     *  `behindBy === 0`, on rung exhaustion, and on a PR/lens change; a query disabled
+     *  mid-poll holds the latch until it re-enables or the PR changes, so readers must
+     *  gate this on the same `enabled` they passed. */
+    updating: latch === identity,
+    /** Arm the ladder after a queued update-branch and read again now. */
+    awaitUpdate,
+  };
 }
 
 export function usePrDiff(
@@ -4398,15 +4490,29 @@ export function useMergePr(repo: string, lens: RemoteLens) {
 }
 
 /** Merge (or rebase) the base branch into a PR's head — GitHub's "Update branch".
- *  Takes the merge mutation's whole-repo invalidation: the head branch moved on the
- *  remote, so mergeability, checks, PR details and the PR list are all stale at once
- *  (the `pr-base-divergence` key sits under the same repo prefix). */
+ *  GitHub QUEUES the work and answers 202, so resolving means accepted, not done —
+ *  `usePrBaseDivergence.awaitUpdate` is what waits for the head to move. Only the
+ *  remote moved, so the invalidation is narrow: the PR subtree (details, mergeability,
+ *  diff, threads), the divergence key by name (it is a sibling, not a child), and the
+ *  rows that carry PR state. Keyed off the args like the label mutation, which
+ *  `useRepoMutation`'s static option can't do. */
 export function usePrUpdateBranch(repo: string) {
-  return useRepoMutation(
-    repo,
-    (args: { number: number; rebase: boolean; lens: RemoteLens }) =>
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { number: number; rebase: boolean; lens: RemoteLens }) =>
       api.ghPrUpdateBranch(repo, args.number, args.rebase, args.lens),
-  );
+    onSettled: (_d, _e, args) => {
+      const keys: QueryKey[] = [
+        ["repo", repo, "pr", args.lens, args.number],
+        prBaseDivergencePrefix(repo, args.number),
+        ["repo", repo, "pr-list", args.lens],
+        ["repo", repo, "prs", args.lens],
+      ];
+      return void Promise.all(
+        keys.map((queryKey) => queryClient.invalidateQueries({ queryKey })),
+      );
+    },
+  });
 }
 
 /** Approve a workflow run GitHub is holding for maintainer approval (a first-time

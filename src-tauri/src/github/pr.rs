@@ -986,9 +986,9 @@ pub async fn gh_pr_close(repo_path: String, number: u64, lens: Option<String>) -
 }
 
 /// Updates a PR's head branch with its base (`gh pr update-branch`) — merge by
-/// default, `rebase` to rebase instead. Synchronous by contract: GitHub's
-/// update-branch PUT returns the decision itself, unlike the async merge queue,
-/// so there is nothing to poll for here.
+/// default, `rebase` to rebase instead. Queued, not synchronous: the underlying PUT
+/// answers 202 Accepted and GitHub runs the update afterwards, so `Ok` means the job
+/// was accepted; a caller that needs the moved head has to poll for it.
 #[tauri::command]
 pub async fn gh_pr_update_branch(
     repo_path: String,
