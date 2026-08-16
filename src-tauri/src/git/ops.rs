@@ -6417,9 +6417,10 @@ detached
         let base_before = rev(&repo, "HEAD").await;
         git(&repo, &["switch", "-c", "feature", &stale]).await;
         commit_file(&repo, dir.path(), "f.txt", "feature\n", "feat commit").await;
-        // Off base for the update-ref arm. By SHA, and every bare-name read above
-        // happens first: once the tag lands, the test's own scaffolding could not
-        // resolve the name either (git refuses an ambiguous object name outright).
+        // Off base for the update-ref arm, by SHA and before the tag exists:
+        // `git switch -c <new> <start-point>` refuses an ambiguous start-point
+        // outright (`fatal: ambiguous object name`, exit 128), unlike the
+        // `rev-parse` read this test is about, which quietly picks the tag.
         git(&repo, &["switch", "-c", "work", &base_before]).await;
         // A tag on an OLDER commit, named exactly like the base branch.
         git(&repo, &["tag", &base, &stale]).await;
@@ -6481,9 +6482,10 @@ detached
             "the anchor under test comes from the oplog entry"
         );
 
+        // Resolve toward the incoming side, so base's new tip must carry
+        // feature's content rather than its own.
         git(&wt, &["checkout", "--theirs", "a.txt"]).await;
         git(&wt, &["add", "a.txt"]).await;
-        let resolved = rev(&wt, "HEAD").await;
 
         // Nothing touches `base` in between — the anchor must accept it.
         let done = finish_local_pr_merge(
@@ -6506,7 +6508,11 @@ detached
             base_after, done.base_tip,
             "base is at the commit the resolve worktree produced"
         );
-        assert_ne!(resolved, base_after, "the merge commit is the resolution");
+        assert_eq!(
+            nlf(git(&repo, &["show", &format!("{base_after}:a.txt")]).await),
+            "feature-side\n",
+            "base carries the resolution staged in the worktree"
+        );
         assert!(
             !std::path::Path::new(&wt).exists(),
             "the resolve worktree is torn down on success"
