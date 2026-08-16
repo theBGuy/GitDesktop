@@ -171,6 +171,7 @@ import { PendingReviewBar } from "./PendingReviewBar";
 import { PrActivityFeed, usePrThreadClaims } from "./PrActivityFeed";
 import { PrCommitDetail } from "./PrCommitDetail";
 import {
+  PR_SWITCH_LOADING_REASON,
   type PrMergeabilityArm,
   PrMergeabilityBanner,
 } from "./PrMergeabilityBanner";
@@ -846,9 +847,9 @@ export function RemotePrView({
     const awaited = awaitedUpdate.current;
     if (!awaited) return;
     awaitedUpdate.current = null;
+    if (awaited.identity !== divergenceIdentity) return;
     // Past this line the component's repoPath/number/lens ARE the awaited PR's — they
     // are what `divergenceIdentity` is built from, and the guard above just matched it.
-    if (awaited.identity !== divergenceIdentity) return;
     if (behindBy === 0) {
       // The mutation's invalidation ran at 202-accept time, against a head that had not
       // moved yet, so details/commits/files and the checks rollup still hold the
@@ -859,13 +860,19 @@ export function RemotePrView({
           queryClient.invalidateQueries({ queryKey }),
         ),
       );
+      // A long update spends the mergeability ladder against the UNKNOWN that GitHub
+      // reports throughout, so the refetch above would land on a gave-up arm. The head
+      // just moved: the question is new again, and the ladder has to start over with it.
+      mergeability.retry();
       toast.success(`Branch updated from ${awaited.base}.`);
       return;
     }
     // The ladder conceded with the head still behind: GitHub's job outlived it. Say
-    // where things stand rather than claiming either outcome, and DON'T invalidate —
-    // nothing has been observed to change, and the strip is on the mergeability read's
-    // authority here; window focus and the stale windows catch the eventual landing.
+    // where things stand rather than claiming either outcome, and DON'T invalidate or
+    // restart the mergeability ladder — nothing has been observed to change, the job is
+    // still running so six fresh rungs would just exhaust against UNKNOWN again, and the
+    // strip's own Retry is the honest affordance. Focus and the stale windows catch the
+    // eventual landing.
     toast.info(`GitHub is still updating this branch from ${awaited.base}.`);
   });
   // Runs on mount and on either dep's change, not only the transition out of updating —
@@ -1022,10 +1029,12 @@ export function RemotePrView({
       {
         // GitHub only ACCEPTED the job here, so the word goes to the poll: the strip
         // holds the updating line and `settleUpdate` speaks once a read has seen the
-        // head catch up (or the ladder concede).
+        // head catch up (or the ladder concede). Arming only follows a ladder that
+        // actually took the request — a refused one would leave the ref waiting for a
+        // poll that never runs, and fire its toast on some later visit to this PR.
         onSuccess: () => {
-          awaitedUpdate.current = { identity: divergenceIdentity, base };
-          divergence.awaitUpdate();
+          if (divergence.awaitUpdate())
+            awaitedUpdate.current = { identity: divergenceIdentity, base };
         },
         onError,
       },
@@ -1496,7 +1505,7 @@ export function RemotePrView({
   // What a control that holds through the switch says, in one wording. It ranks
   // BELOW any permission or read-error reason wherever both hold: those never
   // lift on their own and are the ones still true once the switch lands.
-  const staleReason = detailsStale ? "Loading this pull request…" : undefined;
+  const staleReason = detailsStale ? PR_SWITCH_LOADING_REASON : undefined;
   // The metadata pickers seed from the rendered PR and commit the WHOLE set on
   // close, so one opened mid-switch would write the previous PR's members under
   // the new number. Their triggers disable on a reason, so this rides that seam.

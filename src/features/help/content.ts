@@ -798,8 +798,9 @@ as a background job, so the strip switches to **GitHub is updating this branch f
 \`main\`…** — controls disabled, the reason on hover — and holds there until a fresh
 comparison shows the head caught up, which is when the confirmation arrives. If GitHub
 is still working by the time GitDesktop stops watching, a notice says so and the strip
-falls back to whatever the mergeability read is reporting by then — often still
-**Checking mergeability…**, since GitHub leaves that undecided while it works. The caret
+falls back to whatever the mergeability read is reporting by then — usually **Couldn't
+determine mergeability.** with a **Retry**, since GitHub leaves the answer undecided
+while it works and the mergeability check has stopped asking by then. The caret
 beside the button offers **Update with rebase…** instead, which rewrites the pull
 request branch's history and force-pushes it, so it asks you to confirm first: on a pull
 request from a fork, that branch is the contributor's. Both controls are disabled with

@@ -28,6 +28,10 @@ const FORK_BLOCKED_REASON =
 /** How many conflicting paths get their own row before the rest collapse to a count. */
 const MAX_FILE_ROWS = 5;
 
+/** What a control held open through the PR-switch window says. Shared with the view's
+ *  own stale-held controls so the one wording can't drift into two. */
+export const PR_SWITCH_LOADING_REASON = "Loading this pull request…";
+
 /** Which line the banner shows. `predicted` is the local fallback wherever the forge has
  *  no mergeability to give — Bitbucket by design, or a read that failed; `unknown` is a
  *  `checking` poll that gave up, `unreachable` a read that never landed at all, and
@@ -230,7 +234,7 @@ export function PrMergeabilityBanner({
       case updateSubmitting:
         return "Submitting the update…";
       default:
-        return "Loading this pull request…";
+        return PR_SWITCH_LOADING_REASON;
     }
   })();
   const updateDisabledReason =

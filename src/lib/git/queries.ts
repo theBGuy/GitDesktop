@@ -1254,11 +1254,12 @@ export function usePrBaseDivergence(
   const awaitUpdate = useCallback(() => {
     // A stale closure (the view moved to another PR mid-submit) must not arm the
     // shared refs against the new key — the mount effect keeps ladderFor current.
-    if (ladderFor.current !== identity) return;
+    if (ladderFor.current !== identity) return false;
     awaiting.current = true;
     polls.current = 0;
     setLatch(identity);
     void refetch();
+    return true;
   }, [refetch, identity]);
 
   return {
@@ -1269,7 +1270,9 @@ export function usePrBaseDivergence(
      *  mid-poll holds the latch until it re-enables or the PR changes, so readers must
      *  gate this on the same `enabled` they passed. */
     updating: latch === identity,
-    /** Arm the ladder after a queued update-branch and read again now. */
+    /** Arm the ladder after a queued update-branch and read again now. Returns false
+     *  without arming anything when the view has already moved to another PR or lens,
+     *  so the caller drops an answer that is no longer about what's on screen. */
     awaitUpdate,
   };
 }
