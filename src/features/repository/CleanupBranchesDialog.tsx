@@ -65,7 +65,7 @@ function RowBadge({
     return (
       <span
         className="text-merged"
-        title={`Merged via pull request ${prMerged}`}
+        title={`Merged via pull request ${prMerged} — matched by branch name`}
       >
         merged {prMerged}
       </span>

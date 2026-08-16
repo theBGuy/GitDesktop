@@ -75,12 +75,9 @@ fn failure_text(out: &GitOutput) -> String {
     }
 }
 
-/// Shapes a non-zero raw result the way the plain command does — stdout backfill
-/// included (see `failure_text` and `git_merge_core`) — so the no-stash path's
-/// error reaches the frontend identical to the plain command's. Without the
-/// backfill a conflict here renders as "git exited with code 1", since that arm
-/// is reached exactly when nothing was stashed, i.e. on the clean tree where a
-/// merge/pull/switch conflicts with no stash to unwind.
+/// Shapes a non-zero raw result with `failure_text`'s stdout backfill — a
+/// conflicted merge or pop leaves stderr EMPTY, which renders as "git exited with
+/// code N". Byte-matches `git_merge_core`; plain pull/switch have none yet.
 fn git_error(out: GitOutput) -> AppError {
     AppError::Git {
         code: out.code,
@@ -1177,6 +1174,8 @@ mod tests {
     /// merge reports on STDOUT and leaves stderr empty, and this arm is reached
     /// exactly when nothing was stashed — the clean tree a dirty-tree recovery
     /// leaves behind once the user commits or the changes are already away.
+    /// Merge is the only pair either parity test can compare: the plain pull and
+    /// switch cores carry no stdout backfill to match against yet.
     #[tokio::test]
     async fn a_conflict_with_nothing_stashed_carries_the_stdout_report() {
         let (dir, repo) = setup_with_feat("plain-parity-conflict").await;

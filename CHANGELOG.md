@@ -991,8 +991,8 @@ under `changelog.d/` (see its README); those are assembled here at release time 
 
 - Large diffs in TextMate-highlighted languages (Rust, TSX, Astro, Svelte, and
   other Shiki-rendered or custom-grammar languages) no longer lose their
-  VSCode-fidelity highlighting past the size budget, in every read-only diff
-  surface: commits and history, pull requests, branch compare, stashes, file
+  VSCode-fidelity highlighting past the size budget, in the read-only diff
+  surfaces: commits and history, pull requests, branch compare, stashes, file
   history, session changes, and conflict resolution. They now tokenize in a
   background thread and fill in when ready, with standard highlighting shown in
   the interim.

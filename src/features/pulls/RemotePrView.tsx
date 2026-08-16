@@ -752,7 +752,7 @@ export function RemotePrView({
       // Ordered as `detectStackOffer` refuses: the two fail-closed list guards
       // first, then the row-level fork exclusion.
       case openPrs.some((p) => p.stackUnknown === true):
-        return "Stack suggestions are paused until every open pull request's stack state loads.";
+        return "Stack suggestions are paused — GitDesktop couldn't read every open pull request's stack state.";
       case openPrs.length >= STACK_OFFER_PAGE_LIMIT:
         return "Stack suggestions are paused — too many open pull requests to scan reliably.";
       case forkChild:

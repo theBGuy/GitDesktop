@@ -443,10 +443,10 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   recent pull request, so squash- and rebase-merged branches turn up too, each badged
   **merged #123** with the pull request that took them — and those with no commits in a
   chosen window (30/60/90 days). Branches your own history calls merged, and idle ones,
-  start **pre-checked**; a pull-request match goes by branch name, so those rows start
-  unchecked for you to confirm each one. Review the list, then **archive** them (reversible)
-  or **delete** them together. The current branch, the default branch, and protected
-  branches are never included.
+  start **pre-checked**; a pull-request match goes by branch name, so it never pre-checks
+  a row on its own — it badges one for you to confirm. Review the list, then **archive**
+  them (reversible) or **delete** them together. The current branch, the default branch,
+  and protected branches are never included.
 {{ai}}- **Generate a branch name with AI** from your working-tree changes when creating
   or renaming one. Whenever the working tree can't describe the branch being named —
   it's clean, or you're renaming a branch you aren't on — it names it from that
@@ -897,8 +897,8 @@ range. From there you can:
 A **Review in progress** bar shows the pending count with **Submit review…** and
 **Discard**. Submitting opens a dialog to choose a **verdict** — **Comment**, **Approve**,
 or **Request changes**. All three always show: one that isn't usable yet stays on screen,
-disabled, and names what it's waiting on — *available once GitDesktop connects to GitHub*
-(or GitLab, or Bitbucket) — so you can see the option exists and what makes it work.
+disabled, and names what it's waiting on — *available once GitDesktop connects to GitLab*
+(or Bitbucket) — so you can see the option exists and what makes it work.
 **Request changes** requires a summary. Submit posts all your pending drafts as one batch
 review (it works with no drafts too, for a plain verdict + summary). **Submit review…** and
 **Discard pending review** are also available from the command palette
@@ -1030,8 +1030,8 @@ stack: one that navigates as a unit and **merges bottom-up as a single operation
 this repository's own pull requests can chain — a **fork** pull request never joins a
 stack — and where a repository has more open pull requests than fit one page, it won't
 guess at a chain it can't see whole. When one of those holds it back, a short note sits
-where the offer would: too many open pull requests to scan, stack state still loading, or a
-fork pull request targeting this branch. (GitLab finds stacked merge requests on its own and
+where the offer would: too many open pull requests to scan, stack state GitDesktop couldn't
+read, or a fork pull request targeting this branch. (GitLab finds stacked merge requests on its own and
 Bitbucket has no stacks, so this is GitHub-only.)
 
 A stacked pull request's **Stack** section also offers **Dissolve**, behind a confirmation.

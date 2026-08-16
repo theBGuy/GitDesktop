@@ -131,6 +131,9 @@ interface BranchPr {
   state: PrAuditState;
   /** "#123" for a remote PR, "local" for a local-only one. */
   label: string;
+  /** The branch this PR targets. A merge into anything but the default branch
+   *  can't stand in for "merged into the default branch". */
+  base: string;
   select: SelectedPr;
 }
 
@@ -355,6 +358,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       consider(pr.headRefName, {
         state,
         label: `#${pr.number}`,
+        base: pr.baseRefName,
         select: { kind: "remote", id: String(pr.number) },
       });
     }
@@ -363,6 +367,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       consider(pr.head, {
         state,
         label: "local",
+        base: pr.base,
         select: { kind: "local", id: pr.id },
       });
     }
@@ -371,15 +376,22 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
 
   // Branch name → the merged PR that carries it, for the cleanup dialog. Remote
   // PRs only: a local PR's merge is a real git merge, which divergence already
-  // sees, and it has no PR number to attribute the badge to.
+  // sees, and it has no PR number to attribute the badge to. The base must be the
+  // default branch — a PR merged into a release branch or a stack parent says
+  // nothing about the default branch, which is what that dialog is about. A null
+  // `defaultName` matches nothing, so an unresolved default badges nothing.
   const mergedPrByBranch = useMemo(() => {
     const map = new Map<string, string>();
     for (const [name, pr] of prByBranch) {
-      if (pr.state === "merged" && pr.select.kind === "remote")
+      if (
+        pr.state === "merged" &&
+        pr.select.kind === "remote" &&
+        pr.base === defaultName
+      )
         map.set(name, pr.label);
     }
     return map;
-  }, [prByBranch]);
+  }, [prByBranch, defaultName]);
 
   const openPr = (select: SelectedPr) => {
     // A remote PR here is a fork (origin) PR — force the origin lens (which also

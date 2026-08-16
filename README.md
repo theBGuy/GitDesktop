@@ -135,8 +135,9 @@ PR badge.
 - **Clean up branches** ⭐: one reviewed list that archives or deletes every
   stale branch (merged into the default branch — directly or by a recent
   pull request, so squash and rebase merges count — or with no commits in a
-  chosen window). Pull-request matches are by branch name, so those rows
-  start unchecked, badged with the PR that took them.
+  chosen window). Pull-request matches go by branch name, so they only badge
+  a row with the PR that took it; pre-checking still comes from your own
+  history — merged into the default branch, or idle past that window.
 - **Advanced merge tooling** ⭐: predicts a merge's result in memory before
   you commit (fast-forward, already up to date, clean, or exactly which
   files will conflict), with `--no-ff` and a clearly cautioned auto-resolve
