@@ -61,6 +61,7 @@ import {
 } from "@/lib/git/queries";
 import { formatBinding } from "@/lib/hotkeys/binding";
 import { useEffectiveBindings } from "@/lib/hotkeys/hotkeys";
+import type { PrSection } from "@/lib/pulls/pr-section";
 import { useLocalPrs, useUpdateLocalPr } from "@/lib/pulls/queries";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
@@ -76,7 +77,6 @@ import {
   sortTimeline,
   type TimelineEntry,
 } from "./PrTimeline";
-import type { PrSection } from "./pr-section";
 import { ResolveConflictsView } from "./ResolveConflictsView";
 import {
   useCancelOnIdentityChange,

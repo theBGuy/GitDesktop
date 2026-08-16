@@ -797,14 +797,16 @@ the head up to date on the forge — a merge of the base into it. GitHub runs th
 as a background job, so the strip switches to **GitHub is updating this branch from
 \`main\`…** — controls disabled, the reason on hover — and holds there until a fresh
 comparison shows the head caught up, which is when the confirmation arrives. If GitHub
-is still working by the time GitDesktop stops watching, the line returns to the behind
-count and says as much. The caret beside the button offers **Update with rebase…**
-instead, which rewrites the pull request branch's history and force-pushes it, so it
-asks you to confirm first: on a pull request from a fork, that branch is the
-contributor's. Both controls are disabled with the reason on hover when you don't have
-push access, or when a fork's author left GitHub's *Allow edits by maintainers* off.
-This reads GitHub's own comparison of the two branches, so it's **GitHub** only, and the
-line yields to anything more pressing — a conflict, or an unfinished resolution.
+is still working by the time GitDesktop stops watching, a notice says so and the strip
+falls back to whatever the mergeability read is reporting by then — often still
+**Checking mergeability…**, since GitHub leaves that undecided while it works. The caret
+beside the button offers **Update with rebase…** instead, which rewrites the pull
+request branch's history and force-pushes it, so it asks you to confirm first: on a pull
+request from a fork, that branch is the contributor's. Both controls are disabled with
+the reason on hover when you don't have push access, or when a fork's author left
+GitHub's *Allow edits by maintainers* off. This reads GitHub's own comparison of the two
+branches, so it's **GitHub** only, and the line yields to anything more pressing — a
+conflict, an unfinished resolution, or a mergeability answer the app couldn't read.
 **Update pull request branch** is in the command palette ({{kbd:command-palette}}) too —
 no default shortcut, so give it one in **Settings → Keyboard**.
 

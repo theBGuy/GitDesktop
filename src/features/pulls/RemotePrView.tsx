@@ -82,6 +82,7 @@ import {
   forgeFeatureReady,
   PIPELINE_IN_FLIGHT,
   prDiffOptions,
+  prUpdateBranchKeys,
   TRIAGE_ACCESS_ITEM_REASON,
   triageAccessReason,
   useAbortRemotePrResolve,
@@ -151,6 +152,7 @@ import {
 import { formatBinding } from "@/lib/hotkeys/binding";
 import { useEffectiveBindings, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useJiraLink } from "@/lib/jira/queries";
+import type { PrSection } from "@/lib/pulls/pr-section";
 import {
   useClearReviewDrafts,
   useReviewDrafts,
@@ -174,7 +176,6 @@ import {
 } from "./PrMergeabilityBanner";
 import { PrReviewPanel } from "./PrReviewPanel";
 import { PrTasksChip, PrTasksSection } from "./PrTasksSection";
-import type { PrSection } from "./pr-section";
 import {
   MergePrDialog,
   MrTimeTracking,
@@ -845,13 +846,26 @@ export function RemotePrView({
     const awaited = awaitedUpdate.current;
     if (!awaited) return;
     awaitedUpdate.current = null;
+    // Past this line the component's repoPath/number/lens ARE the awaited PR's — they
+    // are what `divergenceIdentity` is built from, and the guard above just matched it.
     if (awaited.identity !== divergenceIdentity) return;
     if (behindBy === 0) {
+      // The mutation's invalidation ran at 202-accept time, against a head that had not
+      // moved yet, so details/commits/files and the checks rollup still hold the
+      // pre-update read. Refresh them before the toast claims the update landed. The
+      // divergence key stays out: the poll just read it, and that read is what got here.
+      void Promise.all(
+        prUpdateBranchKeys(repoPath, number, lens).map((queryKey) =>
+          queryClient.invalidateQueries({ queryKey }),
+        ),
+      );
       toast.success(`Branch updated from ${awaited.base}.`);
       return;
     }
     // The ladder conceded with the head still behind: GitHub's job outlived it. Say
-    // where things stand rather than claiming either outcome.
+    // where things stand rather than claiming either outcome, and DON'T invalidate —
+    // nothing has been observed to change, and the strip is on the mergeability read's
+    // authority here; window focus and the stale windows catch the eventual landing.
     toast.info(`GitHub is still updating this branch from ${awaited.base}.`);
   });
   // Runs on mount and on either dep's change, not only the transition out of updating —
@@ -902,11 +916,12 @@ export function RemotePrView({
         return null;
     }
   })();
+  // No `updating` term needed: the arm only reads "behind" once the ladder has fallen
+  // past that case. The submitting window is its own thing — it precedes the latch.
   const canUpdateBranch =
     bannerArm === "behind" &&
     updateBlockedReason === undefined &&
-    !updateBranch.isPending &&
-    !updatingBranch;
+    !updateBranch.isPending;
 
   /** Enter the isolated-worktree resolution: a merge that pauses there on conflicts,
    *  and just pushes when there are none. `withAi` hands the conflicts the backend

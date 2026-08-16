@@ -1156,7 +1156,6 @@ export function usePrMergeability(
     /** The last read failed. Only meaningful paired with `data`: without one the forge
      *  was never reached for this PR; with one, a settled answer survives the failure. */
     isError: query.isError,
-    error: query.error,
     /** Restart the ladder and read again — the gave-up banner's Retry. */
     retry,
   };
@@ -4489,12 +4488,28 @@ export function useMergePr(repo: string, lens: RemoteLens) {
   );
 }
 
+/** What an update-branch makes stale on the PR side: the PR subtree (details and its
+ *  commits/files/checks rollup, mergeability, diff, review threads) plus the rows that
+ *  carry PR state. Exported because the set has to run TWICE — once when the forge
+ *  accepts the job, and again once the poll sees the head actually move, since the
+ *  first pass reads a head that has not shifted yet. */
+export const prUpdateBranchKeys = (
+  repo: string,
+  number: number,
+  lens: RemoteLens,
+) =>
+  [
+    ["repo", repo, "pr", lens, number],
+    ["repo", repo, "pr-list", lens],
+    ["repo", repo, "prs", lens],
+  ] as const;
+
 /** Merge (or rebase) the base branch into a PR's head — GitHub's "Update branch".
  *  GitHub QUEUES the work and answers 202, so resolving means accepted, not done —
- *  `usePrBaseDivergence.awaitUpdate` is what waits for the head to move. Only the
- *  remote moved, so the invalidation is narrow: the PR subtree (details, mergeability,
- *  diff, threads), the divergence key by name (it is a sibling, not a child), and the
- *  rows that carry PR state. Keyed off the args like the label mutation, which
+ *  `usePrBaseDivergence.awaitUpdate` is what waits for the head to move, and the caller
+ *  re-runs `prUpdateBranchKeys` once it has. Only the remote moved, so this pass is
+ *  narrow: those keys plus the divergence key by name (it is a sibling of the PR
+ *  subtree, not a child). Keyed off the args like the label mutation, which
  *  `useRepoMutation`'s static option can't do. */
 export function usePrUpdateBranch(repo: string) {
   const queryClient = useQueryClient();
@@ -4503,10 +4518,8 @@ export function usePrUpdateBranch(repo: string) {
       api.ghPrUpdateBranch(repo, args.number, args.rebase, args.lens),
     onSettled: (_d, _e, args) => {
       const keys: QueryKey[] = [
-        ["repo", repo, "pr", args.lens, args.number],
+        ...prUpdateBranchKeys(repo, args.number, args.lens),
         prBaseDivergencePrefix(repo, args.number),
-        ["repo", repo, "pr-list", args.lens],
-        ["repo", repo, "prs", args.lens],
       ];
       return void Promise.all(
         keys.map((queryKey) => queryClient.invalidateQueries({ queryKey })),
