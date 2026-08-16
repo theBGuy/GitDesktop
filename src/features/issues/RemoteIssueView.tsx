@@ -364,7 +364,11 @@ export function RemoteIssueView({
     );
   }
 
+  // Both take a comment id off the RENDERED issue, which through a switch is the
+  // previous one, so either would hide a comment on the issue the viewer just
+  // left. The menu items disable on the same wait; these arms back them up.
   function hideComment(commentId: string, classifier: MinimizeReason) {
+    if (detailsStale) return;
     minimizeComment.mutate(
       { commentId, classifier },
       { onSuccess: () => toast.success("Comment hidden"), onError },
@@ -372,6 +376,7 @@ export function RemoteIssueView({
   }
 
   function unhideComment(commentId: string) {
+    if (detailsStale) return;
     unminimizeComment.mutate(commentId, {
       onSuccess: () => toast.success("Comment shown"),
       onError,
@@ -894,7 +899,10 @@ export function RemoteIssueView({
                       ? () => unhideComment(c.id)
                       : undefined
                   }
-                  disabledReason={triageItemReason}
+                  // Hide/Unhide stay visible but disabled through the switch. The
+                  // permission reason ranks first — it's the one still true once
+                  // the selected issue is on screen.
+                  disabledReason={triageItemReason ?? staleReason}
                   reactions={
                     canReact ? reactions.data?.comments[c.id] : undefined
                   }

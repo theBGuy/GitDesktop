@@ -7,8 +7,8 @@ use crate::error::{AppError, AppResult};
 use crate::git::diff::parse_numstat_z;
 use crate::git::history::validate_hash;
 use crate::git::runner::{
-    run_git, run_git_mutating, run_git_raw, run_git_raw_input, DEFAULT_TIMEOUT, NETWORK_TIMEOUT,
-    WORKTREE_OP_TIMEOUT,
+    run_git, run_git_mutating, run_git_mutating_raw, run_git_raw, run_git_raw_input,
+    DEFAULT_TIMEOUT, NETWORK_TIMEOUT, WORKTREE_OP_TIMEOUT,
 };
 use crate::git::types::{FileDiff, RepoOpState, RewriteStep, StashEntry, TagInfo};
 use crate::state::AppState;
@@ -1737,31 +1737,13 @@ pub(crate) async fn git_merge_core(
         }
     }
     args.push(&branch);
-    // Raw under the lock rather than `run_git_mutating`, because a conflicted
-    // merge reports entirely on STDOUT and leaves stderr EMPTY (measured, git
-    // 2.51.1) — a stderr-only error degrades to "git exited with code 1", where
-    // the stdout text carries the `CONFLICT (…` line the frontend classifies on.
-    let lock = state.repo_lock(&repo_path).await;
-    let _guard = lock.lock().await;
-    let mut out = run_git_raw(Some(&repo_path), &args, DEFAULT_TIMEOUT).await?;
-    // Mirrors `run_git_mutating`'s one-shot retry for index.lock contention from
-    // other tools, which this path would otherwise lose.
-    if out.code != 0 && out.stderr.contains("index.lock") {
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        out = run_git_raw(Some(&repo_path), &args, DEFAULT_TIMEOUT).await?;
-    }
+    // Raw, because a conflicted merge reports entirely on stdout and leaves
+    // stderr empty — `failure_text` is what keeps that report in the error.
+    let out = run_git_mutating_raw(state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
     if out.code != 0 {
-        // Same rule as autostash's `failure_text`, trimming included: its
-        // no-stash arm reports THIS command's failures and a parity test compares
-        // the two byte for byte.
-        let stderr = if out.stderr.trim().is_empty() {
-            out.stdout_lossy().trim().to_string()
-        } else {
-            out.stderr.trim().to_string()
-        };
         return Err(AppError::Git {
             code: out.code,
-            stderr,
+            stderr: out.failure_text(),
         });
     }
     Ok(())
@@ -2094,14 +2076,58 @@ fn orphaned_resolve_worktrees(all_paths: &[String], keep: &[String]) -> Vec<Stri
 ///   index and working tree advance too. A bare `update-ref` would desync it
 ///   (phantom reverts). A dirty one fails cleanly and `base` stays unchanged.
 /// - checked out nowhere → a compare-and-swap `update-ref`, no working tree
-///   touched; a `base` that moved under us is refused, never overwritten.
+///   touched.
+///
+/// `expected_tip` is where `base` stood when the merge was built. Every arm is
+/// refused unless `base` is still exactly there, because all three would
+/// otherwise honor a rewind as readily as a fresh commit: `merge --ff-only`
+/// fast-forwards happily from a `reset --hard <ancestor>`, and a containment
+/// test accepts it too. `None` means the anchor could not be established (an
+/// unjournaled merge) — the containment test alone then stands, which still
+/// refuses a diverged base but cannot see a deliberate rewind.
 async fn finalize_base(
     state: &AppState,
     repo_path: &str,
     base: &str,
     new_sha: &str,
     current: &str,
+    expected_tip: Option<&str>,
 ) -> AppResult<()> {
+    let moved = || {
+        format!(
+            "{base} moved while this merge was being prepared, so advancing it would discard \
+             that change. {base} is unchanged — re-run the merge from its current tip."
+        )
+    };
+    // One read, before any arm: whatever `base` points at now has to match the
+    // tip the merge was built on.
+    let tip_now = run_git(
+        Some(repo_path),
+        &["rev-parse", "--verify", &format!("refs/heads/{base}")],
+        DEFAULT_TIMEOUT,
+    )
+    .await?
+    .stdout_lossy()
+    .trim()
+    .to_string();
+    if let Some(expected) = expected_tip {
+        if tip_now != expected {
+            return Err(AppError::Command(moved()));
+        }
+    } else {
+        // Anchor unknown: fall back to containment, which catches a base that
+        // gained commits but not one deliberately moved back.
+        let contains = run_git_raw(
+            Some(repo_path),
+            &["merge-base", "--is-ancestor", &tip_now, new_sha],
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
+        if contains.code != 0 {
+            return Err(AppError::Command(moved()));
+        }
+    }
+
     if base == current {
         // `base` is the main repo's current branch — fast-forward its working
         // tree to the merged commit. (Guaranteed a fast-forward: `new_sha` was
@@ -2154,40 +2180,12 @@ async fn finalize_base(
     }
 
     // Not checked out anywhere — move the ref directly, no working tree touched.
-    // Compare-and-swap, because `new_sha` was built from a tip read seconds (a
-    // clean merge) or a whole resolution session (a conflicted one) ago: a bare
-    // update-ref would silently drop any commit a concurrent writer landed on
-    // `base` meanwhile. The ancestor check is the readable refusal; git's own
-    // `<oldvalue>` argument closes the window between it and the write.
-    let ref_name = format!("refs/heads/{base}");
-    let old_sha = run_git(
-        Some(repo_path),
-        &["rev-parse", "--verify", &ref_name],
-        DEFAULT_TIMEOUT,
-    )
-    .await?
-    .stdout_lossy()
-    .trim()
-    .to_string();
-    let moved = || {
-        format!(
-            "{base} moved while this merge was being prepared, so advancing it would drop the \
-             commit(s) that landed there. {base} is unchanged — re-run the merge to include them."
-        )
-    };
-    let contains_old = run_git_raw(
-        Some(repo_path),
-        &["merge-base", "--is-ancestor", &old_sha, new_sha],
-        DEFAULT_TIMEOUT,
-    )
-    .await?;
-    if contains_old.code != 0 {
-        return Err(AppError::Command(moved()));
-    }
+    // git's own `<oldvalue>` argument closes the window between the check above
+    // and this write.
     run_git_mutating(
         state,
         repo_path,
-        &["update-ref", &ref_name, new_sha, &old_sha],
+        &["update-ref", &format!("refs/heads/{base}"), new_sha, &tip_now],
         DEFAULT_TIMEOUT,
     )
     .await
@@ -2372,7 +2370,10 @@ pub(crate) async fn merge_local_pr(
                 .stdout_lossy()
                 .trim()
                 .to_string();
-            if let Err(err) = finalize_base(state, repo_path, base, &new_sha, &current).await {
+            // The tip is still in scope here — no need to recover it.
+            if let Err(err) =
+                finalize_base(state, repo_path, base, &new_sha, &current, Some(&base_tip)).await
+            {
                 // base couldn't be advanced (e.g. checked out elsewhere, or the
                 // ff-only failed) — clean up the worktree and surface the cause.
                 remove_resolve_worktree(state, repo_path, &worktree_path).await;
@@ -2582,7 +2583,18 @@ pub(crate) async fn finish_local_pr_merge(
         .stdout_lossy()
         .trim()
         .to_string();
-    finalize_base(state, repo_path, base, &new_sha, &current).await?;
+    // The resolution session is unbounded, so the tip this merge was built on has
+    // to come from the journal `merge_local_pr` wrote before it started.
+    let expected_tip = crate::oplog::pre_op_tip(repo_path, &op_id).await;
+    finalize_base(
+        state,
+        repo_path,
+        base,
+        &new_sha,
+        &current,
+        expected_tip.as_deref(),
+    )
+    .await?;
     remove_resolve_worktree(state, repo_path, worktree_path).await;
     crate::oplog::finish(repo_path, &op_id, None).await;
     Ok(LocalPrMergeOutcome {
@@ -6385,10 +6397,79 @@ detached
         );
     }
 
+    /// A backward move is intent too: someone resetting `base` to an ancestor
+    /// mid-resolution means it, and every finalize arm would honor the rewind as
+    /// readily as a commit (`merge --ff-only` fast-forwards from it; containment
+    /// accepts it). Only the journaled pre-op tip can tell "we started here" from
+    /// "someone moved it back", so this drives the real `op_id`.
+    #[tokio::test]
+    async fn local_pr_finish_refuses_a_base_reset_backwards_during_resolution() {
+        let (dir, repo) = setup_repo("lpr-base-rewound").await;
+        let base = head_branch(&repo).await;
+        let root_tip = rev(&repo, "HEAD").await;
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "feature-side\n", "feat edit").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "a.txt", "base-side\n", "base edit").await;
+        git(&repo, &["switch", "-c", "work"]).await;
+
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let state = AppState::default();
+        let outcome = merge_local_pr(&state, &repo, &base, "feature", "merge it", "merge", &root)
+            .await
+            .unwrap();
+        assert_eq!(outcome.status, "conflicts");
+        let wt = outcome.worktree_path.clone().expect("worktree path set");
+        // Without a journaled id there is no anchor and this test would pass
+        // vacuously through the containment fallback.
+        assert!(
+            outcome.op_id.is_some(),
+            "the anchor under test comes from the oplog entry"
+        );
+
+        git(&wt, &["checkout", "--ours", "a.txt"]).await;
+        git(&wt, &["add", "a.txt"]).await;
+
+        // Someone deliberately rewinds `base` to the commit before the merge was
+        // started — an ancestor of what the worktree built, so containment alone
+        // would wave it through.
+        git(&repo, &["branch", "-f", &base, &root_tip]).await;
+
+        let done = finish_local_pr_merge(
+            &state,
+            &repo,
+            &base,
+            "merge",
+            "merge it",
+            &wt,
+            &outcome.worktree_id.clone().unwrap_or_default(),
+            outcome.op_id.clone(),
+        )
+        .await;
+        let Err(err) = done else {
+            panic!("expected the rewound base to be refused");
+        };
+        assert!(
+            err.to_string().contains("moved"),
+            "the refusal names the moved base: {err}"
+        );
+        assert_eq!(
+            rev(&repo, &base).await,
+            root_tip,
+            "the rewind stands — the merge did not re-advance it"
+        );
+        assert!(
+            std::path::Path::new(&wt).exists(),
+            "the resolve worktree survives so the user can retry"
+        );
+    }
+
     /// The resolve session is unbounded, so `base` can gain a commit while the
     /// user works. Advancing it anyway would drop that commit silently — the
-    /// compare-and-swap refuses instead, and the worktree survives so the
-    /// resolution isn't lost with it.
+    /// refusal keeps it, and the worktree survives so the resolution isn't lost.
+    /// Drives `op_id: None` on purpose: this is the containment fallback that
+    /// stands in for an unjournaled merge.
     #[tokio::test]
     async fn local_pr_finish_refuses_when_base_moved_and_keeps_the_worktree() {
         let (dir, repo) = setup_repo("lpr-base-moved").await;

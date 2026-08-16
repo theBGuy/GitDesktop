@@ -2077,13 +2077,14 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         isProtected={(name) => isDeletionBlocked(rulesConfig, name)}
         isInWorktree={(name) => worktreeByBranch.has(name)}
         prMergedByBranch={mergedPrByBranch}
-        // Only the closed list carries merged PRs. A failed read is an answer —
-        // an unreachable forge must not leave the dialog checking forever.
+        // Only the closed list carries merged PRs. A failed read ends the wait
+        // but is not an answer, so the dialog is told which of the two it got.
         prMergedPending={
           prsWanted &&
           !closedPrs.isError &&
           (closedPrs.isFetching || closedPrs.isPlaceholderData)
         }
+        prMergedFailed={prsWanted && closedPrs.isError}
       />
 
       <ConfirmDialog

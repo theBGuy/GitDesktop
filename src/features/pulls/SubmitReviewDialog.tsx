@@ -130,7 +130,10 @@ export function SubmitReviewDialog({
   const pending = submitReview.isPending || clearDrafts.isPending;
   // Both verdicts are gated on the same thing (`usePrCapabilities`): the host's
   // approve / request-changes wiring, which reads as unavailable until the forge
-  // connection resolves. One reason serves both.
+  // connection resolves. One reason serves both, and "connects" holds in every
+  // reachable state: GitLab and Bitbucket both implement the verdicts
+  // (forge/model.rs `for_provider`), so a false cap on them means disconnected,
+  // and GitHub never reaches the disabled arm (`canWrite ||` at the call site).
   const unavailable = `available once GitDesktop connects to ${remoteLabel}`;
 
   // Reset transient state whenever the dialog closes (for ANY reason — Cancel,

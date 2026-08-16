@@ -1605,24 +1605,26 @@ export function RemotePrView({
     );
   }
   if (details.isError || !pr) {
-    // A read that never landed says so in the forge's own name — the raw summary
-    // alone reads like a missing PR when the real answer is "you're offline". The
-    // provider stays unnamed when its own probe hasn't answered, rather than guessed.
-    const unreachable = provider
-      ? `Couldn't reach ${remoteLabel} to load this ${prNoun}.`
-      : `Couldn't reach the remote to load this ${prNoun}.`;
+    // Offline, deleted, access lost — the class isn't knowable here, so the headline
+    // claims only what is: which host the read was aimed at. Naming one class would
+    // demote the true reason to the summary beneath. The host goes unnamed when its
+    // own probe hasn't answered, rather than guessed.
+    const loadFailed = provider
+      ? `Couldn't load this ${prNoun} from ${remoteLabel}.`
+      : `Couldn't load this ${prNoun} from the remote.`;
     const errorSummary = details.error
       ? presentError(details.error).summary
       : null;
     return (
       <DiffPlaceholder
         message={
-          details.isError ? unreachable : "Could not load this pull request"
+          details.isError ? loadFailed : `Could not load this ${prNoun}`
         }
         action={
           details.isError ? (
             <div className="flex flex-col items-center gap-2">
-              {/* The underlying summary keeps the detail the headline generalizes. */}
+              {/* The headline can't name the failure class, so the real reason —
+                  offline, deleted, no access — lives here. */}
               {errorSummary ? (
                 <p className="max-w-md text-center text-xs">{errorSummary}</p>
               ) : null}
@@ -1857,7 +1859,11 @@ export function RemotePrView({
     toggleReactionMutation.mutate({ subjectId, content, active }, { onError });
   }
 
+  // Both take a comment id off the RENDERED pr, which through a switch is the
+  // previous one, so either would hide a comment on the PR the viewer just left.
+  // The menu items disable on the same wait; these arms back them up.
   function hideComment(commentId: string, classifier: MinimizeReason) {
+    if (detailsStale) return;
     minimizeComment.mutate(
       { commentId, classifier },
       { onSuccess: () => toast.success("Comment hidden"), onError },
@@ -1865,6 +1871,7 @@ export function RemotePrView({
   }
 
   function unhideComment(commentId: string) {
+    if (detailsStale) return;
     unminimizeComment.mutate(commentId, {
       onSuccess: () => toast.success("Comment shown"),
       onError,
@@ -2405,7 +2412,10 @@ export function RemotePrView({
                 <PrTasksSection
                   repoPath={repoPath}
                   number={number}
-                  editable={pr.state === "OPEN"}
+                  // The open-state verb comes off the rendered pr while the task
+                  // writes address `number`, so a switch would offer Add against a
+                  // pull request whose own state hasn't arrived yet.
+                  editable={pr.state === "OPEN" && !detailsStale}
                 />
               )}
               <PrActivityFeed
@@ -2416,7 +2426,10 @@ export function RemotePrView({
                 providerKey={providerKey}
                 suggestionApply={suggestionApply}
                 fileDiffLookup={fileDiffLookup}
-                disabledReason={triageItemReason}
+                // Hide/Unhide stay visible but disabled through the switch. The
+                // permission reason ranks first — it's the one still true once the
+                // selected pull request is on screen.
+                disabledReason={triageItemReason ?? staleReason}
                 revealThreadId={revealThreadId}
                 setRevealThreadId={setRevealThreadId}
                 setSection={setSection}

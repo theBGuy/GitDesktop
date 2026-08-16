@@ -1,4 +1,3 @@
 - A small change deep in a very large file now shows its diff immediately.
-  Diffs whose line numbers run past the highlighter's ceiling skip the grammar
-  download and the background tokenizing pass entirely — work whose result the
-  renderer would discard — instead of leaving the pane blank while it finished.
+  Diffs past the highlighter's line ceiling render as plain text either way, and
+  the pane no longer sits blank waiting on highlighting it wasn't going to use.

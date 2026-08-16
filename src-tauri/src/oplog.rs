@@ -428,6 +428,27 @@ pub async fn finish(repo: &str, id: &Option<String>, error: Option<String>) {
     }
 }
 
+/// The `preOpTip` a [`begin`] recorded for `id` — the ref position the operation
+/// was built on, for a later step that must refuse to move a ref that has since
+/// been changed by anyone else. `None` whenever it can't be established
+/// (unjournaled op, pruned entry, unreadable store), so callers must treat the
+/// absence as "unknown", never as "unchanged".
+pub(crate) async fn pre_op_tip(repo: &str, id: &Option<String>) -> Option<String> {
+    let id = id.as_ref()?;
+    let path = store_path().ok()?;
+    let entries = {
+        let _guard = oplog_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let store = read_store(&path).ok()?;
+        repo_entries(&store, repo)
+    };
+    entries
+        .iter()
+        .find(|e| e.get("id").and_then(Value::as_str) == Some(id.as_str()))
+        .and_then(|e| e.get("preOpTip"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
 /// Return `repo`'s journal entries newest-first by `startedAt`. Pure store read,
 /// no git access. Missing repo key → `[]`.
 #[tauri::command]

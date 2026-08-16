@@ -164,26 +164,37 @@ const OP_ADVICE = /\bgit (rebase|merge|cherry-pick|revert) --continue\b/;
  *  (autostash.rs); keep the two in step. */
 const MERGE_VERDICT = /^Automatic merge failed/;
 
-/** The paused operation, capitalized for the summary. Read only from git's
- *  advice and verdict lines — never the whole blob — so a cherry-pick of a commit
- *  titled "rebase the parser" still reads "Cherry-pick". The split mirrors the
- *  markers' `m` flag, which ends a line at a bare CR too — git has been observed
- *  joining its `Rebasing (n/m)` progress to the diagnostic after it with one. */
-function conflictOp(text: string): string {
+/** The paused operation and the action that finishes it. The name is read only
+ *  from git's advice and verdict lines — never the whole blob — so a cherry-pick
+ *  of a commit titled "rebase the parser" still reads "Cherry-pick". The split
+ *  mirrors the markers' `m` flag, which ends a line at a bare CR too — git has
+ *  been observed joining its `Rebasing (n/m)` progress to the diagnostic after it
+ *  with one.
+ *
+ *  A merge known only by its verdict ends in "commit", not "continue": that arm
+ *  also covers `merge --squash`, which writes no MERGE_HEAD (pinned by
+ *  `local_pr_finish_squash_all_ours_is_a_known_no_op`), so no banner Continue
+ *  exists to point at — and committing is how a plain merge finishes anyway. */
+function conflictSummary(text: string): string {
+  const paused = (op: string, finish: string) =>
+    `${op} paused — resolve the conflicts, then ${finish}.`;
   const lines = text.split(/\r\n|[\n\r]/);
   for (const line of lines) {
     if (SUBJECT_ECHO_LINE.test(line)) continue;
     const op = OP_ADVICE.exec(line)?.[1];
     if (op) {
-      return op === "cherry-pick"
-        ? "Cherry-pick"
-        : op.charAt(0).toUpperCase() + op.slice(1);
+      const name =
+        op === "cherry-pick"
+          ? "Cherry-pick"
+          : op.charAt(0).toUpperCase() + op.slice(1);
+      return paused(name, "continue");
     }
   }
   // Advice first: it is the stronger signal, and only its absence leaves the
   // merge verdict as the sole name for the paused operation.
-  if (lines.some((line) => MERGE_VERDICT.test(line))) return "Merge";
-  return "Operation";
+  if (lines.some((line) => MERGE_VERDICT.test(line)))
+    return paused("Merge", "commit");
+  return paused("Operation", "continue");
 }
 
 /** Count of non-empty lines in a string. */
@@ -217,7 +228,7 @@ export function presentError(e: unknown): ErrorPresentation {
       !rolledBack && CONFLICT_MARKERS.some((m) => m.test(combined));
     const label = KIND_LABELS[e.kind];
     const summary = isConflict
-      ? `${conflictOp(combined)} paused — resolve the conflicts, then continue.`
+      ? conflictSummary(combined)
       : firstMeaningfulLine(message) || label;
 
     const distinctStderr = stderr !== "" && !message.includes(stderr);

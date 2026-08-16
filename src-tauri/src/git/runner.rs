@@ -27,6 +27,20 @@ impl GitOutput {
     pub fn stdout_lossy(&self) -> String {
         String::from_utf8_lossy(&self.stdout).into_owned()
     }
+
+    /// The text describing a non-zero exit: stderr, or stdout when stderr is
+    /// EMPTY. git splits its reporting across both streams — a conflicted merge,
+    /// `stash pop` or `revert` writes everything to stdout and leaves stderr
+    /// empty (measured, git 2.51.1) — and an error carrying only that empty
+    /// stderr renders as "git exited with code N".
+    pub fn failure_text(&self) -> String {
+        let stderr = self.stderr.trim();
+        if stderr.is_empty() {
+            self.stdout_lossy().trim().to_string()
+        } else {
+            stderr.to_string()
+        }
+    }
 }
 
 /// The resolved `git` binary, memoized for the process lifetime.
@@ -363,6 +377,26 @@ pub async fn run_git_mutating(
     timeout: Duration,
 ) -> AppResult<GitOutput> {
     run_git_mutating_input(state, repo_path, args, None, timeout).await
+}
+
+/// `run_git_mutating` without its non-zero-exit verdict: same lock and same
+/// one-shot index.lock retry, but the raw output comes back so the caller can
+/// read STDOUT on failure. Use it wherever git reports a failure there —
+/// [`GitOutput::failure_text`] is the shaping those callers share.
+pub async fn run_git_mutating_raw(
+    state: &AppState,
+    repo_path: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> AppResult<GitOutput> {
+    let lock = state.repo_lock(repo_path).await;
+    let _guard = lock.lock().await;
+    let out = run_git_raw(Some(repo_path), args, timeout).await?;
+    if out.code != 0 && out.stderr.contains("index.lock") {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        return run_git_raw(Some(repo_path), args, timeout).await;
+    }
+    Ok(out)
 }
 
 /// `run_git_mutating` with optional stdin input.

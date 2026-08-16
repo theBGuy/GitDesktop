@@ -63,25 +63,13 @@ async fn autostash_pop(repo: &str) -> AppResult<GitOutput> {
     run_git_raw(Some(repo), &["stash", "pop"], DEFAULT_TIMEOUT).await
 }
 
-/// Failure text for an outcome payload. git splits its reporting across both
-/// streams — a conflicted merge and a conflicted `stash pop` write everything to
-/// stdout and leave stderr EMPTY (measured, git 2.51.1) — so stdout backfills.
-fn failure_text(out: &GitOutput) -> String {
-    let stderr = out.stderr.trim();
-    if stderr.is_empty() {
-        out.stdout_lossy().trim().to_string()
-    } else {
-        stderr.to_string()
-    }
-}
-
-/// Shapes a non-zero raw result with `failure_text`'s stdout backfill — a
-/// conflicted merge or pop leaves stderr EMPTY, which renders as "git exited with
-/// code N". Byte-matches `git_merge_core`; plain pull/switch have none yet.
+/// Shapes a non-zero raw result for the no-stash arm, which reports the plain
+/// command's own failures. Plain pull and switch have no stdout backfill yet, so
+/// against those two this is better output rather than identical output.
 fn git_error(out: GitOutput) -> AppError {
     AppError::Git {
         code: out.code,
-        stderr: failure_text(&out),
+        stderr: out.failure_text(),
     }
 }
 
@@ -105,7 +93,7 @@ async fn settle(
 
     let failure = match &op {
         Ok(out) if out.code == 0 => None,
-        Ok(out) => Some(failure_text(out)),
+        Ok(out) => Some(out.failure_text()),
         Err(err) => Some(err.to_string()),
     };
 
@@ -134,7 +122,7 @@ async fn settle(
     }
     let stderr = match autostash_pop(repo).await {
         Ok(out) if out.code == 0 => return Ok(AutostashOutcome::Reapplied),
-        Ok(out) => failure_text(&out),
+        Ok(out) => out.failure_text(),
         Err(err) => err.to_string(),
     };
     Ok(AutostashOutcome::ReapplyConflicted {
@@ -787,8 +775,8 @@ mod tests {
     /// The conflict summary in `src/lib/error-summary.ts` keys off the ANCHORED
     /// shapes of these lines, so a git release that reworded one would silently
     /// change how conflicts present. Markers 1-2 guard live toast classification;
-    /// markers 3-4 ride stdout, which only the paths that backfill it carry
-    /// (`git_merge_core`, `failure_text`).
+    /// markers 3-4 ride stdout, which only the paths shaping their error through
+    /// `GitOutput::failure_text` carry.
     #[tokio::test]
     async fn conflict_output_still_matches_the_anchored_frontend_markers() {
         // Mirrors of the four CONFLICT_MARKERS regexes, in plain string ops.

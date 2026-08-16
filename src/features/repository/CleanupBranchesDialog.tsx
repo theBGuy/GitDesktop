@@ -97,6 +97,7 @@ export function CleanupBranchesDialog({
   isInWorktree,
   prMergedByBranch,
   prMergedPending,
+  prMergedFailed,
 }: {
   repoPath: string;
   open: boolean;
@@ -116,6 +117,9 @@ export function CleanupBranchesDialog({
   /** True while that map is still filling — the empty state must not claim the
    *  pull requests were checked before they were read. */
   prMergedPending: boolean;
+  /** True when reading them FAILED. A read the app couldn't make is not an
+   *  absence of merges, so the copy drops the pull-request claim and says so. */
+  prMergedFailed: boolean;
 }) {
   const queryClient = useQueryClient();
   // Shared 30s clock: the idle-past-the-window classification below must
@@ -460,8 +464,13 @@ export function CleanupBranchesDialog({
               <span className="font-mono">
                 {defaultBranch ?? "the default branch"}
               </span>
-              , directly or through a recent pull request, and nothing is idle
-              for {windowDays} days. Try a shorter window.
+              {prMergedFailed
+                ? " and nothing is idle for "
+                : ", directly or through a recent pull request, and nothing is idle for "}
+              {windowDays} days. Try a shorter window.
+              {prMergedFailed
+                ? " Pull requests couldn't be checked, so a branch merged through one may be missing here."
+                : null}
             </p>
           ) : (
             <div
@@ -471,6 +480,12 @@ export function CleanupBranchesDialog({
               {checkingMerged && (
                 <p className="px-1 py-1 text-[11px] text-muted-foreground">
                   Checking which branches are merged…
+                </p>
+              )}
+              {prMergedFailed && (
+                <p className="px-1 py-1 text-[11px] text-muted-foreground">
+                  Pull requests couldn't be checked — a branch merged through
+                  one may be missing.
                 </p>
               )}
               {candidates.map((c, idx) => {

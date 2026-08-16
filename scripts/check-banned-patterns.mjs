@@ -213,14 +213,17 @@ export const CHECKS = [
     // form (a hardcoded platform modifier), and a wrapped pair must not read as
     // clean either.
     scan: perLine(/\b(?:ctrlKey|metaKey)\b/),
-    // FROZEN: these 14 files are the app-wide mod+Enter submit policy (PR #202)
-    // and the file-row multi-select modifier. The gate blocks NEW hand-rolled
-    // sites; it is not a to-do list for these.
+    // FROZEN: the mod+Enter submit policy files (PR #202), the file-row
+    // multi-select modifier, and DiffViewer's additive-drag capture listener
+    // (the vendored selection manager's callbacks carry no event, so it reads
+    // the raw flags; the modifier itself stays isMac-derived). The gate blocks
+    // NEW hand-rolled sites; it is not a to-do list for these.
     allowlist: [
       "src/components/markdown-editor.tsx",
       "src/features/conversations/CommentComposer.tsx",
       "src/features/conversations/CommentEditor.tsx",
       "src/features/conversations/EditTitleBodyDialog.tsx",
+      "src/features/diff/DiffViewer.tsx",
       "src/features/discussions/DiscussionView.tsx",
       "src/features/history/HistoryPanel.tsx",
       "src/features/plan/PlanView.tsx",

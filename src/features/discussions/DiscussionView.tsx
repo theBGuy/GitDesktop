@@ -249,9 +249,9 @@ export function DiscussionView({
     markAnswer.isPending ||
     deleteComment.isPending ||
     detailsStale;
-  // Which term of `busy` the composer names, ranked: the switch window outranks a
-  // write the viewer started, being the hold they can't have caused themselves.
-  const composerReason = (() => {
+  // Which term of `busy` a control disabled on it names, ranked: the switch window
+  // outranks a write the viewer started, being the hold they can't have caused.
+  const busyReason = (() => {
     switch (true) {
       case detailsStale:
         return staleReason;
@@ -301,7 +301,11 @@ export function DiscussionView({
     makeQuoteReply({ composerRef, setBody: compose.set })(body);
   };
 
+  // Every comment id below comes off the rendered discussion, which mid-switch is
+  // the previous one — so each write would land on the discussion the viewer just
+  // left. The affordances withhold or disable too; these arms back them up.
   function saveCommentEdit(commentId: string, body: string) {
+    if (detailsStale) return;
     updateComment.mutate(
       { commentId, body },
       { onSuccess: () => toast.success("Comment updated"), onError },
@@ -309,6 +313,7 @@ export function DiscussionView({
   }
 
   function hideComment(commentId: string, classifier: MinimizeReason) {
+    if (detailsStale) return;
     minimizeComment.mutate(
       { commentId, classifier },
       { onSuccess: () => toast.success("Comment hidden"), onError },
@@ -316,6 +321,7 @@ export function DiscussionView({
   }
 
   function unhideComment(commentId: string) {
+    if (detailsStale) return;
     unminimizeComment.mutate(commentId, {
       onSuccess: () => toast.success("Comment shown"),
       onError,
@@ -323,6 +329,7 @@ export function DiscussionView({
   }
 
   function toggleAnswer(commentId: string, isAnswer: boolean) {
+    if (detailsStale) return;
     markAnswer.mutate(
       { commentId, answer: !isAnswer },
       {
@@ -664,12 +671,15 @@ export function DiscussionView({
                   thread={toThread(c)}
                   onQuote={detailsStale ? undefined : () => quoteReply(c.body)}
                   onSaveEdit={
-                    c.viewerDidAuthor
+                    c.viewerDidAuthor && !detailsStale
                       ? (body) => saveCommentEdit(c.id, body)
                       : undefined
                   }
+                  // Withholding the handler only drops the menu entry; an editor
+                  // already open when the switch began needs its Save held too.
+                  editHeld={detailsStale}
                   onDelete={
-                    c.viewerDidAuthor
+                    c.viewerDidAuthor && !detailsStale
                       ? () => setDeletingCommentId(c.id)
                       : undefined
                   }
@@ -681,6 +691,9 @@ export function DiscussionView({
                   onUnhide={
                     c.isMinimized ? () => unhideComment(c.id) : undefined
                   }
+                  // Hide/Unhide stay visible but disabled — the items carry their
+                  // own reason, unlike the entries withheld above.
+                  disabledReason={staleReason}
                   reactions={reactions.data?.comments[c.id]}
                   onToggleReaction={(content, active) =>
                     toggleReaction(c.id, content, active)
@@ -699,10 +712,11 @@ export function DiscussionView({
                   disabled={toggleUpvoteMutation.isPending || detailsStale}
                   onClick={() => toggleUpvote(c.id, c.viewerHasUpvoted)}
                 />
-                <Button
+                <DisabledReasonButton
                   size="xs"
                   variant="ghost"
                   disabled={busy}
+                  reason={busyReason}
                   onClick={() =>
                     reply.set((prev) => ({
                       targetId: prev.targetId === c.id ? null : c.id,
@@ -711,17 +725,18 @@ export function DiscussionView({
                   }
                 >
                   Reply
-                </Button>
+                </DisabledReasonButton>
                 {d.isAnswerable && (
-                  <Button
+                  <DisabledReasonButton
                     size="xs"
                     variant={c.isAnswer ? "secondary" : "outline"}
                     disabled={busy}
+                    reason={busyReason}
                     onClick={() => toggleAnswer(c.id, c.isAnswer)}
                   >
                     <CheckCircleIcon data-icon="inline-start" />
                     {c.isAnswer ? "Unmark answer" : "Mark as answer"}
-                  </Button>
+                  </DisabledReasonButton>
                 )}
               </div>
               {(c.replies.length > 0 || reply.value.targetId === c.id) && (
@@ -734,12 +749,13 @@ export function DiscussionView({
                         detailsStale ? undefined : () => quoteReply(r.body)
                       }
                       onSaveEdit={
-                        r.viewerDidAuthor
+                        r.viewerDidAuthor && !detailsStale
                           ? (body) => saveCommentEdit(r.id, body)
                           : undefined
                       }
+                      editHeld={detailsStale}
                       onDelete={
-                        r.viewerDidAuthor
+                        r.viewerDidAuthor && !detailsStale
                           ? () => setDeletingCommentId(r.id)
                           : undefined
                       }
@@ -751,6 +767,7 @@ export function DiscussionView({
                       onUnhide={
                         r.isMinimized ? () => unhideComment(r.id) : undefined
                       }
+                      disabledReason={staleReason}
                       reactions={reactions.data?.comments[r.id]}
                       onToggleReaction={(content, active) =>
                         toggleReaction(r.id, content, active)
@@ -784,15 +801,18 @@ export function DiscussionView({
                         textareaClassName="max-h-32 min-h-12 resize-y"
                       />
                       <div className="flex items-center gap-2">
-                        <Button
+                        <DisabledReasonButton
                           size="xs"
                           variant="outline"
                           disabled={!reply.value.body.trim() || busy}
+                          // An empty draft explains itself; only the `busy` hold
+                          // needs words.
+                          reason={busy ? busyReason : null}
                           onClick={() => submitReply(c.id)}
                           title={SUBMIT_HINT}
                         >
                           Reply
-                        </Button>
+                        </DisabledReasonButton>
                         <Button
                           size="xs"
                           variant="ghost"
@@ -822,7 +842,7 @@ export function DiscussionView({
         ariaLabel="Add to the discussion"
         placeholder="Add to the discussion…"
         busy={busy}
-        reason={composerReason}
+        reason={busyReason}
       />
 
       <DeleteCommentDialog
