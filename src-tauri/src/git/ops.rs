@@ -150,7 +150,7 @@ pub(crate) async fn has_unmerged(repo: &str) -> AppResult<bool> {
 /// should [`op_state`] ever gain a fallible read.
 pub(crate) async fn op_in_progress(repo: &str) -> bool {
     match op_state(repo).await {
-        Ok(state) => state.merging || state.rebasing || state.cherry_picking || state.reverting,
+        Ok(state) => state.mid_op(),
         Err(_) => true,
     }
 }
@@ -4883,6 +4883,37 @@ mod tests {
         op_continue(&app, &repo, "revert").await.unwrap();
         assert!(!op_state(&repo).await.unwrap().reverting);
         assert_eq!(subjects(&repo).await.len(), 4, "the revert commit landed");
+    }
+
+    /// Every flag counts, and `edit_paused` alone does not — the gates that once
+    /// re-listed these fields each missed a different one, so the predicate they
+    /// now share is pinned per flag rather than through any single caller.
+    #[test]
+    fn mid_op_covers_every_operation_flag() {
+        let clear = RepoOpState {
+            merging: false,
+            rebasing: false,
+            cherry_picking: false,
+            reverting: false,
+            edit_paused: false,
+        };
+        assert!(!clear.mid_op(), "a quiet repo is not mid-op");
+        for set in [
+            |s: &mut RepoOpState| s.merging = true,
+            |s: &mut RepoOpState| s.rebasing = true,
+            |s: &mut RepoOpState| s.cherry_picking = true,
+            |s: &mut RepoOpState| s.reverting = true,
+        ] {
+            let mut state = clear.clone();
+            set(&mut state);
+            assert!(state.mid_op(), "{state:?} is mid-op");
+        }
+        let mut paused = clear.clone();
+        paused.edit_paused = true;
+        assert!(
+            !paused.mid_op(),
+            "edit_paused qualifies `rebasing`; it never stands alone"
+        );
     }
 
     /// The sequencer's verb decides which op it is; anything unreadable stays a

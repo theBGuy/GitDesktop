@@ -33,7 +33,7 @@ import { track } from "@/lib/analytics";
 import { readRepoInstructions } from "@/lib/git/api";
 import type { DiffStatEntry, RemoteLens } from "@/lib/git/types";
 import { notifyIfUnfocused } from "@/lib/notify";
-import { saveReview } from "@/lib/pulls/reviews-history";
+import { reviewPartialKey, saveReview } from "@/lib/pulls/reviews-history";
 import { queryClient } from "@/lib/query-client";
 import { loadSettings } from "@/lib/settings/api";
 import { pushNotification } from "@/lib/stores/notifications";
@@ -837,13 +837,12 @@ export async function startReview(
         })
           .then(() =>
             queryClient.invalidateQueries({
-              queryKey: [
-                "review-partial",
+              queryKey: reviewPartialKey(
                 target.repoPath,
                 context.lens,
                 target.kind,
                 target.ref,
-              ],
+              ),
             }),
           )
           .catch(() => undefined);

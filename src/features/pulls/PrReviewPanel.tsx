@@ -55,6 +55,7 @@ import {
   getLatestPartialReview,
   type PersistedReview,
   partialReviewReason,
+  reviewPartialKey,
 } from "@/lib/pulls/reviews-history";
 import { useSecretPreview, useSettings } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
@@ -166,13 +167,7 @@ export function PrReviewPanel({
   // so this is the only copy after a restart; it's shown solely when nothing newer
   // completed, so a finished review always wins the surface.
   const partialRun = useQuery({
-    queryKey: [
-      "review-partial",
-      context.repoPath,
-      context.lens,
-      prKind,
-      prRef,
-    ] as const,
+    queryKey: reviewPartialKey(context.repoPath, context.lens, prKind, prRef),
     queryFn: () =>
       getLatestPartialReview(context.repoPath, context.lens, prKind, prRef),
   });

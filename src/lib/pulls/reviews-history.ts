@@ -233,6 +233,19 @@ export async function getLatestReview(
     .sort((a, b) => b.finishedAt - a.finishedAt)[0];
 }
 
+/** Query key for {@link getLatestPartialReview}. Lives here, beside the read it keys,
+ *  so all three consumers share one builder: any writer that can remove a partial
+ *  record (history clear, per-record delete) must invalidate it, and a hand-written
+ *  copy that drifts leaves deleted output on screen. Homed in this module rather than
+ *  `queries.ts` so the review store can use it without pulling that module's
+ *  react-query/forge-status graph in. */
+export const reviewPartialKey = (
+  repo: string,
+  lens: RemoteLens,
+  kind: "remote" | "local",
+  ref: string,
+) => ["review-partial", repo, lens, kind, ref] as const;
+
 /** The most recent kept PARTIAL run for a PR (either mode), or undefined if none —
  *  the output a timed-out run left behind, which the panel can show after a restart.
  *  Deliberately its own read: a partial is not a review, so nothing that builds on

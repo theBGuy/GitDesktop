@@ -17,6 +17,7 @@ import {
   clearReviewsFor,
   deleteReview,
   listReviews,
+  reviewPartialKey,
   updateReviewText,
 } from "./reviews-history";
 
@@ -94,10 +95,18 @@ function useReviewHistoryMutation<TArgs>(
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: fn,
+    // Both keys: every mutation here writes the whole record set, and clear/delete
+    // remove kept PARTIAL runs too (they carry no phase filter). Refreshing only the
+    // completed-review key would leave a deleted partial's cached text on screen.
     onSettled: () =>
-      queryClient.invalidateQueries({
-        queryKey: reviewHistoryKey(repo, lens, kind, ref),
-      }),
+      Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: reviewHistoryKey(repo, lens, kind, ref),
+        }),
+        queryClient.invalidateQueries({
+          queryKey: reviewPartialKey(repo, lens, kind, ref),
+        }),
+      ]),
   });
 }
 

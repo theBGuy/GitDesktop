@@ -292,9 +292,10 @@ fn is_interrupted(
 
 /// Reconcile `repo`'s pending entries against real git state, persist, and return
 /// the still-`"pending"` entries newest-first (0 or 1). `mid_op` = a merge,
-/// cherry-pick, or rebase is currently in progress; `tree_dirty` = tracked changes
-/// are present (catches a mid-squash interrupt git_op_state can't see);
-/// `current_branch` = the branch HEAD is on now. Guarded by [`OPLOG_LOCK`].
+/// cherry-pick, rebase or revert is currently in progress ([`RepoOpState::mid_op`]);
+/// `tree_dirty` = tracked changes are present (catches a mid-squash interrupt
+/// git_op_state can't see); `current_branch` = the branch HEAD is on now. Guarded
+/// by [`OPLOG_LOCK`].
 fn reconcile(
     repo: &str,
     mid_op: bool,
@@ -474,7 +475,10 @@ pub async fn git_oplog_check(repo_path: String) -> AppResult<Vec<OpLogEntry>> {
     use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
 
     let state = crate::git::ops::git_op_state(repo_path.clone()).await?;
-    let mid_op = state.merging || state.cherry_picking || state.rebasing;
+    // `mid_op` over a hand-listed set: the flag list lives on `RepoOpState`. Not
+    // `op_in_progress`, whose Err arm answers `true` — that would manufacture an
+    // interrupt from a failed read, which the two probes below refuse to do.
+    let mid_op = state.mid_op();
     // A squash-merge leaves none of those markers, so git_op_state alone misses a
     // mid-squash interrupt. Corroborate with a *tracked*-dirty check (untracked is
     // allowed — mirrors ensure_clean_tree) + the current branch.
