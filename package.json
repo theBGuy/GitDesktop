@@ -21,7 +21,7 @@
     "build:site": "pnpm --filter site build"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^3.0.110",
+    "@ai-sdk/anthropic": "^4.0.15",
     "@ai-sdk/openai": "^3.0.96",
     "@base-ui/react": "^1.7.0",
     "@codemirror/language": "^6.12.4",
