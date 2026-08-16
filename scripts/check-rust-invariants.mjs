@@ -55,6 +55,12 @@ const REFSPEC_ALLOWLIST = [
   },
   {
     file: "git/ops.rs",
+    fn: "branch_tip",
+    rationale:
+      "private helper reading a branch tip (never a refspec); both callers (merge_local_pr, finalize_base via its own callers) validate base with validate_branch_name",
+  },
+  {
+    file: "git/ops.rs",
     fn: "finalize_base",
     rationale:
       "private helper; both callers (merge_local_pr, finish_local_pr_merge) validate base with validate_branch_name",

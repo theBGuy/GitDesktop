@@ -1617,9 +1617,7 @@ export function RemotePrView({
       : null;
     return (
       <DiffPlaceholder
-        message={
-          details.isError ? loadFailed : `Could not load this ${prNoun}`
-        }
+        message={details.isError ? loadFailed : `Could not load this ${prNoun}`}
         action={
           details.isError ? (
             <div className="flex flex-col items-center gap-2">

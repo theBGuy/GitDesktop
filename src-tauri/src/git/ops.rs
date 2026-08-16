@@ -2068,6 +2068,23 @@ fn orphaned_resolve_worktrees(all_paths: &[String], keep: &[String]) -> Vec<Stri
         .collect()
 }
 
+/// A branch's tip, read through its fully-qualified ref. Never a bare name:
+/// gitrevisions resolves `refs/tags/<name>` BEFORE `refs/heads/<name>`, so a tag
+/// sharing the branch name would silently anchor a merge to the tag's commit
+/// (git only warns, and exits 0). Callers validate `base` with
+/// `validate_branch_name`, so the interpolation carries no refspec syntax.
+async fn branch_tip(repo_path: &str, base: &str) -> AppResult<String> {
+    Ok(run_git(
+        Some(repo_path),
+        &["rev-parse", "--verify", &format!("refs/heads/{base}")],
+        DEFAULT_TIMEOUT,
+    )
+    .await?
+    .stdout_lossy()
+    .trim()
+    .to_string())
+}
+
 /// Advances `base` to `new_sha` after the merge landed in the resolve worktree,
 /// picking the safe mechanic for wherever `base` is checked out:
 /// - the MAIN repo's current branch → `merge --ff-only` there (the tree was gated
@@ -2101,15 +2118,7 @@ async fn finalize_base(
     };
     // One read, before any arm: whatever `base` points at now has to match the
     // tip the merge was built on.
-    let tip_now = run_git(
-        Some(repo_path),
-        &["rev-parse", "--verify", &format!("refs/heads/{base}")],
-        DEFAULT_TIMEOUT,
-    )
-    .await?
-    .stdout_lossy()
-    .trim()
-    .to_string();
+    let tip_now = branch_tip(repo_path, base).await?;
     if let Some(expected) = expected_tip {
         if tip_now != expected {
             return Err(AppError::Command(moved()));
@@ -2267,11 +2276,9 @@ pub(crate) async fn merge_local_pr(
     .stdout_lossy()
     .trim()
     .to_string();
-    let base_tip = run_git(Some(repo_path), &["rev-parse", base], DEFAULT_TIMEOUT)
-        .await?
-        .stdout_lossy()
-        .trim()
-        .to_string();
+    // Fully-qualified: this one read anchors the journal, the resolve worktree's
+    // start point, and the rebase strategy's replay range.
+    let base_tip = branch_tip(repo_path, base).await?;
 
     // Only advancing the CURRENT branch touches the main tree — gate that one
     // case on a clean tree (finalize_base's `merge --ff-only` would otherwise
@@ -6394,6 +6401,115 @@ detached
             other.stderr.contains("cannot lock ref") && !other.stderr.contains("but expected"),
             "a non-mismatch failure must not read as a moved base: {}",
             other.stderr
+        );
+    }
+
+    /// A tag sharing the base branch's name must not steer the merge: gitrevisions
+    /// resolves `refs/tags/<name>` BEFORE `refs/heads/<name>`, and git only warns
+    /// (exit 0), so a bare-name read would anchor the journal, the resolve
+    /// worktree and the replay range to the tag's commit.
+    #[tokio::test]
+    async fn local_pr_merge_ignores_a_tag_sharing_the_base_branch_name() {
+        let (dir, repo) = setup_repo("lpr-tag-shadow").await;
+        let base = head_branch(&repo).await;
+        let stale = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "base-side\n", "base edit").await;
+        let base_before = rev(&repo, "HEAD").await;
+        git(&repo, &["switch", "-c", "feature", &stale]).await;
+        commit_file(&repo, dir.path(), "f.txt", "feature\n", "feat commit").await;
+        // Off base for the update-ref arm. By SHA, and every bare-name read above
+        // happens first: once the tag lands, the test's own scaffolding could not
+        // resolve the name either (git refuses an ambiguous object name outright).
+        git(&repo, &["switch", "-c", "work", &base_before]).await;
+        // A tag on an OLDER commit, named exactly like the base branch.
+        git(&repo, &["tag", &base, &stale]).await;
+        assert_ne!(stale, base_before, "the tag points somewhere else");
+
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let state = AppState::default();
+        let outcome = merge_local_pr(&state, &repo, &base, "feature", "merge it", "merge", &root)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.status, "merged");
+        assert_eq!(
+            outcome.base_tip, base_before,
+            "the merge is anchored to the BRANCH tip, not the tag's commit"
+        );
+        // Read through the qualified ref — a bare name is ambiguous here now.
+        let base_after = branch_tip(&repo, &base).await.unwrap();
+        assert_ne!(base_after, base_before, "base advanced from its own tip");
+        git(
+            &repo,
+            &["merge-base", "--is-ancestor", &base_before, &base_after],
+        )
+        .await;
+        git(&repo, &["cat-file", "-e", &format!("{base_after}:f.txt")]).await;
+    }
+
+    /// The green direction, and the only test that would catch an anchor that is
+    /// present but WRONG: the refusal tests stay green against any anchor that
+    /// merely differs from base's tip — including the pre-op HEAD its sibling
+    /// journal calls record — so one successful finish through a real `op_id` is
+    /// what pins `pre_op_tip` to base's tip and the `"preOpTip"` store key to the
+    /// reader.
+    #[tokio::test]
+    async fn local_pr_finish_through_the_journaled_anchor_still_merges() {
+        let (dir, repo) = setup_repo("lpr-anchor-green").await;
+        let base = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "feature-side\n", "feat edit").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "a.txt", "base-side\n", "base edit").await;
+        // Off base, so finalize takes the update-ref arm. Its own branch tip is
+        // deliberately NOT base's, so a HEAD-shaped anchor would refuse here.
+        git(&repo, &["switch", "-c", "work"]).await;
+        commit_file(&repo, dir.path(), "w.txt", "w\n", "work edit").await;
+        let base_before = rev(&repo, &base).await;
+
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let state = AppState::default();
+        let outcome = merge_local_pr(&state, &repo, &base, "feature", "merge it", "merge", &root)
+            .await
+            .unwrap();
+        assert_eq!(outcome.status, "conflicts");
+        let wt = outcome.worktree_path.clone().expect("worktree path set");
+        assert!(
+            outcome.op_id.is_some(),
+            "the anchor under test comes from the oplog entry"
+        );
+
+        git(&wt, &["checkout", "--theirs", "a.txt"]).await;
+        git(&wt, &["add", "a.txt"]).await;
+        let resolved = rev(&wt, "HEAD").await;
+
+        // Nothing touches `base` in between — the anchor must accept it.
+        let done = finish_local_pr_merge(
+            &state,
+            &repo,
+            &base,
+            "merge",
+            "merge it",
+            &wt,
+            &outcome.worktree_id.clone().unwrap_or_default(),
+            outcome.op_id.clone(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(done.status, "merged");
+        let base_after = rev(&repo, &base).await;
+        assert_ne!(base_after, base_before, "base advanced");
+        assert_eq!(
+            base_after, done.base_tip,
+            "base is at the commit the resolve worktree produced"
+        );
+        assert_ne!(resolved, base_after, "the merge commit is the resolution");
+        assert!(
+            !std::path::Path::new(&wt).exists(),
+            "the resolve worktree is torn down on success"
         );
     }
 
