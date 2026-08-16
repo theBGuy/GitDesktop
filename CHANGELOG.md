@@ -991,9 +991,11 @@ under `changelog.d/` (see its README); those are assembled here at release time 
 
 - Large diffs in TextMate-highlighted languages (Rust, TSX, Astro, Svelte, and
   other Shiki-rendered or custom-grammar languages) no longer lose their
-  VSCode-fidelity highlighting past the size budget in commit, history, and
-  pull-request diffs — they now tokenize in a background thread and fill in when
-  ready, with standard highlighting shown in the interim.
+  VSCode-fidelity highlighting past the size budget, in every read-only diff
+  surface: commits and history, pull requests, branch compare, stashes, file
+  history, session changes, and conflict resolution. They now tokenize in a
+  background thread and fill in when ready, with standard highlighting shown in
+  the interim.
 - Opening a pull request now targets a repository explicitly. On a **fork** the
   create dialog lets you choose where the PR lands — your **fork** or the
   **upstream** repository (defaulting to upstream), listing the chosen

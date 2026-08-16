@@ -12,7 +12,6 @@ import {
   useReviewDrafts,
   useUpdateReviewDraft,
 } from "@/lib/pulls/review-drafts";
-import { toastError } from "@/lib/toast";
 
 /** The anchor label for a draft: "Lines a–b" for a range, "Line b" otherwise. */
 function draftLabel(draft: ReviewDraft): string {
@@ -178,7 +177,6 @@ export function PendingReviewBar({
         pending={clearDrafts.isPending}
         onConfirm={() =>
           clearDrafts.mutate(undefined, {
-            onError: (e) => toastError(e),
             onSuccess: () => setConfirmDiscard(false),
           })
         }

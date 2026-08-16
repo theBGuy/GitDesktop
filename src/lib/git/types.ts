@@ -387,11 +387,12 @@ export interface RepoOpState {
   merging: boolean;
   rebasing: boolean;
   cherryPicking: boolean;
+  reverting: boolean;
   /** An interactive rebase is paused at an `edit` (vs a conflict). */
   editPaused: boolean;
 }
 
-export type RepoOp = "merge" | "rebase" | "cherry-pick";
+export type RepoOp = "merge" | "rebase" | "cherry-pick" | "revert";
 
 /**
  * One journaled entry from GitDesktop's operation log (`oplog.rs`) — a risky compound

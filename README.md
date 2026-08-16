@@ -115,10 +115,12 @@ delete), and deep links to the settings GitHub keeps browser-only.
 A unified or split diff with syntax highlighting, collapsible surrounding
 context, and image diffing. Filter the changes list by path or category. The
 working-tree diff is one whole-file view with hunk- and line-level staging
-and discarding (drag across the line numbers), including committing or
-discarding only part of a brand-new (untracked) file. Stage, unstage, or
-discard single files or a multi-selection from the context menu; discarding a
-whole untracked file goes to the recycle bin. Commit with title + body,
+and discarding (drag across the line numbers; hold Ctrl — Cmd on macOS — to
+add to a selection, so one selection can mix added and removed lines across
+hunks), including committing or discarding only part of a brand-new
+(untracked) file. Stage, unstage, or discard single files or a
+multi-selection from the context menu; discarding a whole untracked file
+goes to the recycle bin. Commit with title + body,
 co-authors suggested from history, amend, undo, reset, and revert.
 
 ### Branches
@@ -131,8 +133,10 @@ divergence vs. the default branch (labeled with the default's name), and a
 PR badge.
 
 - **Clean up branches** ⭐: one reviewed list that archives or deletes every
-  stale branch (merged into the default branch, or with no commits in a
-  chosen window).
+  stale branch (merged into the default branch — directly or by a recent
+  pull request, so squash and rebase merges count — or with no commits in a
+  chosen window). Pull-request matches are by branch name, so those rows
+  start unchecked, badged with the PR that took them.
 - **Advanced merge tooling** ⭐: predicts a merge's result in memory before
   you commit (fast-forward, already up to date, clean, or exactly which
   files will conflict), with `--no-ff` and a clearly cautioned auto-resolve
@@ -213,23 +217,25 @@ interval while the window is focused, so the behind-count and incoming
 commits stay current without pressing Fetch; it never pulls or merges, and
 pushing and pulling stay manual.
 
-- **Conflict editor**: an in-progress merge, rebase, or cherry-pick gets a
-  conflict banner with gated Continue / Abort. Selecting a conflicted file
-  opens an in-app editor: each region shows Current (ours) over Incoming
-  (theirs) with Accept current / incoming / both, plus whole-file Accept all
-  current / incoming and Open in editor.
+- **Conflict editor**: an in-progress merge, rebase, cherry-pick, or revert
+  gets a conflict banner naming it, with gated Continue / Abort. Selecting
+  a conflicted file opens an in-app editor: each region shows Current (ours)
+  over Incoming (theirs) with Accept current / incoming / both, plus
+  whole-file Accept all current / incoming and Open in editor.
 - **AI conflict resolution**: one more option there. Ask your model to merge
   a file, review the proposal as a diff, and accept it (per file or all at
   once). Multi-provider, runs on local Ollama or a keyless Claude Code /
   Codex agent, and never writes until you accept.
-- **Stash and reapply**: when a pull or branch update is blocked by
-  uncommitted changes, or you switch branches with work in progress, one
-  click stashes them (untracked files included), runs the operation, and
-  reapplies them on the other side. A reapply that hits conflicts drops the
-  files into the changes list; one that git refuses outright leaves them
-  safely stashed. The stash is kept as a backup either way. **Automatically
-  stash and reapply on pull and branch updates** (Settings → General) makes
-  it the default for both, and the switch prompt remembers a **Reapply after
+- **Stash and reapply**: when a pull, a merge into the branch you're on, or
+  a branch update is blocked by uncommitted changes, or you switch branches
+  with work in progress, one click stashes them (untracked files included),
+  runs the operation, and reapplies them on the other side. A reapply that
+  hits conflicts drops the files into the changes list; one that git refuses
+  outright leaves them safely stashed. The stash is kept as a backup either
+  way. (A squash, no-ff, or strategy merge reports the refusal instead — the
+  recovery redoes the merge plainly.) **Automatically stash and reapply on
+  pull, merge, and branch updates** (Settings → General) makes it the default
+  for all of them, and the switch prompt remembers a **Reapply after
   switching** choice of its own.
 
 ### Pull requests
@@ -301,7 +307,8 @@ PR (comments and all) in one click.
   Post a single comment, or **start a review** to batch drafts (persisted
   per-PR, surviving restarts) that render at their anchors with a
   pending-review count, then **Submit** with a verdict (Comment / Approve /
-  Request changes, capability-gated per provider), inserting a
+  Request changes — all three always shown, one that isn't wired up yet
+  disabled and saying what it's waiting on), inserting a
   **provider-correct suggestion** pre-filled with the selected code.
 - **Commit-level comments**: the Commits tab is arrow-navigable; open a
   commit for its full message, per-file diffs, and a whole-commit thread
@@ -750,7 +757,7 @@ agents read this repo through GitDesktop.
     cut releases, and file or comment on issues (creating a PR pushes its
     head branch, so it also needs `--allow-git-write`)
   - **`--allow-git-write`**: recoverable git ops (stage, commit, branch,
-    push/pull/fetch, stash, merge, rebase, cherry-pick, tags)
+    push/pull/fetch, stash, merge, rebase, revert, cherry-pick, tags)
   - **`--allow-destructive`**: the irreversible ones (discard, reset,
     force-push, delete branch/tag)
 - **Generation recipes**: hands a connected agent the fully assembled

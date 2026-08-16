@@ -164,6 +164,7 @@ import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
+import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
 import { ChecksRollup } from "./ChecksRollup";
 import { LinkedIssuesField } from "./LinkedIssuesField";
@@ -607,11 +608,28 @@ export function RemotePrView({
     armAutoMerge.isPending ||
     cancelAutoMerge.isPending ||
     setDraft.isPending;
-  // Palette twins of the footer's draft controls — same `setDraft` mutation; Ready
-  // also fires the ready-review automation.
+  // WHICH draft action exists is picked off `isDraft`, so placeholder details would
+  // offer the PREVIOUS PR's. Retain the last FRESH value and the PR it belonged to;
+  // a mismatch means nothing fresh has landed for this one yet, and neither action is
+  // offered. Both retained values are primitives — an object would re-set every
+  // render. The stale arms feed null so a mount landing mid-switch seeds neither.
+  const retainedDraftFor = useRetained(
+    details.isPlaceholderData ? null : entityKey,
+    !details.isPlaceholderData,
+  );
+  const retainedIsDraft = useRetained(
+    details.isPlaceholderData ? null : (details.data?.isDraft ?? null),
+    !details.isPlaceholderData,
+  );
+  const shownIsDraft = retainedDraftFor === entityKey ? retainedIsDraft : null;
+  // Palette twins of the footer's draft controls — same `setDraft` mutation, same
+  // frozen identity, and Ready also fires the ready-review automation. Registration
+  // is effect-synced, so an `enabled` term alone still leaves the keypress a frame
+  // to land mid-switch; each handler re-checks the identity it is about to write.
   useHotkeyAction(
     "pr-ready-for-review",
-    () =>
+    () => {
+      if (shownIsDraft !== true) return;
       setDraft.mutate(
         { number, draft: false },
         {
@@ -621,22 +639,25 @@ export function RemotePrView({
           },
           onError,
         },
-      ),
-    isSelectedPr && draftPairVisible && !!details.data?.isDraft && !busy,
+      );
+    },
+    isSelectedPr && draftPairVisible && shownIsDraft === true && !busy,
   );
   useHotkeyAction(
     "pr-convert-to-draft",
-    () =>
+    () => {
+      if (shownIsDraft !== false) return;
       setDraft.mutate(
         { number, draft: true },
         {
           onSuccess: () => toast.success("Converted to draft"),
           onError,
         },
-      ),
+      );
+    },
     isSelectedPr &&
       draftPairVisible &&
-      !details.data?.isDraft &&
+      shownIsDraft === false &&
       details.data?.state === "OPEN" &&
       !busy,
   );
@@ -709,6 +730,37 @@ export function RemotePrView({
     return row ? [{ number: row.number, title: row.title }] : [];
   });
   const stackWriteError = stackCreate.error ?? stackAdd.error ?? null;
+  // A fork row is dropped from the chain rather than voiding the list, so it only
+  // explains THIS PR's missing offer when it would have been its CHILD. The mirror
+  // test (a fork whose head is this PR's base) is not specific: fork PRs are
+  // routinely opened from `main`, which is most PRs' base, so it would make the note
+  // permanent furniture on ordinary pull requests.
+  const forkChild =
+    currentRow != null &&
+    openPrs.some(
+      (p) =>
+        p.crossRepository === true && p.baseRefName === currentRow.headRefName,
+    );
+  // Why a chain that may well exist still gets no offer. Only the ADVISORY refusals
+  // are named — the detector's structural arms (no chain, ambiguity, a stacked
+  // neighbor) genuinely mean "nothing to stack", and a note there is noise. Read off
+  // `openPrs`, so a disabled offer query can never speak for a PR the suggestion was
+  // never attempted on.
+  const stackOfferNote = (() => {
+    if (stackOffer) return null;
+    switch (true) {
+      // Ordered as `detectStackOffer` refuses: the two fail-closed list guards
+      // first, then the row-level fork exclusion.
+      case openPrs.some((p) => p.stackUnknown === true):
+        return "Stack suggestions are paused until every open pull request's stack state loads.";
+      case openPrs.length >= STACK_OFFER_PAGE_LIMIT:
+        return "Stack suggestions are paused — too many open pull requests to scan reliably.";
+      case forkChild:
+        return "A fork pull request targets this branch, but fork pull requests can't join a stack — their branches live in another repository.";
+      default:
+        return null;
+    }
+  })();
 
   function confirmStackOffer() {
     // `offerEnabled` withholds the offer entirely until details are the selected
@@ -1506,6 +1558,38 @@ export function RemotePrView({
   // BELOW any permission or read-error reason wherever both hold: those never
   // lift on their own and are the ones still true once the switch lands.
   const staleReason = detailsStale ? PR_SWITCH_LOADING_REASON : undefined;
+  // Which term of `busy` the composer names, ranked: the switch window outranks a
+  // write the viewer started, being the hold they can't have caused themselves.
+  const composerReason = (() => {
+    switch (true) {
+      case detailsStale:
+        return staleReason;
+      case comment.isPending:
+        return "Posting your comment…";
+      case mergePr.isPending:
+        return `Merging this ${prNoun}…`;
+      case closePr.isPending:
+        return `Closing this ${prNoun}…`;
+      case reopenPr.isPending:
+        return `Reopening this ${prNoun}…`;
+      case approvePr.isPending:
+        return "Submitting your approval…";
+      case unapprovePr.isPending:
+        return "Revoking your approval…";
+      case requestChangesPr.isPending:
+        return "Requesting changes…";
+      case unrequestChangesPr.isPending:
+        return "Revoking your change request…";
+      case armAutoMerge.isPending:
+        return "Enabling auto-merge…";
+      case cancelAutoMerge.isPending:
+        return "Canceling auto-merge…";
+      case setDraft.isPending:
+        return "Updating draft status…";
+      default:
+        return undefined;
+    }
+  })();
   // The metadata pickers seed from the rendered PR and commit the WHOLE set on
   // close, so one opened mid-switch would write the previous PR's members under
   // the new number. Their triggers disable on a reason, so this rides that seam.
@@ -1521,23 +1605,37 @@ export function RemotePrView({
     );
   }
   if (details.isError || !pr) {
+    // A read that never landed says so in the forge's own name — the raw summary
+    // alone reads like a missing PR when the real answer is "you're offline". The
+    // provider stays unnamed when its own probe hasn't answered, rather than guessed.
+    const unreachable = provider
+      ? `Couldn't reach ${remoteLabel} to load this ${prNoun}.`
+      : `Couldn't reach the remote to load this ${prNoun}.`;
+    const errorSummary = details.error
+      ? presentError(details.error).summary
+      : null;
     return (
       <DiffPlaceholder
         message={
-          details.error
-            ? presentError(details.error).summary
-            : "Could not load this pull request"
+          details.isError ? unreachable : "Could not load this pull request"
         }
         action={
           details.isError ? (
-            <Button
-              variant="outline"
-              size="sm"
-              className="cursor-pointer"
-              onClick={() => details.refetch()}
-            >
-              Retry
-            </Button>
+            <div className="flex flex-col items-center gap-2">
+              {/* The underlying summary keeps the detail the headline generalizes. */}
+              {errorSummary ? (
+                <p className="max-w-md text-center text-xs">{errorSummary}</p>
+              ) : null}
+              <Button
+                variant="outline"
+                size="sm"
+                className="cursor-pointer"
+                disabled={details.isFetching}
+                onClick={() => details.refetch()}
+              >
+                {details.isFetching ? "Retrying…" : "Retry"}
+              </Button>
+            </div>
           ) : undefined
         }
       />
@@ -2116,6 +2214,11 @@ export function RemotePrView({
             onCancel={cancelStackOffer}
           />
         )}
+        {/* Sits where the offer would, and only when there is none — plain text in
+            flow, so the absence explains itself instead of reading as a dead slot. */}
+        {stackOfferNote ? (
+          <p className="text-xs text-muted-foreground">{stackOfferNote}</p>
+        ) : null}
         <ChecksRollup
           checks={pr.checks}
           repoPath={repoPath}
@@ -2284,17 +2387,16 @@ export function RemotePrView({
                   </DropdownMenu>
                 </div>
                 {canReact && (
-                  // The counts are a read and stay; only the toggles hold. A
-                  // disabled button swallows `title`, so the wait rides the span.
-                  <span title={staleReason} className="inline-flex">
-                    <ReactionBar
-                      reactions={reactions.data?.body ?? []}
-                      disabled={detailsStale}
-                      onToggle={(content, active) =>
-                        toggleReaction(pr.id, content, active)
-                      }
-                    />
-                  </span>
+                  // The counts are a read and stay; only the toggles hold, and the
+                  // bar carries the wait itself (a disabled button swallows `title`).
+                  <ReactionBar
+                    reactions={reactions.data?.body ?? []}
+                    disabled={detailsStale}
+                    reason={staleReason}
+                    onToggle={(content, active) =>
+                      toggleReaction(pr.id, content, active)
+                    }
+                  />
                 )}
               </div>
               {/* Bitbucket-only PR tasks checklist, between the description and the
@@ -2355,6 +2457,7 @@ export function RemotePrView({
                 onUnhideComment={unhideComment}
                 onToggleReaction={toggleReaction}
                 reactionsHeld={detailsStale}
+                reactionsReason={staleReason ?? null}
               />
               {/* Residual review threads — those NOT shown inline under a review
                   above: all threads on GitLab/Bitbucket (no reviewId), plus
@@ -2424,6 +2527,10 @@ export function RemotePrView({
               ariaLabel="Leave a comment"
               placeholder="Leave a comment…"
               busy={busy}
+              // Every term of `busy` gets words, so a held Submit is never mute —
+              // including the switch, where the comment would post against the
+              // previously rendered PR.
+              reason={composerReason}
               actions={
                 <>
                   {/* The Review control opens the batch submit dialog for every
@@ -2647,7 +2754,7 @@ export function RemotePrView({
               GitHub folds in via `canWrite` and routes the same `setDraft` mutation
               through `gh pr ready [--undo]`. Draft → primary Ready (fires the
               ready-review automation); open → a quieter Convert-to-draft. */}
-          {draftPairVisible && pr.isDraft && (
+          {draftPairVisible && shownIsDraft === true && (
             <DisabledReasonButton
               variant="outline"
               size="sm"
@@ -2669,7 +2776,7 @@ export function RemotePrView({
               Ready for review
             </DisabledReasonButton>
           )}
-          {draftPairVisible && !pr.isDraft && (
+          {draftPairVisible && shownIsDraft === false && (
             <DisabledReasonButton
               variant="ghost"
               size="sm"
@@ -3015,7 +3122,6 @@ export function RemotePrView({
         pending={clearDrafts.isPending}
         onConfirm={() =>
           clearDrafts.mutate(undefined, {
-            onError,
             onSuccess: () => setDiscardConfirmOpen(false),
           })
         }

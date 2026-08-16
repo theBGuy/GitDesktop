@@ -263,14 +263,25 @@ export function useRemoveReviewDraft(
   });
 }
 
+/** Discards every pending draft for a PR/MR. `silent` suppresses the hook-level
+ *  failure toast — for a caller that reports the failure in its own words (react-query
+ *  fires this callback for `mutateAsync` too, so without the opt-out that caller
+ *  double-toasts). */
 export function useClearReviewDrafts(
   repo: string,
   lens: RemoteLens,
   number: number,
+  opts?: { silent?: boolean },
 ) {
   const queryClient = useQueryClient();
+  const silent = opts?.silent ?? false;
   return useMutation({
     mutationFn: () => clearDrafts(repo, lens, number),
+    // Mutation-level: see useUpdateReviewDraft. The pending-review bar unmounts on a
+    // tab switch away from Files, which is exactly when a slow discard fails.
+    onError: (e) => {
+      if (!silent) toastError(e);
+    },
     onSettled: () =>
       void queryClient.invalidateQueries({
         queryKey: reviewDraftsKey(repo, lens, number),

@@ -75,8 +75,12 @@ function firstMeaningfulLine(message: string): string {
  *  which re-runs real conflicts and asserts these shapes still hold. */
 const CONFLICT_MARKERS = [
   // git emits both `error: could not apply …` and a bare `Could not apply
-  // <sha>…` tail line (rebase).
-  /^(?:error: )?[Cc]ould not apply /m,
+  // <sha>…` tail line (rebase); a revert says `could not revert` for the same
+  // thing, and that line is the ONLY marker a conflicted revert produces — the
+  // rest of its report (`CONFLICT (…`) rides stdout, which `git_revert_core`'s
+  // runner drops. Deliberately the same shape as SUBJECT_ECHO_LINE below: the
+  // line that PROVES a conflict is the one that must not be read as its NAME.
+  /^(?:error: )?[Cc]ould not (?:apply|revert) /m,
   /^(?:error: |hint: )Resolve all conflicts/m,
   // Git's own line is always uppercase; a path named "conflict (old)" is not.
   /^CONFLICT \(/m,
@@ -151,13 +155,23 @@ const SUBJECT_ECHO_LINE = /^(?:error: )?[Cc]ould not (?:apply|revert) /;
  *  remedy inside another operation's message must not name the op. */
 const OP_ADVICE = /\bgit (rebase|merge|cherry-pick|revert) --continue\b/;
 
+/** A conflicted merge is the one family git gives no `--continue` advice for —
+ *  it prints this verdict instead, on stdout, with stderr empty (which is why
+ *  `git_merge_core` backfills stdout into the error). Line-anchored, because the
+ *  phrase is otherwise reachable as user text. Rebase and cherry-pick emit it on
+ *  neither stream, so it names a merge unambiguously — both halves are pinned by
+ *  the Rust canary `conflict_output_still_matches_the_anchored_frontend_markers`
+ *  (autostash.rs); keep the two in step. */
+const MERGE_VERDICT = /^Automatic merge failed/;
+
 /** The paused operation, capitalized for the summary. Read only from git's
- *  advice lines — never the whole blob — so a cherry-pick of a commit titled
- *  "rebase the parser" still reads "Cherry-pick". The split mirrors the markers'
- *  `m` flag, which ends a line at a bare CR too — git has been observed joining
- *  its `Rebasing (n/m)` progress to the diagnostic after it with one. */
+ *  advice and verdict lines — never the whole blob — so a cherry-pick of a commit
+ *  titled "rebase the parser" still reads "Cherry-pick". The split mirrors the
+ *  markers' `m` flag, which ends a line at a bare CR too — git has been observed
+ *  joining its `Rebasing (n/m)` progress to the diagnostic after it with one. */
 function conflictOp(text: string): string {
-  for (const line of text.split(/\r\n|[\n\r]/)) {
+  const lines = text.split(/\r\n|[\n\r]/);
+  for (const line of lines) {
     if (SUBJECT_ECHO_LINE.test(line)) continue;
     const op = OP_ADVICE.exec(line)?.[1];
     if (op) {
@@ -166,6 +180,9 @@ function conflictOp(text: string): string {
         : op.charAt(0).toUpperCase() + op.slice(1);
     }
   }
+  // Advice first: it is the stronger signal, and only its absence leaves the
+  // merge verdict as the sole name for the paused operation.
+  if (lines.some((line) => MERGE_VERDICT.test(line))) return "Merge";
   return "Operation";
 }
 

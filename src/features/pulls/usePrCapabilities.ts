@@ -21,9 +21,12 @@ import type {
  *   duplicate a GitHub control that lives elsewhere.
  *
  * Axes, never conflated: every `can*` flag above is AVAILABILITY (is this action
- * wired for this provider?) and decides what RENDERS. `writeBlocked` is
- * PERMISSION and decides only what is ENABLED — consumers disable-with-reason
- * and never hide on permission. Triage is a SEPARATE, lower tier granting
+ * wired for this provider?) and decides what RENDERS. One carve-out: when the
+ * flag is false only because a `forgeFeatureReady` gate hasn't connected yet
+ * (transient within a session, e.g. the review-verdict radios), consumers
+ * disable-with-reason instead of hiding — connecting un-disables in place.
+ * `writeBlocked` is PERMISSION and decides only what is ENABLED — consumers
+ * disable-with-reason and never hide on permission. Triage is a SEPARATE, lower tier granting
  * labels, assignees, milestones, review requests, hiding comments and
  * close/reopen without push, so a triage control keys on `triageAccessReason`,
  * never on `writeBlocked`. Absent or unanswered probe data leaves

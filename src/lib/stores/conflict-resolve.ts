@@ -65,3 +65,17 @@ export const useConflictResolve = create<ConflictResolveState>()(
     stop: () => set({ activePath: null, queue: [] }),
   }),
 );
+
+// A resolve walk belongs to the repo it started in. `conflict-resolve` is a
+// separate store, so the ui store's CROSS_REPO_RESET can't reach it — subscribe
+// to repo changes and drop the walk here. Without this the walk survives a repo
+// switch: the diff pane opens a resolution view for a path that belongs to the
+// OLD tree (or, on a same-named path, resolves the wrong file), and a queued
+// "resolve all" run keeps advancing through the previous repo's conflicts.
+useUiStore.subscribe((s, prev) => {
+  if (s.repoPath === prev.repoPath) return;
+  const { activePath, queue } = useConflictResolve.getState();
+  if (activePath !== null || queue.length > 0) {
+    useConflictResolve.setState({ activePath: null, queue: [] });
+  }
+});

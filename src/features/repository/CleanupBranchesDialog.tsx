@@ -31,6 +31,10 @@ interface Candidate {
   branch: Branch;
   /** Fully merged into the default branch (0 commits it doesn't have). */
   merged: boolean;
+  /** Label of the merged pull request this branch's name maps to ("#123"), or
+   *  null. Squash and rebase merges leave no ancestor link, so the PR is the
+   *  only evidence they landed. */
+  prMerged: string | null;
   /** Whole days since the branch tip's commit. */
   ageDays: number;
   /** Idle beyond the selected age window. */
@@ -38,6 +42,36 @@ interface Candidate {
 }
 
 const pluralBranches = (n: number) => `${n} branch${n === 1 ? "" : "es"}`;
+
+/** The one state badge a row can carry, in precedence order. Text carries the
+ *  meaning — the color never stands alone. */
+function RowBadge({
+  error,
+  merged,
+  prMerged,
+}: {
+  error: string | undefined;
+  merged: boolean;
+  prMerged: string | null;
+}) {
+  if (error)
+    return (
+      <span className="text-destructive" title={error}>
+        failed
+      </span>
+    );
+  if (merged) return <span className="text-merged">merged</span>;
+  if (prMerged)
+    return (
+      <span
+        className="text-merged"
+        title={`Merged via pull request ${prMerged}`}
+      >
+        merged {prMerged}
+      </span>
+    );
+  return null;
+}
 
 /**
  * Bulk "clean up branches" dialog, launched from the branch switcher. Gathers
@@ -47,7 +81,10 @@ const pluralBranches = (n: number) => `${n} branch${n === 1 ? "" : "es"}`;
  * one pass. The current branch, the default branch, and `gd/session/*` branches
  * are never candidates; Delete additionally excludes rule-protected branches.
  *
- * Merged detection reuses branch divergence (`ahead === 0`) — no extra backend.
+ * Merged detection has two sources: branch divergence (`ahead === 0`, no extra
+ * backend) and the switcher's PR map, which catches the squash and rebase merges
+ * divergence can't see. The PR side matches by branch NAME only, so it badges a
+ * row but never pre-selects it for deletion.
  */
 export function CleanupBranchesDialog({
   repoPath,
@@ -58,6 +95,8 @@ export function CleanupBranchesDialog({
   currentBranch,
   isProtected,
   isInWorktree,
+  prMergedByBranch,
+  prMergedPending,
 }: {
   repoPath: string;
   open: boolean;
@@ -70,6 +109,13 @@ export function CleanupBranchesDialog({
   /** True when a branch is checked out in another worktree — git can't delete it,
    *  so it's dropped from the delete candidates (it can still be archived). */
   isInWorktree: (name: string) => boolean;
+  /** Branch name → the label of the merged pull request it maps to ("#123").
+   *  Name-keyed and limited to the PRs the app has fetched, so it labels rows,
+   *  never selects them. */
+  prMergedByBranch: Map<string, string>;
+  /** True while that map is still filling — the empty state must not claim the
+   *  pull requests were checked before they were read. */
+  prMergedPending: boolean;
 }) {
   const queryClient = useQueryClient();
   // Shared 30s clock: the idle-past-the-window classification below must
@@ -121,11 +167,21 @@ export function CleanupBranchesDialog({
       const ts = Date.parse(b.lastCommitDate);
       const ageDays = Number.isFinite(ts) ? Math.floor((now - ts) / DAY_MS) : 0;
       const merged = mergedSet.has(b.name);
+      const prMerged = prMergedByBranch.get(b.name) ?? null;
       const old = ageDays >= windowDays;
-      if (merged || old) out.push({ branch: b, merged, ageDays, old });
+      if (merged || old || prMerged)
+        out.push({ branch: b, merged, prMerged, ageDays, old });
     }
     return out;
-  }, [branches, currentBranch, defaultBranch, mergedSet, now, windowDays]);
+  }, [
+    branches,
+    currentBranch,
+    defaultBranch,
+    mergedSet,
+    now,
+    prMergedByBranch,
+    windowDays,
+  ]);
 
   // Mode-specific candidates. Archive hides — already-archived branches are a
   // no-op, so drop them. Delete is permanent — drop rule-protected branches
@@ -150,7 +206,15 @@ export function CleanupBranchesDialog({
     () => candidates.map((c) => c.branch.name),
     [candidates],
   );
-  // Re-seed the selection only when the SET of candidate names actually changes,
+  // Pre-checked rows: the ones this repo's own history proves are done with.
+  // A row that only a pull request calls merged is matched by branch NAME, which
+  // can't confirm the tip is what that PR merged, so it stays unchecked until the
+  // user says otherwise.
+  const autoSelectNames = useMemo(
+    () => candidates.filter((c) => c.merged || c.old).map((c) => c.branch.name),
+    [candidates],
+  );
+  // Re-seed the selection only when the SET of pre-checked names actually changes,
   // keyed on their joined value rather than the array identity. A parent
   // re-render that yields an equal-but-new `candidates` array — a fresh
   // `isProtected` closure, a no-op branch refetch — would otherwise re-run this
@@ -158,19 +222,18 @@ export function CleanupBranchesDialog({
   // newlines (git ref rules), so the join is unambiguous — and it joins a SORTED
   // copy, because the render order shifts as ages tick on the shared 30s clock
   // and a pure reorder must not read as a new set.
-  const candidateNamesKey = [...candidateNames].sort().join("\n");
+  const autoSelectKey = [...autoSelectNames].sort().join("\n");
   useEffect(() => {
     if (running) return; // don't clobber a batch mid-flight
-    setSelected(
-      new Set(candidateNamesKey ? candidateNamesKey.split("\n") : []),
-    );
+    setSelected(new Set(autoSelectKey ? autoSelectKey.split("\n") : []));
     setActiveName(null);
-  }, [candidateNamesKey, running]);
+  }, [autoSelectKey, running]);
 
-  // First load: divergence still fetching and nothing has surfaced yet. Age-based
-  // candidates already show instantly (branch data is cached), so this only gates
-  // the truly-empty first paint.
-  const checkingMerged = Boolean(defaultBranch) && divergence.isLoading;
+  // First load: a merged signal still in flight and nothing has surfaced yet.
+  // Age-based candidates already show instantly (branch data is cached), so this
+  // only gates the truly-empty first paint.
+  const checkingMerged =
+    (Boolean(defaultBranch) && divergence.isLoading) || prMergedPending;
 
   const selectedCount = candidateNames.filter((n) => selected.has(n)).length;
   const allChecked =
@@ -282,11 +345,12 @@ export function CleanupBranchesDialog({
           <DialogHeader>
             <DialogTitle>Clean up branches</DialogTitle>
             <DialogDescription>
-              Local branches merged into{" "}
+              Local branches already merged into{" "}
               <span className="font-mono">
                 {defaultBranch ?? "the default branch"}
               </span>{" "}
-              or with no commits in a while.{" "}
+              — directly or through a recent pull request — or with no commits
+              in a while.{" "}
               {mode === "archive"
                 ? "Archiving hides them from the switcher — unarchive anytime."
                 : "Deleting removes them permanently, including commits only on them."}
@@ -395,8 +459,9 @@ export function CleanupBranchesDialog({
               No stale branches — nothing is merged into{" "}
               <span className="font-mono">
                 {defaultBranch ?? "the default branch"}
-              </span>{" "}
-              or idle for {windowDays} days. Try a shorter window.
+              </span>
+              , directly or through a recent pull request, and nothing is idle
+              for {windowDays} days. Try a shorter window.
             </p>
           ) : (
             <div
@@ -434,13 +499,11 @@ export function CleanupBranchesDialog({
                       {name}
                     </span>
                     <span className="flex shrink-0 items-center gap-2">
-                      {err ? (
-                        <span className="text-destructive" title={err}>
-                          failed
-                        </span>
-                      ) : c.merged ? (
-                        <span className="text-merged">merged</span>
-                      ) : null}
+                      <RowBadge
+                        error={err}
+                        merged={c.merged}
+                        prMerged={c.prMerged}
+                      />
                       <span className="tabular-nums text-muted-foreground">
                         <RelativeTime date={c.branch.lastCommitDate} />
                       </span>

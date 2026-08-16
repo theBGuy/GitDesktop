@@ -40,19 +40,52 @@ export interface PersistedReview {
   headSha: string;
   startedAt: number;
   finishedAt: number;
+  /** Present only on a PARTIAL record: a run that failed with output worth keeping.
+   *  Its absence is what makes a record a completed review, so every reader that means
+   *  "the previous review" goes through {@link listReviews} / {@link getLatestReview},
+   *  which drop partials. Additive optional field; schemaVersion stays 1. */
+  phase?: "error";
+  /** Why a partial run stopped, as shown to the user. Partial records only. */
+  error?: string;
+  /** The partial run was killed at its timeout (rather than failing outright) — the
+   *  distinction the kept output is labeled with. Partial records only. */
+  timedOut?: boolean;
+}
+
+/** Whether a stored record is a kept PARTIAL run rather than a completed review.
+ *  Store JSON is untrusted, so the flag is compared by exact value, never coerced. */
+export function isPartialReview(r: Pick<PersistedReview, "phase">): boolean {
+  return r.phase === "error";
+}
+
+/** A partial record's stop reason, type-checked out of untrusted store JSON: a
+ *  non-boolean `timedOut` reads as "failed", a non-string `error` as no reason. */
+export function partialReviewReason(
+  r: Pick<PersistedReview, "timedOut" | "error">,
+): { timedOut: boolean; error: string } {
+  return {
+    timedOut: r.timedOut === true,
+    error: typeof r.error === "string" ? r.error : "",
+  };
 }
 
 /** Reviews kept per `(lens, kind, ref, mode)` — enough to show iteration, bounded
  *  so the store file never balloons. Pruned on every write. */
 const MAX_PER_GROUP = 3;
 
+/** Partial runs are grouped separately and capped at one: the latest kept output is
+ *  all the panel offers, and a run of timeouts must never evict completed reviews. */
+const MAX_PARTIAL_PER_GROUP = 1;
+
 /** A record's lens, defaulting the absent field on pre-lens records to the lens
  *  they were written under. */
 const lensOf = (r: Pick<PersistedReview, "lens">): RemoteLens =>
   r.lens ?? "origin";
 
-const groupKey = (r: Pick<PersistedReview, "lens" | "kind" | "ref" | "mode">) =>
-  `${lensOf(r)}#${r.kind}#${r.ref}#${r.mode}`;
+const groupKey = (
+  r: Pick<PersistedReview, "lens" | "kind" | "ref" | "mode" | "phase">,
+) =>
+  `${lensOf(r)}#${r.kind}#${r.ref}#${r.mode}#${isPartialReview(r) ? "partial" : "done"}`;
 
 // Personal app-data, keyed by the repo's worktree-stable identity — never written
 // into the repo itself (the text quotes user source + may contain AI false
@@ -137,7 +170,8 @@ async function writeAll(
   await store.save();
 }
 
-/** Keeps only the newest `MAX_PER_GROUP` reviews per `(lens, kind, ref, mode)`. */
+/** Keeps only the newest few records per `(lens, kind, ref, mode)` — completed
+ *  reviews and kept partial runs are separate groups with their own caps. */
 function prune(records: PersistedReview[]): PersistedReview[] {
   const groups = new Map<string, PersistedReview[]>();
   for (const r of records) {
@@ -149,7 +183,12 @@ function prune(records: PersistedReview[]): PersistedReview[] {
   const kept: PersistedReview[] = [];
   for (const group of groups.values()) {
     group.sort((a, b) => b.finishedAt - a.finishedAt);
-    kept.push(...group.slice(0, MAX_PER_GROUP));
+    // Every member of a group shares its partial-ness (it's part of the key), so the
+    // first member decides the cap.
+    const cap = isPartialReview(group[0])
+      ? MAX_PARTIAL_PER_GROUP
+      : MAX_PER_GROUP;
+    kept.push(...group.slice(0, cap));
   }
   return kept;
 }
@@ -188,16 +227,41 @@ export async function getLatestReview(
         lensOf(r) === lens &&
         r.kind === kind &&
         r.ref === ref &&
-        r.mode === mode,
+        r.mode === mode &&
+        !isPartialReview(r),
     )
     .sort((a, b) => b.finishedAt - a.finishedAt)[0];
 }
 
-/** Every persisted review for a PR (both modes), newest first. Two consumers, so
+/** The most recent kept PARTIAL run for a PR (either mode), or undefined if none —
+ *  the output a timed-out run left behind, which the panel can show after a restart.
+ *  Deliberately its own read: a partial is not a review, so nothing that builds on
+ *  "the previous review" (prior context, the automation coverage gates) may see it. */
+export async function getLatestPartialReview(
+  repo: string,
+  lens: RemoteLens,
+  kind: "remote" | "local",
+  ref: string,
+): Promise<PersistedReview | undefined> {
+  const all = await read(repo);
+  return all
+    .filter(
+      (r) =>
+        lensOf(r) === lens &&
+        r.kind === kind &&
+        r.ref === ref &&
+        isPartialReview(r),
+    )
+    .sort((a, b) => b.finishedAt - a.finishedAt)[0];
+}
+
+/** Every COMPLETED review for a PR (both modes), newest first. Two consumers, so
  *  narrowing what this returns is not a UI-only change: the "Previous reviews"
  *  disclosure, and the runner's pr-sync gate, which reads the whole retained set to
- *  decide whether a head was already covered. `fresh` re-reads the store from disk
- *  first — see {@link read}. */
+ *  decide whether a head was already covered. Kept partial runs are excluded for that
+ *  second reason above all — a timed-out run must not mark a head as reviewed
+ *  ({@link getLatestPartialReview} is the one reader that wants them). `fresh`
+ *  re-reads the store from disk first — see {@link read}. */
 export async function listReviews(
   repo: string,
   lens: RemoteLens,
@@ -207,11 +271,18 @@ export async function listReviews(
 ): Promise<PersistedReview[]> {
   const all = await read(repo, opts);
   return all
-    .filter((r) => lensOf(r) === lens && r.kind === kind && r.ref === ref)
+    .filter(
+      (r) =>
+        lensOf(r) === lens &&
+        r.kind === kind &&
+        r.ref === ref &&
+        !isPartialReview(r),
+    )
     .sort((a, b) => b.finishedAt - a.finishedAt);
 }
 
-/** Upserts a finished review by id, then prunes its group to the newest few. */
+/** Upserts a finished review — or a kept partial run — by id, then prunes its group
+ *  to the newest few. */
 export async function saveReview(
   repo: string,
   record: PersistedReview,

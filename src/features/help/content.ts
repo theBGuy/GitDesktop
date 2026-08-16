@@ -325,7 +325,9 @@ The **Changes** tab ({{kbd:tab-changes}}) lists your modified files, split into
 - **Hunk-level staging** — in a file's diff, each hunk has its own Stage / Unstage /
   Discard buttons.
 - **Line-level staging** — drag across the line-number gutter to select specific lines,
-  then stage or discard just those.
+  then stage or discard just those. Hold {{key:mod}} while dragging and the new run joins
+  the selection instead of replacing it, so one selection can mix added and removed lines
+  across as many hunks as you like; a plain drag starts a fresh one.
 - Select multiple files ({{key:mod}}-click, or Shift-click for a range), then {{secondaryclick}}
   for **Stage / Unstage / Discard / Stash** of the whole selection.
 - Filter the list by path, or by category (new / modified / deleted, included /
@@ -437,10 +439,14 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   push publishes it under its own name — pairs with pushing a branch without switching to it
   (below).
 - **Clean up branches** — from the switcher's menu or the command palette — opens a bulk
-  sweep of stale branches: those **merged** into the default branch, or with no commits in a
-  chosen window (30/60/90 days). Review the pre-checked list, then **archive** them
-  (reversible) or **delete** them together. The current branch, the default branch, and
-  protected branches are never included.
+  sweep of stale branches: those **merged** into the default branch — directly, or through a
+  recent pull request, so squash- and rebase-merged branches turn up too, each badged
+  **merged #123** with the pull request that took them — and those with no commits in a
+  chosen window (30/60/90 days). Branches your own history calls merged, and idle ones,
+  start **pre-checked**; a pull-request match goes by branch name, so those rows start
+  unchecked for you to confirm each one. Review the list, then **archive** them (reversible)
+  or **delete** them together. The current branch, the default branch, and protected
+  branches are never included.
 {{ai}}- **Generate a branch name with AI** from your working-tree changes when creating
   or renaming one. Whenever the working tree can't describe the branch being named —
   it's clean, or you're renaming a branch you aren't on — it names it from that
@@ -494,8 +500,8 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
 **Stash all changes** ({{kbd:stash-all}}) sets your working changes aside; **View
 stashes** lists them to apply, pop, or drop, and **Pop latest stash** restores the most
 recent. Setting changes aside is refused while conflicts are still unresolved, or while a
-merge, rebase or cherry-pick is in progress — finish or abort it first, so a resolution
-you've already staged can't be swept out of the operation.
+merge, rebase, cherry-pick or revert is in progress — finish or abort it first, so a
+resolution you've already staged can't be swept out of the operation.
 
 **Recover lost work** (in the branch ⋮ menu, or the command palette) opens the
 **Recoverable** tab in the stashes dialog. It scans your repository (with \`git fsck\`) for
@@ -512,9 +518,9 @@ from, and whether it finished, failed, or is still pending. If one of these oper
 interrupted (a crash or a restart mid-op), a calm recovery line appears above the **Changes**
 list naming what was interrupted and the state it started from. That notice only informs — it
 never resets or continues anything on its own (the git-native **Continue**/**Abort** for an
-in-progress merge, rebase, or cherry-pick live in the conflict bar right above it); from it
-you can open this history, jump to **Recover lost work** to rescue any orphaned changes, or
-dismiss the notice.
+in-progress merge, rebase, cherry-pick, or revert live in the conflict bar right above it);
+from it you can open this history, jump to **Recover lost work** to rescue any orphaned
+changes, or dismiss the notice.
 
 ## Compare
 
@@ -555,9 +561,9 @@ test, or review several branches at once without stashing or switching.
   removes the worktree (a branch can't be checked out in two at once) and checks that branch
   out in the main workspace. The worktree must be clean first; any uncommitted work in the
   main workspace is stashed so the checkout can't be blocked (restore it with *Pop latest
-  stash*), and promoting is blocked while the main workspace has a merge, rebase or
-  cherry-pick in progress, or unresolved conflicts. Works even on the worktree you're
-  currently in.
+  stash*), and promoting is blocked while the main workspace has a merge, rebase,
+  cherry-pick or revert in progress, or unresolved conflicts. Works even on the worktree
+  you're currently in.
 - **Repair links** (footer) re-connects worktrees if you moved or renamed the repository
   folder in your file manager, which otherwise breaks the path each worktree records.
 
@@ -603,12 +609,15 @@ the pull runs, then they come back on top of it. If reapplying them hits conflic
 conflicted files appear in **Changes** to resolve as usual and the stash is kept as a backup
 until you're done; if they can't go back at all (say the pull brought in a file with the
 same name), they stay safely in the stash. The same recovery covers
-**Update from upstream** and updating the branch you're on from another branch.
+**Update from upstream**, updating the branch you're on from another branch, and **merging**
+a branch into the one you're on. A **squash**, **no-fast-forward**, or strategy merge reports
+the refusal instead: the recovery redoes the merge plainly, so offering it there would drop
+the option you chose.
 
 Tick **Always stash and reapply** in the prompt — or turn on **Automatically stash and
-reapply on pull and branch updates** under **Settings → General** — and those operations
-recover on their own, with no prompt. Either way it only ever kicks in when git actually
-refuses the operation.
+reapply on pull, merge, and branch updates** under **Settings → General** — and those
+operations recover on their own, with no prompt. Either way it only ever kicks in when git
+actually refuses the operation.
 
 ## Update a fork from upstream
 
@@ -640,13 +649,15 @@ pushed in the meantime.
 
 ## Resolving conflicts
 
-During a **merge**, **rebase**, or **cherry-pick**, a slim banner appears in **Changes**
-with the conflict count and **Abort** / **Finish** controls. Select a conflicted file (the
-\`!\` badge) to open the **conflict editor**: each conflict region shows **Current (ours)**
-over **Incoming (theirs)** with **Accept current**, **Accept incoming**, or **Accept both**,
-and the header adds whole-file **Accept all current** / **Accept all incoming** and **Open in
-editor**. Files mark themselves resolved as you go — the \`!\` badge clears — and **Finish**
-stays disabled until every conflict is resolved.
+During a **merge**, **rebase**, **cherry-pick**, or **revert**, a slim banner appears in
+**Changes** naming the operation and its conflict count, with **Abort** and a finish control
+that names it too (**Finish merge**, **Continue rebase**, **Continue cherry-pick**,
+**Continue revert**). Select a conflicted file (the \`!\` badge) to open the **conflict
+editor**: each conflict region shows **Current (ours)** over **Incoming (theirs)** with
+**Accept current**, **Accept incoming**, or **Accept both**, and the header adds whole-file
+**Accept all current** / **Accept all incoming** and **Open in editor**. Files mark
+themselves resolved as you go — the \`!\` badge clears — and the finish control stays
+disabled, saying so, until every conflict is resolved.
 
 {{ai}}## Resolve conflicts with AI
 
@@ -885,10 +896,13 @@ range. From there you can:
 
 A **Review in progress** bar shows the pending count with **Submit review…** and
 **Discard**. Submitting opens a dialog to choose a **verdict** — **Comment**, **Approve**,
-or **Request changes** — each offered only where the provider allows it; **Request changes**
-requires a summary. Submit posts all your pending drafts as one batch review (it works with
-no drafts too, for a plain verdict + summary). **Submit review…** and **Discard pending
-review** are also available from the command palette ({{kbd:command-palette}}).
+or **Request changes**. All three always show: one that isn't usable yet stays on screen,
+disabled, and names what it's waiting on — *available once GitDesktop connects to GitHub*
+(or GitLab, or Bitbucket) — so you can see the option exists and what makes it work.
+**Request changes** requires a summary. Submit posts all your pending drafts as one batch
+review (it works with no drafts too, for a plain verdict + summary). **Submit review…** and
+**Discard pending review** are also available from the command palette
+({{kbd:command-palette}}).
 
 ## The Commits tab
 
@@ -1014,9 +1028,11 @@ this pull request already sits on, and shows you a **preview** of exactly what w
 stacked, bottom to top, before anything is created. Confirm it and the chain becomes a real
 stack: one that navigates as a unit and **merges bottom-up as a single operation**. Only
 this repository's own pull requests can chain — a **fork** pull request never joins a
-stack — and where a repository has more open pull requests than fit one page, the offer
-stays quiet rather than guess at a chain it can't see whole. (GitLab finds stacked merge
-requests on its own and Bitbucket has no stacks, so this is GitHub-only.)
+stack — and where a repository has more open pull requests than fit one page, it won't
+guess at a chain it can't see whole. When one of those holds it back, a short note sits
+where the offer would: too many open pull requests to scan, stack state still loading, or a
+fork pull request targeting this branch. (GitLab finds stacked merge requests on its own and
+Bitbucket has no stacks, so this is GitHub-only.)
 
 A stacked pull request's **Stack** section also offers **Dissolve**, behind a confirmation.
 Dissolving takes the stack apart and nothing else: every pull request in it **stays open on
@@ -1122,7 +1138,11 @@ reviewing model's context window (probing Ollama live), or pick Compact / Standa
 Expanded. **Review timeout** (shown when an agent CLI drives reviews or security audits)
 caps how long such a review may run before it's stopped: **Auto** allows 5 minutes (20 when
 the review is agentic — always, for Codex), or pin a fixed limit that applies to every
-agent-CLI review.
+agent-CLI review. Whatever the reviewer already wrote is kept when the limit hits: it stays
+on screen and is saved with the pull request, labelled **Timed out — partial output kept**,
+so it's still there after a restart. Kept output is never treated as a finished review — it
+doesn't feed the next run's context and doesn't count as coverage for an automated review,
+so run it again for a full one.
 
 **Critical** is the top severity an audit finding can carry — remote code execution,
 execution triggered by content you only clone or open, full compromise, or a mass data
@@ -2108,9 +2128,9 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   background work continues; launching the app again while it's running —
   tray-hidden or not — focuses the existing window), **automatically fetch from your
   remotes** (a background fetch on an interval you pick — it never pulls, merges, or
-  changes your files), **automatically stash and reapply on pull and branch updates**
-  (an operation git would refuse over uncommitted changes recovers on its own, no
-  prompt), **reapply stashed changes after switching branches** (*Stash and switch*
+  changes your files), **automatically stash and reapply on pull, merge, and branch
+  updates** (an operation git would refuse over uncommitted changes recovers on its own,
+  no prompt), **reapply stashed changes after switching branches** (*Stash and switch*
   puts your changes back once the switch lands), **create pull requests as drafts** by
   default (off by default — pre-checks the Create-PR dialog's draft box, still
   overridable per PR; pairs with *Review draft PRs when created* so a draft's automated

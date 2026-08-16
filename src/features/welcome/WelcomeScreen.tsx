@@ -9,6 +9,7 @@ import {
 } from "@phosphor-icons/react";
 import { BrandMark } from "@/components/BrandMark";
 import { Button } from "@/components/ui/button";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { useUpdateCheck } from "@/features/updates/useUpdateCheck";
 import { formatBinding } from "@/lib/hotkeys/binding";
 import { dispatchAction, useEffectiveBindings } from "@/lib/hotkeys/hotkeys";
@@ -118,73 +119,87 @@ export function WelcomeScreen() {
         </div>
       </header>
 
-      <main className="mx-auto flex w-full max-w-4xl flex-1 flex-col justify-center gap-6 p-8">
-        {settings.data && !settings.data.seenGuideNudge && (
-          <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border bg-muted/40 px-3 py-2">
-            <span className="flex items-center gap-2 text-xs text-muted-foreground">
-              <BookOpenIcon className="size-4 shrink-0 text-foreground" />
-              New to GitDesktop? The built-in guide walks through the whole
-              workflow.
-            </span>
-            <span className="flex shrink-0 items-center gap-1">
-              <Button size="xs" variant="ghost" onClick={dismissNudge}>
-                Dismiss
-              </Button>
-              <Button size="xs" onClick={openGuide}>
-                Open guide
-              </Button>
-            </span>
-          </div>
-        )}
-
-        <div className="grid items-center gap-y-8 md:grid-cols-2">
-          <div className="flex flex-col gap-6 md:pr-10">
-            <div className="space-y-2">
-              <h1 className="font-heading text-2xl font-semibold tracking-tight text-balance">
-                The whole loop,
-                <br className="hidden sm:block" /> one window.
-              </h1>
-              <p className="text-xs/relaxed text-muted-foreground">
-                Open a repository to start reviewing, committing, and shipping
-                {aiEnabled ? " — with AI in the loop when you want it." : "."}
-              </p>
-            </div>
-
-            <div className="space-y-2">
-              <div className="flex flex-col gap-2">
-                {actions.map(({ id, label, icon: Icon, variant, onClick }) => {
-                  const binding = bindings.get(id);
-                  return (
-                    <Button
-                      key={id}
-                      variant={variant}
-                      onClick={onClick}
-                      className="w-full justify-between"
-                    >
-                      <span className="flex items-center gap-2">
-                        <Icon className="size-4" />
-                        {label}
-                      </span>
-                      {binding && (
-                        <span className="text-[11px] tabular-nums opacity-60">
-                          {formatBinding(binding)}
-                        </span>
-                      )}
-                    </Button>
-                  );
-                })}
+      {/* overflow-hidden contains the content's natural height (vendored Root is
+          `relative`-only), so a tall welcome pane can't leak a window scrollbar. */}
+      <ScrollArea className="min-h-0 flex-1 overflow-hidden">
+        {/* `my-auto` centers the content while it fits and resolves to zero once
+            it doesn't — unlike `justify-center`, which would push the top of an
+            overflowing pane out of the scrollable region. */}
+        <main className="mx-auto flex min-h-full w-full max-w-4xl flex-col p-8">
+          <div className="my-auto flex w-full flex-col gap-6">
+            {settings.data && !settings.data.seenGuideNudge && (
+              <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border bg-muted/40 px-3 py-2">
+                <span className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <BookOpenIcon className="size-4 shrink-0 text-foreground" />
+                  New to GitDesktop? The built-in guide walks through the whole
+                  workflow.
+                </span>
+                <span className="flex shrink-0 items-center gap-1">
+                  <Button size="xs" variant="ghost" onClick={dismissNudge}>
+                    Dismiss
+                  </Button>
+                  <Button size="xs" onClick={openGuide}>
+                    Open guide
+                  </Button>
+                </span>
               </div>
-              <p className="pt-1 text-[11px] text-muted-foreground">
-                …or drag a repo folder anywhere onto the window.
-              </p>
+            )}
+
+            <div className="grid items-center gap-y-8 md:grid-cols-2">
+              <div className="flex flex-col gap-6 md:pr-10">
+                <div className="space-y-2">
+                  <h1 className="font-heading text-2xl font-semibold tracking-tight text-balance">
+                    The whole loop,
+                    <br className="hidden sm:block" /> one window.
+                  </h1>
+                  <p className="text-xs/relaxed text-muted-foreground">
+                    Open a repository to start reviewing, committing, and
+                    shipping
+                    {aiEnabled
+                      ? " — with AI in the loop when you want it."
+                      : "."}
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <div className="flex flex-col gap-2">
+                    {actions.map(
+                      ({ id, label, icon: Icon, variant, onClick }) => {
+                        const binding = bindings.get(id);
+                        return (
+                          <Button
+                            key={id}
+                            variant={variant}
+                            onClick={onClick}
+                            className="w-full justify-between"
+                          >
+                            <span className="flex items-center gap-2">
+                              <Icon className="size-4" />
+                              {label}
+                            </span>
+                            {binding && (
+                              <span className="text-[11px] tabular-nums opacity-60">
+                                {formatBinding(binding)}
+                              </span>
+                            )}
+                          </Button>
+                        );
+                      },
+                    )}
+                  </div>
+                  <p className="pt-1 text-[11px] text-muted-foreground">
+                    …or drag a repo folder anywhere onto the window.
+                  </p>
+                </div>
+              </div>
+
+              <div className="self-stretch md:border-l md:border-border md:pl-10">
+                <RecentRepoList />
+              </div>
             </div>
           </div>
-
-          <div className="self-stretch md:border-l md:border-border md:pl-10">
-            <RecentRepoList />
-          </div>
-        </div>
-      </main>
+        </main>
+      </ScrollArea>
     </div>
   );
 }

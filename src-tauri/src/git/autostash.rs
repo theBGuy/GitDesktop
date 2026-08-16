@@ -75,12 +75,16 @@ fn failure_text(out: &GitOutput) -> String {
     }
 }
 
-/// Shapes a non-zero raw result exactly as `run_git` would, so the no-stash path's
-/// error reaches the frontend identical to the plain command's.
+/// Shapes a non-zero raw result the way the plain command does — stdout backfill
+/// included (see `failure_text` and `git_merge_core`) — so the no-stash path's
+/// error reaches the frontend identical to the plain command's. Without the
+/// backfill a conflict here renders as "git exited with code 1", since that arm
+/// is reached exactly when nothing was stashed, i.e. on the clean tree where a
+/// merge/pull/switch conflicts with no stash to unwind.
 fn git_error(out: GitOutput) -> AppError {
     AppError::Git {
         code: out.code,
-        stderr: out.stderr,
+        stderr: failure_text(&out),
     }
 }
 
@@ -786,8 +790,8 @@ mod tests {
     /// The conflict summary in `src/lib/error-summary.ts` keys off the ANCHORED
     /// shapes of these lines, so a git release that reworded one would silently
     /// change how conflicts present. Markers 1-2 guard live toast classification;
-    /// markers 3-4 ride stdout, which `AppError::Git` does not carry today —
-    /// guarded here against the day it does.
+    /// markers 3-4 ride stdout, which only the paths that backfill it carry
+    /// (`git_merge_core`, `failure_text`).
     #[tokio::test]
     async fn conflict_output_still_matches_the_anchored_frontend_markers() {
         // Mirrors of the four CONFLICT_MARKERS regexes, in plain string ops.
@@ -797,11 +801,12 @@ mod tests {
         fn lines(text: &str) -> std::str::Split<'_, [char; 2]> {
             text.split(['\n', '\r'])
         }
-        fn could_not_apply(text: &str) -> bool {
-            lines(text).any(|line| {
-                let rest = line.strip_prefix("error: ").unwrap_or(line);
-                rest.starts_with("could not apply ") || rest.starts_with("Could not apply ")
-            })
+        // Mirrors CONFLICT_MARKERS[0], which covers BOTH verbs — rebase and
+        // cherry-pick echo `could not apply`, revert `could not revert`, and for a
+        // revert that line is the only conflict evidence the error carries. Same
+        // shape as `is_subject_echo` on purpose (see the marker's comment).
+        fn could_not_apply_or_revert(text: &str) -> bool {
+            lines(text).any(is_subject_echo)
         }
         fn resolve_all_conflicts(text: &str) -> bool {
             lines(text).any(|line| {
@@ -857,7 +862,7 @@ mod tests {
             .unwrap();
         assert_ne!(cherry.code, 0, "expected the cherry-pick to conflict");
         assert_shape(
-            could_not_apply(&cherry.stderr),
+            could_not_apply_or_revert(&cherry.stderr),
             "error: could not apply <sha>…",
             &cherry.stderr,
         );
@@ -884,7 +889,7 @@ mod tests {
             &rebase.stderr,
         );
         assert_shape(
-            could_not_apply(&rebase.stderr),
+            could_not_apply_or_revert(&rebase.stderr),
             "Could not apply <sha>…",
             &rebase.stderr,
         );
@@ -909,6 +914,67 @@ mod tests {
             needs_merge(&cont.stdout_lossy()),
             "<path>: needs merge",
             &cont.stdout_lossy(),
+        );
+        git(&repo, &["rebase", "--abort"]).await;
+
+        // Revert: its own advice verb, plus the `could not revert` echo — which is
+        // the ONLY conflict marker a revert's error carries, since its runner
+        // keeps stderr alone. Reverting the SECOND-newest commit conflicts; the
+        // newest would apply cleanly.
+        write(dir.path(), "a.txt", "one\n");
+        commit_all(&repo, "one").await;
+        write(dir.path(), "a.txt", "two\n");
+        commit_all(&repo, "two").await;
+        let revert = run_git_raw(
+            Some(&repo),
+            &["revert", "--no-edit", "HEAD~1"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_ne!(revert.code, 0, "expected the revert to conflict");
+        assert_shape(
+            could_not_apply_or_revert(&revert.stderr),
+            "error: could not revert <sha>…",
+            &revert.stderr,
+        );
+        assert!(
+            advises_continue(&revert.stderr, "revert"),
+            "git no longer advises `git revert --continue` outside the subject-echo line — \
+             the frontend would name every paused revert \"Operation\". Actual stderr:\n{}",
+            revert.stderr
+        );
+        git(&repo, &["revert", "--abort"]).await;
+
+        // Merge is the one conflict family with NO `--continue` advice: it reports
+        // on stdout and leaves stderr EMPTY, which is why `git_merge_core` carries
+        // stdout into the error. Asserting the advice here would fail against
+        // correct git — this pins the reality instead.
+        let merge = run_git_raw(
+            Some(&repo),
+            &["merge", "--no-edit", "feat"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_ne!(merge.code, 0, "expected the merge to conflict");
+        assert_shape(
+            conflict_paren(&merge.stdout_lossy()),
+            "CONFLICT (…",
+            &merge.stdout_lossy(),
+        );
+        // Line-anchored, mirroring MERGE_VERDICT (error-summary.ts) — that is the
+        // only line naming the op for a merge, since there is no advice to read.
+        assert_shape(
+            lines(&merge.stdout_lossy()).any(|l| l.starts_with("Automatic merge failed")),
+            "Automatic merge failed…",
+            &merge.stdout_lossy(),
+        );
+        assert!(
+            merge.stderr.trim().is_empty(),
+            "a conflicted merge still leaves stderr empty — the reason git_merge_core \
+             backfills stdout. Actual stderr:\n{}",
+            merge.stderr
         );
     }
 
@@ -1102,6 +1168,65 @@ mod tests {
             ) => {
                 assert_eq!(a, b);
                 assert_eq!(a_err, b_err);
+            }
+            other => panic!("expected two git errors, got {other:?}"),
+        }
+    }
+
+    /// The same parity in the shape that actually loses information: a conflicted
+    /// merge reports on STDOUT and leaves stderr empty, and this arm is reached
+    /// exactly when nothing was stashed — the clean tree a dirty-tree recovery
+    /// leaves behind once the user commits or the changes are already away.
+    #[tokio::test]
+    async fn a_conflict_with_nothing_stashed_carries_the_stdout_report() {
+        let (dir, repo) = setup_with_feat("plain-parity-conflict").await;
+        // Diverge `main` so the merge conflicts instead of fast-forwarding, and
+        // leave the tree CLEAN so `settle` takes its no-stash arm.
+        write(dir.path(), "a.txt", "mine\n");
+        commit_all(&repo, "local change").await;
+        let state = AppState::default();
+
+        let compound = git_merge_autostash_core(&state, repo.clone(), "feat".into())
+            .await
+            .unwrap_err();
+        assert!(stash_list(&repo).await.is_empty(), "nothing was stashed");
+        git(&repo, &["merge", "--abort"]).await;
+        let plain = crate::git::ops::git_merge_core(
+            &state,
+            repo.clone(),
+            "feat".into(),
+            false,
+            false,
+            "none".into(),
+        )
+        .await
+        .unwrap_err();
+        git(&repo, &["merge", "--abort"]).await;
+
+        match (&compound, &plain) {
+            (
+                AppError::Git {
+                    code: a,
+                    stderr: a_err,
+                },
+                AppError::Git {
+                    code: b,
+                    stderr: b_err,
+                },
+            ) => {
+                assert_eq!(a, b);
+                assert_eq!(a_err, b_err);
+                // Mirrors the frontend's anchored CONFLICT_MARKERS: without the
+                // stdout backfill both sides carry an empty stderr instead, which
+                // renders as "git exited with code 1".
+                assert!(
+                    a_err.lines().any(|l| l.starts_with("CONFLICT (")),
+                    "the conflict line must reach the frontend: {a_err}"
+                );
+                assert!(
+                    a_err.contains("Automatic merge failed"),
+                    "and the verdict line that names it a merge: {a_err}"
+                );
             }
             other => panic!("expected two git errors, got {other:?}"),
         }

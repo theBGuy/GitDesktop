@@ -528,9 +528,9 @@ impl GitDesktopMcp {
                        (including untracked). With `paths`, stashes only those files, leaving every \
                        other file's staged and unstaged changes exactly as they were; paths and \
                        directories match exactly, set literal=false to pass a pathspec or glob. \
-                       Refused while conflicts are unresolved, or while a merge, rebase or \
-                       cherry-pick is in progress (finish or abort it first — retrying won't \
-                       help). Requires --allow-git-write.",
+                       Refused while conflicts are unresolved, or while a merge, rebase, \
+                       cherry-pick or revert is in progress (finish or abort it first — \
+                       retrying won't help). Requires --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn stash_push(

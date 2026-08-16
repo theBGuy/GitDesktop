@@ -51,7 +51,11 @@ import {
   useReviewerNotes,
   useReviewHistory,
 } from "@/lib/pulls/queries";
-import type { PersistedReview } from "@/lib/pulls/reviews-history";
+import {
+  getLatestPartialReview,
+  type PersistedReview,
+  partialReviewReason,
+} from "@/lib/pulls/reviews-history";
 import { useSecretPreview, useSettings } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import {
@@ -75,6 +79,12 @@ const DELTA_NOTE: Partial<Record<string, string>> = {
 };
 
 const PROVIDER_IDS = Object.keys(PROVIDER_LABELS) as AiProviderId[];
+
+/** A stored review's findings text. The plugin-store JSON is untrusted (a
+ *  hand-edited `pr-reviews.json` reaches here verbatim), so a non-string `text` reads
+ *  as no text instead of throwing mid-render. */
+const reviewText = (r: PersistedReview): string =>
+  typeof r.text === "string" ? r.text : "";
 
 export function PrReviewPanel({
   context,
@@ -148,10 +158,39 @@ export function PrReviewPanel({
     // empty-text records (trimmed to nothing) — the run feeds them no context,
     // so the banner shouldn't claim it'll "build on" them.
     for (const r of history.data ?? []) {
-      if (r.text.trim() && out[r.mode] == null) out[r.mode] = r;
+      if (reviewText(r).trim() && out[r.mode] == null) out[r.mode] = r;
     }
     return out;
   }, [history.data]);
+  // The output a failed/timed-out run left behind. The live run store is memory-only,
+  // so this is the only copy after a restart; it's shown solely when nothing newer
+  // completed, so a finished review always wins the surface.
+  const partialRun = useQuery({
+    queryKey: [
+      "review-partial",
+      context.repoPath,
+      context.lens,
+      prKind,
+      prRef,
+    ] as const,
+    queryFn: () =>
+      getLatestPartialReview(context.repoPath, context.lens, prKind, prRef),
+  });
+  const keptPartial = useMemo(() => {
+    const record = partialRun.data;
+    // History pending (undefined) withholds it rather than guessing: showing kept
+    // output that a since-completed review supersedes, then yanking it, reads as a flash.
+    if (
+      !record ||
+      !reviewText(record).trim() ||
+      !validEpochMs(record.finishedAt) ||
+      !history.data
+    )
+      return undefined;
+    return record.finishedAt > (history.data[0]?.finishedAt ?? 0)
+      ? record
+      : undefined;
+  }, [partialRun.data, history.data]);
   // Which modes the next run should ignore the prior review for — derived from
   // the clicked button's mode, never the shared store entry (avoids mislabeling).
   const [ignoredModes, setIgnoredModes] = useState<Set<ReviewMode>>(new Set());
@@ -746,6 +785,19 @@ export function PrReviewPanel({
               <Spinner className="size-3" />
               {status || "Starting review…"}
             </p>
+          ) : keptPartial ? (
+            <div className="space-y-2">
+              <p className="flex items-start gap-1.5 text-xs text-warning">
+                <ClockIcon className="mt-0.5 size-3.5 shrink-0" />
+                <span>
+                  {partialReviewReason(keptPartial).timedOut
+                    ? "Timed out"
+                    : "Stopped early"}{" "}
+                  — partial output kept. Run it again for a full review.
+                </span>
+              </p>
+              <Markdown>{reviewText(keptPartial)}</Markdown>
+            </div>
           ) : (
             <p className="text-xs text-muted-foreground">
               Run a general review or a security audit of this {prNoun}'s

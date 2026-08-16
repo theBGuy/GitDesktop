@@ -1560,6 +1560,18 @@ export function JiraIssueView({
     : issue.url;
   const detailsStale = details.isPlaceholderData;
   const staleDim = detailsStale && "opacity-80";
+  // Which hold the composer names, ranked: the switch window outranks a write the
+  // viewer started, being the hold they can't have caused themselves.
+  const composerReason = (() => {
+    switch (true) {
+      case detailsStale:
+        return "Loading this issue…";
+      case comment.isPending:
+        return "Posting your comment…";
+      default:
+        return undefined;
+    }
+  })();
 
   function submitComment() {
     const body = compose.value.trim();
@@ -1749,6 +1761,7 @@ export function JiraIssueView({
               // A placeholder issue is the previously selected one, so submitting
               // would comment on it; typing stays live through the window.
               busy={comment.isPending || detailsStale}
+              reason={composerReason}
               disabled={comment.isPending}
             />
           )}

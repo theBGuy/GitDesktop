@@ -138,11 +138,12 @@ function PromoteBody({
     queryFn: () => gitStatus(mainPath as string),
     enabled: Boolean(mainPath),
   });
-  // Main's in-progress merge/rebase/cherry-pick: the backend refuses to stash over
-  // one, and the stash here runs AFTER the worktree is removed — so it has to be a
-  // precondition, not an error past the point of no return. Inline rather than via
-  // `useOpState` (which takes no `enabled`) because mainPath resolves a tick later
-  // from the worktree list; the shared key keeps one cache entry either way.
+  // Main's in-progress merge/rebase/cherry-pick/revert: the backend refuses to
+  // stash over one, and the stash here runs AFTER the worktree is removed — so it
+  // has to be a precondition, not an error past the point of no return. Inline
+  // rather than via `useOpState` (which takes no `enabled`) because mainPath
+  // resolves a tick later from the worktree list; the shared key keeps one cache
+  // entry either way.
   const mOpState = useQuery({
     queryKey: repoKeys.opState(mainPath ?? "__pending__"),
     queryFn: () => gitOpState(mainPath as string),
@@ -160,7 +161,8 @@ function PromoteBody({
   const mainMidOp = Boolean(
     mOpState.data?.merging ||
       mOpState.data?.rebasing ||
-      mOpState.data?.cherryPicking,
+      mOpState.data?.cherryPicking ||
+      mOpState.data?.reverting,
   );
   // `refuse_mid_op` refuses on unmerged index entries too, and that arm has no
   // marker file behind it: a conflicted squash-merge leaves the conflicts with
@@ -290,8 +292,8 @@ function PromoteBody({
         </p>
       ) : mainMidOp ? (
         <p className="text-xs text-warning">
-          The main workspace has a merge, rebase or cherry-pick in progress —
-          finish or abort it first.
+          The main workspace has a merge, rebase, cherry-pick or revert in
+          progress — finish or abort it first.
         </p>
       ) : mainConflicted ? (
         <p className="text-xs text-warning">

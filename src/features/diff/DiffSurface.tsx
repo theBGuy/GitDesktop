@@ -1,4 +1,4 @@
-import type { DiffAST } from "@git-diff-view/core";
+import type { DiffAST, DiffFileHighlighter } from "@git-diff-view/core";
 import {
   DiffFile,
   DiffModeEnum,
@@ -260,14 +260,17 @@ const EMPTY_WORKER_AST: DiffAST = { type: "root", children: [] };
 /**
  * A @git-diff-view highlighter backed by ASTs the worker already tokenized:
  * `getAST` looks the side up by the raw text's djb2 hash — no engine on the
- * main thread; a miss returns the empty AST (that side plain). Must be fed to a
- * REAL local `initSyntax` so `syntaxFile` populates — otherwise the view's
- * clone WIPES the highlighting on mount. `type: "style"` matches Shiki's spans.
+ * main thread; a miss returns the empty AST (that side plain). Handed to the
+ * view as `registerHighlighter`, whose effect runs `initSyntax` on the view's
+ * OWN clone in place — so the ASTs paint without rebuilding the DiffFile.
+ * `name`/`type` must stay `"shiki"`/`"style"`: the core's re-entry guards
+ * (DiffFile.initSyntax, File.doSyntax) bail on a highlighter matching the one
+ * already applied, so a pair matching the interim "lowlight" pass would keep it.
  */
-function precomputedHighlighter(asts: WorkerAsts) {
+function precomputedHighlighter(asts: WorkerAsts): DiffFileHighlighter {
   return {
     name: "shiki",
-    type: "style" as const,
+    type: "style",
     maxLineToIgnoreSyntax: SYNTAX_LINE_CAP,
     setMaxLineToIgnoreSyntax: () => undefined,
     ignoreSyntaxHighlightList: [],
@@ -312,10 +315,6 @@ export function createDiffFile(
   // files (correct comment/string state) and maps tokens onto the diff lines —
   // and switches to collapsible full-file context instead of a bare hunk.
   content?: { old: string | null; new: string | null },
-  // Per-side ASTs the highlight worker already tokenized. Passed only for an
-  // over-budget Shiki-routed file (the sync path SKIPPED Shiki): run a REAL
-  // local initSyntax off them to paint the worker's highlighting in.
-  workerAsts?: WorkerAsts,
 ): DiffFile | null {
   if (!text.trim()) return null;
   try {
@@ -351,17 +350,6 @@ export function createDiffFile(
       },
       hunks: [text],
     };
-    // Precomputed worker ASTs: a REAL local initSyntax off them yields a
-    // genuinely-highlighted instance (syntaxFile populated) the view's clone
-    // restores instead of wiping — as it would a getBundle-merged Shiki instance.
-    if (workerAsts) {
-      const file = DiffFile.createInstance(data);
-      file.initRaw();
-      file.initSyntax({
-        registerHighlighter: precomputedHighlighter(workerAsts),
-      });
-      return file;
-    }
     const file = DiffFile.createInstance(data);
     file.initRaw();
     // Gate on the char budget for the engine this diff routes to (~8× apart —
@@ -469,11 +457,12 @@ export function useFileContent(
  * and off-thread worker ASTs for an over-budget Shiki-routed diff. Shared by
  * both {@link createDiffFile} call sites so they apply the same routing rules.
  *
- * Contract: callers must list both returned `grammarState` and `workerAsts` in
- * their {@link createDiffFile} memo's deps. `workerAsts` is passed into
- * createDiffFile and is an ordinary dep; `grammarState` is read only via module
- * state (isShikiLang), so listing it explicitly is what forces the rebuild that
- * picks the loaded grammar up.
+ * Contract: callers must list `grammarState` in their {@link createDiffFile}
+ * memo's deps — it's read only via module state (isShikiLang), so listing it
+ * explicitly is what forces the rebuild that picks the loaded grammar up.
+ * `workerHighlighter` goes to the view as its `registerHighlighter` prop and
+ * must NOT be a build dep: keeping the DiffFile identity stable across the
+ * ASTs' arrival is what preserves the view's expansion state.
  */
 export function useShikiRouting({
   filePath,
@@ -499,7 +488,7 @@ export function useShikiRouting({
 }): {
   holdForGrammar: boolean;
   grammarState: Record<string, "ready" | "failed">;
-  workerAsts: WorkerAsts | null;
+  workerHighlighter: DiffFileHighlighter | undefined;
 } {
   // Built-in Shiki grammars load lazily (off the startup bundle). Hold the paint
   // until the load settles rather than rebuild on arrival (highlight pop-in).
@@ -512,12 +501,23 @@ export function useShikiRouting({
     () => diffLang(filePath, syntaxMap),
     [filePath, syntaxMap],
   );
+  // The core ignores syntax outright once the RECONSTRUCTED file passes
+  // SYNTAX_LINE_CAP lines, and hunk-only mode pads to the highest line number
+  // the hunks reference (`rawLength` = that + 1, hence `>=`) — so a small hunk
+  // deep in a big file gets no highlighting from ANY engine. Nothing would
+  // consume a grammar, a paint hold, or worker ASTs here. Content mode can't
+  // reach this: its reads cap at HIGHLIGHT_MAX_LINES.
+  const syntaxIgnored = useMemo(() => {
+    const max = diffMaxLineNumbers(text);
+    return Math.max(max.old, max.new) >= SYNTAX_LINE_CAP;
+  }, [text]);
   useEffect(() => {
     if (
       !lang ||
       // A blocked mega file shows a placeholder, not a diff — don't fetch a
       // grammar it will never render.
       blocked ||
+      syntaxIgnored ||
       !isBuiltinShikiLang(lang) ||
       isShikiLang(lang) ||
       grammarState[lang] !== undefined ||
@@ -536,7 +536,7 @@ export function useShikiRouting({
     return () => {
       cancelled = true;
     };
-  }, [lang, grammarState, text.length, blocked]);
+  }, [lang, grammarState, text.length, blocked, syntaxIgnored]);
 
   // A built-in Shiki grammar this diff needs is still loading (never seen a
   // "ready"/"failed" result for it): hold the paint. `isShikiLang(lang)` already
@@ -571,20 +571,26 @@ export function useShikiRouting({
     // still settling — the worker input would be built on interim text and
     // superseded. (Over budget we never hold the paint on grammarPending, so it
     // isn't gated on here.)
-    enabled: overBudget && useShikiWorker && !contentPending,
+    enabled: overBudget && useShikiWorker && !contentPending && !syntaxIgnored,
     filePath,
     text,
     lang: lang ?? null,
     content,
     tmGrammar,
   });
+  // Memoized: the view's `registerHighlighter` effect re-runs on identity, so a
+  // fresh object each render would re-tokenize the clone every render.
+  const workerHighlighter = useMemo(
+    () => (workerAsts ? precomputedHighlighter(workerAsts) : undefined),
+    [workerAsts],
+  );
 
   // Over budget the main thread never Shiki-tokenizes, so holding the paint for
   // a grammar only the worker needs would just delay the interim paint. Under
   // budget, hold — so the lazy-grammar rebuild still lands in one paint.
-  const holdForGrammar = grammarPending && !overBudget;
+  const holdForGrammar = grammarPending && !overBudget && !syntaxIgnored;
 
-  return { holdForGrammar, grammarState, workerAsts };
+  return { holdForGrammar, grammarState, workerHighlighter };
 }
 
 /** The per-side line -> render() maps the vendored DiffView consumes. */
@@ -696,7 +702,7 @@ function RenderedDiff({
   const activeRepo = useUiStore((s) => s.repoPath);
   const { syntaxMap, customLanguages } = useEffectiveSyntax(activeRepo);
 
-  const { holdForGrammar, grammarState, workerAsts } = useShikiRouting({
+  const { holdForGrammar, grammarState, workerHighlighter } = useShikiRouting({
     filePath: deferredPath,
     text: shown,
     content: content ?? null,
@@ -706,7 +712,7 @@ function RenderedDiff({
     customLanguages,
   });
 
-  // grammarState + workerAsts: rebuild-trigger deps — see useShikiRouting's contract.
+  // grammarState: rebuild-trigger dep — see useShikiRouting's contract.
   // biome-ignore lint/correctness/useExhaustiveDependencies: grammarState is an intentional rebuild trigger, read via module state not directly
   const diffFile = useMemo(
     () =>
@@ -717,7 +723,6 @@ function RenderedDiff({
             shown,
             { syntaxMap, customLanguages },
             content ?? undefined,
-            workerAsts ?? undefined,
           ),
     [
       shown,
@@ -729,7 +734,6 @@ function RenderedDiff({
       contentPending,
       holdForGrammar,
       grammarState,
-      workerAsts,
     ],
   );
 
@@ -1046,6 +1050,9 @@ function RenderedDiff({
         <DiffViewWithMultiSelect<{ render: () => ReactNode }>
           ref={multiSelectRef}
           diffFile={diffFile}
+          // Worker ASTs land as a highlighter PROP, not a rebuild: the view's
+          // effect applies them to its own clone, so expansion state survives.
+          registerHighlighter={workerHighlighter}
           diffViewMode={diffViewMode}
           diffViewTheme={isDark ? "dark" : "light"}
           diffViewHighlight
@@ -1072,6 +1079,7 @@ function RenderedDiff({
       ) : (
         <DiffView<{ render: () => ReactNode }>
           diffFile={diffFile}
+          registerHighlighter={workerHighlighter}
           diffViewMode={diffViewMode}
           diffViewTheme={isDark ? "dark" : "light"}
           diffViewHighlight

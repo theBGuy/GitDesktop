@@ -42,7 +42,8 @@ export const capabilities: Capability[] = [
   },
   {
     group: "Diffs & staging",
-    label: "Line, hunk & file staging — drag across the line numbers",
+    label:
+      "Line, hunk & file staging — drag the line numbers, mixing added and removed lines in one selection",
   },
   {
     group: "Diffs & staging",
@@ -92,7 +93,7 @@ export const capabilities: Capability[] = [
   {
     group: "Branches & history",
     label:
-      "Clean up branches in bulk — archive or delete stale ones in one sweep",
+      "Clean up branches in bulk — archive or delete stale ones in one sweep, including branches a pull request merged",
     highlight: true,
   },
   {
@@ -132,7 +133,7 @@ export const capabilities: Capability[] = [
   {
     group: "Rewrite & recovery",
     label:
-      "Stash and reapply — one click when a pull, update or switch is blocked",
+      "Stash and reapply — one click when a pull, merge, update or switch is blocked",
   },
   {
     group: "Rewrite & recovery",

@@ -121,6 +121,12 @@ const baseName = (p: string) => p.split(/[/\\]/).filter(Boolean).pop() ?? p;
 const secondaryClickCapitalized =
   secondaryClickLabel.charAt(0).toUpperCase() + secondaryClickLabel.slice(1);
 
+/** How many closed PRs the branch surfaces scan. Merged state lives only in the
+ *  closed list, and gh's default 30 covers too little history for the cleanup
+ *  dialog's merged badge. The open list keeps the default so it goes on sharing a
+ *  cache entry with the session PR audit. */
+const CLOSED_PR_SCAN_LIMIT = 100;
+
 interface BranchPr {
   state: PrAuditState;
   /** "#123" for a remote PR, "local" for a local-only one. */
@@ -303,25 +309,22 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   );
 
   // Per-branch PR badge: remote PRs (open + closed, the latter carrying merged)
-  // fetched only while the menu is open AND the repo's forge reports pull-request
-  // support — mirrors the divergence gate above. Local PRs are not gated. Both
-  // reads are forge-neutral: they work for GitHub and GitLab alike.
+  // fetched while the menu OR the cleanup dialog is open AND the repo's forge
+  // reports pull-request support — mirrors the divergence gate above. The cleanup
+  // hotkey closes the menu on its way to the dialog, so gating on `open` alone
+  // would leave that dialog's merged badges permanently empty. Local PRs are not
+  // gated. Both reads are forge-neutral: they work for GitHub and GitLab alike.
   const gh = useForgeStatus(repoPath);
   const canGh = forgeFeatureReady(gh.data, "pullRequests");
+  const prsWanted = canGh && (open || cleanupOpen);
   // Origin lens: the branch popover lists the FORK's own branch PRs; the
   // fork/upstream lens is a Pulls/Issues-tab affordance.
-  const openPrs = usePrList(
-    repoPath,
-    canGh && open,
-    "open",
-    undefined,
-    "origin",
-  );
+  const openPrs = usePrList(repoPath, prsWanted, "open", undefined, "origin");
   const closedPrs = usePrList(
     repoPath,
-    canGh && open,
+    prsWanted,
     "closed",
-    undefined,
+    CLOSED_PR_SCAN_LIMIT,
     "origin",
   );
   const localPrs = useLocalPrs(repoPath);
@@ -365,6 +368,18 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     }
     return map;
   }, [openPrs.data, closedPrs.data, localPrs.data]);
+
+  // Branch name → the merged PR that carries it, for the cleanup dialog. Remote
+  // PRs only: a local PR's merge is a real git merge, which divergence already
+  // sees, and it has no PR number to attribute the badge to.
+  const mergedPrByBranch = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const [name, pr] of prByBranch) {
+      if (pr.state === "merged" && pr.select.kind === "remote")
+        map.set(name, pr.label);
+    }
+    return map;
+  }, [prByBranch]);
 
   const openPr = (select: SelectedPr) => {
     // A remote PR here is a fork (origin) PR — force the origin lens (which also
@@ -746,6 +761,20 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     setPickerMode(mode);
   }
 
+  // A merge into the current branch touches the working tree, so git refuses it
+  // outright when uncommitted changes are in the way — offer the stash → merge →
+  // reapply compound instead of a dead-end toast. `false` leaves the error to
+  // the caller.
+  function beginMergeRecovery(e: unknown, branch: string) {
+    return recovery.handleError(e, {
+      operationLabel: "merge",
+      detail: branch,
+      reappliedMessage: `Merged ${branch} and reapplied your changes.`,
+      plainMessage: `Merged ${branch}`,
+      run: { op: "merge", ref: branch },
+    });
+  }
+
   // The dialog collects the branch + options; the switcher owns the mutations
   // (they feed `busy`) and dispatches them here after closing the picker.
   function runPicker(
@@ -760,22 +789,27 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         onError,
       });
     } else {
+      const squash = mode === "squash";
+      // Options apply to a regular merge only, not squash.
+      const noFf = mode === "merge" && options.noFf;
+      const strategy = mode === "merge" ? options.strategy : "none";
+      // The stash-and-retry compound runs a bare `merge --no-edit`, so it can
+      // only redo a merge that asked for nothing else — offering it for the
+      // others would quietly drop the option the user chose.
+      const plain = !squash && !noFf && strategy === "none";
       mergeBranch.mutate(
-        {
-          branch,
-          squash: mode === "squash",
-          // Options apply to a regular merge only, not squash.
-          noFf: mode === "merge" && options.noFf,
-          strategy: mode === "merge" ? options.strategy : "none",
-        },
+        { branch, squash, noFf, strategy },
         {
           onSuccess: () =>
             toast.success(
-              mode === "squash"
+              squash
                 ? `Squashed ${branch} — changes are staged, review and commit`
                 : `Merged ${branch}`,
             ),
-          onError,
+          onError: (e) => {
+            if (plain && beginMergeRecovery(e, branch)) return;
+            onError(e);
+          },
         },
       );
     }
@@ -2030,6 +2064,14 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         currentBranch={currentName}
         isProtected={(name) => isDeletionBlocked(rulesConfig, name)}
         isInWorktree={(name) => worktreeByBranch.has(name)}
+        prMergedByBranch={mergedPrByBranch}
+        // Only the closed list carries merged PRs. A failed read is an answer —
+        // an unreachable forge must not leave the dialog checking forever.
+        prMergedPending={
+          prsWanted &&
+          !closedPrs.isError &&
+          (closedPrs.isFetching || closedPrs.isPlaceholderData)
+        }
       />
 
       <ConfirmDialog

@@ -484,12 +484,17 @@ export async function startReview(
   // while queued wakes this too — `control.cancelled` then short-circuits below.
   await acquireSlot(lane, control);
 
+  // Both read by the catch below, which persists whatever a failed run produced —
+  // so they live outside the try. `startedAtMs` stays undefined for a failure that
+  // never reached the stream (there's no run to have timed the span of).
+  let startedAtMs: number | undefined;
+  let timedOut = false;
   try {
     if (control.cancelled) return;
     // Wall-clock start, stamped once the run leaves the queue — the queue wait is
     // excluded. One value feeds both the live entry and the persisted record, so they
     // measure the same span.
-    const startedAtMs = Date.now();
+    startedAtMs = Date.now();
     patch({ phase: "running", startedAt: startedAtMs });
     // Count a review when it actually starts — covers manual runs AND a drained queued
     // run, and skips a queued-then-dismissed one (which never reaches here).
@@ -728,6 +733,9 @@ export async function startReview(
       setText: pushText,
       setStatus: (s) => patch({ status: s }),
       onThoughts: (t) => patch({ thoughts: t }),
+      onTimedOut: () => {
+        timedOut = true;
+      },
       onCliId: (id) => {
         control.cliReviewId = id;
       },
@@ -804,6 +812,42 @@ export async function startReview(
         endedAt: Date.now(),
       });
       void notifyReviewDone(title, mode, false, target, message);
+      // Whatever the run produced before it failed — this store is memory-only, so
+      // without a record a timed-out 20-minute run is gone at the next restart. Saved
+      // as a PARTIAL record (`phase`), which the history reads exclude: it's kept
+      // output, never a review the next run may build on.
+      const partial = useReviewStore.getState().texts[key] ?? "";
+      if (partial.trim() && startedAtMs !== undefined) {
+        void saveReview(target.repoPath, {
+          schemaVersion: 1,
+          id: crypto.randomUUID(),
+          kind: target.kind,
+          ref: target.ref,
+          lens: context.lens,
+          mode,
+          model: ai.model,
+          title,
+          text: partial,
+          phase: "error",
+          error: message,
+          ...(timedOut ? { timedOut: true } : {}),
+          headSha: context.headSha ?? "",
+          startedAt: startedAtMs,
+          finishedAt: Date.now(),
+        })
+          .then(() =>
+            queryClient.invalidateQueries({
+              queryKey: [
+                "review-partial",
+                target.repoPath,
+                context.lens,
+                target.kind,
+                target.ref,
+              ],
+            }),
+          )
+          .catch(() => undefined);
+      }
     }
   } finally {
     // Release the lane slot for the next queued run (only if this run actually

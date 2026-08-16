@@ -169,14 +169,33 @@ pub enum ReviewEvent {
         is_error: bool,
         cost_usd: Option<f64>,
     },
-    /// Terminal failure with a message to surface to the user.
-    Error { message: String },
+    /// Terminal failure with a message to surface to the user. `partial_text` carries
+    /// output a whole-message CLI accumulated but never streamed as deltas (Codex), so a
+    /// killed run keeps its work; `timed_out` marks OUR deadline kill, which the frontend
+    /// persists as the reason the kept output is partial.
+    Error {
+        message: String,
+        partial_text: Option<String>,
+        timed_out: bool,
+    },
     /// The CLI's own generated resume id, captured on turn 1 — Codex's thread id
     /// (`thread.started`) or opencode's `sessionID`. The frontend persists it so a
     /// **host** session resumes the *right* conversation (Codex `exec resume <id>`,
     /// opencode `--session <id>`) instead of "continue last", which could grab a
     /// concurrent session sharing the CLI's home. Ignored for reviews / Claude / container.
     NativeSession { id: String },
+}
+
+impl ReviewEvent {
+    /// A failure carrying nothing but its reason — every source except the deadline
+    /// kill, whose partial output is the whole point of the two fields above.
+    fn error(message: impl Into<String>) -> Self {
+        ReviewEvent::Error {
+            message: message.into(),
+            partial_text: None,
+            timed_out: false,
+        }
+    }
 }
 
 /// Sink for streaming agent events — one emitter, N consumers (the Tauri
@@ -1362,19 +1381,17 @@ fn parse_codex_line(
         }
         "turn.failed" => {
             *saw_terminal = true;
-            Some(ReviewEvent::Error {
-                message: "Codex review failed — see the Codex CLI for details.".to_string(),
-            })
+            Some(ReviewEvent::error(
+                "Codex review failed — see the Codex CLI for details.",
+            ))
         }
         "error" => {
             *saw_terminal = true;
-            Some(ReviewEvent::Error {
-                message: v
-                    .get("message")
+            Some(ReviewEvent::error(
+                v.get("message")
                     .and_then(|m| m.as_str())
-                    .unwrap_or("Codex reported an error.")
-                    .to_string(),
-            })
+                    .unwrap_or("Codex reported an error."),
+            ))
         }
         _ => None,
     }
@@ -1582,14 +1599,12 @@ fn parse_opencode_line(
         }
         "error" => {
             *saw_terminal = true;
-            Some(ReviewEvent::Error {
-                message: v
-                    .get("error")
+            Some(ReviewEvent::error(
+                v.get("error")
                     .and_then(|e| e.get("message").or(Some(e)))
                     .and_then(|m| m.as_str())
-                    .unwrap_or("opencode reported an error.")
-                    .to_string(),
-            })
+                    .unwrap_or("opencode reported an error."),
+            ))
         }
         _ => None,
     }
@@ -2062,8 +2077,19 @@ async fn stream_agent(
         return Ok(());
     }
     if timed_out {
+        // Codex accumulates whole messages and only surfaces them at `turn.completed`, so
+        // a kill at the deadline would drop everything it wrote; the streaming CLIs already
+        // sent theirs as deltas and carry none.
+        let partial_text = match kind {
+            AgentKind::Codex if !last_message.trim().is_empty() => {
+                Some(std::mem::take(&mut last_message))
+            }
+            _ => None,
+        };
         on_event.send(ReviewEvent::Error {
             message: timeout_message(noun, timeout, timeout_hint),
+            partial_text,
+            timed_out: true,
         });
         return Ok(());
     }
@@ -2071,13 +2097,11 @@ async fn stream_agent(
         // No terminal result event — surface stderr. Covers auth/quota
         // failures and the empty-stdout-without-a-TTY class of CLI bugs.
         let msg = stderr_text.trim();
-        on_event.send(ReviewEvent::Error {
-            message: if msg.is_empty() {
-                format!("The {noun} process ended without producing any output.")
-            } else {
-                msg.to_string()
-            },
-        });
+        on_event.send(ReviewEvent::error(if msg.is_empty() {
+            format!("The {noun} process ended without producing any output.")
+        } else {
+            msg.to_string()
+        }));
     }
     Ok(())
 }
@@ -3194,9 +3218,30 @@ mod tests {
         // Variant tags are camelCase too (single-word ones are casing-identical).
         let err = serde_json::to_value(ReviewEvent::Error {
             message: "boom".to_string(),
+            partial_text: Some("half a review".to_string()),
+            timed_out: true,
         })
         .expect("Error serializes");
         assert_eq!(err["kind"], "error");
+        let err_obj = err.as_object().expect("Error is a JSON object");
+        let mut err_keys: Vec<&str> = err_obj.keys().map(String::as_str).collect();
+        err_keys.sort_unstable();
+        assert_eq!(err_keys, ["kind", "message", "partialText", "timedOut"]);
+        assert_eq!(err_obj["partialText"], "half a review");
+        assert_eq!(err_obj["timedOut"], true);
+        assert!(
+            err_obj.get("partial_text").is_none(),
+            "snake_case field must not ship"
+        );
+        assert!(
+            err_obj.get("timed_out").is_none(),
+            "snake_case field must not ship"
+        );
+        // A failure with nothing kept still ships both keys — the TS mirror types them
+        // as always-present (`string | null` / `boolean`), like `Done.costUsd`.
+        let bare = serde_json::to_value(ReviewEvent::error("boom")).expect("Error serializes");
+        assert_eq!(bare["partialText"], serde_json::Value::Null);
+        assert_eq!(bare["timedOut"], false);
         let native = serde_json::to_value(ReviewEvent::NativeSession {
             id: "ses_1".to_string(),
         })
@@ -3743,14 +3788,12 @@ mod tests {
         dyn_sink.send(ReviewEvent::Delta {
             text: "hello".to_string(),
         });
-        dyn_sink.send(ReviewEvent::Error {
-            message: "boom".to_string(),
-        });
+        dyn_sink.send(ReviewEvent::error("boom"));
 
         let events = sink.events.lock().unwrap();
         assert_eq!(events.len(), 2);
         assert!(matches!(&events[0], ReviewEvent::Delta { text } if text == "hello"));
-        assert!(matches!(&events[1], ReviewEvent::Error { message } if message == "boom"));
+        assert!(matches!(&events[1], ReviewEvent::Error { message, .. } if message == "boom"));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { MarkdownEditor } from "@/components/markdown-editor";
@@ -20,10 +20,52 @@ import {
   useReviewDrafts,
 } from "@/lib/pulls/review-drafts";
 import { toastError } from "@/lib/toast";
+import { cn } from "@/lib/utils";
 
 /**
- * The submit-a-review dialog: a capability-gated verdict radio (Comment always;
- * Approve / Request changes only when the provider allows), an optional summary
+ * One verdict option. An unavailable verdict stays VISIBLE and disabled, its reason
+ * taking the hint's place — the radio twin of `DisabledReasonButton` (wrapper title +
+ * `aria-describedby`), except the reason renders visibly: a natively-disabled radio
+ * can't take focus, so a hover-only tooltip would reach neither keyboard nor AT users.
+ */
+function VerdictOption({
+  value,
+  label,
+  hint,
+  reason,
+}: {
+  value: ReviewVerdict;
+  label: string;
+  /** What choosing this verdict does — shown when it's available. */
+  hint: string;
+  /** Why it isn't available; absent when it is. */
+  reason?: string;
+}) {
+  const hintId = useId();
+  return (
+    <label
+      className={cn(
+        "flex items-center gap-2",
+        reason ? "cursor-not-allowed text-muted-foreground" : "cursor-pointer",
+      )}
+      title={reason}
+    >
+      <Radio
+        value={value}
+        disabled={Boolean(reason)}
+        aria-describedby={hintId}
+      />
+      {label}
+      <span id={hintId} className="text-muted-foreground">
+        — {reason ?? hint}
+      </span>
+    </label>
+  );
+}
+
+/**
+ * The submit-a-review dialog: a verdict radio (Comment always; Approve / Request
+ * changes disabled-with-reason until the provider allows them), an optional summary
  * (REQUIRED for Request changes), and a submit that posts the pending drafts as
  * one batch review. On success it clears the drafts, closes, and toasts the
  * posted count; on error it stays open and surfaces the error verbatim (it may
@@ -50,7 +92,11 @@ export function SubmitReviewDialog({
 }) {
   const drafts = useReviewDrafts(repoPath, lens, number);
   const submitReview = useSubmitReview(repoPath, lens);
-  const clearDrafts = useClearReviewDrafts(repoPath, lens, number);
+  // Silent: the post already landed by the time this runs, so a clear failure is
+  // reported below in words that say the drafts are still safe — not as a bare error.
+  const clearDrafts = useClearReviewDrafts(repoPath, lens, number, {
+    silent: true,
+  });
   const [verdict, setVerdict] = useState<ReviewVerdict>("comment");
   const [summary, setSummary] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -82,6 +128,10 @@ export function SubmitReviewDialog({
   const summaryRequired = effectiveVerdict === "request_changes";
   const summaryMissing = summaryRequired && summary.trim() === "";
   const pending = submitReview.isPending || clearDrafts.isPending;
+  // Both verdicts are gated on the same thing (`usePrCapabilities`): the host's
+  // approve / request-changes wiring, which reads as unavailable until the forge
+  // connection resolves. One reason serves both.
+  const unavailable = `available once GitDesktop connects to ${remoteLabel}`;
 
   // Reset transient state whenever the dialog closes (for ANY reason — Cancel,
   // Esc, backdrop, or a successful submit), so a reopen never shows a stale
@@ -163,31 +213,23 @@ export function SubmitReviewDialog({
             onValueChange={(v) => setVerdict(v as ReviewVerdict)}
             className="gap-2 text-xs"
           >
-            <label className="flex cursor-pointer items-center gap-2">
-              <Radio value="comment" />
-              Comment
-              <span className="text-muted-foreground">
-                — leave feedback without an explicit approval
-              </span>
-            </label>
-            {caps.canApprove && (
-              <label className="flex cursor-pointer items-center gap-2">
-                <Radio value="approve" />
-                Approve
-                <span className="text-muted-foreground">
-                  — approve these changes
-                </span>
-              </label>
-            )}
-            {caps.canRequestChanges && (
-              <label className="flex cursor-pointer items-center gap-2">
-                <Radio value="request_changes" />
-                Request changes
-                <span className="text-muted-foreground">
-                  — ask for changes before merging
-                </span>
-              </label>
-            )}
+            <VerdictOption
+              value="comment"
+              label="Comment"
+              hint="leave feedback without an explicit approval"
+            />
+            <VerdictOption
+              value="approve"
+              label="Approve"
+              hint="approve these changes"
+              reason={caps.canApprove ? undefined : unavailable}
+            />
+            <VerdictOption
+              value="request_changes"
+              label="Request changes"
+              hint="ask for changes before merging"
+              reason={caps.canRequestChanges ? undefined : unavailable}
+            />
           </RadioGroup>
 
           <MarkdownEditor

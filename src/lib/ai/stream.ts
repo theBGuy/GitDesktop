@@ -47,6 +47,10 @@ export interface CliStreamOpts {
    *  called when there is none — a codex run (no deltas) or a run whose whole
    *  buffer IS the final answer. */
   onThoughts?: (text: string) => void;
+  /** Called before the run rejects when the backend killed it at its deadline — the
+   *  reason a caller keeps and labels whatever text arrived. The rejection still
+   *  carries the timeout message, so a caller that ignores this is unaffected. */
+  onTimedOut?: () => void;
 }
 
 /** A short, human status line for a tool step, from the normalized kind + target
@@ -90,6 +94,7 @@ export async function runCliStream({
   timeoutSecs,
   timeoutConfigurable,
   onThoughts,
+  onTimedOut,
 }: CliStreamOpts): Promise<void> {
   const kind = providerKind(ai.provider);
   if (!kind) throw new Error(`Unsupported CLI provider: ${ai.provider}`);
@@ -171,6 +176,15 @@ export async function runCliStream({
             resolve();
           } else if (event.kind === "error") {
             settled = true;
+            // A whole-message CLI (Codex) streams no deltas, so a killed run's output
+            // arrives only here — adopt it when nothing streamed, so the failure keeps
+            // the work instead of discarding it.
+            const partial = event.partialText?.trim() ? event.partialText : "";
+            if (partial && !buffer) {
+              buffer = partial;
+              setText(buffer);
+            }
+            if (event.timedOut) onTimedOut?.();
             reject(new Error(event.message));
           }
           // nativeSession (the CLI's turn-1 resume id) is session-only — reviews ignore it.
@@ -218,6 +232,9 @@ export interface StreamAiOpts {
    *  before the final answer (agentic CLI + HTTP runs only). The plain HTTP text
    *  path has no narration and never calls it. */
   onThoughts?: (text: string) => void;
+  /** Called when the backend killed a CLI run at its deadline, before the rejection.
+   *  CLI path only — an HTTP stream has no backend deadline. */
+  onTimedOut?: () => void;
   /** CLI path: receives the agent review id (cancel via `cancelAgentReview`). */
   onCliId: (id: string) => void;
   /** HTTP path: receives the AbortController driving the stream (cancel via
@@ -245,6 +262,7 @@ export async function streamAi({
   setText,
   setStatus,
   onThoughts,
+  onTimedOut,
   onCliId,
   onAbort,
 }: StreamAiOpts): Promise<void> {
@@ -262,6 +280,7 @@ export async function streamAi({
       setStatus,
       registerId: onCliId,
       onThoughts,
+      onTimedOut,
     });
     return;
   }

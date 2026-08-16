@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
 import { useOpAbort, useOpContinue, useOpState } from "@/lib/git/queries";
-import type { RepoOp } from "@/lib/git/types";
+import type { RepoOp, RepoOpState } from "@/lib/git/types";
 import { useAiEnabled, useReviewConfigured } from "@/lib/settings/queries";
 import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import { toastError } from "@/lib/toast";
@@ -34,10 +34,30 @@ const OP_LABELS: Record<
     cont: "Continue cherry-pick",
     verb: "Cherry-picking",
   },
+  revert: {
+    banner: "Revert in progress",
+    cont: "Continue revert",
+    verb: "Reverting",
+  },
 };
 
+/** The `RepoOpState` flags that name an operation. Derived, so a renamed field
+ *  breaks here; `editPaused` is excluded because it modifies `rebasing` rather
+ *  than naming an op of its own. */
+type RepoOpFlag = Exclude<keyof RepoOpState, "editPaused">;
+
+/** Which op the banner names. `RepoOpState`'s flags are independent booleans and
+ *  the banner shows one op, so the precedence lives here rather than in a
+ *  ternary chain that has to be re-read every time an op is added. */
+const OP_BY_FLAG: readonly (readonly [RepoOpFlag, RepoOp])[] = [
+  ["merging", "merge"],
+  ["rebasing", "rebase"],
+  ["cherryPicking", "cherry-pick"],
+  ["reverting", "revert"],
+];
+
 /**
- * Guides an in-progress merge/rebase/cherry-pick to its end: shows what's
+ * Guides an in-progress merge/rebase/cherry-pick/revert to its end: shows what's
  * mid-flight and how many conflicts remain, with Continue gated on every
  * conflict being resolved (staged) and Abort behind a confirm. Renders
  * nothing when the repo is in a normal state.
@@ -58,13 +78,8 @@ export function ConflictBanner({
   const [confirmAbort, setConfirmAbort] = useState(false);
 
   const conflictedCount = conflictedPaths.length;
-  const op: RepoOp | null = opState.data?.merging
-    ? "merge"
-    : opState.data?.rebasing
-      ? "rebase"
-      : opState.data?.cherryPicking
-        ? "cherry-pick"
-        : null;
+  const op: RepoOp | null =
+    OP_BY_FLAG.find(([flag]) => opState.data?.[flag])?.[1] ?? null;
   if (!op && conflictedCount === 0) return null;
 
   const canResolveWithAi = aiEnabled && reviewConfigured && conflictedCount > 0;

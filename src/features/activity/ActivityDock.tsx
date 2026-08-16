@@ -34,6 +34,7 @@ import {
   clearNotification,
   markAllNotificationsRead,
   markNotificationRead,
+  type NotificationKind,
   type NotificationTone,
   useNotifications,
   useUnreadCount,
@@ -187,7 +188,7 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
         repoPath: n.repoPath,
         repoName: n.repoName,
         ref: t.ref,
-        section: KIND_SECTION[n.kind] ?? null,
+        section: KIND_SECTION[n.kind as NotificationKind] ?? null,
       });
     } else if (t?.type === "run") {
       openRun({ repoPath: n.repoPath, repoName: n.repoName, runId: t.runId });
@@ -574,7 +575,7 @@ const TONE_CLASS: Record<NotificationTone, string> = {
 
 /** Glyph per event kind; kinds not listed fall back to a tone-appropriate mark
  *  (e.g. `ci-run`, whose success/failure lives in the tone). */
-const KIND_GLYPH: Record<string, typeof CheckCircleIcon> = {
+const KIND_GLYPH: Partial<Record<NotificationKind, typeof CheckCircleIcon>> = {
   "review-ready": SparkleIcon,
   "review-failed": SparkleIcon,
   "checks-passed": CheckCircleIcon,
@@ -598,9 +599,9 @@ const KIND_GLYPH: Record<string, typeof CheckCircleIcon> = {
  *  is therefore already on screen from every section. A `review-failed` from an
  *  *automation* still points at Review even though the panel shows idle: those
  *  runs use a separate `auto:<n>` key namespace, but Review is where the Run
- *  button lives. Keyed by plain string — a hydrated row can carry a kind from an
- *  older build. */
-const KIND_SECTION: Record<string, PrSection> = {
+ *  button lives. Read with a row's plain-string kind — a hydrated row can carry
+ *  a kind from an older build, so a lookup must miss, never fail. */
+const KIND_SECTION: Partial<Record<NotificationKind, PrSection>> = {
   "review-ready": "review",
   "review-failed": "review",
   "pr-opened": "conversation",
@@ -625,5 +626,7 @@ const TONE_ICON: Record<NotificationTone, typeof CheckCircleIcon> = {
 };
 
 function glyphFor(n: AppNotification): typeof CheckCircleIcon {
-  return KIND_GLYPH[n.kind] ?? TONE_ICON[n.tone];
+  // The cast reads a maybe-unknown kind against a closed map: hydrated rows are
+  // untrusted, so the lookup must be allowed to miss into the tone fallback.
+  return KIND_GLYPH[n.kind as NotificationKind] ?? TONE_ICON[n.tone];
 }

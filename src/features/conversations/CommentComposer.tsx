@@ -1,9 +1,9 @@
 import type { ReactNode, Ref } from "react";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import {
   MarkdownEditor,
   type MarkdownEditorHandle,
 } from "@/components/markdown-editor";
-import { Button } from "@/components/ui/button";
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 
 /**
@@ -23,6 +23,7 @@ export function CommentComposer({
   ariaLabel,
   placeholder,
   busy,
+  reason,
   disabled,
   actions,
 }: {
@@ -39,6 +40,9 @@ export function CommentComposer({
   placeholder: string;
   /** A submit is in flight: gates the chord, the submit button and Clear. */
   busy?: boolean;
+  /** Why `busy` holds — announced and shown on the buttons it disables. An empty
+   *  draft is an ordinary form affordance and needs none. */
+  reason?: string | null;
   /** Freeze the text input too — only surfaces that block typing mid-submit
    *  pass it. */
   disabled?: boolean;
@@ -46,6 +50,9 @@ export function CommentComposer({
   actions?: ReactNode;
 }) {
   const hasDraft = value.trim().length > 0;
+  // Only the `busy` hold gets words: an empty draft explains itself, and a reason
+  // there would add a tab stop for every viewer who simply hasn't typed yet.
+  const blockedReason = busy ? (reason ?? null) : null;
   return (
     <div className="space-y-2 border-t p-3">
       <MarkdownEditor
@@ -68,27 +75,29 @@ export function CommentComposer({
         textareaClassName="max-h-32 min-h-12 resize-y"
       />
       <div className="flex items-center gap-2">
-        <Button
+        <DisabledReasonButton
           variant="outline"
           size="sm"
           disabled={!hasDraft || busy}
+          reason={blockedReason}
           onClick={onSubmit}
           title={SUBMIT_HINT}
         >
           {submitLabel}
-        </Button>
+        </DisabledReasonButton>
         {actions}
         {onClear && hasDraft && (
-          <Button
+          <DisabledReasonButton
             variant="ghost"
             size="sm"
-            className="ml-auto"
+            wrapperClassName="ml-auto"
             disabled={busy}
+            reason={blockedReason}
             onClick={onClear}
             title="Discard this draft (e.g. a quote reply)"
           >
             Clear
-          </Button>
+          </DisabledReasonButton>
         )}
       </div>
     </div>

@@ -97,6 +97,7 @@ export function Thread({
   reactions,
   onToggleReaction,
   reactionsHeld = false,
+  reactionsReason,
   renderBody,
   copyMarkdown,
   disabledReason,
@@ -138,6 +139,9 @@ export function Thread({
    *  the chips stay visible (a read) but can't fire a write whose subject id and
    *  target entity would disagree. Same posture as `editHeld`. */
   reactionsHeld?: boolean;
+  /** Why `reactionsHeld` holds — the bar shows and announces it on every control
+   *  it disables. Absent leaves a plain disable no viewer can interrogate. */
+  reactionsReason?: string | null;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
@@ -304,6 +308,7 @@ export function Thread({
         <ReactionBar
           reactions={reactions ?? []}
           disabled={reactionsHeld}
+          reason={reactionsReason}
           onToggle={onToggleReaction}
         />
       )}

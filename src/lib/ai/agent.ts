@@ -141,7 +141,16 @@ export type ReviewEvent =
    *  timeline; `tool` is the normalized category, `target` the thing it acted on. */
   | { kind: "tool"; tool: AgentToolKind; target: string | null }
   | { kind: "done"; text: string; isError: boolean; costUsd: number | null }
-  | { kind: "error"; message: string }
+  /** Terminal failure. `partialText` carries output a whole-message CLI (Codex)
+   *  accumulated but never streamed as deltas — null when the run's text already
+   *  streamed. `timedOut` marks the backend's own kill at the run deadline. Both keys
+   *  always ship (see `review_event_wire_shape_is_camel_case`). */
+  | {
+      kind: "error";
+      message: string;
+      partialText: string | null;
+      timedOut: boolean;
+    }
   /** The CLI's own resume id captured on turn 1 (Codex thread / opencode session)
    *  — persisted so a host session resumes the right conversation. Only sessions
    *  care; reviews ignore it. */

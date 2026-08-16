@@ -7,6 +7,7 @@ import {
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import {
   MarkdownEditor,
   type MarkdownEditorHandle,
@@ -235,19 +236,35 @@ export function DiscussionView({
     return <DiffPlaceholder message="Could not load this discussion" />;
   }
 
-  // Placeholder details are the previous discussion's: `busy` holds the composer,
-  // reply box and mark-as-answer, the seeding actions below read this too, and the
-  // upvote/reaction toggles hold on it — their optimistic patch would land the
-  // rendered discussion's subject under the selected one's cache key. Lock/close,
-  // delete and labels also read `d.id` and stay live — tracked separately.
+  // Placeholder details are the previous discussion's, and every write on this
+  // surface addresses `d.id` — so all of them hold until the rendered discussion
+  // is the selected one, or they land on the discussion the viewer just left.
   const detailsStale = details.isPlaceholderData;
   // Matches the wording the PR and issue views use for the same wait.
   const staleReason = detailsStale ? "Loading this discussion…" : undefined;
+  // A disabled menu item drops pointer events, so its reason rides the label.
+  const staleSuffix = staleReason ? ` — ${staleReason}` : "";
   const busy =
     addComment.isPending ||
     markAnswer.isPending ||
     deleteComment.isPending ||
     detailsStale;
+  // Which term of `busy` the composer names, ranked: the switch window outranks a
+  // write the viewer started, being the hold they can't have caused themselves.
+  const composerReason = (() => {
+    switch (true) {
+      case detailsStale:
+        return staleReason;
+      case addComment.isPending:
+        return "Posting your comment…";
+      case markAnswer.isPending:
+        return "Updating the answer…";
+      case deleteComment.isPending:
+        return "Deleting a comment…";
+      default:
+        return undefined;
+    }
+  })();
 
   function submitComment() {
     if (!d || detailsStale || !compose.value.trim()) return;
@@ -340,8 +357,10 @@ export function DiscussionView({
     setRepoTab("issues");
   }
 
+  // Each of these addresses the rendered discussion's id while the menu belongs to
+  // the selected one; the items disable too, and these arms back them up.
   function doLock(reason: DiscussionLockReason | null) {
-    if (!d) return;
+    if (!d || detailsStale) return;
     lockDiscussion.mutate(
       { discussionId: d.id, reason },
       { onSuccess: () => toast.success("Conversation locked"), onError },
@@ -349,7 +368,7 @@ export function DiscussionView({
   }
 
   function doUnlock() {
-    if (!d) return;
+    if (!d || detailsStale) return;
     unlockDiscussion.mutate(d.id, {
       onSuccess: () => toast.success("Conversation unlocked"),
       onError,
@@ -357,7 +376,7 @@ export function DiscussionView({
   }
 
   function doClose(reason: DiscussionCloseReason) {
-    if (!d) return;
+    if (!d || detailsStale) return;
     closeDiscussion.mutate(
       { discussionId: d.id, reason },
       { onSuccess: () => toast.success("Discussion closed"), onError },
@@ -365,10 +384,25 @@ export function DiscussionView({
   }
 
   function doReopen() {
-    if (!d) return;
+    if (!d || detailsStale) return;
     reopenDiscussion.mutate(d.id, {
       onSuccess: () => toast.success("Discussion reopened"),
       onError,
+    });
+  }
+
+  function doDelete() {
+    if (!d || detailsStale) return;
+    deleteDiscussion.mutate(d.id, {
+      onSuccess: () => {
+        toast.success("Discussion deleted");
+        setDeletingDiscussion(false);
+        selectDiscussion(null);
+      },
+      onError: (e) => {
+        onError(e);
+        setDeletingDiscussion(false);
+      },
     });
   }
 
@@ -422,21 +456,26 @@ export function DiscussionView({
               </DropdownMenuItem>
               {d.closed ? (
                 <DropdownMenuItem
-                  disabled={reopenDiscussion.isPending}
+                  disabled={reopenDiscussion.isPending || detailsStale}
                   onClick={doReopen}
                 >
-                  Reopen discussion
+                  Reopen discussion{staleSuffix}
                 </DropdownMenuItem>
               ) : (
                 <DropdownMenuSub>
-                  <DropdownMenuSubTrigger disabled={closeDiscussion.isPending}>
-                    Close discussion…
+                  {/* The vendored sub-trigger carries no disabled styling of its
+                      own (unlike menu items), so the dim rides a call-site class. */}
+                  <DropdownMenuSubTrigger
+                    disabled={closeDiscussion.isPending || detailsStale}
+                    className="data-disabled:opacity-50"
+                  >
+                    Close discussion…{staleSuffix}
                   </DropdownMenuSubTrigger>
                   <DropdownMenuSubContent>
                     {CLOSE_REASONS.map(([label, reason]) => (
                       <DropdownMenuItem
                         key={reason}
-                        disabled={closeDiscussion.isPending}
+                        disabled={closeDiscussion.isPending || detailsStale}
                         onClick={() => doClose(reason)}
                       >
                         {label}
@@ -447,21 +486,24 @@ export function DiscussionView({
               )}
               {d.locked ? (
                 <DropdownMenuItem
-                  disabled={unlockDiscussion.isPending}
+                  disabled={unlockDiscussion.isPending || detailsStale}
                   onClick={doUnlock}
                 >
-                  Unlock conversation
+                  Unlock conversation{staleSuffix}
                 </DropdownMenuItem>
               ) : (
                 <DropdownMenuSub>
-                  <DropdownMenuSubTrigger disabled={lockDiscussion.isPending}>
-                    Lock conversation…
+                  <DropdownMenuSubTrigger
+                    disabled={lockDiscussion.isPending || detailsStale}
+                    className="data-disabled:opacity-50"
+                  >
+                    Lock conversation…{staleSuffix}
                   </DropdownMenuSubTrigger>
                   <DropdownMenuSubContent>
                     {LOCK_REASONS.map(([label, reason]) => (
                       <DropdownMenuItem
                         key={reason ?? "none"}
-                        disabled={lockDiscussion.isPending}
+                        disabled={lockDiscussion.isPending || detailsStale}
                         onClick={() => doLock(reason)}
                       >
                         {label}
@@ -472,9 +514,10 @@ export function DiscussionView({
               )}
               <DropdownMenuItem
                 variant="destructive"
+                disabled={detailsStale}
                 onClick={() => setDeletingDiscussion(true)}
               >
-                Delete discussion
+                Delete discussion{staleSuffix}
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -525,6 +568,9 @@ export function DiscussionView({
           labelableId={d.id}
           labels={d.labels}
           lens="origin"
+          // `labelableId` is the rendered discussion's while the popover is keyed
+          // to the selected one, so a toggle mid-switch would label the wrong one.
+          disabledReason={staleReason}
         />
       </header>
       {/* overflow-hidden contains the thread's natural height (vendored Root is
@@ -598,6 +644,7 @@ export function DiscussionView({
               <ReactionBar
                 reactions={reactions.data?.body ?? []}
                 disabled={detailsStale}
+                reason={staleReason}
                 onToggle={(content, active) =>
                   toggleReaction(d.id, content, active)
                 }
@@ -639,6 +686,7 @@ export function DiscussionView({
                     toggleReaction(c.id, content, active)
                   }
                   reactionsHeld={detailsStale}
+                  reactionsReason={staleReason}
                 />
               </div>
               <div
@@ -708,6 +756,7 @@ export function DiscussionView({
                         toggleReaction(r.id, content, active)
                       }
                       reactionsHeld={detailsStale}
+                      reactionsReason={staleReason}
                     />
                   ))}
                   {reply.value.targetId === c.id && (
@@ -773,6 +822,7 @@ export function DiscussionView({
         ariaLabel="Add to the discussion"
         placeholder="Add to the discussion…"
         busy={busy}
+        reason={composerReason}
       />
 
       <DeleteCommentDialog
@@ -809,28 +859,17 @@ export function DiscussionView({
             >
               Cancel
             </Button>
-            <Button
+            <DisabledReasonButton
               variant="destructive"
-              disabled={deleteDiscussion.isPending}
-              onClick={() =>
-                deleteDiscussion.mutate(d.id, {
-                  onSuccess: () => {
-                    toast.success("Discussion deleted");
-                    setDeletingDiscussion(false);
-                    selectDiscussion(null);
-                  },
-                  onError: (e) => {
-                    onError(e);
-                    setDeletingDiscussion(false);
-                  },
-                })
-              }
+              disabled={deleteDiscussion.isPending || detailsStale}
+              reason={staleReason}
+              onClick={doDelete}
             >
               {deleteDiscussion.isPending && (
                 <Spinner data-icon="inline-start" />
               )}
               Delete
-            </Button>
+            </DisabledReasonButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>

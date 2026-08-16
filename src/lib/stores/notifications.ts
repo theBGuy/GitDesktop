@@ -12,6 +12,28 @@ export type NotificationTone =
   | "merged"
   | "neutral";
 
+/** Every event kind an emitter may push. Closed on the WRITE side only, so a
+ *  typo'd kind fails to compile instead of rendering a fallback glyph forever;
+ *  {@link AppNotification.kind} stays `string` because a hydrated row can carry a
+ *  kind minted by an older build. */
+export type NotificationKind =
+  | "review-ready"
+  | "review-failed"
+  | "review-requested"
+  | "checks-passed"
+  | "checks-failed"
+  | "ci-run"
+  | "pr-opened"
+  | "pr-merged"
+  | "pr-closed"
+  | "pr-approved"
+  | "pr-changes-requested"
+  | "pr-review"
+  | "pr-comment"
+  | "agent-done"
+  | "research-done"
+  | "plan-done";
+
 /** How clicking a notification routes. Data only — the surface maps it to the UI
  *  store's atomic navigation actions, so this module stays free of view logic. */
 export type NotificationTarget =
@@ -24,7 +46,9 @@ export type NotificationTarget =
  *  the row and the target navigates (switching repos when needed). */
 export interface AppNotification {
   id: string;
-  /** Event kind — drives the glyph in the surface (see `notificationGlyph`). */
+  /** Event kind — drives the glyph in the surface (see `notificationGlyph`).
+   *  Deliberately `string`, not {@link NotificationKind}: hydrated rows are
+   *  untrusted and an older build's kind must still render. */
   kind: string;
   tone: NotificationTone;
   title: string;
@@ -205,7 +229,7 @@ void (async () => {
  * since the window has elapsed).
  */
 export function pushNotification(input: {
-  kind: string;
+  kind: NotificationKind;
   tone: NotificationTone;
   title: string;
   subtitle?: string;

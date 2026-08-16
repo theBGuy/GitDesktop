@@ -446,13 +446,14 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     firstMerge === -1 ? Number.POSITIVE_INFINITY : firstMerge,
   );
   if (editLen === commits.length && !log.hasNextPage) editLen -= 1;
-  // Block editing history while a merge/rebase/cherry-pick is mid-flight — a
-  // new edit-rebase would clobber the in-flight one's state (the banner drives
+  // Block editing history while a merge/rebase/cherry-pick/revert is mid-flight —
+  // a new edit-rebase would clobber the in-flight one's state (the banner drives
   // it). The backend refuses too; this just keeps the action from looking live.
   const opInProgress = Boolean(
     opState.data?.merging ||
       opState.data?.rebasing ||
-      opState.data?.cherryPicking,
+      opState.data?.cherryPicking ||
+      opState.data?.reverting,
   );
   const canEditHistory = editLen >= 1 && !opInProgress;
   const editHistoryHint = opInProgress

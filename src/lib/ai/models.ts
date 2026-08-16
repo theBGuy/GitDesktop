@@ -73,6 +73,28 @@ const MISSING_KEY = Symbol("missing-key");
  *  no base URL: also a no-request state, but the user has a different thing to fix. */
 const MISSING_BASE_URL = Symbol("missing-base-url");
 
+/** A catalog response our own shape casts couldn't read. Distinct from every other
+ *  failure here because the message is OURS: routing it through
+ *  `providerErrorMessage` would quote a TypeError to the user as the provider's
+ *  explanation of what went wrong. */
+class CatalogShapeError extends Error {
+  constructor() {
+    super("The provider's response didn't match the expected format.");
+    this.name = "CatalogShapeError";
+  }
+}
+
+/** Runs a fetched catalog body through its provider's shape mapping, converting a
+ *  shape failure into {@link CatalogShapeError}. Only the mapping is wrapped — the
+ *  fetch stays outside, so HTTP/network failures keep the provider's own words. */
+function shaped(map: () => string[]): string[] {
+  try {
+    return map();
+  } catch {
+    throw new CatalogShapeError();
+  }
+}
+
 async function fetchProviderModels(
   settings: AiSettings,
   allowedHosts?: readonly string[],
@@ -104,10 +126,12 @@ async function fetchProviderModels(
       const json = await fetchJson("https://api.openai.com/v1/models", {
         Authorization: `Bearer ${key}`,
       });
-      return (json.data as { id: string }[])
-        .map((m) => m.id)
-        .filter((id) => !OPENAI_NON_CHAT.test(id))
-        .sort();
+      return shaped(() =>
+        (json.data as { id: string }[])
+          .map((m) => m.id)
+          .filter((id) => !OPENAI_NON_CHAT.test(id))
+          .sort(),
+      );
     }
     case "anthropic": {
       const key = await getSecret("anthropic");
@@ -119,7 +143,7 @@ async function fetchProviderModels(
           "anthropic-version": "2023-06-01",
         },
       );
-      return (json.data as { id: string }[]).map((m) => m.id);
+      return shaped(() => (json.data as { id: string }[]).map((m) => m.id));
     }
     case "google": {
       const key = await getSecret("google");
@@ -127,7 +151,7 @@ async function fetchProviderModels(
       const json = await fetchJson(`${GOOGLE_AI_STUDIO_BASE_URL}/models`, {
         Authorization: `Bearer ${key}`,
       });
-      return googleChatModels(json.data as { id: string }[]);
+      return shaped(() => googleChatModels(json.data as { id: string }[]));
     }
     case "openai-compatible": {
       const key = await getSecret("openai-compatible");
@@ -139,24 +163,28 @@ async function fetchProviderModels(
       const json = await fetchJson(`${base}/models`, {
         Authorization: `Bearer ${key}`,
       });
-      const data = json.data as { id: string }[];
-      // A custom base URL can still point at Google's catalog (and saved settings
-      // from the retired Gemini preset do), which needs the `google` normalization;
-      // other endpoints list only their own models.
-      if (base === GOOGLE_AI_STUDIO_BASE_URL) return googleChatModels(data);
-      return data.map((m) => m.id).sort();
+      return shaped(() => {
+        const data = json.data as { id: string }[];
+        // A custom base URL can still point at Google's catalog (and saved settings
+        // from the retired Gemini preset do), which needs the `google` normalization;
+        // other endpoints list only their own models.
+        if (base === GOOGLE_AI_STUDIO_BASE_URL) return googleChatModels(data);
+        return data.map((m) => m.id).sort();
+      });
     }
     case "openrouter": {
       // public endpoint, no key required
       const json = await fetchJson("https://openrouter.ai/api/v1/models");
-      return (json.data as { id: string }[]).map((m) => m.id).sort();
+      return shaped(() =>
+        (json.data as { id: string }[]).map((m) => m.id).sort(),
+      );
     }
     case "ollama": {
       const base = settings.ollamaBaseUrl.replace(/\/$/, "");
       const json = await fetchJson(`${base}/api/tags`);
-      return ((json.models ?? []) as { name: string }[])
-        .map((m) => m.name)
-        .sort();
+      return shaped(() =>
+        ((json.models ?? []) as { name: string }[]).map((m) => m.name).sort(),
+      );
     }
     case "ollama-cloud": {
       const key = await getSecret("ollama-cloud");
@@ -165,7 +193,9 @@ async function fetchProviderModels(
       const json = await fetchJson(`${OLLAMA_CLOUD_HOST}/v1/models`, {
         Authorization: `Bearer ${key}`,
       });
-      return (json.data as { id: string }[]).map((m) => m.id).sort();
+      return shaped(() =>
+        (json.data as { id: string }[]).map((m) => m.id).sort(),
+      );
     }
     case "claude-cli":
     case "codex-cli":
@@ -226,7 +256,12 @@ export function useAvailableModels(
         return {
           models: fallbackModels(settings),
           live: false,
-          reason: providerErrorMessage(e),
+          // A shape failure is ours to explain; everything else here is the
+          // provider's request that failed, so it keeps the provider's words.
+          reason:
+            e instanceof CatalogShapeError
+              ? e.message
+              : providerErrorMessage(e),
           cause: "failed",
         };
       }

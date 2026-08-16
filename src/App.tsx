@@ -27,6 +27,7 @@ import { syncAnalytics, track } from "@/lib/analytics";
 import { useBackgroundPrSync } from "@/lib/automations/useBackgroundPrSync";
 import { useGitInstalled } from "@/lib/git/queries";
 import { useHotkeyAction, useHotkeysListener } from "@/lib/hotkeys/hotkeys";
+import { useModalGateOpen } from "@/lib/hotkeys/modal-gate";
 import { reloadLocalPrs } from "@/lib/pulls/local";
 import { reloadReviewNotes } from "@/lib/review-notes/store";
 import {
@@ -56,11 +57,13 @@ function App() {
   const pickAndOpen = usePickAndOpenRepo();
   const [cloneOpen, setCloneOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
-  const dialogOpen = cloneOpen || createOpen;
+  // Screens with their own modals (e.g. Explore's clone dialog) register there.
+  const screenModalOpen = useModalGateOpen();
+  const dialogOpen = cloneOpen || createOpen || screenModalOpen;
 
-  // The dialogs live above the view switch, so navigation no longer unmounts
-  // them (e.g. the clone dialog's "Open Settings → Accounts") — close them
-  // when the screen changes, or the new screen mounts behind the modal.
+  // The dialogs live above the view switch, so navigation doesn't unmount them
+  // (e.g. the clone dialog's "Open Settings → Accounts") — close them when the
+  // screen changes, or the new screen mounts behind a still-open modal.
   // biome-ignore lint/correctness/useExhaustiveDependencies: `view` is an intentional close trigger, not read directly
   useEffect(() => {
     setCloneOpen(false);
@@ -159,9 +162,9 @@ function App() {
   // (Settings/Help/Explore mount neither the welcome list nor the repo
   // switcher), and duplicate registrations would shadow by mount order.
   // Disabled until git resolves — the dialogs render below the early returns,
-  // so a click before then would stash a stale `open` that pops later. An open
-  // clone/create dialog suppresses all four: the native menu bar sits outside
-  // the webview's modal overlay, so a menu click there would stack a second.
+  // so a click before then would stash a stale `open` that pops later. Any open
+  // dialog suppresses all four: the native menu bar sits outside the webview's
+  // modal overlay, so a menu click there would stack a second.
   useHotkeyAction(
     "add-local-repository",
     pickAndOpen,

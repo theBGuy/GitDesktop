@@ -294,6 +294,22 @@ export function CommitComments({
     editComment.isPending ||
     deleteComment.isPending ||
     stale;
+  // Which term of `busy` the composer names, ranked: the switch window outranks a
+  // write the viewer started, being the hold they can't have caused themselves.
+  const composerReason = (() => {
+    switch (true) {
+      case stale:
+        return "Loading this commit…";
+      case createComment.isPending:
+        return "Posting your comment…";
+      case editComment.isPending:
+        return "Saving a comment edit…";
+      case deleteComment.isPending:
+        return "Deleting a comment…";
+      default:
+        return undefined;
+    }
+  })();
 
   function submit() {
     const text = draft.value.trim();
@@ -427,6 +443,7 @@ export function CommitComments({
           onSubmit={submit}
           submitLabel="Comment"
           busy={busy}
+          reason={composerReason}
         />
       )}
 

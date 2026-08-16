@@ -15,8 +15,11 @@ type DisabledReasonButtonProps = React.ComponentProps<typeof Button> & {
  * takes Base UI's `focusableWhenDisabled` — `aria-disabled` instead of the
  * native attribute, focus intact, activation still blocked in its handler layer.
  * A reason-less disable stays native rather than becoming a mute tab stop.
- * Trigger sites keep the native attribute: wrap a titled span around
- * `<Trigger disabled render={<Button/>}/>`, or branch when the arms differ.
+ * Trigger sites pick an arm by who needs the reason: a titled span around
+ * `<Trigger disabled render={<Button/>}/>` is hover-only, so keyboard/AT reach
+ * takes `<Trigger render={<DisabledReasonButton disabled reason/>}/>` instead —
+ * disabled on the button, never the trigger, whose open handler the inner
+ * `useButton` then swallows. `ReactionBar` hand-rolls this on a raw `<button>`.
  */
 export function DisabledReasonButton({
   reason,

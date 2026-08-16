@@ -49,7 +49,7 @@ jobs:
         include:
           - platform: windows-latest
             args: ""
-          - platform: ubuntu-22.04
+          - platform: ubuntu-24.04
             args: ""
           # macOS: a universal binary (Intel + Apple Silicon), signed with a
           # Developer ID cert and notarized via the APPLE_* secrets below.
@@ -82,7 +82,7 @@ jobs:
           workspaces: "./src-tauri -> target"
 
       - name: Install Linux dependencies
-        if: matrix.platform == 'ubuntu-22.04'
+        if: matrix.platform == 'ubuntu-24.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y \

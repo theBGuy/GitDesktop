@@ -37,6 +37,7 @@ import {
   useFileDiff,
   useRepoStatus,
 } from "@/lib/git/queries";
+import { formatBinding, isMac } from "@/lib/hotkeys/binding";
 import { useSaveSettings, useSettings } from "@/lib/settings/queries";
 import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import type { SelectedFile } from "@/lib/stores/ui";
@@ -361,7 +362,9 @@ function WorkingTreeDiff({
             <InfoIcon className="size-3.5 shrink-0" />
             <span className="flex-1 leading-snug">
               Drag across the line numbers to{" "}
-              {file.staged ? "unstage" : "stage"} just those lines.
+              {file.staged ? "unstage" : "stage"} just those lines. Hold{" "}
+              {ADDITIVE_MODIFIER} while dragging to add to the selection, so one
+              selection can mix added and removed lines.
             </span>
             <button
               type="button"
@@ -449,6 +452,11 @@ function WorkingTreeDiff({
 
 const SELECT_CLASS = "gd-line-selected";
 
+// The additive-drag modifier, derived per platform (never a hardcoded key):
+// Cmd on macOS, Ctrl elsewhere — Ctrl-click is the secondary click on macOS.
+const ADDITIVE_MODIFIER = formatBinding("mod");
+const isAdditiveDrag = (e: MouseEvent) => (isMac ? e.metaKey : e.ctrlKey);
+
 /** The diff row for a line. Unified mode tags the number span with
  *  `data-line-{new,old}-num`; split mode uses a generic `data-line-num` inside a
  *  cell marked `data-side`. Try both so either view works. */
@@ -477,7 +485,9 @@ function paintLines(container: HTMLElement, lines: SelectedLine[]) {
   }
 }
 
-/** Highlight an in-progress drag range for live feedback (includes context). */
+/** Highlight an in-progress drag range for live feedback (includes context),
+ *  over `base` — the lines an additive drag is merging into, which would
+ *  otherwise vanish on the next mousemove (this repaints from scratch). */
 function paintRange(
   container: HTMLElement,
   range: {
@@ -485,14 +495,33 @@ function paintRange(
     startLineNumber: number;
     endLineNumber: number;
   } | null,
+  base: SelectedLine[],
 ) {
-  clearPaint(container);
+  paintLines(container, base);
   if (!range) return;
   const lo = Math.min(range.startLineNumber, range.endLineNumber);
   const hi = Math.max(range.startLineNumber, range.endLineNumber);
   for (let n = lo; n <= hi; n++) {
     rowForLine(container, range.side, n)?.classList.add(SELECT_CLASS);
   }
+}
+
+/** Union of two line selections, deduped by side+line — an additive drag adds
+ *  to the committed selection instead of replacing it, and the two can overlap
+ *  or (unlike one library-reported drag) span both sides. */
+function mergeSelection(
+  base: SelectedLine[] | null,
+  added: SelectedLine[],
+): SelectedLine[] {
+  const merged = [...(base ?? [])];
+  const seen = new Set(merged.map((s) => `${s.side}|${s.line}`));
+  for (const line of added) {
+    const key = `${line.side}|${line.line}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(line);
+  }
+  return merged;
 }
 
 /** A hunk's first old/new line number, from its `@@ -a,b +c,d @@` header. */
@@ -628,7 +657,7 @@ function StagingDiffView({
   );
   // `blocked` is omitted: a mega-line file never reaches this view —
   // WorkingTreeDiff routes it to the whole-file DiffSurface fallback first.
-  const { holdForGrammar, grammarState, workerAsts } = useShikiRouting({
+  const { holdForGrammar, grammarState, workerHighlighter } = useShikiRouting({
     filePath: deferredPath,
     text: displayText,
     content: content ?? null,
@@ -641,7 +670,7 @@ function StagingDiffView({
   // stage/unstage/discard patch (see WorkingTreeDiff). Null while content reads
   // are pending: don't build an intermediate diff the arriving reads would
   // immediately restructure.
-  // grammarState + workerAsts: rebuild-trigger deps — see useShikiRouting's contract.
+  // grammarState: rebuild-trigger dep — see useShikiRouting's contract.
   // biome-ignore lint/correctness/useExhaustiveDependencies: grammarState is an intentional rebuild trigger, read via module state not directly
   const diffFile = useMemo(
     () =>
@@ -652,7 +681,6 @@ function StagingDiffView({
             displayText,
             { syntaxMap, customLanguages },
             content ?? undefined,
-            workerAsts ?? undefined,
           ),
     [
       deferredPath,
@@ -663,7 +691,6 @@ function StagingDiffView({
       contentPending,
       holdForGrammar,
       grammarState,
-      workerAsts,
     ],
   );
 
@@ -677,13 +704,28 @@ function StagingDiffView({
   const onSelectRef = useLatestRef(onSelect);
   const selectedRef = useLatestRef(selection);
 
+  // Whether the drag in progress started modifier-held. The library's callbacks
+  // carry no event, so it's captured from the container's own mousedown on the
+  // CAPTURE phase — the manager listens on the same element, bubble phase.
+  const additiveRef = useRef(false);
+
   useEffect(() => {
     const container = containerRef.current;
     if (!container || !diffFile) return;
+    const onMouseDownCapture = (e: MouseEvent) => {
+      additiveRef.current = isAdditiveDrag(e);
+    };
+    container.addEventListener("mousedown", onMouseDownCapture, true);
+    // An additive drag paints over the committed selection; a plain one replaces
+    // it, so its base is empty (the pre-additive behavior).
+    const paintBase = () =>
+      additiveRef.current ? (selectedRef.current ?? []) : [];
     const manager = createDiffMultiSelectManager(container, diffFile, {
       isUnifiedMode: viewMode !== "split",
-      onSelectionChange: (range) => paintRange(container, range),
+      onSelectionChange: (range) => paintRange(container, range, paintBase()),
       onSelectionComplete: (result) => {
+        // One drag is single-sided by library contract; the union across drags
+        // is what lets a selection carry added AND deleted lines.
         const lines = (result?.lines ?? [])
           .filter((l) => l.isAdd || l.isDelete)
           .map(
@@ -692,11 +734,17 @@ function StagingDiffView({
               line: l.lineNumber,
             }),
           );
-        onSelectRef.current(lines.length ? lines : null);
+        const next = additiveRef.current
+          ? mergeSelection(selectedRef.current, lines)
+          : lines;
+        onSelectRef.current(next.length ? next : null);
       },
     });
     paintLines(container, selectedRef.current ?? []); // re-assert after (re)mount
-    return () => manager.destroy();
+    return () => {
+      container.removeEventListener("mousedown", onMouseDownCapture, true);
+      manager.destroy();
+    };
   }, [diffFile, viewMode]);
 
   // Paint the committed selection from state (incl. cleared → []).
@@ -810,6 +858,9 @@ function StagingDiffView({
       )}
       <DiffView
         diffFile={diffFile}
+        // Worker ASTs land as a highlighter PROP, not a rebuild: the view's
+        // effect applies them to its own clone, so expansion state survives.
+        registerHighlighter={workerHighlighter}
         diffViewMode={
           viewMode === "split" ? DiffModeEnum.Split : DiffModeEnum.Unified
         }

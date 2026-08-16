@@ -300,6 +300,22 @@ export function RemoteIssueView({
     closeIssue.isPending ||
     reopenIssue.isPending ||
     detailsStale;
+  // Which term of `busy` the composer names, ranked: the switch window outranks a
+  // write the viewer started, being the hold they can't have caused themselves.
+  const composerReason = (() => {
+    switch (true) {
+      case detailsStale:
+        return staleReason;
+      case comment.isPending:
+        return "Posting your comment…";
+      case closeIssue.isPending:
+        return "Closing this issue…";
+      case reopenIssue.isPending:
+        return "Reopening this issue…";
+      default:
+        return undefined;
+    }
+  })();
   const comments = issue.comments.filter((c) => hasVisibleBody(c.body));
 
   function submitComment() {
@@ -818,17 +834,15 @@ export function RemoteIssueView({
                   </p>
                 )}
                 {canReact && (
-                  // The counts are a read and stay; only the toggles hold. A
-                  // disabled button swallows `title`, so the wait rides the span.
-                  <span title={staleReason} className="inline-flex">
-                    <ReactionBar
-                      reactions={reactions.data?.body ?? []}
-                      disabled={detailsStale}
-                      onToggle={(content, active) =>
-                        toggleReaction(issue.id, content, active)
-                      }
-                    />
-                  </span>
+                  // The counts are a read and stay; only the toggles hold.
+                  <ReactionBar
+                    reactions={reactions.data?.body ?? []}
+                    disabled={detailsStale}
+                    reason={staleReason}
+                    onToggle={(content, active) =>
+                      toggleReaction(issue.id, content, active)
+                    }
+                  />
                 )}
               </div>
               {canWrite && (
@@ -891,6 +905,7 @@ export function RemoteIssueView({
                       : undefined
                   }
                   reactionsHeld={detailsStale}
+                  reactionsReason={staleReason}
                 />
               ))}
               {comments.length === 0 && (
@@ -914,20 +929,22 @@ export function RemoteIssueView({
               onSubmit={submitComment}
               submitLabel="Comment"
               busy={busy}
+              reason={composerReason}
               // Clear is site-rendered rather than the shared `onClear` one: the
               // close/reopen arm follows it, and the shared Clear is `ml-auto`.
               actions={
                 <>
                   {compose.value.trim() && (
-                    <Button
+                    <DisabledReasonButton
                       variant="ghost"
                       size="sm"
                       disabled={busy}
+                      reason={composerReason}
                       onClick={() => compose.set("")}
                       title="Discard this draft (e.g. a quote reply)"
                     >
                       Clear
-                    </Button>
+                    </DisabledReasonButton>
                   )}
                   {stateActions}
                 </>

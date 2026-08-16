@@ -13,6 +13,7 @@ import type { PrPollInfo } from "@/lib/git/types";
 import { notifyIfUnfocused } from "@/lib/notify";
 import { useAiEnabled, useSettings } from "@/lib/settings/queries";
 import {
+  type NotificationKind,
   type NotificationTone,
   pushNotification,
   repoNameFromPath,
@@ -155,7 +156,7 @@ export function usePrNotifications(repoPath: string) {
     // when unfocused. One pref gates both, so turning a category off also hides it
     // from the inbox.
     const record = (
-      kind: string,
+      kind: NotificationKind,
       tone: NotificationTone,
       title: string,
       pr: PrPollInfo,

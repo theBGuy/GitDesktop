@@ -93,7 +93,7 @@ function signatureOf(args: WorkerHighlightArgs): string {
 
 /**
  * Off-thread Shiki highlighting for over-budget Shiki-routed diffs. Returns the
- * per-side tokenized ASTs to hand `createDiffFile(..., workerAsts)` once they
+ * per-side tokenized ASTs that become the view's `registerHighlighter` once they
  * land, or null until then (and forever if the worker is unavailable or the
  * tokenize fails) — the caller keeps its interim paint. Latest-wins: a response
  * for a superseded request (rapid file navigation) is discarded, so no
