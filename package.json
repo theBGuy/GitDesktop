@@ -22,7 +22,7 @@
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.110",
-    "@ai-sdk/openai": "^3.0.96",
+    "@ai-sdk/openai": "^4.0.15",
     "@base-ui/react": "^1.7.0",
     "@codemirror/language": "^6.12.4",
     "@codemirror/legacy-modes": "^6.5.3",
