@@ -1375,6 +1375,9 @@ export function RemotePrView({
   }
 
   async function doClose() {
+    // Re-checked in the handler: the footer disables on the same hold, but a
+    // click can land across a selection switch before the disable repaints.
+    if (busy || triageBlocked) return;
     // Captured before the await: posting clears the draft, and the error arm
     // below has to know a comment already went out.
     const withComment = draftRidesStateChange;
@@ -1400,6 +1403,7 @@ export function RemotePrView({
   }
 
   async function doReopen() {
+    if (busy || triageBlocked) return;
     const withComment = draftRidesStateChange;
     if (!(await postRidingDraft())) return;
     reopenPr.mutate(number, {

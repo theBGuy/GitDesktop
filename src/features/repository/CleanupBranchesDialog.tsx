@@ -84,7 +84,9 @@ export function prCheckStateFrom(
 
 /** The empty state's merged clause, per PR-check outcome. It names pull requests
  *  only where they were actually read: a failed read gets its own caveat below,
- *  and a check that never ran says nothing about them either way. */
+ *  and a check that never ran says nothing about them either way. The `pending`
+ *  arm is unreachable — `checkingMerged` paints the skeleton over this empty
+ *  state — and mirrors `checked` only to keep the record total. */
 const EMPTY_MERGED_CLAUSE: Record<PrCheckState, string> = {
   checked:
     ", directly or through a recent pull request, and nothing is idle for ",
@@ -402,9 +404,12 @@ export function CleanupBranchesDialog({
               <span className="font-mono">
                 {defaultBranch ?? "the default branch"}
               </span>
-              {prCheckState === "unavailable"
-                ? ", or with no commits in a while. "
-                : " — directly or through a recent pull request — or with no commits in a while. "}
+              {/* The clause claims pull requests contribute, so it renders only
+                  while that is true or underway — a FAILED check's note below
+                  says the opposite, and the two must never disagree. */}
+              {prCheckState === "checked" || prCheckState === "pending"
+                ? " — directly or through a recent pull request — or with no commits in a while. "
+                : ", or with no commits in a while. "}
               {mode === "archive"
                 ? "Archiving hides them from the switcher — unarchive anytime."
                 : "Deleting removes them permanently, including commits only on them."}

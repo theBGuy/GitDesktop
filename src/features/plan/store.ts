@@ -313,8 +313,10 @@ export const usePlanStore = create<PlanState>((set, get) => {
             // Keep what a killed run wrote — a whole-message agent (codex) delivers it
             // only here, so adopt it when nothing streamed and fold it in exactly as the
             // done branch does. `errored` returns before `extractPlanDraft` below, so a
-            // truncated plan can still never become a draft.
-            if (ev.partialText?.trim() && !finalText) {
+            // truncated plan can still never become a draft. Superseded-guarded like the
+            // error patch: a stopped or restarted run's dying event must not write into
+            // the transcript that replaced it.
+            if (!superseded() && ev.partialText?.trim() && !finalText) {
               finalText = ev.partialText;
               const cur = get().runs.find((r) => r.id === id);
               patch(id, {

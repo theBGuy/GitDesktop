@@ -38,14 +38,17 @@ interface WorktreeRemovalState {
   }) => string | null;
 }
 
-/** Removal outlives the dialog that started it, so the outcome goes to whichever
- *  dialog is still mounted for that target — and to a toast when none is. That
- *  keeps every failure to exactly one surface. Listeners never affect rendering,
- *  so they live beside the store rather than in its state. */
-const listeners = new Map<string, RemovalListener>();
-// A separator no path contains: with a space, ("C:/a b", "c") and
-// ("C:/a", "b c") would share one key.
-const listenerKey = (repoPath: string, path: string) => `${repoPath}::${path}`;
+/** Removal outlives the dialog that started it, so the outcome goes to the
+ *  NEWEST dialog still mounted for that target — and to a toast when none is.
+ *  That keeps every failure to exactly one, live surface. A stack rather than
+ *  one slot: each disposer splices only itself, so an unmounted dialog can
+ *  never linger as a stale recipient while a mounted one exists. Listeners
+ *  never affect rendering, so they live beside the store, not in its state. */
+const listeners = new Map<string, RemovalListener[]>();
+// NUL is the one separator no filesystem path can contain — POSIX allows `:`,
+// so ("a::b", "c") and ("a", "b::c") would share a "::"-joined key.
+const listenerKey = (repoPath: string, path: string) =>
+  `${repoPath}\u0000${path}`;
 
 /** Registers a dialog's outcome handlers for one target; call the returned
  *  function on unmount. */
@@ -55,9 +58,15 @@ export function registerRemovalListener(
   listener: RemovalListener,
 ): () => void {
   const key = listenerKey(repoPath, path);
-  listeners.set(key, listener);
+  const stack = listeners.get(key) ?? [];
+  stack.push(listener);
+  listeners.set(key, stack);
   return () => {
-    if (listeners.get(key) === listener) listeners.delete(key);
+    const cur = listeners.get(key);
+    if (!cur) return;
+    const i = cur.indexOf(listener);
+    if (i !== -1) cur.splice(i, 1);
+    if (cur.length === 0) listeners.delete(key);
   };
 }
 
@@ -129,7 +138,7 @@ async function run(repoPath: string, path: string, force: boolean) {
     queryKey: ["repo", repoPath, "branches"],
   });
 
-  const listener = listeners.get(listenerKey(repoPath, path));
+  const listener = listeners.get(listenerKey(repoPath, path))?.at(-1);
   if (!failure) {
     toast.success("Worktree removed");
     listener?.onSuccess();

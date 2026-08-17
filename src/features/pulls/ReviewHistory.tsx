@@ -301,7 +301,9 @@ export function ReviewHistory({
                             onClick={() =>
                               copyText(
                                 reviewText(r),
-                                partial ? "Partial output copied" : "Review copied",
+                                partial
+                                  ? "Partial output copied"
+                                  : "Review copied",
                               )
                             }
                           >

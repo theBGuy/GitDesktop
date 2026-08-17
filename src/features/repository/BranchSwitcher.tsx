@@ -595,6 +595,12 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   });
   const stashes = stashCount.data ?? 0;
   const hasChanges = (status.data?.entries.length ?? 0) > 0;
+  // Rebase refuses only on dirty TRACKED files, so the proactive stash offer
+  // keys on this — an untracked-only tree rebases fine, and stashing it
+  // unasked would move those files into a stash on any replay conflict.
+  const hasTrackedChanges = (status.data?.entries ?? []).some(
+    (e) => e.staged !== null || (e.unstaged !== null && e.unstaged !== "untracked"),
+  );
   // Naming a branch from changes needs a commit to diff against; an unborn HEAD
   // (no commits) has nothing to compare the working tree to.
   const headExists = Boolean(head?.oid);
@@ -868,22 +874,29 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // compound up front beats a round-trip that can only fail.
   function runRebaseOnto(newBase: string, oldBase: string) {
     setRebaseOntoOpen(false);
-    if (hasChanges) {
-      recovery.begin({
-        operationLabel: "rebase",
-        detail: newBase,
-        detailPreposition: "onto",
-        reappliedMessage: `Rebased onto ${newBase} and reapplied your changes.`,
-        plainMessage: `Rebased onto ${newBase}`,
-        run: { op: "rebaseOnto", newBase, oldBase },
-      });
+    const request = {
+      operationLabel: "rebase",
+      detail: newBase,
+      detailPreposition: "onto",
+      reappliedMessage: `Rebased onto ${newBase} and reapplied your changes.`,
+      plainMessage: `Rebased onto ${newBase}`,
+      run: { op: "rebaseOnto", newBase, oldBase },
+    } as const;
+    if (hasTrackedChanges) {
+      recovery.begin(request);
       return;
     }
     rebaseOnto.mutate(
       { newBase, oldBase },
       {
         onSuccess: () => toast.success(`Rebased onto ${newBase}`),
-        onError,
+        // `hasChanges` is a query-state read that can trail the tree: a file
+        // saved between the check and the run still deserves the offer, so a
+        // dirty refusal routes back into the same recovery.
+        onError: (e) => {
+          if (recovery.handleError(e, request)) return;
+          onError(e);
+        },
       },
     );
   }

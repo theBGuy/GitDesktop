@@ -376,6 +376,10 @@ export function RemoteIssueView({
   }
 
   async function doClose(reason: "completed" | "not_planned") {
+    // The caret menu can sit open across a selection switch or a mutation, so
+    // the hold has to be re-checked here — item clicks bypass the trigger's
+    // disable.
+    if (busy || triageBlocked) return;
     // Captured before the await: posting clears the draft, and the error arm
     // below has to know a comment already went out.
     const withComment = draftRidesStateChange;
@@ -396,6 +400,7 @@ export function RemoteIssueView({
   }
 
   async function doReopen() {
+    if (busy || triageBlocked) return;
     const withComment = draftRidesStateChange;
     if (!(await postRidingDraft())) return;
     reopenIssue.mutate(number, {

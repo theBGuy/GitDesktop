@@ -15,6 +15,7 @@ import {
 import { useState } from "react";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -412,9 +413,11 @@ export function LocalIssueView({
             )}
             {/* The label swaps while a note rides along: the action changed
                 meaning, and only the label reaches a viewer before the click. */}
-            <Button
+            <DisabledReasonButton
               variant="outline"
               size="sm"
+              disabled={update.isPending}
+              reason="Saving…"
               onClick={() => setStatus("closed")}
               title={
                 draftRidesStateChange
@@ -423,13 +426,15 @@ export function LocalIssueView({
               }
             >
               {draftRidesStateChange ? "Close with comment" : "Close"}
-            </Button>
+            </DisabledReasonButton>
           </>
         )}
         {!isOpen && (
-          <Button
+          <DisabledReasonButton
             variant="outline"
             size="sm"
+            disabled={update.isPending}
+            reason="Saving…"
             onClick={() => setStatus("open")}
             title={
               draftRidesStateChange
@@ -439,7 +444,7 @@ export function LocalIssueView({
           >
             <ArrowCounterClockwiseIcon data-icon="inline-start" />
             {draftRidesStateChange ? "Reopen with comment" : "Reopen"}
-          </Button>
+          </DisabledReasonButton>
         )}
       </div>
 

@@ -21,6 +21,7 @@ import { useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -980,9 +981,11 @@ export function LocalPrView({
             )}
             {/* The label swaps while a note rides along: the action changed
                 meaning, and only the label reaches a viewer before the click. */}
-            <Button
+            <DisabledReasonButton
               variant="outline"
               size="sm"
+              disabled={update.isPending}
+              reason="Saving…"
               onClick={() => setStatus("closed")}
               title={
                 draftRidesStateChange
@@ -991,7 +994,7 @@ export function LocalPrView({
               }
             >
               {draftRidesStateChange ? "Close with comment" : "Close"}
-            </Button>
+            </DisabledReasonButton>
             <span className="flex-1" />
             {/* GitHub-style "Update branch": only when head has fallen behind
                 base. Merges base into head (in a throwaway worktree, so it
@@ -1090,9 +1093,11 @@ export function LocalPrView({
         {pr.status === "closed" && (
           <>
             <span className="flex-1" />
-            <Button
+            <DisabledReasonButton
               variant="outline"
               size="sm"
+              disabled={update.isPending}
+              reason="Saving…"
               onClick={() => setStatus("open")}
               title={
                 draftRidesStateChange
@@ -1102,7 +1107,7 @@ export function LocalPrView({
             >
               <ArrowCounterClockwiseIcon data-icon="inline-start" />
               {draftRidesStateChange ? "Reopen with comment" : "Reopen"}
-            </Button>
+            </DisabledReasonButton>
           </>
         )}
       </div>

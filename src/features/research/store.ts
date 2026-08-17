@@ -392,8 +392,10 @@ export const useResearchStore = create<ResearchState>((set, get) => {
             // Keep what a killed run wrote — a whole-message agent (codex) delivers it
             // only here, so adopt it when nothing streamed and fold it in exactly as the
             // done branch does. `errored` returns before `extractResearchReport` below,
-            // so a truncated report can still never become the saved report.
-            if (ev.partialText?.trim() && !finalText) {
+            // so a truncated report can still never become the saved report. Superseded-
+            // guarded like the error patch: a stopped or restarted run's dying event
+            // must not write into the transcript that replaced it.
+            if (!superseded() && ev.partialText?.trim() && !finalText) {
               finalText = ev.partialText;
               const cur = get().runs.find((r) => r.id === id);
               patch(id, {

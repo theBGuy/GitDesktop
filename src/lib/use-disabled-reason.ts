@@ -1,12 +1,9 @@
-// The disabled-reason contract's shared internals. A natively-disabled control
-// swallows its own `title` and leaves the tab order, so one WITH a reason trades
-// the native attribute for `aria-disabled`: focus intact, the reason announced
-// through an sr-only node joined into `aria-describedby`, and the hover text
-// moved onto a wrapper span since both disabled paths kill pointer events on the
-// control itself. A reason-less disable stays native rather than becoming a mute
-// tab stop. The JSX stays per-caller — the vendored Button and a raw `<button>`
-// carry different markup and sizing — so this owns only the derivations every
-// site has to get right.
+// Shared internals of the disabled-reason contract. A natively-disabled control
+// swallows its own `title` and leaves the tab order, so a reasoned disable trades
+// it for `aria-disabled`: focus intact, the reason announced via an sr-only node
+// joined into `aria-describedby`, hover text on a wrapper span. A reason-less
+// disable stays native rather than becoming a mute tab stop. JSX stays per-caller
+// (the vendored Button and a raw `<button>` differ); this owns the derivations.
 import { type MouseEventHandler, useId } from "react";
 
 /** The dim `aria-disabled` needs: the vendored `disabled:` variants can't see
