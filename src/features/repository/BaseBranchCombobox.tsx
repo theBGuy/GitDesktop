@@ -14,16 +14,13 @@ import {
   ComboboxTrigger,
   ComboboxValue,
 } from "@/components/ui/combobox";
+import { normPath } from "@/lib/git/path";
 import {
   useBranches,
   useRemoteBranches,
   useUserWorktrees,
 } from "@/lib/git/queries";
 import type { Branch } from "@/lib/git/types";
-
-/** Lower-cased, forward-slashed path for cross-source comparison — git emits
- *  "/", the app stores "\" on Windows (mirrors BranchSwitcher's helper). */
-const normPath = (p: string) => p.replace(/\\/g, "/").toLowerCase();
 
 /** Whether a local branch may be offered as a base: drop the agent-session
  *  namespace (a hard repo invariant — every branch surface filters

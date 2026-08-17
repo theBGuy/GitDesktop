@@ -9,6 +9,7 @@ import {
 } from "@/lib/ai/agent";
 import { cleanupContainerSandbox, stopTestContainer } from "@/lib/ai/sandbox";
 import { terminalErrorMessage } from "@/lib/ai/terminal-error";
+import { normPath } from "@/lib/git/path";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import {
   commitWorktreeAll,
@@ -230,12 +231,6 @@ function newTurn(prompt: string): SessionTurn {
 type Get = () => SessionsState;
 type SetState = (partial: Partial<SessionsState>) => void;
 
-/** Normalize a path for comparison (git reports forward slashes; Windows paths
- *  arrive with backslashes, and are case-insensitive). */
-function normPath(p: string): string {
-  return p.replace(/\\/g, "/").toLowerCase();
-}
-
 /** A session loaded from disk can't have a live turn — its CLI process is gone.
  *  Mark a mid-run turn as interrupted so the session is idle (resumes on the
  *  next message). */
@@ -327,17 +322,19 @@ async function runTurn(
     set({
       sessions: get().sessions.map((s) => (s.id === id ? updater(s) : s)),
     });
+  const hasOwnTurn = (s: AgentSession) =>
+    turnIndex >= 0 && turnIndex < s.turns.length;
+  // Session-level fields (`running`, `nativeSessionId`) may only be written by the run
+  // that still owns the LAST turn: a stale run's late write would re-enable the composer
+  // over the live run (leaving it uncancellable, since `cancel` bails on `!s.running`).
+  const ownsLastTurn = (s: AgentSession) => s.turns.length - 1 === turnIndex;
   const patchTurn = (p: Partial<SessionTurn>) =>
     setSession((s) => {
-      if (turnIndex < 0 || turnIndex >= s.turns.length) return s;
+      if (!hasOwnTurn(s)) return s;
       const turns = s.turns.slice();
       turns[turnIndex] = { ...turns[turnIndex], ...p };
       return { ...s, turns };
     });
-  // `running` is session-level, so only the run still owning the LAST turn may clear
-  // it: a stale run's late teardown would otherwise re-enable the composer over the
-  // live run and leave that one uncancellable (`cancel` bails on `!s.running`).
-  const ownsLastTurn = (s: AgentSession) => s.turns.length - 1 === turnIndex;
   // End of a turn: persist this run's now-terminal turn (one append per turn) and,
   // unless you're watching this session live, fire an OS notification.
   const endTurn = () => {
@@ -401,7 +398,9 @@ async function runTurn(
         if (!s) return;
         if (ev.kind === "nativeSession") {
           // Capture once (turn 1) + persist, so a host resume targets this session.
-          if (!s.nativeSessionId) {
+          // Only the run still owning the last turn may capture: a stale run's late id
+          // would rebind later resumes to a dead conversation and block the live one.
+          if (ownsLastTurn(s) && !s.nativeSessionId) {
             setSession((x) => ({ ...x, nativeSessionId: ev.id }));
             persist(appendNativeSession(id, ev.id));
           }
@@ -491,7 +490,7 @@ async function runTurn(
     const hash = await commitWorktreeAll(worktreePath, msg);
     setSession((s) => {
       const turns = s.turns.slice();
-      if (turnIndex >= 0 && turnIndex < turns.length)
+      if (hasOwnTurn(s))
         turns[turnIndex] = {
           ...turns[turnIndex],
           status: "done",

@@ -1,10 +1,7 @@
 import { ArchiveIcon, TreeStructureIcon } from "@phosphor-icons/react";
 import { type ReactNode, useMemo } from "react";
+import { normPath } from "@/lib/git/path";
 import { useBranches, useUserWorktrees } from "@/lib/git/queries";
-
-/** Lower-cased, forward-slashed path for cross-source comparison — git emits
- *  "/", the app stores "\" on Windows (mirrors BranchSwitcher's helper). */
-const normPath = (p: string) => p.replace(/\\/g, "/").toLowerCase();
 
 export interface BranchPickerOptions {
   /** Selectable branch names in git order; session + archived branches excluded

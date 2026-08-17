@@ -1,6 +1,7 @@
 import { toast } from "sonner";
 import { create } from "zustand";
 import { gitCheckoutBranch, gitStashAll, validateRepo } from "@/lib/git/api";
+import { normPath } from "@/lib/git/path";
 import { repoKeys, worktreeKey } from "@/lib/git/queries";
 import { pruneWorktrees, removeWorktree } from "@/lib/git/worktree";
 import { queryClient } from "@/lib/query-client";
@@ -28,7 +29,13 @@ export interface RemovalListener {
 
 interface WorktreeRemovalState {
   /** repoPath → worktree path → the removal in flight. Keyed by repo so a repo
-   *  switch reads an empty set rather than another repo's removals. */
+   *  switch reads an empty set rather than another repo's removals.
+   *
+   *  The repo key is ALWAYS the ui store's repoPath spelling (`RepoInfo.root`),
+   *  because every consumer reads it from there; the worktree key is git's list
+   *  spelling. A writer holding git's spelling of the repo (the promote path)
+   *  must resolve it through `validateRepo` first, or its entry lands in a
+   *  bucket the banner and the manager's rows never read. */
   byRepo: Record<string, Record<string, WorktreeRemoval>>;
   /** Starts a removal and keeps it visible until it settles. Returns null once
    *  started, or the reason it was refused: a second attempt on the same
@@ -89,11 +96,6 @@ export function registerRemovalListener(
 }
 
 const NO_REMOVALS: WorktreeRemoval[] = [];
-
-// One directory reaches this module in two spellings: git's worktree list prints
-// forward slashes on Windows, while `validate_repo` hands back backslashes. Same
-// comparator the rest of the app uses for this (BranchSwitcher, WorktreesDialog).
-const normPath = (p: string) => p.replace(/\\/g, "/").toLowerCase();
 
 /** True while this worktree is being removed, whichever spelling either path
  *  arrived in — the promote path holds git's, the delete path the ui store's. */
@@ -265,12 +267,9 @@ async function runPromote(
     // moved/unmounted main path would otherwise let the app stay on the
     // worktree while we go on to delete it. Throwing here aborts cleanly.
     const info = await validateRepo(mainPath);
-    // Every consumer keys off `info.root`: `openRepo` writes it straight to the
-    // ui store's repoPath, and the banner, the manager's list query and its row
-    // badges all read that. `mainPath` came from git's worktree list, which
-    // spells the same directory with forward slashes on Windows — state or
-    // invalidations keyed by it miss every mounted consumer silently. The git
-    // calls below keep taking `mainPath`; either spelling works for git.
+    // The spelling every consumer keys by (see `byRepo`), including the
+    // invalidations below, which have to hit the mounted query keys. The git
+    // calls keep taking `mainPath`; either spelling works for git.
     const activeKey = info.root;
     // Move the app onto the main workspace — we're about to delete this
     // worktree's folder, and nothing should keep reading git status inside it.

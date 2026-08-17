@@ -7127,6 +7127,64 @@ detached
         );
     }
 
+    /// The premise the two conclude-with-commit legs rest on
+    /// (`finish_local_pr_merge`, `finish_remote_pr_resolve`): a `git commit` that
+    /// refuses writes its whole report to STDOUT and leaves stderr EMPTY, so an
+    /// error carrying stderr alone renders as the bare "git exited with code 1".
+    /// That is the split `full_failure_text` exists to close.
+    ///
+    /// Pinned here rather than at those call sites because no real-repo fixture
+    /// can reach them with this shape: every OTHER commit refusal measured (git
+    /// 2.51.1) — a rejecting hook, an empty message, a signing failure — reports
+    /// on stderr, and git redirects hook output to stderr too, so a hook cannot
+    /// stage the stdout case either.
+    #[tokio::test]
+    async fn a_refusing_commit_reports_on_stdout_with_stderr_empty() {
+        let (dir, repo) = setup_repo("commit-streams").await;
+
+        // Clean tree, nothing staged.
+        let clean = run_git_raw(Some(&repo), &["commit", "-m", "x"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_ne!(clean.code, 0, "a commit with nothing staged must refuse");
+        assert!(
+            clean.stderr.trim().is_empty(),
+            "stderr staying empty is the whole problem: {}",
+            clean.stderr
+        );
+        assert!(
+            clean.stdout_lossy().contains("nothing to commit"),
+            "git's report rides stdout: {}",
+            clean.stdout_lossy()
+        );
+
+        // Same refusal with an untracked file present is a DIFFERENT sentence —
+        // and the one neither `already` allow-list substring matches, so it is the
+        // shape that reaches the error build rather than being swallowed.
+        std::fs::write(dir.path().join("untracked.txt"), "u\n").unwrap();
+        let untracked = run_git_raw(Some(&repo), &["commit", "-m", "x"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_ne!(untracked.code, 0, "a commit with nothing staged must refuse");
+        assert!(
+            untracked.stderr.trim().is_empty(),
+            "stderr staying empty is the whole problem: {}",
+            untracked.stderr
+        );
+        let report = untracked.stdout_lossy();
+        assert!(
+            report.contains("nothing added to commit but untracked files present"),
+            "git's report rides stdout: {report}"
+        );
+        // The legs read their allow-list off stderr, which this refusal never
+        // populates — so the tolerate-it arm cannot fire and the error build does.
+        let lower = untracked.stderr.to_lowercase();
+        assert!(
+            !lower.contains("nothing to commit") && !lower.contains("no changes added"),
+            "a stderr-read allow-list cannot see a stdout-only refusal: {report}"
+        );
+    }
+
     /// The PR head moving while the user resolves must FAIL honestly (the push is
     /// never forced) and KEEP the worktree — it holds resolutions that would
     /// otherwise be lost.

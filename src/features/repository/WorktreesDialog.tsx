@@ -42,6 +42,7 @@ import {
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { copyText } from "@/lib/clipboard";
+import { normPath } from "@/lib/git/path";
 import {
   useAddUserWorktree,
   useBranches,
@@ -61,11 +62,6 @@ import { cn } from "@/lib/utils";
 import { DeleteWorktreeDialog } from "./DeleteWorktreeDialog";
 import { PromoteWorktreeDialog } from "./PromoteWorktreeDialog";
 import { useOpenWorktree } from "./useOpenRepoByPath";
-
-/** Lower-cased, forward-slashed path — git emits "/", the app stores "\" on
- *  Windows. Mirrors the backend's `normalize_wt_path` so "current" detection and
- *  default-path derivation compare apples to apples. */
-const norm = (p: string) => p.replace(/\\/g, "/").toLowerCase();
 
 /** Sets a hover title only when a Select item is actually clipped. Base UI pins
  *  the popup to the trigger width and clips `overflow-x`, and the inner item text
@@ -139,7 +135,7 @@ function WorktreeList({
   const unlock = useUnlockUserWorktree(repoPath);
   const repair = useRepairWorktrees(repoPath);
   const activeRepo = useUiStore((s) => s.repoPath);
-  const activeNorm = activeRepo ? norm(activeRepo) : "";
+  const activeNorm = activeRepo ? normPath(activeRepo) : "";
 
   const [highlight, setHighlight] = useState(-1);
   const [deleteTarget, setDeleteTarget] = useState<UserWorktree | null>(null);
@@ -163,7 +159,7 @@ function WorktreeList({
   });
 
   async function handleOpen(w: UserWorktree) {
-    if (norm(w.path) === activeNorm) return; // already here
+    if (normPath(w.path) === activeNorm) return; // already here
     if (removingPaths.has(w.path)) return; // its folder is going away
     await openWorktree(w.path);
     onClose();
@@ -206,7 +202,7 @@ function WorktreeList({
                 key={w.path}
                 worktree={w}
                 highlighted={i === highlight}
-                isCurrent={norm(w.path) === activeNorm}
+                isCurrent={normPath(w.path) === activeNorm}
                 isRemoving={removingPaths.has(w.path)}
                 onFocus={() => setHighlight(i)}
                 onOpen={() => handleOpen(w)}
@@ -536,7 +532,8 @@ export function RenameWorktreeDialog({
 
   const trimmed = name.trim();
   const newPath = parent ? `${parent}/${trimmed}` : trimmed;
-  const unchanged = !!worktree && norm(newPath) === norm(worktree.path);
+  const unchanged =
+    !!worktree && normPath(newPath) === normPath(worktree.path);
   // A rename keeps the worktree in place, so block path separators (that'd be a
   // move into another folder) — keep this a simple in-place rename.
   const invalid = /[\\/]/.test(trimmed);

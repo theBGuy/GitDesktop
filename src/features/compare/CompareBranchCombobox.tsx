@@ -15,12 +15,9 @@ import {
   ComboboxTrigger,
   ComboboxValue,
 } from "@/components/ui/combobox";
+import { normPath } from "@/lib/git/path";
 import { useBranchDivergence, useUserWorktrees } from "@/lib/git/queries";
 import type { Branch, BranchDivergence } from "@/lib/git/types";
-
-/** Lower-cased, forward-slashed path for cross-source comparison — git emits
- *  "/", the app stores "\" on Windows (mirrors BranchSwitcher's helper). */
-const normPath = (p: string) => p.replace(/\\/g, "/").toLowerCase();
 
 /**
  * The Compare tab's base-branch picker: a searchable combobox over the local

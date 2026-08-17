@@ -34,6 +34,7 @@ import { useEffectiveBranchRules } from "@/lib/branch-rules/queries";
 import { copyText } from "@/lib/clipboard";
 import { isDirtyTreeRefusal } from "@/lib/error-summary";
 import { forgeDetectForkPrForBranch } from "@/lib/git/api";
+import { normPath } from "@/lib/git/path";
 import {
   forgeFeatureReady,
   useBranchDivergence,
@@ -111,10 +112,6 @@ import {
   useStashReapplyRecovery,
 } from "./useStashReapplyRecovery";
 import { LockWorktreeDialog, RenameWorktreeDialog } from "./WorktreesDialog";
-
-/** Lower-cased, forward-slashed path for cross-source comparison — git emits
- *  "/", the app stores "\" on Windows. */
-const normPath = (p: string) => p.replace(/\\/g, "/").toLowerCase();
 
 /** Last path segment (folder name), tolerating either separator. */
 const baseName = (p: string) => p.split(/[/\\]/).filter(Boolean).pop() ?? p;
