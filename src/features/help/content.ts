@@ -571,7 +571,9 @@ test, or review several branches at once without stashing or switching.
   main workspace is stashed so the checkout can't be blocked (restore it with *Pop latest
   stash*), and promoting is blocked while the main workspace has a merge, rebase,
   cherry-pick or revert in progress, or unresolved conflicts. Works even on the worktree
-  you're currently in.
+  you're currently in. The dialog closes right away and the promote finishes on its own;
+  its removal step shows the same line at the top of the repository view and the same
+  **Removing…** row as a delete.
 - **Repair links** (footer) re-connects worktrees if you moved or renamed the repository
   folder in your file manager, which otherwise breaks the path each worktree records.
 

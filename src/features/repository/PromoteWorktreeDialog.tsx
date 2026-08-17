@@ -1,5 +1,5 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { useRef } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -11,46 +11,10 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
-import {
-  gitCheckoutBranch,
-  gitOpState,
-  gitStashAll,
-  gitStatus,
-  validateRepo,
-} from "@/lib/git/api";
+import { gitOpState, gitStatus } from "@/lib/git/api";
 import { repoKeys, useUserWorktrees } from "@/lib/git/queries";
-import {
-  pruneWorktrees,
-  removeWorktree,
-  type UserWorktree,
-} from "@/lib/git/worktree";
-import { toastError } from "@/lib/toast";
-import { useOpenWorktree } from "./useOpenRepoByPath";
-
-/** Remove a worktree while keeping its branch, retrying once if the folder is
- *  momentarily still held. The app has just switched off this worktree, but its
- *  last in-flight git-status poll (or the OS) can keep the directory busy for a
- *  beat — and `openRepo`'s switch is deferred by a View Transition, so the app
- *  may not have fully let go yet. The retry covers that window; a real, lasting
- *  hold (an editor/terminal in the folder) still surfaces the actionable error. */
-async function removeWorktreeFreeingBranch(repoPath: string, path: string) {
-  try {
-    await removeWorktree(repoPath, path, null, false);
-  } catch (e) {
-    // Path stripped before matching — a folder NAMED e.g. "docs-in-use" must
-    // not read as a transient hold.
-    const msg = String((e as { message?: string })?.message ?? e).replaceAll(
-      path,
-      "",
-    );
-    if (/close any program|in use|being used|invalid argument/i.test(msg)) {
-      await new Promise((resolve) => setTimeout(resolve, 300));
-      await removeWorktree(repoPath, path, null, false);
-    } else {
-      throw e;
-    }
-  }
-}
+import type { UserWorktree } from "@/lib/git/worktree";
+import { useWorktreeRemovalStore } from "@/lib/stores/worktree-removal";
 
 /**
  * Promotes a linked worktree's branch into the MAIN workspace. A branch can only
@@ -64,6 +28,12 @@ async function removeWorktreeFreeingBranch(repoPath: string, path: string) {
  * is polled), so moving the app off the worktree and letting its last poll
  * settle is what lets the folder delete cleanly — even when you promote the very
  * worktree you're standing in.
+ *
+ * This dialog only gathers and checks those preconditions. The composite itself
+ * is store-owned (`worktree-removal`), so nothing that closes or unmounts this
+ * dialog can cut it short — which is why it closes as soon as the store accepts
+ * the promote instead of holding the user in a modal for the whole run. Its
+ * removal step shows in the repo view's removal line and the manager's row.
  */
 export function PromoteWorktreeDialog({
   repoPath,
@@ -74,27 +44,13 @@ export function PromoteWorktreeDialog({
   worktree: UserWorktree | null;
   onClose: () => void;
 }) {
-  // `pending` lives here (not in PromoteBody) so it gates dismissal: while a
-  // promote runs, Esc / the X / an outside click must NOT tear the dialog down —
-  // the async chain would keep going with the dialog gone (a background recovery
-  // toast; or a second concurrent promote after a quick reopen re-mounts a fresh
-  // re-entry latch). Controlled Base UI funnels every dismissal through
-  // onOpenChange, so gating onClose on !pending blocks them all.
-  const [pending, setPending] = useState(false);
   return (
-    <Dialog
-      open={worktree !== null}
-      onOpenChange={(o) => {
-        if (!o && !pending) onClose();
-      }}
-    >
+    <Dialog open={worktree !== null} onOpenChange={(o) => !o && onClose()}>
       <DialogContent>
         {worktree && (
           <PromoteBody
             repoPath={repoPath}
             worktree={worktree}
-            pending={pending}
-            setPending={setPending}
             onClose={onClose}
           />
         )}
@@ -106,21 +62,16 @@ export function PromoteWorktreeDialog({
 function PromoteBody({
   repoPath,
   worktree,
-  pending,
-  setPending,
   onClose,
 }: {
   repoPath: string;
   worktree: UserWorktree;
-  pending: boolean;
-  setPending: (value: boolean) => void;
   onClose: () => void;
 }) {
   const worktrees = useUserWorktrees(repoPath);
-  const openWorktree = useOpenWorktree();
-  const queryClient = useQueryClient();
-  // Synchronous re-entry latch: `setPending` is async, so two fast clicks could
-  // both pass the pending check before a re-render — this stops the second.
+  const startPromote = useWorktreeRemovalStore((s) => s.startPromote);
+  // Synchronous re-entry latch: no re-render separates two clicks in the same
+  // tick, so only a ref can refuse the second.
   const runningRef = useRef(false);
 
   const mainPath = (worktrees.data ?? []).find((w) => w.isMain)?.path ?? null;
@@ -186,67 +137,24 @@ function PromoteBody({
     worktree.isLocked ||
     !worktree.branch;
 
-  async function doPromote() {
+  function doPromote() {
     if (!mainPath || !worktree.branch || blocked) return;
-    // Synchronous latch — beat a double-click before `setPending` re-renders.
     if (runningRef.current) return;
     runningRef.current = true;
-    const willStash = mainDirty;
-    // Track how far the composite got. Once the worktree is removed we're past
-    // the point of no return: a later failure needs recovery guidance (the
-    // folder is gone, the branch is free but unchecked-out), not git's raw error.
-    let removed = false;
-    let stashed = false;
-    setPending(true);
-    try {
-      // Verify the main workspace is reachable BEFORE any mutation.
-      // `useOpenWorktree` swallows its own errors (it toasts, never throws), so a
-      // moved/unmounted main path would otherwise let the app stay on the
-      // worktree while we go on to delete it. Throwing here aborts cleanly.
-      await validateRepo(mainPath);
-      // Move the app onto the main workspace — we're about to delete this
-      // worktree's folder, and nothing should keep reading git status inside it.
-      // There's no fs-watcher (status is polled), so switching away stops future
-      // polls; `removeWorktreeFreeingBranch` retries once for any last in-flight
-      // poll that hasn't drained (openRepo's switch is deferred by a transition).
-      await openWorktree(mainPath);
-      await new Promise((resolve) => setTimeout(resolve, 80));
-      // Free the branch: remove the worktree but KEEP the branch (null) — we
-      // check it out in main next. force=false: the clean-tree guard already ran.
-      await removeWorktreeFreeingBranch(mainPath, worktree.path);
-      removed = true;
-      await pruneWorktrees(mainPath).catch(() => undefined);
-      // The branch's working tree is free now; stash main's own WIP (if any) so
-      // the checkout can't be blocked, then land main on the promoted branch.
-      if (willStash) {
-        await gitStashAll(mainPath);
-        stashed = true;
-      }
-      await gitCheckoutBranch(mainPath, worktree.branch);
-      await queryClient.invalidateQueries({ queryKey: repoKeys.all(mainPath) });
-      toast.success(
-        willStash
-          ? `Promoted ${worktree.branch} — your main workspace changes were stashed; Pop latest stash brings them back`
-          : `Promoted ${worktree.branch} to your main workspace`,
-      );
-      setPending(false);
-      onClose();
-    } catch (e) {
-      if (removed) {
-        // The worktree is already gone and the branch is free but not checked
-        // out — surface the recovery path (with git's error as the detail).
-        toast.error(
-          `Removed the worktree, but couldn't check out ${worktree.branch} in your main workspace — switch to it there manually.${
-            stashed ? " Your changes are stashed — use Pop latest stash." : ""
-          }`,
-          { description: e instanceof Error ? e.message : String(e) },
-        );
-      } else {
-        toastError(e);
-      }
+    // Resolved here, while the dialog still holds its precondition queries; the
+    // store runs the composite from there and outlives this dialog.
+    const refused = startPromote({
+      mainPath,
+      worktreePath: worktree.path,
+      branch: worktree.branch,
+      willStash: mainDirty,
+    });
+    if (refused) {
       runningRef.current = false;
-      setPending(false);
+      toast.info(refused);
+      return;
     }
+    onClose();
   }
 
   return (
@@ -313,11 +221,10 @@ function PromoteBody({
       ) : null}
 
       <DialogFooter>
-        <Button variant="outline" onClick={onClose} disabled={pending}>
+        <Button variant="outline" onClick={onClose}>
           Cancel
         </Button>
-        <Button disabled={checking || blocked || pending} onClick={doPromote}>
-          {pending && <Spinner data-icon="inline-start" />}
+        <Button disabled={checking || blocked} onClick={doPromote}>
           {mainDirty && !blocked ? "Stash & promote" : "Promote"}
         </Button>
       </DialogFooter>

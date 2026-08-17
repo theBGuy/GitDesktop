@@ -1,9 +1,11 @@
 import { toast } from "sonner";
 import { create } from "zustand";
+import { gitCheckoutBranch, gitStashAll, validateRepo } from "@/lib/git/api";
 import { repoKeys, worktreeKey } from "@/lib/git/queries";
 import { pruneWorktrees, removeWorktree } from "@/lib/git/worktree";
 import { queryClient } from "@/lib/query-client";
 import { toastError } from "@/lib/toast";
+import { useUiStore } from "./ui";
 
 /** A worktree removal the app is still waiting on. */
 export interface WorktreeRemoval {
@@ -36,6 +38,21 @@ interface WorktreeRemovalState {
     path: string;
     name: string;
     force: boolean;
+  }) => string | null;
+  /** Starts a promote — remove the worktree to free its branch, then check that
+   *  branch out in the main workspace — and keeps its removal step visible the
+   *  same way `startRemoval` does. Returns null once started, or the reason it
+   *  was refused. Every precondition is the caller's to check first; this runs
+   *  past the point of no return with no dialog left to report to. */
+  startPromote: (args: {
+    /** The main workspace, and the repo the app is switched onto to run this. */
+    mainPath: string;
+    /** The worktree whose folder goes away to free the branch. */
+    worktreePath: string;
+    /** The branch to check out in the main workspace once it's free. */
+    branch: string;
+    /** Stash the main workspace's own uncommitted changes before checking out. */
+    willStash: boolean;
   }) => string | null;
 }
 
@@ -73,27 +90,72 @@ export function registerRemovalListener(
 
 const NO_REMOVALS: WorktreeRemoval[] = [];
 
+// One directory reaches this module in two spellings: git's worktree list prints
+// forward slashes on Windows, while `validate_repo` hands back backslashes. Same
+// comparator the rest of the app uses for this (BranchSwitcher, WorktreesDialog).
+const normPath = (p: string) => p.replace(/\\/g, "/").toLowerCase();
+
+/** True while this worktree is being removed, whichever spelling either path
+ *  arrived in — the promote path holds git's, the delete path the ui store's. */
+function isRemovalInFlight(
+  byRepo: Record<string, Record<string, WorktreeRemoval>>,
+  repoPath: string,
+  path: string,
+): boolean {
+  const repo = normPath(repoPath);
+  const target = normPath(path);
+  return Object.entries(byRepo).some(
+    ([r, entries]) =>
+      normPath(r) === repo &&
+      Object.keys(entries).some((p) => normPath(p) === target),
+  );
+}
+
+/** Main workspaces with a promote running, keyed by {@link normPath} so the two
+ *  spellings can't both pass. Two promotes into the same checkout would fight
+ *  over the final `gitCheckoutBranch`, and the dialog that started the first is
+ *  gone by then — so the latch lives here, not in a component ref. */
+const promoting = new Set<string>();
+
+// `_set` unused: every write goes through the module-level helpers below, so a
+// runner that outlives its dialog reaches state the same way the starters do.
 export const useWorktreeRemovalStore = create<WorktreeRemovalState>()(
-  (set, get) => ({
+  (_set, get) => ({
     byRepo: {},
 
     startRemoval: ({ repoPath, path, name, force }) => {
       if (get().byRepo[repoPath]?.[path])
         return "This worktree is already being removed.";
-      set((s) => ({
-        byRepo: {
-          ...s.byRepo,
-          [repoPath]: {
-            ...s.byRepo[repoPath],
-            [path]: { path, name, startedAt: Date.now() },
-          },
-        },
-      }));
+      markRemoval(repoPath, path, name);
       void run(repoPath, path, force);
+      return null;
+    },
+
+    startPromote: ({ mainPath, worktreePath, branch, willStash }) => {
+      // `mainPath` is git's spelling; the entry this would collide with was
+      // written under the ui store's. Match on the directory, not the string.
+      if (isRemovalInFlight(get().byRepo, mainPath, worktreePath))
+        return "This worktree is already being removed.";
+      if (promoting.has(normPath(mainPath)))
+        return "Another worktree is already being promoted to your main workspace.";
+      promoting.add(normPath(mainPath));
+      void runPromote(mainPath, worktreePath, branch, willStash);
       return null;
     },
   }),
 );
+
+function markRemoval(repoPath: string, path: string, name: string) {
+  useWorktreeRemovalStore.setState((s) => ({
+    byRepo: {
+      ...s.byRepo,
+      [repoPath]: {
+        ...s.byRepo[repoPath],
+        [path]: { path, name, startedAt: Date.now() },
+      },
+    },
+  }));
+}
 
 function clearRemoval(repoPath: string, path: string) {
   useWorktreeRemovalStore.setState((s) => {
@@ -108,6 +170,15 @@ function clearRemoval(repoPath: string, path: string) {
           : otherRepos,
     };
   });
+}
+
+/** Drops the entry and refreshes what a settled removal changed: the manager's
+ *  list, plus branches (a removed worktree frees its branch for checkout
+ *  elsewhere) — the same set the worktree mutations invalidate. */
+function settleRemoval(repoPath: string, path: string) {
+  clearRemoval(repoPath, path);
+  void queryClient.invalidateQueries({ queryKey: worktreeKey(repoPath) });
+  void queryClient.invalidateQueries({ queryKey: repoKeys.branches(repoPath) });
 }
 
 /**
@@ -129,11 +200,7 @@ async function run(repoPath: string, path: string, force: boolean) {
 
   // Drop the entry before handing the outcome over, so a dialog re-offering a
   // force remove already sees its Remove button live again.
-  clearRemoval(repoPath, path);
-  // The same set the worktree mutations invalidate: the manager's list, plus
-  // branches (a removed worktree frees its branch for checkout elsewhere).
-  void queryClient.invalidateQueries({ queryKey: worktreeKey(repoPath) });
-  void queryClient.invalidateQueries({ queryKey: repoKeys.branches(repoPath) });
+  settleRemoval(repoPath, path);
 
   const listener = listeners.get(listenerKey(repoPath, path))?.at(-1);
   if (!failure) {
@@ -143,6 +210,117 @@ async function run(repoPath: string, path: string, force: boolean) {
   }
   if (listener) listener.onError(failure.error, force);
   else toastError(failure.error);
+}
+
+/** Remove a worktree while keeping its branch, retrying once if the folder is
+ *  momentarily still held. The app has just switched off this worktree, but its
+ *  last in-flight git-status poll (or the OS) can keep the directory busy for a
+ *  beat — and `openRepo`'s switch is deferred by a View Transition, so the app
+ *  may not have fully let go yet. The retry covers that window; a real, lasting
+ *  hold (an editor/terminal in the folder) still surfaces the actionable error. */
+async function removeWorktreeFreeingBranch(repoPath: string, path: string) {
+  try {
+    await removeWorktree(repoPath, path, null, false);
+  } catch (e) {
+    // Path stripped before matching — a folder NAMED e.g. "docs-in-use" must
+    // not read as a transient hold.
+    const msg = String((e as { message?: string })?.message ?? e).replaceAll(
+      path,
+      "",
+    );
+    if (/close any program|in use|being used|invalid argument/i.test(msg)) {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await removeWorktree(repoPath, path, null, false);
+    } else {
+      throw e;
+    }
+  }
+}
+
+/**
+ * Runs one promote to completion: free the branch (remove its worktree, keep the
+ * branch) then check it out in the main workspace. Store-owned so the composite
+ * survives its dialog, which closes as soon as the store accepts the promote;
+ * its removal step shows in the main workspace's own removal line and manager
+ * row like any other.
+ *
+ * The generic removal toast and the listener stack stay out of this path: they
+ * are the delete dialog's contract, and promote ends on its own composite toast.
+ */
+async function runPromote(
+  mainPath: string,
+  worktreePath: string,
+  branch: string,
+  willStash: boolean,
+) {
+  // Track how far the composite got. Once the worktree is removed we're past
+  // the point of no return: a later failure needs recovery guidance (the
+  // folder is gone, the branch is free but unchecked-out), not git's raw error.
+  let removed = false;
+  let stashed = false;
+  // The key the removal entry was marked under, or null once it has settled.
+  let markedKey: string | null = null;
+  try {
+    // Verify the main workspace is reachable BEFORE any mutation: a
+    // moved/unmounted main path would otherwise let the app stay on the
+    // worktree while we go on to delete it. Throwing here aborts cleanly.
+    const info = await validateRepo(mainPath);
+    // Every consumer keys off `info.root`: `openRepo` writes it straight to the
+    // ui store's repoPath, and the banner, the manager's list query and its row
+    // badges all read that. `mainPath` came from git's worktree list, which
+    // spells the same directory with forward slashes on Windows — state or
+    // invalidations keyed by it miss every mounted consumer silently. The git
+    // calls below keep taking `mainPath`; either spelling works for git.
+    const activeKey = info.root;
+    // Move the app onto the main workspace — we're about to delete this
+    // worktree's folder, and nothing should keep reading git status inside it.
+    // There's no fs-watcher (status is polled), so switching away stops future
+    // polls; `removeWorktreeFreeingBranch` retries once for any last in-flight
+    // poll that hasn't drained (openRepo's switch is deferred by a transition).
+    useUiStore.getState().openRepo(info);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    // Main is the active repo now, so the removal is visible where the user is.
+    markRemoval(activeKey, worktreePath, branch);
+    markedKey = activeKey;
+    // Free the branch: remove the worktree but KEEP the branch (null) — we
+    // check it out in main next. force=false: the clean-tree guard already ran.
+    await removeWorktreeFreeingBranch(mainPath, worktreePath);
+    removed = true;
+    await pruneWorktrees(mainPath).catch(() => undefined);
+    settleRemoval(activeKey, worktreePath);
+    markedKey = null;
+    // The branch's working tree is free now; stash main's own WIP (if any) so
+    // the checkout can't be blocked, then land main on the promoted branch.
+    if (willStash) {
+      await gitStashAll(mainPath);
+      stashed = true;
+    }
+    await gitCheckoutBranch(mainPath, branch);
+    await queryClient.invalidateQueries({ queryKey: repoKeys.all(activeKey) });
+    toast.success(
+      willStash
+        ? `Promoted ${branch} — your main workspace changes were stashed; Pop latest stash brings them back`
+        : `Promoted ${branch} to your main workspace`,
+    );
+  } catch (e) {
+    // Never leave the removal line spinning over a step that has stopped.
+    if (markedKey) settleRemoval(markedKey, worktreePath);
+    if (removed) {
+      // The worktree is already gone and the branch is free but not checked
+      // out — surface the recovery path (with git's error as the detail).
+      toast.error(
+        `Removed the worktree, but couldn't check out ${branch} in your main workspace — switch to it there manually.${
+          stashed ? " Your changes are stashed — use Pop latest stash." : ""
+        }`,
+        { description: e instanceof Error ? e.message : String(e) },
+      );
+    } else {
+      toastError(e);
+    }
+  } finally {
+    // Same expression `startPromote` added under, or the latch never releases.
+    promoting.delete(normPath(mainPath));
+  }
 }
 
 /** The removals in flight for one repo, oldest first. */

@@ -42,7 +42,6 @@ import {
   removeTranscript,
   setKept,
 } from "./persistence";
-import { sessionStatus } from "./status";
 import { isWatchingAgentSurface } from "./watching";
 
 /** Fire-and-forget a transcript write: persistence must never break a session,
@@ -288,6 +287,10 @@ async function runTurn(
   const find = () => get().sessions.find((s) => s.id === id);
   const s0 = find();
   if (!s0) return;
+  // The turn this run owns, captured before the first await: a cancel + a fresh
+  // prompt appends a NEW last turn while this run is still live, and turns are
+  // append-only, so this index addresses the owned turn for the whole run.
+  const turnIndex = s0.turns.length - 1;
   const {
     claudeSessionId,
     worktreePath,
@@ -326,22 +329,25 @@ async function runTurn(
     });
   const patchTurn = (p: Partial<SessionTurn>) =>
     setSession((s) => {
-      if (s.turns.length === 0) return s;
+      if (turnIndex < 0 || turnIndex >= s.turns.length) return s;
       const turns = s.turns.slice();
-      turns[turns.length - 1] = { ...turns[turns.length - 1], ...p };
+      turns[turnIndex] = { ...turns[turnIndex], ...p };
       return { ...s, turns };
     });
-  // End of a turn: persist the now-terminal last turn (one append per turn) and,
+  // `running` is session-level, so only the run still owning the LAST turn may clear
+  // it: a stale run's late teardown would otherwise re-enable the composer over the
+  // live run and leave that one uncancellable (`cancel` bails on `!s.running`).
+  const ownsLastTurn = (s: AgentSession) => s.turns.length - 1 === turnIndex;
+  // End of a turn: persist this run's now-terminal turn (one append per turn) and,
   // unless you're watching this session live, fire an OS notification.
   const endTurn = () => {
     const s = find();
-    const i = (s?.turns.length ?? 0) - 1;
-    const t = s?.turns[i];
+    const t = s?.turns[turnIndex];
     if (!s || !t) return;
     persist(
       appendResult(
         id,
-        i,
+        turnIndex,
         t.status,
         t.narration,
         t.segments,
@@ -359,7 +365,7 @@ async function runTurn(
     const label =
       s.turns[0]?.prompt.trim().replace(/\s+/g, " ").slice(0, 70) ||
       "Agent session";
-    const failed = sessionStatus(s).kind === "error";
+    const failed = t.status === "error";
     const headline = failed ? "Agent failed" : "Agent finished";
     void notify(headline, label);
     pushNotification({
@@ -370,13 +376,10 @@ async function runTurn(
       repoPath: s.repoPath,
       repoName: repoNameFromPath(s.repoPath),
       target: { type: "agent" },
-      dedupeKey: `agent:${id}:${i}`,
+      dedupeKey: `agent:${id}:${turnIndex}`,
     });
   };
 
-  // The turn this run owns: cancel + a fresh prompt appends a NEW last turn
-  // while this closure is still live, so adoption below must re-check it.
-  const turnIndex = (find()?.turns.length ?? 0) - 1;
   setSession((s) => ({ ...s, running: true }));
   try {
     await runAgentSession({
@@ -404,19 +407,19 @@ async function runTurn(
           }
           return;
         }
-        const last = s.turns[s.turns.length - 1];
-        if (!last) return;
+        const own = s.turns[turnIndex];
+        if (!own) return;
         if (ev.kind === "delta")
           patchTurn({
-            narration: last.narration + ev.text,
-            segments: appendTranscriptText(last.segments ?? [], ev.text),
+            narration: own.narration + ev.text,
+            segments: appendTranscriptText(own.segments ?? [], ev.text),
             statusText: "",
           });
         else if (ev.kind === "status") patchTurn({ statusText: ev.text });
         else if (ev.kind === "tool")
           patchTurn({
             segments: appendTranscriptTool(
-              last.segments ?? [],
+              own.segments ?? [],
               ev.tool,
               ev.target,
             ),
@@ -429,15 +432,13 @@ async function runTurn(
             statusText: "",
             // Keep what a killed turn wrote — a whole-message agent (codex) delivers it
             // only here, so adopt it when nothing streamed, mirroring the done branch.
-            // Only into the turn this run owns: a dying event after cancel + a new
-            // prompt must not write into the replacement turn.
-            ...(s.turns.length - 1 === turnIndex &&
-            ev.partialText?.trim() &&
-            !last.narration
+            // A dying event after cancel + a new prompt must never write into the
+            // replacement turn.
+            ...(ev.partialText?.trim() && !own.narration
               ? {
                   narration: ev.partialText,
                   segments: appendTranscriptText(
-                    last.segments ?? [],
+                    own.segments ?? [],
                     ev.partialText,
                   ),
                 }
@@ -452,10 +453,10 @@ async function runTurn(
             // a text segment too so the transcript shows it after its tool steps; streaming
             // agents already have both. Never on an errored Done, whose text is the failure
             // REASON — adopting it would render the reason as the agent's own message.
-            ...(ev.text && !last.narration && !ev.isError
+            ...(ev.text && !own.narration && !ev.isError
               ? {
                   narration: ev.text,
-                  segments: appendTranscriptText(last.segments ?? [], ev.text),
+                  segments: appendTranscriptText(own.segments ?? [], ev.text),
                 }
               : {}),
             ...(ev.isError
@@ -472,15 +473,15 @@ async function runTurn(
     });
   } catch (e) {
     patchTurn({ status: "error", error: errorMessage(e), statusText: "" });
-    setSession((s) => ({ ...s, running: false }));
+    setSession((s) => (ownsLastTurn(s) ? { ...s, running: false } : s));
     endTurn();
     return;
   }
 
   const s1 = find();
   if (!s1) return;
-  if (s1.turns[s1.turns.length - 1]?.status === "error") {
-    setSession((s) => ({ ...s, running: false }));
+  if (s1.turns[turnIndex]?.status === "error") {
+    setSession((s) => (ownsLastTurn(s) ? { ...s, running: false } : s));
     endTurn();
     return;
   }
@@ -490,18 +491,26 @@ async function runTurn(
     const hash = await commitWorktreeAll(worktreePath, msg);
     setSession((s) => {
       const turns = s.turns.slice();
-      turns[turns.length - 1] = {
-        ...turns[turns.length - 1],
-        status: "done",
-        statusText: "",
-        commitHash: hash,
+      if (turnIndex >= 0 && turnIndex < turns.length)
+        turns[turnIndex] = {
+          ...turns[turnIndex],
+          status: "done",
+          statusText: "",
+          commitHash: hash,
+        };
+      // `headHash` is session state and the checkpoint really landed, so it applies
+      // whichever turn is last now.
+      return {
+        ...s,
+        running: ownsLastTurn(s) ? false : s.running,
+        turns,
+        headHash: hash ?? s.headHash,
       };
-      return { ...s, running: false, turns, headHash: hash ?? s.headHash };
     });
     endTurn();
   } catch (e) {
     patchTurn({ status: "error", error: errorMessage(e), statusText: "" });
-    setSession((s) => ({ ...s, running: false }));
+    setSession((s) => (ownsLastTurn(s) ? { ...s, running: false } : s));
     endTurn();
   }
 }

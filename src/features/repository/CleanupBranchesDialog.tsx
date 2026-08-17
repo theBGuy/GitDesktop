@@ -96,6 +96,32 @@ const EMPTY_MERGED_CLAUSE: Record<PrCheckState, string> = {
   unavailable: " and nothing is idle for ",
 };
 
+/** The one-line status above the candidate list while merged detection runs.
+ *  A parked check has no progress to report, so it names what it's waiting on
+ *  rather than implying the read is underway. */
+function MergedCheckLine({ paused }: { paused: boolean }) {
+  return (
+    <p className="px-1 py-1 text-[11px] text-muted-foreground">
+      {paused
+        ? "Waiting for a connection to check which branches are merged…"
+        : "Checking which branches are merged…"}
+    </p>
+  );
+}
+
+/** Empty first paint while merged detection runs. An animated skeleton over a
+ *  parked check would be a false activity signal. */
+function CheckingMergedPlaceholder({ paused }: { paused: boolean }) {
+  if (paused) return <MergedCheckLine paused />;
+  return (
+    <div className="space-y-1 py-2" aria-busy>
+      {[0, 1, 2].map((i) => (
+        <div key={i} className="h-7 animate-pulse rounded-none bg-muted/50" />
+      ))}
+    </div>
+  );
+}
+
 /** The one state badge a row can carry, in precedence order. Text carries the
  *  meaning — the color never stands alone. */
 function RowBadge({
@@ -150,6 +176,7 @@ export function CleanupBranchesDialog({
   isInWorktree,
   prMergedByBranch,
   prCheckState,
+  prCheckPaused,
 }: {
   repoPath: string;
   open: boolean;
@@ -170,6 +197,10 @@ export function CleanupBranchesDialog({
    *  mentions pull requests renders off this: a read that failed says so, and
    *  one that never ran leaves them out rather than passing for a clean check. */
   prCheckState: PrCheckState;
+  /** True when the pull-request read is parked on a missing connection rather
+   *  than in flight. It only retitles the waiting copy — the check itself
+   *  resumes on its own once the connection returns. */
+  prCheckPaused: boolean;
 }) {
   const queryClient = useQueryClient();
   // Shared 30s clock: the idle-past-the-window classification below must
@@ -505,14 +536,7 @@ export function CleanupBranchesDialog({
 
           {/* List / skeleton / empty */}
           {checkingMerged && candidates.length === 0 ? (
-            <div className="space-y-1 py-2" aria-busy>
-              {[0, 1, 2].map((i) => (
-                <div
-                  key={i}
-                  className="h-7 animate-pulse rounded-none bg-muted/50"
-                />
-              ))}
-            </div>
+            <CheckingMergedPlaceholder paused={prCheckPaused} />
           ) : candidates.length === 0 ? (
             <p className="py-6 text-center text-xs text-muted-foreground">
               No stale branches — nothing is merged into{" "}
@@ -530,11 +554,7 @@ export function CleanupBranchesDialog({
               className="-mx-1 max-h-[45vh] space-y-0.5 overflow-x-hidden overflow-y-auto px-1"
               onKeyDown={onKeyDown}
             >
-              {checkingMerged && (
-                <p className="px-1 py-1 text-[11px] text-muted-foreground">
-                  Checking which branches are merged…
-                </p>
-              )}
+              {checkingMerged && <MergedCheckLine paused={prCheckPaused} />}
               {prCheckState === "failed" && (
                 <p className="px-1 py-1 text-[11px] text-muted-foreground">
                   Pull requests couldn't be checked — a branch merged through

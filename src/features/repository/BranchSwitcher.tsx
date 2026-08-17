@@ -2130,6 +2130,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         // query runs at all — so the dialog is told which of the four it got,
         // never-ran included.
         prCheckState={prCheckStateFrom(canGh, closedPrs)}
+        // react-query's own signal for "offline": networkMode "online" parks the
+        // fetch, which is otherwise indistinguishable from one in flight.
+        prCheckPaused={closedPrs.fetchStatus === "paused"}
       />
 
       <ConfirmDialog
