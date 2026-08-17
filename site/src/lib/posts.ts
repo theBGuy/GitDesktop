@@ -41,14 +41,16 @@ export async function getPosts(): Promise<Post[]> {
  * knowing: getPosts() hides drafts and future-dated posts outside
  * DEV/PUBLIC_SHOW_DRAFTS, so marking the target `draft` (or dating it ahead)
  * would pass a Pages preview and fail production.
+ *
+ * @param errorContext Prefixes the thrown message, naming the broken link site.
  */
 export async function getRequiredPost(
   id: string,
-  label: string,
+  errorContext: string,
 ): Promise<Post> {
   const post = (await getPosts()).find((p) => p.id === id);
   if (!post) {
-    throw new Error(`${label}: no blog post with id "${id}".`);
+    throw new Error(`${errorContext}: no blog post with id "${id}".`);
   }
   return post;
 }
