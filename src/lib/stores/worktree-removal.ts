@@ -117,7 +117,7 @@ function isRemovalInFlight(
  *  spellings can't both pass. Two promotes into the same checkout would fight
  *  over the final `gitCheckoutBranch`, and the dialog that started the first is
  *  gone by then — so the latch lives here, not in a component ref. */
-const promoting = new Set<string>();
+const promotingMains = new Set<string>();
 
 /** Worktrees claimed by a promote, keyed by {@link normPath} and GLOBAL rather
  *  than per-repo: a promote reserves its source before it knows which repo key
@@ -150,9 +150,11 @@ export const useWorktreeRemovalStore = create<WorktreeRemovalState>()(
       // written under the ui store's. Match on the directory, not the string.
       if (isRemovalInFlight(get().byRepo, mainPath, worktreePath))
         return "This worktree is already being removed.";
-      if (promoting.has(normPath(mainPath)))
+      if (promotingWorktrees.has(normPath(worktreePath)))
+        return "This worktree is being promoted.";
+      if (promotingMains.has(normPath(mainPath)))
         return "Another worktree is already being promoted to your main workspace.";
-      promoting.add(normPath(mainPath));
+      promotingMains.add(normPath(mainPath));
       // Claim the source worktree BEFORE the first await: `validateRepo` plus
       // the repo switch is long enough for a delete of the same folder to be
       // accepted, and this promote's dialog has already closed.
@@ -334,7 +336,7 @@ async function runPromote(
     }
   } finally {
     // Same expressions `startPromote` claimed under, or a latch never releases.
-    promoting.delete(normPath(mainPath));
+    promotingMains.delete(normPath(mainPath));
     promotingWorktrees.delete(normPath(worktreePath));
   }
 }
