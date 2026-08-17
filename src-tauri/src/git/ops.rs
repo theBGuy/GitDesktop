@@ -7165,7 +7165,10 @@ detached
         let untracked = run_git_raw(Some(&repo), &["commit", "-m", "x"], DEFAULT_TIMEOUT)
             .await
             .unwrap();
-        assert_ne!(untracked.code, 0, "a commit with nothing staged must refuse");
+        assert_ne!(
+            untracked.code, 0,
+            "a commit refusing over only-untracked files must still refuse"
+        );
         assert!(
             untracked.stderr.trim().is_empty(),
             "stderr staying empty is the whole problem: {}",
@@ -7176,12 +7179,13 @@ detached
             report.contains("nothing added to commit but untracked files present"),
             "git's report rides stdout: {report}"
         );
-        // The legs read their allow-list off stderr, which this refusal never
-        // populates — so the tolerate-it arm cannot fire and the error build does.
-        let lower = untracked.stderr.to_lowercase();
+        // This variant's sentence matches NEITHER allow-list substring, so it
+        // reaches the error build even off combined output — the blind spot that
+        // makes full_failure_text() load-bearing at both conclude-with-commit legs.
+        let lower = report.to_lowercase();
         assert!(
             !lower.contains("nothing to commit") && !lower.contains("no changes added"),
-            "a stderr-read allow-list cannot see a stdout-only refusal: {report}"
+            "the untracked refusal must not match the tolerate-it substrings: {report}"
         );
     }
 

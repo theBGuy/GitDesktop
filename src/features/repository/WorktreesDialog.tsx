@@ -532,8 +532,7 @@ export function RenameWorktreeDialog({
 
   const trimmed = name.trim();
   const newPath = parent ? `${parent}/${trimmed}` : trimmed;
-  const unchanged =
-    !!worktree && normPath(newPath) === normPath(worktree.path);
+  const unchanged = !!worktree && normPath(newPath) === normPath(worktree.path);
   // A rename keeps the worktree in place, so block path separators (that'd be a
   // move into another folder) — keep this a simple in-place rename.
   const invalid = /[\\/]/.test(trimmed);

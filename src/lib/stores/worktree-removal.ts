@@ -119,6 +119,14 @@ function isRemovalInFlight(
  *  gone by then — so the latch lives here, not in a component ref. */
 const promoting = new Set<string>();
 
+/** Worktrees claimed by a promote, keyed by {@link normPath} and GLOBAL rather
+ *  than per-repo: a promote reserves its source before it knows which repo key
+ *  it will mark under, and the same folder can be targeted from another
+ *  checkout's context. Deliberately NOT a `byRepo` entry — that map paints the
+ *  banner, and a promote that fails `validateRepo` would leave a removal on
+ *  screen that never started. */
+const promotingWorktrees = new Set<string>();
+
 // `_set` unused: every write goes through the module-level helpers below, so a
 // runner that outlives its dialog reaches state the same way the starters do.
 export const useWorktreeRemovalStore = create<WorktreeRemovalState>()(
@@ -126,8 +134,12 @@ export const useWorktreeRemovalStore = create<WorktreeRemovalState>()(
     byRepo: {},
 
     startRemoval: ({ repoPath, path, name, force }) => {
-      if (get().byRepo[repoPath]?.[path])
+      // Matched on the directory, not the string: today's callers all spell it
+      // the ui store's way, but the admission rule shouldn't depend on that.
+      if (isRemovalInFlight(get().byRepo, repoPath, path))
         return "This worktree is already being removed.";
+      if (promotingWorktrees.has(normPath(path)))
+        return "This worktree is being promoted.";
       markRemoval(repoPath, path, name);
       void run(repoPath, path, force);
       return null;
@@ -141,6 +153,10 @@ export const useWorktreeRemovalStore = create<WorktreeRemovalState>()(
       if (promoting.has(normPath(mainPath)))
         return "Another worktree is already being promoted to your main workspace.";
       promoting.add(normPath(mainPath));
+      // Claim the source worktree BEFORE the first await: `validateRepo` plus
+      // the repo switch is long enough for a delete of the same folder to be
+      // accepted, and this promote's dialog has already closed.
+      promotingWorktrees.add(normPath(worktreePath));
       void runPromote(mainPath, worktreePath, branch, willStash);
       return null;
     },
@@ -317,8 +333,9 @@ async function runPromote(
       toastError(e);
     }
   } finally {
-    // Same expression `startPromote` added under, or the latch never releases.
+    // Same expressions `startPromote` claimed under, or a latch never releases.
     promoting.delete(normPath(mainPath));
+    promotingWorktrees.delete(normPath(worktreePath));
   }
 }
 
