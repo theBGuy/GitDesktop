@@ -1,5 +1,6 @@
 import { toast } from "sonner";
 import { create } from "zustand";
+import { repoKeys, worktreeKey } from "@/lib/git/queries";
 import { pruneWorktrees, removeWorktree } from "@/lib/git/worktree";
 import { queryClient } from "@/lib/query-client";
 import { toastError } from "@/lib/toast";
@@ -131,12 +132,8 @@ async function run(repoPath: string, path: string, force: boolean) {
   clearRemoval(repoPath, path);
   // The same set the worktree mutations invalidate: the manager's list, plus
   // branches (a removed worktree frees its branch for checkout elsewhere).
-  void queryClient.invalidateQueries({
-    queryKey: ["repo", repoPath, "user-worktrees"],
-  });
-  void queryClient.invalidateQueries({
-    queryKey: ["repo", repoPath, "branches"],
-  });
+  void queryClient.invalidateQueries({ queryKey: worktreeKey(repoPath) });
+  void queryClient.invalidateQueries({ queryKey: repoKeys.branches(repoPath) });
 
   const listener = listeners.get(listenerKey(repoPath, path))?.at(-1);
   if (!failure) {

@@ -250,7 +250,8 @@ export function useRemoteBranches(repo: string, enabled = true) {
   });
 }
 
-const worktreeKey = (repo: string) => ["repo", repo, "user-worktrees"] as const;
+export const worktreeKey = (repo: string) =>
+  ["repo", repo, "user-worktrees"] as const;
 
 /** The repo's user-facing worktrees (session worktrees filtered out by the
  *  backend). `enabled` gates the fetch so it only runs while the manager is open. */

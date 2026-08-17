@@ -374,6 +374,9 @@ async function runTurn(
     });
   };
 
+  // The turn this run owns: cancel + a fresh prompt appends a NEW last turn
+  // while this closure is still live, so adoption below must re-check it.
+  const turnIndex = (find()?.turns.length ?? 0) - 1;
   setSession((s) => ({ ...s, running: true }));
   try {
     await runAgentSession({
@@ -426,7 +429,11 @@ async function runTurn(
             statusText: "",
             // Keep what a killed turn wrote — a whole-message agent (codex) delivers it
             // only here, so adopt it when nothing streamed, mirroring the done branch.
-            ...(ev.partialText?.trim() && !last.narration
+            // Only into the turn this run owns: a dying event after cancel + a new
+            // prompt must not write into the replacement turn.
+            ...(s.turns.length - 1 === turnIndex &&
+            ev.partialText?.trim() &&
+            !last.narration
               ? {
                   narration: ev.partialText,
                   segments: appendTranscriptText(
